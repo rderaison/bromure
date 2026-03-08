@@ -376,6 +376,7 @@ public final class LinuxImageManager {
             let data = handle.availableData
             if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
                 consoleOutput.append(text)
+                progress(.consoleOutput(text))
                 if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil {
                     FileHandle.standardError.write(data)
                 }
@@ -419,7 +420,7 @@ public final class LinuxImageManager {
             }
             try await consoleOutput.waitFor(
                 marker: "localhost:~#",
-                timeout: 300,
+                timeout: 900,
                 progress: progress
             )
         }
@@ -611,8 +612,15 @@ public final class LinuxImageManager {
             "# dnsmasq config for Pi-hole",
             "printf '%s\\n' 'addn-hosts=/etc/pihole/gravity.list' 'addn-hosts=/etc/pihole/local.list' 'addn-hosts=/etc/pihole/custom.list' 'localise-queries' 'no-resolv' 'log-queries' 'log-facility=/var/log/pihole/pihole.log' 'log-async' 'cache-size=10000' 'server=1.1.1.1' 'server=1.0.0.1' 'domain-needed' 'expand-hosts' 'bogus-priv' 'except-interface=nonexisting' > /mnt/etc/dnsmasq.d/pihole.conf",
             "",
+            "# Chromium enterprise policies (memory saver balanced mode)",
+            "mkdir -p /mnt/etc/chromium/policies/managed",
+            "printf '%s\\n' '{' '  \"HighEfficiencyModeEnabled\": true,' '  \"MemorySaverModeSavings\": 1' '}' > /mnt/etc/chromium/policies/managed/bromure.json",
+            "",
             "# Squid proxy config",
-            "printf '%s\\n' 'dns_nameservers 127.0.0.1' 'forwarded_for off' 'http_port 127.0.0.1:3128' 'acl blocked_ip dst 0.0.0.0/32' 'acl all src 0.0.0.0/0' 'http_access deny blocked_ip' 'http_access allow all' > /mnt/etc/squid/squid.conf",
+            "printf '%s\\n' 'dns_nameservers 127.0.0.1' 'forwarded_for off' 'http_port 127.0.0.1:3128' 'acl blocked_ip dst 0.0.0.0/32' 'acl all src 0.0.0.0/0' 'http_access deny blocked_ip' 'http_access allow all' 'cache_mem 32 MB' 'maximum_object_size_in_memory 512 KB' 'cache deny all' 'max_filedescriptors 4096' 'memory_pools off' 'memory_pools_limit none' > /mnt/etc/squid/squid.conf",
+            "",
+            "# Network stack tuning (prevent exhaustion under heavy browsing)",
+            "printf '%s\\n' 'net.core.somaxconn=1024' 'net.core.netdev_max_backlog=2000' 'net.core.rmem_max=4194304' 'net.core.wmem_max=4194304' 'net.ipv4.tcp_rmem=4096 87380 4194304' 'net.ipv4.tcp_wmem=4096 65536 4194304' 'net.ipv4.tcp_max_syn_backlog=2048' 'net.ipv4.tcp_tw_reuse=1' 'net.ipv4.ip_local_port_range=1024 65535' 'net.ipv4.tcp_fin_timeout=15' 'net.ipv4.tcp_max_tw_buckets=16384' 'net.nf_conntrack_max=32768' > /mnt/etc/sysctl.d/99-bromure.conf",
             "",
             "# Locale (mirrored from macOS host)",
             "printf '%s\\n' 'export LANG=\(locale).UTF-8' 'export LC_ALL=\(locale).UTF-8' 'export LD_PRELOAD=/usr/lib/libresolv_stub.so' > /mnt/etc/profile.d/locale.sh",
@@ -753,21 +761,38 @@ private final class ConsoleBuffer: @unchecked Sendable {
         timeout: TimeInterval,
         progress: @escaping (ProgressEvent) -> Void
     ) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
+        var deadline = Date().addingTimeInterval(timeout)
+        var lastBufferLength = 0
+        var recentOutput = ""
         while Date() < deadline {
             lock.lock()
             let contains = buffer.contains(marker)
+            let currentLength = buffer.count
+            recentOutput = String(buffer.suffix(1024))
             // Trim buffer to avoid unbounded growth
             if buffer.count > 64_000 {
                 buffer = String(buffer.suffix(32_000))
+                lastBufferLength = buffer.count
             }
             lock.unlock()
 
             if contains { return }
+            // Reset deadline whenever new console output appears
+            if currentLength != lastBufferLength {
+                lastBufferLength = currentLength
+                deadline = Date().addingTimeInterval(timeout)
+            }
             try await Task.sleep(for: .milliseconds(500))
         }
+
+        // Check if the last console output suggests a network issue
+        let networkHints = ["fetch ", "Connecting to ", "APKINDEX", "downloading", "wget", "transfer"]
+        let looksLikeNetwork = networkHints.contains { recentOutput.localizedCaseInsensitiveContains($0) }
+        let detail = looksLikeNetwork
+            ? "The VM appears to be waiting on a network operation. Check your internet connection and try again."
+            : "No console output received for \(Int(timeout))s."
         throw SandboxError.vmStartFailed(
-            "Timed out waiting for '\(marker)' from VM console (after \(Int(timeout))s)"
+            "Timed out waiting for '\(marker)' — \(detail)"
         )
     }
 }

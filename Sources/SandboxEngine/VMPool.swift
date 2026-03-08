@@ -85,7 +85,7 @@ public final class VMPool {
         if config.forceDarkMode {
             extraFlags.append("--force-dark-mode --enable-features=WebContentsForceDark")
         }
-        if config.enableNetworking {
+        if config.enableNetworking && (config.enableAdBlocking || config.enableWarp) {
             extraFlags.append("--proxy-server=http://127.0.0.1:3128")
         }
         var envLines: [String] = []
@@ -95,14 +95,13 @@ public final class VMPool {
         }
         envLines.append("CHROME_URL=\(shellEscape(config.homePage))")
 
-        // Always start dnsmasq + squid when networking is enabled.
-        // - Ad blocking: squid uses 127.0.0.1 as DNS (dnsmasq with pihole blocklist)
-        // - WARP: squid is started via proxychains to route through WARP SOCKS5
+        // Only start dnsmasq + squid when ad blocking or WARP is enabled.
+        // When neither is active, Chrome runs directly without proxy.
         var bootScript = "mkdir -p /tmp/bromure && "
             + envLines.map { "echo \(shellEscape($0)) >> /tmp/bromure/chrome-env" }.joined(separator: " && ")
             + " && touch /tmp/bromure/chrome-ready"
-        if config.enableNetworking {
-            // Always run dnsmasq with pihole config
+        if config.enableNetworking && (config.enableAdBlocking || config.enableWarp) {
+            // Run dnsmasq with pihole config
             bootScript += " && dnsmasq -C /etc/dnsmasq.d/pihole.conf"
             // If ad blocking, squid should resolve via dnsmasq (127.0.0.1); otherwise use system DNS
             if config.enableAdBlocking {
@@ -119,8 +118,8 @@ public final class VMPool {
         // Wait for boot, then immediately write config (before the 5s X11 wait)
         await waitForBoot(outputPipe: outputPipe, inputPipe: inputPipe, onBootDetected: bootScript)
 
-        // Always start Cloudflare WARP in proxy mode when networking is enabled
-        if config.enableNetworking {
+        // Start Cloudflare WARP in proxy mode when enabled
+        if config.enableWarp {
             let preload = "LD_PRELOAD=/usr/lib/libresolv_stub.so"
             let warpCommands = [
                 "/usr/bin/dbus-daemon --system 2>/dev/null",

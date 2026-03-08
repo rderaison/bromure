@@ -16,4 +16,7 @@ public enum ProgressEvent {
 
     /// Installation progress: 0.0 to 1.0.
     case install(fraction: Double)
+
+    /// Raw console output from the VM (for diagnostic display).
+    case consoleOutput(String)
 }

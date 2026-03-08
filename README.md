@@ -88,7 +88,7 @@ No. The very first time you launch Bromure, it needs to boot a VM from scratch, 
 
 **How much memory should I allocate to the VM?**
 
-The default of 2 GB is sufficient for most browsing. If you plan to watch high-definition videos or use memory-heavy web apps, consider increasing it to 4 GB in Preferences. Going above 4 GB is rarely necessary.
+The default of 2 GB is sufficient for most browsing. Video playback works great thanks to GPU hardware acceleration, but if you notice choppy playback on high-definition videos or use memory-heavy web apps, consider increasing it to 4 GB in Preferences. Going above 4 GB is rarely necessary.
 
 **How do I enable the VPN? Is it free?**
 
@@ -105,6 +105,14 @@ No, and this is by design. The VM is fully isolated from your host filesystem to
 **Can I use Bromure as my default browser?**
 
 Yes. Go to System Settings > Desktop & Dock > Default web browser and select Bromure. Links clicked in other apps will open in a fresh, isolated VM session.
+
+**Does each VM session require 4 GB of disk space?**
+
+No. Bromure uses `clonefile()` to create each session's disk image, which leverages APFS copy-on-write (COW) semantics. The cloned image initially takes up almost no additional space -- only the blocks that the VM actually modifies during the session consume real disk storage. A typical browsing session writes very little to disk, so the actual cost per session is usually just a few megabytes rather than the full 4 GB.
+
+**Networking in the VM is broken when my VPN is active.**
+
+This is a known limitation of Apple's Virtualization.framework. When a VPN (especially IKEv2 or other full-tunnel configurations) reroutes all host traffic, the VM's NAT networking may fail to follow the routing change. Try starting the VPN before launching Bromure, or restarting Bromure after connecting. In some cases, a host reboot may be required to restore VM networking.
 
 **Does Bromure work on Intel Macs?**
 

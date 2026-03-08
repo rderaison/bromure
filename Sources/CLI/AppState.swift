@@ -33,6 +33,7 @@ final class AppState: @unchecked Sendable {
     var poolReady = false
     var sessionCount = 0
     var initSteps: [InitStep] = []
+    var consoleLog: String = ""
 
     struct InitStep: Identifiable {
         let id = UUID()
@@ -70,6 +71,7 @@ final class AppState: @unchecked Sendable {
 
         phase = .initializing(status: "Preparing...", progress: nil)
         initSteps = []
+        consoleLog = ""
 
         let defaults = UserDefaults.standard
         let keyboard = defaults.string(forKey: "vm.keyboardLayout")
@@ -120,6 +122,12 @@ final class AppState: @unchecked Sendable {
             }
         case .install(let fraction):
             phase = .initializing(status: "Installing...", progress: fraction)
+        case .consoleOutput(let text):
+            consoleLog += text
+            // Keep only the last 8KB to avoid unbounded growth
+            if consoleLog.count > 8192 {
+                consoleLog = String(consoleLog.suffix(4096))
+            }
         }
     }
 

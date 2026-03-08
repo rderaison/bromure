@@ -141,6 +141,27 @@ struct MainView: View {
             Text(status)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            if !state.consoleLog.isEmpty {
+                DisclosureGroup("Console Output") {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            Text(state.consoleLog)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                                .id("console-bottom")
+                        }
+                        .frame(height: 100)
+                        .onChange(of: state.consoleLog) {
+                            proxy.scrollTo("console-bottom", anchor: .bottom)
+                        }
+                    }
+                }
+                .font(.caption)
+                .padding(.horizontal, 40)
+            }
         }
         .padding()
     }

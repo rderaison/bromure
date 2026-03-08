@@ -45,6 +45,9 @@ final class TerminalProgress {
         case .install(let fraction):
             let bar = renderBar(fraction: fraction, width: 30)
             overwrite("  \(bar) Installing: \(Int(fraction * 100))%")
+
+        case .consoleOutput:
+            break // only displayed in GUI
         }
     }
 
