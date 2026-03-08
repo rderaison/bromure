@@ -1,0 +1,31 @@
+import Foundation
+
+/// Errors specific to the Bromure tool.
+public enum SandboxError: LocalizedError {
+    case unsupportedHardware
+    case baseImageNotFound
+    case corruptMetadata(String)
+    case downloadFailed(String)
+    case diskCreationFailed(String)
+    case cloneFailed(String)
+    case vmStartFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedHardware:
+            return "This Mac does not support macOS virtualization. Apple Silicon is required."
+        case .baseImageNotFound:
+            return "No base image found. Run 'bromure init' first to create one."
+        case .corruptMetadata(let detail):
+            return "Base image metadata is corrupt: \(detail)"
+        case .downloadFailed(let detail):
+            return "Failed to download macOS restore image: \(detail)"
+        case .diskCreationFailed(let detail):
+            return "Failed to create disk image: \(detail)"
+        case .cloneFailed(let detail):
+            return "Failed to create ephemeral disk clone: \(detail)"
+        case .vmStartFailed(let detail):
+            return "Failed to start virtual machine: \(detail)"
+        }
+    }
+}

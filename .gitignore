@@ -1,0 +1,13 @@
+.build/
+.swiftpm/
+.claude/
+*.o
+*.d
+*.swiftdeps
+*.swiftdeps~
+*.hmap
+*.abi.json
+DerivedData/
+xcuserdata/
+*.xcscmblueprint
+Package.resolved
