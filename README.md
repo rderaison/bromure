@@ -80,6 +80,40 @@ WARP runs entirely inside the disposable VM, so Cloudflare never sees your host 
 open .build/arm64-apple-macosx/release/bromure.app
 ```
 
+## FAQ
+
+**The first browser window takes a long time to open. Will it always be this slow?**
+
+No. The very first time you launch Bromure, it needs to boot a VM from scratch, which takes several seconds. Once that VM is ready, it goes into a warm pool -- subsequent windows open almost instantly because a pre-booted VM is already waiting. If you add Bromure to your Login Items (System Settings > General > Login Items), it will start in the background when you log in, so a warm VM is always ready when you need it.
+
+**How much memory should I allocate to the VM?**
+
+The default of 2 GB is sufficient for most browsing. If you plan to watch high-definition videos or use memory-heavy web apps, consider increasing it to 4 GB in Preferences. Going above 4 GB is rarely necessary.
+
+**How do I enable the VPN? Is it free?**
+
+Open Preferences and toggle "Cloudflare WARP". The first time you enable it, you will be asked to accept Cloudflare's terms of service. WARP is a free service provided by [Cloudflare](https://one.one.one.one/) -- it encrypts your DNS queries and routes your traffic through Cloudflare's network. It runs entirely inside the disposable VM, so no configuration is needed on your host machine, and the WARP registration is destroyed when the session ends.
+
+**Can I make my browsing data persistent or save a baseline image?**
+
+Not currently. Every session is ephemeral by design -- all data is destroyed when the window closes. If persistent profiles or custom base images would be useful to you, please [open a feature request](https://github.com/rderaison/bromure/issues).
+
+**Can I download files from the VM to my Mac?**
+
+No, and this is by design. The VM is fully isolated from your host filesystem to prevent malicious downloads or drive-by attacks from escaping the sandbox. If you need this capability, please [open a feature request](https://github.com/rderaison/bromure/issues).
+
+**Can I use Bromure as my default browser?**
+
+Yes. Go to System Settings > Desktop & Dock > Default web browser and select Bromure. Links clicked in other apps will open in a fresh, isolated VM session.
+
+**Does Bromure work on Intel Macs?**
+
+No. Bromure requires Apple Silicon (M1 or later). It relies on Apple's Virtualization.framework, which only supports ARM64 guest VMs on Apple Silicon hosts.
+
+**Why is it called "Bromure"?**
+
+It is a pun on [Bromium](https://en.wikipedia.org/wiki/Bromium), a company that pioneered micro-virtualization for endpoint security -- running each task in a disposable VM. Bromium was acquired by HP in 2019. "Bromure" is also the French word for "bromide", which felt fitting for something designed to neutralize threats.
+
 ## Author
 
 - [Renaud Deraison](https://github.com/rderaison) (prompting)
