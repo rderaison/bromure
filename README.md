@@ -75,5 +75,5 @@ open .build/arm64-apple-macosx/release/bromure.app
 
 ## Author
 
-[Renaud Deraison](https://github.com/rderaison) (prompting)
-[Claude + Opus 4.6] (https://www.anthropic.com) (implementation)
+- [Renaud Deraison](https://github.com/rderaison) (prompting)
+- [Claude + Opus 4.6] (https://www.anthropic.com) (implementation)
