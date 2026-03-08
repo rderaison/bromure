@@ -30,8 +30,15 @@ Each browser session runs in a fully isolated virtual machine with its own ephem
 Bromure uses Apple's Virtualization.framework for near-native performance on Apple Silicon:
 
 - **Instant windows** -- a pre-warmed VM pool keeps a fully booted VM ready in the background. Opening a new browser window takes under a second.
-- **Lightweight VMs** -- each session runs Alpine Linux with Chromium, using as little as 2 GB of RAM.
+- **Lightweight VMs** -- each session runs Alpine Linux with Chromium, using as little as 1 GB of RAM.
 - **Native acceleration** -- Virtio GPU, audio, and input drivers provide a smooth browsing experience with no noticeable overhead.
+
+## Screenshot
+
+<p align="center">
+  <img src="Resources/screenshot.png" width="720" alt="Bromure screenshot">
+</p>
+
 
 ## Features
 

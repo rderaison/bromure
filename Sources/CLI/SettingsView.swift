@@ -2,7 +2,7 @@ import SwiftUI
 import SandboxEngine
 
 struct SettingsView: View {
-    @AppStorage("vm.memoryGB") private var memoryGB = 2
+    @AppStorage("vm.memoryGB") private var memoryGB = 1
     @AppStorage("vm.cpuCount") private var cpuCount = 0
     @AppStorage("vm.enableNetworking") private var enableNetworking = true
     @AppStorage("vm.enableAudio") private var enableAudio = true
@@ -69,7 +69,7 @@ struct SettingsView: View {
                     Text("8 GB").tag(8)
                     Text("16 GB").tag(16)
                 }
-                .help("RAM allocated to the VM. 2 GB is sufficient for most browsing.")
+                .help("RAM allocated to the VM. 1 GB is sufficient for most browsing.")
 
                 Picker("CPU Cores", selection: $cpuCount) {
                     Text("Automatic (\(autoCPU))").tag(0)

@@ -167,7 +167,7 @@ final class AppState: @unchecked Sendable {
 
         return VMConfig(
             cpuCount: cpus > 0 ? cpus : nil,
-            memorySize: UInt64(memGB > 0 ? memGB : 2) * 1024 * 1024 * 1024,
+            memorySize: UInt64(memGB > 0 ? memGB : 1) * 1024 * 1024 * 1024,
             enableNetworking: defaults.object(forKey: "vm.enableNetworking") as? Bool ?? true,
             enableAudio: defaults.object(forKey: "vm.enableAudio") as? Bool ?? true,
             enableWarp: defaults.object(forKey: "vm.enableWarp") as? Bool ?? false,
