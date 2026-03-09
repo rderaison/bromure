@@ -732,22 +732,42 @@ private final class ConsoleBuffer: @unchecked Sendable {
     private var buffer = ""
     private var captureStart = 0
 
-    func append(_ text: String) {
+    private func withLock<T>(_ body: () -> T) -> T {
         lock.lock()
-        buffer += text
-        lock.unlock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    struct PollResult {
+        let found: Bool
+        let length: Int
+        let recentOutput: String
+    }
+
+    func pollAndTrim(marker: String) -> PollResult {
+        withLock {
+            let found = buffer.contains(marker)
+            let length = buffer.count
+            let recent = String(buffer.suffix(1024))
+            if buffer.count > 64_000 {
+                buffer = String(buffer.suffix(32_000))
+            }
+            return PollResult(found: found, length: length, recentOutput: recent)
+        }
+    }
+
+    func append(_ text: String) {
+        withLock { buffer += text }
     }
 
     func startCapture() {
-        lock.lock()
-        captureStart = buffer.count
-        lock.unlock()
+        withLock { captureStart = buffer.count }
     }
 
     func extractBetween(start: String, end: String) -> String {
-        lock.lock()
-        let captured = String(buffer.suffix(from: buffer.index(buffer.startIndex, offsetBy: min(captureStart, buffer.count))))
-        lock.unlock()
+        let captured = withLock {
+            String(buffer.suffix(from: buffer.index(buffer.startIndex, offsetBy: min(captureStart, buffer.count))))
+        }
 
         guard let startRange = captured.range(of: start),
               let endRange = captured.range(of: end) else {
@@ -765,21 +785,13 @@ private final class ConsoleBuffer: @unchecked Sendable {
         var lastBufferLength = 0
         var recentOutput = ""
         while Date() < deadline {
-            lock.lock()
-            let contains = buffer.contains(marker)
-            let currentLength = buffer.count
-            recentOutput = String(buffer.suffix(1024))
-            // Trim buffer to avoid unbounded growth
-            if buffer.count > 64_000 {
-                buffer = String(buffer.suffix(32_000))
-                lastBufferLength = buffer.count
-            }
-            lock.unlock()
+            let snapshot = pollAndTrim(marker: marker)
+            recentOutput = snapshot.recentOutput
 
-            if contains { return }
+            if snapshot.found { return }
             // Reset deadline whenever new console output appears
-            if currentLength != lastBufferLength {
-                lastBufferLength = currentLength
+            if snapshot.length != lastBufferLength {
+                lastBufferLength = snapshot.length
                 deadline = Date().addingTimeInterval(timeout)
             }
             try await Task.sleep(for: .milliseconds(500))

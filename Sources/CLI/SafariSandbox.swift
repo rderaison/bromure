@@ -30,15 +30,17 @@ struct Launch: ParsableCommand {
             throw ExitCode.failure
         }
 
-        let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
+        MainActor.assumeIsolated {
+            let app = NSApplication.shared
+            app.setActivationPolicy(.regular)
 
-        let state = AppState()
-        let delegate = GUIAppDelegate(state: state)
-        app.delegate = delegate
+            let state = AppState()
+            let delegate = GUIAppDelegate(state: state)
+            app.delegate = delegate
 
-        app.run()
-        _ = delegate
+            app.run()
+            _ = delegate
+        }
     }
 }
 
@@ -796,21 +798,23 @@ struct Run: ParsableCommand {
     }
 
     private func runLinux(config: VMConfig, dir: URL) throws {
-        let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
+        try MainActor.assumeIsolated {
+            let app = NSApplication.shared
+            app.setActivationPolicy(.regular)
 
-        let pool = VMPool(config: config, storageDir: dir)
-        guard pool.baseImageExists else {
-            print("No base image. Run 'bromure init' first.")
-            throw ExitCode.failure
+            let pool = VMPool(config: config, storageDir: dir)
+            guard pool.baseImageExists else {
+                print("No base image. Run 'bromure init' first.")
+                throw ExitCode.failure
+            }
+
+            let state = AppState()
+            let delegate = GUIAppDelegate(state: state)
+            app.delegate = delegate
+
+            app.run()
+            _ = delegate
         }
-
-        let state = AppState()
-        let delegate = GUIAppDelegate(state: state)
-        app.delegate = delegate
-
-        app.run()
-        _ = delegate
     }
 }
 

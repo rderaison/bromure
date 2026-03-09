@@ -25,17 +25,18 @@ public final class VMPool {
 
     public var hasWarmVM: Bool { warmVM != nil }
 
-    public nonisolated var baseImageExists: Bool { imageManager.baseImageExists }
+    public var baseImageExists: Bool { imageManager.baseImageExists }
 
     /// Update the config used for the next warm-up.
     public func updateConfig(_ config: VMConfig) {
         self.config = config
     }
 
-    public nonisolated init(config: VMConfig, storageDir: URL? = nil) {
+    public init(config: VMConfig, storageDir: URL? = nil) {
         self.config = config
-        self.storageDir = storageDir ?? VMConfig.defaultStorageDirectory
-        self.imageManager = LinuxImageManager(storageDir: self.storageDir)
+        let dir = storageDir ?? VMConfig.defaultStorageDirectory
+        self.storageDir = dir
+        self.imageManager = LinuxImageManager(storageDir: dir)
     }
 
     /// Pre-warm a VM by booting it and waiting for Chromium to be ready.
@@ -199,20 +200,25 @@ public final class VMPool {
 
     // MARK: - Private
 
+    /// Mutable state shared between the readability handler and timeout callback.
+    private final class BootState: @unchecked Sendable {
+        var resolved = false
+        var accumulated = ""
+    }
+
     private func waitForBoot(outputPipe: Pipe, inputPipe: Pipe, onBootDetected: String) async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            var resolved = false
-            var accumulated = ""
+            let state = BootState()
 
             outputPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
                 if bromureDebug { print(text, terminator: "") }
-                accumulated += text
+                state.accumulated += text
 
                 // Shell prompt means Alpine has booted
-                if !resolved && (accumulated.contains("localhost:~#") || accumulated.contains("login:")) {
-                    resolved = true
+                if !state.resolved && (state.accumulated.contains("localhost:~#") || state.accumulated.contains("login:")) {
+                    state.resolved = true
                     // Write chrome-env IMMEDIATELY — xinitrc is waiting for it
                     inputPipe.fileHandleForWriting.write(Data((onBootDetected + "\n").utf8))
                     // Then wait for X11 + Chromium to initialize
@@ -224,8 +230,8 @@ public final class VMPool {
 
             // Timeout after 60s — proceed anyway
             DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
-                if !resolved {
-                    resolved = true
+                if !state.resolved {
+                    state.resolved = true
                     cont.resume()
                 }
             }

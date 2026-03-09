@@ -50,7 +50,7 @@ final class AppState: @unchecked Sendable {
     /// Called by the app delegate when sessions need to be closed for image rebuild.
     var onCloseAllSessions: (() async -> Void)?
 
-    nonisolated init() {
+    init() {
         self.storageDir = VMConfig.defaultStorageDirectory
         self.imageManager = LinuxImageManager(storageDir: storageDir)
     }

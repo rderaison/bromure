@@ -14,7 +14,8 @@ let package = Package(
                 "SandboxEngine",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
-            path: "Sources/CLI"
+            path: "Sources/CLI",
+            exclude: ["Info.plist", "SafariSandbox.entitlements"]
         ),
         .target(
             name: "SandboxEngine",
