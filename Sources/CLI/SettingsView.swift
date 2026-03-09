@@ -226,7 +226,21 @@ struct SettingsView: View {
         .onChange(of: memoryGB) { _, _ in state?.restartPool() }
         .onChange(of: cpuCount) { _, _ in state?.restartPool() }
         .onChange(of: enableAudio) { _, _ in state?.restartPool() }
-        .onChange(of: enableWarp) { _, _ in state?.restartPool() }
+        .onChange(of: enableWarp) { _, newValue in
+            if newValue && !UserDefaults.standard.bool(forKey: "warpEULAAccepted") {
+                // Revert toggle — EULA must be accepted first
+                enableWarp = false
+                onShowWarpEULA?({
+                    // Called after user accepts the EULA
+                    state?.restartPool()
+                })
+            } else {
+                if newValue && memoryGB < 2 {
+                    showWarpMemoryConfirm = true
+                }
+                state?.restartPool()
+            }
+        }
         .onChange(of: enableAdBlocking) { _, _ in state?.restartPool() }
         .onChange(of: swapCmdCtrl) { _, _ in state?.restartPool() }
         .onChange(of: appearance) { _, _ in state?.restartPool() }

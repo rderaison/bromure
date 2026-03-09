@@ -5,7 +5,7 @@
     <key>CFBundleName</key>
     <string>Bromure</string>
     <key>CFBundleIdentifier</key>
-    <string>com.bromure.app</string>
+    <string>io.bromure.app</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>
