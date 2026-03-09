@@ -4,7 +4,6 @@ import SandboxEngine
 struct SettingsView: View {
     @AppStorage("vm.memoryGB") private var memoryGB = 2
     @AppStorage("vm.cpuCount") private var cpuCount = 0
-    @AppStorage("vm.enableNetworking") private var enableNetworking = true
     @AppStorage("vm.enableAudio") private var enableAudio = true
     @AppStorage("vm.enableWarp") private var enableWarp = false
     @AppStorage("vm.enableAdBlocking") private var enableAdBlocking = false
@@ -136,15 +135,11 @@ struct SettingsView: View {
             }
 
             Section("Features") {
-                Toggle("Networking", isOn: $enableNetworking)
-                    .help("Disable for fully isolated browsing with no network access.")
                 Toggle("Audio", isOn: $enableAudio)
                 Toggle("Filter ads (with Pi-hole)", isOn: $enableAdBlocking)
                     .help("Block ads and trackers using Pi-hole DNS filtering with a local Squid proxy.")
-                    .disabled(!enableNetworking)
                 Toggle("Cloudflare WARP", isOn: $enableWarp)
                     .help("Route VM traffic through Cloudflare\u{2019}s encrypted network via SOCKS5 proxy.")
-                    .disabled(!enableNetworking)
             }
 
             Section("Storage") {
@@ -230,7 +225,6 @@ struct SettingsView: View {
 
         .onChange(of: memoryGB) { _, _ in state?.restartPool() }
         .onChange(of: cpuCount) { _, _ in state?.restartPool() }
-        .onChange(of: enableNetworking) { _, _ in state?.restartPool() }
         .onChange(of: enableAudio) { _, _ in state?.restartPool() }
         .onChange(of: enableWarp) { _, _ in state?.restartPool() }
         .onChange(of: enableAdBlocking) { _, _ in state?.restartPool() }

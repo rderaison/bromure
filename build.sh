@@ -71,7 +71,6 @@ echo "  $MACOS_DIR/$PRODUCT_NAME setup                   # complete macOS Setup 
 echo "  $MACOS_DIR/$PRODUCT_NAME run --os macOS           # launch ephemeral Safari session"
 echo ""
 echo "  # Options:"
-echo "  $MACOS_DIR/$PRODUCT_NAME run --no-network        # disable network"
 echo "  $MACOS_DIR/$PRODUCT_NAME run --persist ~/s.img   # keep session disk"
 echo ""
 echo "Or run the app bundle directly:"

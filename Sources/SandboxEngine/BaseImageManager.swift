@@ -301,11 +301,9 @@ public final class BaseImageManager {
         vzConfig.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
 
         // Network
-        if config.enableNetworking {
-            let net = VZVirtioNetworkDeviceConfiguration()
-            net.attachment = VZNATNetworkDeviceAttachment()
-            vzConfig.networkDevices = [net]
-        }
+        let net = VZVirtioNetworkDeviceConfiguration()
+        net.attachment = VZNATNetworkDeviceAttachment()
+        vzConfig.networkDevices = [net]
 
         // Graphics
         let graphics = VZMacGraphicsDeviceConfiguration()

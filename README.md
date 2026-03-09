@@ -23,7 +23,7 @@ Each browser session runs in a fully isolated virtual machine with its own ephem
 - **Complete isolation** -- malware, exploits, or malicious scripts are confined to the VM and destroyed when the window closes.
 - **No persistent state** -- there is nothing to steal. Cookies, session tokens, and browsing data exist only for the lifetime of the window.
 - **Clean environment** -- every session starts from an identical, known-good base image. There is no accumulated attack surface from previous browsing.
-- **Network segmentation** -- each VM has its own network stack. Optionally disable networking entirely for air-gapped document viewing.
+- **Network segmentation** -- each VM has its own network stack, isolated from the host and other sessions.
 
 ## Performance
 

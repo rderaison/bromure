@@ -767,9 +767,6 @@ struct Run: ParsableCommand {
     @Option(name: .long, help: "Display height in pixels.")
     var height: Int = 1080
 
-    @Flag(name: .long, help: "Disable network access.")
-    var noNetwork: Bool = false
-
     @Flag(name: .long, help: "Disable audio.")
     var noAudio: Bool = false
 
@@ -784,7 +781,6 @@ struct Run: ParsableCommand {
             memorySize: memory * 1024 * 1024 * 1024,
             displayWidth: width,
             displayHeight: height,
-            enableNetworking: !noNetwork,
             enableAudio: !noAudio
         )
 

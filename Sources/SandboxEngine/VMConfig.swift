@@ -43,9 +43,6 @@ public struct VMConfig {
     /// Pixels per inch for the virtual display.
     public var pixelsPerInch: Int
 
-    /// Whether to attach a NAT network device.
-    public var enableNetworking: Bool
-
     /// Whether to attach audio devices.
     public var enableAudio: Bool
 
@@ -79,7 +76,6 @@ public struct VMConfig {
         displayWidth: Int = 1920,
         displayHeight: Int = 1080,
         pixelsPerInch: Int = 144,
-        enableNetworking: Bool = true,
         enableAudio: Bool = true,
         enableWarp: Bool = false,
         forceDarkMode: Bool = false,
@@ -95,7 +91,6 @@ public struct VMConfig {
         self.displayWidth = displayWidth
         self.displayHeight = displayHeight
         self.pixelsPerInch = pixelsPerInch
-        self.enableNetworking = enableNetworking
         self.enableAudio = enableAudio
         self.enableWarp = enableWarp
         self.forceDarkMode = forceDarkMode

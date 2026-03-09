@@ -86,7 +86,7 @@ public final class VMPool {
         if config.forceDarkMode {
             extraFlags.append("--force-dark-mode --enable-features=WebContentsForceDark")
         }
-        if config.enableNetworking && (config.enableAdBlocking || config.enableWarp) {
+        if config.enableAdBlocking || config.enableWarp {
             extraFlags.append("--proxy-server=http://127.0.0.1:3128")
         }
         var envLines: [String] = []
@@ -104,7 +104,7 @@ public final class VMPool {
         var bootScript = "mkdir -p /tmp/bromure && "
             + envLines.map { "echo \(shellEscape($0)) >> /tmp/bromure/chrome-env" }.joined(separator: " && ")
             + " && touch /tmp/bromure/chrome-ready"
-        if config.enableNetworking && (config.enableAdBlocking || config.enableWarp) {
+        if config.enableAdBlocking || config.enableWarp {
             // Run dnsmasq with pihole config
             bootScript += " && dnsmasq -C /etc/dnsmasq.d/pihole.conf"
             // If ad blocking, squid should resolve via dnsmasq (127.0.0.1); otherwise use system DNS

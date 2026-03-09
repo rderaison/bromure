@@ -187,6 +187,6 @@ public final class SandboxVM: NSObject, VZVirtualMachineDelegate, @unchecked Sen
         } else {
             diskInfo = ""
         }
-        return "[\(state)] cpus=\(config.cpuCount) mem=\(config.memorySize / (1024*1024*1024))GB net=\(config.enableNetworking)\(diskInfo)"
+        return "[\(state)] cpus=\(config.cpuCount) mem=\(config.memorySize / (1024*1024*1024))GB\(diskInfo)"
     }
 }

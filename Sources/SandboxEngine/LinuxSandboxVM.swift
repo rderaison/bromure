@@ -206,6 +206,6 @@ public final class LinuxSandboxVM: NSObject, VZVirtualMachineDelegate, @unchecke
         } else {
             diskInfo = ""
         }
-        return "[linux/\(state)] cpus=\(config.cpuCount) mem=\(config.memorySize / (1024*1024*1024))GB net=\(config.enableNetworking)\(diskInfo)"
+        return "[linux/\(state)] cpus=\(config.cpuCount) mem=\(config.memorySize / (1024*1024*1024))GB\(diskInfo)"
     }
 }

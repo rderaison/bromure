@@ -112,7 +112,6 @@ struct E2ETests {
         #expect(result.exitCode == 0)
         #expect(result.stdout.contains("--cpus"))
         #expect(result.stdout.contains("--memory"))
-        #expect(result.stdout.contains("--no-network"))
         #expect(result.stdout.contains("--no-audio"))
         #expect(result.stdout.contains("--persist"))
         #expect(result.stdout.contains("--width"))
@@ -223,14 +222,14 @@ struct E2ETests {
         #expect(!combined.contains("Error: The value '8' is invalid"))
     }
 
-    @Test("run --no-network and --no-audio are accepted together")
+    @Test("run --no-audio is accepted")
     func runIsolationFlags() throws {
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("bromure-e2e-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let result = try run(["run", "--storage-dir", tmpDir.path, "--no-network", "--no-audio"])
+        let result = try run(["run", "--storage-dir", tmpDir.path, "--no-audio"])
         let combined = result.stdout + result.stderr
         // Should fail on missing base image, not on arg parsing
         #expect(combined.contains("No base image found") || combined.contains("bromure init"))
