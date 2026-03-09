@@ -124,5 +124,5 @@ It is a pun on [Bromium](https://en.wikipedia.org/wiki/Bromium), a company that 
 
 ## Author
 
-- [Renaud Deraison](https://github.com/rderaison) (prompting)
+- [Renaud Deraison](https://www.linkedin.com/in/rderaison/) (prompting)
 - [Claude + Opus 4.6](https://www.anthropic.com) (implementation)
