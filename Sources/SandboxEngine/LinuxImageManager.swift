@@ -1,3 +1,4 @@
+import CommonCrypto
 import Foundation
 import Virtualization
 
@@ -180,35 +181,91 @@ public final class LinuxImageManager {
 
     // MARK: - Private
 
-    private static let alpineVersion = "3.21"
-    private static let alpineRelease = "3.21.3"
-    private static let netbootBase =
-        "https://dl-cdn.alpinelinux.org/alpine/v\(alpineVersion)/releases/aarch64/netboot"
+    private static let alpineVersion = "3.23"
+    private static let alpineRelease = "3.23.3"
+    private static let releasesBase =
+        "https://dl-cdn.alpinelinux.org/alpine/v\(alpineVersion)/releases/aarch64"
+    private static let netbootBase = "\(releasesBase)/netboot-\(alpineRelease)"
 
     private func downloadNetbootFiles(
         kernelDest: URL,
         initrdDest: URL,
         progress: @escaping (ProgressEvent) -> Void
     ) async throws {
-        let kernelURL = URL(string: "\(Self.netbootBase)/vmlinuz-virt")!
-        let initrdURL = URL(string: "\(Self.netbootBase)/initramfs-virt")!
+        let tarballName = "alpine-netboot-\(Self.alpineRelease)-aarch64.tar.gz"
+        let tarballURL = URL(string: "\(Self.releasesBase)/\(tarballName)")!
+        let checksumURL = URL(string: "\(Self.releasesBase)/\(tarballName).sha256")!
+        let tarballDest = storageDir.appendingPathComponent(tarballName)
+        let checksumDest = storageDir.appendingPathComponent("\(tarballName).sha256")
 
-        // Download kernel (EFI stub format)
-        progress(.message("Downloading kernel..."))
-        let efiKernelDest = kernelDest.deletingLastPathComponent()
-            .appendingPathComponent("netboot-vmlinuz-efi")
-        try await downloadFile(from: kernelURL, to: efiKernelDest, progress: progress)
+        // Download checksum file
+        progress(.message("Downloading checksum..."))
+        try await downloadFile(from: checksumURL, to: checksumDest, progress: progress)
+        let checksumLine = try String(contentsOf: checksumDest, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let expectedHash = String(checksumLine.split(separator: " ").first ?? "")
+        guard expectedHash.count == 64 else {
+            throw SandboxError.diskCreationFailed("Invalid SHA-256 checksum file")
+        }
 
-        // Extract raw ARM64 Image from EFI stub.
-        // VZLinuxBootLoader requires a raw ARM64 Image, not the EFI PE wrapper.
-        // The gzip-compressed Image is embedded after the EFI headers.
+        // Download tarball
+        progress(.message("Downloading Alpine netboot tarball..."))
+        try await downloadFile(from: tarballURL, to: tarballDest, progress: progress)
+
+        // Verify SHA-256 checksum
+        progress(.message("Verifying checksum..."))
+        let actualHash = try sha256(of: tarballDest)
+        guard actualHash == expectedHash else {
+            try? FileManager.default.removeItem(at: tarballDest)
+            throw SandboxError.diskCreationFailed(
+                "Checksum mismatch for \(tarballName): expected \(expectedHash), got \(actualHash)"
+            )
+        }
+
+        // Extract vmlinuz-virt and initramfs-virt from tarball
+        progress(.message("Extracting netboot files..."))
+        let extractDir = storageDir.appendingPathComponent("netboot-extract")
+        try? FileManager.default.removeItem(at: extractDir)
+        try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+
+        let tar = Process()
+        tar.executableURL = URL(filePath: "/usr/bin/tar")
+        tar.arguments = [
+            "xzf", tarballDest.path,
+            "-C", extractDir.path,
+            "boot/vmlinuz-virt", "boot/initramfs-virt"
+        ]
+        try tar.run()
+        tar.waitUntilExit()
+        guard tar.terminationStatus == 0 else {
+            throw SandboxError.diskCreationFailed("Failed to extract netboot tarball")
+        }
+
+        // Move extracted files to destinations
+        let extractedKernel = extractDir.appendingPathComponent("boot/vmlinuz-virt")
+        let extractedInitrd = extractDir.appendingPathComponent("boot/initramfs-virt")
+
+        // Extract raw ARM64 Image from EFI stub kernel
         progress(.message("Extracting raw kernel..."))
-        try extractRawKernel(from: efiKernelDest, to: kernelDest)
-        try? FileManager.default.removeItem(at: efiKernelDest)
+        try extractRawKernel(from: extractedKernel, to: kernelDest)
 
-        // Download initramfs
-        progress(.message("Downloading initramfs..."))
-        try await downloadFile(from: initrdURL, to: initrdDest, progress: progress)
+        try? FileManager.default.removeItem(at: initrdDest)
+        try FileManager.default.moveItem(at: extractedInitrd, to: initrdDest)
+
+        // Clean up
+        try? FileManager.default.removeItem(at: extractDir)
+        try? FileManager.default.removeItem(at: tarballDest)
+        try? FileManager.default.removeItem(at: checksumDest)
+    }
+
+    /// Compute SHA-256 hash of a file.
+    private func sha256(of fileURL: URL) throws -> String {
+        let data = try Data(contentsOf: fileURL)
+        var hash = [UInt8](repeating: 0, count: 32)
+        data.withUnsafeBytes { buffer in
+            _ = CC_SHA256(buffer.baseAddress, CC_LONG(buffer.count), &hash)
+        }
+        return hash.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Extract the raw ARM64 Image from an EFI stub vmlinuz.
@@ -317,7 +374,7 @@ public final class LinuxImageManager {
 
         let bootLoader = VZLinuxBootLoader(kernelURL: netbootKernel)
         bootLoader.initialRamdiskURL = netbootInitrd
-        bootLoader.commandLine = "console=hvc0 ip=dhcp alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main modloop=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/releases/aarch64/netboot/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk"
+        bootLoader.commandLine = "console=hvc0 ip=dhcp alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main modloop=\(Self.netbootBase)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.platform = VZGenericPlatformConfiguration()
@@ -558,7 +615,7 @@ public final class LinuxImageManager {
             "",
             "# Repos",
             "mkdir -p /mnt/etc/apk",
-            "printf '%s\\n' 'https://dl-cdn.alpinelinux.org/alpine/v3.21/main' 'https://dl-cdn.alpinelinux.org/alpine/v3.21/community' > /mnt/etc/apk/repositories",
+            "printf '%s\\n' 'https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main' 'https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/community' > /mnt/etc/apk/repositories",
             "",
             "# DNS",
             "cp /etc/resolv.conf /mnt/etc/resolv.conf",
