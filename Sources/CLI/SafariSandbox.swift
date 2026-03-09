@@ -3,7 +3,7 @@ import Cocoa
 import Foundation
 import SandboxEngine
 import SwiftUI
-import Virtualization
+@preconcurrency import Virtualization
 
 @main
 struct Bromure: ParsableCommand {
@@ -462,6 +462,7 @@ final class BrowserSession {
         warmVM?.vm.delegate = nil
         // 2. Stop VM on the main dispatch queue (VZ requirement)
         if let vm = warmVM?.vm, vm.state == .running || vm.state == .paused {
+            nonisolated(unsafe) let vm = vm
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 DispatchQueue.main.async {
                     vm.stop { _ in cont.resume() }
