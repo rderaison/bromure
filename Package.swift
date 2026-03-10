@@ -21,6 +21,7 @@ let package = Package(
             name: "SandboxEngine",
             dependencies: [],
             path: "Sources/SandboxEngine",
+            resources: [.copy("Resources/vm-setup")],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("AppKit"),

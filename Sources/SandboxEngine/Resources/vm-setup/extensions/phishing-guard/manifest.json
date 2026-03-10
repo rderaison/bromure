@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Bromure Phishing Guard",
+  "version": "1.0.0",
+  "description": "Detects and warns about potential phishing sites when password fields are present.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "webNavigation",
+    "declarativeNetRequest"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Bromure Phishing Guard"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["blocked.html", "top-domains.json"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

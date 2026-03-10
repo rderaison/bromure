@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div id="warning" class="hidden">
+      <div class="icon">&#x26a0;</div>
+      <h2>Password field detected</h2>
+      <p>
+        First time seeing a password field on
+        <strong id="domain-name"></strong>
+      </p>
+      <div class="actions">
+        <button id="trust-btn" class="btn btn-trust">Trust this site</button>
+        <button id="back-btn" class="btn btn-back">Go back</button>
+      </div>
+    </div>
+    <div id="safe" class="hidden">
+      <div class="icon safe-icon">&#x2713;</div>
+      <p>No warnings for this tab.</p>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

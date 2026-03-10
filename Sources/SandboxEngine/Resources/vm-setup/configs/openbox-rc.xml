@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <resistance><strength>10</strength><screen_edge_strength>20</screen_edge_strength></resistance>
+  <focus><focusNew>yes</focusNew><followMouse>yes</followMouse><raiseOnFocus>yes</raiseOnFocus></focus>
+  <placement><policy>Smart</policy></placement>
+  <theme><name>Clearlooks</name><titleLayout></titleLayout></theme>
+  <desktops><number>1</number></desktops>
+  <keyboard/>
+  <mouse/>
+  <applications>
+    <application class="*"><decor>no</decor><maximized>true</maximized></application>
+  </applications>
+</openbox_config>

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Site Blocked - Bromure Phishing Guard</title>
+    <link rel="stylesheet" href="blocked.css" />
+  </head>
+  <body>
+    <div class="container">
+      <div class="shield">&#x1f6e1;</div>
+      <h1>This site has been flagged as potentially dangerous</h1>
+      <p class="domain-label">
+        Blocked domain: <strong id="blocked-domain"></strong>
+      </p>
+      <p class="explanation">
+        This domain matches known phishing patterns. Entering your credentials
+        here could compromise your accounts.
+      </p>
+      <button id="go-back" class="btn btn-safe">Go back to safety</button>
+      <a href="#" id="proceed" class="proceed-link"
+        >Proceed anyway (not recommended)</a
+      >
+    </div>
+    <script src="blocked.js"></script>
+  </body>
+</html>

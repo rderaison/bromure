@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/rc">
+  <menu id="root-menu" label="Menu">
+    <item label="Logout"><action name="Execute"><command>doas poweroff</command></action></item>
+  </menu>
+</openbox_menu>

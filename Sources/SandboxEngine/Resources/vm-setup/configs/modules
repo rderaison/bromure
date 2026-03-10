@@ -1,0 +1,11 @@
+xhci_pci
+usbhid
+hid_generic
+tun
+nf_tables
+nft_reject_inet
+virtio_snd
+tcp_bbr
+dm-crypt
+vsock
+vmw_vsock_virtio_transport

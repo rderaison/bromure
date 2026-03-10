@@ -76,6 +76,15 @@ public struct VMConfig {
     /// Whether WebGL and WebGPU are enabled in the browser.
     public var enableWebGL: Bool
 
+    /// Whether to block known malware sites via Cloudflare DNS (1.1.1.2/1.0.0.2).
+    public var blockMalwareSites: Bool
+
+    /// Whether to enable file transfer between host and guest.
+    public var enableFileTransfer: Bool
+
+    /// Whether to warn about phishing when password fields are detected on suspicious sites.
+    public var phishingWarning: Bool
+
     /// Whether to share the clipboard between host and guest via SPICE agent.
     public var enableClipboardSharing: Bool
 
@@ -93,6 +102,9 @@ public struct VMConfig {
         homePage: String = "https://www.google.com",
         enableGPU: Bool = true,
         enableWebGL: Bool = false,
+        blockMalwareSites: Bool = false,
+        enableFileTransfer: Bool = false,
+        phishingWarning: Bool = false,
         enableClipboardSharing: Bool = false,
         keyboardLayout: String? = nil,
         naturalScrolling: Bool? = nil,
@@ -111,6 +123,9 @@ public struct VMConfig {
         self.homePage = homePage
         self.enableGPU = enableGPU
         self.enableWebGL = enableWebGL
+        self.blockMalwareSites = blockMalwareSites
+        self.enableFileTransfer = enableFileTransfer
+        self.phishingWarning = phishingWarning
         self.enableClipboardSharing = enableClipboardSharing
         self.keyboardLayout = keyboardLayout ?? VMConfig.detectKeyboardLayout()
         self.naturalScrolling = naturalScrolling ?? VMConfig.detectNaturalScrolling()

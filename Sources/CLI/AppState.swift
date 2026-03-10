@@ -32,6 +32,8 @@ final class AppState: @unchecked Sendable {
     var phase: Phase = .checking
     var poolReady = false
     var sessionCount = 0
+    var profileVersion = 0
+    var isLaunching = false
     var initSteps: [InitStep] = []
     var consoleLog: String = ""
 
@@ -47,12 +49,28 @@ final class AppState: @unchecked Sendable {
     private var warmUpTask: Task<Void, Never>?
     private var initTask: Task<Void, Never>?
 
+    /// Profile management
+    let profileManager: ProfileManager
+    var selectedProfileID: UUID?
+
     /// Called by the app delegate when sessions need to be closed for image rebuild.
     var onCloseAllSessions: (() async -> Void)?
 
     init() {
         self.storageDir = VMConfig.defaultStorageDirectory
         self.imageManager = LinuxImageManager(storageDir: storageDir)
+        self.profileManager = ProfileManager(storageDir: storageDir)
+
+        // Migrate v1.0.x UserDefaults settings into a Default profile
+        if let migrated = profileManager.migrateFromUserDefaults() {
+            selectedProfileID = migrated.id
+        }
+
+        // Ensure a Default profile always exists
+        if profileManager.allProfiles.isEmpty {
+            let defaultProfile = profileManager.createProfile(name: "Default", color: nil)
+            selectedProfileID = defaultProfile.id
+        }
     }
 
     func checkState() {
@@ -148,7 +166,7 @@ final class AppState: @unchecked Sendable {
     }
 
     func startPool() {
-        let config = buildConfig()
+        let config = buildBaseConfig()
         pool = VMPool(config: config, storageDir: storageDir)
         poolReady = false
         warmUpTask = Task {
@@ -164,32 +182,30 @@ final class AppState: @unchecked Sendable {
         }
     }
 
-    func buildConfig() -> VMConfig {
+    /// Minimal config for booting a VM (hardware only — no browser-specific flags).
+    /// Always enables vsock so clipboard/file-transfer are available regardless of profile.
+    /// Software config (chrome-env, services) is applied at claim time.
+    func buildBaseConfig() -> VMConfig {
         let defaults = UserDefaults.standard
         let memGB = defaults.integer(forKey: "vm.memoryGB")
         let cpus = defaults.integer(forKey: "vm.cpuCount")
-
-        let appearancePref = defaults.string(forKey: "vm.appearance") ?? "system"
-        let forceDark: Bool
-        switch appearancePref {
-        case "dark": forceDark = true
-        case "light": forceDark = false
-        default: forceDark = VMConfig.detectDarkMode()
-        }
-
         return VMConfig(
             cpuCount: cpus > 0 ? cpus : nil,
             memorySize: UInt64(memGB > 0 ? memGB : 2) * 1024 * 1024 * 1024,
             enableAudio: defaults.object(forKey: "vm.enableAudio") as? Bool ?? true,
-            enableWarp: defaults.object(forKey: "vm.enableWarp") as? Bool ?? false,
-            forceDarkMode: forceDark,
-            enableAdBlocking: defaults.object(forKey: "vm.enableAdBlocking") as? Bool ?? false,
-            swapCmdCtrl: defaults.object(forKey: "vm.swapCmdCtrl") as? Bool ?? true,
-            homePage: defaults.string(forKey: "vm.homePage") ?? "https://www.google.com",
-            enableGPU: defaults.object(forKey: "vm.enableGPU") as? Bool ?? true,
-            enableWebGL: defaults.object(forKey: "vm.enableWebGL") as? Bool ?? false,
-            enableClipboardSharing: defaults.object(forKey: "vm.enableClipboardSharing") as? Bool ?? false
+            enableFileTransfer: true,
+            enableClipboardSharing: true
         )
+    }
+
+    /// Build a VMConfig from a profile's settings (merges with app-wide hardware settings).
+    func buildConfig(for profile: Profile) -> VMConfig {
+        profile.settings.toVMConfig()
+    }
+
+    /// Build a default VMConfig when no profile is selected.
+    func buildDefaultConfig() -> VMConfig {
+        ProfileSettings().toVMConfig()
     }
 
     /// Close all sessions, delete the base image, and rebuild with new settings.

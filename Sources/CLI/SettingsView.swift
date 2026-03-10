@@ -5,20 +5,12 @@ struct SettingsView: View {
     @AppStorage("vm.memoryGB") private var memoryGB = 2
     @AppStorage("vm.cpuCount") private var cpuCount = 0
     @AppStorage("vm.enableAudio") private var enableAudio = true
-    @AppStorage("vm.enableWarp") private var enableWarp = false
-    @AppStorage("vm.enableAdBlocking") private var enableAdBlocking = false
-    @AppStorage("vm.enableGPU") private var enableGPU = true
-    @AppStorage("vm.enableWebGL") private var enableWebGL = false
     @AppStorage("vm.swapCmdCtrl") private var swapCmdCtrl = true
     @AppStorage("vm.appearance") private var appearance = "system"
-    @AppStorage("vm.homePage") private var homePage = "https://www.google.com"
-    @AppStorage("vm.enableClipboardSharing") private var enableClipboardSharing = false
 
     var state: AppState?
-    var onShowWarpEULA: ((@escaping () -> Void) -> Void)?
     @State private var showResetConfirm = false
     @State private var showRebuildConfirm = false
-    @State private var showWarpMemoryConfirm = false
     @State private var pendingKeyboard: String?
     @State private var pendingScrolling: Bool?
     @State private var pendingDisplayScale: Int?
@@ -80,6 +72,8 @@ struct SettingsView: View {
                         Text("\(n)").tag(n)
                     }
                 }
+
+                Toggle("Audio", isOn: $enableAudio)
             }
 
             Section("Input") {
@@ -107,7 +101,7 @@ struct SettingsView: View {
                     }
 
                 Toggle("Use Command as Control", isOn: $swapCmdCtrl)
-                    .help("Swap Command and Control keys so macOS shortcuts (⌘T, ⌘W, ⌘L, etc.) work in Chromium.")
+                    .help("Swap Command and Control keys so macOS shortcuts work in Chromium.")
             }
 
             Section("Display") {
@@ -132,25 +126,6 @@ struct SettingsView: View {
                 .help("Controls Chromium's color scheme in the VM.")
             }
 
-            Section("Browser") {
-                TextField("Home Page", text: $homePage)
-                    .help("The page Chromium opens on launch.")
-            }
-
-            Section("Features") {
-                Toggle("Audio", isOn: $enableAudio)
-                Toggle("GPU Acceleration", isOn: $enableGPU)
-                    .help("Hardware GPU acceleration in the browser. Disable if you experience graphical glitches.")
-                Toggle("WebGL", isOn: $enableWebGL)
-                    .help("Enable WebGL and WebGPU. Some websites with heavy 3D content may cause slowdowns.")
-                Toggle("Filter ads (with Pi-hole)", isOn: $enableAdBlocking)
-                    .help("Block ads and trackers using Pi-hole DNS filtering with a local Squid proxy.")
-                Toggle("Cloudflare WARP", isOn: $enableWarp)
-                    .help("Route VM traffic through Cloudflare\u{2019}s encrypted network via SOCKS5 proxy.")
-                Toggle("Shared Clipboard", isOn: $enableClipboardSharing)
-                    .help("Share the clipboard between macOS and the VM browser.")
-            }
-
             Section("Storage") {
                 LabeledContent("Disk Usage") {
                     Text(state?.diskUsage ?? "\u{2014}")
@@ -169,7 +144,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 450, height: 550)
+        .frame(width: 450, height: 480)
         .onAppear {
             keyboardLayout = state?.currentKeyboardLayout ?? VMConfig.detectKeyboardLayout()
             naturalScrolling = state?.currentNaturalScrolling ?? VMConfig.detectNaturalScrolling()
@@ -207,7 +182,6 @@ struct SettingsView: View {
                 state?.regenerateImage()
             }
             Button("Cancel", role: .cancel) {
-                // Revert UI to current values
                 keyboardLayout = state?.currentKeyboardLayout ?? "us"
                 naturalScrolling = state?.currentNaturalScrolling ?? true
                 displayScale = state?.currentDisplayScale ?? VMConfig.detectDisplayScale()
@@ -219,46 +193,11 @@ struct SettingsView: View {
             Text("Changing this setting requires rebuilding the base image. All open browser windows will be closed and any unsaved data will be lost.")
         }
 
-        .confirmationDialog(
-            "Increase VM memory?",
-            isPresented: $showWarpMemoryConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Increase to 2 GB") {
-                memoryGB = 2
-            }
-            Button("Keep \(memoryGB) GB", role: .cancel) { }
-        } message: {
-            Text("Cloudflare WARP requires at least 2 GB of RAM to run reliably. Would you like to increase the VM memory?")
-        }
-
         .onChange(of: memoryGB) { _, _ in state?.restartPool() }
         .onChange(of: cpuCount) { _, _ in state?.restartPool() }
         .onChange(of: enableAudio) { _, _ in state?.restartPool() }
-        .onChange(of: enableGPU) { _, _ in state?.restartPool() }
-        .onChange(of: enableWebGL) { _, _ in state?.restartPool() }
-        .onChange(of: enableWarp) { _, newValue in
-            if newValue && !UserDefaults.standard.bool(forKey: "warpEULAAccepted") {
-                // Revert toggle — EULA must be accepted first
-                enableWarp = false
-                onShowWarpEULA?({
-                    // Called after user accepts the EULA
-                    state?.restartPool()
-                })
-            } else {
-                if newValue && memoryGB < 2 {
-                    showWarpMemoryConfirm = true
-                }
-                state?.restartPool()
-            }
-        }
-        .onChange(of: enableAdBlocking) { _, _ in state?.restartPool() }
-        .onChange(of: swapCmdCtrl) { _, _ in state?.restartPool() }
-        .onChange(of: appearance) { _, _ in state?.restartPool() }
-        .onChange(of: homePage) { _, _ in state?.restartPool() }
-        .onChange(of: enableClipboardSharing) { _, _ in state?.restartPool() }
 
-        Text("Changes take effect immediately by restarting the pre-warmed VM.")
+        Text("Changes restart the pre-warmed VM.")
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .padding(.bottom, 8)

@@ -1,0 +1,1 @@
+/root/debug.sh &

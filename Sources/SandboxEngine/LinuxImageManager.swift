@@ -11,7 +11,7 @@ import Virtualization
 /// - virtio drivers for GPU, network, and disk
 public final class LinuxImageManager {
     /// Bump this to force a rebuild of the base image on next launch.
-    public static let imageVersion = "2"
+    public static let imageVersion = "5"
 
     private let storageDir: URL
 
@@ -141,7 +141,8 @@ public final class LinuxImageManager {
     public func buildLinuxVMConfig(
         diskURL: URL,
         config: VMConfig,
-        readOnlyDisk: Bool = false
+        readOnlyDisk: Bool = false,
+        profileDiskURL: URL? = nil
     ) throws -> VZVirtualMachineConfiguration {
         let vzConfig = VZVirtualMachineConfiguration()
 
@@ -152,7 +153,8 @@ public final class LinuxImageManager {
         bootLoader.initialRamdiskURL = linuxInitrdURL
         // Alpine init reads modules= to know what to modprobe at boot.
         // We need virtio_blk (for /dev/vda) and ext4 (for root filesystem).
-        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk rw"
+        // dm-crypt is needed for LUKS-encrypted profile disks.
+        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk,dm-crypt rw"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.cpuCount = config.cpuCount
@@ -161,11 +163,20 @@ public final class LinuxImageManager {
         // Platform
         vzConfig.platform = VZGenericPlatformConfiguration()
 
-        // Storage
+        // Storage — root disk (vda) + optional profile disk (vdb)
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(
             url: diskURL, readOnly: readOnlyDisk
         )
-        vzConfig.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
+        var storageDevices: [VZStorageDeviceConfiguration] = [
+            VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)
+        ]
+        if let profileDiskURL {
+            let profileAttachment = try VZDiskImageStorageDeviceAttachment(
+                url: profileDiskURL, readOnly: false
+            )
+            storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: profileAttachment))
+        }
+        vzConfig.storageDevices = storageDevices
 
         // Network — NAT mode (bridged networking requires com.apple.vm.networking
         // entitlement which needs an Apple Developer provisioning profile)
@@ -201,6 +212,12 @@ public final class LinuxImageManager {
 
         // Memory balloon — allows host to reclaim unused guest memory
         vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+
+        // Vsock device for file transfer
+        if config.enableFileTransfer {
+            vzConfig.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+        }
+
 
         // SPICE agent for clipboard sharing
         if config.enableClipboardSharing {
@@ -492,50 +509,42 @@ public final class LinuxImageManager {
         writer.write(Data("root\n".utf8))
         try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
 
+        progress(.message("Transferring setup files..."))
+
+        // Create a tar.gz archive of the bundled vm-setup resources and
+        // transfer it to the installer VM via base64 over serial.
+        let archive = try Self.createSetupArchive()
+        let base64 = archive.base64EncodedString()
+        let chunkSize = 800
+        writer.write(Data("mkdir -p /tmp/vm-setup\n".utf8))
+        try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
+        var offset = base64.startIndex
+        while offset < base64.endIndex {
+            let end = base64.index(offset, offsetBy: chunkSize, limitedBy: base64.endIndex) ?? base64.endIndex
+            let chunk = base64[offset..<end]
+            writer.write(Data("echo '\(chunk)' >> /tmp/s.b64\n".utf8))
+            try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
+            offset = end
+        }
+        writer.write(Data("base64 -d /tmp/s.b64 | tar xz -C /tmp\n".utf8))
+        try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
+        writer.write(Data("rm -f /tmp/s.b64\n".utf8))
+        try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
+
         progress(.message("Running setup script (installing packages, this may take a few minutes)..."))
 
-        // Send each command and wait for the shell prompt before sending the next.
-        // This prevents commands from interleaving when apk downloads take time.
+        // Run the setup script as a single command. It will print
+        // SANDBOX_SETUP_DONE on success or SANDBOX_SETUP_FAILED on error.
         let hostConfig = VMConfig()
-        let scriptLines = Self.setupScript(
-            keyboardLayout: keyboardLayout ?? hostConfig.keyboardLayout,
-            naturalScrolling: naturalScrolling ?? hostConfig.naturalScrolling,
-            locale: locale ?? hostConfig.locale,
-            displayScale: displayScale ?? VMConfig.detectDisplayScale()
-        ).components(separatedBy: "\n")
-        for line in scriptLines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
-            writer.write(Data((line + "\n").utf8))
-            // Wait for either the shell prompt or our completion marker
-            if trimmed.contains("SANDBOX_SETUP_DONE") {
-                break
-            }
-            do {
-                try await consoleOutput.waitFor(
-                    marker: "localhost:~#",
-                    timeout: 900,
-                    progress: progress
-                )
-            } catch {
-                // If the shell exited due to a setup failure, detect it early
-                let snapshot = consoleOutput.pollAndTrim(marker: "SANDBOX_SETUP_FAILED")
-                if snapshot.found {
-                    throw SandboxError.diskCreationFailed(
-                        "The image could not be created. Package installation failed, likely due to network issues. Please check your internet connection and try again."
-                    )
-                }
-                throw error
-            }
-        }
+        let kbLayout = Self.shellEscape(keyboardLayout ?? hostConfig.keyboardLayout)
+        let natScroll = (naturalScrolling ?? hostConfig.naturalScrolling) ? "true" : "false"
+        let loc = Self.shellEscape(locale ?? hostConfig.locale)
+        let scale = displayScale ?? VMConfig.detectDisplayScale()
+        writer.write(Data("sh /tmp/vm-setup/setup.sh \(kbLayout) \(natScroll) \(loc) \(scale) \(Self.alpineVersion)\n".utf8))
 
-        // Check for setup failure before waiting for SANDBOX_SETUP_DONE.
-        // If a critical package failed to install, the script will emit
-        // SANDBOX_SETUP_FAILED and exit before reaching SANDBOX_SETUP_DONE.
         do {
-            try await consoleOutput.waitFor(marker: "SANDBOX_SETUP_DONE", timeout: 60, progress: progress)
+            try await consoleOutput.waitFor(marker: "SANDBOX_SETUP_DONE", timeout: 900, progress: progress)
         } catch {
-            // Check if the setup script reported a specific failure
             let snapshot = consoleOutput.pollAndTrim(marker: "SANDBOX_SETUP_FAILED")
             if snapshot.found {
                 throw SandboxError.diskCreationFailed(
@@ -652,227 +661,35 @@ public final class LinuxImageManager {
         try initrdData.write(to: initrdDest)
     }
 
-    /// Shell script lines to install Alpine + Chromium to /dev/vda.
-    ///
-    /// Each line is sent individually over the serial console, so we avoid
-    /// heredocs (which break when lines have leading whitespace). Instead
-    /// we use `printf` + `>>`/`>` for file creation.
-    private static func setupScript(
-        keyboardLayout: String,
-        naturalScrolling: Bool,
-        locale: String,
-        displayScale: Int
-    ) -> String {
-        // Lines are joined with \n; each is sent to the serial console individually.
-        // No heredocs — they don't work reliably over serial with line-by-line sending.
-        return [
-            "# Retry wrapper: 3 attempts with 2s delay, hard-fail with detectable marker",
-            #"retry() { for i in 1 2 3; do "$@" && return 0; echo "RETRY $i/3: $*"; sleep 2; done; echo "SANDBOX_SETUP_FAILED: command failed after 3 attempts: $*"; exit 1; }"#,
-            "",
-            "# Wait for network connectivity (up to 30s)",
-            "for i in $(seq 1 30); do wget -q -O /dev/null --spider http://dl-cdn.alpinelinux.org/alpine/ 2>/dev/null && break; sleep 1; done",
-            "wget -q -O /dev/null --spider http://dl-cdn.alpinelinux.org/alpine/ 2>/dev/null || { echo 'SANDBOX_SETUP_FAILED: no network connectivity — check your internet connection'; exit 1; }",
-            "",
-            "# Load ext4 module and format target disk",
-            "modprobe ext4",
-            "retry apk add e2fsprogs",
-            "mkfs.ext4 -q -F /dev/vda",
-            "mkdir -p /mnt",
-            "mount -t ext4 /dev/vda /mnt",
-            "",
-            "# Install Alpine base",
-            "retry apk add alpine-base --root /mnt --initdb --keys-dir /etc/apk/keys --repositories-file /etc/apk/repositories",
-            "",
-            "# Repos",
-            "mkdir -p /mnt/etc/apk",
-            "printf '%s\\n' 'https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main' 'https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/community' > /mnt/etc/apk/repositories",
-            "",
-            "# DNS",
-            "cp /etc/resolv.conf /mnt/etc/resolv.conf",
-            "",
-            "# Bind-mount for chroot",
-            "mount -t proc proc /mnt/proc",
-            "mount -t sysfs sys /mnt/sys",
-            "mount --bind /dev /mnt/dev",
-            "",
-            "# Chroot: update and install packages",
-            "retry chroot /mnt apk update",
-            "retry chroot /mnt apk add openrc linux-virt linux-firmware-none mkinitfs",
-            "retry chroot /mnt apk add chromium xorg-server xinit mesa-dri-gallium mesa-egl mesa-gl mesa-gles mesa-gbm eudev dbus ttf-freefont ttf-dejavu font-noto-emoji font-liberation xf86-input-libinput agetty util-linux openbox xrandr xdotool setxkbmap pulseaudio pulseaudio-alsa alsa-utils alsa-plugins-pulse adwaita-icon-theme spice-vdagent",
-            "ls -la /mnt/sbin/init || { echo 'SANDBOX_SETUP_FAILED: /sbin/init not found — package installation likely failed due to network issues'; exit 1; }",
-            "",
-            "# Install Cloudflare WARP (glibc binary on musl Alpine)",
-            "retry chroot /mnt apk add gcompat libstdc++ ca-certificates nftables iproute2 glib nss nspr libgcc",
-            "retry apk add binutils",
-            #"WARP_DEB=$(wget -qO- 'https://pkg.cloudflareclient.com/dists/bookworm/main/binary-arm64/Packages' | grep '^Filename:' | tail -1 | cut -d' ' -f2)"#,
-            #"for i in 1 2 3; do wget -q "https://pkg.cloudflareclient.com/$WARP_DEB" -O /tmp/warp.deb && break; sleep 2; done"#,
-            "cd /tmp && ar x warp.deb 2>/dev/null",
-            "tar xf /tmp/data.tar.* -C /mnt 2>/dev/null || echo 'WARP_EXTRACT_FAILED'",
-            "rm -f /tmp/warp.deb /tmp/data.tar.* /tmp/control.tar.* /tmp/debian-binary",
-            "mkdir -p /mnt/var/lib/cloudflare-warp /mnt/var/log/cloudflare-warp",
-            "ls -la /mnt/bin/warp-cli 2>/dev/null && echo 'WARP_INSTALLED_OK' || echo 'WARP_INSTALL_FAILED'",
-            "",
-            "# Build glibc resolver stub for WARP (gcompat lacks __res_init)",
-            "retry apk add gcc musl-dev",
-            #"printf '#include <stddef.h>\nint __res_init(void) { return 0; }\nint res_init(void) { return 0; }\nint __res_nclose(void *s) { return 0; }\nint __res_ninit(void *s) { return 0; }\n' > /tmp/resolv_stub.c"#,
-            "gcc -shared -o /mnt/usr/lib/libresolv_stub.so /tmp/resolv_stub.c",
-            "rm -f /tmp/resolv_stub.c",
-            "",
-            "# Install Squid proxy, dnsmasq, and proxychains for ad blocking / WARP",
-            "retry chroot /mnt apk add squid dnsmasq proxychains-ng",
-            "",
-            "# proxychains config for WARP SOCKS5 proxy",
-            "printf '%s\\n' '[ProxyList]' 'socks5 \t127.0.0.1 40000' > /mnt/etc/proxychains/proxychains.conf",
-            "",
-            "# Pi-hole directory structure",
-            "mkdir -p /mnt/etc/pihole /mnt/var/log/pihole /mnt/etc/dnsmasq.d",
-            "",
-            "# Download ad blocklist (Steven Black unified hosts)",
-            "for i in 1 2 3; do wget -qO /mnt/etc/pihole/gravity.list 'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts' && break; sleep 2; done",
-            "touch /mnt/etc/pihole/local.list /mnt/etc/pihole/custom.list",
-            "",
-            "# Pi-hole setupVars.conf",
-            "printf '%s\\n' 'PIHOLE_INTERFACE=eth0' 'IPV4_ADDRESS=0.0.0.0/0' 'QUERY_LOGGING=true' 'INSTALL_WEB_SERVER=true' 'INSTALL_WEB_INTERFACE=true' 'LIGHTTPD_ENABLED=true' 'CACHE_SIZE=10000' 'DNS_FQDN_REQUIRED=true' 'DNS_BOGUS_PRIV=true' 'DNSMASQ_LISTENING=all' 'WEBPASSWORD=32ff1e004f32399ace3c36d63612719c3abc0e96c27895709db3996601b98073' 'BLOCKING_ENABLED=true' 'PIHOLE_DNS_1=1.1.1.3' 'PIHOLE_DNS_2=1.0.0.3' 'DNSSEC=false' 'REV_SERVER=false' > /mnt/etc/pihole/setupVars.conf",
-            "",
-            "# dnsmasq config for Pi-hole",
-            "printf '%s\\n' 'addn-hosts=/etc/pihole/gravity.list' 'addn-hosts=/etc/pihole/local.list' 'addn-hosts=/etc/pihole/custom.list' 'localise-queries' 'no-resolv' 'log-queries' 'log-facility=/var/log/pihole/pihole.log' 'log-async' 'cache-size=10000' 'server=1.1.1.1' 'server=1.0.0.1' 'domain-needed' 'expand-hosts' 'bogus-priv' 'except-interface=nonexisting' > /mnt/etc/dnsmasq.d/pihole.conf",
-            "",
-            "# Chromium enterprise policies",
-            "mkdir -p /mnt/etc/chromium/policies/managed",
-            "printf '%s\\n' '{' '  \"HighEfficiencyModeEnabled\": true,' '  \"MemorySaverModeSavings\": 1,' '  \"URLBlocklist\": [\"file://*\"]' '}' > /mnt/etc/chromium/policies/managed/bromure.json",
-            "",
-            "# Squid proxy config",
-            "printf '%s\\n' 'dns_nameservers 127.0.0.1' 'forwarded_for off' 'http_port 127.0.0.1:3128' 'acl blocked_ip dst 0.0.0.0/32' 'acl all src 0.0.0.0/0' 'http_access deny blocked_ip' 'http_access allow all' 'cache_mem 32 MB' 'maximum_object_size_in_memory 512 KB' 'cache deny all' 'max_filedescriptors 4096' 'memory_pools off' 'memory_pools_limit none' > /mnt/etc/squid/squid.conf",
-            "",
-            "# Network stack tuning (prevent exhaustion under heavy browsing)",
-            "printf '%s\\n' 'net.core.somaxconn=1024' 'net.core.netdev_max_backlog=2000' 'net.core.rmem_max=16777216' 'net.core.wmem_max=16777216' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_rmem=4096 87380 16777216' 'net.ipv4.tcp_wmem=4096 65536 16777216' 'net.ipv4.tcp_max_syn_backlog=2048' 'net.ipv4.tcp_tw_reuse=1' 'net.ipv4.ip_local_port_range=1024 65535' 'net.ipv4.tcp_fin_timeout=15' 'net.ipv4.tcp_max_tw_buckets=16384' 'net.ipv4.tcp_fastopen=3' 'net.ipv4.tcp_slow_start_after_idle=0' 'net.ipv4.tcp_mtu_probing=1' 'net.ipv4.tcp_notsent_lowat=16384' 'net.ipv4.tcp_congestion_control=bbr' 'net.nf_conntrack_max=32768' > /mnt/etc/sysctl.d/99-bromure.conf",
-            "",
-            "# Locale (mirrored from macOS host)",
-            "printf '%s\\n' 'export LANG=\(locale).UTF-8' 'export LC_ALL=\(locale).UTF-8' 'export LD_PRELOAD=/usr/lib/libresolv_stub.so' > /mnt/etc/profile.d/locale.sh",
-            "",
-            "# Empty root password and create chrome user",
-            "chroot /mnt sh -c 'echo \"root:\" | chpasswd'",
-            "chroot /mnt adduser -D -s /bin/sh chrome",
-            "chroot /mnt addgroup chrome video",
-            "chroot /mnt addgroup chrome render",
-            "chroot /mnt addgroup chrome input",
-            "chroot /mnt addgroup chrome audio",
-            "retry chroot /mnt apk add doas",
-            "printf '%s\\n' 'permit nopass chrome as root cmd poweroff' 'permit nopass chrome as root cmd warp-cli' > /mnt/etc/doas.d/chrome.conf",
-            "",
-            "# Enable services",
-            "chroot /mnt rc-update add devfs sysinit",
-            "chroot /mnt rc-update add dmesg sysinit",
-            "chroot /mnt rc-update add udev sysinit",
-            "chroot /mnt rc-update add networking boot",
-            "chroot /mnt rc-update add modules boot",
-            "chroot /mnt rc-update add dbus default",
-            "chroot /mnt rc-update add spice-vdagentd default",
-            "",
-            "# Networking config",
-            "printf '%s\\n' 'auto lo' 'iface lo inet loopback' '' 'auto eth0' 'iface eth0 inet dhcp' > /mnt/etc/network/interfaces",
-            "",
-            "# Auto-login chrome user on tty1 + debug on serial",
-            "sed -i 's|^tty1::.*|tty1::respawn:/bin/login -f chrome|' /mnt/etc/inittab",
-            "echo 'hvc0::respawn:/bin/login -f root' >> /mnt/etc/inittab",
-            "# Root auto-debug: dump info to serial after boot",
-            "printf '%s\\n' '#!/bin/sh' 'sleep 15' 'echo === PCI DEVICES ===' 'cat /proc/bus/pci/devices 2>/dev/null || echo no-pci' 'ls -la /sys/bus/pci/devices/ 2>/dev/null' 'for d in /sys/bus/pci/devices/*; do echo \"$d: $(cat $d/vendor 2>/dev/null) $(cat $d/device 2>/dev/null) $(cat $d/class 2>/dev/null)\"; done' 'echo === USB MODULES AVAIL ===' 'find /lib/modules/*/kernel/drivers/usb -name \"*.ko*\" 2>/dev/null || echo none' 'find /lib/modules/*/kernel/drivers/hid -name \"*.ko*\" 2>/dev/null || echo none' 'echo === USB/INPUT ===' 'lsmod 2>/dev/null' 'ls -la /dev/input/ 2>/dev/null || echo no-input-devs' 'cat /proc/bus/input/devices 2>/dev/null || echo no-input-proc' 'dmesg | grep -iE \"usb|hid|input|keyboard|xhci|pci\" 2>/dev/null' 'echo === END DEBUG ===' > /mnt/root/debug.sh",
-            "chmod +x /mnt/root/debug.sh",
-            "printf '%s\\n' '/root/debug.sh &' > /mnt/root/.profile",
-            "",
-            "# Udev rule for DRI device permissions (GPU access for render group)",
-            "mkdir -p /mnt/etc/udev/rules.d",
-            "printf '%s\\n' 'SUBSYSTEM==\"drm\", KERNEL==\"renderD*\", GROUP=\"render\", MODE=\"0666\"' 'SUBSYSTEM==\"drm\", KERNEL==\"card*\", GROUP=\"video\", MODE=\"0666\"' > /mnt/etc/udev/rules.d/70-dri.rules",
-            "",
-            "# Default cursor theme (so X11/Chromium find the Adwaita cursors)",
-            "mkdir -p /mnt/usr/share/icons/default",
-            "printf '%s\\n' '[Icon Theme]' 'Inherits=Adwaita' > /mnt/usr/share/icons/default/index.theme",
-            "",
-            "# Xorg config for virtio-gpu (use modesetting driver)",
-            "mkdir -p /mnt/etc/X11/xorg.conf.d",
-            "printf '%s\\n' 'Section \"Device\"' '  Identifier \"virtio\"' '  Driver \"modesetting\"' 'EndSection' '' 'Section \"ServerFlags\"' '  Option \"DRI2\" \"true\"' 'EndSection' > /mnt/etc/X11/xorg.conf.d/10-virtio.conf",
-            "",
-            "# Keyboard layout (mirrored from macOS host)",
-            "printf '%s\\n' 'Section \"InputClass\"' '  Identifier \"keyboard-layout\"' '  MatchIsKeyboard \"on\"' '  Option \"XkbLayout\" \"\(keyboardLayout)\"' 'EndSection' > /mnt/etc/X11/xorg.conf.d/20-keyboard.conf",
-            "",
-            "# Scrolling direction (mirrored from macOS host)",
-            "printf '%s\\n' 'Section \"InputClass\"' '  Identifier \"scrolling\"' '  MatchIsPointer \"on\"' '  Option \"NaturalScrolling\" \"\(naturalScrolling)\"' 'EndSection' > /mnt/etc/X11/xorg.conf.d/30-scrolling.conf",
-            "",
-            "# Allow non-root users to start X",
-            "printf '%s\\n' 'allowed_users=anybody' 'needs_root_rights=yes' > /mnt/etc/X11/Xwrapper.config",
-            "",
-            "# Resize watcher — monitors virtio-gpu display changes and applies them",
-            #"printf '#!/bin/sh\nOUTPUT=$(xrandr 2>/dev/null | grep " connected" | cut -d" " -f1 | head -1)\nif [ -z "$OUTPUT" ]; then OUTPUT="Virtual-1"; fi\nLAST=""\nwhile true; do\n  CUR=$(xrandr 2>/dev/null | grep "^$OUTPUT " | grep -o "[0-9]*x[0-9]*+[0-9]*+[0-9]*" | head -1 | cut -d+ -f1)\n  BEST=$(xrandr 2>/dev/null | grep -A1 "^$OUTPUT " | tail -1 | sed "s/^ *//" | cut -d" " -f1)\n  if [ -n "$BEST" ] && [ "$BEST" != "$CUR" ]; then\n    xrandr --output "$OUTPUT" --mode "$BEST" 2>/dev/null\n    LAST="$BEST"\n  fi\n  sleep 1\ndone\n' > /mnt/usr/local/bin/resize-watcher.sh"#,
-            "chmod +x /mnt/usr/local/bin/resize-watcher.sh",
-            "",
-            "# xinitrc for chrome user - openbox WM + Chromium maximized",
-            "printf '%s\\n' '#!/bin/sh' 'export XCURSOR_SIZE=\(displayScale * 24)' 'export XCURSOR_THEME=Adwaita' 'echo \"Xcursor.size: \(displayScale * 24)\" | xrdb -merge' '/usr/local/bin/resize-watcher.sh &' 'openbox &' 'spice-vdagent -x 2>/dev/null &' 'cat /proc/asound/cards > /dev/hvc0 2>&1' 'pulseaudio --start --exit-idle-time=-1 2>/dev/null' 'sleep 0.5' 'pactl list sinks short > /dev/hvc0 2>&1' 'for i in $(seq 1 20); do [ -f /tmp/bromure/chrome-ready ] && break; sleep 0.2; done' 'EXTRA_FLAGS=' 'CHROME_URL=' 'SWAP_CMD_CTRL=' '[ -f /tmp/bromure/chrome-env ] && . /tmp/bromure/chrome-env' '[ \"$SWAP_CMD_CTRL\" = \"1\" ] && setxkbmap -option ctrl:swap_lwin_lctl,ctrl:swap_rwin_rctl' 'echo \"xinitrc: EXTRA_FLAGS=$EXTRA_FLAGS CHROME_URL=$CHROME_URL SWAP_CMD_CTRL=$SWAP_CMD_CTRL\" > /dev/hvc0' 'export LIBGL_ALWAYS_SOFTWARE=1' 'chromium-browser --no-first-run --start-maximized --force-device-scale-factor=\(displayScale) --use-gl=angle --use-angle=gl --ignore-gpu-blocklist --enable-gpu-rasterization --enable-smooth-scrolling --enable-zero-copy --disable-vulkan --in-process-gpu $EXTRA_FLAGS $CHROME_URL' 'doas poweroff' > /mnt/home/chrome/.xinitrc",
-            "chroot /mnt chown chrome:chrome /home/chrome/.xinitrc",
-            "# Configure openbox: no decorations, minimal menu (just Logout)",
-            "mkdir -p /mnt/home/chrome/.config/openbox",
-            "mkdir -p /mnt/home/chrome/.cache/openbox/sessions",
-            #"""
-            cat > /mnt/home/chrome/.config/openbox/rc.xml << 'OBRC'
-            <?xml version="1.0" encoding="UTF-8"?>
-            <openbox_config xmlns="http://openbox.org/3.4/rc">
-              <resistance><strength>10</strength><screen_edge_strength>20</screen_edge_strength></resistance>
-              <focus><focusNew>yes</focusNew><followMouse>yes</followMouse><raiseOnFocus>yes</raiseOnFocus></focus>
-              <placement><policy>Smart</policy></placement>
-              <theme><name>Clearlooks</name><titleLayout></titleLayout></theme>
-              <desktops><number>1</number></desktops>
-              <keyboard/>
-              <mouse/>
-              <applications>
-                <application class="*"><decor>no</decor><maximized>true</maximized></application>
-              </applications>
-            </openbox_config>
-            OBRC
-            """#,
-            #"""
-            cat > /mnt/home/chrome/.config/openbox/menu.xml << 'OBMENU'
-            <?xml version="1.0" encoding="UTF-8"?>
-            <openbox_menu xmlns="http://openbox.org/3.4/rc">
-              <menu id="root-menu" label="Menu">
-                <item label="Logout"><action name="Execute"><command>doas poweroff</command></action></item>
-              </menu>
-            </openbox_menu>
-            OBMENU
-            """#,
-            "# Pre-seed Chromium preferences to use system title bar (no CSD buttons)",
-            "mkdir -p /mnt/home/chrome/.config/chromium/Default",
-            #"printf '%s\n' '{"browser":{"custom_chrome_frame":false}}' > /mnt/home/chrome/.config/chromium/Default/Preferences"#,
-            "chroot /mnt chown -R chrome:chrome /home/chrome/.config /home/chrome/.cache",
-            "",
-            "# Auto-start X on login for chrome user",
-            #"printf '%s\n' 'echo "profile: DISPLAY=$DISPLAY tty=$(tty)" > /dev/hvc0 2>/dev/null' 'if [ -z "$DISPLAY" ]; then' '  echo "starting X..." > /dev/hvc0 2>/dev/null' '  startx > /tmp/startx.log 2>&1' '  echo "startx exited: $?" > /dev/hvc0 2>/dev/null' '  cat /tmp/startx.log > /dev/hvc0 2>/dev/null' '  doas poweroff' 'fi' > /mnt/home/chrome/.profile"#,
-            "chroot /mnt chown chrome:chrome /home/chrome/.profile",
-            "",
-            "# mkinitfs config for virtio — include all virtio and scsi modules",
-            "printf '%s\\n' 'features=\"ata base ext4 virtio scsi\"' > /mnt/etc/mkinitfs/mkinitfs.conf",
-            "# Also list available features for debugging",
-            "chroot /mnt ls /etc/mkinitfs/features.d/ 2>/dev/null || true",
-            "",
-            "# Rebuild initramfs",
-            "chroot /mnt sh -c 'mkinitfs $(ls /lib/modules/)'",
-            "",
-            "# Ensure USB HID modules load at boot (needed for VZ keyboard/mouse)",
-            "printf '%s\\n' 'xhci_pci' 'usbhid' 'hid_generic' 'tun' 'nf_tables' 'nft_reject_inet' 'virtio_snd' 'tcp_bbr' >> /mnt/etc/modules",
-            "",
-            "# Sysctl settings for Cloudflare WARP",
-            "printf '%s\\n' 'net.ipv4.conf.all.src_valid_mark=1' 'net.ipv6.conf.all.disable_ipv6=0' > /mnt/etc/sysctl.d/warp.conf",
-            "",
-            "# fstab",
-            "printf '%s\\n' '/dev/vda  /  ext4  defaults,noatime  0 1' > /mnt/etc/fstab",
-            "",
-            "# Unmount",
-            "umount /mnt/dev",
-            "umount /mnt/sys",
-            "umount /mnt/proc",
-            "umount /mnt",
-            "",
-            "echo SANDBOX_SETUP_DONE",
-        ].joined(separator: "\n")
+    /// Create a tar.gz archive of the bundled vm-setup resources.
+    private static func createSetupArchive() throws -> Data {
+        guard let setupDir = Bundle.module.url(forResource: "vm-setup", withExtension: nil) else {
+            throw SandboxError.diskCreationFailed("vm-setup resources not found in bundle")
+        }
+        let tempTar = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vm-setup-\(UUID().uuidString).tar.gz")
+        defer { try? FileManager.default.removeItem(at: tempTar) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        process.arguments = [
+            "-czf", tempTar.path,
+            "-C", setupDir.deletingLastPathComponent().path,
+            setupDir.lastPathComponent,
+        ]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw SandboxError.diskCreationFailed("Failed to create setup archive (tar exit \(process.terminationStatus))")
+        }
+        return try Data(contentsOf: tempTar)
     }
+
+    /// Escape a string for safe use in a shell command.
+    private static func shellEscape(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
 }
 
 // MARK: - Console Buffer

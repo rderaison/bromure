@@ -1,0 +1,5 @@
+{
+  "HighEfficiencyModeEnabled": true,
+  "MemorySaverModeSavings": 1,
+  "URLBlocklist": ["file://*"]
+}

@@ -39,7 +39,11 @@ public final class VMPool {
         self.imageManager = LinuxImageManager(storageDir: dir)
     }
 
-    /// Pre-warm a VM by booting it and waiting for Chromium to be ready.
+    /// Pre-warm a VM by booting it to an idle shell prompt.
+    ///
+    /// The VM boots with no chrome-env, no services — just Alpine at a shell prompt.
+    /// The guest xinitrc waits up to 120s for `/tmp/bromure/chrome-ready`, which is
+    /// written later by `applyConfig(_:to:)` when the user claims the VM.
     public func warmUp() async throws {
         guard !isWarming, warmVM == nil else { return }
         guard imageManager.baseImageExists else {
@@ -68,7 +72,6 @@ public final class VMPool {
         try vzConfig.validate()
 
         let vm = VZVirtualMachine(configuration: vzConfig)
-        // VZ requires the real main dispatch queue for start/stop
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             DispatchQueue.main.async {
                 vm.start { result in
@@ -80,90 +83,10 @@ public final class VMPool {
             }
         }
 
-        // Build chrome-env content to write immediately on boot detection
-        if bromureDebug { print("[VMPool] Writing chrome-env: homePage='\(config.homePage)' forceDarkMode=\(config.forceDarkMode) adBlocking=\(config.enableAdBlocking)") }
-        var extraFlags: [String] = []
-        if config.forceDarkMode {
-            extraFlags.append("--force-dark-mode --enable-features=WebContentsForceDark")
-        }
-        if config.enableAdBlocking || config.enableWarp {
-            extraFlags.append("--proxy-server=http://127.0.0.1:3128")
-        }
-        if !config.enableGPU {
-            extraFlags.append("--disable-gpu")
-        }
-        if !config.enableWebGL {
-            extraFlags.append("--disable-webgl --disable-3d-apis")
-        }
-        var envLines: [String] = []
-        if !extraFlags.isEmpty {
-            // extraFlags are hardcoded strings, safe to interpolate
-            envLines.append("EXTRA_FLAGS=\"\(extraFlags.joined(separator: " "))\"")
-        }
-        envLines.append("CHROME_URL=\(shellEscape(config.homePage))")
-        if config.swapCmdCtrl {
-            envLines.append("SWAP_CMD_CTRL=1")
-        }
-
-        // Only start dnsmasq + squid when ad blocking or WARP is enabled.
-        // When neither is active, Chrome runs directly without proxy.
-        var bootScript = "mkdir -p /tmp/bromure && "
-            + envLines.map { "echo \(shellEscape($0)) >> /tmp/bromure/chrome-env" }.joined(separator: " && ")
-            + " && touch /tmp/bromure/chrome-ready"
-        if config.enableAdBlocking || config.enableWarp {
-            // Run dnsmasq with pihole config
-            bootScript += " && dnsmasq -C /etc/dnsmasq.d/pihole.conf"
-            // If ad blocking, squid should resolve via dnsmasq (127.0.0.1); otherwise use system DNS
-            if config.enableAdBlocking {
-                bootScript += " && sed -i 's/^dns_nameservers.*/dns_nameservers 127.0.0.1/' /etc/squid/squid.conf"
-            } else {
-                bootScript += " && sed -i '/^dns_nameservers/d' /etc/squid/squid.conf"
-            }
-            // If WARP is not enabled, start squid now; otherwise defer until after WARP is connected
-            if !config.enableWarp {
-                bootScript += " && squid -N -f /etc/squid/squid.conf &"
-            }
-        }
-
-        // Wait for boot, then immediately write config (before the 5s X11 wait)
-        await waitForBoot(outputPipe: outputPipe, inputPipe: inputPipe, onBootDetected: bootScript)
-
-        // Start Cloudflare WARP in proxy mode when enabled
-        if config.enableWarp {
-            let preload = "LD_PRELOAD=/usr/lib/libresolv_stub.so"
-            let warpCommands = [
-                "/usr/bin/dbus-daemon --system 2>/dev/null",
-                "\(preload) /bin/warp-svc 1>/dev/null 2>/dev/null &",
-                "sleep 3",
-                "\(preload) /bin/warp-cli --accept-tos registration new 2>&1",
-                "\(preload) /bin/warp-cli --accept-tos mode proxy 2>&1",
-                "\(preload) /bin/warp-cli --accept-tos connect 2>&1",
-                "sleep 5",
-                "\(preload) /bin/warp-cli --accept-tos status 2>&1",
-            ]
-
-            for cmd in warpCommands {
-                if bromureDebug { print("[VMPool] WARP: \(cmd)") }
-                inputPipe.fileHandleForWriting.write(Data((cmd + "\n").utf8))
-                if cmd.hasPrefix("sleep") {
-                    let secs = Int(cmd.split(separator: " ").dropFirst().first ?? "2") ?? 2
-                    try? await Task.sleep(for: .seconds(secs + 1))
-                } else {
-                    try? await Task.sleep(for: .milliseconds(500))
-                }
-            }
-            if bromureDebug { print("[VMPool] WARP setup complete") }
-
-            // Start squid via proxychains now that WARP is connected
-            if config.enableWarp {
-                let squidCmd = "proxychains4 -q -f /etc/proxychains/proxychains.conf squid -N -f /etc/squid/squid.conf &"
-                if bromureDebug { print("[VMPool] Starting squid via proxychains") }
-                inputPipe.fileHandleForWriting.write(Data((squidCmd + "\n").utf8))
-                try? await Task.sleep(for: .milliseconds(500))
-            }
-        }
-
-        outputPipe.fileHandleForReading.readabilityHandler = nil
+        // Wait for boot (shell prompt), just create /tmp/bromure — no config yet.
+        // After boot detection, the handler switches to drain mode (keeps reading
+        // so the pipe buffer doesn't fill up and block the VM's shell).
+        await waitForBoot(outputPipe: outputPipe, inputPipe: inputPipe, onBootDetected: "/usr/local/bin/on-boot.sh")
 
         warmVM = WarmVM(
             vm: vm,
@@ -173,26 +96,207 @@ public final class VMPool {
         )
 
         // Inflate balloon to reclaim unused guest memory while VM is idle.
+        // The idle Alpine shell uses ~80-100 MB; reclaim the rest.
         inflateBalloon(vm: vm)
     }
 
-    /// Claim the pre-warmed VM. Returns nil if none ready.
-    /// Automatically triggers warming the next VM in the background.
-    public func claim() -> WarmVM? {
-        let result = warmVM
-        warmVM = nil
-        Task { try? await warmUp() }
-        // Deflate balloon — give all memory back before running the browser
-        if let vm = result?.vm {
-            deflateBalloon(vm: vm)
+    /// Claim the pre-warmed VM with a specific config applied at claim time.
+    ///
+    /// For persistent profiles (profileDiskURL != nil), a dedicated VM is booted
+    /// with the profile disk attached since block devices can't be hot-plugged.
+    /// For ephemeral profiles, the pre-warmed VM from the pool is used.
+    ///
+    /// Writes chrome-env, starts services, and touches chrome-ready so xinitrc
+    /// proceeds. Returns nil if no VM is available.
+    public func claim(
+        config: VMConfig,
+        profileID: UUID? = nil,
+        profileDiskURL: URL? = nil,
+        profileDiskKey: String? = nil,
+        restoreSession: Bool = false
+    ) async -> WarmVM? {
+        if let profileDiskURL {
+            // Persistent profile — need dedicated VM with disk attached
+            // Leave pool VM alone for next ephemeral claim
+            return await bootDedicated(
+                config: config,
+                profileID: profileID,
+                profileDiskURL: profileDiskURL,
+                profileDiskKey: profileDiskKey,
+                restoreSession: restoreSession
+            )
         }
-        return result
+
+        // Ephemeral — use pre-warmed pool VM
+        guard let warm = warmVM else { return nil }
+        warmVM = nil
+        // Deflate balloon — give all memory back before running the browser
+        deflateBalloon(vm: warm.vm)
+        await applyConfig(config, to: warm, profileID: nil, hasProfileDisk: false, profileDiskKey: nil, restoreSession: false)
+        return warm
+    }
+
+    /// Schedule a warm-up after a delay, to avoid resource contention with the
+    /// session that just launched.
+    public func scheduleWarmUp(delay: Duration = .seconds(5)) {
+        Task {
+            try? await Task.sleep(for: delay)
+            try? await warmUp()
+        }
+    }
+
+    /// Boot a dedicated VM with a profile disk attached (for persistent profiles).
+    private func bootDedicated(
+        config: VMConfig,
+        profileID: UUID?,
+        profileDiskURL: URL,
+        profileDiskKey: String?,
+        restoreSession: Bool
+    ) async -> WarmVM? {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        print("[VMPool] Booting dedicated VM for persistent profile")
+
+        let ephDisk = EphemeralDisk(baseImageURL: imageManager.linuxDiskURL)
+        do {
+            try ephDisk.create()
+        } catch {
+            print("[VMPool] Failed to create ephemeral disk: \(error)")
+            return nil
+        }
+
+        let vzConfig: VZVirtualMachineConfiguration
+        do {
+            vzConfig = try imageManager.buildLinuxVMConfig(
+                diskURL: ephDisk.ephemeralURL,
+                config: config,
+                profileDiskURL: profileDiskURL
+            )
+        } catch {
+            print("[VMPool] Failed to build VM config: \(error)")
+            try? ephDisk.destroy()
+            return nil
+        }
+
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
+        serial.attachment = VZFileHandleSerialPortAttachment(
+            fileHandleForReading: inputPipe.fileHandleForReading,
+            fileHandleForWriting: outputPipe.fileHandleForWriting
+        )
+        vzConfig.serialPorts = [serial]
+
+        do {
+            try vzConfig.validate()
+        } catch {
+            print("[VMPool] VM config validation failed: \(error)")
+            try? ephDisk.destroy()
+            return nil
+        }
+
+        let vm = VZVirtualMachine(configuration: vzConfig)
+        do {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                DispatchQueue.main.async {
+                    vm.start { result in
+                        switch result {
+                        case .success: cont.resume()
+                        case .failure(let error): cont.resume(throwing: error)
+                        }
+                    }
+                }
+            }
+        } catch {
+            print("[VMPool] VM start failed: \(error)")
+            try? ephDisk.destroy()
+            return nil
+        }
+
+        print("[VMPool] Dedicated VM started in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t0))s")
+
+        await waitForBoot(outputPipe: outputPipe, inputPipe: inputPipe, onBootDetected: "/usr/local/bin/on-boot.sh")
+
+        print("[VMPool] Dedicated VM booted in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t0))s")
+
+        let warm = WarmVM(
+            vm: vm,
+            ephemeralDisk: ephDisk,
+            serialInput: inputPipe,
+            serialOutput: outputPipe
+        )
+
+        await applyConfig(config, to: warm, profileID: profileID, hasProfileDisk: true, profileDiskKey: profileDiskKey, restoreSession: restoreSession)
+
+        print("[VMPool] Dedicated VM ready in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t0))s")
+
+        return warm
+    }
+
+    /// Apply a profile's config to a booted-but-idle VM.
+    ///
+    /// Writes chrome-env, starts network services, unlocks LUKS disk if needed,
+    /// and THEN touches chrome-ready to unblock xinitrc.
+    /// The output pipe must remain readable (drain handler) to prevent the VM
+    /// from blocking on console writes.
+    private func applyConfig(_ config: VMConfig, to warm: WarmVM, profileID: UUID?, hasProfileDisk: Bool, profileDiskKey: String?, restoreSession: Bool) async {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let input = warm.serialInput.fileHandleForWriting
+
+        print("[VMPool] Applying config: homePage='\(config.homePage)' forceDarkMode=\(config.forceDarkMode) adBlocking=\(config.enableAdBlocking)")
+
+        // Mount profile disk BEFORE running apply-config.sh
+        let profileMountPoint = profileID.map { "/home/chrome/.\($0.uuidString)" }
+        if hasProfileDisk, let mountPoint = profileMountPoint {
+            let t1 = CFAbsoluteTimeGetCurrent()
+            if let profileDiskKey {
+                // Encrypted: LUKS format (if new), unlock, and mount
+                print("[VMPool] Unlocking LUKS profile disk...")
+                let formatCmd = "cryptsetup isLuks /dev/vdb 2>/dev/null || { " + ProfileDisk.luksFormatCommand(key: profileDiskKey) + "; }"
+                input.write(Data((formatCmd + "\n").utf8))
+                try? await Task.sleep(for: .seconds(2))
+
+                let unlockCmd = ProfileDisk.luksUnlockAndMountCommand(key: profileDiskKey, mountPoint: mountPoint)
+                input.write(Data((unlockCmd + "\n").utf8))
+                try? await Task.sleep(for: .seconds(2))
+                print("[VMPool] LUKS unlocked in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t1))s")
+            } else {
+                // Unencrypted: format if new, then mount directly
+                print("[VMPool] Mounting unencrypted profile disk...")
+                let mountCmd = "mkdir -p \(mountPoint) && (blkid /dev/vdb >/dev/null 2>&1 || mkfs.ext4 -q /dev/vdb) && mount /dev/vdb \(mountPoint) && chown chrome:chrome \(mountPoint)"
+                input.write(Data((mountCmd + "\n").utf8))
+                try? await Task.sleep(for: .seconds(1))
+                print("[VMPool] Disk mounted in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t1))s")
+            }
+        }
+
+        // Build environment variables for apply-config.sh
+        var envVars: [String] = []
+        if config.forceDarkMode { envVars.append("DARK_MODE=1") }
+        if config.enableAdBlocking || config.enableWarp || config.blockMalwareSites { envVars.append("USE_PROXY=1") }
+        if !config.enableGPU { envVars.append("DISABLE_GPU=1") }
+        if !config.enableWebGL { envVars.append("DISABLE_WEBGL=1") }
+        if config.phishingWarning { envVars.append("PHISHING_GUARD=1") }
+        if let mountPoint = profileMountPoint, hasProfileDisk {
+            envVars.append("PROFILE_DIR=\(mountPoint)")
+            if restoreSession { envVars.append("RESTORE_SESSION=1") }
+        }
+        envVars.append("CHROME_URL=\(shellEscape(config.homePage))")
+        if config.swapCmdCtrl { envVars.append("SWAP_CMD_CTRL=1") }
+        if config.enableFileTransfer { envVars.append("FILE_TRANSFER=1") }
+        if config.enableClipboardSharing { envVars.append("CLIPBOARD=1") }
+        if config.blockMalwareSites { envVars.append("BLOCK_MALWARE=1") }
+        if config.enableAdBlocking { envVars.append("AD_BLOCKING=1") }
+        if config.enableWarp { envVars.append("ENABLE_WARP=1") }
+
+        let cmd = envVars.joined(separator: " ") + " /usr/local/bin/apply-config.sh"
+        input.write(Data((cmd + "\n").utf8))
+
+        print("[VMPool] applyConfig total: \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t0))s")
     }
 
     /// Shut down the pool and clean up.
     public func shutdown() async {
         if let warm = warmVM {
-            // Stop VM first on the main dispatch queue (VZ requirement)
             if warm.vm.state == .running || warm.vm.state == .paused {
                 await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                     DispatchQueue.main.async {
@@ -219,24 +323,35 @@ public final class VMPool {
         var accumulated = ""
     }
 
+    /// Wait for the VM to boot (shell prompt), then switch to a drain handler
+    /// that keeps reading output so the pipe buffer never fills up.
     private func waitForBoot(outputPipe: Pipe, inputPipe: Pipe, onBootDetected: String) async {
+        let t0 = CFAbsoluteTimeGetCurrent()
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             let state = BootState()
 
             outputPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
-                guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-                if bromureDebug { print(text, terminator: "") }
-                state.accumulated += text
+                guard !data.isEmpty else { return }
+                if bromureDebug, let text = String(data: data, encoding: .utf8) {
+                    print(text, terminator: "")
+                }
 
-                // Shell prompt means Alpine has booted
-                if !state.resolved && (state.accumulated.contains("localhost:~#") || state.accumulated.contains("login:")) {
-                    state.resolved = true
-                    // Write chrome-env IMMEDIATELY — xinitrc is waiting for it
-                    inputPipe.fileHandleForWriting.write(Data((onBootDetected + "\n").utf8))
-                    // Then wait for X11 + Chromium to initialize
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                        cont.resume()
+                if !state.resolved, let text = String(data: data, encoding: .utf8) {
+                    state.accumulated += text
+
+                    // Shell prompt means Alpine has booted
+                    if state.accumulated.contains("localhost:~#") || state.accumulated.contains("login:") {
+                        state.resolved = true
+                        inputPipe.fileHandleForWriting.write(Data((onBootDetected + "\n").utf8))
+                        // Brief delay for the command to execute, then resume.
+                        // The readabilityHandler stays active as a drain — this is
+                        // critical to prevent the pipe buffer from filling up and
+                        // blocking the VM's shell when it writes console output.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            print("[VMPool] Boot detected in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t0))s")
+                            cont.resume()
+                        }
                     }
                 }
             }
@@ -245,10 +360,13 @@ public final class VMPool {
             DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
                 if !state.resolved {
                     state.resolved = true
+                    print("[VMPool] Boot timed out after 60s")
                     cont.resume()
                 }
             }
         }
+        // NOTE: Do NOT nil out readabilityHandler here.
+        // It must keep draining output or the VM will block.
     }
 
     // MARK: - Memory Balloon
@@ -258,11 +376,12 @@ public final class VMPool {
     private func inflateBalloon(vm: VZVirtualMachine) {
         guard let balloon = vm.memoryBalloonDevices.first
                 as? VZVirtioTraditionalMemoryBalloonDevice else { return }
-        let keep: UInt64 = 128 * 1024 * 1024
+        let keep: UInt64 = 128 * 1024 * 1024  // 128 MB for idle guest
+        let total = config.memorySize
+        let target = total > keep ? total - keep : 0
         balloon.targetVirtualMachineMemorySize = keep
         if bromureDebug {
-            let reclaimed = config.memorySize > keep ? config.memorySize - keep : 0
-            print("[VMPool] Balloon inflated: reclaiming \(reclaimed / 1024 / 1024) MB, guest keeps \(keep / 1024 / 1024) MB")
+            print("[VMPool] Balloon inflated: reclaiming \(target / 1024 / 1024) MB, guest keeps \(keep / 1024 / 1024) MB")
         }
     }
 

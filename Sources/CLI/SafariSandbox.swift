@@ -149,7 +149,13 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
         let onNewBrowser: @MainActor () -> Void = { [weak self] in
             self?.openNewBrowser()
         }
-        let mainView = MainView(state: state, onNewBrowser: onNewBrowser)
+        let onNewBrowserWithProfile: @MainActor (Profile) -> Void = { [weak self] profile in
+            self?.openNewBrowser(with: profile)
+        }
+        let onShowWarpEULA: (@escaping () -> Void) -> Void = { [weak self] onAccepted in
+            self?.showWarpEULA(onAccepted: onAccepted)
+        }
+        let mainView = MainView(state: state, onNewBrowser: onNewBrowser, onNewBrowserWithProfile: onNewBrowserWithProfile, onShowWarpEULA: onShowWarpEULA)
 
         let hostingView = NSHostingView(rootView: mainView)
         let window = NSWindow(
@@ -174,9 +180,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let settingsView = SettingsView(state: state, onShowWarpEULA: { [weak self] onAccepted in
-            self?.showWarpEULA(onAccepted: onAccepted)
-        })
+        let settingsView = SettingsView(state: state)
         let hostingView = NSHostingView(rootView: settingsView)
 
         let window = NSWindow(
@@ -233,6 +237,15 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
         fileItem.submenu = fileMenu
         mainMenu.addItem(fileItem)
 
+        // View menu
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Toggle File Drawer",
+                         action: #selector(toggleFileDrawerAction(_:)),
+                         keyEquivalent: "d")
+        let viewItem = NSMenuItem()
+        viewItem.submenu = viewMenu
+        mainMenu.addItem(viewItem)
+
         // Edit menu
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
@@ -261,6 +274,14 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor @objc func newBrowserAction(_ sender: Any?) {
         openNewBrowser()
+    }
+
+    @MainActor @objc func toggleFileDrawerAction(_ sender: Any?) {
+        // Find the active browser session for the key window
+        guard let keyWindow = NSApp.keyWindow,
+              let session = sessions.first(where: { $0.window === keyWindow }),
+              session.hasFileTransfer else { return }
+        session.toggleDrawer()
     }
 
     @MainActor @objc func recreateBaseImageAction(_ sender: Any?) {
@@ -292,28 +313,107 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor func openNewBrowser(initialURL: URL? = nil) {
-        let config = state.buildConfig()
-        // Update pool config so the NEXT warm-up uses current settings
-        state.pool?.updateConfig(config)
-        guard let pool = state.pool, let warm = pool.claim() else {
-            // Show main window if no VM ready
+        guard state.pool != nil, state.poolReady else {
             if let url = initialURL { pendingURL = url }
             showMainWindow()
             return
         }
-
-        let session = BrowserSession(warmVM: warm, config: config, initialURL: initialURL)
-        session.onClosed = { [weak self] session in
-            guard let self else { return }
-            self.sessions.removeAll { $0 === session }
+        let config = state.buildDefaultConfig()
+        Task { @MainActor in
+            guard let warm = await state.pool?.claim(config: config) else {
+                if let url = initialURL { self.pendingURL = url }
+                self.showMainWindow()
+                return
+            }
+            let session = BrowserSession(warmVM: warm, config: config, initialURL: initialURL)
+            session.onClosed = { [weak self] session in
+                guard let self else { return }
+                self.sessions.removeAll { $0 === session }
+                self.state.sessionCount = self.sessions.count
+                self.retiredSessions.append(session)
+            }
+            self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
-            // Keep session alive permanently — VZ dispatch sources may fire
-            // long after vm.stop() and crash if the session is deallocated.
-            self.retiredSessions.append(session)
+            session.show()
+            self.state.pool?.scheduleWarmUp()
         }
-        sessions.append(session)
-        state.sessionCount = sessions.count
-        session.show()
+    }
+
+    @MainActor func openNewBrowser(with profile: Profile) {
+        guard state.pool != nil, state.poolReady else {
+            showMainWindow()
+            return
+        }
+        state.isLaunching = true
+        state.profileManager.markUsed(id: profile.id)
+        let config = state.buildConfig(for: profile)
+        let vtKey = profile.settings.virusTotalEnabled ? profile.settings.virusTotalAPIKey : nil
+
+        // For persistent profiles, ensure the disk image exists
+        var profileDiskURL: URL?
+        var profileDiskKey: String?
+        var isFirstBoot = false
+        if profile.isPersistent {
+            let diskURL = state.profileManager.profileDiskURL(for: profile.id)
+            if !ProfileDisk.diskExists(at: diskURL) {
+                isFirstBoot = true
+                do {
+                    try ProfileDisk.createDisk(profileID: profile.id, at: diskURL)
+                    print("[Profile] Created persistent disk for '\(profile.name)' at \(diskURL.path)")
+                } catch {
+                    print("[Profile] Failed to create persistent disk: \(error)")
+                }
+            }
+            if ProfileDisk.diskExists(at: diskURL) {
+                profileDiskURL = diskURL
+                // Only fetch the LUKS key if encryption is enabled
+                if profile.isEncrypted {
+                    profileDiskKey = try? ProfileDisk.keyForProfile(id: profile.id)
+                }
+            }
+        }
+
+        // Ask whether to restore previous tabs for persistent profiles with existing data
+        var restoreSession = false
+        if profile.isPersistent, !isFirstBoot, profileDiskURL != nil {
+            let alert = NSAlert()
+            alert.messageText = "Restore previous tabs?"
+            alert.informativeText = "This profile has data from a previous session. Would you like to restore your open tabs?"
+            alert.addButton(withTitle: "Restore")
+            alert.addButton(withTitle: "Start Fresh")
+            alert.alertStyle = .informational
+            restoreSession = alert.runModal() == .alertFirstButtonReturn
+        }
+
+        Task { @MainActor in
+            guard let warm = await state.pool?.claim(
+                config: config,
+                profileID: profile.id,
+                profileDiskURL: profileDiskURL,
+                profileDiskKey: profileDiskKey,
+                restoreSession: restoreSession
+            ) else {
+                self.state.isLaunching = false
+                self.showMainWindow()
+                return
+            }
+            let session = BrowserSession(
+                warmVM: warm, config: config,
+                profile: profile,
+                virusTotalAPIKey: vtKey
+            )
+            session.onClosed = { [weak self] session in
+                guard let self else { return }
+                self.sessions.removeAll { $0 === session }
+                self.state.sessionCount = self.sessions.count
+                self.retiredSessions.append(session)
+            }
+            self.sessions.append(session)
+            self.state.sessionCount = self.sessions.count
+            session.show()
+            self.state.isLaunching = false
+            self.state.pool?.scheduleWarmUp()
+        }
     }
 
     // MARK: - App Lifecycle
@@ -385,11 +485,18 @@ final class BrowserSession {
     fileprivate var confirmed = false
     private static var windowCount = 0
     private var delegateHelper: SessionDelegateHelper?
+    private var fileTransferBridge: FileTransferBridge?
+    private var fileDrawerModel: FileDrawerModel?
+    private var splitView: NSSplitView?
+    private var drawerHost: NSView?
+    fileprivate var hasFileTransfer = false
+    private let profile: Profile?
 
     private var initialURL: URL?
 
-    init(warmVM: VMPool.WarmVM, config: VMConfig, initialURL: URL? = nil) {
+    init(warmVM: VMPool.WarmVM, config: VMConfig, profile: Profile? = nil, initialURL: URL? = nil, virusTotalAPIKey: String? = nil) {
         self.warmVM = warmVM
+        self.profile = profile
         self.initialURL = initialURL
         BrowserSession.windowCount += 1
 
@@ -399,18 +506,77 @@ final class BrowserSession {
         vmView.automaticallyReconfiguresDisplay = true
         self.vmView = vmView
 
+        let windowWidth = CGFloat(config.displayWidth) / 2
+        let windowHeight = CGFloat(config.displayHeight)
+
+        // If file transfer is enabled, set up the bridge and show drawer alongside VM
+        var contentView: NSView = vmView
+        if config.enableFileTransfer {
+            if let socketDevices = warmVM.vm.socketDevices as? [VZVirtioSocketDevice],
+               let socketDevice = socketDevices.first {
+                let bridge = MainActor.assumeIsolated { FileTransferBridge(socketDevice: socketDevice) }
+                let model = MainActor.assumeIsolated { FileDrawerModel(virusTotalAPIKey: virusTotalAPIKey) }
+                MainActor.assumeIsolated { model.attach(bridge: bridge) }
+                self.fileTransferBridge = bridge
+                self.fileDrawerModel = model
+
+                let drawerView = FileDrawerView(model: model)
+                let hostView = NSHostingView(rootView: drawerView)
+                hostView.setFrameSize(NSSize(width: 280, height: windowHeight))
+
+                let split = NSSplitView()
+                split.isVertical = true
+                split.dividerStyle = .thin
+                split.addSubview(vmView)
+                split.addSubview(hostView)
+                split.setHoldingPriority(.defaultLow, forSubviewAt: 0)
+                split.setHoldingPriority(.defaultHigh, forSubviewAt: 1)
+                self.splitView = split
+                self.drawerHost = hostView
+                self.hasFileTransfer = true
+                contentView = split
+            }
+        }
+
+        // Wrap content in a border view if profile has a color
+        if let profile, let profileColor = profile.color {
+            let borderColor = Self.nsColor(for: profileColor)
+            let borderWidth: CGFloat = 3
+
+            let borderView = NSView()
+            borderView.wantsLayer = true
+            borderView.layer?.borderColor = borderColor.cgColor
+            borderView.layer?.borderWidth = borderWidth
+
+            borderView.addSubview(contentView)
+            contentView.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                contentView.topAnchor.constraint(equalTo: borderView.topAnchor, constant: borderWidth),
+                contentView.bottomAnchor.constraint(equalTo: borderView.bottomAnchor, constant: -borderWidth),
+                contentView.leadingAnchor.constraint(equalTo: borderView.leadingAnchor, constant: borderWidth),
+                contentView.trailingAnchor.constraint(equalTo: borderView.trailingAnchor, constant: -borderWidth),
+            ])
+            contentView = borderView
+        }
+
         let window = NSWindow(
             contentRect: NSRect(
                 x: 0, y: 0,
-                width: CGFloat(config.displayWidth) / 2,
-                height: CGFloat(config.displayHeight)
+                width: windowWidth + (config.enableFileTransfer ? 280 : 0),
+                height: windowHeight
             ),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "Bromure \u{2014} Chromium"
-        window.contentView = vmView
+
+        if let profile {
+            window.title = "Bromure \u{2014} \(profile.name)"
+        } else {
+            window.title = "Bromure \u{2014} Chromium"
+        }
+
+        window.contentView = contentView
         window.contentMinSize = NSSize(width: 800, height: 600)
         window.animationBehavior = .none
         self.window = window
@@ -419,6 +585,19 @@ final class BrowserSession {
         self.delegateHelper = helper
         warmVM.vm.delegate = helper
         window.delegate = helper
+    }
+
+    private static func nsColor(for color: ProfileColor) -> NSColor {
+        switch color {
+        case .blue: return .systemBlue
+        case .red: return .systemRed
+        case .green: return .systemGreen
+        case .orange: return .systemOrange
+        case .purple: return .systemPurple
+        case .pink: return .systemPink
+        case .teal: return .systemTeal
+        case .gray: return .systemGray
+        }
     }
 
     /// Navigate to a URL in the running Chromium.
@@ -458,6 +637,20 @@ final class BrowserSession {
     /// Stop the VM, close pipes, destroy disk — in that order.
     /// VZVirtualMachine.stop() requires the real main dispatch queue (not @MainActor).
     fileprivate func fullCleanup() async {
+        // 0. Sync and unmount persistent profile disk before killing the VM
+        if let profile, profile.isPersistent, let input = warmVM?.serialInput.fileHandleForWriting {
+            let mountPoint = "/home/chrome/.\(profile.id.uuidString)"
+            let syncCmd = "sync && umount \(mountPoint) 2>/dev/null"
+            if profile.isEncrypted {
+                // Close LUKS volume after unmounting
+                let cmd = syncCmd + " && cryptsetup close profile_data 2>/dev/null"
+                input.write(Data((cmd + "\n").utf8))
+            } else {
+                input.write(Data((syncCmd + "\n").utf8))
+            }
+            // Give it a moment to flush
+            try? await Task.sleep(for: .seconds(1))
+        }
         // 1. Disconnect delegates so VZ doesn't call back into us
         warmVM?.vm.delegate = nil
         // 2. Stop VM on the main dispatch queue (VZ requirement)
@@ -483,6 +676,27 @@ final class BrowserSession {
         warmVM = nil
     }
 
+    /// Toggle the file transfer drawer visibility.
+    func toggleDrawer() {
+        guard let drawerHost, let splitView else { return }
+        if drawerHost.isHidden {
+            drawerHost.isHidden = false
+            var frame = window.frame
+            frame.size.width += 280
+            window.setFrame(frame, display: true, animate: true)
+        } else {
+            drawerHost.isHidden = true
+            var frame = window.frame
+            frame.size.width -= 280
+            window.setFrame(frame, display: true, animate: true)
+        }
+        splitView.adjustSubviews()
+    }
+
+    var isDrawerVisible: Bool {
+        drawerHost?.isHidden == false
+    }
+
     func show() {
         window.center()
         let offset = CGFloat((BrowserSession.windowCount - 1) % 5) * 25
@@ -506,6 +720,12 @@ final class BrowserSession {
     func teardown() async {
         guard !closing else { return }
         closing = true
+        await MainActor.run {
+            fileDrawerModel?.detach()
+            fileTransferBridge?.stop()
+            fileTransferBridge = nil
+            fileDrawerModel = nil
+        }
         detachView()
         delegateHelper = nil
         await fullCleanup()
