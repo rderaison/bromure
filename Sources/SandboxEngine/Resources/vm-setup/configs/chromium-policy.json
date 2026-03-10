@@ -2,5 +2,7 @@
   "HighEfficiencyModeEnabled": true,
   "MemorySaverModeSavings": 1,
   "URLBlocklist": ["file://*"],
-  "URLAllowlist": ["file:///home/chrome/"]
+  "URLAllowlist": ["file:///home/chrome/"],
+  "PasswordManagerEnabled": false,
+  "AutofillCreditCardEnabled": false
 }
