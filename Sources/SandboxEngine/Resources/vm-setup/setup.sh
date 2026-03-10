@@ -262,6 +262,23 @@ chroot /mnt chown chrome:chrome /home/chrome/.profile
 install_config scripts/file-agent.py /mnt/usr/local/bin/file-agent.py 755
 
 # ---------------------------------------------------------------------------
+# Credential bridge (passkeys + passwords)
+# ---------------------------------------------------------------------------
+
+install_config scripts/credential-agent.py /mnt/usr/local/bin/credential-agent.py 755
+
+# Chrome extension
+mkdir -p /mnt/opt/bromure/extensions/credential-bridge
+for f in manifest.json content-main.js content-isolated.js background.js; do
+    [ -f "$SCRIPT_DIR/extensions/credential-bridge/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/credential-bridge/$f" /mnt/opt/bromure/extensions/credential-bridge/
+done
+
+# Native messaging host manifest (system-wide)
+mkdir -p /mnt/etc/chromium/native-messaging-hosts
+install_config configs/com.bromure.credential_bridge.json /mnt/etc/chromium/native-messaging-hosts/com.bromure.credential_bridge.json
+
+# ---------------------------------------------------------------------------
 # Phishing guard extension
 # ---------------------------------------------------------------------------
 

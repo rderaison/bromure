@@ -11,7 +11,7 @@ import Virtualization
 /// - virtio drivers for GPU, network, and disk
 public final class LinuxImageManager {
     /// Bump this to force a rebuild of the base image on next launch.
-    public static let imageVersion = "10"
+    public static let imageVersion = "11"
 
     private let storageDir: URL
 
@@ -211,10 +211,8 @@ public final class LinuxImageManager {
         // Memory balloon — allows host to reclaim unused guest memory
         vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
 
-        // Vsock device for file transfer
-        if config.enableFileTransfer {
-            vzConfig.socketDevices = [VZVirtioSocketDeviceConfiguration()]
-        }
+        // Vsock device — always enabled (used by credential bridge and file transfer)
+        vzConfig.socketDevices = [VZVirtioSocketDeviceConfiguration()]
 
 
         // SPICE agent for clipboard sharing

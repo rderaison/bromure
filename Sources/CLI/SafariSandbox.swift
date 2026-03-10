@@ -492,6 +492,7 @@ final class BrowserSession {
     private static var windowCount = 0
     private var delegateHelper: SessionDelegateHelper?
     private var fileTransferBridge: FileTransferBridge?
+    private var credentialBridge: CredentialBridge?
     private var fileDrawerModel: FileDrawerModel?
     private var splitView: NSSplitView?
     private var drawerHost: NSView?
@@ -602,6 +603,15 @@ final class BrowserSession {
             accessory.view = button
             accessory.layoutAttribute = .trailing
             window.addTitlebarAccessoryViewController(accessory)
+        }
+
+        // Credential bridge — always set up (vsock is always present)
+        if let socketDevices = warmVM.vm.socketDevices as? [VZVirtioSocketDevice],
+           let socketDevice = socketDevices.first {
+            let credBridge = MainActor.assumeIsolated {
+                CredentialBridge(socketDevice: socketDevice, window: window)
+            }
+            self.credentialBridge = credBridge
         }
 
         let helper = SessionDelegateHelper(session: self)
@@ -755,7 +765,9 @@ final class BrowserSession {
         await MainActor.run {
             fileDrawerModel?.detach()
             fileTransferBridge?.stop()
+            credentialBridge?.stop()
             fileTransferBridge = nil
+            credentialBridge = nil
             fileDrawerModel = nil
         }
         detachView()

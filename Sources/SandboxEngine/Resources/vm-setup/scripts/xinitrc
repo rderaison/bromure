@@ -16,6 +16,7 @@ CLIPBOARD=
 [ -f /tmp/bromure/chrome-env ] && . /tmp/bromure/chrome-env
 [ "$CLIPBOARD" = "1" ] && spice-vdagent -x 2>/dev/null &
 [ "$FILE_TRANSFER" = "1" ] && mkdir -p /home/chrome/Downloads && /usr/local/bin/file-agent.py &
+/usr/local/bin/credential-agent.py &
 [ "$SWAP_CMD_CTRL" = "1" ] && setxkbmap -option ctrl:swap_lwin_lctl,ctrl:swap_rctl
 echo "xinitrc: EXTRA_FLAGS=$EXTRA_FLAGS CHROME_URL=$CHROME_URL SWAP_CMD_CTRL=$SWAP_CMD_CTRL" > /dev/hvc0
 export LIBGL_ALWAYS_SOFTWARE=1

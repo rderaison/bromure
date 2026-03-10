@@ -41,12 +41,14 @@ ENABLE_FEATURES=""
 [ "$DISABLE_WEBGL" = "1" ] && \
     EXTRA_FLAGS="$EXTRA_FLAGS --disable-webgl --disable-3d-apis"
 
+# Always load credential bridge extension (passkeys + passwords)
+EXTENSIONS="/opt/bromure/extensions/credential-bridge"
 [ "$PHISHING_GUARD" = "1" ] && \
-    EXTRA_FLAGS="$EXTRA_FLAGS --load-extension=/opt/bromure/extensions/phishing-guard"
+    EXTENSIONS="$EXTENSIONS,/opt/bromure/extensions/phishing-guard"
+EXTRA_FLAGS="$EXTRA_FLAGS --load-extension=$EXTENSIONS"
 
 [ -n "$PROFILE_DIR" ] && \
-    EXTRA_FLAGS="$EXTRA_FLAGS --user-data-dir=$PROFILE_DIR" && \
-    ENABLE_FEATURES="${ENABLE_FEATURES:+$ENABLE_FEATURES,}WebAuthenticationNewPasskeyUI"
+    EXTRA_FLAGS="$EXTRA_FLAGS --user-data-dir=$PROFILE_DIR"
 
 [ "$RESTORE_SESSION" = "1" ] && \
     EXTRA_FLAGS="$EXTRA_FLAGS --restore-last-session"

@@ -25,6 +25,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("AppKit"),
+                .linkedFramework("AuthenticationServices"),
             ]
         ),
         .target(
