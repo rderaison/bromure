@@ -1,1 +1,1 @@
-/root/debug.sh &
+#/root/debug.sh &

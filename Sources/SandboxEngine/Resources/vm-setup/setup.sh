@@ -217,6 +217,7 @@ install_config scripts/root-profile.sh /mnt/root/.profile
 # Udev
 mkdir -p /mnt/etc/udev/rules.d
 install_config configs/70-dri.rules /mnt/etc/udev/rules.d/70-dri.rules
+install_config configs/71-hvc0.rules /mnt/etc/udev/rules.d/71-hvc0.rules
 
 # Cursor theme
 mkdir -p /mnt/usr/share/icons/default
@@ -258,7 +259,7 @@ chroot /mnt chown chrome:chrome /home/chrome/.profile
 # File transfer agent
 # ---------------------------------------------------------------------------
 
-install_config scripts/file-agent.sh /mnt/usr/local/bin/file-agent.sh 755
+install_config scripts/file-agent.py /mnt/usr/local/bin/file-agent.py 755
 
 # ---------------------------------------------------------------------------
 # Phishing guard extension
@@ -280,11 +281,11 @@ if wget -q -O "$TRANCO_ZIP" "$TRANCO_URL"; then
     # Extract top 10,000 domains (CSV format: rank,domain), build JSON array
     {
         echo "["
-        head -n 10000 /tmp/top-1m.csv | cut -d',' -f2 | \
+        head -n 100000 /tmp/top-1m.csv | tr -d '\r' | cut -d',' -f2 | \
             sed 's/.*/"&"/' | paste -sd',' -
         echo "]"
     } > /mnt/opt/bromure/extensions/phishing-guard/top-domains.json
-    DOMAIN_COUNT=$(head -n 10000 /tmp/top-1m.csv | wc -l)
+    DOMAIN_COUNT=$(head -n 100000 /tmp/top-1m.csv | wc -l)
     echo "Loaded $DOMAIN_COUNT popular domains from Tranco list"
     rm -f "$TRANCO_ZIP" /tmp/top-1m.csv
 else

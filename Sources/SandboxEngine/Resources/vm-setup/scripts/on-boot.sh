@@ -5,6 +5,12 @@
 # (e.g. WARP in proxy mode) so they're ready by the time a session is claimed.
 
 mkdir -p /tmp/bromure
+chmod 666 /dev/hvc0 2>/dev/null
+
+# Load modules needed for profile disk mounting (virtio-fs mounted later at claim time)
+modprobe virtiofs 2>/dev/null
+modprobe loop 2>/dev/null
+mkdir -p /mnt/share
 
 # Start Cloudflare WARP in proxy mode (socks5://127.0.0.1:40000).
 # Runs in the background so boot is not blocked.

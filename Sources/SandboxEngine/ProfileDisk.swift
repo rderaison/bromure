@@ -100,17 +100,16 @@ public final class ProfileDisk {
     /// Shell command to LUKS-format a new disk inside the VM.
     ///
     /// This should only be run once when the profile disk is first created.
-    /// The disk appears as `/dev/vdb` in the guest.
-    public static func luksFormatCommand(key: String) -> String {
-        "echo -n '\(key)' | cryptsetup luksFormat --batch-mode /dev/vdb -"
+    public static func luksFormatCommand(key: String, device: String = "/dev/vdb") -> String {
+        "echo -n '\(key)' | cryptsetup luksFormat --batch-mode \(device) -"
     }
 
     /// Shell command to unlock and mount a LUKS-encrypted profile disk.
     ///
     /// Opens the LUKS volume, creates the filesystem if needed, and mounts
     /// it at the given mount point.
-    public static func luksUnlockAndMountCommand(key: String, mountPoint: String) -> String {
-        let open = "echo -n '\(key)' | cryptsetup open /dev/vdb profile_data -"
+    public static func luksUnlockAndMountCommand(key: String, device: String = "/dev/vdb", mountPoint: String) -> String {
+        let open = "echo -n '\(key)' | cryptsetup open \(device) profile_data -"
         let mkdirMount = "mkdir -p \(mountPoint)"
         // If the mapper device has no filesystem yet, create one
         let mkfs = "blkid /dev/mapper/profile_data >/dev/null 2>&1 || mkfs.ext4 -q /dev/mapper/profile_data"

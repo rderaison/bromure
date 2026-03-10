@@ -26,9 +26,11 @@ ENVFILE="/tmp/bromure/chrome-env"
 # --- Build EXTRA_FLAGS for Chromium ---
 
 EXTRA_FLAGS=""
+ENABLE_FEATURES=""
 
 [ "$DARK_MODE" = "1" ] && \
-    EXTRA_FLAGS="$EXTRA_FLAGS --force-dark-mode --enable-features=WebContentsForceDark"
+    EXTRA_FLAGS="$EXTRA_FLAGS --force-dark-mode" && \
+    ENABLE_FEATURES="${ENABLE_FEATURES:+$ENABLE_FEATURES,}WebContentsForceDark"
 
 [ "$USE_PROXY" = "1" ] && \
     EXTRA_FLAGS="$EXTRA_FLAGS --proxy-server=http://127.0.0.1:3128"
@@ -43,10 +45,14 @@ EXTRA_FLAGS=""
     EXTRA_FLAGS="$EXTRA_FLAGS --load-extension=/opt/bromure/extensions/phishing-guard"
 
 [ -n "$PROFILE_DIR" ] && \
-    EXTRA_FLAGS="$EXTRA_FLAGS --user-data-dir=$PROFILE_DIR"
+    EXTRA_FLAGS="$EXTRA_FLAGS --user-data-dir=$PROFILE_DIR" && \
+    ENABLE_FEATURES="${ENABLE_FEATURES:+$ENABLE_FEATURES,}WebAuthenticationNewPasskeyUI"
 
 [ "$RESTORE_SESSION" = "1" ] && \
     EXTRA_FLAGS="$EXTRA_FLAGS --restore-last-session"
+
+[ -n "$ENABLE_FEATURES" ] && \
+    EXTRA_FLAGS="$EXTRA_FLAGS --enable-features=$ENABLE_FEATURES"
 
 # --- Write chrome-env ---
 

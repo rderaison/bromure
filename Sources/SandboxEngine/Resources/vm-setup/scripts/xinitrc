@@ -4,10 +4,7 @@ export XCURSOR_THEME=Adwaita
 echo "Xcursor.size: %%CURSOR_SIZE%%" | xrdb -merge
 /usr/local/bin/resize-watcher.sh &
 openbox &
-cat /proc/asound/cards > /dev/hvc0 2>&1
 pulseaudio --start --exit-idle-time=-1 2>/dev/null
-sleep 0.5
-pactl list sinks short > /dev/hvc0 2>&1
 # Wait for the host to write chrome-env (up to 120s).
 # The host writes it when the user selects a profile and opens a browser.
 for i in $(seq 1 600); do [ -f /tmp/bromure/chrome-ready ] && break; sleep 0.2; done
@@ -18,7 +15,7 @@ FILE_TRANSFER=
 CLIPBOARD=
 [ -f /tmp/bromure/chrome-env ] && . /tmp/bromure/chrome-env
 [ "$CLIPBOARD" = "1" ] && spice-vdagent -x 2>/dev/null &
-[ "$FILE_TRANSFER" = "1" ] && /usr/local/bin/file-agent.sh &
+[ "$FILE_TRANSFER" = "1" ] && mkdir -p /home/chrome/Downloads && /usr/local/bin/file-agent.py &
 [ "$SWAP_CMD_CTRL" = "1" ] && setxkbmap -option ctrl:swap_lwin_lctl,ctrl:swap_rctl
 echo "xinitrc: EXTRA_FLAGS=$EXTRA_FLAGS CHROME_URL=$CHROME_URL SWAP_CMD_CTRL=$SWAP_CMD_CTRL" > /dev/hvc0
 export LIBGL_ALWAYS_SOFTWARE=1

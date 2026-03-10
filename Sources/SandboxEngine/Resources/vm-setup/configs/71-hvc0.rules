@@ -1,0 +1,1 @@
+KERNEL=="hvc0", MODE="0666"

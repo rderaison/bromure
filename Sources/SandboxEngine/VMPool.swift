@@ -102,37 +102,42 @@ public final class VMPool {
 
     /// Claim the pre-warmed VM with a specific config applied at claim time.
     ///
-    /// For persistent profiles (profileDiskURL != nil), a dedicated VM is booted
-    /// with the profile disk attached since block devices can't be hot-plugged.
-    /// For ephemeral profiles, the pre-warmed VM from the pool is used.
+    /// For persistent profiles, the profile disk image is symlinked into the
+    /// virtio-fs shared directory so the guest can loop-mount it.
+    /// For ephemeral sessions, the shared directory is deleted from the host
+    /// so a compromised guest cannot reach any host files.
     ///
     /// Writes chrome-env, starts services, and touches chrome-ready so xinitrc
     /// proceeds. Returns nil if no VM is available.
     public func claim(
         config: VMConfig,
         profileID: UUID? = nil,
-        profileDiskURL: URL? = nil,
+        profileImageDir: URL? = nil,
         profileDiskKey: String? = nil,
         restoreSession: Bool = false
     ) async -> WarmVM? {
-        if let profileDiskURL {
-            // Persistent profile — need dedicated VM with disk attached
-            // Leave pool VM alone for next ephemeral claim
-            return await bootDedicated(
-                config: config,
-                profileID: profileID,
-                profileDiskURL: profileDiskURL,
-                profileDiskKey: profileDiskKey,
-                restoreSession: restoreSession
-            )
+        // If no pre-warmed VM is available, warm up on demand
+        if warmVM == nil {
+            try? await warmUp()
         }
-
-        // Ephemeral — use pre-warmed pool VM
         guard let warm = warmVM else { return nil }
         warmVM = nil
         // Deflate balloon — give all memory back before running the browser
         deflateBalloon(vm: warm.vm)
-        await applyConfig(config, to: warm, profileID: nil, hasProfileDisk: false, profileDiskKey: nil, restoreSession: false)
+
+        // Point the virtio-fs share to the profile's image directory,
+        // or disconnect it entirely for ephemeral sessions.
+        if let fsDevice = warm.vm.directorySharingDevices.first as? VZVirtioFileSystemDevice {
+            if let profileImageDir {
+                fsDevice.share = VZSingleDirectoryShare(
+                    directory: VZSharedDirectory(url: profileImageDir, readOnly: false)
+                )
+            } else {
+                fsDevice.share = nil
+            }
+        }
+
+        await applyConfig(config, to: warm, profileID: profileID, hasProfileDisk: profileImageDir != nil, profileDiskKey: profileDiskKey, restoreSession: restoreSession)
         return warm
     }
 
@@ -143,93 +148,6 @@ public final class VMPool {
             try? await Task.sleep(for: delay)
             try? await warmUp()
         }
-    }
-
-    /// Boot a dedicated VM with a profile disk attached (for persistent profiles).
-    private func bootDedicated(
-        config: VMConfig,
-        profileID: UUID?,
-        profileDiskURL: URL,
-        profileDiskKey: String?,
-        restoreSession: Bool
-    ) async -> WarmVM? {
-        let t0 = CFAbsoluteTimeGetCurrent()
-        print("[VMPool] Booting dedicated VM for persistent profile")
-
-        let ephDisk = EphemeralDisk(baseImageURL: imageManager.linuxDiskURL)
-        do {
-            try ephDisk.create()
-        } catch {
-            print("[VMPool] Failed to create ephemeral disk: \(error)")
-            return nil
-        }
-
-        let vzConfig: VZVirtualMachineConfiguration
-        do {
-            vzConfig = try imageManager.buildLinuxVMConfig(
-                diskURL: ephDisk.ephemeralURL,
-                config: config,
-                profileDiskURL: profileDiskURL
-            )
-        } catch {
-            print("[VMPool] Failed to build VM config: \(error)")
-            try? ephDisk.destroy()
-            return nil
-        }
-
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
-        serial.attachment = VZFileHandleSerialPortAttachment(
-            fileHandleForReading: inputPipe.fileHandleForReading,
-            fileHandleForWriting: outputPipe.fileHandleForWriting
-        )
-        vzConfig.serialPorts = [serial]
-
-        do {
-            try vzConfig.validate()
-        } catch {
-            print("[VMPool] VM config validation failed: \(error)")
-            try? ephDisk.destroy()
-            return nil
-        }
-
-        let vm = VZVirtualMachine(configuration: vzConfig)
-        do {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                DispatchQueue.main.async {
-                    vm.start { result in
-                        switch result {
-                        case .success: cont.resume()
-                        case .failure(let error): cont.resume(throwing: error)
-                        }
-                    }
-                }
-            }
-        } catch {
-            print("[VMPool] VM start failed: \(error)")
-            try? ephDisk.destroy()
-            return nil
-        }
-
-        print("[VMPool] Dedicated VM started in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t0))s")
-
-        await waitForBoot(outputPipe: outputPipe, inputPipe: inputPipe, onBootDetected: "/usr/local/bin/on-boot.sh")
-
-        print("[VMPool] Dedicated VM booted in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t0))s")
-
-        let warm = WarmVM(
-            vm: vm,
-            ephemeralDisk: ephDisk,
-            serialInput: inputPipe,
-            serialOutput: outputPipe
-        )
-
-        await applyConfig(config, to: warm, profileID: profileID, hasProfileDisk: true, profileDiskKey: profileDiskKey, restoreSession: restoreSession)
-
-        print("[VMPool] Dedicated VM ready in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t0))s")
-
-        return warm
     }
 
     /// Apply a profile's config to a booted-but-idle VM.
@@ -244,25 +162,37 @@ public final class VMPool {
 
         print("[VMPool] Applying config: homePage='\(config.homePage)' forceDarkMode=\(config.forceDarkMode) adBlocking=\(config.enableAdBlocking)")
 
-        // Mount profile disk BEFORE running apply-config.sh
+        // Mount profile disk via virtio-fs share + loop device.
+        // The host sets fsDevice.share in claim() before calling applyConfig,
+        // so we mount virtio-fs here (it wasn't available at boot time).
         let profileMountPoint = profileID.map { "/home/chrome/.\($0.uuidString)" }
         if hasProfileDisk, let mountPoint = profileMountPoint {
             let t1 = CFAbsoluteTimeGetCurrent()
+            let diskPath = "/mnt/share/profile.img"
+
+            // Mount virtio-fs first (the share was just pointed to the image dir)
+            input.write(Data("mount -t virtiofs share /mnt/share\n".utf8))
+            try? await Task.sleep(for: .seconds(1))
+
             if let profileDiskKey {
-                // Encrypted: LUKS format (if new), unlock, and mount
+                // Encrypted: LUKS format (if new), unlock, and mount via loop
                 print("[VMPool] Unlocking LUKS profile disk...")
-                let formatCmd = "cryptsetup isLuks /dev/vdb 2>/dev/null || { " + ProfileDisk.luksFormatCommand(key: profileDiskKey) + "; }"
+                let loopSetup = "LOOP=$(losetup -f) && losetup $LOOP \(diskPath)"
+                input.write(Data((loopSetup + "\n").utf8))
+                try? await Task.sleep(for: .seconds(1))
+
+                let formatCmd = "cryptsetup isLuks $LOOP 2>/dev/null || { " + ProfileDisk.luksFormatCommand(key: profileDiskKey, device: "$LOOP") + "; }"
                 input.write(Data((formatCmd + "\n").utf8))
                 try? await Task.sleep(for: .seconds(2))
 
-                let unlockCmd = ProfileDisk.luksUnlockAndMountCommand(key: profileDiskKey, mountPoint: mountPoint)
+                let unlockCmd = ProfileDisk.luksUnlockAndMountCommand(key: profileDiskKey, device: "$LOOP", mountPoint: mountPoint)
                 input.write(Data((unlockCmd + "\n").utf8))
                 try? await Task.sleep(for: .seconds(2))
                 print("[VMPool] LUKS unlocked in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t1))s")
             } else {
-                // Unencrypted: format if new, then mount directly
+                // Unencrypted: format if new, then loop-mount
                 print("[VMPool] Mounting unencrypted profile disk...")
-                let mountCmd = "mkdir -p \(mountPoint) && (blkid /dev/vdb >/dev/null 2>&1 || mkfs.ext4 -q /dev/vdb) && mount /dev/vdb \(mountPoint) && chown chrome:chrome \(mountPoint)"
+                let mountCmd = "mkdir -p \(mountPoint) && (blkid \(diskPath) >/dev/null 2>&1 || mkfs.ext4 -q \(diskPath)) && mount -o loop \(diskPath) \(mountPoint) && chown chrome:chrome \(mountPoint)"
                 input.write(Data((mountCmd + "\n").utf8))
                 try? await Task.sleep(for: .seconds(1))
                 print("[VMPool] Disk mounted in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t1))s")

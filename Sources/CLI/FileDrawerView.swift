@@ -7,6 +7,7 @@ enum ScanStatus: Equatable {
     case scanning
     case clean
     case threat(String)
+    case error(String)
     case skipped
 
     var label: String {
@@ -15,6 +16,7 @@ enum ScanStatus: Equatable {
         case .scanning: return "Scanning..."
         case .clean: return "Clean"
         case .threat(let name): return "Threat: \(name)"
+        case .error(let reason): return "Scan failed: \(reason)"
         case .skipped: return "Skipped"
         }
     }
@@ -36,14 +38,24 @@ final class TransferredFile: Identifiable {
     let date: Date
     var scanStatus: ScanStatus
     var localURL: URL?
+    /// Transfer progress: 0.0 to 1.0, or nil if transfer is complete / single-shot.
+    var progress: Double?
+    /// Whether this file has been explicitly saved to ~/Downloads by the user.
+    var isSaved = false
 
-    init(filename: String, size: Int, direction: TransferDirection, scanStatus: ScanStatus = .pending, localURL: URL? = nil) {
+    /// Whether the scan is still in progress (file should not be saved/dragged).
+    var isScanInProgress: Bool {
+        scanStatus == .pending || scanStatus == .scanning
+    }
+
+    init(filename: String, size: Int, direction: TransferDirection, scanStatus: ScanStatus = .pending, localURL: URL? = nil, progress: Double? = nil) {
         self.filename = filename
         self.size = size
         self.direction = direction
         self.date = Date()
         self.scanStatus = scanStatus
         self.localURL = localURL
+        self.progress = progress
     }
 }
 
@@ -104,7 +116,7 @@ struct FileDrawerView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            Text("Files downloaded in the VM will appear here automatically")
+            Text("Files downloaded in the VM appear here — drag or save to keep")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -141,6 +153,12 @@ struct FileDrawerView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
 
+                if let progress = file.progress {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .frame(maxWidth: .infinity)
+                }
+
                 HStack(spacing: 6) {
                     Text(formattedSize(file.size))
                         .font(.caption2)
@@ -152,18 +170,38 @@ struct FileDrawerView: View {
 
             Spacer()
 
-            if file.direction == .guestToHost, let url = file.localURL {
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                } label: {
-                    Image(systemName: "folder")
-                        .font(.caption)
+            if file.direction == .guestToHost, file.localURL != nil, file.progress == nil, !file.isScanInProgress {
+                if file.isSaved {
+                    Button {
+                        if let url = file.localURL {
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        }
+                    } label: {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Saved — Show in Finder")
+                } else {
+                    Button {
+                        model.saveFile(file)
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Save to Downloads")
                 }
-                .buttonStyle(.borderless)
-                .help("Show in Finder")
             }
         }
         .padding(.vertical, 2)
+        .onDrag {
+            if let url = file.localURL, !file.isScanInProgress {
+                return NSItemProvider(object: url as NSURL)
+            }
+            return NSItemProvider()
+        }
     }
 
     private func directionIcon(_ direction: TransferDirection) -> some View {
@@ -195,6 +233,10 @@ struct FileDrawerView: View {
             Label(name, systemImage: "exclamationmark.shield.fill")
                 .font(.caption2)
                 .foregroundStyle(.red)
+        case .error(let reason):
+            Label(reason, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(.orange)
         case .skipped:
             EmptyView()
         }
@@ -215,6 +257,8 @@ struct FileDrawerView: View {
                 guard let urlData = data as? Data,
                       let url = URL(dataRepresentation: urlData, relativeTo: nil) else { return }
                 DispatchQueue.main.async {
+                    // Ignore files dragged back from the session temp directory
+                    guard !url.path.hasPrefix(model.sessionDir.path) else { return }
                     model.uploadFile(url: url)
                 }
             }
@@ -242,12 +286,27 @@ final class FileDrawerModel {
     var isDragTargeted = false
     var isConnected = false
 
+    /// Called when a file is received from the guest (for auto-opening the drawer).
+    @ObservationIgnored nonisolated(unsafe) var onFileFromGuest: (() -> Void)?
+
     private var bridge: FileTransferBridge?
-    private let downloadDir: URL
+    /// Per-session temp directory for received files. Deleted on detach/teardown.
+    let sessionDir: URL
+    private let userDownloadsDir: URL
     private var virusTotalClient: VirusTotalClient?
 
     init(virusTotalAPIKey: String? = nil) {
-        self.downloadDir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        let bromureTmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bromure", isDirectory: true)
+        // Clean up stale session dirs from previous crashes
+        if FileManager.default.fileExists(atPath: bromureTmp.path) {
+            try? FileManager.default.removeItem(at: bromureTmp)
+        }
+        let tmpBase = bromureTmp
+            .appendingPathComponent("session-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmpBase, withIntermediateDirectories: true)
+        self.sessionDir = tmpBase
+        self.userDownloadsDir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         if let key = virusTotalAPIKey, !key.isEmpty {
             self.virusTotalClient = try? VirusTotalClient(apiKey: key)
@@ -261,6 +320,25 @@ final class FileDrawerModel {
 
         bridge.onFileReceived = { [weak self] filename, data in
             self?.handleReceivedFile(filename: filename, data: data)
+        }
+
+        bridge.onTransferProgress = { [weak self] filename, received, total in
+            guard let self else { return }
+            // Find the in-progress file entry and update its progress
+            if let existing = self.files.first(where: { $0.filename == filename && $0.progress != nil }) {
+                existing.progress = total > 0 ? Double(received) / Double(total) : 0
+            } else {
+                // First chunk — insert a placeholder entry and open the drawer
+                let file = TransferredFile(
+                    filename: filename,
+                    size: total,
+                    direction: .guestToHost,
+                    scanStatus: .pending,
+                    progress: total > 0 ? Double(received) / Double(total) : 0
+                )
+                self.files.insert(file, at: 0)
+                self.onFileFromGuest?()
+            }
         }
 
         bridge.onFileListReceived = { [weak self] fileList in
@@ -280,8 +358,11 @@ final class FileDrawerModel {
         bridge?.onFileReceived = nil
         bridge?.onFileListReceived = nil
         bridge?.onConnectionChanged = nil
+        bridge?.onTransferProgress = nil
         bridge = nil
         isConnected = false
+        // Delete the per-session temp directory and all unsaved files
+        try? FileManager.default.removeItem(at: sessionDir)
     }
 
     /// Upload a file from the host to the guest VM.
@@ -302,8 +383,8 @@ final class FileDrawerModel {
 
     /// Handle a file received from the guest VM.
     private func handleReceivedFile(filename: String, data: Data) {
-        // Save to host Downloads directory
-        let destURL = uniqueURL(for: filename, in: downloadDir)
+        // Save to per-session temp directory (not ~/Downloads)
+        let destURL = uniqueURL(for: filename, in: sessionDir)
         do {
             try data.write(to: destURL)
         } catch {
@@ -314,35 +395,70 @@ final class FileDrawerModel {
         }
 
         let initialStatus: ScanStatus = virusTotalClient != nil ? .pending : .skipped
-        let file = TransferredFile(
-            filename: destURL.lastPathComponent,
-            size: data.count,
-            direction: .guestToHost,
-            scanStatus: initialStatus,
-            localURL: destURL
-        )
-        files.insert(file, at: 0)
+
+        // If there's an in-progress entry from chunked transfer, finalize it
+        let transferredFile: TransferredFile
+        if let existing = files.first(where: { $0.filename == filename && $0.progress != nil }) {
+            existing.progress = nil
+            existing.scanStatus = initialStatus
+            existing.localURL = destURL
+            transferredFile = existing
+        } else {
+            let newFile = TransferredFile(
+                filename: destURL.lastPathComponent,
+                size: data.count,
+                direction: .guestToHost,
+                scanStatus: initialStatus,
+                localURL: destURL
+            )
+            files.insert(newFile, at: 0)
+            transferredFile = newFile
+        }
+        onFileFromGuest?()
 
         // Trigger VirusTotal scan if configured
         if let client = virusTotalClient {
             Task { @MainActor in
-                file.scanStatus = .scanning
+                transferredFile.scanStatus = .scanning
                 do {
                     let result = try await client.scanFile(at: destURL)
                     switch result.status {
                     case .clean:
-                        file.scanStatus = .clean
+                        transferredFile.scanStatus = .clean
                     case .threat(let positives, let total):
-                        file.scanStatus = .threat("\(positives)/\(total) engines")
+                        transferredFile.scanStatus = .threat("\(positives)/\(total) engines")
                     default:
-                        file.scanStatus = .pending
+                        transferredFile.scanStatus = .pending
+                    }
+                } catch let vtError as VirusTotalError {
+                    switch vtError {
+                    case .fileTooLarge:
+                        transferredFile.scanStatus = .error("VirusTotal: Too large")
+                    case .rateLimited:
+                        transferredFile.scanStatus = .error("VirusTotal: Rate limited")
+                    case .notFound:
+                        transferredFile.scanStatus = .error("VirusTotal: Unknown file")
+                    default:
+                        transferredFile.scanStatus = .error("VirusTotal: Scan failed")
                     }
                 } catch {
-                    if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil {
-                        print("[FileDrawer] VirusTotal scan failed: \(error)")
-                    }
-                    file.scanStatus = .skipped
+                    transferredFile.scanStatus = .error("VirusTotal: Scan failed")
                 }
+            }
+        }
+    }
+
+    /// Save a received file to ~/Downloads (user-initiated).
+    func saveFile(_ file: TransferredFile) {
+        guard let sourceURL = file.localURL, !file.isSaved else { return }
+        let destURL = uniqueURL(for: file.filename, in: userDownloadsDir)
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: destURL)
+            file.localURL = destURL
+            file.isSaved = true
+        } catch {
+            if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil {
+                print("[FileDrawer] failed to save \(file.filename): \(error)")
             }
         }
     }

@@ -11,7 +11,7 @@ import Virtualization
 /// - virtio drivers for GPU, network, and disk
 public final class LinuxImageManager {
     /// Bump this to force a rebuild of the base image on next launch.
-    public static let imageVersion = "5"
+    public static let imageVersion = "10"
 
     private let storageDir: URL
 
@@ -141,8 +141,7 @@ public final class LinuxImageManager {
     public func buildLinuxVMConfig(
         diskURL: URL,
         config: VMConfig,
-        readOnlyDisk: Bool = false,
-        profileDiskURL: URL? = nil
+        readOnlyDisk: Bool = false
     ) throws -> VZVirtualMachineConfiguration {
         let vzConfig = VZVirtualMachineConfiguration()
 
@@ -154,7 +153,7 @@ public final class LinuxImageManager {
         // Alpine init reads modules= to know what to modprobe at boot.
         // We need virtio_blk (for /dev/vda) and ext4 (for root filesystem).
         // dm-crypt is needed for LUKS-encrypted profile disks.
-        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk,dm-crypt rw"
+        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk,virtiofs,loop,dm-crypt rw"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.cpuCount = config.cpuCount
@@ -163,20 +162,19 @@ public final class LinuxImageManager {
         // Platform
         vzConfig.platform = VZGenericPlatformConfiguration()
 
-        // Storage — root disk (vda) + optional profile disk (vdb)
+        // Storage — root disk (vda)
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(
             url: diskURL, readOnly: readOnlyDisk
         )
-        var storageDevices: [VZStorageDeviceConfiguration] = [
+        vzConfig.storageDevices = [
             VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)
         ]
-        if let profileDiskURL {
-            let profileAttachment = try VZDiskImageStorageDeviceAttachment(
-                url: profileDiskURL, readOnly: false
-            )
-            storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: profileAttachment))
-        }
-        vzConfig.storageDevices = storageDevices
+
+        // Virtio-fs device for sharing profile disk images with the guest.
+        // The share is initially empty; it's pointed to the profile's image
+        // directory at claim time via VZVirtioFileSystemDevice.share.
+        let shareDevice = VZVirtioFileSystemDeviceConfiguration(tag: "share")
+        vzConfig.directorySharingDevices = [shareDevice]
 
         // Network — NAT mode (bridged networking requires com.apple.vm.networking
         // entitlement which needs an Apple Developer provisioning profile)

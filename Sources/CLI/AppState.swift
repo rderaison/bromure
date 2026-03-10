@@ -169,6 +169,13 @@ final class AppState: @unchecked Sendable {
         let config = buildBaseConfig()
         pool = VMPool(config: config, storageDir: storageDir)
         poolReady = false
+        if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil {
+            // Skip pre-warming in debug mode to keep logs clean.
+            // The pool is still needed for bootDedicated() — just don't warm up.
+            poolReady = true
+            phase = .ready
+            return
+        }
         warmUpTask = Task {
             do {
                 try await pool?.warmUp()

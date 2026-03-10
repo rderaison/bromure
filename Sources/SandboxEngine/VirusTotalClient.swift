@@ -25,6 +25,7 @@ public enum VirusTotalError: Error, LocalizedError {
     case rateLimited
     case notFound
     case uploadFailed(statusCode: Int)
+    case fileTooLarge(sizeMB: Int)
     case analysisError(String)
     case networkError(Error)
 
@@ -38,6 +39,8 @@ public enum VirusTotalError: Error, LocalizedError {
             return "File not found in VirusTotal database."
         case .uploadFailed(let code):
             return "VirusTotal upload failed with status code \(code)."
+        case .fileTooLarge(let sizeMB):
+            return "File too large for VirusTotal upload (\(sizeMB) MB). Hash lookup returned no results."
         case .analysisError(let msg):
             return "VirusTotal analysis error: \(msg)"
         case .networkError(let err):
@@ -110,6 +113,9 @@ public final class VirusTotalClient: @unchecked Sendable {
     /// Scan a file end-to-end: check hash first, upload if unknown, poll until done.
     ///
     /// This is the main entry point for scanning a downloaded file.
+    /// Maximum file size for upload (32 MB, VirusTotal free tier limit).
+    private static let maxUploadSize = 32 * 1024 * 1024
+
     public func scanFile(at fileURL: URL) async throws -> VirusTotalResult {
         let fileData = try Data(contentsOf: fileURL)
         let hash = Self.sha256(of: fileData)
@@ -121,7 +127,12 @@ public final class VirusTotalClient: @unchecked Sendable {
                 return result
             }
         } catch VirusTotalError.notFound {
-            // Not in database — need to upload
+            // Not in database — need to upload (if small enough)
+        }
+
+        // Skip upload for files exceeding VirusTotal's size limit
+        guard fileData.count <= Self.maxUploadSize else {
+            throw VirusTotalError.fileTooLarge(sizeMB: fileData.count / (1024 * 1024))
         }
 
         // Upload the file

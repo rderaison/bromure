@@ -96,9 +96,15 @@ public final class ProfileManager {
         return profile
     }
 
+    /// URL for the directory containing the profile's disk image.
+    /// This directory is shared with the guest VM via virtio-fs.
+    public func profileImageDir(for id: UUID) -> URL {
+        profileDir(for: id).appendingPathComponent("image")
+    }
+
     /// URL for a profile's persistent disk image.
     public func profileDiskURL(for id: UUID) -> URL {
-        profileDir(for: id).appendingPathComponent("profile-disk.img")
+        profileImageDir(for: id).appendingPathComponent("profile.img")
     }
 
     // MARK: - Private

@@ -29,6 +29,11 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
     private var connection: VZVirtioSocketConnection?
     private var readSource: DispatchSourceRead?
 
+    // Chunked transfer state
+    private var chunkedFilename: String?
+    private var chunkedSize: Int = 0
+    private var chunkedData = Data()
+
     /// Called when a file is received from the guest.
     /// Parameters: filename, file data.
     public var onFileReceived: ((String, Data) -> Void)?
@@ -38,6 +43,9 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
 
     /// Called when the connection state changes (guest connects/disconnects).
     public var onConnectionChanged: ((Bool) -> Void)?
+
+    /// Called during chunked transfer with progress (filename, bytesReceived, totalBytes).
+    public var onTransferProgress: ((String, Int, Int) -> Void)?
 
     /// Start file transfer bridging on the given socket device.
     public init(socketDevice: VZVirtioSocketDevice) {
@@ -162,14 +170,55 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
 
         switch type {
         case "file_download":
+            // Single-shot transfer (small files)
             guard let filename = json["filename"] as? String,
                   let base64 = json["data"] as? String,
                   let fileData = Data(base64Encoded: base64) else {
                 if ftDebug { print("[FileTransfer] file_download: missing fields") }
                 return
             }
+            if filename.hasSuffix(".crdownload") {
+                if ftDebug { print("[FileTransfer] ignoring temp file: \(filename)") }
+                return
+            }
             if ftDebug { print("[FileTransfer] received file: \(filename) (\(fileData.count) bytes)") }
             onFileReceived?(filename, fileData)
+
+        case "file_start":
+            // Begin chunked transfer
+            guard let filename = json["filename"] as? String,
+                  let size = json["size"] as? Int else {
+                if ftDebug { print("[FileTransfer] file_start: missing fields") }
+                return
+            }
+            if filename.hasSuffix(".crdownload") {
+                if ftDebug { print("[FileTransfer] ignoring temp file: \(filename)") }
+                chunkedFilename = nil
+                return
+            }
+            chunkedFilename = filename
+            chunkedSize = size
+            chunkedData = Data()
+            chunkedData.reserveCapacity(size)
+            if ftDebug { print("[FileTransfer] file_start: \(filename) (\(size) bytes)") }
+
+        case "file_chunk":
+            guard let filename = chunkedFilename,
+                  let base64 = json["data"] as? String,
+                  let chunkData = Data(base64Encoded: base64) else { return }
+            chunkedData.append(chunkData)
+            if ftDebug, let seq = json["seq"] as? Int {
+                print("[FileTransfer] file_chunk #\(seq): +\(chunkData.count) bytes (total: \(chunkedData.count)/\(chunkedSize))")
+            }
+            onTransferProgress?(filename, chunkedData.count, chunkedSize)
+
+        case "file_end":
+            guard let filename = chunkedFilename else { return }
+            if ftDebug { print("[FileTransfer] file_end: \(filename) (\(chunkedData.count) bytes)") }
+            onFileReceived?(filename, chunkedData)
+            chunkedFilename = nil
+            chunkedSize = 0
+            chunkedData = Data()
 
         case "file_list_response":
             let files = json["files"] as? [String] ?? []

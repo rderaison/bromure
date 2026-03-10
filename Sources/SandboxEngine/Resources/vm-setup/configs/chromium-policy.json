@@ -1,5 +1,6 @@
 {
   "HighEfficiencyModeEnabled": true,
   "MemorySaverModeSavings": 1,
-  "URLBlocklist": ["file://*"]
+  "URLBlocklist": ["file://*"],
+  "URLAllowlist": ["file:///home/chrome/"]
 }

@@ -90,7 +90,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         print("[URL] sessions=\(sessions.count), phase=\(state.phase)")
-        if let session = sessions.first(where: { !$0.closing }) {
+        // Prefer the frontmost (key) window session, fall back to the most recent one
+        let activeSession = sessions.first(where: { !$0.closing && $0.window.isKeyWindow })
+            ?? sessions.last(where: { !$0.closing })
+        if let session = activeSession {
             print("[URL] sending to existing session")
             session.navigateTo(url: url)
         } else if state.phase == .ready {
@@ -335,7 +338,9 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
             session.show()
-            self.state.pool?.scheduleWarmUp()
+            if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
+                self.state.pool?.scheduleWarmUp()
+            }
         }
     }
 
@@ -350,7 +355,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
         let vtKey = profile.settings.virusTotalEnabled ? profile.settings.virusTotalAPIKey : nil
 
         // For persistent profiles, ensure the disk image exists
-        var profileDiskURL: URL?
+        var profileImageDir: URL?
         var profileDiskKey: String?
         var isFirstBoot = false
         if profile.isPersistent {
@@ -365,8 +370,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             if ProfileDisk.diskExists(at: diskURL) {
-                profileDiskURL = diskURL
-                // Only fetch the LUKS key if encryption is enabled
+                profileImageDir = state.profileManager.profileImageDir(for: profile.id)
                 if profile.isEncrypted {
                     profileDiskKey = try? ProfileDisk.keyForProfile(id: profile.id)
                 }
@@ -375,7 +379,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
 
         // Ask whether to restore previous tabs for persistent profiles with existing data
         var restoreSession = false
-        if profile.isPersistent, !isFirstBoot, profileDiskURL != nil {
+        if profile.isPersistent, !isFirstBoot, profileImageDir != nil {
             let alert = NSAlert()
             alert.messageText = "Restore previous tabs?"
             alert.informativeText = "This profile has data from a previous session. Would you like to restore your open tabs?"
@@ -389,7 +393,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
             guard let warm = await state.pool?.claim(
                 config: config,
                 profileID: profile.id,
-                profileDiskURL: profileDiskURL,
+                profileImageDir: profileImageDir,
                 profileDiskKey: profileDiskKey,
                 restoreSession: restoreSession
             ) else {
@@ -412,7 +416,9 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
             self.state.sessionCount = self.sessions.count
             session.show()
             self.state.isLaunching = false
-            self.state.pool?.scheduleWarmUp()
+            if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
+                self.state.pool?.scheduleWarmUp()
+            }
         }
     }
 
@@ -533,8 +539,10 @@ final class BrowserSession {
                 split.setHoldingPriority(.defaultHigh, forSubviewAt: 1)
                 self.splitView = split
                 self.drawerHost = hostView
+                hostView.isHidden = true
                 self.hasFileTransfer = true
                 contentView = split
+
             }
         }
 
@@ -562,7 +570,7 @@ final class BrowserSession {
         let window = NSWindow(
             contentRect: NSRect(
                 x: 0, y: 0,
-                width: windowWidth + (config.enableFileTransfer ? 280 : 0),
+                width: windowWidth,
                 height: windowHeight
             ),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
@@ -580,6 +588,21 @@ final class BrowserSession {
         window.contentMinSize = NSSize(width: 800, height: 600)
         window.animationBehavior = .none
         self.window = window
+
+        // Add a sidebar toggle button in the titlebar for file transfer
+        if hasFileTransfer {
+            let accessory = NSTitlebarAccessoryViewController()
+            let button = NSButton(
+                image: NSImage(systemSymbolName: "sidebar.trailing", accessibilityDescription: "Toggle File Drawer")!,
+                target: nil,
+                action: #selector(GUIAppDelegate.toggleFileDrawerAction(_:))
+            )
+            button.bezelStyle = NSButton.BezelStyle.recessed
+            button.toolTip = "Toggle File Drawer (⌘D)"
+            accessory.view = button
+            accessory.layoutAttribute = .trailing
+            window.addTitlebarAccessoryViewController(accessory)
+        }
 
         let helper = SessionDelegateHelper(session: self)
         self.delegateHelper = helper
@@ -708,6 +731,15 @@ final class BrowserSession {
         }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+
+        // Auto-open drawer when a file arrives from the guest
+        if let model = fileDrawerModel {
+            model.onFileFromGuest = { [weak self] in
+                if let self, self.drawerHost?.isHidden == true {
+                    self.toggleDrawer()
+                }
+            }
+        }
 
         if let url = initialURL {
             initialURL = nil

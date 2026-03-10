@@ -2,14 +2,15 @@
 
 // ---------------------------------------------------------------------------
 // Popular domains database (loaded from top-domains.json at startup)
-// Source: Tranco list (https://tranco-list.eu) — top 10,000 most popular
+// Source: Tranco list (https://tranco-list.eu) — top 100,000 most popular
 // domains aggregated from multiple ranking providers.
 // ---------------------------------------------------------------------------
 
 let POPULAR_DOMAINS = new Set();
 
-// Load the domain list on startup
-fetch(chrome.runtime.getURL("top-domains.json"))
+// Load the domain list on startup. The promise is awaited before processing
+// any password-field messages to avoid false positives on popular sites.
+const domainsReady = fetch(chrome.runtime.getURL("top-domains.json"))
   .then((r) => r.json())
   .then((domains) => {
     POPULAR_DOMAINS = new Set(domains);
@@ -156,6 +157,9 @@ async function handlePasswordDetection(message, sender) {
   const { domain } = message;
   const tabId = sender.tab?.id;
   if (!tabId) return "safe";
+
+  // Wait for the domain list to finish loading
+  await domainsReady;
 
   // 1. User-trusted domains
   const trusted = await getTrustedDomains();
