@@ -5,5 +5,12 @@
     <!-- Required to use Virtualization.framework APIs -->
     <key>com.apple.security.virtualization</key>
     <true/>
+    <!-- Required for ASAuthorization (passkeys + passwords) -->
+    <key>com.apple.application-identifier</key>
+    <string>W3RD8G85BC.io.bromure.app</string>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>W3RD8G85BC.io.bromure.app</string>
+    </array>
 </dict>
 </plist>

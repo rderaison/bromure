@@ -11,3 +11,4 @@ DerivedData/
 xcuserdata/
 *.xcscmblueprint
 Package.resolved
+*.provisionprofile

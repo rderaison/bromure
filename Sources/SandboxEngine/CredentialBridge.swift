@@ -298,25 +298,38 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
                 requestInFlight = false
             }
             do {
-                let result = try await provider.getPasskey(
+                let result = try await provider.getCredential(
                     rpId: rpId,
                     challenge: challenge,
                     allowedCredentialIDs: allowedCredentialIDs
                 )
                 handleUserApproval()
-                sendResponse([
-                    "type": "passkey_get_response",
-                    "requestId": requestId,
-                    "success": true,
-                    "credentialId": result.credentialId,
-                    "authenticatorData": result.authenticatorData,
-                    "signature": result.signature,
-                    "userHandle": result.userHandle,
-                    "clientDataJSON": result.clientDataJSON,
-                ])
+                switch result {
+                case .passkey(let passkey):
+                    sendResponse([
+                        "type": "passkey_get_response",
+                        "requestId": requestId,
+                        "success": true,
+                        "credentialId": passkey.credentialId,
+                        "authenticatorData": passkey.authenticatorData,
+                        "signature": passkey.signature,
+                        "userHandle": passkey.userHandle,
+                        "clientDataJSON": passkey.clientDataJSON,
+                    ])
+                case .password(let password):
+                    sendResponse([
+                        "type": "passkey_get_response",
+                        "requestId": requestId,
+                        "success": true,
+                        "isPassword": true,
+                        "username": password.username,
+                        "password": password.password,
+                    ])
+                }
             } catch {
                 let cancelled = (error as? ASAuthorizationError)?.code == .canceled
                 if cancelled { handleUserDenial() }
+                if cbDebug { print("[CredentialBridge] passkey_get: \(cancelled ? "cancelled" : "failed: \(error)")") }
                 sendError(requestId: requestId, type: "passkey_get_response",
                           error: cancelled ? "user_cancelled" : "no_credentials")
             }
@@ -335,65 +348,35 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
             return
         }
 
+        // Use ASAuthorizationPasswordProvider to access iCloud Keychain passwords
+        // (SecItemCopyMatching cannot access Safari/iCloud Keychain passwords)
+        let provider = PasskeyProvider(window: window)
+        activeProvider = provider
         requestInFlight = true
 
-        // Query Keychain for matching credentials (attributes only — no password data yet)
-        let candidates = Self.fetchUsernames(for: domain)
-
-        if candidates.isEmpty {
-            if cbDebug { print("[CredentialBridge] password_get for \(domain): no credentials found") }
-            requestInFlight = false
-            sendResponse([
-                "type": "password_get_response",
-                "requestId": requestId,
-                "success": true,
-                "credentials": [] as [Any],
-            ])
-            return
-        }
-
-        // Show a host-side dialog for the user to pick a credential
-        let alert = NSAlert()
-        alert.messageText = "Password requested"
-        alert.informativeText = "The browser is requesting a saved password for \u{201c}\(domain)\u{201d}.\n\nSelect which account to use:"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Autofill")
-        alert.addButton(withTitle: "Deny")
-
-        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 28), pullsDown: false)
-        for candidate in candidates {
-            popup.addItem(withTitle: candidate)
-        }
-        alert.accessoryView = popup
-
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard let self else { return }
-            self.requestInFlight = false
-
-            if response == .alertFirstButtonReturn {
-                let selectedUsername = candidates[popup.indexOfSelectedItem]
-                // Now fetch the actual password for the selected account
-                if let password = Self.fetchPassword(for: domain, username: selectedUsername) {
-                    self.handleUserApproval()
-                    self.sendResponse([
-                        "type": "password_get_response",
-                        "requestId": requestId,
-                        "success": true,
-                        "credentials": [
-                            ["username": selectedUsername, "password": password]
-                        ],
-                    ])
-                } else {
-                    self.sendResponse([
-                        "type": "password_get_response",
-                        "requestId": requestId,
-                        "success": true,
-                        "credentials": [] as [Any],
-                    ])
-                }
-            } else {
-                self.handleUserDenial()
-                self.sendError(requestId: requestId, type: "password_get_response", error: "user_cancelled")
+        Task { @MainActor in
+            defer {
+                activeProvider = nil
+                requestInFlight = false
+            }
+            do {
+                let result = try await provider.getPassword()
+                handleUserApproval()
+                if cbDebug { print("[CredentialBridge] password_get for \(domain): got \(result.username)") }
+                sendResponse([
+                    "type": "password_get_response",
+                    "requestId": requestId,
+                    "success": true,
+                    "credentials": [
+                        ["username": result.username, "password": result.password]
+                    ],
+                ])
+            } catch {
+                let cancelled = (error as? ASAuthorizationError)?.code == .canceled
+                if cancelled { handleUserDenial() }
+                if cbDebug { print("[CredentialBridge] password_get for \(domain): \(cancelled ? "cancelled" : "failed: \(error)")") }
+                sendError(requestId: requestId, type: "password_get_response",
+                          error: cancelled ? "user_cancelled" : "no_credentials")
             }
         }
     }
@@ -442,43 +425,6 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
     }
 
     // MARK: - Keychain Operations (scoped to Bromure)
-
-    /// Fetch usernames (not passwords) for a domain. Used to populate the picker.
-    private static func fetchUsernames(for domain: String) -> [String] {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassInternetPassword,
-            kSecAttrServer as String: domain,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            // Do NOT request kSecReturnData — only get account names
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let items = result as? [[String: Any]] else {
-            return []
-        }
-
-        return items.compactMap { $0[kSecAttrAccount as String] as? String }
-    }
-
-    /// Fetch the password for a specific domain+username. Only called after user approval.
-    private static func fetchPassword(for domain: String, username: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassInternetPassword,
-            kSecAttrServer as String: domain,
-            kSecAttrAccount as String: username,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else {
-            return nil
-        }
-        return String(data: data, encoding: .utf8)
-    }
 
     /// Save a password, scoped to Bromure entries only.
     /// Uses kSecAttrLabel to tag entries so updates only affect our own entries.

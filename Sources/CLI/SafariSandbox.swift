@@ -610,12 +610,13 @@ final class BrowserSession {
             if let socketDevices = warmVM.vm.socketDevices as? [VZVirtioSocketDevice],
                let socketDevice = socketDevices.first {
                 let credBridge = MainActor.assumeIsolated {
-                    CredentialBridge(socketDevice: socketDevice, window: window)
-                }
-                credBridge.onKillSession = { [weak self] in
-                    guard let self else { return }
-                    self.confirmed = true
-                    self.window.close()
+                    let bridge = CredentialBridge(socketDevice: socketDevice, window: window)
+                    bridge.onKillSession = { [weak self] in
+                        guard let self else { return }
+                        self.confirmed = true
+                        self.window.close()
+                    }
+                    return bridge
                 }
                 self.credentialBridge = credBridge
             }

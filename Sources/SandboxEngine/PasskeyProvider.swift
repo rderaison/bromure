@@ -17,6 +17,17 @@ public struct PasskeyGetResult {
     public let clientDataJSON: String  // base64
 }
 
+public struct PasswordGetResult {
+    public let username: String
+    public let password: String
+}
+
+/// What the ASAuthorizationController returned for a get request.
+public enum CredentialGetResult {
+    case passkey(PasskeyGetResult)
+    case password(PasswordGetResult)
+}
+
 /// Wraps ASAuthorizationController for passkey create/get operations.
 ///
 /// Each instance handles a single request. Create a new PasskeyProvider for each
@@ -27,7 +38,7 @@ final class PasskeyProvider: NSObject, ASAuthorizationControllerDelegate,
 {
     private weak var window: NSWindow?
     private var createContinuation: CheckedContinuation<PasskeyCreateResult, Error>?
-    private var getContinuation: CheckedContinuation<PasskeyGetResult, Error>?
+    private var getContinuation: CheckedContinuation<CredentialGetResult, Error>?
 
     init(window: NSWindow) {
         self.window = window
@@ -65,23 +76,33 @@ final class PasskeyProvider: NSObject, ASAuthorizationControllerDelegate,
 
     // MARK: - Get Passkey
 
-    func getPasskey(
+    func getCredential(
         rpId: String,
         challenge: Data,
-        allowedCredentialIDs: [Data] = []
-    ) async throws -> PasskeyGetResult {
-        let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(
+        allowedCredentialIDs: [Data] = [],
+        includePasswords: Bool = true
+    ) async throws -> CredentialGetResult {
+        var requests: [ASAuthorizationRequest] = []
+
+        // Passkey assertion request
+        let passkeyProvider = ASAuthorizationPlatformPublicKeyCredentialProvider(
             relyingPartyIdentifier: rpId
         )
-        let request = provider.createCredentialAssertionRequest(challenge: challenge)
-
+        let passkeyRequest = passkeyProvider.createCredentialAssertionRequest(challenge: challenge)
         if !allowedCredentialIDs.isEmpty {
-            request.allowedCredentials = allowedCredentialIDs.map {
+            passkeyRequest.allowedCredentials = allowedCredentialIDs.map {
                 ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: $0)
             }
         }
+        requests.append(passkeyRequest)
 
-        let controller = ASAuthorizationController(authorizationRequests: [request])
+        // Password request — lets the system sheet show saved iCloud Keychain passwords too
+        if includePasswords {
+            let passwordProvider = ASAuthorizationPasswordProvider()
+            requests.append(passwordProvider.createRequest())
+        }
+
+        let controller = ASAuthorizationController(authorizationRequests: requests)
         controller.delegate = self
         controller.presentationContextProvider = self
 
@@ -89,6 +110,26 @@ final class PasskeyProvider: NSObject, ASAuthorizationControllerDelegate,
             self.getContinuation = continuation
             controller.performRequests()
         }
+    }
+
+    /// Password-only request (no passkey). Used for password_get when there's no WebAuthn context.
+    func getPassword() async throws -> PasswordGetResult {
+        let passwordProvider = ASAuthorizationPasswordProvider()
+        let request = passwordProvider.createRequest()
+
+        let controller = ASAuthorizationController(authorizationRequests: [request])
+        controller.delegate = self
+        controller.presentationContextProvider = self
+
+        let result = try await withCheckedThrowingContinuation { continuation in
+            self.getContinuation = continuation
+            controller.performRequests()
+        }
+
+        guard case .password(let passwordResult) = result else {
+            throw ASAuthorizationError(.failed)
+        }
+        return passwordResult
     }
 
     // MARK: - ASAuthorizationControllerDelegate
@@ -118,7 +159,17 @@ final class PasskeyProvider: NSObject, ASAuthorizationControllerDelegate,
                 userHandle: assertion.userID.base64EncodedString(),
                 clientDataJSON: assertion.rawClientDataJSON.base64EncodedString()
             )
-            getContinuation?.resume(returning: result)
+            getContinuation?.resume(returning: .passkey(result))
+            getContinuation = nil
+
+        } else if let passwordCredential = authorization.credential
+            as? ASPasswordCredential
+        {
+            let result = PasswordGetResult(
+                username: passwordCredential.user,
+                password: passwordCredential.password
+            )
+            getContinuation?.resume(returning: .password(result))
             getContinuation = nil
         }
     }

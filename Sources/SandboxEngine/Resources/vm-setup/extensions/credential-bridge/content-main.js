@@ -79,7 +79,16 @@
     if (data.type === "passkey_create_response") {
       pending.resolve(buildCreateResponse(data));
     } else if (data.type === "passkey_get_response") {
-      pending.resolve(buildGetResponse(data));
+      if (data.isPassword) {
+        // User picked a password from the system sheet during a WebAuthn flow.
+        // Can't return a password as a PublicKeyCredential — autofill the form instead.
+        autofillPasswordFields(data.username, data.password);
+        pending.reject(
+          new DOMException("Password autofilled instead", "NotAllowedError")
+        );
+      } else {
+        pending.resolve(buildGetResponse(data));
+      }
     } else if (
       data.type === "password_get_response" ||
       data.type === "password_save_response"
@@ -299,6 +308,17 @@
     setter.call(element, value);
     element.dispatchEvent(new Event("input", { bubbles: true }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function autofillPasswordFields(username, password) {
+    // Find visible password field on the page and fill it + any username field
+    const pwField = document.querySelector('input[type="password"]');
+    if (pwField) {
+      const form = pwField.closest("form") || pwField.parentElement;
+      const userField = form ? findUsernameField(form, pwField) : null;
+      if (userField) setNativeValue(userField, username);
+      setNativeValue(pwField, password);
+    }
   }
 
   function showCredentialPicker(usernameField, passwordField, credentials) {

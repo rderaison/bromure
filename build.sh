@@ -23,8 +23,9 @@ fi
 echo "Binary built at: $BINARY"
 
 # Sign the standalone binary too (for direct invocation without the app bundle)
+SIGN_ID="${CODESIGN_IDENTITY:--}"
 echo "Code signing standalone binary..."
-codesign --force --sign - --entitlements "$ENTITLEMENTS" "$BINARY"
+codesign --force --sign "$SIGN_ID" --entitlements "$ENTITLEMENTS" "$BINARY"
 
 # Create a minimal .app bundle so macOS treats this as a GUI application.
 # This is needed for:
@@ -57,9 +58,22 @@ done
 
 # Code sign with entitlements.
 # Virtualization.framework requires the com.apple.security.virtualization entitlement.
-# Use ad-hoc signing (-) for local development, or replace with your identity.
-echo "Code signing with entitlements..."
-codesign --force --sign - --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
+# Set CODESIGN_IDENTITY to your Developer ID for full functionality (ASAuthorization/passkeys).
+# Falls back to ad-hoc signing (-) if not set.
+SIGN_ID="${CODESIGN_IDENTITY:--}"
+echo "Code signing with entitlements (identity: $SIGN_ID)..."
+if [ "$SIGN_ID" != "-" ]; then
+    # Embed provisioning profile if available (required for ASAuthorization/passkeys).
+    # Place your Developer ID provisioning profile at the repo root as Bromure.provisionprofile.
+    PROV_PROFILE="$SCRIPT_DIR/bromureprofile1.provisionprofile"
+    if [ -f "$PROV_PROFILE" ]; then
+        cp "$PROV_PROFILE" "$CONTENTS/embedded.provisionprofile"
+        echo "Embedded provisioning profile"
+    fi
+    codesign --force --sign "$SIGN_ID" --entitlements "$ENTITLEMENTS" --options runtime "$APP_BUNDLE"
+else
+    codesign --force --sign - --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
+fi
 
 echo ""
 echo "=== Build Complete ==="
