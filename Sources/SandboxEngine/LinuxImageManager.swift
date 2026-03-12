@@ -195,21 +195,18 @@ public final class LinuxImageManager {
         ]
         vzConfig.graphicsDevices = [graphics]
 
-        // Audio — always include both output and input streams.
-        // Input (microphone) is always available at the hardware level;
-        // whether the guest actually uses it depends on the profile config.
-        if config.enableAudio {
-            let audio = VZVirtioSoundDeviceConfiguration()
+        // Audio — always attach hardware so pre-warmed VMs work for any profile.
+        // PipeWire in the guest only starts when the profile has audio enabled.
+        let audio = VZVirtioSoundDeviceConfiguration()
 
-            let outputStream = VZVirtioSoundDeviceOutputStreamConfiguration()
-            outputStream.sink = VZHostAudioOutputStreamSink()
+        let outputStream = VZVirtioSoundDeviceOutputStreamConfiguration()
+        outputStream.sink = VZHostAudioOutputStreamSink()
 
-            let inputStream = VZVirtioSoundDeviceInputStreamConfiguration()
-            inputStream.source = VZHostAudioInputStreamSource()
+        let inputStream = VZVirtioSoundDeviceInputStreamConfiguration()
+        inputStream.source = VZHostAudioInputStreamSource()
 
-            audio.streams = [outputStream, inputStream]
-            vzConfig.audioDevices = [audio]
-        }
+        audio.streams = [outputStream, inputStream]
+        vzConfig.audioDevices = [audio]
 
         // Input
         vzConfig.keyboards = [VZUSBKeyboardConfiguration()]

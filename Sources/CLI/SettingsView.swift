@@ -4,7 +4,7 @@ import SandboxEngine
 struct SettingsView: View {
     @AppStorage("vm.memoryGB") private var memoryGB = 2
     @AppStorage("vm.cpuCount") private var cpuCount = 0
-    @AppStorage("vm.enableAudio") private var enableAudio = true
+    // Audio moved to per-profile (ProfileSettings.enableAudio)
     @AppStorage("vm.swapCmdCtrl") private var swapCmdCtrl = true
     @AppStorage("vm.appearance") private var appearance = "system"
 
@@ -73,7 +73,6 @@ struct SettingsView: View {
                     }
                 }
 
-                Toggle("Audio", isOn: $enableAudio)
             }
 
             Section("Input") {
@@ -195,7 +194,7 @@ struct SettingsView: View {
 
         .onChange(of: memoryGB) { _, _ in state?.restartPool() }
         .onChange(of: cpuCount) { _, _ in state?.restartPool() }
-        .onChange(of: enableAudio) { _, _ in state?.restartPool() }
+
 
         Text("Changes restart the pre-warmed VM.")
             .font(.caption2)

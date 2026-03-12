@@ -70,6 +70,18 @@ public struct Profile: Codable, Identifiable, Equatable {
     }
 }
 
+/// A custom root CA certificate stored as PEM in the profile JSON.
+public struct CustomRootCA: Codable, Equatable, Identifiable {
+    public var id = UUID()
+    public var name: String
+    public var pem: String
+
+    public init(name: String, pem: String) {
+        self.name = name
+        self.pem = pem
+    }
+}
+
 /// Per-profile settings. Hardware settings (memory, CPU, audio) are app-wide
 /// and read from UserDefaults at VM creation time.
 public struct ProfileSettings: Codable, Equatable {
@@ -106,11 +118,15 @@ public struct ProfileSettings: Codable, Equatable {
     public var allowedPorts: String = "80,443"
 
     // Media
+    public var enableAudio: Bool = true
     public var enableWebcam: Bool = false
     public var enableMicrophone: Bool = false
     public var webcamDeviceID: String?
     public var microphoneDeviceID: String?
     public var speakerDeviceID: String?
+
+    // Certificates
+    public var rootCAs: [CustomRootCA] = []
 
     // Advanced
     public var persistent: Bool = false
@@ -138,11 +154,13 @@ public struct ProfileSettings: Codable, Equatable {
         isolateFromLAN = try c.decodeIfPresent(Bool.self, forKey: .isolateFromLAN) ?? defaults.isolateFromLAN
         restrictPorts = try c.decodeIfPresent(Bool.self, forKey: .restrictPorts) ?? defaults.restrictPorts
         allowedPorts = try c.decodeIfPresent(String.self, forKey: .allowedPorts) ?? defaults.allowedPorts
+        enableAudio = try c.decodeIfPresent(Bool.self, forKey: .enableAudio) ?? defaults.enableAudio
         enableWebcam = try c.decodeIfPresent(Bool.self, forKey: .enableWebcam) ?? defaults.enableWebcam
         enableMicrophone = try c.decodeIfPresent(Bool.self, forKey: .enableMicrophone) ?? defaults.enableMicrophone
         webcamDeviceID = try c.decodeIfPresent(String.self, forKey: .webcamDeviceID)
         microphoneDeviceID = try c.decodeIfPresent(String.self, forKey: .microphoneDeviceID)
         speakerDeviceID = try c.decodeIfPresent(String.self, forKey: .speakerDeviceID)
+        rootCAs = try c.decodeIfPresent([CustomRootCA].self, forKey: .rootCAs) ?? defaults.rootCAs
         persistent = try c.decodeIfPresent(Bool.self, forKey: .persistent) ?? defaults.persistent
         encryptOnDisk = try c.decodeIfPresent(Bool.self, forKey: .encryptOnDisk) ?? defaults.encryptOnDisk
     }
@@ -165,7 +183,7 @@ public struct ProfileSettings: Codable, Equatable {
         return VMConfig(
             cpuCount: cpus > 0 ? cpus : nil,
             memorySize: UInt64(max(memGB > 0 ? memGB : 2, 1)) * 1024 * 1024 * 1024,
-            enableAudio: defaults.object(forKey: "vm.enableAudio") as? Bool ?? true,
+            enableAudio: enableAudio,
             enableWarp: enableWarp,
             forceDarkMode: forceDark,
             enableAdBlocking: enableAdBlocking,
@@ -183,6 +201,7 @@ public struct ProfileSettings: Codable, Equatable {
             webcamDeviceID: webcamDeviceID,
             microphoneDeviceID: microphoneDeviceID,
             speakerDeviceID: speakerDeviceID,
+            rootCAs: rootCAs.map(\.pem),
             isolateFromLAN: isolateFromLAN,
             allowedPorts: restrictPorts ? allowedPorts : nil
         )

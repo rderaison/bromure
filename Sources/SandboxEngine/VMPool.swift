@@ -260,7 +260,30 @@ public final class VMPool {
             envVars.append("WEBCAM_WIDTH=\(res.width)")
             envVars.append("WEBCAM_HEIGHT=\(res.height)")
         }
+        if config.enableAudio { envVars.append("AUDIO=1") }
         if config.enableMicrophone { envVars.append("MICROPHONE=1") }
+
+        // Write custom root CAs to the guest before apply-config.sh.
+        // Base64-encode each PEM cert and write in <=512-char chunks to stay
+        // within the serial console line buffer.
+        if !config.rootCAs.isEmpty {
+            input.write(Data("mkdir -p /tmp/bromure/custom-cas\n".utf8))
+            for (i, pem) in config.rootCAs.enumerated() {
+                let b64File = "/tmp/bromure/custom-cas/ca-\(i).b64"
+                let crtFile = "/tmp/bromure/custom-cas/ca-\(i).crt"
+                let b64 = Data(pem.utf8).base64EncodedString()
+                input.write(Data(": > \(b64File)\n".utf8))
+                for chunk in stride(from: 0, to: b64.count, by: 512).map({
+                    let start = b64.index(b64.startIndex, offsetBy: $0)
+                    let end = b64.index(start, offsetBy: min(512, b64.distance(from: start, to: b64.endIndex)))
+                    return String(b64[start..<end])
+                }) {
+                    input.write(Data("echo '\(chunk)' >> \(b64File)\n".utf8))
+                }
+                input.write(Data("base64 -d \(b64File) > \(crtFile)\n".utf8))
+            }
+            envVars.append("CUSTOM_CAS=\(config.rootCAs.count)")
+        }
 
         let cmd = envVars.joined(separator: " ") + " /usr/local/bin/apply-config.sh"
         input.write(Data((cmd + "\n").utf8))

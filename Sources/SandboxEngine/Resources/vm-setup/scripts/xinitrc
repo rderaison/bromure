@@ -13,13 +13,6 @@ doas chown $(id -u):$(id -g) "$XDG_RUNTIME_DIR"
 # Start D-Bus session bus (dbus-x11 provides dbus-launch)
 eval $(dbus-launch --sh-syntax)
 
-# Start PipeWire + WirePlumber (replaces PulseAudio)
-pipewire &
-sleep 0.3
-wireplumber &
-pipewire-pulse &
-sleep 0.5
-
 # Wait for the host to write chrome-env (up to 120s).
 # The host writes it when the user selects a profile and opens a browser.
 for i in $(seq 1 600); do [ -f /tmp/bromure/chrome-ready ] && break; sleep 0.2; done
@@ -32,7 +25,18 @@ WEBCAM=
 WEBCAM_WIDTH=
 WEBCAM_HEIGHT=
 MICROPHONE=
+AUDIO=
 [ -f /tmp/bromure/chrome-env ] && . /tmp/bromure/chrome-env
+
+# Start PipeWire + WirePlumber only when audio is enabled for this profile.
+if [ "$AUDIO" = "1" ]; then
+    pipewire &
+    sleep 0.3
+    wireplumber &
+    pipewire-pulse &
+    sleep 0.5
+fi
+
 [ "$CLIPBOARD" = "1" ] && spice-vdagent -x 2>/dev/null &
 [ "$FILE_TRANSFER" = "1" ] && mkdir -p /home/chrome/Downloads && /usr/local/bin/file-agent.py &
 [ "$SWAP_CMD_CTRL" = "1" ] && setxkbmap -option ctrl:swap_lwin_lctl,ctrl:swap_rctl

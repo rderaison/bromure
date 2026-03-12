@@ -162,6 +162,7 @@ public final class ProfileManager {
         settings.enableWebGL = defaults.object(forKey: "vm.enableWebGL") as? Bool ?? false
         settings.enableAdBlocking = defaults.object(forKey: "vm.enableAdBlocking") as? Bool ?? false
         settings.enableWarp = defaults.object(forKey: "vm.enableWarp") as? Bool ?? false
+        settings.enableAudio = defaults.object(forKey: "vm.enableAudio") as? Bool ?? true
         settings.enableClipboardSharing = defaults.object(forKey: "vm.enableClipboardSharing") as? Bool ?? false
         settings.blockMalwareSites = defaults.object(forKey: "vm.blockMalwareSites") as? Bool ?? false
         settings.phishingWarning = defaults.object(forKey: "vm.phishingWarning") as? Bool ?? false

@@ -517,6 +517,19 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
             showMainWindow()
             return
         }
+
+        // Persistent profiles can only have one session (they can't share the filesystem).
+        // If one is already running, focus its window instead of starting a new VM.
+        if profile.isPersistent,
+           let existing = sessions.first(where: { $0.profile?.id == profile.id && !$0.closing }) {
+            existing.window.makeKeyAndOrderFront(nil)
+            if existing.window.isMiniaturized { existing.window.deminiaturize(nil) }
+            if let url = initialURL {
+                existing.navigateTo(url: url)
+            }
+            return
+        }
+
         state.isLaunching = true
         state.profileManager.markUsed(id: profile.id)
         let config = state.buildConfig(for: profile)

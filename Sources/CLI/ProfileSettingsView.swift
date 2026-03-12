@@ -1,5 +1,11 @@
 import SwiftUI
 import SandboxEngine
+import UniformTypeIdentifiers
+import Security
+
+private extension UTType {
+    static let pem = UTType(filenameExtension: "pem") ?? .data
+}
 
 struct ProfileSettingsView: View {
     @State var draft: Profile
@@ -15,6 +21,8 @@ struct ProfileSettingsView: View {
     @State private var showWarpMemoryConfirm = false
     @State private var showEncryptionWarning = false
     @State private var pendingEncryptOnDisk = false
+    @State private var showCAPicker = false
+    @State private var caImportError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -152,6 +160,9 @@ struct ProfileSettingsView: View {
 
                 // MARK: - Media
                 Section("Media") {
+                    Toggle("Audio", isOn: $draft.settings.enableAudio)
+                        .help("Enable speaker output and audio playback in the VM.")
+
                     Toggle("Share Webcam", isOn: $draft.settings.enableWebcam)
                         .help("Share your Mac\u{2019}s camera with the browser in the VM.")
 
@@ -173,6 +184,61 @@ struct ProfileSettingsView: View {
                                 Text(device.name).tag(Optional(device.id))
                             }
                         }
+                    }
+                }
+
+                // MARK: - Root CAs
+                Section("Root CAs") {
+                    ForEach(draft.settings.rootCAs) { ca in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(ca.name).lineLimit(1)
+                                Text(caSummary(ca.pem))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                draft.settings.rootCAs.removeAll { $0.id == ca.id }
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+
+                    Button("Add Certificate\u{2026}") {
+                        showCAPicker = true
+                    }
+
+                    if let err = caImportError {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+                .fileImporter(
+                    isPresented: $showCAPicker,
+                    allowedContentTypes: [.x509Certificate, .pem, .data],
+                    allowsMultipleSelection: true
+                ) { result in
+                    caImportError = nil
+                    switch result {
+                    case .success(let urls):
+                        for url in urls {
+                            guard url.startAccessingSecurityScopedResource() else { continue }
+                            defer { url.stopAccessingSecurityScopedResource() }
+                            do {
+                                let pem = try Self.loadCertificateAsPEM(from: url)
+                                let name = url.deletingPathExtension().lastPathComponent
+                                draft.settings.rootCAs.append(CustomRootCA(name: name, pem: pem))
+                            } catch {
+                                caImportError = "\(url.lastPathComponent): \(error.localizedDescription)"
+                            }
+                        }
+                    case .failure(let error):
+                        caImportError = error.localizedDescription
                     }
                 }
 
@@ -247,6 +313,57 @@ struct ProfileSettingsView: View {
     private var availableColors: [ProfileColor] {
         ProfileColor.allCases.filter { color in
             !usedColors.contains(color) || draft.color == color
+        }
+    }
+
+    /// Load a certificate file (.pem, .crt, .cer, .der) and return PEM text.
+    static func loadCertificateAsPEM(from url: URL) throws -> String {
+        let data = try Data(contentsOf: url)
+
+        // If it already looks like PEM, validate and return it
+        if let text = String(data: data, encoding: .utf8),
+           text.contains("-----BEGIN CERTIFICATE-----") {
+            // Validate by parsing
+            guard SecCertificateCreateWithData(nil, Self.pemToDER(text) as CFData) != nil else {
+                throw CertError.invalidCertificate
+            }
+            return text.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
+        }
+
+        // Treat as DER — try to parse it
+        guard let cert = SecCertificateCreateWithData(nil, data as CFData) else {
+            throw CertError.invalidCertificate
+        }
+        let derData = SecCertificateCopyData(cert) as Data
+        let b64 = derData.base64EncodedString(options: [.lineLength76Characters, .endLineWithLineFeed])
+        return "-----BEGIN CERTIFICATE-----\n\(b64)\n-----END CERTIFICATE-----\n"
+    }
+
+    /// Extract DER bytes from a PEM string.
+    private static func pemToDER(_ pem: String) -> Data {
+        let lines = pem.components(separatedBy: .newlines)
+            .filter { !$0.hasPrefix("-----") && !$0.isEmpty }
+        return Data(base64Encoded: lines.joined()) ?? Data()
+    }
+
+    /// Brief summary of a PEM certificate (subject CN or fallback).
+    private func caSummary(_ pem: String) -> String {
+        let der = Self.pemToDER(pem)
+        guard let cert = SecCertificateCreateWithData(nil, der as CFData) else {
+            return "Invalid certificate"
+        }
+        if let summary = SecCertificateCopySubjectSummary(cert) as String? {
+            return summary
+        }
+        return "Certificate"
+    }
+
+    private enum CertError: LocalizedError {
+        case invalidCertificate
+        var errorDescription: String? {
+            switch self {
+            case .invalidCertificate: return "Not a valid X.509 certificate"
+            }
         }
     }
 

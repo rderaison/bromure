@@ -209,7 +209,7 @@ final class AppState: @unchecked Sendable {
         return VMConfig(
             cpuCount: cpus > 0 ? cpus : nil,
             memorySize: UInt64(memGB > 0 ? memGB : 2) * 1024 * 1024 * 1024,
-            enableAudio: defaults.object(forKey: "vm.enableAudio") as? Bool ?? true,
+            enableAudio: true,
             enableFileTransfer: true,
             enableClipboardSharing: true
         )

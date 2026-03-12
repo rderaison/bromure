@@ -136,7 +136,7 @@ rm -f /tmp/resolv_stub.c
 # ---------------------------------------------------------------------------
 
 retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools jq python3 \
-    v4l-utils
+    v4l-utils nss-tools
 
 # ---------------------------------------------------------------------------
 # Configuration files (static)

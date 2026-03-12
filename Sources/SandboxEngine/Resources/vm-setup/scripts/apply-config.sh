@@ -20,7 +20,9 @@
 #   ENABLE_WARP=1         Route traffic through Cloudflare WARP
 #   LINK_SENDER=1         Enable "Send link to other session" context menu
 #   WEBCAM=1              Enable webcam sharing from host via vsock + v4l2loopback
+#   AUDIO=1               Enable audio output (start PipeWire in the guest)
 #   MICROPHONE=1          Enable microphone sharing from host via virtio-snd
+#   CUSTOM_CAS=N          Number of custom root CAs in /tmp/bromure/custom-cas/
 
 set -e
 
@@ -84,6 +86,7 @@ if [ "$WEBCAM" = "1" ]; then
     [ -n "$WEBCAM_WIDTH" ] && echo "WEBCAM_WIDTH=$WEBCAM_WIDTH" >> "$ENVFILE"
     [ -n "$WEBCAM_HEIGHT" ] && echo "WEBCAM_HEIGHT=$WEBCAM_HEIGHT" >> "$ENVFILE"
 fi
+[ "$AUDIO" = "1" ] && echo "AUDIO=1" >> "$ENVFILE"
 [ "$MICROPHONE" = "1" ] && echo "MICROPHONE=1" >> "$ENVFILE"
 
 # --- Configure DNS/proxy services ---
@@ -153,6 +156,22 @@ if [ "$WEBCAM" = "1" ]; then
     for i in $(seq 1 30); do [ -e /dev/video0 ] && break; sleep 0.1; done
     chown root:video /dev/video0 2>/dev/null
     chmod 660 /dev/video0 2>/dev/null
+fi
+
+# --- Install custom root CAs ---
+
+if [ -n "$CUSTOM_CAS" ] && [ -d /tmp/bromure/custom-cas ]; then
+    for f in /tmp/bromure/custom-cas/*.crt; do
+        [ -f "$f" ] && cp "$f" /usr/local/share/ca-certificates/
+    done
+    update-ca-certificates 2>/dev/null
+    # Tell Chromium to use the system NSS DB
+    mkdir -p /home/chrome/.pki/nssdb
+    for f in /usr/local/share/ca-certificates/*.crt; do
+        [ -f "$f" ] && certutil -d sql:/home/chrome/.pki/nssdb -A -t "C,," \
+            -n "$(basename "$f" .crt)" -i "$f" 2>/dev/null
+    done
+    chown -R chrome:chrome /home/chrome/.pki
 fi
 
 # --- Signal xinitrc to launch Chromium ---
