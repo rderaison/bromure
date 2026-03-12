@@ -209,13 +209,23 @@ public final class ProfileManager {
     }
 
     private func save(_ profile: Profile) {
+        let url = profileMetadataURL(for: profile.id)
         let dir = metadataDir(for: profile.id)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            print("[Profiles] Failed to create directory \(dir.path): \(error)")
+            return
+        }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = .prettyPrinted
-        if let data = try? encoder.encode(profile) {
-            try? data.write(to: profileMetadataURL(for: profile.id))
+        do {
+            let data = try encoder.encode(profile)
+            try data.write(to: url, options: .atomic)
+            print("[Profiles] Saved '\(profile.name)' to \(url.path)")
+        } catch {
+            print("[Profiles] Failed to save profile '\(profile.name)': \(error)")
         }
     }
 

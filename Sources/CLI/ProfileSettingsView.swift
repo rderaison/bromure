@@ -57,8 +57,6 @@ struct ProfileSettingsView: View {
     var onShowWarpEULA: ((@escaping () -> Void) -> Void)?
 
     @State private var selectedCategory: SettingsCategory = .general
-    @State private var isRenaming = false
-    @State private var editedName: String = ""
     @State private var showWarpMemoryConfirm = false
     @State private var showEncryptionWarning = false
     @State private var pendingEncryptOnDisk = false
@@ -179,32 +177,8 @@ struct ProfileSettingsView: View {
             // Name
             VStack(alignment: .leading, spacing: 6) {
                 Text("Profile Name").font(.headline)
-                if isRenaming {
-                    HStack {
-                        TextField("Name", text: $editedName)
-                            .textFieldStyle(.roundedBorder)
-                        Button("Done") {
-                            let trimmed = editedName.trimmingCharacters(in: .whitespaces)
-                            if !trimmed.isEmpty { draft.name = trimmed }
-                            isRenaming = false
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        Button("Cancel") { isRenaming = false }
-                            .controlSize(.small)
-                    }
-                } else {
-                    HStack {
-                        Text(draft.name)
-                            .foregroundStyle(.primary)
-                        Spacer()
-                        Button("Rename") {
-                            editedName = draft.name
-                            isRenaming = true
-                        }
-                        .controlSize(.small)
-                    }
-                }
+                TextField("Name", text: $draft.name)
+                    .textFieldStyle(.roundedBorder)
             }
 
             settingsDivider

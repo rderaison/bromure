@@ -11,6 +11,7 @@ struct MainView: View {
     @State private var newProfileName = ""
     @State private var newProfileColor: ProfileColor? = .blue
     @State private var editingProfile: Profile?
+    @State private var settingsPanel: NSPanel?
     @State private var profileToDelete: Profile?
 
     /// Colors already used by other profiles.
@@ -370,28 +371,10 @@ struct MainView: View {
             .padding(24)
         }
 
-        .sheet(item: $editingProfile) { profile in
-            ProfileSettingsView(
-                draft: profile,
-                usedColors: usedColors(excluding: profile.id),
-                profileDiskExists: ProfileDisk.diskExists(
-                    at: state.profileManager.profileDiskURL(for: profile.id)
-                ),
-                onDeleteProfileDisk: {
-                    let diskURL = state.profileManager.profileDiskURL(for: profile.id)
-                    try? FileManager.default.removeItem(at: diskURL)
-                },
-                onSave: { updated in
-                    state.profileManager.updateProfile(updated)
-                    state.profileVersion += 1
-                    editingProfile = nil
-                },
-                onCancel: {
-                    editingProfile = nil
-                },
-                onShowWarpEULA: onShowWarpEULA
-            )
-            .frame(width: 680, height: 560)
+        .onChange(of: editingProfile?.id) { _, newID in
+            if let profile = editingProfile, newID != nil {
+                openSettingsPanel(for: profile)
+            }
         }
 
         .confirmationDialog(
@@ -444,5 +427,54 @@ struct MainView: View {
             .controlSize(.regular)
         }
         .padding()
+    }
+
+    // MARK: - Non-modal settings panel
+
+    private func openSettingsPanel(for profile: Profile) {
+        // Close existing panel if open
+        settingsPanel?.close()
+
+        let settingsView = ProfileSettingsView(
+            draft: profile,
+            usedColors: usedColors(excluding: profile.id),
+            profileDiskExists: ProfileDisk.diskExists(
+                at: state.profileManager.profileDiskURL(for: profile.id)
+            ),
+            onDeleteProfileDisk: {
+                let diskURL = state.profileManager.profileDiskURL(for: profile.id)
+                try? FileManager.default.removeItem(at: diskURL)
+            },
+            onSave: { [self] updated in
+                state.profileManager.updateProfile(updated)
+                state.profileVersion += 1
+                editingProfile = nil
+                settingsPanel?.close()
+                settingsPanel = nil
+            },
+            onCancel: { [self] in
+                editingProfile = nil
+                settingsPanel?.close()
+                settingsPanel = nil
+            },
+            onShowWarpEULA: onShowWarpEULA
+        )
+
+        let hostingView = NSHostingView(rootView: settingsView)
+        hostingView.setFrameSize(NSSize(width: 680, height: 560))
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 680, height: 560),
+            styleMask: [.titled, .closable, .resizable, .utilityWindow],
+            backing: .buffered,
+            defer: false
+        )
+        panel.contentView = hostingView
+        panel.title = "Profile Settings — \(profile.name)"
+        panel.isReleasedWhenClosed = false
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+
+        self.settingsPanel = panel
     }
 }
