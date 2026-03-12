@@ -14,6 +14,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     case performance = "Performance"
     case media = "Media"
     case privacy = "Privacy & Safety"
+    case network = "Network Isolation"
     case vpnAds = "VPN & Ads"
     case enterprise = "Enterprise"
     case advanced = "Advanced"
@@ -26,6 +27,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         case .performance: "bolt.fill"
         case .media: "speaker.wave.2.fill"
         case .privacy: "lock.shield.fill"
+        case .network: "network"
         case .vpnAds: "shield.fill"
         case .enterprise: "building.2.fill"
         case .advanced: "wrench.and.screwdriver.fill"
@@ -38,6 +40,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         case .performance: .orange
         case .media: .pink
         case .privacy: .blue
+        case .network: .indigo
         case .vpnAds: .green
         case .enterprise: .purple
         case .advanced: .gray
@@ -162,6 +165,7 @@ struct ProfileSettingsView: View {
         case .performance: performanceView
         case .media: mediaView
         case .privacy: privacyView
+        case .network: networkView
         case .vpnAds: vpnAdsView
         case .enterprise: enterpriseView
         case .advanced: advancedView
@@ -263,6 +267,25 @@ struct ProfileSettingsView: View {
                 description: "Play sounds, music, and video audio from websites.",
                 isOn: $draft.settings.enableAudio
             )
+
+            if draft.settings.enableAudio {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Volume").font(.headline)
+                    HStack(spacing: 8) {
+                        Image(systemName: "speaker.fill")
+                            .foregroundStyle(.secondary)
+                        Slider(value: Binding(
+                            get: { Double(draft.settings.audioVolume) },
+                            set: { draft.settings.audioVolume = Int($0) }
+                        ), in: 0...100, step: 5)
+                        Image(systemName: "speaker.wave.3.fill")
+                            .foregroundStyle(.secondary)
+                        Text("\(draft.settings.audioVolume)%")
+                            .monospacedDigit()
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                }
+            }
 
             settingsDivider
 
@@ -400,8 +423,14 @@ struct ProfileSettingsView: View {
                 description: "Adds a right-click menu option to send a web page link to another Bromure profile.",
                 isOn: $draft.settings.enableLinkSender
             )
+        }
+    }
 
-            settingsDivider
+    // MARK: - Network Isolation
+
+    private var networkView: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            sectionHeader("Network Isolation", subtitle: "Restrict which networks and ports this browser can reach")
 
             settingToggle(
                 "Isolate from Local Network",

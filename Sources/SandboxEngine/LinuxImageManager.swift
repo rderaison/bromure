@@ -218,10 +218,8 @@ public final class LinuxImageManager {
         // Memory balloon — allows host to reclaim unused guest memory
         vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
 
-        // Vsock device for file transfer
-        if config.enableFileTransfer {
-            vzConfig.socketDevices = [VZVirtioSocketDeviceConfiguration()]
-        }
+        // Vsock device — always attached (config-agent, file transfer, webcam, link sender)
+        vzConfig.socketDevices = [VZVirtioSocketDeviceConfiguration()]
 
 
         // SPICE agent for clipboard sharing

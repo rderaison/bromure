@@ -47,6 +47,9 @@ public struct VMConfig {
     /// Whether to attach audio devices.
     public var enableAudio: Bool
 
+    /// Audio output volume (0-100%).
+    public var audioVolume: Int
+
     /// Whether to enable Cloudflare WARP VPN in proxy mode.
     public var enableWarp: Bool
 
@@ -126,6 +129,7 @@ public struct VMConfig {
         displayHeight: Int = 1080,
         pixelsPerInch: Int = 144,
         enableAudio: Bool = true,
+        audioVolume: Int = 100,
         enableWarp: Bool = false,
         forceDarkMode: Bool = false,
         enableAdBlocking: Bool = false,
@@ -157,6 +161,7 @@ public struct VMConfig {
         self.displayHeight = displayHeight
         self.pixelsPerInch = pixelsPerInch
         self.enableAudio = enableAudio
+        self.audioVolume = audioVolume
         self.enableWarp = enableWarp
         self.forceDarkMode = forceDarkMode
         self.enableAdBlocking = enableAdBlocking

@@ -83,6 +83,9 @@ final class AppState: @unchecked Sendable {
     }
 
     func checkState() {
+        if pool != nil {
+            return
+        }
         if imageManager.baseImageExists {
             phase = .warmingUp
             startPool()

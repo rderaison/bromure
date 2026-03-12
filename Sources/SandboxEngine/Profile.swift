@@ -121,6 +121,7 @@ public struct ProfileSettings: Codable, Equatable {
 
     // Media
     public var enableAudio: Bool = true
+    public var audioVolume: Int = 100
     public var enableWebcam: Bool = false
     public var enableMicrophone: Bool = false
     public var webcamDeviceID: String?
@@ -159,6 +160,7 @@ public struct ProfileSettings: Codable, Equatable {
         restrictPorts = try c.decodeIfPresent(Bool.self, forKey: .restrictPorts) ?? defaults.restrictPorts
         allowedPorts = try c.decodeIfPresent(String.self, forKey: .allowedPorts) ?? defaults.allowedPorts
         enableAudio = try c.decodeIfPresent(Bool.self, forKey: .enableAudio) ?? defaults.enableAudio
+        audioVolume = try c.decodeIfPresent(Int.self, forKey: .audioVolume) ?? defaults.audioVolume
         enableWebcam = try c.decodeIfPresent(Bool.self, forKey: .enableWebcam) ?? defaults.enableWebcam
         enableMicrophone = try c.decodeIfPresent(Bool.self, forKey: .enableMicrophone) ?? defaults.enableMicrophone
         webcamDeviceID = try c.decodeIfPresent(String.self, forKey: .webcamDeviceID)
@@ -188,6 +190,7 @@ public struct ProfileSettings: Codable, Equatable {
             cpuCount: cpus > 0 ? cpus : nil,
             memorySize: UInt64(max(memGB > 0 ? memGB : 2, 1)) * 1024 * 1024 * 1024,
             enableAudio: enableAudio,
+            audioVolume: audioVolume,
             enableWarp: enableWarp,
             forceDarkMode: forceDark,
             enableAdBlocking: enableAdBlocking,

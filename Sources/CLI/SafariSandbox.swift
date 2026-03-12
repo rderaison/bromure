@@ -46,7 +46,7 @@ struct Launch: ParsableCommand {
 
 // MARK: - GUI App Delegate
 
-final class GUIAppDelegate: NSObject, NSApplicationDelegate {
+final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let state: AppState
     var sessions: [BrowserSession] = []
     /// Retired sessions kept alive permanently to prevent VZ dispatch source
@@ -335,7 +335,15 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
         window.center()
         window.makeKeyAndOrderFront(nil)
 
+        window.isReleasedWhenClosed = false
+        window.delegate = self
         self.mainWindow = window
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if (notification.object as? NSWindow) === mainWindow {
+            mainWindow = nil
+        }
     }
 
     @MainActor @objc func showSettings(_ sender: Any?) {

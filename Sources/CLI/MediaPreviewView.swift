@@ -19,7 +19,7 @@ struct MediaPreviewView: View {
             if enableWebcam {
                 ZStack {
                     CameraPreviewView(session: preview.captureSession)
-                        .frame(height: 180)
+                        .aspectRatio(4/3, contentMode: .fit)
                         .scaleEffect(x: -1, y: 1)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(
@@ -195,6 +195,13 @@ final class MediaPreviewModel: ObservableObject {
             currentCameraInput = nil
         }
         captureSession.commitConfiguration()
+        if captureSession.isRunning {
+            let session = captureSession
+            DispatchQueue.global(qos: .userInitiated).async {
+                nonisolated(unsafe) let s = session
+                s.stopRunning()
+            }
+        }
         cameraActive = false
     }
 
@@ -252,8 +259,5 @@ final class MediaPreviewModel: ObservableObject {
     func stop() {
         stopCamera()
         stopMicrophone()
-        if captureSession.isRunning {
-            captureSession.stopRunning()
-        }
     }
 }

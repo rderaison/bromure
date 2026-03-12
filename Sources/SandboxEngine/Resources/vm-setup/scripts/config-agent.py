@@ -51,9 +51,12 @@ def mount_profile_disk(cfg):
         run(f"losetup {loop} {disk_path}", check=True)
         # Format if not already LUKS
         rc, _ = run(f"cryptsetup isLuks {loop}")
+        key_bytes = disk_key.encode()
         if rc != 0:
-            run(f"echo -n '{disk_key}' | cryptsetup luksFormat --batch-mode {loop} -", check=True)
-        run(f"echo -n '{disk_key}' | cryptsetup open {loop} profile_data -", check=True)
+            subprocess.run(["cryptsetup", "luksFormat", "--batch-mode", loop, "-"],
+                           input=key_bytes, check=True, capture_output=True)
+        subprocess.run(["cryptsetup", "open", loop, "profile_data", "-"],
+                       input=key_bytes, check=True, capture_output=True)
         os.makedirs(mount_point, exist_ok=True)
         rc, _ = run("blkid /dev/mapper/profile_data")
         if rc != 0:
@@ -140,8 +143,13 @@ def write_chrome_env(cfg):
             lines.append(f"WEBCAM_WIDTH={cfg['webcamWidth']}")
         if cfg.get("webcamHeight"):
             lines.append(f"WEBCAM_HEIGHT={cfg['webcamHeight']}")
+    if profile_dir:
+        lines.append(f"PROFILE_DIR={profile_dir}")
     if cfg.get("audio"):
         lines.append("AUDIO=1")
+        vol = cfg.get("audioVolume")
+        if vol is not None:
+            lines.append(f"AUDIO_VOLUME={vol}")
     if cfg.get("microphone"):
         lines.append("MICROPHONE=1")
 
@@ -186,6 +194,10 @@ def configure_services(cfg, ca_count):
     if ca_count > 0:
         pid = os.fork()
         if pid == 0:
+            # Copy CAs to system trust store, then update system + Chrome nssdb
+            subprocess.run(
+                "cp /tmp/bromure/custom-cas/*.crt /usr/local/share/ca-certificates/ 2>/dev/null",
+                shell=True)
             subprocess.run("update-ca-certificates 2>/dev/null", shell=True)
             subprocess.run(
                 "mkdir -p /home/chrome/.pki/nssdb;"
@@ -213,9 +225,14 @@ def configure_services(cfg, ca_count):
             if not os.path.exists("/tmp/bromure/on-boot-done"):
                 subprocess.run("inotifywait -t 10 -e create --include on-boot-done /tmp/bromure/",
                                shell=True, capture_output=True)
-            run("proxychains4 -q -f /etc/proxychains/proxychains.conf squid -N -f /etc/squid/squid.conf &")
+            subprocess.Popen(
+                ["proxychains4", "-q", "-f", "/etc/proxychains/proxychains.conf",
+                 "squid", "-N", "-f", "/etc/squid/squid.conf"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            run("squid -N -f /etc/squid/squid.conf &")
+            subprocess.Popen(
+                ["squid", "-N", "-f", "/etc/squid/squid.conf"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Profile preferences
     profile_dir = cfg.get("profileDir")
@@ -284,6 +301,7 @@ def main():
         run("pkill -f file-agent.py")
     if not cfg.get("webcam"):
         run("pkill -f webcam-agent.py")
+        subprocess.Popen(["rmmod", "v4l2loopback"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Configure services
     bg_pids, fire_and_forget = configure_services(cfg, ca_count)

@@ -269,7 +269,10 @@ public final class VMPool {
             cfg["webcamWidth"] = res.width
             cfg["webcamHeight"] = res.height
         }
-        if config.enableAudio { cfg["audio"] = true }
+        if config.enableAudio {
+            cfg["audio"] = true
+            if config.audioVolume < 100 { cfg["audioVolume"] = config.audioVolume }
+        }
         if config.enableMicrophone { cfg["microphone"] = true }
         if !config.rootCAs.isEmpty { cfg["rootCAs"] = config.rootCAs }
 

@@ -30,6 +30,8 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
 
     private static let headerSize = 16  // 1 byte type + 7 reserved + 8 bytes length (u64be)
     private static let sendChunkSize = 1024 * 1024  // 1 MB raw chunks
+    private static let maxFramePayload = 16 * 1024 * 1024  // 16 MB max per frame
+    private static let maxFileSize = 10 * 1024 * 1024 * 1024  // 10 GB max per file
 
     private weak var socketDevice: VZVirtioSocketDevice?
     private var listenerDelegate: ListenerDelegate?
@@ -179,6 +181,13 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
             // Bytes 1..7 are reserved (skip them), 8..15 are length (u64be)
             let payloadLen = readU64BE(pendingData, offset: s + 8)
 
+            // Reject oversized frames from a potentially compromised guest.
+            guard payloadLen <= Self.maxFramePayload else {
+                print("[FileTransfer] dropping connection: frame payload \(payloadLen) exceeds \(Self.maxFramePayload)")
+                readSource?.cancel()
+                return
+            }
+
             let totalFrameSize = Self.headerSize + payloadLen
             guard pendingData.count >= totalFrameSize else { break }
 
@@ -199,12 +208,27 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
                 return
             }
             let nameData = payload[payload.startIndex..<nulIndex]
-            let filename = String(data: nameData, encoding: .utf8) ?? "unknown"
+            let rawFilename = String(data: nameData, encoding: .utf8) ?? "unknown"
             let sizeOffset = nulIndex + 1
             let fileSize = readU64BE(payload, offset: sizeOffset)
 
+            // Sanitize filename: strip path components to prevent directory traversal.
+            let filename = (rawFilename as NSString).lastPathComponent
+            if filename.isEmpty || filename == "." || filename == ".." || filename.contains("/") || filename.contains("\0") {
+                if ftDebug { print("[FileTransfer] FILE_META: rejected unsafe filename: \(rawFilename)") }
+                rxFilename = nil
+                return
+            }
+
             if filename.hasSuffix(".crdownload") {
                 if ftDebug { print("[FileTransfer] ignoring temp file: \(filename)") }
+                rxFilename = nil
+                return
+            }
+
+            // Reject files that exceed the size limit.
+            guard fileSize <= Self.maxFileSize else {
+                if ftDebug { print("[FileTransfer] FILE_META: rejected \(filename) — size \(fileSize) exceeds limit") }
                 rxFilename = nil
                 return
             }
@@ -217,6 +241,12 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
 
         case Self.typeData:
             guard let filename = rxFilename else { return }
+            guard rxData.count + payload.count <= Self.maxFileSize else {
+                print("[FileTransfer] dropping transfer \(filename): cumulative size exceeds \(Self.maxFileSize)")
+                rxFilename = nil
+                rxData = Data()
+                return
+            }
             rxData.append(payload)
             if ftDebug && rxData.count % (5 * 1024 * 1024) < payload.count {
                 print("[FileTransfer] FILE_DATA: \(rxData.count)/\(rxFileSize) bytes")
@@ -251,6 +281,7 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
         for i in 0..<8 {
             val = val << 8 | UInt64(data[offset + i])
         }
+        guard val <= UInt64(Int.max) else { return Int.max }
         return Int(val)
     }
 
