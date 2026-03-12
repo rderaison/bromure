@@ -383,6 +383,20 @@ struct ProfileSettingsView: View {
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 300)
                             .padding(.leading, 20)
+
+                            settingToggle(
+                                "Block Threats",
+                                description: "Automatically block files that VirusTotal identifies as malicious. Blocked files cannot be saved or dragged to your Mac.",
+                                isOn: $draft.settings.blockThreats
+                            )
+                            .padding(.leading, 20)
+
+                            settingToggle(
+                                "Block Unscannable Files",
+                                description: "Block files that could not be scanned by VirusTotal (too large, rate-limited, or unknown). When turned off, unscannable files can still be saved manually.",
+                                isOn: $draft.settings.blockUnscannable
+                            )
+                            .padding(.leading, 20)
                         }
                     }
                 }

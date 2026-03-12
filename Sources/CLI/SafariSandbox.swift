@@ -595,7 +595,9 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate {
                 warmVM: warm, config: config,
                 profile: profile,
                 initialURL: initialURL,
-                virusTotalAPIKey: vtKey
+                virusTotalAPIKey: vtKey,
+                blockThreats: profile.settings.blockThreats,
+                blockUnscannable: profile.settings.blockUnscannable
             )
             session.onClosed = { [weak self] session in
                 guard let self else { return }
@@ -697,7 +699,7 @@ final class BrowserSession {
 
     private var initialURL: URL?
 
-    init(warmVM: VMPool.WarmVM, config: VMConfig, profile: Profile? = nil, initialURL: URL? = nil, virusTotalAPIKey: String? = nil) {
+    init(warmVM: VMPool.WarmVM, config: VMConfig, profile: Profile? = nil, initialURL: URL? = nil, virusTotalAPIKey: String? = nil, blockThreats: Bool = false, blockUnscannable: Bool = false) {
         self.warmVM = warmVM
         self.profile = profile
         self.initialURL = initialURL
@@ -718,7 +720,7 @@ final class BrowserSession {
             if let socketDevices = warmVM.vm.socketDevices as? [VZVirtioSocketDevice],
                let socketDevice = socketDevices.first {
                 let bridge = MainActor.assumeIsolated { FileTransferBridge(socketDevice: socketDevice) }
-                let model = MainActor.assumeIsolated { FileDrawerModel(virusTotalAPIKey: virusTotalAPIKey) }
+                let model = MainActor.assumeIsolated { FileDrawerModel(virusTotalAPIKey: virusTotalAPIKey, blockThreats: blockThreats, blockUnscannable: blockUnscannable) }
                 MainActor.assumeIsolated { model.attach(bridge: bridge) }
                 self.fileTransferBridge = bridge
                 self.fileDrawerModel = model

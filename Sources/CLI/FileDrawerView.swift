@@ -48,6 +48,9 @@ final class TransferredFile: Identifiable {
         scanStatus == .pending || scanStatus == .scanning
     }
 
+    /// Whether this file is blocked due to scan policy.
+    var isBlocked = false
+
     init(filename: String, size: Int, direction: TransferDirection, scanStatus: ScanStatus = .pending, localURL: URL? = nil, progress: Double? = nil) {
         self.filename = filename
         self.size = size
@@ -164,13 +167,19 @@ struct FileDrawerView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
 
-                    scanBadge(file.scanStatus)
+                    if file.isBlocked {
+                        Label("Blocked", systemImage: "xmark.shield.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    } else {
+                        scanBadge(file.scanStatus)
+                    }
                 }
             }
 
             Spacer()
 
-            if file.direction == .guestToHost, file.localURL != nil, file.progress == nil, !file.isScanInProgress {
+            if file.direction == .guestToHost, file.localURL != nil, file.progress == nil, !file.isScanInProgress, !file.isBlocked {
                 if file.isSaved {
                     Button {
                         if let url = file.localURL {
@@ -197,7 +206,7 @@ struct FileDrawerView: View {
         }
         .padding(.vertical, 2)
         .onDrag {
-            if let url = file.localURL, !file.isScanInProgress {
+            if let url = file.localURL, !file.isScanInProgress, !file.isBlocked {
                 return NSItemProvider(object: url as NSURL)
             }
             return NSItemProvider()
@@ -295,7 +304,12 @@ final class FileDrawerModel {
     private let userDownloadsDir: URL
     private var virusTotalClient: VirusTotalClient?
 
-    init(virusTotalAPIKey: String? = nil) {
+    /// Whether to block files flagged as threats by VirusTotal.
+    let blockThreats: Bool
+    /// Whether to block files that could not be scanned by VirusTotal.
+    let blockUnscannable: Bool
+
+    init(virusTotalAPIKey: String? = nil, blockThreats: Bool = false, blockUnscannable: Bool = false) {
         let bromureTmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("bromure", isDirectory: true)
         // Clean up stale session dirs from previous crashes
@@ -308,6 +322,8 @@ final class FileDrawerModel {
         self.sessionDir = tmpBase
         self.userDownloadsDir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
+        self.blockThreats = blockThreats
+        self.blockUnscannable = blockUnscannable
         if let key = virusTotalAPIKey, !key.isEmpty {
             self.virusTotalClient = try? VirusTotalClient(apiKey: key)
         }
@@ -427,22 +443,34 @@ final class FileDrawerModel {
                         transferredFile.scanStatus = .clean
                     case .threat(let positives, let total):
                         transferredFile.scanStatus = .threat("\(positives)/\(total) engines")
+                        if blockThreats {
+                            transferredFile.isBlocked = true
+                            try? FileManager.default.removeItem(at: destURL)
+                        }
                     default:
                         transferredFile.scanStatus = .pending
                     }
                 } catch let vtError as VirusTotalError {
                     switch vtError {
                     case .fileTooLarge:
-                        transferredFile.scanStatus = .error("VirusTotal: Too large")
+                        transferredFile.scanStatus = .error("Too large to scan")
                     case .rateLimited:
-                        transferredFile.scanStatus = .error("VirusTotal: Rate limited")
+                        transferredFile.scanStatus = .error("Rate limited")
                     case .notFound:
-                        transferredFile.scanStatus = .error("VirusTotal: Unknown file")
+                        transferredFile.scanStatus = .error("Unknown file")
                     default:
-                        transferredFile.scanStatus = .error("VirusTotal: Scan failed")
+                        transferredFile.scanStatus = .error("Scan failed")
+                    }
+                    if blockUnscannable {
+                        transferredFile.isBlocked = true
+                        try? FileManager.default.removeItem(at: destURL)
                     }
                 } catch {
-                    transferredFile.scanStatus = .error("VirusTotal: Scan failed")
+                    transferredFile.scanStatus = .error("Scan failed")
+                    if blockUnscannable {
+                        transferredFile.isBlocked = true
+                        try? FileManager.default.removeItem(at: destURL)
+                    }
                 }
             }
         }
@@ -450,7 +478,7 @@ final class FileDrawerModel {
 
     /// Save a received file to ~/Downloads (user-initiated).
     func saveFile(_ file: TransferredFile) {
-        guard let sourceURL = file.localURL, !file.isSaved else { return }
+        guard let sourceURL = file.localURL, !file.isSaved, !file.isBlocked else { return }
         let destURL = uniqueURL(for: file.filename, in: userDownloadsDir)
         do {
             try FileManager.default.copyItem(at: sourceURL, to: destURL)

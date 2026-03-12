@@ -102,6 +102,8 @@ public struct ProfileSettings: Codable, Equatable {
     public var canDownload: Bool = false
     public var virusTotalEnabled: Bool = false
     public var virusTotalAPIKey: String?
+    public var blockThreats: Bool = true
+    public var blockUnscannable: Bool = false
 
     // Security — network
     public var blockMalwareSites: Bool = false
@@ -148,6 +150,8 @@ public struct ProfileSettings: Codable, Equatable {
         canDownload = try c.decodeIfPresent(Bool.self, forKey: .canDownload) ?? defaults.canDownload
         virusTotalEnabled = try c.decodeIfPresent(Bool.self, forKey: .virusTotalEnabled) ?? defaults.virusTotalEnabled
         virusTotalAPIKey = try c.decodeIfPresent(String.self, forKey: .virusTotalAPIKey)
+        blockThreats = try c.decodeIfPresent(Bool.self, forKey: .blockThreats) ?? defaults.blockThreats
+        blockUnscannable = try c.decodeIfPresent(Bool.self, forKey: .blockUnscannable) ?? defaults.blockUnscannable
         blockMalwareSites = try c.decodeIfPresent(Bool.self, forKey: .blockMalwareSites) ?? defaults.blockMalwareSites
         phishingWarning = try c.decodeIfPresent(Bool.self, forKey: .phishingWarning) ?? defaults.phishingWarning
         enableLinkSender = try c.decodeIfPresent(Bool.self, forKey: .enableLinkSender) ?? defaults.enableLinkSender
