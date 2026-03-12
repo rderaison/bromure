@@ -163,7 +163,18 @@ final class AppState: @unchecked Sendable {
     }
 
     /// Shut down the current pool and start a fresh one with updated config.
+    /// No-op if an image build is in progress (no base image to warm up).
     func restartPool() {
+        if case .initializing = phase { return }
+        guard imageManager.baseImageExists else {
+            // Image was deleted or never created — show setup screen
+            warmUpTask?.cancel()
+            warmUpTask = nil
+            pool = nil
+            poolReady = false
+            phase = .needsSetup
+            return
+        }
         warmUpTask?.cancel()
         warmUpTask = nil
         Task {
