@@ -15,7 +15,7 @@ Binary protocol (length-prefixed frames):
   Type 0x04 — LIST_REQ:   empty payload (host → guest)
   Type 0x05 — LIST_RESP:  NUL-separated filenames (guest → host)
 
-Started from xinitrc when FILE_TRANSFER=1 env var is set.
+Started at boot via inittab. Killed by config-agent if file transfer is disabled.
 """
 
 import os
@@ -28,7 +28,7 @@ import time
 
 VSOCK_PORT = 5100
 HOST_CID = 2  # Apple Virtualization.framework host CID
-DOWNLOAD_DIR = os.path.expanduser("~/Downloads")
+DOWNLOAD_DIR = "/home/chrome/Downloads"
 
 HEADER_SIZE = 16  # 1 byte type + 7 reserved + 8 bytes length
 CHUNK_SIZE = 1024 * 1024  # 1 MB raw chunks
@@ -143,13 +143,18 @@ def handle_frame(sock, frame_type, payload):
 
 
 def run(sock):
-    """Main loop: poll ~/Downloads for new files + handle host messages."""
+    """Main loop: poll ~/Downloads for new files + handle host messages.
+
+    Returns True if data was exchanged (reconnect on disconnect),
+    False if host closed immediately (feature disabled, exit).
+    """
     global rx_filename, rx_file
     rx_filename = None
     rx_file = None
 
     buf = b""
     known_files = set()
+    got_data = False
 
     # Snapshot existing files so we only transfer new ones
     try:
@@ -167,7 +172,8 @@ def run(sock):
             if readable:
                 chunk = sock.recv(1048576)  # 1 MB
                 if not chunk:
-                    return
+                    return got_data
+                got_data = True
                 buf += chunk
                 buf = process_frames(sock, buf)
 
@@ -205,7 +211,11 @@ def main():
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1048576)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)
             sock.connect((HOST_CID, VSOCK_PORT))
-            run(sock)
+            had_data = run(sock)
+            if not had_data:
+                # Host closed immediately — feature disabled, exit cleanly
+                sock.close()
+                return
         except (ConnectionError, OSError):
             pass
         finally:

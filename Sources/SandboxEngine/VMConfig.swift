@@ -150,7 +150,8 @@ public struct VMConfig {
         naturalScrolling: Bool? = nil,
         locale: String? = nil
     ) {
-        self.cpuCount = cpuCount ?? max(2, ProcessInfo.processInfo.processorCount / 2)
+        let memGB = Int(memorySize / (1024 * 1024 * 1024))
+        self.cpuCount = cpuCount ?? min(max(2, memGB * 2), ProcessInfo.processInfo.processorCount)
         self.memorySize = memorySize
         self.displayWidth = displayWidth
         self.displayHeight = displayHeight

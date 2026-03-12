@@ -98,7 +98,7 @@ retry chroot /mnt apk add \
     mesa-gbm eudev dbus dbus-x11 ttf-freefont ttf-dejavu font-noto-emoji font-liberation \
     xf86-input-libinput agetty util-linux openbox xrandr xdotool setxkbmap \
     pipewire pipewire-pulse wireplumber pipewire-tools alsa-utils alsa-plugins-pulse adwaita-icon-theme \
-    spice-vdagent
+    spice-vdagent xterm font-dejavu
 
 ls -la /mnt/sbin/init || {
     echo "SANDBOX_SETUP_FAILED: /sbin/init not found — package installation likely failed"
@@ -208,6 +208,9 @@ chroot /mnt rc-update add spice-vdagentd default
 
 sed -i 's|^tty1::.*|tty1::respawn:/bin/login -f chrome|' /mnt/etc/inittab
 echo 'hvc0::respawn:/bin/login -f root' >> /mnt/etc/inittab
+echo '::once:/usr/local/bin/config-agent.py' >> /mnt/etc/inittab
+echo '::once:su -s /bin/sh chrome -c /usr/local/bin/file-agent.py' >> /mnt/etc/inittab
+echo '::once:/usr/local/bin/webcam-agent.py' >> /mnt/etc/inittab
 
 install_config scripts/debug.sh        /mnt/root/debug.sh          755
 install_config scripts/root-profile.sh /mnt/root/.profile
@@ -253,6 +256,9 @@ mkdir -p /mnt/home/chrome/.config/chromium/Default
 install_config configs/chromium-preferences.json /mnt/home/chrome/.config/chromium/Default/Preferences
 chroot /mnt chown -R chrome:chrome /home/chrome/.config /home/chrome/.cache
 
+# Pre-compute font cache so X11/Chromium don't scan fonts on first boot
+chroot /mnt fc-cache -f
+
 # Chrome user profile (auto-starts X)
 install_config scripts/chrome-profile.sh /mnt/home/chrome/.profile
 chroot /mnt chown chrome:chrome /home/chrome/.profile
@@ -261,9 +267,10 @@ chroot /mnt chown chrome:chrome /home/chrome/.profile
 # File transfer agent
 # ---------------------------------------------------------------------------
 
-install_config scripts/file-agent.py  /mnt/usr/local/bin/file-agent.py  755
-install_config scripts/link-agent.py /mnt/usr/local/bin/link-agent.py 755
+install_config scripts/file-agent.py   /mnt/usr/local/bin/file-agent.py   755
+install_config scripts/link-agent.py  /mnt/usr/local/bin/link-agent.py  755
 install_config scripts/webcam-agent.py /mnt/usr/local/bin/webcam-agent.py 755
+install_config scripts/config-agent.py /mnt/usr/local/bin/config-agent.py 755
 
 # ---------------------------------------------------------------------------
 # Phishing guard extension

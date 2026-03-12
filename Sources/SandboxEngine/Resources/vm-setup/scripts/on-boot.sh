@@ -18,6 +18,8 @@ mkdir -p /mnt/share
 # Start Cloudflare WARP in proxy mode (socks5://127.0.0.1:40000).
 # Runs in the background so boot is not blocked.
 # If WARP is not needed for the session, apply-config.sh will disconnect it.
+# The barrier marker at the end signals apply-config.sh that it's safe to
+# tear down WARP (avoids a race where killall runs before warp-svc starts).
 (
     PRELOAD="LD_PRELOAD=/usr/lib/libresolv_stub.so"
     /usr/bin/dbus-daemon --system 2>/dev/null
@@ -26,4 +28,5 @@ mkdir -p /mnt/share
     env $PRELOAD /bin/warp-cli --accept-tos registration new 2>&1
     env $PRELOAD /bin/warp-cli --accept-tos mode proxy 2>&1
     env $PRELOAD /bin/warp-cli --accept-tos connect 2>&1
+    touch /tmp/bromure/on-boot-done
 ) &

@@ -23,10 +23,40 @@
 #   AUDIO=1               Enable audio output (start PipeWire in the guest)
 #   MICROPHONE=1          Enable microphone sharing from host via virtio-snd
 #   CUSTOM_CAS=N          Number of custom root CAs in /tmp/bromure/custom-cas/
-
-set -e
+#   PROFILE_DISK=1        Mount virtio-fs share and loop-mount profile.img
+#   PROFILE_MOUNT=<path>  Mount point for the profile disk (e.g. /home/chrome/.UUID)
+#   PROFILE_DISK_KEY=<key> LUKS encryption key (omit for unencrypted)
 
 ENVFILE="/tmp/bromure/chrome-env"
+
+# --- Wait for on-boot.sh to finish (WARP startup, etc.) ---
+
+[ -f /tmp/bromure/on-boot-done ] || inotifywait -t 10 -e create --include "on-boot-done" /tmp/bromure/ 2>/dev/null
+
+# --- Mount profile disk (persistent profiles only) ---
+
+if [ "$PROFILE_DISK" = "1" ] && [ -n "$PROFILE_MOUNT" ]; then
+    mount -t virtiofs share /mnt/share
+    DISK_PATH="/mnt/share/profile.img"
+
+    if [ -n "$PROFILE_DISK_KEY" ]; then
+        # Encrypted: LUKS format (if new), unlock, and mount via loop
+        LOOP=$(losetup -f) && losetup $LOOP "$DISK_PATH"
+        echo -n "$PROFILE_DISK_KEY" | cryptsetup isLuks $LOOP 2>/dev/null || \
+            echo -n "$PROFILE_DISK_KEY" | cryptsetup luksFormat --batch-mode $LOOP -
+        echo -n "$PROFILE_DISK_KEY" | cryptsetup open $LOOP profile_data -
+        mkdir -p "$PROFILE_MOUNT"
+        blkid /dev/mapper/profile_data >/dev/null 2>&1 || mkfs.ext4 -q /dev/mapper/profile_data
+        mount /dev/mapper/profile_data "$PROFILE_MOUNT"
+        chown chrome:chrome "$PROFILE_MOUNT"
+    else
+        # Unencrypted: format if new, then loop-mount
+        mkdir -p "$PROFILE_MOUNT"
+        blkid "$DISK_PATH" >/dev/null 2>&1 || mkfs.ext4 -q "$DISK_PATH"
+        mount -o loop "$DISK_PATH" "$PROFILE_MOUNT"
+        chown chrome:chrome "$PROFILE_MOUNT"
+    fi
+fi
 
 # --- Build EXTRA_FLAGS for Chromium ---
 
@@ -89,6 +119,43 @@ fi
 [ "$AUDIO" = "1" ] && echo "AUDIO=1" >> "$ENVFILE"
 [ "$MICROPHONE" = "1" ] && echo "MICROPHONE=1" >> "$ENVFILE"
 
+# --- Background: WARP teardown (~200 MB freed) ---
+
+if [ "$ENABLE_WARP" != "1" ]; then
+    (
+        LD_PRELOAD=/usr/lib/libresolv_stub.so /bin/warp-cli --accept-tos disconnect 2>/dev/null || true
+        kill $(ps auxw | grep warp-svc | grep -v grep | awk '{print $1}') 2>/dev/null || true
+    ) &
+fi
+
+# --- Background: Webcam setup (modprobe + device wait) ---
+
+if [ "$WEBCAM" = "1" ]; then
+    (
+        modprobe v4l2loopback video_nr=0 card_label="Bromure Camera" exclusive_caps=1 2>/dev/null
+        for i in $(seq 1 30); do [ -e /dev/video0 ] && break; sleep 0.1; done
+        chown root:video /dev/video0 2>/dev/null
+        chmod 660 /dev/video0 2>/dev/null
+    ) &
+fi
+
+# --- Background: Custom root CAs ---
+
+if [ -n "$CUSTOM_CAS" ] && [ -d /tmp/bromure/custom-cas ]; then
+    (
+        for f in /tmp/bromure/custom-cas/*.crt; do
+            [ -f "$f" ] && cp "$f" /usr/local/share/ca-certificates/
+        done
+        update-ca-certificates 2>/dev/null
+        mkdir -p /home/chrome/.pki/nssdb
+        for f in /usr/local/share/ca-certificates/*.crt; do
+            [ -f "$f" ] && certutil -d sql:/home/chrome/.pki/nssdb -A -t "C,," \
+                -n "$(basename "$f" .crt)" -i "$f" 2>/dev/null
+        done
+        chown -R chrome:chrome /home/chrome/.pki
+    ) &
+fi
+
 # --- Configure DNS/proxy services ---
 
 if [ "$BLOCK_MALWARE" = "1" ]; then
@@ -105,26 +172,14 @@ if [ "$AD_BLOCKING" = "1" ] || [ "$ENABLE_WARP" = "1" ] || [ "$BLOCK_MALWARE" = 
         sed -i '/^dns_nameservers/d' /etc/squid/squid.conf
     fi
 
-    if [ "$ENABLE_WARP" != "1" ]; then
+    if [ "$ENABLE_WARP" = "1" ]; then
+        proxychains4 -q -f /etc/proxychains/proxychains.conf squid -N -f /etc/squid/squid.conf &
+    else
         squid -N -f /etc/squid/squid.conf &
     fi
 fi
 
-# --- WARP: connect or disconnect ---
-# WARP is started at boot (on-boot.sh) in proxy mode.
-# If ENABLE_WARP is set, route squid through it via proxychains.
-# Otherwise, disconnect to free Cloudflare resources.
-
-if [ "$ENABLE_WARP" = "1" ]; then
-    proxychains4 -q -f /etc/proxychains/proxychains.conf squid -N -f /etc/squid/squid.conf &
-else
-    LD_PRELOAD=/usr/lib/libresolv_stub.so /bin/warp-cli --accept-tos disconnect 2>/dev/null || true
-fi
-
 # --- Seed default Chromium preferences for persistent profiles ---
-# When --user-data-dir points to a new directory, Chromium has no preferences.
-# Copy the default preferences (e.g. no window decorations) so the experience
-# matches ephemeral sessions.
 
 if [ -n "$PROFILE_DIR" ]; then
     PREFS_DIR="$PROFILE_DIR/Default"
@@ -133,14 +188,8 @@ if [ -n "$PROFILE_DIR" ]; then
         cp /home/chrome/.config/chromium/Default/Preferences "$PREFS_DIR/Preferences"
         chown -R chrome:chrome "$PROFILE_DIR"
     fi
-fi
 
-# --- Clean up Chromium crash state for persistent profiles ---
-# The VM is killed on shutdown, so Chromium always records exit_type=Crashed.
-# Patch Preferences to mark a clean exit so Chromium doesn't show the
-# "restore pages?" bubble — session restore is controlled by --restore-last-session.
-
-if [ -n "$PROFILE_DIR" ]; then
+    # Clean up crash state so Chromium doesn't show "restore pages?" bubble
     PREFS="$PROFILE_DIR/Default/Preferences"
     if [ -f "$PREFS" ]; then
         sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$PREFS"
@@ -148,32 +197,8 @@ if [ -n "$PROFILE_DIR" ]; then
     fi
 fi
 
-# --- Webcam: load v4l2loopback and start agent ---
+# --- Wait for background tasks, then signal xinitrc ---
 
-if [ "$WEBCAM" = "1" ]; then
-    modprobe v4l2loopback video_nr=0 card_label="Bromure Camera" exclusive_caps=1 2>/dev/null
-    # Wait for /dev/video0 to appear, then fix permissions
-    for i in $(seq 1 30); do [ -e /dev/video0 ] && break; sleep 0.1; done
-    chown root:video /dev/video0 2>/dev/null
-    chmod 660 /dev/video0 2>/dev/null
-fi
-
-# --- Install custom root CAs ---
-
-if [ -n "$CUSTOM_CAS" ] && [ -d /tmp/bromure/custom-cas ]; then
-    for f in /tmp/bromure/custom-cas/*.crt; do
-        [ -f "$f" ] && cp "$f" /usr/local/share/ca-certificates/
-    done
-    update-ca-certificates 2>/dev/null
-    # Tell Chromium to use the system NSS DB
-    mkdir -p /home/chrome/.pki/nssdb
-    for f in /usr/local/share/ca-certificates/*.crt; do
-        [ -f "$f" ] && certutil -d sql:/home/chrome/.pki/nssdb -A -t "C,," \
-            -n "$(basename "$f" .crt)" -i "$f" 2>/dev/null
-    done
-    chown -R chrome:chrome /home/chrome/.pki
-fi
-
-# --- Signal xinitrc to launch Chromium ---
-
+wait
 touch /tmp/bromure/chrome-ready
+echo APPLY_CONFIG_DONE

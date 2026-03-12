@@ -1,7 +1,9 @@
 #!/bin/sh
+set -x
 export XCURSOR_SIZE=%%CURSOR_SIZE%%
 export XCURSOR_THEME=Adwaita
 echo "Xcursor.size: %%CURSOR_SIZE%%" | xrdb -merge
+
 /usr/local/bin/resize-watcher.sh &
 openbox &
 
@@ -13,17 +15,13 @@ doas chown $(id -u):$(id -g) "$XDG_RUNTIME_DIR"
 # Start D-Bus session bus (dbus-x11 provides dbus-launch)
 eval $(dbus-launch --sh-syntax)
 
-# Wait for the host to write chrome-env (up to 120s).
+# Wait for the host to write chrome-ready (up to 120s).
 # The host writes it when the user selects a profile and opens a browser.
-for i in $(seq 1 600); do [ -f /tmp/bromure/chrome-ready ] && break; sleep 0.2; done
+[ -f /tmp/bromure/chrome-ready ] || inotifywait -t 120 -e create --include "chrome-ready" /tmp/bromure/ 2>/dev/null
 EXTRA_FLAGS=
 CHROME_URL=
 SWAP_CMD_CTRL=
-FILE_TRANSFER=
 CLIPBOARD=
-WEBCAM=
-WEBCAM_WIDTH=
-WEBCAM_HEIGHT=
 MICROPHONE=
 AUDIO=
 [ -f /tmp/bromure/chrome-env ] && . /tmp/bromure/chrome-env
@@ -38,12 +36,18 @@ if [ "$AUDIO" = "1" ]; then
 fi
 
 [ "$CLIPBOARD" = "1" ] && spice-vdagent -x 2>/dev/null &
-[ "$FILE_TRANSFER" = "1" ] && mkdir -p /home/chrome/Downloads && /usr/local/bin/file-agent.py &
+# file-agent.py and webcam-agent.py are started at boot via inittab
 [ "$SWAP_CMD_CTRL" = "1" ] && setxkbmap -option ctrl:swap_lwin_lctl,ctrl:swap_rctl
-[ "$WEBCAM" = "1" ] && WEBCAM_WIDTH="$WEBCAM_WIDTH" WEBCAM_HEIGHT="$WEBCAM_HEIGHT" /usr/local/bin/webcam-agent.py &
-[ "$MICROPHONE" = "1" ] && pactl load-module module-alsa-source device=hw:0,1 source_name=virtio_mic source_properties=device.description=Microphone 2>/dev/null
+[ "$MICROPHONE" = "1" ] && pactl load-module module-alsa-source device=hw:0,1 source_name=virtio_mic source_properties=device.description=Microphone 2>/dev/null &
 echo "xinitrc: EXTRA_FLAGS=$EXTRA_FLAGS CHROME_URL=$CHROME_URL SWAP_CMD_CTRL=$SWAP_CMD_CTRL" > /dev/hvc0
 export LIBGL_ALWAYS_SOFTWARE=1
+
+# Boost Xorg and Chromium to high CPU priority (-10 nice).
+# Xorg is already running; renice it now, then renice Chrome once it starts.
+doas renice -10 $(pgrep -f /usr/libexec/Xorg) 2>/dev/null
+(sleep 1; for pid in $(pgrep -f chromium-browser); do doas renice -10 $pid 2>/dev/null; done) &
+
+xterm -fa "DejaVu Sans Mono" -fs 14 &
 chromium-browser --no-first-run --start-maximized --force-device-scale-factor=%%DISPLAY_SCALE%% --use-gl=angle --use-angle=gl --ignore-gpu-blocklist --enable-gpu-rasterization --enable-smooth-scrolling --enable-zero-copy --disable-vulkan --in-process-gpu $EXTRA_FLAGS $CHROME_URL
-doas poweroff
+wait
 

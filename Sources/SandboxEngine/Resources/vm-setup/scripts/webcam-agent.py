@@ -103,17 +103,32 @@ def stream_frames(sock, vfd, width, height):
         os.write(vfd, frame)
 
 
+def read_chrome_env(key, default=""):
+    """Read a value from /tmp/bromure/chrome-env."""
+    try:
+        with open("/tmp/bromure/chrome-env") as f:
+            for line in f:
+                if line.startswith(key + "="):
+                    return line.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return default
+
+
 def main():
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
     my_pid = str(os.getpid())
 
-    # Wait for /dev/video0
+    # Wait for /dev/video0 (created by config-agent when webcam is enabled)
     log("waiting for " + VIDEO_DEV)
     while not os.path.exists(VIDEO_DEV):
         time.sleep(0.5)
 
-    # Read camera resolution from environment (set by host via chrome-env)
-    width = int(os.environ.get("WEBCAM_WIDTH", "640"))
-    height = int(os.environ.get("WEBCAM_HEIGHT", "480"))
+    # Read camera resolution from chrome-env (written by config-agent before v4l2loopback)
+    width = int(read_chrome_env("WEBCAM_WIDTH", "640"))
+    height = int(read_chrome_env("WEBCAM_HEIGHT", "480"))
     log(f"host camera: {width}x{height}")
 
     # Open the device and set format to match host camera

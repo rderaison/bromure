@@ -59,7 +59,8 @@ struct SettingsView: View {
     @State private var displayScale: Int = 2
 
     private var autoCPU: Int {
-        max(2, ProcessInfo.processInfo.processorCount / 2)
+        let mem = memoryGB > 0 ? memoryGB : 2
+        return min(max(2, mem * 2), ProcessInfo.processInfo.processorCount)
     }
 
     static let keyboardLayouts: [(label: String, value: String)] = [
@@ -211,7 +212,7 @@ struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("CPU Cores").font(.headline)
-                Text("Number of processor cores available to the browser. Automatic uses half of your Mac\u{2019}s cores, which is a good balance between browser speed and Mac performance.")
+                Text("Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac.")
                     .settingDescription()
                 Picker("", selection: $cpuCount) {
                     Text("Automatic (\(autoCPU))").tag(0)
