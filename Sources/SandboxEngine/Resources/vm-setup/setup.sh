@@ -98,7 +98,7 @@ retry chroot /mnt apk add \
     mesa-gbm eudev dbus dbus-x11 ttf-freefont ttf-dejavu font-noto-emoji font-liberation \
     xf86-input-libinput agetty util-linux openbox xrandr xdotool setxkbmap \
     pipewire pipewire-pulse wireplumber pipewire-tools alsa-utils alsa-plugins-pulse adwaita-icon-theme \
-    spice-vdagent xterm font-dejavu
+    spice-vdagent
 
 ls -la /mnt/sbin/init || {
     echo "SANDBOX_SETUP_FAILED: /sbin/init not found — package installation likely failed"
