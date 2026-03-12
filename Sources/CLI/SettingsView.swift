@@ -7,6 +7,7 @@ private enum AppSettingsCategory: String, CaseIterable, Identifiable {
     case hardware = "Hardware"
     case input = "Input"
     case display = "Display"
+    case network = "Network"
     case storage = "Storage"
 
     var id: String { rawValue }
@@ -16,6 +17,7 @@ private enum AppSettingsCategory: String, CaseIterable, Identifiable {
         case .hardware: "cpu.fill"
         case .input: "keyboard.fill"
         case .display: "display"
+        case .network: "network"
         case .storage: "internaldrive.fill"
         }
     }
@@ -25,6 +27,7 @@ private enum AppSettingsCategory: String, CaseIterable, Identifiable {
         case .hardware: .orange
         case .input: .blue
         case .display: .purple
+        case .network: .green
         case .storage: .gray
         }
     }
@@ -38,6 +41,9 @@ struct SettingsView: View {
     // Audio moved to per-profile (ProfileSettings.enableAudio)
     @AppStorage("vm.swapCmdCtrl") private var swapCmdCtrl = true
     @AppStorage("vm.appearance") private var appearance = "system"
+    @AppStorage("vm.dnsServers") private var dnsServers = ""
+    @AppStorage("vm.networkMode") private var networkMode = "nat"
+    @AppStorage("vm.bridgedInterface") private var bridgedInterface = ""
 
     var state: AppState?
 
@@ -114,7 +120,7 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(width: 620, height: 440)
+        .frame(width: 620, height: 480)
         .onAppear {
             keyboardLayout = state?.currentKeyboardLayout ?? VMConfig.detectKeyboardLayout()
             naturalScrolling = state?.currentNaturalScrolling ?? VMConfig.detectNaturalScrolling()
@@ -174,6 +180,7 @@ struct SettingsView: View {
         case .hardware: hardwareView
         case .input: inputView
         case .display: displayView
+        case .network: networkView
         case .storage: storageView
         }
     }
@@ -312,6 +319,98 @@ struct SettingsView: View {
                 }
                 .labelsHidden()
                 .frame(width: 200)
+            }
+        }
+    }
+
+    // MARK: - Network
+
+    private var networkView: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            sectionHeader("Network", subtitle: "Connection mode and DNS settings")
+
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.yellow)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("You probably don\u{2019}t need to change anything here.")
+                        .font(.callout.bold())
+                    Text("These settings are only useful if you\u{2019}re having trouble during installation or if a VPN, firewall, or other local software is preventing the browser from connecting to the internet.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.yellow.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.yellow.opacity(0.3), lineWidth: 1))
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Connection Mode").font(.headline)
+                Text("NAT (recommended) gives the browser its own private network address. Bridged mode places the browser directly on your network, as if it were a separate device.")
+                    .settingDescription()
+                Picker("", selection: $networkMode) {
+                    Text("NAT (Recommended)").tag("nat")
+                    Text("Bridged").tag("bridged")
+                }
+                .labelsHidden()
+                .pickerStyle(.radioGroup)
+                .onChange(of: networkMode) { _, _ in state?.restartPool() }
+            }
+
+            if networkMode == "bridged" {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Network Interface").font(.headline)
+                    Text("Choose which network connection the browser should use. Typically this is your Wi-Fi or Ethernet adapter.")
+                        .settingDescription()
+                    let interfaces = VMConfig.bridgedInterfaces()
+                    if interfaces.isEmpty {
+                        Text("No network interfaces available.")
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                    } else {
+                        Picker("", selection: $bridgedInterface) {
+                            Text("Select\u{2026}").tag("")
+                            ForEach(interfaces) { iface in
+                                Text(iface.displayName).tag(iface.id)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 300)
+                        .onChange(of: bridgedInterface) { _, _ in state?.restartPool() }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Label {
+                        Text("LAN isolation and port restriction are not available in bridged mode.")
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.yellow)
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            settingsDivider
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("DNS Servers").font(.headline)
+                Text("Override which DNS servers the browser uses to look up website addresses. Leave empty to use the default. Set this if you\u{2019}re on a VPN or security software that breaks internet access in the browser.")
+                    .settingDescription()
+                TextField("e.g. 1.1.1.1, 8.8.8.8", text: $dnsServers)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 300)
+                    .onChange(of: dnsServers) { _, _ in state?.restartPool() }
+
+                if networkMode == "bridged" {
+                    Text("DNS override only works in NAT mode.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }

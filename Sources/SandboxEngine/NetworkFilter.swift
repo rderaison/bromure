@@ -3,13 +3,14 @@ import Foundation
 import Virtualization
 
 private let fwDebug = ProcessInfo.processInfo.environment["BROMURE_FW_DEBUG"] != nil
+private let dnsDebug = ProcessInfo.processInfo.environment["BROMURE_DNS_DEBUG"] != nil
 
-/// Host-side packet filter that sits between a VM and vmnet (shared/NAT mode).
+/// Host-side packet filter that sits between a VM and vmnet.
 ///
-/// Creates a vmnet interface in shared mode, a UNIX datagram socketpair, and
-/// proxies Ethernet frames between them.  Outbound packets (VM → internet) are
-/// inspected and dropped if they target the host's LAN subnet or other VMs on
-/// the vmnet subnet.
+/// Creates a vmnet interface (shared/NAT or bridged mode), a UNIX datagram
+/// socketpair, and proxies Ethernet frames between them.  Outbound packets
+/// (VM → internet) are inspected and dropped if they target the host's LAN
+/// subnet or other VMs on the vmnet subnet.
 ///
 /// Requires the `com.apple.developer.networking.vmnet` entitlement.
 ///
@@ -48,6 +49,12 @@ public final class NetworkFilter: @unchecked Sendable {
     private let vmnetSubnet: UInt32  = 0xC0A8_4000    // 192.168.64.0
     private let vmnetMask: UInt32    = 0xFFFF_FF00    // /24
 
+    /// DNS servers to inject into DHCP responses (host byte order). Empty = no rewriting.
+    private let dnsOverrideServers: [UInt32]
+
+    /// Interface name for bridged mode (e.g. "en0"). nil = shared/NAT mode.
+    private let bridgedInterface: String?
+
     // Well-known private ranges (for blocking all private IPs, not just the detected LAN)
     private static let privateRanges: [(UInt32, UInt32)] = [
         (0x0A00_0000, 0xFF00_0000),  // 10.0.0.0/8
@@ -56,10 +63,16 @@ public final class NetworkFilter: @unchecked Sendable {
         (0xA9FE_0000, 0xFFFF_0000),  // 169.254.0.0/16 (link-local)
     ]
 
-    /// Create a network filter with LAN isolation.
+    /// Create a network filter.
+    ///
+    /// - Parameters:
+    ///   - networkInfo: Host network configuration (LAN subnet, gateway, DNS).
+    ///   - dnsOverrideServers: Custom DNS servers to inject via DHCP rewriting.
+    ///   - bridgedInterface: If non-nil, use vmnet bridged mode on this interface
+    ///     (e.g. "en0"). If nil, use vmnet shared (NAT) mode.
     ///
     /// Returns nil if vmnet cannot be started (missing entitlement or other error).
-    public init?(networkInfo: HostNetworkInfo) {
+    public init?(networkInfo: HostNetworkInfo, dnsOverrideServers: [UInt32] = [], bridgedInterface: String? = nil) {
         // Create datagram socketpair
         var fds: [Int32] = [0, 0]
         guard fds.withUnsafeMutableBufferPointer({ buf in
@@ -85,6 +98,17 @@ public final class NetworkFilter: @unchecked Sendable {
         self.lanMask = networkInfo.subnetMask
         self.gatewayIP = networkInfo.gateway
         self.dnsServers = Set(networkInfo.dnsServers)
+        self.dnsOverrideServers = dnsOverrideServers
+        self.bridgedInterface = bridgedInterface
+
+        if dnsDebug {
+            if dnsOverrideServers.isEmpty {
+                print("[DNS] No override DNS servers configured, DHCP responses will pass through unmodified")
+            } else {
+                let servers = dnsOverrideServers.map { HostNetworkInfo.formatIPv4($0) }.joined(separator: ", ")
+                print("[DNS] Override DNS servers: \(servers)")
+            }
+        }
 
         self.vmnetQueue = DispatchQueue(label: "io.bromure.vmnet", qos: .userInteractive)
         self.readQueue = DispatchQueue(label: "io.bromure.vmnet-read", qos: .userInteractive)
@@ -190,7 +214,14 @@ public final class NetworkFilter: @unchecked Sendable {
 
     private func startVmnet() -> Bool {
         let desc = xpc_dictionary_create(nil, nil, 0)
-        xpc_dictionary_set_uint64(desc, vmnet_operation_mode_key, UInt64(kVmnetSharedMode))
+
+        if let ifName = bridgedInterface {
+            xpc_dictionary_set_uint64(desc, vmnet_operation_mode_key, UInt64(kVmnetBridgedMode))
+            xpc_dictionary_set_string(desc, vmnet_shared_interface_name_key, ifName)
+            print("[NetworkFilter] Starting vmnet in bridged mode on \(ifName)")
+        } else {
+            xpc_dictionary_set_uint64(desc, vmnet_operation_mode_key, UInt64(kVmnetSharedMode))
+        }
 
         let sem = DispatchSemaphore(value: 0)
         var success = false
@@ -250,8 +281,18 @@ public final class NetworkFilter: @unchecked Sendable {
             guard ret == vmnet_return_t(rawValue: kVmnetSuccess), count > 0 else { break }
 
             let size = pktSize
-            let n = Darwin.write(hostFD, buf, size)
-            if n <= 0 { break }
+
+            // Rewrite DNS servers in DHCP responses if override is configured
+            if !dnsOverrideServers.isEmpty,
+               let rewritten = rewriteDHCPDNS(buf, count: size) {
+                let n = rewritten.withUnsafeBytes { ptr in
+                    Darwin.write(hostFD, ptr.baseAddress!, rewritten.count)
+                }
+                if n <= 0 { break }
+            } else {
+                let n = Darwin.write(hostFD, buf, size)
+                if n <= 0 { break }
+            }
         }
     }
 
@@ -377,6 +418,153 @@ public final class NetworkFilter: @unchecked Sendable {
 
         // Allow everything else (internet)
         return true
+    }
+
+    // MARK: - DHCP DNS rewriting
+
+    /// Rewrite DNS servers (option 6) in a DHCP response packet.
+    /// Returns the modified packet, or nil if this is not a DHCP response or has no option 6.
+    private func rewriteDHCPDNS(_ buf: UnsafeMutablePointer<UInt8>, count: Int) -> Data? {
+        // Minimum: 14 (eth) + 20 (ip) + 8 (udp) + 240 (bootp+cookie) + 1 (end) = 283
+        guard count >= 283 else { return nil }
+
+        // Ethernet type = IPv4
+        guard UInt16(buf[12]) << 8 | UInt16(buf[13]) == 0x0800 else { return nil }
+
+        // IP protocol = UDP
+        guard buf[23] == 17 else { return nil }
+
+        let ihl = Int(buf[14] & 0x0F) * 4
+        let udpOffset = 14 + ihl
+        guard count >= udpOffset + 8 else { return nil }
+
+        // UDP src port = 67 (DHCP server), dst port = 68 (DHCP client)
+        let srcPort = UInt16(buf[udpOffset]) << 8 | UInt16(buf[udpOffset + 1])
+        let dstPort = UInt16(buf[udpOffset + 2]) << 8 | UInt16(buf[udpOffset + 3])
+        guard srcPort == 67, dstPort == 68 else { return nil }
+
+        let bootpOffset = udpOffset + 8
+        guard count >= bootpOffset + 240 else { return nil }
+
+        // BOOTP op = 2 (reply)
+        guard buf[bootpOffset] == 2 else { return nil }
+
+        // Magic cookie 0x63825363
+        let cookie = bootpOffset + 236
+        guard buf[cookie] == 0x63, buf[cookie + 1] == 0x82,
+              buf[cookie + 2] == 0x53, buf[cookie + 3] == 0x63 else { return nil }
+
+        // Find option 6 (DNS servers) in DHCP options
+        let optionsStart = cookie + 4
+        var i = optionsStart
+        var option6Start = -1
+        var option6DataLen = 0
+
+        while i < count {
+            let optType = buf[i]
+            if optType == 255 { break }      // end
+            if optType == 0 { i += 1; continue }  // pad
+            guard i + 1 < count else { break }
+            let optLen = Int(buf[i + 1])
+            if optType == 6 {
+                option6Start = i
+                option6DataLen = optLen
+                break
+            }
+            i += 2 + optLen
+        }
+
+        guard option6Start >= 0 else { return nil }
+
+        // Build new packet with replaced option 6
+        let newOption6Len = dnsOverrideServers.count * 4
+        let sizeDiff = newOption6Len - option6DataLen
+
+        var data = Data()
+        data.reserveCapacity(count + sizeDiff)
+
+        // Everything before option 6
+        data.append(UnsafeBufferPointer(start: buf, count: option6Start))
+
+        // New option 6: type + length + IPs
+        data.append(6)
+        data.append(UInt8(newOption6Len))
+        for ip in dnsOverrideServers {
+            data.append(UInt8((ip >> 24) & 0xFF))
+            data.append(UInt8((ip >> 16) & 0xFF))
+            data.append(UInt8((ip >> 8) & 0xFF))
+            data.append(UInt8(ip & 0xFF))
+        }
+
+        // Everything after original option 6
+        let afterOption6 = option6Start + 2 + option6DataLen
+        if afterOption6 < count {
+            data.append(UnsafeBufferPointer(start: buf + afterOption6, count: count - afterOption6))
+        }
+
+        // Update IP total length
+        let oldIPLen = Int(UInt16(data[16]) << 8 | UInt16(data[17]))
+        let newIPLen = oldIPLen + sizeDiff
+        data[16] = UInt8((newIPLen >> 8) & 0xFF)
+        data[17] = UInt8(newIPLen & 0xFF)
+
+        // Update UDP length
+        let udpLenOff = udpOffset + 4
+        let oldUDPLen = Int(UInt16(data[udpLenOff]) << 8 | UInt16(data[udpLenOff + 1]))
+        let newUDPLen = oldUDPLen + sizeDiff
+        data[udpLenOff] = UInt8((newUDPLen >> 8) & 0xFF)
+        data[udpLenOff + 1] = UInt8(newUDPLen & 0xFF)
+
+        // Recalculate IP header checksum
+        data[24] = 0
+        data[25] = 0
+        var ipSum: UInt32 = 0
+        for j in stride(from: 14, to: 14 + ihl, by: 2) {
+            ipSum += UInt32(data[j]) << 8 | UInt32(data[j + 1])
+        }
+        while ipSum > 0xFFFF { ipSum = (ipSum & 0xFFFF) + (ipSum >> 16) }
+        let ipChecksum = ~UInt16(ipSum)
+        data[24] = UInt8((ipChecksum >> 8) & 0xFF)
+        data[25] = UInt8(ipChecksum & 0xFF)
+
+        // Recalculate UDP checksum over pseudo-header + UDP header + payload
+        data[udpOffset + 6] = 0
+        data[udpOffset + 7] = 0
+        var udpSum: UInt32 = 0
+        // Pseudo-header: src IP, dst IP, zero+proto, UDP length
+        for j in stride(from: 26, to: 34, by: 2) {
+            udpSum += UInt32(data[j]) << 8 | UInt32(data[j + 1])
+        }
+        udpSum += UInt32(17)  // protocol
+        udpSum += UInt32(newUDPLen)
+        // UDP header + payload
+        let udpEnd = udpOffset + newUDPLen
+        var j = udpOffset
+        while j + 1 < udpEnd {
+            udpSum += UInt32(data[j]) << 8 | UInt32(data[j + 1])
+            j += 2
+        }
+        if j < udpEnd { udpSum += UInt32(data[j]) << 8 }  // odd trailing byte
+        while udpSum > 0xFFFF { udpSum = (udpSum & 0xFFFF) + (udpSum >> 16) }
+        var udpChecksum = ~UInt16(udpSum)
+        if udpChecksum == 0 { udpChecksum = 0xFFFF }  // RFC 768: 0 means no checksum
+        data[udpOffset + 6] = UInt8((udpChecksum >> 8) & 0xFF)
+        data[udpOffset + 7] = UInt8(udpChecksum & 0xFF)
+
+        if dnsDebug {
+            let srcIP = UInt32(data[26]) << 24 | UInt32(data[27]) << 16 | UInt32(data[28]) << 8 | UInt32(data[29])
+            let clientIP = UInt32(data[bootpOffset + 16]) << 24 | UInt32(data[bootpOffset + 17]) << 16 | UInt32(data[bootpOffset + 18]) << 8 | UInt32(data[bootpOffset + 19])
+            let oldDNS = (0..<option6DataLen / 4).map { idx in
+                let o = option6Start + 2 + idx * 4
+                return HostNetworkInfo.formatIPv4(
+                    UInt32(buf[o]) << 24 | UInt32(buf[o + 1]) << 16 | UInt32(buf[o + 2]) << 8 | UInt32(buf[o + 3])
+                )
+            }.joined(separator: ", ")
+            let newDNS = dnsOverrideServers.map { HostNetworkInfo.formatIPv4($0) }.joined(separator: ", ")
+            print("[DNS] DHCP response from \(HostNetworkInfo.formatIPv4(srcIP)) for client \(HostNetworkInfo.formatIPv4(clientIP)): DNS \(oldDNS) \u{2192} \(newDNS) (packet \(count)\u{2192}\(data.count) bytes)")
+        }
+
+        return data
     }
 
     // MARK: - Helpers

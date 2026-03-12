@@ -58,15 +58,38 @@ public final class VMPool {
         let ephDisk = EphemeralDisk(baseImageURL: imageManager.linuxDiskURL)
         try ephDisk.create()
 
-        // Always create NetworkFilter (vmnet proxy) so we can activate LAN
-        // isolation at claim time based on the profile's config.
-        // The filter starts in pass-through mode until activateFiltering() is called.
+        // Network mode: NAT (default, via vmnet shared) or Bridged (via vmnet bridged)
+        let defaults = UserDefaults.standard
+        let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
+
         var networkFilter: NetworkFilter?
         var networkAttachment: VZNetworkDeviceAttachment?
+
+        // Read DNS override from preferences (e.g. "1.1.1.1,1.0.0.1")
+        let dnsOverride: [UInt32]
+        if let dnsString = defaults.string(forKey: "vm.dnsServers"),
+           !dnsString.trimmingCharacters(in: .whitespaces).isEmpty {
+            dnsOverride = dnsString.split(separator: ",")
+                .compactMap { HostNetworkInfo.parseIPv4(String($0).trimmingCharacters(in: .whitespaces)) }
+        } else {
+            dnsOverride = []
+        }
+
         if let netInfo = HostNetworkInfo.detect() {
-            if let filter = NetworkFilter(networkInfo: netInfo) {
+            let bridgedIface: String? = (networkMode == "bridged")
+                ? defaults.string(forKey: "vm.bridgedInterface")
+                : nil
+
+            if let filter = NetworkFilter(
+                networkInfo: netInfo,
+                dnsOverrideServers: dnsOverride,
+                bridgedInterface: bridgedIface
+            ) {
                 networkFilter = filter
                 networkAttachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
+                if bridgedIface != nil {
+                    print("[VMPool] Using bridged networking via vmnet on \(bridgedIface!)")
+                }
             } else {
                 print("[VMPool] NetworkFilter unavailable (missing vmnet entitlement?), falling back to NAT")
             }

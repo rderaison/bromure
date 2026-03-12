@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Virtualization
 
 /// The guest operating system type.
 public enum GuestOS: String, Codable, CaseIterable {
@@ -261,6 +262,26 @@ public struct VMConfig {
     public static func baseMetadataURL(in storageDir: URL? = nil) -> URL {
         let dir = storageDir ?? defaultStorageDirectory
         return dir.appendingPathComponent("base.json")
+    }
+
+    /// Network interface suitable for bridged mode.
+    public struct BridgedInterface: Identifiable {
+        public let id: String          // e.g. "en0"
+        public let localizedName: String? // e.g. "Wi-Fi"
+
+        public var displayName: String {
+            if let name = localizedName {
+                return "\(name) (\(id))"
+            }
+            return id
+        }
+    }
+
+    /// List available network interfaces for bridged networking.
+    public static func bridgedInterfaces() -> [BridgedInterface] {
+        VZBridgedNetworkInterface.networkInterfaces.map {
+            BridgedInterface(id: $0.identifier, localizedName: $0.localizedDisplayName)
+        }
     }
 
     /// Path to the saved VM state (for instant restore).

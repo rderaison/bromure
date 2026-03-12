@@ -453,9 +453,28 @@ public final class LinuxImageManager {
             VZVirtioBlockDeviceConfiguration(attachment: transferAttachment),
         ]
 
-        // Network (needed for apk)
+        // Network (needed for apk) — use NetworkFilter to rewrite DHCP DNS
+        // when the user has overridden DNS servers (e.g. VPN software breaks DNS)
+        var buildNetworkFilter: NetworkFilter?
         let net = VZVirtioNetworkDeviceConfiguration()
-        net.attachment = VZNATNetworkDeviceAttachment()
+        if let netInfo = HostNetworkInfo.detect() {
+            let dnsOverride: [UInt32]
+            if let dnsString = UserDefaults.standard.string(forKey: "vm.dnsServers"),
+               !dnsString.trimmingCharacters(in: .whitespaces).isEmpty {
+                dnsOverride = dnsString.split(separator: ",")
+                    .compactMap { HostNetworkInfo.parseIPv4(String($0).trimmingCharacters(in: .whitespaces)) }
+            } else {
+                dnsOverride = []
+            }
+            if !dnsOverride.isEmpty, let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride) {
+                buildNetworkFilter = filter
+                net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
+            } else {
+                net.attachment = VZNATNetworkDeviceAttachment()
+            }
+        } else {
+            net.attachment = VZNATNetworkDeviceAttachment()
+        }
         vzConfig.networkDevices = [net]
 
         // Serial console via pipe
@@ -504,11 +523,24 @@ public final class LinuxImageManager {
         let writer = inputPipe.fileHandleForWriting
 
         progress(.message("Waiting for Alpine to boot..."))
-        try await consoleOutput.waitFor(
-            marker: "localhost login:",
-            timeout: 120,
-            progress: progress
-        )
+        do {
+            try await consoleOutput.waitFor(
+                marker: "localhost login:",
+                timeout: 120,
+                progress: progress,
+                failMarkers: [
+                    (marker: "OK: 0 B in 0 packages", error: .diskCreationFailed(
+                        "Alpine Linux could not download packages during boot. This usually means a VPN, firewall, or DNS issue is blocking network access from the VM. Try setting override DNS servers (e.g. 1.1.1.1, 8.8.8.8) in Settings \u{2192} Network \u{2192} DNS Servers."
+                    ))
+                ]
+            )
+        } catch {
+            writer.write(Data("poweroff\n".utf8))
+            try? await Task.sleep(for: .seconds(2))
+            if vm.state != .stopped { try? await vm.stop() }
+            withExtendedLifetime(buildNetworkFilter) { buildNetworkFilter?.stop() }
+            throw error
+        }
 
         progress(.message("Logging in..."))
         writer.write(Data("root\n".utf8))
@@ -554,6 +586,12 @@ public final class LinuxImageManager {
             if snapshot.found {
                 throw SandboxError.diskCreationFailed(
                     "The image could not be created. Package installation failed, likely due to network issues. Please check your internet connection and try again."
+                )
+            }
+            let dnsSnapshot = consoleOutput.pollAndTrim(marker: "APKINDEX.tar.gz: DNS:")
+            if dnsSnapshot.found {
+                throw SandboxError.diskCreationFailed(
+                    "DNS resolution failed inside the VM. If you use a VPN or security software that modifies DNS, set override DNS servers (e.g. 1.1.1.1, 1.0.0.1) in Settings \u{2192} Troubleshooting \u{2192} DNS Servers."
                 )
             }
             throw error
@@ -613,6 +651,10 @@ public final class LinuxImageManager {
         }
         if vm.state != .stopped {
             try? await vm.stop()
+        }
+        // Keep the network filter alive for the VM's lifetime, then clean up
+        withExtendedLifetime(buildNetworkFilter) {
+            buildNetworkFilter?.stop()
         }
     }
 
@@ -764,7 +806,8 @@ private final class ConsoleBuffer: @unchecked Sendable {
     func waitFor(
         marker: String,
         timeout: TimeInterval,
-        progress: @escaping (ProgressEvent) -> Void
+        progress: @escaping (ProgressEvent) -> Void,
+        failMarkers: [(marker: String, error: SandboxError)] = []
     ) async throws {
         var deadline = Date().addingTimeInterval(timeout)
         var lastBufferLength = 0
@@ -774,6 +817,13 @@ private final class ConsoleBuffer: @unchecked Sendable {
             recentOutput = snapshot.recentOutput
 
             if snapshot.found { return }
+
+            // Check for known failure patterns
+            for fail in failMarkers {
+                let failSnapshot = pollAndTrim(marker: fail.marker)
+                if failSnapshot.found { throw fail.error }
+            }
+
             // Reset deadline whenever new console output appears
             if snapshot.length != lastBufferLength {
                 lastBufferLength = snapshot.length
