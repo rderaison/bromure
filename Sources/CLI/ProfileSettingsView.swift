@@ -374,19 +374,30 @@ struct ProfileSettingsView: View {
             )
 
             if draft.settings.enableWebcam {
-                Button {
-                    showWebcamEffects = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Label("Effects\u{2026}", systemImage: "sparkles")
-                        if draft.settings.webcamEffects.hasAnyEffect {
-                            Circle()
-                                .fill(.blue)
-                                .frame(width: 6, height: 6)
+                VStack(alignment: .leading, spacing: 6) {
+                    MediaPreviewView(
+                        webcamDeviceID: $draft.settings.webcamDeviceID,
+                        microphoneDeviceID: .constant(nil),
+                        speakerDeviceID: .constant(nil),
+                        enableWebcam: !showWebcamEffects,
+                        enableMicrophone: false,
+                        webcamEffects: draft.settings.webcamEffects
+                    )
+
+                    Button {
+                        showWebcamEffects = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Label("Effects\u{2026}", systemImage: "sparkles")
+                            if draft.settings.webcamEffects.hasAnyEffect {
+                                Circle()
+                                    .fill(.blue)
+                                    .frame(width: 6, height: 6)
+                            }
                         }
                     }
+                    .controlSize(.small)
                 }
-                .controlSize(.small)
                 .padding(.leading, 20)
             }
 
@@ -398,22 +409,22 @@ struct ProfileSettingsView: View {
                 isOn: $draft.settings.enableMicrophone
             )
 
-            settingsDivider
-
-            // Device selection
-            VStack(alignment: .leading, spacing: 6) {
-                if draft.settings.enableWebcam || draft.settings.enableMicrophone {
-                    Text("Device Selection").font(.headline)
-                    Text("Choose which camera, microphone, and speaker to use with this profile.")
-                        .settingDescription()
+            if draft.settings.enableMicrophone {
+                VStack(alignment: .leading, spacing: 6) {
                     MediaPreviewView(
-                        webcamDeviceID: $draft.settings.webcamDeviceID,
+                        webcamDeviceID: .constant(nil),
                         microphoneDeviceID: $draft.settings.microphoneDeviceID,
                         speakerDeviceID: $draft.settings.speakerDeviceID,
-                        enableWebcam: draft.settings.enableWebcam && !showWebcamEffects,
-                        enableMicrophone: draft.settings.enableMicrophone
+                        enableWebcam: false,
+                        enableMicrophone: true
                     )
-                } else {
+                }
+                .padding(.leading, 20)
+            }
+
+            if !draft.settings.enableWebcam && !draft.settings.enableMicrophone {
+                settingsDivider
+                VStack(alignment: .leading, spacing: 6) {
                     Text("Speaker").font(.headline)
                     Text("Choose which speaker to use for audio output.")
                         .settingDescription()

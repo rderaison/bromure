@@ -429,45 +429,18 @@ struct WebcamEffectsView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
 
-            // Bottom-right: name badge (white box, black border, black text)
+            // Bottom-right: CNN-style name badge (name white-on-red, title black-on-white)
             if !effects.displayName.isEmpty || !effects.displayTitle.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
-                    if !effects.displayName.isEmpty {
-                        Text(effects.displayName)
-                            .font(.custom(effects.fontFamily, size: fontSize).bold())
-                            .foregroundStyle(.black)
-                            .padding(.horizontal, fontSize * 0.6)
-                            .padding(.vertical, fontSize * 0.3)
-                    }
-                    if !effects.displayTitle.isEmpty {
-                        Text(effects.displayTitle)
-                            .font(.custom(effects.fontFamily, size: fontSize * 0.7))
-                            .foregroundStyle(.black)
-                            .padding(.horizontal, fontSize * 0.6)
-                            .padding(.vertical, fontSize * 0.3)
-                    }
-                }
-                .background(.white)
-                .overlay(
-                    Rectangle()
-                        .stroke(.black, lineWidth: max(1, fontSize * 0.1))
-                )
-                .padding(.trailing, margin)
-                .padding(.bottom, effects.faceSwapActive ? margin * 0.8 + geo.size.height * 0.06 : margin * 0.8)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                NameBadge(name: effects.displayName, title: effects.displayTitle,
+                          fontFamily: effects.fontFamily, fontSize: fontSize)
+                    .padding(.trailing, margin)
+                    .padding(.bottom, effects.faceSwapActive ? margin * 0.8 + geo.size.height * 0.06 : margin * 0.8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             }
 
-            // Face swap banner (red bar at bottom)
+            // Face swap scrolling disclaimer banner at bottom
             if effects.faceSwapActive {
-                VStack {
-                    Spacer()
-                    Text("User\u{2019}s real face anonymized by Bromure.io")
-                        .font(.system(size: max(6, geo.size.height * 0.033)))
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: geo.size.height * 0.06)
-                        .background(Color(red: 0.85, green: 0.05, blue: 0.05))
-                }
+                FaceSwapBanner(height: geo.size.height * 0.06, fontSize: max(6, geo.size.height * 0.033))
             }
         }
     }
@@ -532,6 +505,84 @@ private struct CityTimeBox: View {
             fmt.timeZone = tz
         }
         currentTime = fmt.string(from: Date())
+    }
+}
+
+// MARK: - CNN-style Name Badge (shared between previews)
+
+/// Two-row badge: name in white-on-red (top), title in black-on-white (bottom).
+struct NameBadge: View {
+    let name: String
+    let title: String
+    var fontFamily: String = "Helvetica Neue"
+    var fontSize: CGFloat = 14
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if !name.isEmpty {
+                Text(name)
+                    .font(.custom(fontFamily, size: fontSize).weight(.heavy))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, fontSize * 0.6)
+                    .padding(.vertical, fontSize * 0.25)
+                    .frame(minWidth: fontSize * 4, alignment: .leading)
+                    .background(Color.red)
+            }
+            if !title.isEmpty {
+                Text(title)
+                    .font(.custom(fontFamily, size: fontSize * 0.7))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, fontSize * 0.6)
+                    .padding(.vertical, fontSize * 0.2)
+                    .frame(minWidth: fontSize * 4, alignment: .leading)
+                    .background(.white)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: fontSize * 0.1))
+        .shadow(color: .black.opacity(0.4), radius: 2, x: 1, y: 1)
+    }
+}
+
+// MARK: - Face Swap Scrolling Banner
+
+/// Red banner at the bottom with scrolling disclaimer text.
+struct FaceSwapBanner: View {
+    let height: CGFloat
+    let fontSize: CGFloat
+
+    @State private var scrollOffset: CGFloat = 0
+
+    private let text = "DISCLAIMER \u{2014} User\u{2019}s real face has been anonymized by Bromure.io    \u{2022}    "
+
+    var body: some View {
+        VStack {
+            Spacer()
+            GeometryReader { geo in
+                let fullText = text + text  // duplicate for seamless loop
+                ZStack {
+                    Color(red: 0.85, green: 0.05, blue: 0.05)
+                    Text(fullText)
+                        .font(.system(size: fontSize, weight: .bold))
+                        .foregroundStyle(.white)
+                        .fixedSize()
+                        .offset(x: scrollOffset)
+                }
+                .frame(height: height)
+                .clipped()
+                .onAppear { startScrolling(width: geo.size.width) }
+            }
+            .frame(height: height)
+        }
+    }
+
+    private func startScrolling(width: CGFloat) {
+        // Estimate text width for scrolling
+        let charWidth = fontSize * 0.6
+        let singleWidth = charWidth * CGFloat(text.count)
+        scrollOffset = width
+        withAnimation(.linear(duration: Double(singleWidth + width) / 60.0).repeatForever(autoreverses: false)) {
+            scrollOffset = -singleWidth
+        }
     }
 }
 

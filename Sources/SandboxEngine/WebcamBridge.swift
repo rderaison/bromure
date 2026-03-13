@@ -283,9 +283,12 @@ final class OverlayRenderer: @unchecked Sendable {
             drawCityTimeBox(ctx: ctx, width: width, height: height, fontSize: fontSize, margin: margin)
         }
 
-        // Bottom-right: name badge (white box, black border, black text)
+        // Bottom-right: CNN-style name badge (offset above banner if face swap active)
         if !effects.displayName.isEmpty || !effects.displayTitle.isEmpty {
-            drawNameBadge(ctx: ctx, name: effects.displayName, title: effects.displayTitle, width: width, height: height, fontSize: fontSize, margin: margin)
+            let bannerOffset = faceSwapped ? CGFloat(height) * 0.06 : 0
+            drawNameBadge(ctx: ctx, name: effects.displayName, title: effects.displayTitle,
+                          width: width, height: height, fontSize: fontSize, margin: margin,
+                          bottomOffset: bannerOffset)
         }
 
         // Top-right: logo
@@ -390,23 +393,24 @@ final class OverlayRenderer: @unchecked Sendable {
         ctx.restoreGState()
     }
 
-    private func drawNameBadge(ctx: CGContext, name: String, title: String, width: Int, height: Int, fontSize: CGFloat, margin: CGFloat) {
+    /// CNN-style two-row badge: name white-on-red, title black-on-white.
+    private func drawNameBadge(ctx: CGContext, name: String, title: String, width: Int, height: Int, fontSize: CGFloat, margin: CGFloat, bottomOffset: CGFloat = 0) {
         let fontName = effects.fontFamily as CFString
         let nameFont = CTFontCreateWithName(fontName, fontSize, nil)
         let titleFontSize = fontSize * 0.7
         let titleFont = CTFontCreateWithName(fontName, titleFontSize, nil)
 
+        let hasName = !name.isEmpty
+        let hasTitle = !title.isEmpty
+
         let nameAttrs: [NSAttributedString.Key: Any] = [
             .font: nameFont,
-            .foregroundColor: CGColor(gray: 0, alpha: 1),
+            .foregroundColor: CGColor(gray: 1, alpha: 1),  // white text
         ]
         let titleAttrs: [NSAttributedString.Key: Any] = [
             .font: titleFont,
-            .foregroundColor: CGColor(gray: 0, alpha: 1),
+            .foregroundColor: CGColor(gray: 0, alpha: 1),  // black text
         ]
-
-        let hasName = !name.isEmpty
-        let hasTitle = !title.isEmpty
 
         let nameLine = hasName ? CTLineCreateWithAttributedString(NSAttributedString(string: name, attributes: nameAttrs)) : nil
         let titleLine = hasTitle ? CTLineCreateWithAttributedString(NSAttributedString(string: title, attributes: titleAttrs)) : nil
@@ -415,44 +419,41 @@ final class OverlayRenderer: @unchecked Sendable {
         let titleBounds = titleLine.map { CTLineGetBoundsWithOptions($0, []) } ?? .zero
 
         let padH = fontSize * 0.6
-        let padV = fontSize * 0.3
+        let padV = fontSize * 0.25
         let contentWidth = max(nameBounds.width, titleBounds.width)
         let nameRowHeight = hasName ? nameBounds.height + padV * 2 : 0
         let titleRowHeight = hasTitle ? titleBounds.height + padV * 2 : 0
-        let badgeWidth = contentWidth + padH * 2
+        let badgeWidth = max(contentWidth + padH * 2, fontSize * 4)
         let badgeHeight = nameRowHeight + titleRowHeight
         let badgeX = CGFloat(width) - badgeWidth - margin
-        let badgeY = CGFloat(height) - badgeHeight - margin * 0.8
-        let borderWidth = max(1, fontSize * 0.1)
+        let badgeY = CGFloat(height) - badgeHeight - margin * 0.8 - bottomOffset
 
-        let badgeRect = CGRect(x: badgeX, y: badgeY, width: badgeWidth, height: badgeHeight)
+        // Red background for name row
+        if hasName {
+            ctx.saveGState()
+            ctx.setFillColor(CGColor(red: 0.8, green: 0.05, blue: 0.05, alpha: 1))
+            ctx.fill(CGRect(x: badgeX, y: badgeY, width: badgeWidth, height: nameRowHeight))
+            ctx.restoreGState()
 
-        // White fill
-        ctx.saveGState()
-        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
-        ctx.fill(badgeRect)
-        ctx.restoreGState()
-
-        // Black border
-        ctx.saveGState()
-        ctx.setStrokeColor(CGColor(gray: 0, alpha: 1))
-        ctx.setLineWidth(borderWidth)
-        ctx.stroke(badgeRect.insetBy(dx: borderWidth / 2, dy: borderWidth / 2))
-        ctx.restoreGState()
-
-        // Name text (bold, top of badge)
-        if let nameLine {
+            // White name text
             ctx.saveGState()
             ctx.textPosition = CGPoint(x: badgeX + padH, y: badgeY + padV + nameBounds.height * 0.15)
-            CTLineDraw(nameLine, ctx)
+            CTLineDraw(nameLine!, ctx)
             ctx.restoreGState()
         }
 
-        // Title text (smaller, below name)
-        if let titleLine {
+        // White background for title row
+        if hasTitle {
+            let titleY = badgeY + nameRowHeight
             ctx.saveGState()
-            ctx.textPosition = CGPoint(x: badgeX + padH, y: badgeY + nameRowHeight + padV + titleBounds.height * 0.15)
-            CTLineDraw(titleLine, ctx)
+            ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+            ctx.fill(CGRect(x: badgeX, y: titleY, width: badgeWidth, height: titleRowHeight))
+            ctx.restoreGState()
+
+            // Black title text
+            ctx.saveGState()
+            ctx.textPosition = CGPoint(x: badgeX + padH, y: titleY + padV + titleBounds.height * 0.15)
+            CTLineDraw(titleLine!, ctx)
             ctx.restoreGState()
         }
     }

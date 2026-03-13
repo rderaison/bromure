@@ -10,6 +10,7 @@ struct MediaPreviewView: View {
     @Binding var speakerDeviceID: String?
     let enableWebcam: Bool
     let enableMicrophone: Bool
+    var webcamEffects: WebcamEffects = WebcamEffects()
 
     @StateObject private var preview = MediaPreviewModel()
 
@@ -35,6 +36,12 @@ struct MediaPreviewView: View {
                                 .font(.caption)
                         }
                         .foregroundStyle(.secondary)
+                    }
+
+                    // Show effect overlays in the preview
+                    if webcamEffects.hasAnyEffect {
+                        effectOverlays
+                            .scaleEffect(x: -1, y: 1)  // match the mirror flip
                     }
                 }
 
@@ -104,6 +111,28 @@ struct MediaPreviewView: View {
         .onChange(of: enableMicrophone) { _, enabled in
             if enabled { preview.startMicrophone(deviceID: microphoneDeviceID) }
             else { preview.stopMicrophone() }
+        }
+    }
+
+    /// Simplified effect overlays for the settings preview.
+    private var effectOverlays: some View {
+        GeometryReader { geo in
+            let fs = max(8, geo.size.height * CGFloat(webcamEffects.fontSizePercent) / 100)
+            let m = fs * 1.2
+
+            ZStack {
+                if !webcamEffects.displayName.isEmpty || !webcamEffects.displayTitle.isEmpty {
+                    NameBadge(name: webcamEffects.displayName, title: webcamEffects.displayTitle,
+                              fontFamily: webcamEffects.fontFamily, fontSize: fs)
+                        .padding(.trailing, m)
+                        .padding(.bottom, m * 0.8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                }
+
+                if webcamEffects.faceSwapActive {
+                    FaceSwapBanner(height: geo.size.height * 0.06, fontSize: max(6, geo.size.height * 0.033))
+                }
+            }
         }
     }
 
