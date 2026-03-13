@@ -127,15 +127,7 @@ def write_chrome_env(cfg):
     if extensions:
         extra_flags.append(f"--load-extension={','.join(extensions)}")
         # Only allow our extensions, disable any others
-        allowed_ids = {
-            "/opt/bromure/extensions/file-picker": "cjdidalalgkgekmhonlcaleiafjbkdfn",
-            "/opt/bromure/extensions/link-sender": "enbpbmcnhegfldincheobkbmcddgngeo",
-            "/opt/bromure/extensions/phishing-guard": "bihpbnfdiechljfdimgmkpbfmfpoejgm",
-            "/opt/bromure/extensions/webrtc-block": "glekfcbcaohbkpbaeiomgcklmlghmeki",
-        }
-        ids = [allowed_ids[e] for e in extensions if e in allowed_ids]
-        if ids:
-            extra_flags.append(f"--disable-extensions-except={','.join(ids)}")
+        extra_flags.append(f"--disable-extensions-except={','.join(extensions)}")
 
     profile_dir = cfg.get("profileDir")
     if profile_dir:

@@ -99,17 +99,7 @@ fi
 if [ -n "$EXTENSIONS" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --load-extension=$EXTENSIONS"
     # Only allow our extensions, disable any others
-    ALLOWED_IDS=""
-    echo "$EXTENSIONS" | grep -q "phishing-guard" && \
-        ALLOWED_IDS="${ALLOWED_IDS:+$ALLOWED_IDS,}bihpbnfdiechljfdimgmkpbfmfpoejgm"
-    echo "$EXTENSIONS" | grep -q "link-sender" && \
-        ALLOWED_IDS="${ALLOWED_IDS:+$ALLOWED_IDS,}enbpbmcnhegfldincheobkbmcddgngeo"
-    echo "$EXTENSIONS" | grep -q "file-picker" && \
-        ALLOWED_IDS="${ALLOWED_IDS:+$ALLOWED_IDS,}cjdidalalgkgekmhonlcaleiafjbkdfn"
-    echo "$EXTENSIONS" | grep -q "webrtc-block" && \
-        ALLOWED_IDS="${ALLOWED_IDS:+$ALLOWED_IDS,}glekfcbcaohbkpbaeiomgcklmlghmeki"
-    [ -n "$ALLOWED_IDS" ] && \
-        EXTRA_FLAGS="$EXTRA_FLAGS --disable-extensions-except=$ALLOWED_IDS"
+    EXTRA_FLAGS="$EXTRA_FLAGS --disable-extensions-except=$EXTENSIONS"
 fi
 
 [ -n "$PROFILE_DIR" ] && \
