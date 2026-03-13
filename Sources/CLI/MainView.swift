@@ -356,9 +356,13 @@ struct MainView: View {
                     Button("Create") {
                         let trimmed = newProfileName.trimmingCharacters(in: .whitespaces)
                         guard !trimmed.isEmpty else { return }
+                        var settings = ProfileSettings()
+                        settings.enableClipboardSharing = true
+                        settings.enableLinkSender = true
                         let profile = state.profileManager.createProfile(
                             name: trimmed,
-                            color: newProfileColor
+                            color: newProfileColor,
+                            settings: settings
                         )
                         state.selectedProfileID = profile.id
                         state.profileVersion += 1

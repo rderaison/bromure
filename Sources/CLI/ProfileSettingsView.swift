@@ -13,6 +13,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     case general = "General"
     case performance = "Performance"
     case media = "Media"
+    case fileTransfer = "File Transfer"
     case privacy = "Privacy & Safety"
     case network = "Network Isolation"
     case vpnAds = "VPN & Ads"
@@ -26,6 +27,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         case .general: "gearshape.fill"
         case .performance: "bolt.fill"
         case .media: "speaker.wave.2.fill"
+        case .fileTransfer: "arrow.up.arrow.down"
         case .privacy: "lock.shield.fill"
         case .network: "network"
         case .vpnAds: "shield.fill"
@@ -39,6 +41,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         case .general: .gray
         case .performance: .orange
         case .media: .pink
+        case .fileTransfer: .cyan
         case .privacy: .blue
         case .network: .indigo
         case .vpnAds: .green
@@ -66,6 +69,7 @@ struct ProfileSettingsView: View {
     @State private var showCAPicker = false
     @State private var caImportError: String?
     @State private var showWebcamEffects = false
+    @State private var showPhishingPersistenceAlert = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -132,6 +136,19 @@ struct ProfileSettingsView: View {
         } message: {
             Text("Changing the encryption setting will delete all existing browsing data for this profile. This cannot be undone.")
         }
+        .confirmationDialog(
+            "Enable data persistence?",
+            isPresented: $showPhishingPersistenceAlert,
+            titleVisibility: .visible
+        ) {
+            Button("Enable Both") {
+                draft.settings.persistent = true
+                draft.settings.phishingWarning = true
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Phishing protection needs to remember which sites you\u{2019}ve visited so it can detect suspicious look-alikes. This requires retaining browsing data between sessions.")
+        }
         .sheet(isPresented: $showWebcamEffects) {
             WebcamEffectsView(
                 effects: $draft.settings.webcamEffects,
@@ -172,6 +189,7 @@ struct ProfileSettingsView: View {
         case .general: generalView
         case .performance: performanceView
         case .media: mediaView
+        case .fileTransfer: fileTransferView
         case .privacy: privacyView
         case .network: networkView
         case .vpnAds: vpnAdsView
@@ -278,8 +296,19 @@ struct ProfileSettingsView: View {
                 isOn: $draft.settings.persistent
             )
             .onChange(of: draft.settings.persistent) { _, newValue in
-                if !newValue { draft.settings.encryptOnDisk = false }
+                if !newValue {
+                    draft.settings.encryptOnDisk = false
+                    draft.settings.phishingWarning = false
+                }
             }
+
+            settingsDivider
+
+            settingToggle(
+                "Shared Clipboard",
+                description: "Copy and paste text and images between your Mac and this browser. When turned off, the browser\u{2019}s clipboard is completely isolated.",
+                isOn: $draft.settings.enableClipboardSharing
+            )
         }
     }
 
@@ -401,71 +430,67 @@ struct ProfileSettingsView: View {
         }
     }
 
+    // MARK: - File Transfer
+
+    private var fileTransferView: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            sectionHeader("File Transfer", subtitle: "Control file uploads and downloads between your Mac and this browser")
+
+            settingToggle(
+                "File Upload",
+                description: "Allow sending files from your Mac to websites in this browser.",
+                isOn: $draft.settings.canUpload
+            )
+
+            settingsDivider
+
+            settingToggle(
+                "File Download",
+                description: "Allow saving files from websites to your Mac.",
+                isOn: $draft.settings.canDownload
+            )
+
+            if draft.settings.canDownload {
+                settingsDivider
+
+                settingToggle(
+                    "Scan Downloads with VirusTotal",
+                    description: "Automatically check downloaded files for viruses and malware before they reach your Mac.",
+                    isOn: $draft.settings.virusTotalEnabled
+                )
+
+                if draft.settings.virusTotalEnabled {
+                    SecureField("VirusTotal API Key", text: Binding(
+                        get: { draft.settings.virusTotalAPIKey ?? "" },
+                        set: { draft.settings.virusTotalAPIKey = $0.isEmpty ? nil : $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 300)
+                    .padding(.leading, 20)
+
+                    settingToggle(
+                        "Block Threats",
+                        description: "Automatically block files that VirusTotal identifies as malicious. Blocked files cannot be saved or dragged to your Mac.",
+                        isOn: $draft.settings.blockThreats
+                    )
+                    .padding(.leading, 20)
+
+                    settingToggle(
+                        "Block Unscannable Files",
+                        description: "Block files that could not be scanned by VirusTotal (too large, rate-limited, or unknown). When turned off, unscannable files can still be saved manually.",
+                        isOn: $draft.settings.blockUnscannable
+                    )
+                    .padding(.leading, 20)
+                }
+            }
+        }
+    }
+
     // MARK: - Privacy & Safety
 
     private var privacyView: some View {
         VStack(alignment: .leading, spacing: 20) {
             sectionHeader("Privacy & Safety", subtitle: "Control what this browser can access and share")
-
-            settingToggle(
-                "Shared Clipboard",
-                description: "Copy and paste text and images between your Mac and this browser. When turned off, the browser\u{2019}s clipboard is completely isolated.",
-                isOn: $draft.settings.enableClipboardSharing
-            )
-
-            settingsDivider
-
-            // File transfer group
-            VStack(alignment: .leading, spacing: 12) {
-                settingToggle(
-                    "File Upload",
-                    description: "Allow sending files from your Mac to websites in this browser.",
-                    isOn: $draft.settings.canUpload
-                )
-
-                settingToggle(
-                    "File Download",
-                    description: "Allow saving files from websites to your Mac.",
-                    isOn: $draft.settings.canDownload
-                )
-
-                if draft.settings.canDownload {
-                    VStack(alignment: .leading, spacing: 6) {
-                        settingToggle(
-                            "Scan Downloads with VirusTotal",
-                            description: "Automatically check downloaded files for viruses and malware before they reach your Mac.",
-                            isOn: $draft.settings.virusTotalEnabled
-                        )
-                        .padding(.leading, 20)
-
-                        if draft.settings.virusTotalEnabled {
-                            SecureField("VirusTotal API Key", text: Binding(
-                                get: { draft.settings.virusTotalAPIKey ?? "" },
-                                set: { draft.settings.virusTotalAPIKey = $0.isEmpty ? nil : $0 }
-                            ))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 300)
-                            .padding(.leading, 20)
-
-                            settingToggle(
-                                "Block Threats",
-                                description: "Automatically block files that VirusTotal identifies as malicious. Blocked files cannot be saved or dragged to your Mac.",
-                                isOn: $draft.settings.blockThreats
-                            )
-                            .padding(.leading, 20)
-
-                            settingToggle(
-                                "Block Unscannable Files",
-                                description: "Block files that could not be scanned by VirusTotal (too large, rate-limited, or unknown). When turned off, unscannable files can still be saved manually.",
-                                isOn: $draft.settings.blockUnscannable
-                            )
-                            .padding(.leading, 20)
-                        }
-                    }
-                }
-            }
-
-            settingsDivider
 
             settingToggle(
                 "Block Malware Sites",
@@ -481,6 +506,12 @@ struct ProfileSettingsView: View {
                 isOn: $draft.settings.phishingWarning,
                 badge: "Beta"
             )
+            .onChange(of: draft.settings.phishingWarning) { _, newValue in
+                if newValue && !draft.settings.persistent {
+                    draft.settings.phishingWarning = false
+                    showPhishingPersistenceAlert = true
+                }
+            }
 
             settingsDivider
 
