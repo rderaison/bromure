@@ -67,8 +67,15 @@ ENABLE_FEATURES=""
     EXTRA_FLAGS="$EXTRA_FLAGS --force-dark-mode" && \
     ENABLE_FEATURES="${ENABLE_FEATURES:+$ENABLE_FEATURES,}WebContentsForceDark"
 
-[ "$USE_PROXY" = "1" ] && \
+if [ -n "$PROXY_HOST" ] && [ -n "$PROXY_PORT" ]; then
+    if [ -n "$PROXY_USERNAME" ] && [ -n "$PROXY_PASSWORD" ]; then
+        EXTRA_FLAGS="$EXTRA_FLAGS --proxy-server=http://$PROXY_USERNAME:$PROXY_PASSWORD@$PROXY_HOST:$PROXY_PORT"
+    else
+        EXTRA_FLAGS="$EXTRA_FLAGS --proxy-server=http://$PROXY_HOST:$PROXY_PORT"
+    fi
+elif [ "$USE_PROXY" = "1" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --proxy-server=http://127.0.0.1:3128"
+fi
 
 [ "$DISABLE_GPU" = "1" ] && \
     EXTRA_FLAGS="$EXTRA_FLAGS --disable-gpu"
@@ -81,6 +88,10 @@ EXTENSIONS=""
     EXTENSIONS="${EXTENSIONS:+$EXTENSIONS,}/opt/bromure/extensions/phishing-guard"
 [ "$LINK_SENDER" = "1" ] && \
     EXTENSIONS="${EXTENSIONS:+$EXTENSIONS,}/opt/bromure/extensions/link-sender"
+if [ "$FILE_TRANSFER" = "1" ]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS --silent-debugger-extension-api"
+    EXTENSIONS="${EXTENSIONS:+$EXTENSIONS,}/opt/bromure/extensions/file-picker"
+fi
 [ -n "$EXTENSIONS" ] && \
     EXTRA_FLAGS="$EXTRA_FLAGS --load-extension=$EXTENSIONS"
 
@@ -96,10 +107,39 @@ DISABLE_FEATURES=""
 [ "$MICROPHONE" = "1" ] && \
     DISABLE_FEATURES="${DISABLE_FEATURES:+$DISABLE_FEATURES,}AudioServiceOutOfProcess"
 
+# Disable WebRTC when both webcam and microphone are off
+if [ "$WEBCAM" != "1" ] && [ "$MICROPHONE" != "1" ]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS --force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+    EXTRA_FLAGS="$EXTRA_FLAGS --enforce-webrtc-ip-permission-check"
+fi
+
 [ -n "$ENABLE_FEATURES" ] && \
     EXTRA_FLAGS="$EXTRA_FLAGS --enable-features=$ENABLE_FEATURES"
 [ -n "$DISABLE_FEATURES" ] && \
     EXTRA_FLAGS="$EXTRA_FLAGS --disable-features=$DISABLE_FEATURES"
+
+# --- Write dynamic Chrome policy (media capture, WebRTC) ---
+
+POLICY_DIR="/etc/chromium/policies/managed"
+mkdir -p "$POLICY_DIR"
+SESSION_POLICY="$POLICY_DIR/session.json"
+echo "{" > "$SESSION_POLICY"
+if [ "$WEBCAM" = "1" ]; then
+    echo '  "VideoCaptureAllowed": true,' >> "$SESSION_POLICY"
+else
+    echo '  "VideoCaptureAllowed": false,' >> "$SESSION_POLICY"
+fi
+if [ "$MICROPHONE" = "1" ]; then
+    echo '  "AudioCaptureAllowed": true' >> "$SESSION_POLICY"
+else
+    echo '  "AudioCaptureAllowed": false' >> "$SESSION_POLICY"
+fi
+if [ "$WEBCAM" != "1" ] && [ "$MICROPHONE" != "1" ]; then
+    # Replace last line to add comma, then add WebRTC policy
+    sed -i '$ s/$/,/' "$SESSION_POLICY"
+    echo '  "WebRtcIPHandlingPolicy": "disable_non_proxied_udp"' >> "$SESSION_POLICY"
+fi
+echo "}" >> "$SESSION_POLICY"
 
 # --- Write chrome-env ---
 

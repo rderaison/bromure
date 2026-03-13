@@ -125,6 +125,18 @@ public struct VMConfig {
     /// nil means all ports are allowed.
     public var allowedPorts: String?
 
+    /// Custom HTTP proxy hostname (e.g. "proxy.example.com").
+    public var proxyHost: String?
+
+    /// Custom HTTP proxy port (e.g. 8080).
+    public var proxyPort: Int?
+
+    /// Username for proxy authentication (optional).
+    public var proxyUsername: String?
+
+    /// Password for proxy authentication (optional).
+    public var proxyPassword: String?
+
     public init(
         cpuCount: Int? = nil,
         memorySize: UInt64 = 4 * 1024 * 1024 * 1024,
@@ -154,6 +166,10 @@ public struct VMConfig {
         rootCAs: [String] = [],
         isolateFromLAN: Bool = false,
         allowedPorts: String? = nil,
+        proxyHost: String? = nil,
+        proxyPort: Int? = nil,
+        proxyUsername: String? = nil,
+        proxyPassword: String? = nil,
         keyboardLayout: String? = nil,
         naturalScrolling: Bool? = nil,
         locale: String? = nil
@@ -187,6 +203,10 @@ public struct VMConfig {
         self.rootCAs = rootCAs
         self.isolateFromLAN = isolateFromLAN
         self.allowedPorts = allowedPorts
+        self.proxyHost = proxyHost
+        self.proxyPort = proxyPort
+        self.proxyUsername = proxyUsername
+        self.proxyPassword = proxyPassword
         self.keyboardLayout = keyboardLayout ?? VMConfig.detectKeyboardLayout()
         self.naturalScrolling = naturalScrolling ?? VMConfig.detectNaturalScrolling()
         self.locale = locale ?? VMConfig.detectLocale()

@@ -741,6 +741,7 @@ final class BrowserSession {
     private var fileTransferBridge: FileTransferBridge?
     private var fileDrawerModel: FileDrawerModel?
     private var linkSenderBridge: LinkSenderBridge?
+    private var filePickerBridge: FilePickerBridge?
     private var webcamBridge: WebcamBridge?
     private var splitView: NSSplitView?
     private var drawerHost: NSView?
@@ -869,6 +870,18 @@ final class BrowserSession {
                 }
             }
             self.linkSenderBridge = bridge
+        }
+
+        // Set up file picker bridge (vsock port 5600) for host-side file upload dialogs.
+        // Uses the existing FileTransferBridge (port 5100) to send the actual file data.
+        if config.enableFileTransfer, let dev = linkSocketDevice {
+            let fpBridge = MainActor.assumeIsolated { FilePickerBridge(socketDevice: dev) }
+            MainActor.assumeIsolated {
+                fpBridge.onSendFile = { [weak self] url in
+                    self?.fileTransferBridge?.sendFile(url: url)
+                }
+            }
+            self.filePickerBridge = fpBridge
         }
 
         // Set up webcam bridge (vsock port 5400) for camera sharing.
@@ -1040,6 +1053,8 @@ final class BrowserSession {
             fileDrawerModel = nil
             linkSenderBridge?.stop()
             linkSenderBridge = nil
+            filePickerBridge?.stop()
+            filePickerBridge = nil
         }
         detachView()
         delegateHelper = nil

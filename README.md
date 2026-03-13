@@ -96,8 +96,8 @@ Use Bromure for video calls and meetings:
 ## Enterprise
 
 - **Custom Root CA Certificates** -- install your organization's internal certificates so the browser trusts internal websites and services. Supports PEM, DER, CRT, and CER formats.
-- **Encrypted Persistent Storage** -- LUKS encryption with keys stored in macOS Keychain for profiles that need to retain data.
 - **Network Controls** -- LAN isolation and port restriction for compliance with corporate security policies.
+- **Encrypted Persistent Storage** -- LUKS encryption with keys stored in macOS Keychain for profiles that need to retain data.
 
 ## Hardware & Display
 

@@ -267,10 +267,11 @@ chroot /mnt chown chrome:chrome /home/chrome/.profile
 # File transfer agent
 # ---------------------------------------------------------------------------
 
-install_config scripts/file-agent.py   /mnt/usr/local/bin/file-agent.py   755
-install_config scripts/link-agent.py  /mnt/usr/local/bin/link-agent.py  755
-install_config scripts/webcam-agent.py /mnt/usr/local/bin/webcam-agent.py 755
-install_config scripts/config-agent.py /mnt/usr/local/bin/config-agent.py 755
+install_config scripts/file-agent.py        /mnt/usr/local/bin/file-agent.py        755
+install_config scripts/file-picker-host.py  /mnt/usr/local/bin/file-picker-host.py  755
+install_config scripts/link-agent.py        /mnt/usr/local/bin/link-agent.py        755
+install_config scripts/webcam-agent.py      /mnt/usr/local/bin/webcam-agent.py      755
+install_config scripts/config-agent.py      /mnt/usr/local/bin/config-agent.py      755
 
 # ---------------------------------------------------------------------------
 # Phishing guard extension
@@ -292,10 +293,22 @@ for f in manifest.json background.js; do
         cp "$SCRIPT_DIR/extensions/link-sender/$f" /mnt/opt/bromure/extensions/link-sender/
 done
 
-# Native messaging hosts (link sender)
+# ---------------------------------------------------------------------------
+# File picker extension
+# ---------------------------------------------------------------------------
+
+mkdir -p /mnt/opt/bromure/extensions/file-picker
+for f in manifest.json background.js content.js; do
+    [ -f "$SCRIPT_DIR/extensions/file-picker/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/file-picker/$f" /mnt/opt/bromure/extensions/file-picker/
+done
+
+# Native messaging hosts (link sender + file picker)
 mkdir -p /mnt/etc/chromium/native-messaging-hosts
 install_config configs/com.bromure.link_sender.json \
     /mnt/etc/chromium/native-messaging-hosts/com.bromure.link_sender.json
+install_config configs/com.bromure.file_picker.json \
+    /mnt/etc/chromium/native-messaging-hosts/com.bromure.file_picker.json
 
 # Download Tranco top domains list (research-grade popularity ranking)
 echo "SANDBOX_STEP_START:Downloading popular domains list"

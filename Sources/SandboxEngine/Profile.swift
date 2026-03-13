@@ -121,6 +121,17 @@ public struct ProfileSettings: Codable, Equatable {
     public var enableAdBlocking: Bool = false
     public var enableWarp: Bool = false
 
+    // Proxy
+    public var proxyHost: String = ""
+    public var proxyPort: Int = 0
+    public var proxyUsername: String = ""
+    public var proxyPassword: String = ""
+
+    /// Whether a custom proxy is configured.
+    public var hasProxy: Bool {
+        !proxyHost.isEmpty && proxyPort > 0
+    }
+
     // Security — clipboard
     public var enableClipboardSharing: Bool = false
 
@@ -179,6 +190,10 @@ public struct ProfileSettings: Codable, Equatable {
         enableWebGL = try c.decodeIfPresent(Bool.self, forKey: .enableWebGL) ?? defaults.enableWebGL
         enableAdBlocking = try c.decodeIfPresent(Bool.self, forKey: .enableAdBlocking) ?? defaults.enableAdBlocking
         enableWarp = try c.decodeIfPresent(Bool.self, forKey: .enableWarp) ?? defaults.enableWarp
+        proxyHost = try c.decodeIfPresent(String.self, forKey: .proxyHost) ?? defaults.proxyHost
+        proxyPort = try c.decodeIfPresent(Int.self, forKey: .proxyPort) ?? defaults.proxyPort
+        proxyUsername = try c.decodeIfPresent(String.self, forKey: .proxyUsername) ?? defaults.proxyUsername
+        proxyPassword = try c.decodeIfPresent(String.self, forKey: .proxyPassword) ?? defaults.proxyPassword
         enableClipboardSharing = try c.decodeIfPresent(Bool.self, forKey: .enableClipboardSharing) ?? defaults.enableClipboardSharing
         canUpload = try c.decodeIfPresent(Bool.self, forKey: .canUpload) ?? defaults.canUpload
         canDownload = try c.decodeIfPresent(Bool.self, forKey: .canDownload) ?? defaults.canDownload
@@ -221,14 +236,18 @@ public struct ProfileSettings: Codable, Equatable {
         default: forceDark = VMConfig.detectDarkMode()
         }
 
+        // Custom proxy overrides WARP and ad blocking
+        let effectiveWarp = hasProxy ? false : enableWarp
+        let effectiveAdBlocking = hasProxy ? false : enableAdBlocking
+
         return VMConfig(
             cpuCount: cpus > 0 ? cpus : nil,
             memorySize: UInt64(max(memGB > 0 ? memGB : 2, 1)) * 1024 * 1024 * 1024,
             enableAudio: enableAudio,
             audioVolume: audioVolume,
-            enableWarp: enableWarp,
+            enableWarp: effectiveWarp,
             forceDarkMode: forceDark,
-            enableAdBlocking: enableAdBlocking,
+            enableAdBlocking: effectiveAdBlocking,
             swapCmdCtrl: defaults.object(forKey: "vm.swapCmdCtrl") as? Bool ?? true,
             homePage: homePage,
             enableGPU: enableGPU,
@@ -247,6 +266,10 @@ public struct ProfileSettings: Codable, Equatable {
             rootCAs: rootCAs.map(\.pem),
             isolateFromLAN: isolateFromLAN,
             allowedPorts: restrictPorts ? allowedPorts : nil,
+            proxyHost: hasProxy ? proxyHost : nil,
+            proxyPort: hasProxy ? proxyPort : nil,
+            proxyUsername: hasProxy && !proxyUsername.isEmpty ? proxyUsername : nil,
+            proxyPassword: hasProxy && !proxyPassword.isEmpty ? proxyPassword : nil,
             locale: locale
         )
     }

@@ -263,6 +263,12 @@ public final class VMPool {
         if config.blockMalwareSites { cfg["blockMalware"] = true }
         if config.enableAdBlocking { cfg["adBlocking"] = true }
         if config.enableWarp { cfg["enableWarp"] = true }
+        if let proxyHost = config.proxyHost, let proxyPort = config.proxyPort {
+            cfg["proxyHost"] = proxyHost
+            cfg["proxyPort"] = proxyPort
+            if let u = config.proxyUsername { cfg["proxyUsername"] = u }
+            if let p = config.proxyPassword { cfg["proxyPassword"] = p }
+        }
         if config.enableLinkSender { cfg["linkSender"] = true }
         if config.enableWebcam {
             cfg["webcam"] = true

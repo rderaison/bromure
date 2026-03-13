@@ -528,8 +528,17 @@ struct ProfileSettingsView: View {
     // MARK: - VPN & Ads
 
     private var vpnAdsView: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        let proxyActive = draft.settings.hasProxy
+
+        return VStack(alignment: .leading, spacing: 20) {
             sectionHeader("VPN & Ads", subtitle: "Network privacy and ad blocking")
+
+            if proxyActive {
+                Text("A custom proxy is configured in the Enterprise tab. VPN and ad blocking are disabled while a proxy is active.")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 settingToggle(
@@ -537,6 +546,7 @@ struct ProfileSettingsView: View {
                     description: "Routes all browser traffic through Cloudflare\u{2019}s encrypted network, hiding your IP address from websites. Works like a VPN.",
                     isOn: $draft.settings.enableWarp
                 )
+                .disabled(proxyActive)
                 .onChange(of: draft.settings.enableWarp) { _, newValue in
                     if newValue {
                         if let onShowWarpEULA, !UserDefaults.standard.bool(forKey: "warpEULAAccepted") {
@@ -559,6 +569,7 @@ struct ProfileSettingsView: View {
                 description: "Blocks ads and tracking scripts from loading on websites. This can make pages load faster and protects your privacy.",
                 isOn: $draft.settings.enableAdBlocking
             )
+            .disabled(proxyActive)
         }
     }
 
@@ -567,6 +578,32 @@ struct ProfileSettingsView: View {
     private var enterpriseView: some View {
         VStack(alignment: .leading, spacing: 20) {
             sectionHeader("Enterprise", subtitle: "Settings for managed environments")
+
+            // Proxy
+            VStack(alignment: .leading, spacing: 10) {
+                Text("HTTP Proxy").font(.headline)
+                Text("Route all browser traffic through a corporate proxy server. When a proxy is configured, VPN and ad blocking are automatically disabled.")
+                    .settingDescription()
+
+                HStack(spacing: 8) {
+                    TextField("Hostname", text: $draft.settings.proxyHost)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Port", value: $draft.settings.proxyPort, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                }
+
+                if !draft.settings.proxyHost.isEmpty {
+                    HStack(spacing: 8) {
+                        TextField("Username", text: $draft.settings.proxyUsername)
+                            .textFieldStyle(.roundedBorder)
+                        SecureField("Password", text: $draft.settings.proxyPassword)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+            }
+
+            settingsDivider
 
             VStack(alignment: .leading, spacing: 10) {
                 Text("Root Certificates").font(.headline)

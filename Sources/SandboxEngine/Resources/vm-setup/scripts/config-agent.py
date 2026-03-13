@@ -96,7 +96,17 @@ def write_chrome_env(cfg):
     if cfg.get("darkMode"):
         extra_flags.append("--force-dark-mode")
         enable_features.append("WebContentsForceDark")
-    if cfg.get("useProxy"):
+    if cfg.get("proxyHost"):
+        # Custom proxy: point Chrome directly at the external proxy
+        proxy_host = cfg["proxyHost"]
+        proxy_port = cfg.get("proxyPort", 8080)
+        proxy_user = cfg.get("proxyUsername", "")
+        proxy_pass = cfg.get("proxyPassword", "")
+        if proxy_user and proxy_pass:
+            extra_flags.append(f"--proxy-server=http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}")
+        else:
+            extra_flags.append(f"--proxy-server=http://{proxy_host}:{proxy_port}")
+    elif cfg.get("useProxy"):
         extra_flags.append("--proxy-server=http://127.0.0.1:3128")
     if cfg.get("disableGPU"):
         extra_flags.append("--disable-gpu")
@@ -108,6 +118,9 @@ def write_chrome_env(cfg):
         extensions.append("/opt/bromure/extensions/phishing-guard")
     if cfg.get("linkSender"):
         extensions.append("/opt/bromure/extensions/link-sender")
+    if cfg.get("fileTransfer"):
+        extra_flags.append("--silent-debugger-extension-api")
+        extensions.append("/opt/bromure/extensions/file-picker")
     if extensions:
         extra_flags.append(f"--load-extension={','.join(extensions)}")
 
@@ -119,6 +132,11 @@ def write_chrome_env(cfg):
         extra_flags.append("--restore-last-session")
     if cfg.get("microphone"):
         disable_features.append("AudioServiceOutOfProcess")
+
+    # Disable WebRTC when both webcam and microphone are off
+    if not cfg.get("webcam") and not cfg.get("microphone"):
+        extra_flags.append("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+        extra_flags.append("--enforce-webrtc-ip-permission-check")
 
     if enable_features:
         extra_flags.append(f"--enable-features={','.join(enable_features)}")
@@ -137,6 +155,13 @@ def write_chrome_env(cfg):
         lines.append("CLIPBOARD=1")
     if cfg.get("linkSender"):
         lines.append("LINK_SENDER=1")
+    if cfg.get("proxyHost"):
+        lines.append(f"PROXY_HOST={cfg['proxyHost']}")
+        lines.append(f"PROXY_PORT={cfg.get('proxyPort', 8080)}")
+        if cfg.get("proxyUsername"):
+            lines.append(f"PROXY_USERNAME={cfg['proxyUsername']}")
+        if cfg.get("proxyPassword"):
+            lines.append(f"PROXY_PASSWORD={cfg['proxyPassword']}")
     if cfg.get("webcam"):
         lines.append("WEBCAM=1")
         if cfg.get("webcamWidth"):
@@ -166,6 +191,24 @@ def write_chrome_env(cfg):
 
     with open(env_file, "w") as f:
         f.write("\n".join(lines) + "\n")
+
+
+def write_dynamic_policy(cfg):
+    """Write session-specific Chrome enterprise policy (media capture, WebRTC)."""
+    policy = {}
+
+    # Media capture: allow only when the corresponding device is enabled
+    policy["VideoCaptureAllowed"] = bool(cfg.get("webcam"))
+    policy["AudioCaptureAllowed"] = bool(cfg.get("microphone"))
+
+    # Lock down WebRTC when both webcam and microphone are off
+    if not cfg.get("webcam") and not cfg.get("microphone"):
+        policy["WebRtcIPHandlingPolicy"] = "disable_non_proxied_udp"
+
+    policy_path = "/etc/chromium/policies/managed/session.json"
+    os.makedirs(os.path.dirname(policy_path), exist_ok=True)
+    with open(policy_path, "w") as f:
+        json.dump(policy, f)
 
 
 def configure_services(cfg, ca_count):
@@ -301,6 +344,9 @@ def main():
 
     # Write chrome-env
     write_chrome_env(cfg)
+
+    # Write dynamic Chrome policy (media capture, WebRTC)
+    write_dynamic_policy(cfg)
 
     # Kill pre-started agents for disabled features
     if not cfg.get("fileTransfer"):
