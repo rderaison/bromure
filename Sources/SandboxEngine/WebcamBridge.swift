@@ -96,9 +96,12 @@ public final class WebcamBridge: NSObject, @unchecked Sendable {
         }
     }
 
+    private static let faceSwapFPS = 12
+
     private func startCapture(fd: Int32) {
         let session = AVCaptureSession()
-        session.sessionPreset = .vga640x480
+        let hasFaceSwap = effects.faceSwapActive
+        session.sessionPreset = hasFaceSwap ? .cif352x288 : .vga640x480
 
         let camera: AVCaptureDevice?
         if let cameraID, let specific = AVCaptureDevice(uniqueID: cameraID) {
@@ -149,18 +152,22 @@ public final class WebcamBridge: NSObject, @unchecked Sendable {
         }
         session.addOutput(output)
 
-        // Configure frame rate — use the camera's native frame duration
-        var actualFPS = Self.captureFPS
-        if let range = camera.activeFormat.videoSupportedFrameRateRanges.first {
-            actualFPS = Int(range.maxFrameRate)
-            do {
-                try camera.lockForConfiguration()
+        // Configure frame rate — cap at 12fps for face swap, native otherwise
+        var actualFPS = hasFaceSwap ? Self.faceSwapFPS : Self.captureFPS
+        do {
+            try camera.lockForConfiguration()
+            if hasFaceSwap {
+                let dur = CMTime(value: 1, timescale: CMTimeScale(Self.faceSwapFPS))
+                camera.activeVideoMinFrameDuration = dur
+                camera.activeVideoMaxFrameDuration = dur
+            } else if let range = camera.activeFormat.videoSupportedFrameRateRanges.first {
                 camera.activeVideoMinFrameDuration = range.minFrameDuration
                 camera.activeVideoMaxFrameDuration = range.minFrameDuration
-                camera.unlockForConfiguration()
-            } catch {
-                print("[Webcam] failed to configure frame rate: \(error)")
+                actualFPS = Int(range.maxFrameRate)
             }
+            camera.unlockForConfiguration()
+        } catch {
+            print("[Webcam] failed to configure frame rate: \(error)")
         }
 
         // Header is sent from the first captured frame (actual resolution may differ from preset)
@@ -194,6 +201,7 @@ final class OverlayRenderer: @unchecked Sendable {
     private let timeZone: TimeZone?
     private let logoImage: CGImage?
     private let dateFormatter: DateFormatter
+    private let faceSwapEngine: FaceSwapEngine?
 
     init(effects: WebcamEffects) {
         self.effects = effects
@@ -213,6 +221,19 @@ final class OverlayRenderer: @unchecked Sendable {
             fmt.timeZone = tz
         }
         self.dateFormatter = fmt
+
+        // Initialize face swap engine if enabled and configured
+        if effects.faceSwapActive, let imageData = effects.faceSwapImageData {
+            do {
+                self.faceSwapEngine = try FaceSwapEngine(sourceImageData: imageData)
+                if wcDebug { print("[Webcam] face swap engine initialized") }
+            } catch {
+                print("[Webcam] failed to initialize face swap: \(error)")
+                self.faceSwapEngine = nil
+            }
+        } else {
+            self.faceSwapEngine = nil
+        }
     }
 
     /// Render overlays onto a BGRA pixel buffer and return YUYV data.
@@ -246,6 +267,14 @@ final class OverlayRenderer: @unchecked Sendable {
         ctx.translateBy(x: 0, y: CGFloat(height))
         ctx.scaleBy(x: 1, y: -1)
 
+        // Face swap (applied first, before overlays)
+        let faceSwapped: Bool
+        if let engine = faceSwapEngine {
+            faceSwapped = engine.processFrame(ctx: ctx, pixelBuffer: pixelBuffer, width: width, height: height)
+        } else {
+            faceSwapped = false
+        }
+
         let fontSize = CGFloat(height) * CGFloat(effects.fontSizePercent) / 100.0
         let margin = fontSize * 1.2
 
@@ -255,8 +284,8 @@ final class OverlayRenderer: @unchecked Sendable {
         }
 
         // Bottom-right: name badge (white box, black border, black text)
-        if !effects.displayName.isEmpty {
-            drawNameBadge(ctx: ctx, name: effects.displayName, width: width, height: height, fontSize: fontSize, margin: margin)
+        if !effects.displayName.isEmpty || !effects.displayTitle.isEmpty {
+            drawNameBadge(ctx: ctx, name: effects.displayName, title: effects.displayTitle, width: width, height: height, fontSize: fontSize, margin: margin)
         }
 
         // Top-right: logo
@@ -273,6 +302,11 @@ final class OverlayRenderer: @unchecked Sendable {
             ctx.setShadow(offset: CGSize(width: 1, height: 1), blur: 3, color: CGColor(gray: 0, alpha: 0.4))
             ctx.draw(logo, in: logoRect)
             ctx.restoreGState()
+        }
+
+        // Red banner at bottom when face swap is active
+        if faceSwapped {
+            drawFaceSwapBanner(ctx: ctx, width: width, height: height)
         }
 
         return bgraToYUYV(pixelBuffer: pixelBuffer, width: width, height: height)
@@ -356,20 +390,37 @@ final class OverlayRenderer: @unchecked Sendable {
         ctx.restoreGState()
     }
 
-    private func drawNameBadge(ctx: CGContext, name: String, width: Int, height: Int, fontSize: CGFloat, margin: CGFloat) {
-        let font = CTFontCreateWithName(effects.fontFamily as CFString, fontSize, nil)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
+    private func drawNameBadge(ctx: CGContext, name: String, title: String, width: Int, height: Int, fontSize: CGFloat, margin: CGFloat) {
+        let fontName = effects.fontFamily as CFString
+        let nameFont = CTFontCreateWithName(fontName, fontSize, nil)
+        let titleFontSize = fontSize * 0.7
+        let titleFont = CTFontCreateWithName(fontName, titleFontSize, nil)
+
+        let nameAttrs: [NSAttributedString.Key: Any] = [
+            .font: nameFont,
             .foregroundColor: CGColor(gray: 0, alpha: 1),
         ]
-        let attrStr = NSAttributedString(string: name, attributes: attrs)
-        let line = CTLineCreateWithAttributedString(attrStr)
-        let bounds = CTLineGetBoundsWithOptions(line, [])
+        let titleAttrs: [NSAttributedString.Key: Any] = [
+            .font: titleFont,
+            .foregroundColor: CGColor(gray: 0, alpha: 1),
+        ]
+
+        let hasName = !name.isEmpty
+        let hasTitle = !title.isEmpty
+
+        let nameLine = hasName ? CTLineCreateWithAttributedString(NSAttributedString(string: name, attributes: nameAttrs)) : nil
+        let titleLine = hasTitle ? CTLineCreateWithAttributedString(NSAttributedString(string: title, attributes: titleAttrs)) : nil
+
+        let nameBounds = nameLine.map { CTLineGetBoundsWithOptions($0, []) } ?? .zero
+        let titleBounds = titleLine.map { CTLineGetBoundsWithOptions($0, []) } ?? .zero
 
         let padH = fontSize * 0.6
         let padV = fontSize * 0.3
-        let badgeWidth = bounds.width + padH * 2
-        let badgeHeight = bounds.height + padV * 2
+        let contentWidth = max(nameBounds.width, titleBounds.width)
+        let nameRowHeight = hasName ? nameBounds.height + padV * 2 : 0
+        let titleRowHeight = hasTitle ? titleBounds.height + padV * 2 : 0
+        let badgeWidth = contentWidth + padH * 2
+        let badgeHeight = nameRowHeight + titleRowHeight
         let badgeX = CGFloat(width) - badgeWidth - margin
         let badgeY = CGFloat(height) - badgeHeight - margin * 0.8
         let borderWidth = max(1, fontSize * 0.1)
@@ -389,9 +440,47 @@ final class OverlayRenderer: @unchecked Sendable {
         ctx.stroke(badgeRect.insetBy(dx: borderWidth / 2, dy: borderWidth / 2))
         ctx.restoreGState()
 
-        // Black text
+        // Name text (bold, top of badge)
+        if let nameLine {
+            ctx.saveGState()
+            ctx.textPosition = CGPoint(x: badgeX + padH, y: badgeY + padV + nameBounds.height * 0.15)
+            CTLineDraw(nameLine, ctx)
+            ctx.restoreGState()
+        }
+
+        // Title text (smaller, below name)
+        if let titleLine {
+            ctx.saveGState()
+            ctx.textPosition = CGPoint(x: badgeX + padH, y: badgeY + nameRowHeight + padV + titleBounds.height * 0.15)
+            CTLineDraw(titleLine, ctx)
+            ctx.restoreGState()
+        }
+    }
+
+    private func drawFaceSwapBanner(ctx: CGContext, width: Int, height: Int) {
+        let bannerHeight = CGFloat(height) * 0.06
+        let bannerY = CGFloat(height) - bannerHeight
+
+        // Red background
         ctx.saveGState()
-        ctx.textPosition = CGPoint(x: badgeX + padH, y: badgeY + padV + bounds.height * 0.15)
+        ctx.setFillColor(CGColor(red: 0.85, green: 0.05, blue: 0.05, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: bannerY, width: CGFloat(width), height: bannerHeight))
+
+        // White text centered
+        let bannerFontSize = bannerHeight * 0.55
+        let font = CTFontCreateWithName("Helvetica Neue" as CFString, bannerFontSize, nil)
+        let text = "User\u{2019}s real face anonymized by Bromure.io"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: CGColor(gray: 1, alpha: 1),
+        ]
+        let attrStr = NSAttributedString(string: text, attributes: attrs)
+        let line = CTLineCreateWithAttributedString(attrStr)
+        let bounds = CTLineGetBoundsWithOptions(line, [])
+
+        let textX = (CGFloat(width) - bounds.width) / 2
+        let textY = bannerY + (bannerHeight - bounds.height) / 2 + bounds.height * 0.15
+        ctx.textPosition = CGPoint(x: textX, y: textY)
         CTLineDraw(line, ctx)
         ctx.restoreGState()
     }

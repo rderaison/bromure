@@ -144,12 +144,52 @@ struct CameraPreviewView: NSViewRepresentable {
 final class MediaPreviewModel: ObservableObject {
     @Published var micLevel: Float = 0
     @Published var cameraActive = false
+    @Published var processedFrame: CGImage?
     let captureSession = AVCaptureSession()
 
     private var audioEngine: AVAudioEngine?
     private var levelTimer: Timer?
     private var currentCameraInput: AVCaptureDeviceInput?
     private var currentAudioDevice: AVCaptureDevice?
+    private var videoOutput: AVCaptureVideoDataOutput?
+    private var frameDelegate: FrameProcessingDelegate?
+
+    /// Set a frame processor for real-time video effects preview.
+    /// When set, frames are captured in BGRA, processed, and published to `processedFrame`.
+    func setFrameProcessor(_ processor: ((CVPixelBuffer, CGContext, Int, Int) -> Void)?) {
+        captureSession.beginConfiguration()
+
+        // Remove existing video output
+        if let output = videoOutput {
+            captureSession.removeOutput(output)
+            videoOutput = nil
+            frameDelegate = nil
+        }
+
+        if let processor {
+            let output = AVCaptureVideoDataOutput()
+            output.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+            output.alwaysDiscardsLateVideoFrames = true
+
+            let delegate = FrameProcessingDelegate(processor: processor) { [weak self] image in
+                DispatchQueue.main.async { self?.processedFrame = image }
+            }
+            let queue = DispatchQueue(label: "io.bromure.preview-processing", qos: .userInteractive)
+            output.setSampleBufferDelegate(delegate, queue: queue)
+            self.frameDelegate = delegate
+
+            if captureSession.canAddOutput(output) {
+                captureSession.addOutput(output)
+                videoOutput = output
+            }
+        } else {
+            processedFrame = nil
+        }
+
+        captureSession.commitConfiguration()
+    }
 
     func startCamera(deviceID: String?) {
         captureSession.beginConfiguration()
@@ -176,11 +216,7 @@ final class MediaPreviewModel: ObservableObject {
         captureSession.commitConfiguration()
 
         if !captureSession.isRunning {
-            let session = captureSession
-            DispatchQueue.global(qos: .userInitiated).async {
-                nonisolated(unsafe) let s = session
-                s.startRunning()
-            }
+            captureSession.startRunning()
         }
     }
 
@@ -196,11 +232,7 @@ final class MediaPreviewModel: ObservableObject {
         }
         captureSession.commitConfiguration()
         if captureSession.isRunning {
-            let session = captureSession
-            DispatchQueue.global(qos: .userInitiated).async {
-                nonisolated(unsafe) let s = session
-                s.stopRunning()
-            }
+            captureSession.stopRunning()
         }
         cameraActive = false
     }
@@ -257,7 +289,72 @@ final class MediaPreviewModel: ObservableObject {
     }
 
     func stop() {
+        setFrameProcessor(nil)
         stopCamera()
         stopMicrophone()
+    }
+}
+
+// MARK: - Frame processing delegate
+
+private final class FrameProcessingDelegate: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+    let processor: (CVPixelBuffer, CGContext, Int, Int) -> Void
+    let onFrame: (CGImage) -> Void
+
+    init(processor: @escaping (CVPixelBuffer, CGContext, Int, Int) -> Void, onFrame: @escaping (CGImage) -> Void) {
+        self.processor = processor
+        self.onFrame = onFrame
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+        guard let baseAddr = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+
+        guard let ctx = CGContext(
+            data: baseAddr, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: bytesPerRow,
+            space: colorSpace, bitmapInfo: bitmapInfo
+        ) else { return }
+
+        // Flip for top-left origin (same as OverlayRenderer)
+        ctx.translateBy(x: 0, y: CGFloat(height))
+        ctx.scaleBy(x: 1, y: -1)
+
+        processor(pixelBuffer, ctx, width, height)
+
+        // Create CGImage from the modified pixel buffer
+        if let image = ctx.makeImage() {
+            onFrame(image)
+        }
+    }
+}
+
+// MARK: - Processed frame view
+
+/// Displays processed CGImage frames via a CALayer for efficient 30fps rendering.
+struct ProcessedFrameView: NSViewRepresentable {
+    let frame: CGImage?
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer = CALayer()
+        view.layer?.contentsGravity = .resizeAspect
+        view.layer?.backgroundColor = NSColor.black.cgColor
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        nsView.layer?.contents = frame
     }
 }

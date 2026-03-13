@@ -3,7 +3,7 @@ import SwiftUI
 import SandboxEngine
 import UniformTypeIdentifiers
 
-/// Effects panel for configuring webcam overlays (city/time, name badge, logo).
+/// Effects panel for configuring webcam overlays (city/time, name badge, logo, face swap).
 /// Shows dual camera previews: mirrored ("What you see") and non-mirrored ("What they see").
 struct WebcamEffectsView: View {
     @Binding var effects: WebcamEffects
@@ -12,6 +12,12 @@ struct WebcamEffectsView: View {
 
     @StateObject private var preview = MediaPreviewModel()
     @State private var showLogoPicker = false
+    @State private var showFaceSwapPicker = false
+    @State private var showModelDownloadAlert = false
+    @State private var isDownloadingModels = false
+    @State private var downloadProgress: Double = 0
+    @State private var downloadError: String?
+    @State private var faceSwapEngine: FaceSwapEngine?
 
     // Font families available for overlays
     private static let fontFamilies = [
@@ -92,13 +98,16 @@ struct WebcamEffectsView: View {
 
                     Divider()
 
-                    // Display Name
+                    // Display Name & Title
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Name Badge").font(.headline)
-                        Text("Your name appears in the bottom-right corner, like a TV news anchor.")
+                        Text("Your name and title appear in the bottom-right corner, like a TV news anchor.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                         TextField("Display name", text: $effects.displayName)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 250)
+                        TextField("Job title", text: $effects.displayTitle)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 250)
                     }
@@ -146,6 +155,70 @@ struct WebcamEffectsView: View {
 
                     Divider()
 
+                    // Face Swap
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Face Swap").font(.headline)
+                        Text("Replace your face with another in the video feed. A red banner will indicate the effect is active.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+
+                        Toggle("Enable Face Swap", isOn: $effects.faceSwapEnabled)
+                            .onChange(of: effects.faceSwapEnabled) { _, enabled in
+                                if enabled && !FaceSwapEngine.modelsExist {
+                                    effects.faceSwapEnabled = false
+                                    showModelDownloadAlert = true
+                                }
+                            }
+
+                        if effects.faceSwapEnabled {
+                            HStack(spacing: 12) {
+                                if let data = effects.faceSwapImageData, let nsImage = NSImage(data: data) {
+                                    Image(nsImage: nsImage)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                        .frame(width: 48, height: 48)
+                                        .clipShape(Circle())
+                                        .overlay(Circle().stroke(Color.secondary.opacity(0.3), lineWidth: 1))
+
+                                    Button(role: .destructive) {
+                                        effects.faceSwapImageData = nil
+                                    } label: {
+                                        Label("Remove", systemImage: "trash")
+                                    }
+                                    .controlSize(.small)
+                                }
+
+                                Button {
+                                    showFaceSwapPicker = true
+                                } label: {
+                                    Label(
+                                        effects.faceSwapImageData == nil ? "Choose Face\u{2026}" : "Replace\u{2026}",
+                                        systemImage: "person.crop.circle"
+                                    )
+                                }
+                                .controlSize(.small)
+                            }
+                        }
+
+                        if isDownloadingModels {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ProgressView(value: downloadProgress)
+                                    .frame(width: 200)
+                                Text("Downloading face swap models\u{2026}")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        if let error = downloadError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    }
+
+                    Divider()
+
                     // Font settings
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Font").font(.headline)
@@ -187,13 +260,16 @@ struct WebcamEffectsView: View {
             }
             .padding(12)
         }
-        .frame(width: 620, height: 560)
+        .frame(width: 620, height: 680)
         .onAppear {
             preview.startCamera(deviceID: webcamDeviceID)
+            updateFaceSwapProcessor()
         }
         .onDisappear {
             preview.stop()
         }
+        .onChange(of: effects.faceSwapEnabled) { _, _ in updateFaceSwapProcessor() }
+        .onChange(of: effects.faceSwapImageData) { _, _ in updateFaceSwapProcessor() }
         .fileImporter(
             isPresented: $showLogoPicker,
             allowedContentTypes: [.png, .jpeg, .heic, .svg, .image],
@@ -207,6 +283,70 @@ struct WebcamEffectsView: View {
                 }
             }
         }
+        .fileImporter(
+            isPresented: $showFaceSwapPicker,
+            allowedContentTypes: [.png, .jpeg, .heic, .image],
+            allowsMultipleSelection: false
+        ) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                guard url.startAccessingSecurityScopedResource() else { return }
+                defer { url.stopAccessingSecurityScopedResource() }
+                if let nsImage = NSImage(contentsOf: url), let pngData = nsImage.pngRepresentation() {
+                    effects.faceSwapImageData = pngData
+                }
+            }
+        }
+        .alert("Download Face Swap Models?", isPresented: $showModelDownloadAlert) {
+            Button("Download") {
+                startModelDownload()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Face swap requires two AI models (~500 MB total). They will be downloaded from Hugging Face and stored locally.")
+        }
+    }
+
+    private func updateFaceSwapProcessor() {
+        if effects.faceSwapActive, let imageData = effects.faceSwapImageData {
+            do {
+                let engine = try FaceSwapEngine(sourceImageData: imageData)
+                self.faceSwapEngine = engine
+                preview.setFrameProcessor { pixelBuffer, ctx, width, height in
+                    engine.processFrame(ctx: ctx, pixelBuffer: pixelBuffer, width: width, height: height)
+                }
+                return
+            } catch {
+                print("[FaceSwap] engine init failed: \(error)")
+            }
+        }
+        // Disable processing
+        self.faceSwapEngine = nil
+        preview.setFrameProcessor(nil)
+    }
+
+    private func startModelDownload() {
+        isDownloadingModels = true
+        downloadProgress = 0
+        downloadError = nil
+
+        Task {
+            do {
+                try await FaceSwapEngine.downloadModels { progress in
+                    Task { @MainActor in
+                        downloadProgress = progress
+                    }
+                }
+                await MainActor.run {
+                    isDownloadingModels = false
+                    effects.faceSwapEnabled = true
+                }
+            } catch {
+                await MainActor.run {
+                    isDownloadingModels = false
+                    downloadError = error.localizedDescription
+                }
+            }
+        }
     }
 
     // MARK: - Preview Pane
@@ -215,13 +355,25 @@ struct WebcamEffectsView: View {
     private func previewPane(mirrored: Bool, caption: String) -> some View {
         VStack(spacing: 6) {
             ZStack {
-                CameraPreviewView(session: preview.captureSession)
-                    .aspectRatio(4/3, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
-                    )
+                if let processedFrame = preview.processedFrame {
+                    // Show face-swapped processed frame
+                    ProcessedFrameView(frame: processedFrame)
+                        .aspectRatio(4/3, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                        )
+                } else {
+                    // Show raw camera preview
+                    CameraPreviewView(session: preview.captureSession)
+                        .aspectRatio(4/3, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                        )
+                }
 
                 if !preview.cameraActive {
                     VStack(spacing: 4) {
@@ -233,7 +385,7 @@ struct WebcamEffectsView: View {
                     .foregroundStyle(.secondary)
                 }
 
-                // Overlay effects (drawn on top of the camera preview)
+                // Overlay effects (drawn on top — only non-faceswap overlays when processed)
                 overlayEffects
             }
             .scaleEffect(x: mirrored ? -1 : 1, y: 1)
@@ -278,20 +430,44 @@ struct WebcamEffectsView: View {
             }
 
             // Bottom-right: name badge (white box, black border, black text)
-            if !effects.displayName.isEmpty {
-                Text(effects.displayName)
-                    .font(.custom(effects.fontFamily, size: fontSize).bold())
-                    .foregroundStyle(.black)
-                    .padding(.horizontal, fontSize * 0.6)
-                    .padding(.vertical, fontSize * 0.3)
-                    .background(.white)
-                    .overlay(
-                        Rectangle()
-                            .stroke(.black, lineWidth: max(1, fontSize * 0.1))
-                    )
-                    .padding(.trailing, margin)
-                    .padding(.bottom, margin * 0.8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            if !effects.displayName.isEmpty || !effects.displayTitle.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    if !effects.displayName.isEmpty {
+                        Text(effects.displayName)
+                            .font(.custom(effects.fontFamily, size: fontSize).bold())
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, fontSize * 0.6)
+                            .padding(.vertical, fontSize * 0.3)
+                    }
+                    if !effects.displayTitle.isEmpty {
+                        Text(effects.displayTitle)
+                            .font(.custom(effects.fontFamily, size: fontSize * 0.7))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, fontSize * 0.6)
+                            .padding(.vertical, fontSize * 0.3)
+                    }
+                }
+                .background(.white)
+                .overlay(
+                    Rectangle()
+                        .stroke(.black, lineWidth: max(1, fontSize * 0.1))
+                )
+                .padding(.trailing, margin)
+                .padding(.bottom, effects.faceSwapActive ? margin * 0.8 + geo.size.height * 0.06 : margin * 0.8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            }
+
+            // Face swap banner (red bar at bottom)
+            if effects.faceSwapActive {
+                VStack {
+                    Spacer()
+                    Text("User\u{2019}s real face anonymized by Bromure.io")
+                        .font(.system(size: max(6, geo.size.height * 0.033)))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: geo.size.height * 0.06)
+                        .background(Color(red: 0.85, green: 0.05, blue: 0.05))
+                }
             }
         }
     }
