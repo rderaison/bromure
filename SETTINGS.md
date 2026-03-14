@@ -82,7 +82,7 @@ Controls what the browser can access and share.
 | Setting | Description |
 |---|---|
 | **Block Malware Sites** | Blocks access to websites known to distribute viruses or steal information by routing DNS queries through Cloudflare's security-filtered resolvers (1.1.1.2 / 1.0.0.2). |
-| **Phishing Warning** (Beta) | Shows an in-browser warning banner when you are about to enter a password on a website that looks suspicious or fake. Uses a Chromium extension that compares the site against the Tranco top-10k domains list to detect typosquatting and impersonation. Requires "Retain Browsing Data" to be enabled (the extension needs persistent storage to track which sites you've previously trusted). |
+| **Phishing Warning** (Beta -- experimental) | Shows an in-browser warning banner when you are about to enter a password on a website that looks suspicious or fake. Uses a Chromium extension that compares the site against the Tranco top-10k domains list to detect typosquatting and impersonation. **This is a rough heuristic and will produce false positives** -- it is meant as an extra nudge, not a reliable anti-phishing solution. Requires "Retain Browsing Data" to be enabled (the extension needs persistent storage to track which sites you've previously trusted). |
 | **Send Link to Other Session** | Adds a right-click context menu option inside the browser to send a link to a different Bromure profile. Useful for moving a link from your general browsing profile to a more secure one (e.g., opening a banking link in your Banking profile). |
 
 ### Network Isolation

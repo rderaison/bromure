@@ -66,14 +66,12 @@ Bromure blocks ads and trackers at the network layer using a built-in DNS sinkho
 
 <p align="center">
   <img src="Resources/prefs_privacy.jpg" width="480" alt="Privacy & Safety settings">
-  &nbsp;&nbsp;
-  <img src="Resources/phishing_warning.jpg" width="480" alt="Phishing warning in action">
 </p>
 
 Each profile has granular privacy controls:
 
 - **Malware Site Blocking** -- block known malicious websites using Cloudflare's security DNS.
-- **Phishing Warnings** (Beta) -- get alerted when you're about to enter a password on a website that looks suspicious or fake.
+- **Phishing Warnings** (Beta) -- experimental alerts when you're about to enter a password on a website that looks suspicious or fake. This feature uses a simple heuristic (Tranco top-10k domain list) and will produce false positives -- treat it as an extra nudge, not a guarantee.
 - **Cross-Profile Link Sharing** -- right-click any link to send it to a different Bromure profile.
 
 ## File Transfer & Malware Scanning
