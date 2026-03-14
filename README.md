@@ -10,9 +10,11 @@
 
 ---
 
-## Your browser is the biggest hole in your Mac
+## Your browser is the prime entry point for attacks on your Mac
 
-Every link you click, every page you load, every ad that renders -- it all runs code on your machine. Ransomware encrypts your files through a browser tab. Drive-by downloads install malware you never asked for. Credential-stealing scripts read your clipboard. A single zero-day exploit can hand an attacker your documents, your photos, your Keychain. And when it's over, private browsing mode can't erase what was never contained in the first place.
+A modern web browser is one of the most complex pieces of software on your computer -- millions of lines of code parsing HTML, CSS, JavaScript, images, fonts, video codecs, WebAssembly, PDFs, and more. All day long, it processes untrusted data from millions of different sources. That combination of complexity and exposure makes it the widest attack surface on your machine.
+
+Ransomware encrypts your files through a browser tab. Drive-by downloads install malware you never asked for. Credential-stealing scripts read your clipboard. A single zero-day in any of those parsers can hand an attacker your documents, your photos, your Keychain. And when it's over, private browsing mode can't erase what was never contained in the first place.
 
 Traditional browsers try to protect you with layers of sandboxing -- but the sandbox shares an OS, a filesystem, and a kernel with everything you care about.
 
@@ -97,6 +99,16 @@ Use Bromure for video calls and meetings:
 - **Microphone** -- share your Mac's microphone for calls and voice input.
 - **Speaker Selection** -- choose which audio output device each profile uses.
 - **Volume control** -- independent volume slider per profile.
+
+### Anonymous Video Calls
+
+Bromure can swap your face in real time during video calls, letting you attend meetings without revealing your identity. Useful for whistleblowers, journalists, or anyone who needs to be on camera without being recognized.
+
+<p align="center">
+  <img src="Resources/demo_faceswap.png" width="480" alt="Face swap on a Google Meet call">
+</p>
+
+Worried this could be used to deceive? A visible banner is overlaid on the video feed to let other participants know the user's appearance has been anonymized.
 
 ## Enterprise
 

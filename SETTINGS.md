@@ -51,7 +51,7 @@ Audio output and device sharing for video calls, meetings, and media playback.
 |---|---|
 | **Audio** | Master toggle for all sound output from websites. When enabled, a volume slider (0--100%) appears. |
 | **Volume** | Controls the audio output level for this profile. Independent from other profiles and from your Mac's system volume. |
-| **Share Webcam** | Forwards your Mac's camera into the VM so websites can use it for video calls. When enabled, a live preview appears along with a quality picker (resolution depends on your camera) and an Effects button for applying real-time visual effects. |
+| **Share Webcam** | Forwards your Mac's camera into the VM so websites can use it for video calls. When enabled, a live preview appears along with a quality picker (resolution depends on your camera) and an Effects button for applying real-time visual effects, including face swap for anonymous video calls. When face swap is active, a visible banner is overlaid on the video feed so other meeting participants know the user's appearance has been anonymized. |
 | **Share Microphone** | Forwards your Mac's microphone into the VM for voice calls and voice input. When enabled, a preview with level meter appears. |
 | **Speaker** | Choose which audio output device this profile uses. Defaults to your Mac's default output. Useful for routing different profiles to different speakers or headphones. |
 
