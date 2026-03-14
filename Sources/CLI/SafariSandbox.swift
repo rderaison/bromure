@@ -1272,6 +1272,8 @@ final class BrowserSession {
             filePickerBridge = nil
             warpBridge?.stop()
             warpBridge = nil
+            webcamBridge?.stop()
+            webcamBridge = nil
             effectsPanel?.orderOut(nil)
             effectsPanel = nil
         }
