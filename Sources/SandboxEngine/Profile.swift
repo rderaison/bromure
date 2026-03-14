@@ -252,6 +252,8 @@ public struct ProfileSettings: Codable, Equatable {
         let effectiveWarp = hasProxy ? false : enableWarp
         let effectiveAdBlocking = hasProxy ? false : enableAdBlocking
 
+        let isTestSuite = ProcessInfo.processInfo.environment["BROMURE_TEST_SUITE"] != nil
+
         return VMConfig(
             cpuCount: cpus > 0 ? cpus : nil,
             memorySize: UInt64(max(memGB > 0 ? memGB : 2, 1)) * 1024 * 1024 * 1024,
@@ -283,6 +285,7 @@ public struct ProfileSettings: Codable, Equatable {
             proxyUsername: hasProxy && !proxyUsername.isEmpty ? proxyUsername : nil,
             proxyPassword: hasProxy && !proxyPassword.isEmpty ? proxyPassword : nil,
             blockDownloads: !canDownload,
+            testSuite: isTestSuite,
             locale: locale
         )
     }

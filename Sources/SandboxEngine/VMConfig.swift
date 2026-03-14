@@ -142,6 +142,10 @@ public struct VMConfig {
     /// files created outside dot-directories in /home/chrome.
     public var blockDownloads: Bool
 
+    /// When true, the guest runs test-runner.sh instead of Chromium.
+    /// Set via the BROMURE_TEST_SUITE environment variable on the host.
+    public var testSuite: Bool
+
     public init(
         cpuCount: Int? = nil,
         memorySize: UInt64 = 4 * 1024 * 1024 * 1024,
@@ -176,6 +180,7 @@ public struct VMConfig {
         proxyUsername: String? = nil,
         proxyPassword: String? = nil,
         blockDownloads: Bool = false,
+        testSuite: Bool = false,
         keyboardLayout: String? = nil,
         naturalScrolling: Bool? = nil,
         locale: String? = nil
@@ -214,6 +219,7 @@ public struct VMConfig {
         self.proxyUsername = proxyUsername
         self.proxyPassword = proxyPassword
         self.blockDownloads = blockDownloads
+        self.testSuite = testSuite
         self.keyboardLayout = keyboardLayout ?? VMConfig.detectKeyboardLayout()
         self.naturalScrolling = naturalScrolling ?? VMConfig.detectNaturalScrolling()
         self.locale = locale ?? VMConfig.detectLocale()

@@ -19,7 +19,7 @@ public final class VMPool {
         /// Host-side network filter (must stay alive for the VM's lifetime).
         public var networkFilter: NetworkFilter?
         /// Monitors serial output for completion markers (used by applyConfig).
-        let serialWaiter: SerialWaiter
+        public let serialWaiter: SerialWaiter
     }
 
     private var config: VMConfig
@@ -32,6 +32,9 @@ public final class VMPool {
     private var rejectListenerDelegate: RejectListenerDelegate?
 
     public var hasWarmVM: Bool { warmVM != nil }
+
+    /// Access the pre-warmed VM (e.g. to install serial handlers before claiming).
+    public var currentWarmVM: WarmVM? { warmVM }
 
     public var baseImageExists: Bool { imageManager.baseImageExists }
 
@@ -290,6 +293,39 @@ public final class VMPool {
             cfg["appVersion"] = version
         }
 
+        // Test suite: inject TEST_SUITE flag and expectations for guest test-runner.sh
+        if config.testSuite {
+            cfg["TEST_SUITE"] = "1"
+            cfg["TEST_EXPECT_URL"] = config.homePage
+            cfg["TEST_EXPECT_DARK_MODE"] = config.forceDarkMode ? "1" : "0"
+            cfg["TEST_EXPECT_GPU"] = config.enableGPU ? "1" : "0"
+            cfg["TEST_EXPECT_WEBGL"] = config.enableWebGL ? "1" : "0"
+            cfg["TEST_EXPECT_AUDIO"] = config.enableAudio ? "1" : "0"
+            if config.enableAudio && config.audioVolume < 100 {
+                cfg["TEST_EXPECT_VOLUME"] = "\(config.audioVolume)"
+            }
+            cfg["TEST_EXPECT_CLIPBOARD"] = config.enableClipboardSharing ? "1" : "0"
+            cfg["TEST_EXPECT_FILE_TRANSFER"] = config.enableFileTransfer ? "1" : "0"
+            cfg["TEST_EXPECT_BLOCK_DOWNLOADS"] = config.blockDownloads ? "1" : "0"
+            if let proxyHost = config.proxyHost {
+                cfg["TEST_EXPECT_PROXY_HOST"] = proxyHost
+            }
+            let needsInternalProxy = config.enableAdBlocking || config.enableWarp || config.blockMalwareSites
+            cfg["TEST_EXPECT_INTERNAL_PROXY"] = needsInternalProxy && config.proxyHost == nil ? "1" : "0"
+            cfg["TEST_EXPECT_DNSMASQ"] = needsInternalProxy ? "1" : "0"
+            cfg["TEST_EXPECT_SQUID"] = needsInternalProxy ? "1" : "0"
+            cfg["TEST_EXPECT_MALWARE_DNS"] = config.blockMalwareSites ? "1" : "0"
+            cfg["TEST_EXPECT_PHISHING"] = config.phishingWarning ? "1" : "0"
+            cfg["TEST_EXPECT_LINK_SENDER"] = config.enableLinkSender ? "1" : "0"
+            cfg["TEST_EXPECT_WEBCAM"] = config.enableWebcam ? "1" : "0"
+            cfg["TEST_EXPECT_MICROPHONE"] = config.enableMicrophone ? "1" : "0"
+            cfg["TEST_EXPECT_WEBRTC_BLOCKED"] = (!config.enableWebcam && !config.enableMicrophone) ? "1" : "0"
+            cfg["TEST_EXPECT_LOCALE"] = config.locale
+            cfg["TEST_EXPECT_CA_COUNT"] = "\(config.rootCAs.count)"
+            cfg["TEST_EXPECT_SWAP_CMD_CTRL"] = config.swapCmdCtrl ? "1" : "0"
+            cfg["TEST_EXPECT_USER_AGENT"] = "1"
+        }
+
         // Send config to guest via vsock.
         // Host listens on port 5000; guest config-agent.py connects to it.
         guard let socketDevice = warm.vm.socketDevices.first as? VZVirtioSocketDevice else {
@@ -397,12 +433,16 @@ public final class VMPool {
     }
 
     /// Tracks pending marker waits so the drain handler can resolve them.
-    final class SerialWaiter: @unchecked Sendable {
+    public final class SerialWaiter: @unchecked Sendable {
         private let lock = NSLock()
         private var buffer = ""
         private var pending: [(marker: String, continuation: CheckedContinuation<Void, Never>)] = []
 
-        func feed(_ text: String) {
+        /// Optional observer callback — called with every chunk of text fed to the waiter.
+        public var observer: ((String) -> Void)?
+
+        public func feed(_ text: String) {
+            observer?(text)
             lock.lock()
             buffer += text
             var resolved: [CheckedContinuation<Void, Never>] = []
@@ -421,7 +461,7 @@ public final class VMPool {
             for cont in resolved { cont.resume() }
         }
 
-        func waitFor(_ marker: String, timeout: TimeInterval = 10) async {
+        public func waitFor(_ marker: String, timeout: TimeInterval = 10) async {
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 self.lock.lock()
                 if self.buffer.contains(marker) {

@@ -297,6 +297,7 @@ install_config scripts/link-agent.py        /mnt/usr/local/bin/link-agent.py    
 install_config scripts/webcam-agent.py      /mnt/usr/local/bin/webcam-agent.py      755
 install_config scripts/config-agent.py      /mnt/usr/local/bin/config-agent.py      755
 install_config scripts/download-guard.sh    /mnt/usr/local/bin/download-guard.sh    755
+install_config scripts/test-runner.sh      /mnt/usr/local/bin/test-runner.sh       755
 
 # ---------------------------------------------------------------------------
 # Phishing guard extension

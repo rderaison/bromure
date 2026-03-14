@@ -198,6 +198,11 @@ def write_chrome_env(cfg):
     lines.append(f'export LC_ALL="{locale}.UTF-8"')
     lines.append(f'export LANGUAGE="{base_lang}"')
 
+    # Test suite: forward TEST_* expectations to chrome-env
+    for key, val in cfg.items():
+        if key.startswith("TEST_"):
+            lines.append(f'{key}="{val}"')
+
     with open(env_file, "w") as f:
         f.write("\n".join(lines) + "\n")
 

@@ -10,7 +10,7 @@ struct Bromure: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure",
         abstract: "Run a browser in an isolated, ephemeral VM.",
-        subcommands: [Launch.self, Init.self, Run.self, Setup.self],
+        subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self],
         defaultSubcommand: Launch.self
     )
 
@@ -1331,6 +1331,259 @@ final class SetupAppDelegate: NSObject, NSApplicationDelegate, VZVirtualMachineD
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
+    }
+}
+
+// MARK: - CLI: Test
+
+struct Test: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Run integration tests inside a VM."
+    )
+
+    @Option(name: .long, help: "Custom storage directory.")
+    var storageDir: String?
+
+    @Option(name: .long, help: "Test scenario: 'defaults', 'privacy', 'proxy', 'media', or 'all'.")
+    var scenario: String = "all"
+
+    @Option(name: .long, help: "Timeout in seconds for the test suite.")
+    var timeout: Int = 120
+
+    func run() throws {
+        try MainActor.assumeIsolated {
+            let dir = storageDir.map { URL(filePath: $0) } ?? VMConfig.defaultStorageDirectory
+            let imageManager = LinuxImageManager(storageDir: dir)
+            guard imageManager.baseImageExists else {
+                print("No base image. Run 'bromure init' first.")
+                throw ExitCode.failure
+            }
+
+            let scenarios = buildScenarios()
+            var allPassed = true
+            var totalPass = 0
+            var totalFail = 0
+            var finished = false
+            var taskError: Error?
+
+            Task {
+                do {
+                    for (name, config) in scenarios {
+                        print("\n\u{2501}\u{2501}\u{2501} Scenario: \(name) \u{2501}\u{2501}\u{2501}")
+                        let result = try await self.runScenario(name: name, config: config, storageDir: dir, timeout: self.timeout)
+                        totalPass += result.pass
+                        totalFail += result.fail
+                        if result.fail > 0 { allPassed = false }
+                    }
+                } catch {
+                    taskError = error
+                }
+                finished = true
+                CFRunLoopStop(CFRunLoopGetMain())
+            }
+
+            while !finished {
+                RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
+            }
+
+            if let taskError {
+                print("\nTest run failed: \(taskError.localizedDescription)")
+                throw ExitCode.failure
+            }
+
+            print("\n\u{2501}\u{2501}\u{2501} Results \u{2501}\u{2501}\u{2501}")
+            print("Total: \(totalPass) passed, \(totalFail) failed")
+            if !allPassed { throw ExitCode.failure }
+        }
+    }
+
+    // MARK: - Scenario Definitions
+
+    private func buildScenarios() -> [(String, VMConfig)] {
+        // Parameter order must match VMConfig.init:
+        // cpuCount, memorySize, displayWidth, displayHeight, pixelsPerInch,
+        // enableAudio, audioVolume, enableWarp, forceDarkMode, enableAdBlocking,
+        // swapCmdCtrl, homePage, enableGPU, enableWebGL, blockMalwareSites,
+        // enableFileTransfer, phishingWarning, enableClipboardSharing, enableLinkSender,
+        // enableWebcam, enableMicrophone, ..., rootCAs, ...,
+        // proxyHost, proxyPort, proxyUsername, proxyPassword, blockDownloads,
+        // testSuite, ..., locale
+        let all: [(String, VMConfig)] = [
+            ("defaults", VMConfig(
+                testSuite: true
+            )),
+            ("dark-mode", VMConfig(
+                forceDarkMode: true,
+                testSuite: true
+            )),
+            ("gpu-off", VMConfig(
+                enableGPU: false,
+                enableWebGL: false,
+                testSuite: true
+            )),
+            ("audio-off", VMConfig(
+                enableAudio: false,
+                testSuite: true
+            )),
+            ("audio-50pct", VMConfig(
+                audioVolume: 50,
+                testSuite: true
+            )),
+            ("clipboard-on", VMConfig(
+                enableClipboardSharing: true,
+                testSuite: true
+            )),
+            ("file-transfer", VMConfig(
+                enableFileTransfer: true,
+                blockDownloads: false,
+                testSuite: true
+            )),
+            ("downloads-blocked", VMConfig(
+                enableFileTransfer: true,
+                blockDownloads: true,
+                testSuite: true
+            )),
+            ("privacy", VMConfig(
+                enableAdBlocking: true,
+                blockMalwareSites: true,
+                phishingWarning: true,
+                testSuite: true
+            )),
+            ("proxy", VMConfig(
+                proxyHost: "proxy.example.com",
+                proxyPort: 8080,
+                proxyUsername: "user",
+                proxyPassword: "pass",
+                testSuite: true
+            )),
+            ("link-sender", VMConfig(
+                enableLinkSender: true,
+                testSuite: true
+            )),
+            ("custom-cas", VMConfig(
+                rootCAs: ["-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----"],
+                testSuite: true
+            )),
+            ("locale-fr", VMConfig(
+                homePage: "https://www.google.fr",
+                testSuite: true,
+                locale: "fr_FR"
+            )),
+        ]
+
+        if scenario == "all" { return all }
+        return all.filter { $0.0 == scenario }
+    }
+
+    // MARK: - Scenario Runner
+
+    private struct ScenarioResult {
+        let pass: Int
+        let fail: Int
+        let output: [String]
+    }
+
+    @MainActor
+    private func runScenario(name: String, config: VMConfig, storageDir: URL, timeout: Int) async throws -> ScenarioResult {
+        let pool = VMPool(config: config, storageDir: storageDir)
+        guard pool.baseImageExists else {
+            throw SandboxError.baseImageNotFound
+        }
+
+        // Boot VM and attach collector to the serial waiter's observer
+        // BEFORE claiming, so we capture test output that arrives immediately
+        let collector = TestOutputCollector()
+        try await pool.warmUp()
+
+        // Attach observer to the waiter — every chunk fed to waiter also goes to collector
+        if let waiter = pool.currentWarmVM?.serialWaiter {
+            waiter.observer = { text in
+                collector.feed(text)
+            }
+        }
+
+        guard let warm = await pool.claim(config: config) else {
+            throw SandboxError.vmStartFailed("Failed to claim VM for test scenario '\(name)'")
+        }
+
+        // Wait for test suite to complete or timeout
+        await warm.serialWaiter.waitFor("TEST_SUITE_DONE", timeout: TimeInterval(timeout))
+
+        // Parse results
+        let lines = collector.lines
+        var passCount = 0
+        var failCount = 0
+
+        for line in lines {
+            if line.hasPrefix("PASS:") {
+                passCount += 1
+            } else if line.hasPrefix("FAIL:") {
+                failCount += 1
+                print("  \u{2718} \(line)")
+            } else if line.hasPrefix("TEST_SUITE_DONE:") {
+                let parts = line.split(separator: ":")
+                for part in parts {
+                    if part.hasPrefix("pass=") {
+                        passCount = Int(part.dropFirst(5)) ?? passCount
+                    } else if part.hasPrefix("fail=") {
+                        failCount = Int(part.dropFirst(5)) ?? failCount
+                    }
+                }
+            }
+        }
+
+        let symbol = failCount == 0 ? "\u{2714}" : "\u{2718}"
+        print("  \(symbol) \(name): \(passCount) passed, \(failCount) failed")
+
+        // Stop the VM
+        if warm.vm.state == .running {
+            try? await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                DispatchQueue.main.async {
+                    warm.vm.stop { error in
+                        if let error { cont.resume(throwing: error) }
+                        else { cont.resume() }
+                    }
+                }
+            }
+        }
+
+        return ScenarioResult(pass: passCount, fail: failCount, output: lines)
+    }
+}
+
+/// Collects PASS/FAIL/TEST_SUITE_DONE lines from serial output.
+private final class TestOutputCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = ""
+    private var _lines: [String] = []
+
+    var lines: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        // Flush any remaining partial line in the buffer
+        if !buffer.isEmpty {
+            let line = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("PASS:") || line.hasPrefix("FAIL:") || line.hasPrefix("TEST_SUITE") {
+                _lines.append(line)
+            }
+            buffer = ""
+        }
+        return _lines
+    }
+
+    func feed(_ text: String) {
+        lock.lock()
+        // Normalize CR+LF to LF
+        buffer += text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        // Extract complete lines
+        while let newlineIndex = buffer.firstIndex(of: "\n") {
+            let line = String(buffer[buffer.startIndex..<newlineIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("PASS:") || line.hasPrefix("FAIL:") || line.hasPrefix("TEST_SUITE") {
+                _lines.append(line)
+            }
+            buffer = String(buffer[buffer.index(after: newlineIndex)...])
+        }
+        lock.unlock()
     }
 }
 

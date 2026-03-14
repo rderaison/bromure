@@ -58,6 +58,12 @@ export LIBGL_ALWAYS_SOFTWARE=1
 doas renice -10 $(pgrep -f /usr/libexec/Xorg) 2>/dev/null
 (sleep 1; for pid in $(pgrep -f chromium-browser); do doas renice -10 $pid 2>/dev/null; done) &
 
+if [ "$TEST_SUITE" = "1" ]; then
+    /usr/local/bin/test-runner.sh
+    doas poweroff
+    exit 0
+fi
+
 LANG_FLAG=
 [ -n "$CHROME_LANG" ] && LANG_FLAG="--lang=$CHROME_LANG"
 chromium-browser --no-first-run --start-maximized --force-device-scale-factor=%%DISPLAY_SCALE%% --use-gl=angle --use-angle=gl --ignore-gpu-blocklist --enable-gpu-rasterization --enable-smooth-scrolling --enable-zero-copy --disable-vulkan --in-process-gpu $LANG_FLAG $EXTRA_FLAGS $CHROME_URL

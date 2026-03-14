@@ -70,6 +70,14 @@ struct ProfileSettingsView: View {
     @State private var caImportError: String?
     @State private var showWebcamEffects = false
     @State private var showPhishingPersistenceAlert = false
+    @State private var showVirusTotalKeyError = false
+    @State private var vtKeyVerifying = false
+    @State private var vtKeyStatus: VTKeyStatus?
+
+    private enum VTKeyStatus {
+        case valid
+        case invalid(String)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -105,7 +113,14 @@ struct ProfileSettingsView: View {
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Save") { onSave(draft) }
+                Button("Save") {
+                    if draft.settings.virusTotalEnabled,
+                       (draft.settings.virusTotalAPIKey ?? "").isEmpty {
+                        showVirusTotalKeyError = true
+                    } else {
+                        onSave(draft)
+                    }
+                }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
             }
@@ -148,6 +163,13 @@ struct ProfileSettingsView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Phishing protection needs to remember which sites you\u{2019}ve visited so it can detect suspicious look-alikes. This requires retaining browsing data between sessions.")
+        }
+        .alert("VirusTotal API Key Required", isPresented: $showVirusTotalKeyError) {
+            Button("OK") {
+                selectedCategory = .fileTransfer
+            }
+        } message: {
+            Text("Enter a VirusTotal API key to enable download scanning. You can get a free key at:\nhttps://www.virustotal.com/gui/join-us")
         }
         .sheet(isPresented: $showWebcamEffects) {
             WebcamEffectsView(
@@ -471,12 +493,59 @@ struct ProfileSettingsView: View {
                 )
 
                 if draft.settings.virusTotalEnabled {
-                    SecureField("VirusTotal API Key", text: Binding(
-                        get: { draft.settings.virusTotalAPIKey ?? "" },
-                        set: { draft.settings.virusTotalAPIKey = $0.isEmpty ? nil : $0 }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 300)
+                    HStack(spacing: 8) {
+                        SecureField("VirusTotal API Key", text: Binding(
+                            get: { draft.settings.virusTotalAPIKey ?? "" },
+                            set: {
+                                draft.settings.virusTotalAPIKey = $0.isEmpty ? nil : $0
+                                vtKeyStatus = nil
+                            }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 300)
+
+                        Button {
+                            let key = draft.settings.virusTotalAPIKey ?? ""
+                            guard !key.isEmpty else {
+                                vtKeyStatus = .invalid("Enter an API key first.")
+                                return
+                            }
+                            vtKeyVerifying = true
+                            vtKeyStatus = nil
+                            Task {
+                                do {
+                                    try await VirusTotalClient.validateAPIKey(key)
+                                    vtKeyVerifying = false
+                                    vtKeyStatus = .valid
+                                } catch {
+                                    vtKeyVerifying = false
+                                    vtKeyStatus = .invalid(error.localizedDescription)
+                                }
+                            }
+                        } label: {
+                            if vtKeyVerifying {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(width: 50)
+                            } else {
+                                Text("Verify")
+                                    .frame(width: 50)
+                            }
+                        }
+                        .disabled(vtKeyVerifying)
+
+                        if let status = vtKeyStatus {
+                            switch status {
+                            case .valid:
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                            case .invalid(let msg):
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.red)
+                                    .help(msg)
+                            }
+                        }
+                    }
                     .padding(.leading, 20)
 
                     settingToggle(
