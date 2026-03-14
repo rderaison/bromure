@@ -25,6 +25,7 @@ public final class FilePickerBridge: NSObject, @unchecked Sendable {
     private var listenerDelegate: PickerListenerDelegate?
     private var connection: VZVirtioSocketConnection?
     private var readSource: DispatchSourceRead?
+    private var connectionGeneration: UInt64 = 0
     private var pendingData = Data()
 
     /// Whether an NSOpenPanel is currently being shown.
@@ -63,35 +64,55 @@ public final class FilePickerBridge: NSObject, @unchecked Sendable {
     // MARK: - Connection handling
 
     private func handleConnection(_ conn: VZVirtioSocketConnection) {
-        print("[FilePicker] guest connected (fd=\(conn.fileDescriptor))")
+        // Must run on main thread for @MainActor property access
+        let setup = { @MainActor [weak self] in
+            guard let self = self else { return }
 
-        readSource?.cancel()
-        connection = conn
-        pendingData = Data()
+            print("[FilePicker] guest connected (fd=\(conn.fileDescriptor))")
 
-        let fd = conn.fileDescriptor
-        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
+            self.readSource?.cancel()
+            self.connectionGeneration &+= 1
+            let gen = self.connectionGeneration
+            self.connection = conn
+            self.pendingData = Data()
 
-        source.setEventHandler { [weak self] in
-            var buf = [UInt8](repeating: 0, count: 65536)
-            let n = Darwin.read(fd, &buf, buf.count)
-            guard n > 0 else {
-                print("[FilePicker] connection closed (read returned \(n))")
-                source.cancel()
-                return
+            let fd = conn.fileDescriptor
+            let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
+
+            source.setEventHandler { [weak self] in
+                var buf = [UInt8](repeating: 0, count: 65536)
+                let n = Darwin.read(fd, &buf, buf.count)
+                guard n > 0 else {
+                    print("[FilePicker] connection closed (read returned \(n))")
+                    source.cancel()
+                    return
+                }
+                self?.pendingData.append(contentsOf: buf[0..<n])
+                self?.drainMessages()
             }
-            self?.pendingData.append(contentsOf: buf[0..<n])
-            self?.drainMessages()
+
+            source.setCancelHandler { [weak self] in
+                guard let self = self else { return }
+                // Only nil out if this cancel handler belongs to the current generation.
+                // A newer handleConnection may have already replaced readSource/connection.
+                guard self.connectionGeneration == gen else {
+                    print("[FilePicker] stale dispatch source cancelled (gen \(gen), current \(self.connectionGeneration))")
+                    return
+                }
+                print("[FilePicker] dispatch source cancelled")
+                self.readSource = nil
+                self.connection = nil
+            }
+
+            source.resume()
+            self.readSource = source
         }
 
-        source.setCancelHandler { [weak self] in
-            print("[FilePicker] dispatch source cancelled")
-            self?.readSource = nil
-            self?.connection = nil
+        if Thread.isMainThread {
+            setup()
+        } else {
+            DispatchQueue.main.async(execute: setup)
         }
-
-        source.resume()
-        readSource = source
     }
 
     /// Process complete newline-delimited JSON messages from the receive buffer.

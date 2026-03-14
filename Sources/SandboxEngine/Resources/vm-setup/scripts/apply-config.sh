@@ -98,8 +98,6 @@ if [ "$WEBCAM" != "1" ] && [ "$MICROPHONE" != "1" ]; then
 fi
 if [ -n "$EXTENSIONS" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --load-extension=$EXTENSIONS"
-    # Only allow our extensions, disable any others
-    EXTRA_FLAGS="$EXTRA_FLAGS --disable-extensions-except=$EXTENSIONS"
 fi
 
 [ -n "$PROFILE_DIR" ] && \
