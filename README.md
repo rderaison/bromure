@@ -10,25 +10,25 @@
 
 ---
 
-## What is Bromure?
+## Your browser is the biggest hole in your Mac
 
-Bromure is a native macOS app that runs every browser session inside a lightweight, disposable Linux virtual machine using Apple's [Virtualization.framework](https://developer.apple.com/documentation/virtualization). By default, when you close the window, the VM is destroyed -- cookies, history, malware, trackers, all of it. Gone. Profiles that need continuity can opt in to persistent storage, but the default is zero trace.
+Every link you click, every page you load, every ad that renders -- it all runs code on your machine. Ransomware encrypts your files through a browser tab. Drive-by downloads install malware you never asked for. Credential-stealing scripts read your clipboard. A single zero-day exploit can hand an attacker your documents, your photos, your Keychain. And when it's over, private browsing mode can't erase what was never contained in the first place.
+
+Traditional browsers try to protect you with layers of sandboxing -- but the sandbox shares an OS, a filesystem, and a kernel with everything you care about.
+
+## Bromure throws the whole OS away
+
+Bromure is a native macOS app that runs every browser session inside a lightweight, disposable Linux virtual machine using Apple's [Virtualization.framework](https://developer.apple.com/documentation/virtualization). The browser and your Mac don't share an operating system, a filesystem, or even a kernel. When you close the window, the VM is destroyed -- cookies, history, malware, trackers, all of it. Gone.
 
 <p align="center">
-  <img src="Resources/screenshot.png" width="720" alt="Bromure main window and browser">
+  <img src="Resources/screenshot.jpg" width="720" alt="Bromure main window and browser">
 </p>
 
-## Why a VM Changes Everything
-
-This isn't browser-level sandboxing or a private browsing mode. Bromure runs a complete, separate operating system for every browser window. That distinction matters:
-
-- **Ransomware can't escape.** If a malicious website or download tries to encrypt your files, it can only see the VM's temporary filesystem -- your Mac's documents, photos, and drives are completely unreachable. Close the window and the ransomware is gone, along with the entire OS it was running on. No cleanup, no decryption keys, no ransom.
-- **Drive-by downloads are harmless.** Exploit kits that silently install malware through browser vulnerabilities are trapped inside a VM that gets destroyed. They never touch your real system.
-- **Credential theft is contained.** Keyloggers, clipboard hijackers, and screen capture malware running inside the VM can't see anything outside of it -- not your other apps, not your password manager, not your macOS Keychain.
-- **Zero-day exploits have nowhere to go.** Even if an attacker chains a browser zero-day with an OS-level exploit, they've compromised a throwaway Linux VM with no personal data, no network access to your other devices (with LAN isolation on), and no way to persist -- because the VM won't exist in a few minutes.
-- **No forensic residue.** Unlike a regular browser, there's no cache, no DNS history, no temp files left on your Mac's disk. The VM's entire filesystem lives in a temporary disk image that's deleted on close.
-
-Traditional browsers try to protect you with layers of sandboxing inside the same operating system your files live on. Bromure eliminates the problem entirely: the browser and your Mac don't share an OS, a filesystem, or even a kernel.
+- **Ransomware can't escape.** It can only see the VM's temporary filesystem. Close the window and the ransomware is gone, along with the entire OS it was running on. No cleanup, no decryption keys, no ransom.
+- **Drive-by downloads are harmless.** Exploit kits are trapped inside a VM that gets destroyed. They never touch your real system.
+- **Credential theft is contained.** Keyloggers, clipboard hijackers, and screen capture malware can't see anything outside the VM -- not your other apps, not your password manager, not your macOS Keychain.
+- **Zero-day exploits have nowhere to go.** Even a chained browser + OS exploit only compromises a throwaway VM with no personal data and no way to persist.
+- **No forensic residue.** No cache, no DNS history, no temp files on your Mac's disk. The VM's filesystem is deleted on close.
 
 ## Instant Launch
 
@@ -38,18 +38,19 @@ Add Bromure to your Login Items and a warm VM is always ready when you need it.
 
 ## Profiles
 
-<!-- TODO: screenshot of main window with profile list -->
+Create named profiles for different contexts -- Work, Personal, Banking, Shopping, Research -- each with its own color-coded window border so you can tell them apart at a glance.
 
-Create named profiles for different contexts: Work, Personal, Banking, Shopping, Research. Each profile gets its own color-coded window border so you can tell them apart at a glance.
+<p align="center">
+  <img src="Resources/profile_work.jpg" width="480" alt="Work profile on Salesforce">
+  &nbsp;&nbsp;
+  <img src="Resources/profile_fun.jpg" width="480" alt="Play profile booking a vacation">
+</p>
 
-Every profile carries its own independent settings:
+Every profile carries its own independent settings -- home page, VPN, ad blocking, clipboard access, network rules, media devices -- so your banking profile can be locked down tight while your personal profile lets you copy-paste and download freely.
 
-- **Home page** -- each profile opens to its own start page
-- **Persistent storage** -- optionally keep bookmarks, history, and cookies between sessions (off by default)
-- **Encryption** -- persistent profiles can encrypt their data with LUKS, with the key stored in your macOS Keychain
-- **Security posture** -- different ad blocking, VPN, clipboard, and network rules per profile
-
-Profiles sync across your Macs via iCloud, so your setup follows you.
+- **Persistent storage** -- optionally keep bookmarks, history, and cookies between sessions, with LUKS encryption and keys stored in your macOS Keychain
+- **Language** -- set a different browser language per profile (English, French, German, Spanish, Portuguese, Japanese, Chinese, and more)
+- **iCloud sync** -- profiles sync across your Macs, so your setup follows you
 
 ## Built-in VPN
 
@@ -59,59 +60,64 @@ WARP runs entirely inside the disposable VM, so Cloudflare never sees your host 
 
 ## Network-Level Ad Blocking
 
-Bromure blocks ads and trackers at the network layer using a built-in Pi-hole DNS sinkhole and Squid proxy. This is more effective than browser extensions -- ads are blocked before they even reach the browser, making pages load faster and eliminating tracking scripts.
+Bromure blocks ads and trackers at the network layer using a built-in DNS sinkhole and Squid proxy. This is more effective than browser extensions -- ads are blocked before they even reach the browser, making pages load faster and eliminating tracking scripts.
 
 ## Privacy & Safety
 
-<!-- TODO: screenshot of Privacy & Safety settings panel -->
+<p align="center">
+  <img src="Resources/prefs_privacy.jpg" width="480" alt="Privacy & Safety settings">
+  &nbsp;&nbsp;
+  <img src="Resources/phishing_warning.jpg" width="480" alt="Phishing warning in action">
+</p>
 
 Each profile has granular privacy controls:
 
-- **Shared Clipboard** -- allow or block copy-paste between your Mac and the browser. Off by default.
-- **File Upload / Download** -- independently control whether the browser can send files to websites or save files to your Mac.
-- **VirusTotal Scanning** -- automatically scan every downloaded file for malware before it reaches your Mac. Optionally block files flagged as threats or files that couldn't be scanned.
 - **Malware Site Blocking** -- block known malicious websites using Cloudflare's security DNS.
-- **Phishing Warnings** (Beta) -- get alerted when you're about to enter a password on a suspicious website.
+- **Phishing Warnings** (Beta) -- get alerted when you're about to enter a password on a website that looks suspicious or fake.
 - **Cross-Profile Link Sharing** -- right-click any link to send it to a different Bromure profile.
+
+## File Transfer & Malware Scanning
+
+<p align="center">
+  <img src="Resources/prefs_file_transfer.jpg" width="480" alt="File Transfer settings with VirusTotal">
+</p>
+
+Upload and download are controlled independently per profile. When downloads are enabled, you can plug in your [VirusTotal](https://www.virustotal.com/) API key to automatically scan every file for malware before it reaches your Mac -- and optionally block anything flagged as a threat.
 
 ## Network Isolation
 
 Lock down what the browser can reach on your network:
 
 - **LAN Isolation** -- prevent the browser from accessing devices on your local network (printers, NAS, internal servers) while keeping full internet access.
-- **Port Restriction** -- whitelist specific outgoing ports to control exactly which services the browser can connect to.
+- **Port Restriction** -- whitelist specific outgoing ports (e.g. 80, 443) to control exactly which services the browser can connect to.
 
 ## Media
 
-<!-- TODO: screenshot of Media settings panel with device selection -->
-
 Use Bromure for video calls and meetings:
 
-- **Webcam** -- share your Mac's camera with websites inside the VM.
+- **Webcam** -- share your Mac's camera with websites inside the VM, with quality selection and live effects.
 - **Microphone** -- share your Mac's microphone for calls and voice input.
 - **Speaker Selection** -- choose which audio output device each profile uses.
-- **Per-device assignment** -- assign specific cameras, mics, and speakers to different profiles.
 - **Volume control** -- independent volume slider per profile.
 
 ## Enterprise
 
-- **Custom Root CA Certificates** -- install your organization's internal certificates so the browser trusts internal websites and services. Supports PEM, DER, CRT, and CER formats.
+- **HTTP Proxy** -- route traffic through your organization's proxy server with authentication support.
+- **Custom Root CA Certificates** -- install internal certificates so the browser trusts your corporate websites and services. Supports PEM, DER, CRT, and CER formats.
 - **Network Controls** -- LAN isolation and port restriction for compliance with corporate security policies.
 - **Encrypted Persistent Storage** -- LUKS encryption with keys stored in macOS Keychain for profiles that need to retain data.
 
 ## Hardware & Display
 
-<!-- TODO: screenshot of app-wide Settings window -->
-
 Fine-tune how the VM uses your Mac's resources:
 
-- **Memory** -- 1 GB, 2 GB, 3 GB, 4 GB, 8 GB, or 16 GB per session
+- **Memory** -- 1 GB to 16 GB per session
 - **CPU Cores** -- automatic scaling based on memory, or manual override
 - **GPU Acceleration** -- hardware-accelerated rendering for faster page loads
 - **WebGL** -- enable 3D graphics for games, maps, and data visualizations
 - **Display Scaling** -- 1x or 2x for Retina displays
 - **Dark Mode** -- follow system appearance, or force light/dark
-- **28+ Keyboard Layouts** -- QWERTY, AZERTY, QWERTZ, Dvorak, Colemak, and international layouts including Japanese, Korean, Arabic, Hebrew, and more
+- **29 Keyboard Layouts** -- QWERTY, AZERTY, QWERTZ, Dvorak, Colemak, and international layouts including Japanese, Korean, Arabic, Hebrew, and more
 - **Natural Scrolling** -- matches your macOS trackpad preference
 - **Command Key Swap** -- use Cmd instead of Ctrl for familiar macOS shortcuts
 
@@ -148,6 +154,10 @@ open .build/arm64-apple-macosx/release/bromure.app
 
 No Docker. No containers. Full hardware-level virtualization via Apple's Virtualization.framework.
 
+## Documentation
+
+See [Settings Reference](SETTINGS.md) for a detailed description of every settings panel.
+
 ## FAQ
 
 **The first browser window takes a long time to open. Will it always be this slow?**
@@ -168,7 +178,7 @@ Yes. Open the profile settings and turn on "Retain Browsing Data" under General.
 
 **Can I upload or download files?**
 
-Yes. File upload and download are controlled independently per profile under Privacy & Safety. When downloads are enabled, you can optionally enable VirusTotal scanning to check files for malware before they reach your Mac.
+Yes. File upload and download are controlled independently per profile under File Transfer. When downloads are enabled, you can optionally enable VirusTotal scanning to check files for malware before they reach your Mac.
 
 **Does each VM session require a lot of disk space?**
 
