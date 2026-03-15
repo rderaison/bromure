@@ -216,11 +216,11 @@ else
     sed -i '/^dns_nameservers/d' /etc/squid/squid.conf
 fi
 
-# Start direct SOCKS5 proxy on :40000 + squid through proxychains.
-# When WARP connects, warp-agent swaps direct-socks for warp-svc on :40000.
+# Start routing SOCKS5 proxy on :40001 + squid through proxychains.
+# routing-socks switches between warp-svc (:40000) and direct per-connection.
 # Squid is never restarted.
 if [ -z "$PROXY_HOST" ] || [ -z "$PROXY_PORT" ]; then
-    /usr/local/bin/direct-socks.py &
+    /usr/local/bin/routing-socks.py &
     proxychains4 -q -f /etc/proxychains/proxychains.conf squid -N -f /etc/squid/squid.conf &
 fi
 

@@ -244,11 +244,32 @@ def configure_services(cfg, ca_count):
     # PIDs we don't need to wait for before Chrome starts
     fire_and_forget = []
 
-    # WARP auto-connect: write a marker so the warp-agent enables WARP
-    # after it connects to the host.  The agent handles the full lifecycle
-    # (dbus, warp-svc, registration, connect, squid restart).
-    if cfg.get("warpAutoConnect"):
-        open("/tmp/bromure/warp-auto-connect", "w").close()
+    # WARP: write markers for warp-agent.  When WARP is enabled, we start
+    # dbus + warp-svc now so the VPN can connect during boot.  The
+    # warp-agent finishes setup (registration, mode, port) and connects.
+    # Routing is controlled by the /tmp/bromure/warp-active flag file —
+    # toggling is instant with no process swap.
+    if cfg.get("enableWarp"):
+        open("/tmp/bromure/warp-boot-setup", "w").close()
+        if cfg.get("warpAutoConnect"):
+            open("/tmp/bromure/warp-auto-connect", "w").close()
+
+        # Start dbus (required by warp-svc)
+        rc, _ = run("pgrep -x dbus-daemon")
+        if rc != 0:
+            run("rm -f /run/dbus/dbus.pid")
+            run("/usr/bin/dbus-daemon --system")
+
+        # Start warp-svc early so it can boot while Chrome starts
+        if os.path.isfile("/bin/warp-svc"):
+            warp_env = dict(os.environ, LD_PRELOAD="/usr/lib/libresolv_stub.so",
+                            LANG="C", LC_ALL="C", LANGUAGE="C")
+            svc_log = open("/tmp/bromure/warp-svc.log", "a")
+            subprocess.Popen(
+                ["/bin/warp-svc"],
+                env=warp_env,
+                stdout=svc_log,
+                stderr=svc_log)
 
     # Webcam setup (background)
     if cfg.get("webcam"):
@@ -283,9 +304,8 @@ def configure_services(cfg, ca_count):
 
     # DNS/proxy (synchronous — needed before Chrome)
     #
-    # Squid always runs (unless a custom external proxy is configured) so
-    # that the WARP agent can toggle WARP at runtime by restarting squid
-    # with or without proxychains.
+    # Squid always runs (unless a custom external proxy is configured).
+    # It routes through proxychains → :40001 (routing-socks).
     has_custom_proxy = bool(cfg.get("proxyHost"))
 
     if cfg.get("blockMalware"):
@@ -303,12 +323,13 @@ def configure_services(cfg, ca_count):
     else:
         run("sed -i '/^dns_nameservers/d' /etc/squid/squid.conf")
 
-    # Start the direct SOCKS5 proxy on :40000 (transparent forwarding).
-    # When WARP connects, warp-agent stops this and starts warp-svc
-    # on the same port.  Squid always goes through proxychains → :40000.
+    # Start routing-socks.py on :40001 — proxychains always points here.
+    # It switches per-connection between warp-svc (:40000) and direct
+    # based on /tmp/bromure/warp-active flag.  Without WARP, the flag
+    # never exists so all connections go direct.
     if not has_custom_proxy:
         subprocess.Popen(
-            ["/usr/local/bin/direct-socks.py"],
+            ["/usr/local/bin/routing-socks.py"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # Start squid through proxychains (always, never restarted).
