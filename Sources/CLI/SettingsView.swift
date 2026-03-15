@@ -428,7 +428,7 @@ struct SettingsView: View {
 
     private var automationView: some View {
         VStack(alignment: .leading, spacing: 20) {
-            sectionHeader("Automation", subtitle: "Remote browser control via Chrome DevTools Protocol")
+            sectionHeader("Automation", subtitle: "Remote browser control via HTTP API, CDP, and MCP")
 
             settingToggle(
                 "Enable Automation",
@@ -443,7 +443,10 @@ struct SettingsView: View {
                     Text("API Port").font(.headline)
                     Text("The port for the automation API server. Tools connect here to list profiles, create sessions, and get CDP endpoints.")
                         .settingDescription()
-                    TextField("Port", value: $automationPort, format: .number.grouping(.never))
+                    TextField("Port", text: Binding(
+                        get: { String(automationPort) },
+                        set: { automationPort = Int($0) ?? automationPort }
+                    ))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 100)
                 }
@@ -460,6 +463,18 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                     .frame(width: 280)
+
+                    if automationBindAddress == "0.0.0.0" {
+                        Label {
+                            Text("Binding to all interfaces exposes the automation API to your entire network. Anyone on your LAN can create browser sessions, execute JavaScript, and take screenshots. Only use this on trusted networks.")
+                                .font(.callout)
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.yellow)
+                        }
+                        .padding(10)
+                        .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                    }
                 }
 
                 settingsDivider
@@ -493,6 +508,38 @@ struct SettingsView: View {
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+                }
+
+                settingsDivider
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("MCP Server").font(.headline)
+                    Text("Bromure includes a built-in MCP server for Claude Code, Openclaws, and other MCP-compatible AI tools. Add this to your MCP configuration:")
+                        .settingDescription()
+
+                    let bromurePath = Bundle.main.executablePath ?? "/Applications/Bromure.app/Contents/MacOS/bromure"
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(".mcp.json").font(.callout.bold())
+                        Text("""
+                        {
+                          "mcpServers": {
+                            "bromure": {
+                              "command": "\(bromurePath)",
+                              "args": ["mcp"]
+                            }
+                          }
+                        }
+                        """)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+
+                    Text("Add --debug to the args to include VM shell access and app state tools.")
+                        .settingDescription()
                 }
             }
 

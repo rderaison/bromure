@@ -31,6 +31,7 @@ CHROME_URL=
 SWAP_CMD_CTRL=
 CLIPBOARD=
 AUTOMATION=
+DEBUG_SHELL=
 MICROPHONE=
 AUDIO=
 AUDIO_VOLUME=
@@ -61,6 +62,7 @@ fi
 [ "$SWAP_CMD_CTRL" = "1" ] && setxkbmap -option ctrl:swap_lwin_lctl,ctrl:swap_rctl
 [ "$MICROPHONE" = "1" ] && pactl load-module module-alsa-source device=hw:0,1 source_name=virtio_mic source_properties=device.description=Microphone 2>/dev/null &
 [ "$AUTOMATION" = "1" ] && /usr/local/bin/cdp-agent.py &
+[ "$DEBUG_SHELL" = "1" ] && /usr/local/bin/shell-agent.py &
 echo "xinitrc: EXTRA_FLAGS=$EXTRA_FLAGS CHROME_URL=$CHROME_URL SWAP_CMD_CTRL=$SWAP_CMD_CTRL" > /dev/hvc0
 export LIBGL_ALWAYS_SOFTWARE=1
 

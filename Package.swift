@@ -17,7 +17,7 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "Sources/CLI",
-            exclude: ["Info.plist", "SafariSandbox.entitlements"]
+            exclude: ["Info.plist", "SafariSandbox.entitlements", "Bromure.sdef"]
         ),
         .systemLibrary(
             name: "CVmnet",

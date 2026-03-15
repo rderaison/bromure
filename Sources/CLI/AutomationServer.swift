@@ -24,6 +24,10 @@ final class AutomationServer {
     let port: UInt16
     let bindAddress: String
 
+    /// Whether debug endpoints (/exec, /app/*) are enabled.
+    /// Gated on BROMURE_DEBUG_CLAUDE environment variable.
+    let debugEnabled: Bool
+
     /// Callbacks into the app delegate for session management.
     var onCreateSession: ((_ profileName: String?, _ profileID: String?, _ url: String?) async -> AutomationSessionInfo?)?
     var onDestroySession: ((_ sessionID: String) async -> Bool)?
@@ -33,9 +37,16 @@ final class AutomationServer {
     /// Callback to get a vsock connection for a session's CDP.
     var onGetCDPConnection: ((_ sessionID: String) -> CDPProxyConnection?)?
 
+    /// Callback to get a vsock connection for a session's shell (debug only).
+    var onGetShellConnection: ((_ sessionID: String) -> ShellProxyConnection?)?
+
+    /// Callback to get app state (debug only).
+    var onGetAppState: (() -> [String: Any])?
+
     init(port: UInt16 = 9222, bindAddress: String = "127.0.0.1") {
         self.port = port
         self.bindAddress = bindAddress
+        self.debugEnabled = ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil
     }
 
     func start() {
@@ -230,6 +241,56 @@ final class AutomationServer {
             let list = profiles.map { $0.toDict() }
             sendResponse(fd: fd, status: 200, body: ["profiles": list])
 
+        // Debug: execute shell command in a session's VM
+        case ("POST", _) where path.hasSuffix("/exec") && path.hasPrefix("/sessions/"):
+            guard debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Debug endpoints require BROMURE_DEBUG_CLAUDE"])
+                return
+            }
+            let middle = path.dropFirst("/sessions/".count).dropLast("/exec".count)
+            let sessionID = String(middle)
+            let command = bodyJSON["command"] as? String ?? ""
+            let timeout = bodyJSON["timeout"] as? Int ?? 30
+
+            if command.isEmpty {
+                sendResponse(fd: fd, status: 400, body: ["error": "Missing 'command' field"])
+                return
+            }
+
+            // Get shell connection (wait up to 10s for pool to fill)
+            var shellConn: ShellProxyConnection?
+            for _ in 0..<100 {
+                shellConn = DispatchQueue.main.sync {
+                    self.onGetShellConnection?(sessionID)
+                }
+                if shellConn != nil { break }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            guard let conn = shellConn else {
+                sendResponse(fd: fd, status: 502, body: ["error": "No shell connection available for session \(sessionID) after 10s"])
+                return
+            }
+
+            if let result = Self.executeShellCommand(fd: conn.fd, command: command, timeout: timeout) {
+                sendResponse(fd: fd, status: 200, body: [
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "exitCode": result.exitCode,
+                ])
+            } else {
+                sendResponse(fd: fd, status: 502, body: ["error": "Shell command execution failed"])
+            }
+            _ = conn.conn
+
+        // Debug: app state
+        case ("GET", "/app/state"):
+            guard debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Debug endpoints require BROMURE_DEBUG_CLAUDE"])
+                return
+            }
+            let state = DispatchQueue.main.sync { self.onGetAppState?() ?? [:] }
+            sendResponse(fd: fd, status: 200, body: state)
+
         default:
             sendResponse(fd: fd, status: 404, body: ["error": "Not found"])
         }
@@ -330,6 +391,54 @@ final class AutomationServer {
         }
     }
 
+    // MARK: - Shell execution
+
+    /// Execute a shell command over a vsock connection using the shell-agent protocol.
+    /// Blocking I/O — call from a background queue.
+    private static func executeShellCommand(fd: Int32, command: String, timeout: Int) -> ShellExecResult? {
+        let request: [String: Any] = ["cmd": command, "timeout": timeout]
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: request) else { return nil }
+
+        // Send [u32be len][json]
+        var length = UInt32(jsonData.count).bigEndian
+        let lenOK = withUnsafeBytes(of: &length) { buf in
+            writeAll(fd: fd, buf: buf.baseAddress!, count: 4)
+        }
+        guard lenOK else { return nil }
+
+        let dataOK = jsonData.withUnsafeBytes { buf in
+            writeAll(fd: fd, buf: buf.baseAddress!, count: buf.count)
+        }
+        guard dataOK else { return nil }
+
+        // Read response [u32be len][json]
+        var respLenBuf = [UInt8](repeating: 0, count: 4)
+        guard readAll(fd: fd, buf: &respLenBuf, count: 4) else { return nil }
+        let respLen = respLenBuf.withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian
+        guard respLen > 0, respLen < 100 * 1024 * 1024 else { return nil }
+
+        var respBuf = [UInt8](repeating: 0, count: Int(respLen))
+        guard readAll(fd: fd, buf: &respBuf, count: Int(respLen)) else { return nil }
+
+        guard let json = try? JSONSerialization.jsonObject(with: Data(respBuf)) as? [String: Any] else { return nil }
+
+        return ShellExecResult(
+            stdout: json["stdout"] as? String ?? "",
+            stderr: json["stderr"] as? String ?? "",
+            exitCode: json["exit_code"] as? Int ?? -1
+        )
+    }
+
+    private static func readAll(fd: Int32, buf: UnsafeMutablePointer<UInt8>, count: Int) -> Bool {
+        var read = 0
+        while read < count {
+            let n = Darwin.read(fd, buf + read, count - read)
+            if n <= 0 { return false }
+            read += n
+        }
+        return true
+    }
+
     // MARK: - Helpers
 
     private static func writeAll(fd: Int32, buf: UnsafeRawPointer, count: Int) -> Bool {
@@ -348,6 +457,7 @@ final class AutomationServer {
         case 200: statusText = "OK"
         case 201: statusText = "Created"
         case 400: statusText = "Bad Request"
+        case 403: statusText = "Forbidden"
         case 404: statusText = "Not Found"
         case 500: statusText = "Internal Server Error"
         case 502: statusText = "Bad Gateway"
@@ -396,6 +506,19 @@ struct AutomationSessionInfo {
         if let profileID { d["profileId"] = profileID }
         return d
     }
+}
+
+/// A vsock connection ready to proxy shell commands (debug only).
+struct ShellProxyConnection {
+    let fd: Int32
+    /// Keep alive to prevent VZ from closing the file descriptor.
+    let conn: Any
+}
+
+struct ShellExecResult {
+    let stdout: String
+    let stderr: String
+    let exitCode: Int
 }
 
 struct AutomationProfileInfo {

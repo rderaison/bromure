@@ -207,6 +207,9 @@ public struct ProfileSettings: Codable, Equatable {
     // Locale
     public var locale: String?  // nil = auto-detect from OS
 
+    // Automation
+    public var allowAutomation: Bool = false
+
     // Advanced
     public var persistent: Bool = false
     public var encryptOnDisk: Bool = false
@@ -252,6 +255,7 @@ public struct ProfileSettings: Codable, Equatable {
         webcamEffects = try c.decodeIfPresent(WebcamEffects.self, forKey: .webcamEffects) ?? defaults.webcamEffects
         rootCAs = try c.decodeIfPresent([CustomRootCA].self, forKey: .rootCAs) ?? defaults.rootCAs
         locale = try c.decodeIfPresent(String.self, forKey: .locale)
+        allowAutomation = try c.decodeIfPresent(Bool.self, forKey: .allowAutomation) ?? defaults.allowAutomation
         persistent = try c.decodeIfPresent(Bool.self, forKey: .persistent) ?? defaults.persistent
         encryptOnDisk = try c.decodeIfPresent(Bool.self, forKey: .encryptOnDisk) ?? defaults.encryptOnDisk
     }

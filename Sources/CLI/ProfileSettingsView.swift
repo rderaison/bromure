@@ -225,6 +225,8 @@ struct ProfileSettingsView: View {
 
     // MARK: - General
 
+    @AppStorage("automation.enabled") private var automationEnabled = false
+
     private var generalView: some View {
         VStack(alignment: .leading, spacing: 20) {
             sectionHeader("General", subtitle: "Basic profile settings")
@@ -238,19 +240,26 @@ struct ProfileSettingsView: View {
 
             settingsDivider
 
-            // Comments
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Comments").font(.headline)
-                Text("A short note about this profile. Shown when you hover over it in the profile list.")
-                    .settingDescription()
-                TextEditor(text: $draft.comments)
-                    .font(.body)
-                    .frame(height: 56)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5)
-                            .stroke(.quaternary, lineWidth: 1)
-                    )
+            // Retain browsing data
+            settingToggle(
+                "Retain Browsing Data",
+                description: "Keep your bookmarks, history, cookies, and passwords between sessions. When turned off, everything is erased each time you close the browser.",
+                isOn: $draft.settings.persistent
+            )
+            .onChange(of: draft.settings.persistent) { _, newValue in
+                if !newValue {
+                    draft.settings.encryptOnDisk = false
+                    draft.settings.phishingWarning = false
+                }
             }
+
+            settingsDivider
+
+            settingToggle(
+                "Shared Clipboard",
+                description: "Copy and paste text and images between your Mac and this browser. When turned off, the browser\u{2019}s clipboard is completely isolated.",
+                isOn: $draft.settings.enableClipboardSharing
+            )
 
             settingsDivider
 
@@ -314,26 +323,42 @@ struct ProfileSettingsView: View {
 
             settingsDivider
 
-            // Retain browsing data
-            settingToggle(
-                "Retain Browsing Data",
-                description: "Keep your bookmarks, history, cookies, and passwords between sessions. When turned off, everything is erased each time you close the browser.",
-                isOn: $draft.settings.persistent
-            )
-            .onChange(of: draft.settings.persistent) { _, newValue in
-                if !newValue {
-                    draft.settings.encryptOnDisk = false
-                    draft.settings.phishingWarning = false
+            // Allow Automation
+            VStack(alignment: .leading, spacing: 6) {
+                settingToggle(
+                    "Allow Automation",
+                    description: "Let external tools (Claude Code, Puppeteer, Playwright) create browser sessions and control this profile remotely. When turned off, this profile is hidden from the automation API.",
+                    isOn: $draft.settings.allowAutomation
+                )
+
+                if draft.settings.allowAutomation && !automationEnabled {
+                    Label {
+                        Text("The automation server is currently disabled. Enable it in Bromure \u{2192} Settings \u{2192} Automation.")
+                            .font(.callout)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.yellow)
+                    }
+                    .padding(10)
+                    .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
                 }
             }
 
             settingsDivider
 
-            settingToggle(
-                "Shared Clipboard",
-                description: "Copy and paste text and images between your Mac and this browser. When turned off, the browser\u{2019}s clipboard is completely isolated.",
-                isOn: $draft.settings.enableClipboardSharing
-            )
+            // Comments (at the bottom)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Comments").font(.headline)
+                Text("A short note about this profile. Shown when you hover over it in the profile list.")
+                    .settingDescription()
+                TextEditor(text: $draft.comments)
+                    .font(.body)
+                    .frame(height: 56)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(.quaternary, lineWidth: 1)
+                    )
+            }
         }
     }
 

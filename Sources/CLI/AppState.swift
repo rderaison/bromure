@@ -77,6 +77,7 @@ final class AppState: @unchecked Sendable {
                 settings.enableAudio = true
                 settings.enableClipboardSharing = true
                 settings.enableLinkSender = true
+                settings.allowAutomation = true
                 let defaultProfile = self.profileManager.createProfile(
                     name: "Private Browsing",
                     comments: "Fully stateless browsing. Nothing is saved between sessions \u{2014} no cookies, no history, no cache. Only the clipboard is shared with your Mac.",

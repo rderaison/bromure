@@ -1,12 +1,12 @@
 {
   "mcpServers": {
     "bromure": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["mcp-server/server.js"],
-      "env": {
-        "BROMURE_API_URL": "http://127.0.0.1:9222"
-      }
+      "command": ".build/arm64-apple-macosx/release/Bromure.app/Contents/MacOS/bromure",
+      "args": ["mcp"]
+    },
+    "bromure-debug": {
+      "command": ".build/arm64-apple-macosx/release/Bromure.app/Contents/MacOS/bromure",
+      "args": ["mcp", "--debug"]
     }
   }
 }

@@ -89,6 +89,7 @@
 - [ ] Share Webcam OFF (default) — `navigator.mediaDevices.enumerateDevices()` returns no video inputs
 - [ ] Share Webcam ON — verify camera feed visible on a test page (e.g., webcamtests.com)
 - [ ] Camera device picker — select specific camera, verify correct feed
+- [ ] Webcam quality picker — Low / Medium / High / Ultra change capture resolution
 - [ ] Webcam Effects button shows blue dot when any effect configured
 
 ### 5.3 Webcam Effects
@@ -98,6 +99,8 @@
 - [ ] Logo — pick an image file, verify it renders in overlay
 - [ ] Font family — change font, verify overlay text updates
 - [ ] Font size slider — verify text size changes (2.5%–8%)
+- [ ] Face swap — enable, pick a reference image, verify face replaced in video feed
+- [ ] Face swap banner — when active, visible "Anonymized" overlay on video feed
 
 ### 5.4 Microphone
 - [ ] Share Microphone OFF (default) — no audio input devices in guest
@@ -123,6 +126,7 @@
 - [ ] File Upload ON — drag file onto VM window: drop zone highlights, file delivered to guest
 - [ ] Verify drag hover feedback (highlight dropzones in guest Chromium)
 - [ ] Upload via file drawer sidebar
+- [ ] Drag-and-drop to web dropzone — navigate to images.google.com, drag an image file from macOS onto the search dropzone, verify file is uploaded and reverse-image search runs
 
 ### 7.2 Download
 - [ ] File Download OFF (default) — downloads blocked by Chrome policy
@@ -154,11 +158,21 @@
 - [ ] Enable with persistence ON — Chromium extension loaded, warns on suspicious password entry
 - [ ] Test with a domain NOT in Tranco top-10k — verify warning shown
 - [ ] Test with a domain IN Tranco top-10k — no warning
+- [ ] Navigate to https://travel.secl.io — verify phishing warning banner appears
+- [ ] Click "I trust this site" on https://travel.secl.io — verify warning is dismissed and does NOT reappear on subsequent visits to the same site
 
-### 8.3 Send Link to Other Session
+### 8.3 Block Screen Capture
+- [ ] Block Screen Capture OFF (default) — browser window visible in screenshots and screen recordings
+- [ ] Block Screen Capture ON — browser window hidden from macOS screenshots (`Cmd+Shift+3/4`), screen recordings (QuickTime, OBS), and screen sharing apps (Zoom, Teams)
+- [ ] Verify `window.sharingType = .none` is set on the NSWindow when enabled
+- [ ] Verify the window content appears as a black rectangle in screen captures
+- [ ] Toggle does not require a restart — takes effect on next session
+
+### 8.4 Send Link to Other Session
 - [ ] Toggle OFF (default) — no "Send to..." in right-click menu
 - [ ] Toggle ON — right-click a link → "Send to [Profile Name]" appears
 - [ ] Send link — verify it opens in the target profile's browser session
+- [ ] Cross-session link delivery — open two sessions (A and B) with link sender enabled, right-click a link in session A and send to session B, verify the URL opens in session B's Chromium instance
 
 ---
 
@@ -183,9 +197,14 @@
 
 ### 10.1 Cloudflare WARP
 - [ ] WARP OFF (default)
+- [ ] WARP OFF — verify `warp-svc` is NOT running in the VM
 - [ ] Enable WARP first time — EULA dialog appears, must accept to proceed
 - [ ] Decline EULA — WARP stays OFF
 - [ ] Accept EULA — WARP activates, verify `curl ifconfig.me` shows Cloudflare IP
+- [ ] WARP ON — verify `warp-svc` is running in the VM
+- [ ] Connect on Startup ON — verify WARP auto-connects when session launches
+- [ ] Connect on Startup OFF — verify WARP agent runs but does not auto-connect
+- [ ] WARP toggle is instant — 3-5s after boot, toggle WARP on, verify `ipconfig.me` shows a different IP; toggle off, verify original IP returns
 - [ ] WARP with <2GB RAM — memory warning dialog, offer to increase
 - [ ] WARP disabled when custom proxy is configured (orange warning)
 - [ ] Verify gcompat + libresolv_stub.so loaded for WARP binary
@@ -297,3 +316,36 @@ These verify that toggling one setting correctly enables/disables dependent sett
 - [ ] Rapid profile switching — no crashes or leaked VMs
 - [ ] Simultaneous settings changes while VM is running
 - [ ] Legacy profile migration (`isPersistent` → `persistent + encryptOnDisk = true`)
+
+---
+
+## 18. Automation API
+
+### 18.1 HTTP API
+- [ ] `GET /health` returns `{"status":"ok"}`
+- [ ] `GET /profiles` lists all profiles
+- [ ] `POST /sessions` creates a session with CDP endpoint
+- [ ] `GET /sessions/:id` returns session info
+- [ ] `DELETE /sessions/:id` destroys session and VM
+- [ ] CDP proxy at `/cdp/:sessionId/*` correctly forwards to Chromium DevTools
+
+### 18.2 Allow Automation Flag
+- [ ] New profiles default to `allowAutomation = false`
+- [ ] Default "Private Browsing" profile has `allowAutomation = true`
+- [ ] Profile with `allowAutomation = false` does NOT appear in `GET /profiles`
+- [ ] Profile with `allowAutomation = false` cannot be used with `POST /sessions` (even by UUID)
+- [ ] Profile with `allowAutomation = true` appears in `GET /profiles` and can create sessions
+- [ ] Toggling `allowAutomation` on a profile shows a warning if automation server is disabled
+
+### 18.3 AppleScript
+- [ ] `list profiles` returns JSON array of profiles
+- [ ] `create profile` returns UUID, profile appears in list
+- [ ] `delete profile` removes profile
+- [ ] `get/set profile setting` for all keys (homePage, gpu, audio, etc.)
+- [ ] `get/set app setting` for all keys (vm.memoryGB, automation.enabled, etc.)
+- [ ] `get app state` returns phase, poolReady, sessions
+
+### 18.4 Debug Shell (BROMURE_DEBUG_CLAUDE)
+- [ ] `POST /sessions/:id/exec` executes command in VM, returns stdout/stderr/exitCode
+- [ ] Shell agent pool replenishes after command execution
+- [ ] `GET /app/state` returns debug state info

@@ -10,7 +10,7 @@ struct Bromure: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure",
         abstract: "Run a browser in an isolated, ephemeral VM.",
-        subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self],
+        subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self],
         defaultSubcommand: Launch.self
     )
 
@@ -732,14 +732,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         server.onListProfiles = { [weak self] in
             guard let self else { return [] }
-            return self.state.profileManager.allProfiles.map { p in
-                AutomationProfileInfo(
-                    id: p.id.uuidString,
-                    name: p.name,
-                    isPersistent: p.isPersistent,
-                    color: p.color?.rawValue
-                )
-            }
+            return self.state.profileManager.allProfiles
+                .filter { $0.settings.allowAutomation }
+                .map { p in
+                    AutomationProfileInfo(
+                        id: p.id.uuidString,
+                        name: p.name,
+                        isPersistent: p.isPersistent,
+                        color: p.color?.rawValue
+                    )
+                }
         }
 
         server.onCreateSession = { [weak self] profileName, profileID, url in
@@ -757,6 +759,44 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let session = self.sessions.first(where: { $0.id.uuidString == sessionID }),
                   let conn = session.cdpBridge?.dequeueConnection() else { return nil }
             return CDPProxyConnection(fd: conn.fileDescriptor, conn: conn)
+        }
+
+        server.onGetShellConnection = { [weak self] sessionID in
+            guard let self else { return nil }
+            guard let session = self.sessions.first(where: { $0.id.uuidString == sessionID }),
+                  let conn = session.shellBridge?.dequeueConnection() else { return nil }
+            return ShellProxyConnection(fd: conn.fileDescriptor, conn: conn)
+        }
+
+        server.onGetAppState = { [weak self] in
+            guard let self else { return [:] }
+            let phase: String
+            switch self.state.phase {
+            case .checking: phase = "checking"
+            case .needsSetup: phase = "needsSetup"
+            case .initializing(let status, _): phase = "initializing: \(status)"
+            case .warmingUp: phase = "warmingUp"
+            case .ready: phase = "ready"
+            case .error(let msg): phase = "error: \(msg)"
+            }
+            let sessions = self.sessions.compactMap { s -> [String: Any]? in
+                guard !s.closing else { return nil }
+                return [
+                    "id": s.id.uuidString,
+                    "profile": s.profile?.name ?? "Anonymous",
+                    "hasCDP": s.cdpBridge != nil,
+                    "hasShell": s.shellBridge != nil,
+                ]
+            }
+            return [
+                "phase": phase,
+                "poolReady": self.state.poolReady,
+                "sessionCount": self.state.sessionCount,
+                "baseImageExists": self.state.pool?.baseImageExists ?? false,
+                "sessions": sessions,
+                "profiles": self.state.profileManager.allProfiles.map { ["id": $0.id.uuidString, "name": $0.name] },
+                "debugEnabled": true,
+            ]
         }
 
         server.start()
@@ -777,6 +817,11 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         guard let profile else {
             print("[Automation] Profile not found: \(profileName ?? profileID ?? "nil")")
+            return nil
+        }
+
+        guard profile.settings.allowAutomation else {
+            print("[Automation] Profile '\(profile.name)' does not allow automation")
             return nil
         }
 
@@ -1033,6 +1078,7 @@ final class BrowserSession {
     private var webcamBridge: WebcamBridge?
     private var warpBridge: WarpBridge?
     private(set) var cdpBridge: CDPBridge?
+    private(set) var shellBridge: ShellBridge?
     private var warpButton: NSButton?
     private var warpPulseTimer: Timer?
     private var effectsPanel: NSWindow?
@@ -1267,6 +1313,14 @@ final class BrowserSession {
         if config.enableAutomation, let dev = linkSocketDevice {
             let bridge = MainActor.assumeIsolated { CDPBridge(socketDevice: dev) }
             self.cdpBridge = bridge
+        }
+
+        // Set up shell bridge for debug command execution (BROMURE_DEBUG_CLAUDE only).
+        if config.enableAutomation,
+           ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil,
+           let dev = linkSocketDevice {
+            let bridge = MainActor.assumeIsolated { ShellBridge(socketDevice: dev) }
+            self.shellBridge = bridge
         }
 
         let helper = SessionDelegateHelper(session: self)
@@ -1570,6 +1624,8 @@ final class BrowserSession {
             webcamBridge = nil
             cdpBridge?.stop()
             cdpBridge = nil
+            shellBridge?.stop()
+            shellBridge = nil
             effectsPanel?.orderOut(nil)
             effectsPanel = nil
         }

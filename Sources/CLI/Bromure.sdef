@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<dictionary title="Bromure Scripting Dictionary">
+
+    <suite name="Standard Suite" code="????" description="Common classes and commands for all applications.">
+        <command name="quit" code="aevtquit" description="Quit the application.">
+            <cocoa class="NSQuitCommand"/>
+        </command>
+    </suite>
+
+    <suite name="Bromure Suite" code="Brmr" description="Commands for controlling Bromure browser profiles, sessions, and settings.">
+
+        <!-- ============================================================ -->
+        <!-- Profile Management                                           -->
+        <!-- ============================================================ -->
+
+        <command name="create profile" code="BrmrCrPr" description="Create a new browser profile. Returns the profile ID (UUID).">
+            <cocoa class="BromureCreateProfileCommand"/>
+            <direct-parameter type="text" description="Profile name"/>
+            <parameter name="persistent" code="pPer" type="boolean" optional="yes" description="Retain browsing data between sessions (default: false)"/>
+            <parameter name="color" code="pCol" type="text" optional="yes" description="Window border color: blue, red, green, orange, purple, pink, teal, gray"/>
+            <parameter name="home page" code="pHPg" type="text" optional="yes" description="URL loaded on session start"/>
+            <parameter name="comments" code="pCmt" type="text" optional="yes" description="Description shown on hover"/>
+            <result type="text" description="Profile ID (UUID string)"/>
+        </command>
+
+        <command name="delete profile" code="BrmrDlPr" description="Delete a profile by name or ID.">
+            <cocoa class="BromureDeleteProfileCommand"/>
+            <direct-parameter type="text" description="Profile name or UUID"/>
+        </command>
+
+        <command name="list profiles" code="BrmrLsPr" description="List all profiles as a JSON array.">
+            <cocoa class="BromureListProfilesCommand"/>
+            <result type="text" description="JSON array of profile objects"/>
+        </command>
+
+        <!-- ============================================================ -->
+        <!-- Profile Settings                                             -->
+        <!-- ============================================================ -->
+
+        <command name="get profile setting" code="BrmrGpSt" description="Read a profile setting. Keys: homePage, persistent, encryptOnDisk, clipboard, gpu, webgl, audio, audioVolume, webcam, microphone, canUpload, canDownload, blockMalware, phishingWarning, linkSender, adBlocking, warp, warpAutoConnect, isolateFromLAN, restrictPorts, allowedPorts, proxyHost, proxyPort, proxyUsername, proxyPassword, locale, color, comments.">
+            <cocoa class="BromureGetProfileSettingCommand"/>
+            <direct-parameter type="text" description="Profile name or UUID"/>
+            <parameter name="key" code="pKey" type="text" description="Setting key name"/>
+            <result type="text" description="Current value as string"/>
+        </command>
+
+        <command name="set profile setting" code="BrmrSpSt" description="Change a profile setting. Same keys as 'get profile setting'. Boolean values: true/false. Numbers: integer string.">
+            <cocoa class="BromureSetProfileSettingCommand"/>
+            <direct-parameter type="text" description="Profile name or UUID"/>
+            <parameter name="key" code="pKey" type="text" description="Setting key name"/>
+            <parameter name="to value" code="pVal" type="text" description="New value"/>
+        </command>
+
+        <!-- ============================================================ -->
+        <!-- App Settings                                                 -->
+        <!-- ============================================================ -->
+
+        <command name="get app setting" code="BrmrGaSt" description="Read a global app setting. Keys: vm.memoryGB, vm.cpuCount, vm.keyboardLayout, vm.naturalScrolling, vm.swapCmdCtrl, vm.displayScale, vm.appearance, vm.networkMode, vm.bridgedInterface, vm.dnsServers, automation.enabled, automation.port, automation.bindAddress.">
+            <cocoa class="BromureGetAppSettingCommand"/>
+            <direct-parameter type="text" description="Setting key"/>
+            <result type="text" description="Current value as string"/>
+        </command>
+
+        <command name="set app setting" code="BrmrSaSt" description="Change a global app setting. Same keys as 'get app setting'.">
+            <cocoa class="BromureSetAppSettingCommand"/>
+            <direct-parameter type="text" description="Setting key"/>
+            <parameter name="to value" code="pVal" type="text" description="New value"/>
+        </command>
+
+        <!-- ============================================================ -->
+        <!-- App State                                                    -->
+        <!-- ============================================================ -->
+
+        <command name="get app state" code="BrmrGtSt" description="Returns a JSON object with the app phase, pool status, active sessions, and profile list.">
+            <cocoa class="BromureGetAppStateCommand"/>
+            <result type="text" description="JSON object"/>
+        </command>
+
+        <command name="toggle warp" code="BrmrTgWp" description="Toggle WARP VPN on/off for a session (same as clicking the VPN button in the titlebar).">
+            <cocoa class="BromureToggleWarpCommand"/>
+            <direct-parameter type="text" description="Session ID (UUID)"/>
+        </command>
+
+    </suite>
+</dictionary>

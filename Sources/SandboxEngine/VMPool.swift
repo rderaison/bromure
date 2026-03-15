@@ -301,6 +301,9 @@ public final class VMPool {
         if config.enableMicrophone { cfg["microphone"] = true }
         if config.blockDownloads { cfg["blockDownloads"] = true }
         if config.enableAutomation { cfg["automation"] = true }
+        if ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil {
+            cfg["debugShell"] = true
+        }
         if !config.rootCAs.isEmpty { cfg["rootCAs"] = config.rootCAs }
         cfg["locale"] = config.locale
 

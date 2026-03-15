@@ -59,6 +59,12 @@ if [ -f "$ICON_FILE" ]; then
     cp "$ICON_FILE" "$RESOURCES_DIR/AppIcon.icns"
 fi
 
+# Copy AppleScript scripting definition
+SDEF_FILE="$SCRIPT_DIR/Sources/CLI/Bromure.sdef"
+if [ -f "$SDEF_FILE" ]; then
+    cp "$SDEF_FILE" "$RESOURCES_DIR/Bromure.sdef"
+fi
+
 # Copy SPM resource bundles (needed for vm-setup resources at runtime).
 for bundle in "$BUILD_DIR"/*.bundle; do
     [ -e "$bundle" ] && cp -R "$bundle" "$RESOURCES_DIR/"

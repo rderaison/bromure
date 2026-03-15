@@ -200,6 +200,8 @@ def write_chrome_env(cfg):
         lines.append("MICROPHONE=1")
     if cfg.get("automation"):
         lines.append("AUTOMATION=1")
+    if cfg.get("debugShell"):
+        lines.append("DEBUG_SHELL=1")
 
     # Locale: forward host OS locale to Chromium
     locale = cfg.get("locale", "en_US")
