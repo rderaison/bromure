@@ -880,6 +880,9 @@ final class BrowserSession {
         window.contentView = contentView
         window.contentMinSize = NSSize(width: 800, height: 600)
         window.animationBehavior = .none
+        if profile?.settings.blockScreenCapture == true {
+            window.sharingType = .none
+        }
         self.window = window
 
         // Add a sidebar toggle button in the titlebar for file transfer

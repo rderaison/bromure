@@ -177,6 +177,9 @@ public struct ProfileSettings: Codable, Equatable {
     // Security — phishing
     public var phishingWarning: Bool = false
 
+    // Security — screen capture
+    public var blockScreenCapture: Bool = false
+
     // Cross-session
     public var enableLinkSender: Bool = false
 
@@ -233,6 +236,7 @@ public struct ProfileSettings: Codable, Equatable {
         blockUnscannable = try c.decodeIfPresent(Bool.self, forKey: .blockUnscannable) ?? defaults.blockUnscannable
         blockMalwareSites = try c.decodeIfPresent(Bool.self, forKey: .blockMalwareSites) ?? defaults.blockMalwareSites
         phishingWarning = try c.decodeIfPresent(Bool.self, forKey: .phishingWarning) ?? defaults.phishingWarning
+        blockScreenCapture = try c.decodeIfPresent(Bool.self, forKey: .blockScreenCapture) ?? defaults.blockScreenCapture
         enableLinkSender = try c.decodeIfPresent(Bool.self, forKey: .enableLinkSender) ?? defaults.enableLinkSender
         isolateFromLAN = try c.decodeIfPresent(Bool.self, forKey: .isolateFromLAN) ?? defaults.isolateFromLAN
         restrictPorts = try c.decodeIfPresent(Bool.self, forKey: .restrictPorts) ?? defaults.restrictPorts

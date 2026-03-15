@@ -611,6 +611,14 @@ struct ProfileSettingsView: View {
             settingsDivider
 
             settingToggle(
+                "Block Screen Capture",
+                description: "Hides this browser window from screenshots, screen recordings, and screen sharing apps like Zoom.",
+                isOn: $draft.settings.blockScreenCapture
+            )
+
+            settingsDivider
+
+            settingToggle(
                 "Send Link to Other Session",
                 description: "Adds a right-click menu option to send a web page link to another Bromure profile.",
                 isOn: $draft.settings.enableLinkSender
