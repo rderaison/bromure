@@ -16,7 +16,16 @@ eval $(dbus-launch --sh-syntax)
 
 # Wait for the host to write chrome-ready (up to 120s).
 # The host writes it when the user selects a profile and opens a browser.
-[ -f /tmp/bromure/chrome-ready ] || inotifywait -t 120 -e create --include "chrome-ready" /tmp/bromure/ 2>/dev/null
+# Use a loop to avoid two races:
+#   1. /tmp/bromure may not exist yet (created by on-boot.sh / config-agent) —
+#      inotifywait would fail silently and xinitrc would skip the wait entirely.
+#   2. TOCTOU: chrome-ready could be created between the [ -f ] check and
+#      inotifywait starting, causing inotifywait to miss the event.
+mkdir -p /tmp/bromure
+for _attempt in $(seq 1 24); do
+    [ -f /tmp/bromure/chrome-ready ] && break
+    inotifywait -t 5 -e create --include "chrome-ready" /tmp/bromure/ 2>/dev/null || true
+done
 EXTRA_FLAGS=
 CHROME_URL=
 SWAP_CMD_CTRL=
@@ -68,6 +77,6 @@ fi
 
 LANG_FLAG=
 [ -n "$CHROME_LANG" ] && LANG_FLAG="--lang=$CHROME_LANG"
-chromium-browser --no-first-run --start-maximized --force-device-scale-factor=%%DISPLAY_SCALE%% --use-gl=angle --use-angle=gl --ignore-gpu-blocklist --enable-gpu-rasterization --enable-smooth-scrolling --enable-zero-copy --disable-vulkan $LANG_FLAG $EXTRA_FLAGS $CHROME_URL
+chromium-browser --no-first-run --start-maximized --force-device-scale-factor=%%DISPLAY_SCALE%% --use-gl=angle --use-angle=gl --ignore-gpu-blocklist --enable-gpu-rasterization --enable-smooth-scrolling --enable-zero-copy --disable-vulkan $LANG_FLAG $EXTRA_FLAGS "$CHROME_URL"
 doas poweroff
 

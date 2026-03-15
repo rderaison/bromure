@@ -1,10 +1,13 @@
 #!/usr/bin/python3 -u
-"""Minimal SOCKS5 proxy — transparent forwarding without authentication.
+"""Routing SOCKS5 proxy — switches between direct and upstream (WARP).
 
-Binds to 127.0.0.1:40000 and relays connections directly to the
-destination.  Used as the default upstream for squid (via proxychains)
-when Cloudflare WARP is not active.  When WARP is enabled, this process
-is stopped and warp-svc takes over port 40000.
+Binds to 127.0.0.1:40001.  Per-connection, checks /tmp/bromure/warp-active:
+  - If present: forwards through upstream SOCKS5 at 127.0.0.1:40000 (warp-svc)
+  - If absent:  connects directly to the destination
+
+Squid (via proxychains) always connects here.  When WARP is enabled, warp-svc
+runs on :40000 and the flag file controls routing.  Enable/disable is instant
+— just toggling the flag, no process swap or port rebind.
 
 Supports CONNECT command only (IPv4, IPv6, and domain name addressing).
 """
@@ -16,15 +19,18 @@ import socket
 import struct
 import sys
 import threading
+import time
 
 BIND_ADDR = "127.0.0.1"
-BIND_PORT = 40000
+BIND_PORT = 40001
+WARP_UPSTREAM = ("127.0.0.1", 40000)
+WARP_FLAG = "/tmp/bromure/warp-active"
 RELAY_BUF = 65536
 MAX_THREADS = 256
 MAX_CONNECTION_TIME = 86400  # 24 hours — matches VM session lifetime
 
-# Semaphore to cap concurrent connections
 _conn_semaphore = threading.Semaphore(MAX_THREADS)
+_monotonic = time.monotonic
 
 
 def relay(a, b):
@@ -38,7 +44,6 @@ def relay(a, b):
             timeout = min(remaining, 60.0)
             readable, _, _ = select.select([a, b], [], [], timeout)
             if not readable:
-                # select timed out — check if we hit the deadline
                 if _monotonic() >= deadline:
                     break
                 continue
@@ -55,11 +60,36 @@ def relay(a, b):
         b.close()
 
 
-def _monotonic():
-    return os.times()[4] if not hasattr(select, 'monotonic') else __import__('time').monotonic()
+def connect_via_upstream(atyp, addr, port):
+    """Connect to target through upstream SOCKS5 proxy (warp-svc on :40001)."""
+    upstream = socket.create_connection(WARP_UPSTREAM, timeout=10)
+    try:
+        # SOCKS5 greeting: version 5, 1 method (no auth)
+        upstream.sendall(b"\x05\x01\x00")
+        resp = upstream.recv(2)
+        if len(resp) < 2 or resp[0] != 0x05 or resp[1] != 0x00:
+            raise OSError("upstream SOCKS5 greeting rejected")
 
-# Use time.monotonic directly
-_monotonic = __import__('time').monotonic
+        # Build CONNECT request
+        req = b"\x05\x01\x00"
+        if atyp == 0x01:  # IPv4
+            req += b"\x01" + socket.inet_aton(addr) + struct.pack("!H", port)
+        elif atyp == 0x03:  # Domain
+            encoded = addr.encode("ascii")
+            req += b"\x03" + bytes([len(encoded)]) + encoded + struct.pack("!H", port)
+        elif atyp == 0x04:  # IPv6
+            req += b"\x04" + socket.inet_pton(socket.AF_INET6, addr) + struct.pack("!H", port)
+        upstream.sendall(req)
+
+        # Read response (variable length depending on address type)
+        resp = upstream.recv(256)
+        if len(resp) < 2 or resp[1] != 0x00:
+            raise OSError("upstream SOCKS5 connect refused")
+
+        return upstream
+    except:
+        upstream.close()
+        raise
 
 
 def handle_client(client):
@@ -110,9 +140,12 @@ def handle_client(client):
             client.sendall(b"\x05\x02\x00\x01" + b"\x00" * 6)
             return
 
-        # --- Connect to target ---
+        # --- Route: through WARP upstream or direct ---
         try:
-            remote = socket.create_connection((addr, port), timeout=10)
+            if os.path.exists(WARP_FLAG):
+                remote = connect_via_upstream(atyp, addr, port)
+            else:
+                remote = socket.create_connection((addr, port), timeout=10)
         except OSError:
             # Connection refused / host unreachable
             client.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)
@@ -149,7 +182,7 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((BIND_ADDR, BIND_PORT))
     srv.listen(128)
-    print(f"direct-socks: listening on {BIND_ADDR}:{BIND_PORT}", file=sys.stderr)
+    print(f"routing-socks: listening on {BIND_ADDR}:{BIND_PORT}", file=sys.stderr)
 
     while True:
         try:

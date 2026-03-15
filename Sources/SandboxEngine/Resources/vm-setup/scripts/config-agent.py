@@ -84,6 +84,11 @@ def write_custom_cas(cas):
     return len(cas)
 
 
+def sh_escape(s):
+    """Escape a string for safe use as a single-quoted shell value."""
+    return "'" + str(s).replace("'", "'\\''") + "'"
+
+
 def write_chrome_env(cfg):
     """Build and write the chrome-env file."""
     env_file = "/tmp/bromure/chrome-env"
@@ -160,9 +165,9 @@ def write_chrome_env(cfg):
         extra_flags.append(f"--disable-features={','.join(disable_features)}")
 
     if extra_flags:
-        lines.append(f'EXTRA_FLAGS="{" ".join(extra_flags)}"')
+        lines.append(f"EXTRA_FLAGS={sh_escape(' '.join(extra_flags))}")
     if not cfg.get("restoreSession"):
-        lines.append(f"CHROME_URL={cfg.get('chromeURL', 'about:blank')}")
+        lines.append(f"CHROME_URL={sh_escape(cfg.get('chromeURL', 'about:blank'))}")
     if cfg.get("swapCmdCtrl"):
         lines.append("SWAP_CMD_CTRL=1")
     if cfg.get("fileTransfer"):
@@ -172,12 +177,12 @@ def write_chrome_env(cfg):
     if cfg.get("linkSender"):
         lines.append("LINK_SENDER=1")
     if cfg.get("proxyHost"):
-        lines.append(f"PROXY_HOST={cfg['proxyHost']}")
-        lines.append(f"PROXY_PORT={cfg.get('proxyPort', 8080)}")
+        lines.append(f"PROXY_HOST={sh_escape(cfg['proxyHost'])}")
+        lines.append(f"PROXY_PORT={sh_escape(cfg.get('proxyPort', 8080))}")
         if cfg.get("proxyUsername"):
-            lines.append(f"PROXY_USERNAME={cfg['proxyUsername']}")
+            lines.append(f"PROXY_USERNAME={sh_escape(cfg['proxyUsername'])}")
         if cfg.get("proxyPassword"):
-            lines.append(f"PROXY_PASSWORD={cfg['proxyPassword']}")
+            lines.append(f"PROXY_PASSWORD={sh_escape(cfg['proxyPassword'])}")
     if cfg.get("webcam"):
         lines.append("WEBCAM=1")
         if cfg.get("webcamWidth"):
@@ -185,7 +190,7 @@ def write_chrome_env(cfg):
         if cfg.get("webcamHeight"):
             lines.append(f"WEBCAM_HEIGHT={cfg['webcamHeight']}")
     if profile_dir:
-        lines.append(f"PROFILE_DIR={profile_dir}")
+        lines.append(f"PROFILE_DIR={sh_escape(profile_dir)}")
     if cfg.get("audio"):
         lines.append("AUDIO=1")
         vol = cfg.get("audioVolume")
@@ -202,15 +207,15 @@ def write_chrome_env(cfg):
     chrome_lang = locale.replace("_", "-")
     # Strip region for base language (e.g. "en-US" -> "en")
     base_lang = locale.split("_")[0]
-    lines.append(f'CHROME_LANG="{chrome_lang}"')
-    lines.append(f'export LANG="{locale}.UTF-8"')
-    lines.append(f'export LC_ALL="{locale}.UTF-8"')
-    lines.append(f'export LANGUAGE="{base_lang}"')
+    lines.append(f"CHROME_LANG={sh_escape(chrome_lang)}")
+    lines.append(f"export LANG={sh_escape(f'{locale}.UTF-8')}")
+    lines.append(f"export LC_ALL={sh_escape(f'{locale}.UTF-8')}")
+    lines.append(f"export LANGUAGE={sh_escape(base_lang)}")
 
     # Test suite: forward TEST_* expectations to chrome-env
     for key, val in cfg.items():
         if key.startswith("TEST_"):
-            lines.append(f'{key}="{val}"')
+            lines.append(f"{key}={sh_escape(val)}")
 
     with open(env_file, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -246,11 +251,32 @@ def configure_services(cfg, ca_count):
     # PIDs we don't need to wait for before Chrome starts
     fire_and_forget = []
 
-    # WARP auto-connect: write a marker so the warp-agent enables WARP
-    # after it connects to the host.  The agent handles the full lifecycle
-    # (dbus, warp-svc, registration, connect, squid restart).
-    if cfg.get("warpAutoConnect"):
-        open("/tmp/bromure/warp-auto-connect", "w").close()
+    # WARP: write markers for warp-agent.  When WARP is enabled, we start
+    # dbus + warp-svc now so the VPN can connect during boot.  The
+    # warp-agent finishes setup (registration, mode, port) and connects.
+    # Routing is controlled by the /tmp/bromure/warp-active flag file —
+    # toggling is instant with no process swap.
+    if cfg.get("enableWarp"):
+        open("/tmp/bromure/warp-boot-setup", "w").close()
+        if cfg.get("warpAutoConnect"):
+            open("/tmp/bromure/warp-auto-connect", "w").close()
+
+        # Start dbus (required by warp-svc)
+        rc, _ = run("pgrep -x dbus-daemon")
+        if rc != 0:
+            run("rm -f /run/dbus/dbus.pid")
+            run("/usr/bin/dbus-daemon --system")
+
+        # Start warp-svc early so it can boot while Chrome starts
+        if os.path.isfile("/bin/warp-svc"):
+            warp_env = dict(os.environ, LD_PRELOAD="/usr/lib/libresolv_stub.so",
+                            LANG="C", LC_ALL="C", LANGUAGE="C")
+            svc_log = open("/tmp/bromure/warp-svc.log", "a")
+            subprocess.Popen(
+                ["/bin/warp-svc"],
+                env=warp_env,
+                stdout=svc_log,
+                stderr=svc_log)
 
     # Webcam setup (background)
     if cfg.get("webcam"):
@@ -285,9 +311,8 @@ def configure_services(cfg, ca_count):
 
     # DNS/proxy (synchronous — needed before Chrome)
     #
-    # Squid always runs (unless a custom external proxy is configured) so
-    # that the WARP agent can toggle WARP at runtime by restarting squid
-    # with or without proxychains.
+    # Squid always runs (unless a custom external proxy is configured).
+    # It routes through proxychains → :40001 (routing-socks).
     has_custom_proxy = bool(cfg.get("proxyHost"))
 
     if cfg.get("blockMalware"):
@@ -305,12 +330,13 @@ def configure_services(cfg, ca_count):
     else:
         run("sed -i '/^dns_nameservers/d' /etc/squid/squid.conf")
 
-    # Start the direct SOCKS5 proxy on :40000 (transparent forwarding).
-    # When WARP connects, warp-agent stops this and starts warp-svc
-    # on the same port.  Squid always goes through proxychains → :40000.
+    # Start routing-socks.py on :40001 — proxychains always points here.
+    # It switches per-connection between warp-svc (:40000) and direct
+    # based on /tmp/bromure/warp-active flag.  Without WARP, the flag
+    # never exists so all connections go direct.
     if not has_custom_proxy:
         subprocess.Popen(
-            ["/usr/local/bin/direct-socks.py"],
+            ["/usr/local/bin/routing-socks.py"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # Start squid through proxychains (always, never restarted).

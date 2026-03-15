@@ -11,7 +11,7 @@ import Virtualization
 /// - virtio drivers for GPU, network, and disk
 public final class LinuxImageManager {
     /// Bump this to force a rebuild of the base image on next launch.
-    public static let imageVersion = "200"
+    public static let imageVersion = "201"
 
     private let storageDir: URL
 
@@ -451,20 +451,26 @@ public final class LinuxImageManager {
             VZVirtioBlockDeviceConfiguration(attachment: transferAttachment),
         ]
 
-        // Network (needed for apk) — use NetworkFilter to rewrite DHCP DNS
-        // when the user has overridden DNS servers (e.g. VPN software breaks DNS)
+        // Network (needed for apk) — respect the same network mode (NAT/bridged)
+        // and DNS override settings used by regular VMs.
         var buildNetworkFilter: NetworkFilter?
         let net = VZVirtioNetworkDeviceConfiguration()
         if let netInfo = HostNetworkInfo.detect() {
+            let defaults = UserDefaults.standard
+            let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
+            let bridgedIface: String? = (networkMode == "bridged")
+                ? defaults.string(forKey: "vm.bridgedInterface")
+                : nil
+
             let dnsOverride: [UInt32]
-            if let dnsString = UserDefaults.standard.string(forKey: "vm.dnsServers"),
+            if let dnsString = defaults.string(forKey: "vm.dnsServers"),
                !dnsString.trimmingCharacters(in: .whitespaces).isEmpty {
                 dnsOverride = dnsString.split(separator: ",")
                     .compactMap { HostNetworkInfo.parseIPv4(String($0).trimmingCharacters(in: .whitespaces)) }
             } else {
                 dnsOverride = []
             }
-            if !dnsOverride.isEmpty, let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride) {
+            if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, bridgedInterface: bridgedIface) {
                 buildNetworkFilter = filter
                 net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
             } else {

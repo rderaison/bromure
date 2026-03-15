@@ -29,6 +29,9 @@
 
 ENVFILE="/tmp/bromure/chrome-env"
 
+# Escape a value for safe single-quoting in chrome-env.
+sh_escape() { printf "'" ; printf '%s' "$1" | sed "s/'/'\\\\''/g" ; printf "'" ; }
+
 # --- Wait for on-boot.sh to finish (dbus startup, etc.) ---
 
 # --- Mount profile disk (persistent profiles only) ---
@@ -151,9 +154,9 @@ echo "}" >> "$SESSION_POLICY"
 # --- Write chrome-env ---
 
 : > "$ENVFILE"
-[ -n "$EXTRA_FLAGS" ] && echo "EXTRA_FLAGS=\"$EXTRA_FLAGS\"" >> "$ENVFILE"
+[ -n "$EXTRA_FLAGS" ] && printf 'EXTRA_FLAGS=%s\n' "$(sh_escape "$EXTRA_FLAGS")" >> "$ENVFILE"
 # Don't open the home page when restoring a previous session
-[ "$RESTORE_SESSION" != "1" ] && echo "CHROME_URL=${CHROME_URL:-about:blank}" >> "$ENVFILE"
+[ "$RESTORE_SESSION" != "1" ] && printf 'CHROME_URL=%s\n' "$(sh_escape "${CHROME_URL:-about:blank}")" >> "$ENVFILE"
 [ "$SWAP_CMD_CTRL" = "1" ] && echo "SWAP_CMD_CTRL=1" >> "$ENVFILE"
 [ "$FILE_TRANSFER" = "1" ] && echo "FILE_TRANSFER=1" >> "$ENVFILE"
 [ "$CLIPBOARD" = "1" ] && echo "CLIPBOARD=1" >> "$ENVFILE"
@@ -213,11 +216,11 @@ else
     sed -i '/^dns_nameservers/d' /etc/squid/squid.conf
 fi
 
-# Start direct SOCKS5 proxy on :40000 + squid through proxychains.
-# When WARP connects, warp-agent swaps direct-socks for warp-svc on :40000.
+# Start routing SOCKS5 proxy on :40001 + squid through proxychains.
+# routing-socks switches between warp-svc (:40000) and direct per-connection.
 # Squid is never restarted.
 if [ -z "$PROXY_HOST" ] || [ -z "$PROXY_PORT" ]; then
-    /usr/local/bin/direct-socks.py &
+    /usr/local/bin/routing-socks.py &
     proxychains4 -q -f /etc/proxychains/proxychains.conf squid -N -f /etc/squid/squid.conf &
 fi
 

@@ -2,7 +2,18 @@
 """Bromure WARP control agent — runs inside the guest VM.
 
 Listens on vsock port 5700 for JSON commands from the host to
-dynamically control Cloudflare WARP (connect/disconnect/status).
+dynamically control Cloudflare WARP routing.
+
+Architecture:
+  warp-svc runs continuously on port 40001 (started at boot by config-agent).
+  A routing SOCKS5 proxy on port 40000 switches per-connection between
+  warp-svc (when /tmp/bromure/warp-active exists) and direct connections
+  (when it doesn't).  Enable/disable is instant — just toggling the flag file.
+
+  This agent handles:
+    1. Boot setup: register warp-svc, set proxy mode/port, connect VPN
+    2. Runtime: toggle the routing flag on enable/disable commands
+    3. Monitoring: poll warp-cli status every 5s, push changes to host
 
 Protocol: newline-delimited JSON on vsock port 5700.
 
@@ -12,14 +23,9 @@ Commands from host:
   {"type":"disable"}
 
 Responses to host:
-  {"type":"status","state":"connected"|"disconnected"|"not_installed"|"error","error":"..."}
+  {"type":"status","state":"connected"|"disconnected"|"connecting"|"not_installed"|"error","error":"..."}
   {"type":"enable","ok":true|false,"error":"..."}
   {"type":"disable","ok":true|false,"error":"..."}
-
-Squid always runs through proxychains pointing to socks5://127.0.0.1:40000.
-When WARP is disabled, direct-socks.py occupies port 40000 (transparent
-forwarding).  When WARP is enabled, direct-socks is stopped and warp-svc
-takes over port 40000.
 
 Started at boot via inittab (runs as root).
 """
@@ -30,6 +36,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 VSOCK_PORT = 5700
@@ -38,6 +45,8 @@ HOST_CID = 2
 WARP_SVC = "/bin/warp-svc"
 WARP_CLI = "/bin/warp-cli"
 RESOLV_STUB = "/usr/lib/libresolv_stub.so"
+WARP_PORT = 40000
+WARP_FLAG = "/tmp/bromure/warp-active"
 
 # WARP is a glibc binary on musl Alpine — needs the resolver stub.
 # Force C locale so warp-cli output is always English.
@@ -101,12 +110,11 @@ def dbus_running():
     return rc == 0
 
 
-def warp_status():
-    """Query warp-cli for connection status.
+def warp_vpn_status():
+    """Query warp-cli for VPN connection status.
 
-    Returns one of: "connected", "connecting", "disconnected",
-    "not_installed", "error".
-    On error, also returns the error message.
+    Returns the raw VPN state: "connected", "connecting", "disconnected",
+    "not_installed", or "error".
     """
     if not warp_installed():
         return "not_installed", "warp-cli/warp-svc not found"
@@ -129,55 +137,66 @@ def warp_status():
         return "error", out
 
 
-DIRECT_SOCKS = "/usr/local/bin/direct-socks.py"
+def warp_routing():
+    """Check if WARP routing is active (flag file exists)."""
+    return os.path.exists(WARP_FLAG)
 
 
-def stop_direct_socks():
-    """Stop the direct SOCKS5 proxy to free port 40000 for warp-svc."""
-    log("stopping direct-socks...")
-    run("pid=$(pgrep -f '[d]irect-socks'); test -n \"$pid\" && kill $pid", quiet=True)
-    # Wait for port to be released
-    for _ in range(20):
-        rc, _, _ = run("pgrep -f '[d]irect-socks'", quiet=True)
-        if rc != 0:
-            break
-        time.sleep(0.1)
+def effective_state():
+    """Get the user-facing state based on flag file + VPN status.
+
+    Returns (state, error) where state is one of:
+      connected    — traffic routes through WARP
+      disconnected — traffic goes direct (even if VPN is up)
+      connecting   — VPN handshake in progress
+      not_installed — WARP binaries missing
+      error        — something went wrong
+    """
+    vpn_state, vpn_error = warp_vpn_status()
+
+    if vpn_state == "not_installed":
+        return "not_installed", vpn_error
+
+    if warp_routing():
+        # User wants WARP routing — report actual VPN state
+        if vpn_state == "connected":
+            return "connected", None
+        elif vpn_state == "connecting":
+            return "connecting", None
+        else:
+            # Flag exists but VPN isn't connected — safety: remove flag
+            # to prevent routing to a dead upstream
+            log("VPN lost while routing active, removing flag")
+            try:
+                os.unlink(WARP_FLAG)
+            except OSError:
+                pass
+            return "error", vpn_error or "VPN connection lost"
+    else:
+        return "disconnected", None
 
 
-def start_direct_socks():
-    """Start the direct SOCKS5 proxy on port 40000 (transparent forwarding)."""
-    log("starting direct-socks...")
-    proc = subprocess.Popen(
-        [DIRECT_SOCKS],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    log(f"  direct-socks started (pid {proc.pid})")
+# ---------------------------------------------------------------------------
+# warp-svc lifecycle
+# ---------------------------------------------------------------------------
 
-
-def do_enable():
-    """Stop direct-socks, start warp-svc on :40000, and connect."""
-    log("do_enable: starting")
-
+def ensure_warp_svc():
+    """Ensure warp-svc is running and configured in proxy mode on :40000."""
     if not warp_installed():
         return False, "warp-cli/warp-svc not found"
 
     # Ensure dbus is running (warp-svc needs it)
     if not dbus_running():
-        log("dbus not running, cleaning up stale pid file and starting it")
+        log("dbus not running, starting it")
         run("rm -f /run/dbus/dbus.pid", quiet=True)
         run("/usr/bin/dbus-daemon --system")
         time.sleep(0.5)
         if not dbus_running():
             log("WARNING: dbus-daemon failed to start")
 
-    # Free port 40000 — stop direct-socks so warp-svc can bind it
-    stop_direct_socks()
-
-    # Start warp-svc if not already running
     if not warp_svc_running():
-        # Clean up stale sockets/pid files from previous runs
         run("rm -f /run/cloudflare-warp/warp-svc.sock", quiet=True)
         log("starting warp-svc...")
-        # Capture stderr to a log file for debugging
         svc_log_path = "/tmp/bromure/warp-svc.log"
         svc_log = open(svc_log_path, "a")
         proc = subprocess.Popen(
@@ -185,9 +204,8 @@ def do_enable():
             env=WARP_ENV,
             stdout=svc_log,
             stderr=svc_log)
-        log(f"warp-svc spawned (pid {proc.pid}), waiting for it to be ready...")
+        log(f"warp-svc spawned (pid {proc.pid})")
 
-        # Wait for it to appear in the process table
         started = False
         for i in range(30):
             time.sleep(0.3)
@@ -195,7 +213,6 @@ def do_enable():
                 log(f"warp-svc ready after {(i+1)*0.3:.1f}s")
                 started = True
                 break
-            # Check if it exited already
             ret = proc.poll()
             if ret is not None:
                 svc_log.close()
@@ -208,18 +225,15 @@ def do_enable():
                     pass
                 return False, f"warp-svc exited with code {ret}"
 
-        # Close our copy of the log fd — warp-svc inherited it
         svc_log.close()
-
         if not started:
             log("warp-svc did not appear after 9s")
             return False, "warp-svc failed to start (timeout)"
 
-        # Extra settle time for dbus registration
         log("waiting 1s for dbus registration...")
         time.sleep(1)
 
-    # Check status / register if needed
+    # Register if needed
     log("checking warp-cli status...")
     rc, out, err = run(f"{WARP_CLI} --accept-tos status", env=WARP_ENV)
     combined = (out + " " + err).lower()
@@ -227,11 +241,25 @@ def do_enable():
     if "registration" in combined and "missing" in combined:
         log("registration missing, registering...")
         run(f"{WARP_CLI} --accept-tos registration new", env=WARP_ENV)
-        log("setting proxy mode...")
-        run(f"{WARP_CLI} --accept-tos mode proxy", env=WARP_ENV)
         time.sleep(1)
 
-    # Connect
+    # Always ensure proxy mode (warp-svc defaults to :40000)
+    log("setting proxy mode...")
+    run(f"{WARP_CLI} --accept-tos mode proxy", env=WARP_ENV)
+
+    return True, None
+
+
+def ensure_warp_connected():
+    """Ensure warp-svc is running, configured, and VPN is connected."""
+    ok, err = ensure_warp_svc()
+    if not ok:
+        return False, err
+
+    vpn_state, _ = warp_vpn_status()
+    if vpn_state == "connected":
+        return True, None
+
     log("connecting...")
     rc, out, err = run(f"{WARP_CLI} --accept-tos connect", env=WARP_ENV)
     if rc != 0:
@@ -241,59 +269,54 @@ def do_enable():
     log("waiting for connection...")
     for i in range(30):
         time.sleep(1)
-        state, msg = warp_status()
+        state, msg = warp_vpn_status()
         log(f"  poll {i+1}: state={state}")
         if state == "connected":
-            break
+            return True, None
         elif state == "connecting":
             continue
         else:
             return False, msg or "WARP did not connect"
-    else:
-        return False, "WARP connection timed out (30s)"
 
-    log("do_enable: success")
+    return False, "WARP connection timed out (30s)"
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def do_enable():
+    """Enable WARP routing: ensure VPN is connected, then set flag."""
+    log("do_enable: starting")
+
+    ok, err = ensure_warp_connected()
+    if not ok:
+        return False, err
+
+    # Set routing flag — routing-socks.py will forward through WARP
+    open(WARP_FLAG, "w").close()
+    log("do_enable: success (flag set)")
     return True, None
 
 
 def do_disable():
-    """Disconnect WARP, kill warp-svc, and start direct-socks on :40000."""
+    """Disable WARP routing: remove flag. VPN stays connected for fast re-enable."""
     log("do_disable: starting")
-
-    if not warp_installed():
-        log("WARP not installed, ensuring direct-socks is running")
-        start_direct_socks()
-        return True, None
-
-    # Disconnect
-    if warp_svc_running():
-        log("disconnecting warp-cli...")
-        run(f"{WARP_CLI} --accept-tos disconnect", env=WARP_ENV)
-
-    # Kill warp-svc to free port 40000 and memory
-    log("killing warp-svc...")
-    run("pid=$(pgrep -f '[w]arp-svc'); test -n \"$pid\" && kill $pid")
-    time.sleep(0.3)
-    run("rm -f /run/cloudflare-warp/warp-svc.sock", quiet=True)
-
-    # Start direct-socks on :40000 so squid keeps working
-    start_direct_socks()
-
-    log("do_disable: success")
+    try:
+        os.unlink(WARP_FLAG)
+    except FileNotFoundError:
+        pass
+    log("do_disable: success (flag removed)")
     return True, None
 
 
 def handle_message(msg, sock):
-    """Process a JSON command and return a JSON response dict.
-
-    ``sock`` is passed so long-running commands (enable) can send
-    intermediate status updates to the host.
-    """
+    """Process a JSON command and return a JSON response dict."""
     msg_type = msg.get("type")
     log(f"handling command: {msg_type}")
 
     if msg_type == "status":
-        state, error = warp_status()
+        state, error = effective_state()
         resp = {"type": "status", "state": state}
         if error:
             resp["error"] = error
@@ -321,10 +344,37 @@ def handle_message(msg, sock):
     return {"type": "error", "error": f"unknown command: {msg_type}"}
 
 
+# ---------------------------------------------------------------------------
+# Transport
+# ---------------------------------------------------------------------------
+
+_send_lock = threading.Lock()
+
+
 def send_json(sock, obj):
-    """Send a newline-delimited JSON message."""
+    """Send a newline-delimited JSON message (thread-safe)."""
     data = json.dumps(obj, separators=(",", ":")).encode() + b"\n"
-    sock.sendall(data)
+    with _send_lock:
+        sock.sendall(data)
+
+
+def status_poller(sock, stop_event):
+    """Background thread: poll WARP status every 5s and push changes to host."""
+    last_state = None
+    last_error = None
+    while not stop_event.wait(5):
+        state, error = effective_state()
+        if state != last_state or error != last_error:
+            last_state = state
+            last_error = error
+            resp = {"type": "status", "state": state}
+            if error:
+                resp["error"] = error
+            try:
+                send_json(sock, resp)
+                log(f"status poll: pushed {state}")
+            except (OSError, BrokenPipeError):
+                break
 
 
 MAX_BUF = 1_048_576  # 1 MB — cap receive buffer to prevent memory exhaustion
@@ -344,10 +394,42 @@ def run_session():
 
     log("connected to host")
 
-    # Auto-connect if config-agent wrote the marker
+    # -----------------------------------------------------------------------
+    # Boot setup: config-agent started warp-svc and wrote a marker.
+    # We finish configuration (register, mode, port) and connect the VPN.
+    # -----------------------------------------------------------------------
+    boot_marker = "/tmp/bromure/warp-boot-setup"
     auto_marker = "/tmp/bromure/warp-auto-connect"
-    if os.path.exists(auto_marker):
-        log("auto-connect marker found, enabling WARP...")
+
+    if os.path.exists(boot_marker):
+        log("boot setup marker found, configuring warp-svc...")
+        try:
+            os.unlink(boot_marker)
+        except OSError:
+            pass
+
+        send_json(s, {"type": "status", "state": "connecting"})
+
+        ok, err = ensure_warp_connected()
+        if ok:
+            if os.path.exists(auto_marker):
+                # Auto-connect: enable routing immediately
+                try:
+                    os.unlink(auto_marker)
+                except OSError:
+                    pass
+                open(WARP_FLAG, "w").close()
+                send_json(s, {"type": "status", "state": "connected"})
+                log("boot: VPN connected, routing enabled (auto-connect)")
+            else:
+                send_json(s, {"type": "status", "state": "disconnected"})
+                log("boot: VPN connected, routing disabled (toggle to enable)")
+        else:
+            send_json(s, {"type": "status", "state": "error", "error": err})
+            log(f"boot: VPN setup failed: {err}")
+    elif os.path.exists(auto_marker):
+        # Legacy path: auto-connect marker without boot-setup
+        log("auto-connect marker found (legacy path)")
         try:
             os.unlink(auto_marker)
         except OSError:
@@ -360,6 +442,11 @@ def run_session():
         else:
             send_json(s, {"type": "status", "state": "error", "error": error})
             log(f"auto-connect failed: {error}")
+
+    # Start background status poller
+    stop_event = threading.Event()
+    poller = threading.Thread(target=status_poller, args=(s, stop_event), daemon=True)
+    poller.start()
 
     buf = b""
     while True:
@@ -393,6 +480,7 @@ def run_session():
             log(f"connection error: {e}")
             break
 
+    stop_event.set()
     s.close()
 
 
