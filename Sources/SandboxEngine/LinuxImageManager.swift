@@ -157,7 +157,7 @@ public final class LinuxImageManager {
         // Alpine init reads modules= to know what to modprobe at boot.
         // We need virtio_blk (for /dev/vda) and ext4 (for root filesystem).
         // dm-crypt is needed for LUKS-encrypted profile disks.
-        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk,virtiofs,loop,dm-crypt rw"
+        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk,virtiofs,loop,dm-crypt rw arm64.nosme"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.cpuCount = config.cpuCount
@@ -432,7 +432,7 @@ public final class LinuxImageManager {
 
         let bootLoader = VZLinuxBootLoader(kernelURL: netbootKernel)
         bootLoader.initialRamdiskURL = netbootInitrd
-        bootLoader.commandLine = "console=hvc0 ip=dhcp alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main modloop=\(Self.netbootBase)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk"
+        bootLoader.commandLine = "console=hvc0 ip=dhcp alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main modloop=\(Self.netbootBase)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk arm64.nosme"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.platform = VZGenericPlatformConfiguration()

@@ -37,8 +37,6 @@ install_template() {
     sed -e "s|%%KEYBOARD_LAYOUT%%|$KB_LAYOUT|g" \
         -e "s|%%NATURAL_SCROLLING%%|$NATURAL_SCROLLING|g" \
         -e "s|%%LOCALE%%|$LOCALE|g" \
-        -e "s|%%DISPLAY_SCALE%%|$DISPLAY_SCALE|g" \
-        -e "s|%%CURSOR_SIZE%%|$CURSOR_SIZE|g" \
         "$SCRIPT_DIR/$1" > "$2"
     [ -n "$3" ] && chmod "$3" "$2"
 }
