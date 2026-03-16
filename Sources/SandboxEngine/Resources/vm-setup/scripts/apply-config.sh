@@ -199,6 +199,17 @@ fi
 
 # --- Configure DNS/proxy services ---
 
+# Wait for eth0 to get an IP via DHCP before starting Squid.
+# apply-config runs concurrently with Alpine's networking service, and Squid
+# reads /etc/resolv.conf at startup and caches DNS servers.  If DHCP hasn't
+# completed yet, resolv.conf is stale/empty and DNS fails.
+if [ -z "$PROXY_HOST" ]; then
+    for _i in $(seq 1 50); do
+        ip -4 addr show dev eth0 scope global 2>/dev/null | grep -q 'inet ' && break
+        sleep 0.1
+    done
+fi
+
 if [ "$BLOCK_MALWARE" = "1" ]; then
     sed -i 's/^server=1\.1\.1\.1/server=1.1.1.2/' /etc/dnsmasq.d/pihole.conf
     sed -i 's/^server=1\.0\.0\.1/server=1.0.0.2/' /etc/dnsmasq.d/pihole.conf
@@ -209,7 +220,9 @@ if [ "$AD_BLOCKING" = "1" ] || [ "$ENABLE_WARP" = "1" ] || [ "$BLOCK_MALWARE" = 
     dnsmasq -C /etc/dnsmasq.d/pihole.conf
 fi
 
-# Configure squid DNS: use dnsmasq when ad-blocking or malware-blocking is on
+# Configure squid DNS: use dnsmasq when ad-blocking or malware-blocking is on,
+# otherwise use system defaults (resolv.conf).
+# The DHCP wait above ensures resolv.conf is populated before we get here.
 if [ "$AD_BLOCKING" = "1" ] || [ "$BLOCK_MALWARE" = "1" ]; then
     sed -i 's/^dns_nameservers.*/dns_nameservers 127.0.0.1/' /etc/squid/squid.conf
 else

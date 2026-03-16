@@ -48,6 +48,17 @@ install_template() {
 # ---------------------------------------------------------------------------
 
 echo "Waiting for network..."
+
+# Append well-known public DNS as fallback.  The kernel's ip=dhcp provides
+# the vmnet gateway as nameserver, which forwards to the host's DNS.  This
+# works most of the time, but fails when the host uses VPN-only, Private
+# Relay, or corporate DNS that doesn't respond to queries from the VM subnet.
+# Appending public servers lets the resolver fall back if the primary fails.
+if ! grep -q '1\.1\.1\.1' /etc/resolv.conf 2>/dev/null; then
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    echo "nameserver 1.0.0.1" >> /etc/resolv.conf
+fi
+
 for i in $(seq 1 30); do
     wget -q -O /dev/null --spider http://dl-cdn.alpinelinux.org/alpine/ 2>/dev/null && break
     sleep 1
@@ -80,7 +91,12 @@ printf '%s\n' \
     "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community" \
     > /mnt/etc/apk/repositories
 
-cp /etc/resolv.conf /mnt/etc/resolv.conf
+# Write well-known public DNS as initial resolv.conf for the installed image.
+# DHCP (eth0 inet dhcp) will overwrite this at boot, but it serves as a sane
+# fallback if DHCP is slow or the DHCP-provided DNS doesn't work.
+# Don't copy the installer's resolv.conf — it contains the vmnet gateway IP
+# from the build-time vmnet instance, which may differ at runtime.
+printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /mnt/etc/resolv.conf
 
 # Bind-mount for chroot
 mount -t proc proc /mnt/proc

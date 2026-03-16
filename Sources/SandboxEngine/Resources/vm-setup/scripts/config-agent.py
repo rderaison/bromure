@@ -317,6 +317,20 @@ def configure_services(cfg, ca_count):
     # It routes through proxychains → :40001 (routing-socks).
     has_custom_proxy = bool(cfg.get("proxyHost"))
 
+    # Wait for eth0 to get an IP via DHCP before starting Squid.
+    # config-agent starts via inittab concurrently with the networking service,
+    # and Squid reads /etc/resolv.conf at startup and caches DNS servers.
+    # If DHCP hasn't completed yet, resolv.conf is stale/empty and DNS fails.
+    if not has_custom_proxy:
+        for _attempt in range(50):  # up to 5 seconds
+            rc, out = run("ip -4 addr show dev eth0 scope global")
+            if rc == 0 and "inet " in out:
+                break
+            time.sleep(0.1)
+        else:
+            print("config-agent: WARNING: eth0 has no IP after 5s, network may not work",
+                  file=sys.stderr)
+
     if cfg.get("blockMalware"):
         run("sed -i 's/^server=1\\.1\\.1\\.1/server=1.1.1.2/' /etc/dnsmasq.d/pihole.conf")
         run("sed -i 's/^server=1\\.0\\.0\\.1/server=1.0.0.2/' /etc/dnsmasq.d/pihole.conf")
@@ -326,7 +340,8 @@ def configure_services(cfg, ca_count):
         run("dnsmasq -C /etc/dnsmasq.d/pihole.conf")
 
     # Configure squid DNS: use dnsmasq (127.0.0.1) when ad-blocking or
-    # malware-blocking is on, otherwise use system defaults.
+    # malware-blocking is on, otherwise use system defaults (resolv.conf).
+    # The DHCP wait above ensures resolv.conf is populated before we get here.
     if cfg.get("adBlocking") or cfg.get("blockMalware"):
         run("sed -i 's/^dns_nameservers.*/dns_nameservers 127.0.0.1/' /etc/squid/squid.conf")
     else:
