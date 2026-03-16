@@ -43,7 +43,7 @@ struct MainView: View {
             state.onOpenProfileSettings = { [self] profileID, category in
                 guard let profile = state.profileManager.profile(withID: profileID) else { return }
                 editingProfile = profile
-                // Category selection is handled by the ProfileSettingsView init
+                openSettingsPanel(for: profile, category: category)
             }
         }
     }
@@ -384,7 +384,8 @@ struct MainView: View {
         }
 
         .onChange(of: editingProfile?.id) { _, newID in
-            if let profile = editingProfile, newID != nil {
+            // Only open from sidebar click (not AppleScript — that calls openSettingsPanel directly)
+            if let profile = editingProfile, newID != nil, settingsPanel == nil {
                 openSettingsPanel(for: profile)
             }
         }
@@ -443,11 +444,26 @@ struct MainView: View {
 
     // MARK: - Profile settings window
 
-    private func openSettingsPanel(for profile: Profile) {
+    private func openSettingsPanel(for profile: Profile, category: String? = nil) {
         // Close existing panel if open
         settingsPanel?.close()
 
         let originalProfile = profile
+
+        // Map category string to enum
+        let initialCat: SettingsCategory
+        switch category {
+        case "general": initialCat = .general
+        case "performance": initialCat = .performance
+        case "media": initialCat = .media
+        case "fileTransfer": initialCat = .fileTransfer
+        case "privacy": initialCat = .privacy
+        case "network": initialCat = .network
+        case "vpnAds": initialCat = .vpnAds
+        case "enterprise": initialCat = .enterprise
+        case "advanced": initialCat = .advanced
+        default: initialCat = .general
+        }
 
         let settingsView = ProfileSettingsView(
             draft: profile,
@@ -479,7 +495,8 @@ struct MainView: View {
                 settingsPanel = nil
                 settingsDelegateHelper = nil
             },
-            onShowWarpEULA: onShowWarpEULA
+            onShowWarpEULA: onShowWarpEULA,
+            initialCategory: initialCat
         )
 
         let hostingView = NSHostingView(rootView: settingsView)

@@ -10,7 +10,7 @@ private extension UTType {
 
 // MARK: - Settings Category
 
-private enum SettingsCategory: String, CaseIterable, Identifiable {
+enum SettingsCategory: String, CaseIterable, Identifiable {
     case general = "General"
     case performance = "Performance"
     case media = "Media"
@@ -62,8 +62,25 @@ struct ProfileSettingsView: View {
     var onSave: (Profile) -> Void
     var onCancel: () -> Void
     var onShowWarpEULA: ((@escaping () -> Void) -> Void)?
+    var initialCategory: SettingsCategory = .general
 
-    @State private var selectedCategory: SettingsCategory = .general
+    // Initialized from initialCategory via init
+    @State private var selectedCategory: SettingsCategory
+
+    init(draft: Profile, usedColors: Set<ProfileColor>, profileDiskExists: Bool,
+         onDeleteProfileDisk: (() -> Void)? = nil, onSave: @escaping (Profile) -> Void,
+         onCancel: @escaping () -> Void, onShowWarpEULA: ((@escaping () -> Void) -> Void)? = nil,
+         initialCategory: SettingsCategory = .general) {
+        self._draft = State(initialValue: draft)
+        self.usedColors = usedColors
+        self.profileDiskExists = profileDiskExists
+        self.onDeleteProfileDisk = onDeleteProfileDisk
+        self.onSave = onSave
+        self.onCancel = onCancel
+        self.onShowWarpEULA = onShowWarpEULA
+        self.initialCategory = initialCategory
+        self._selectedCategory = State(initialValue: initialCategory)
+    }
     @State private var showWarpMemoryConfirm = false
     @State private var showEncryptionWarning = false
     @State private var pendingEncryptOnDisk = false
