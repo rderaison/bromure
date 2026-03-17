@@ -1,4 +1,4 @@
-FROM arm64v8/alpine:3.23
+FROM arm64v8/alpine:3.22.3
 
 RUN apk add --no-cache linux-lts-dev make gcc musl-dev
 

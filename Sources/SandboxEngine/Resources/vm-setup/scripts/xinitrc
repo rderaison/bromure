@@ -88,6 +88,7 @@ fi
 LANG_FLAG=
 [ -n "$CHROME_LANG" ] && LANG_FLAG="--lang=$CHROME_LANG"
 chromium-browser --no-first-run --start-maximized --force-device-scale-factor="$DISPLAY_SCALE" --disable-vulkan $LANG_FLAG $EXTRA_FLAGS "$CHROME_URL"
+sleep infinity
 doas udhcpc -R -i eth0 2>/dev/null
 doas poweroff
 

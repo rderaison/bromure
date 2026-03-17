@@ -678,6 +678,36 @@ async function main() {
     });
   }
 
+  if (hasDebugShell) {
+    await test("6.3 Webcam ON — v4l2loopback device and policy", async () => {
+      await withSession("E2E_Webcam_On", { webcam: "true" },
+        async ({ sessionId }) => {
+          // Check /dev/video0 exists (v4l2loopback loaded)
+          const dev = await vmExec(sessionId, "test -e /dev/video0 && echo yes || echo no");
+          assert(dev.stdout.trim() === "yes", "/dev/video0 not found — v4l2loopback not loaded");
+          // Check VideoCaptureAllowed policy is true
+          const policy = await vmExec(sessionId, "cat /etc/chromium/policies/managed/session.json");
+          const json = JSON.parse(policy.stdout.trim());
+          assert(json.VideoCaptureAllowed === true, `VideoCaptureAllowed=${json.VideoCaptureAllowed}, expected true`);
+        }
+      );
+    });
+
+    await test("6.4 Webcam OFF — no video device, policy blocks capture", async () => {
+      await withSession("E2E_Webcam_Off", { webcam: "false" },
+        async ({ sessionId }) => {
+          // Check /dev/video0 does not exist
+          const dev = await vmExec(sessionId, "test -e /dev/video0 && echo yes || echo no");
+          assert(dev.stdout.trim() === "no", "/dev/video0 exists but webcam is off");
+          // Check VideoCaptureAllowed policy is false
+          const policy = await vmExec(sessionId, "cat /etc/chromium/policies/managed/session.json");
+          const json = JSON.parse(policy.stdout.trim());
+          assert(json.VideoCaptureAllowed === false, `VideoCaptureAllowed=${json.VideoCaptureAllowed}, expected false`);
+        }
+      );
+    });
+  }
+
   // ======================================================================
   // 7. Clipboard
   // ======================================================================

@@ -8,7 +8,7 @@ KB_LAYOUT_SPEC="${1:-us}"
 NATURAL_SCROLLING="${2:-true}"
 LOCALE="${3:-en_US}"
 DISPLAY_SCALE="${4:-2}"
-ALPINE_VERSION="${5:-3.23}"
+ALPINE_VERSION="${5:-3.22}"
 CURSOR_SIZE=$((DISPLAY_SCALE * 24))
 
 # Parse layout:variant format (e.g. "ch:fr" → layout="ch", variant="fr")
@@ -218,7 +218,6 @@ chroot /mnt addgroup chrome input
 chroot /mnt addgroup chrome audio
 retry chroot /mnt apk add doas
 install_config configs/doas-chrome.conf /mnt/etc/doas.d/chrome.conf
-
 
 # ---------------------------------------------------------------------------
 # Services

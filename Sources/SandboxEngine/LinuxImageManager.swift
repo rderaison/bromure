@@ -11,7 +11,7 @@ import Virtualization
 /// - virtio drivers for GPU, network, and disk
 public final class LinuxImageManager {
     /// Bump this to force a rebuild of the base image on next launch.
-    public static let imageVersion = "220"
+    public static let imageVersion = "221"
 
     private let storageDir: URL
 
@@ -238,8 +238,8 @@ public final class LinuxImageManager {
 
     // MARK: - Private
 
-    private static let alpineVersion = "3.23"
-    private static let alpineRelease = "3.23.3"
+    private static let alpineVersion = "3.22"
+    private static let alpineRelease = "3.22.3"
     private static let releasesBase =
         "https://dl-cdn.alpinelinux.org/alpine/v\(alpineVersion)/releases/aarch64"
     private static let netbootBase = "\(releasesBase)/netboot-\(alpineRelease)"
