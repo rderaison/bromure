@@ -7,7 +7,7 @@ import SandboxEngine
 ///   GET  /health                — health check
 ///   GET  /profiles              — list available profiles
 ///   GET  /sessions              — list active sessions
-///   POST /sessions              — create a new session  {"profile":"name-or-id", "url":"..."}
+///   POST /sessions              — create a new session  {"profile":"name-or-id", "url":"...", "restore":true}
 ///   GET  /sessions/:id          — get session info
 ///   DELETE /sessions/:id        — close a session
 ///
@@ -29,7 +29,7 @@ final class AutomationServer {
     let debugEnabled: Bool
 
     /// Callbacks into the app delegate for session management.
-    var onCreateSession: ((_ profileName: String?, _ profileID: String?, _ url: String?) async -> AutomationSessionInfo?)?
+    var onCreateSession: ((_ profileName: String?, _ profileID: String?, _ url: String?, _ restore: Bool) async -> AutomationSessionInfo?)?
     var onDestroySession: ((_ sessionID: String) async -> Bool)?
     var onListSessions: (() -> [AutomationSessionInfo])?
     var onListProfiles: (() -> [AutomationProfileInfo])?
@@ -193,6 +193,7 @@ final class AutomationServer {
             let profileName = bodyJSON["profile"] as? String
             let profileID = bodyJSON["profileId"] as? String
             let url = bodyJSON["url"] as? String
+            let restore = bodyJSON["restore"] as? Bool ?? false
 
             if profileName == nil && profileID == nil {
                 sendResponse(fd: fd, status: 400, body: ["error": "Missing 'profile' or 'profileId' field"])
@@ -203,7 +204,7 @@ final class AutomationServer {
             var result: AutomationSessionInfo?
             DispatchQueue.main.async {
                 Task { @MainActor in
-                    result = await self.onCreateSession?(profileName, profileID, url)
+                    result = await self.onCreateSession?(profileName, profileID, url, restore)
                     semaphore.signal()
                 }
             }

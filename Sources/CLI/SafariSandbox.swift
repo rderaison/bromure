@@ -813,9 +813,9 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
         }
 
-        server.onCreateSession = { [weak self] profileName, profileID, url in
+        server.onCreateSession = { [weak self] profileName, profileID, url, restore in
             guard let self else { return nil }
-            return await self.automationCreateSession(profileName: profileName, profileID: profileID, url: url)
+            return await self.automationCreateSession(profileName: profileName, profileID: profileID, url: url, restore: restore)
         }
 
         server.onDestroySession = { [weak self] sessionID in
@@ -930,7 +930,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @MainActor
-    private func automationCreateSession(profileName: String?, profileID: String?, url: String?) async -> AutomationSessionInfo? {
+    private func automationCreateSession(profileName: String?, profileID: String?, url: String?, restore: Bool = false) async -> AutomationSessionInfo? {
         // Find the profile
         let profile: Profile?
         if let profileID, let uuid = UUID(uuidString: profileID) {
@@ -1003,7 +1003,8 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             config: config,
             profileID: profile.id,
             profileImageDir: profileImageDir,
-            profileDiskKey: profileDiskKey
+            profileDiskKey: profileDiskKey,
+            restoreSession: restore
         ) else {
             print("[Automation] Failed to claim VM")
             return nil

@@ -1161,6 +1161,68 @@ print('n/a')
     osascript('delete profile "E2E_Persist"');
   });
 
+  await test("13.3 Persistent storage — tabs restored after restart", async () => {
+    const profileName = "E2E_Restore";
+    const sites = [
+      "https://example.com",
+      "https://httpbin.org/get",
+      "https://httpbin.org/html",
+    ];
+
+    osascript(`create profile "${profileName}" persistent true`);
+    osascript(`set profile setting "${profileName}" key "allowAutomation" to value "true"`);
+    osascript(`set profile setting "${profileName}" key "encryptOnDisk" to value "false"`);
+
+    try {
+      // --- First session: open 3 tabs ---
+      await waitForPool();
+      const s1 = await api("POST", "/sessions", { profile: profileName });
+      assert(!s1.error, `Session 1 failed: ${s1.error}`);
+      await sleep(5000);
+
+      const browser1 = await connectSession(s1.id);
+      try {
+        for (const url of sites) {
+          const tab = await browser1.newPage();
+          await tab.goto(url, { waitUntil: "load", timeout: 15000 });
+        }
+        // Give Chrome a moment to persist session state
+        await sleep(3000);
+      } finally {
+        browser1.disconnect();
+        await sleep(500);
+      }
+
+      // Close the session (VM shuts down, disk persists)
+      await api("DELETE", `/sessions/${s1.id}`);
+      await sleep(3000);
+
+      // --- Second session: restore previous tabs ---
+      await waitForPool();
+      const s2 = await api("POST", "/sessions", { profile: profileName, restore: true });
+      assert(!s2.error, `Session 2 failed: ${s2.error}`);
+      await sleep(8000); // extra time for restore
+
+      const browser2 = await connectSession(s2.id);
+      try {
+        const pages = await browser2.pages();
+        const urls = pages.map((p) => p.url()).filter((u) => !u.startsWith("about:"));
+
+        for (const site of sites) {
+          const found = urls.some((u) => u.startsWith(site));
+          assert(found, `Tab ${site} not restored. Open URLs: ${urls.join(", ")}`);
+        }
+      } finally {
+        browser2.disconnect();
+        await sleep(500);
+        await api("DELETE", `/sessions/${s2.id}`);
+      }
+    } finally {
+      await sleep(500);
+      osascript(`delete profile "${profileName}"`);
+    }
+  });
+
   // ======================================================================
   // 15. Automation API
   // ======================================================================
