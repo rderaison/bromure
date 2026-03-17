@@ -14,7 +14,7 @@ Bromure requires several entitlements that must be registered in your Apple Deve
 
 Under **Identifiers**, create an App ID with:
 
-- **Bundle ID:** `io.bromure.app` (explicit, not wildcard)
+- **Bundle ID:** Create a new bundle ID (I'm using `io.bromure.app`)
 - **App ID Prefix / Team ID:** your 10-character team ID (e.g. `W3RD8G85BC`)
 
 Enable these **Capabilities** on the App ID:
@@ -29,7 +29,7 @@ Enable these **Capabilities** on the App ID:
 Under **Profiles**, create a **Developer ID** provisioning profile:
 
 - **Type:** Developer ID Application
-- **App ID:** `io.bromure.app`
+- **App ID:** The Bundle ID you picked (`io.bromure.app` in my case)
 - **Certificate:** your "Developer ID Application" certificate (see below)
 
 Download the `.provisionprofile` file and save it as:
