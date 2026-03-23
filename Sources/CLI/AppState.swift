@@ -55,25 +55,49 @@ final class AppState: @unchecked Sendable {
 
     /// Called by the app delegate when sessions need to be closed for image rebuild.
     var onCloseAllSessions: (() async -> Void)?
+    var onPoolReady: (() -> Void)?
+    var onOpenProfileSettings: ((_ profileID: UUID, _ category: String?) -> Void)?
 
     init() {
         self.storageDir = VMConfig.defaultStorageDirectory
         self.imageManager = LinuxImageManager(storageDir: storageDir)
         self.profileManager = ProfileManager(storageDir: storageDir)
 
-        // Migrate v1.0.x UserDefaults settings into a Default profile
-        if let migrated = profileManager.migrateFromUserDefaults() {
-            selectedProfileID = migrated.id
-        }
-
-        // Ensure a Default profile always exists
-        if profileManager.allProfiles.isEmpty {
-            let defaultProfile = profileManager.createProfile(name: "Default", color: nil)
-            selectedProfileID = defaultProfile.id
+        // Profiles load asynchronously (iCloud discovery happens in background).
+        // Defer migration and default-profile creation until profiles are ready.
+        profileManager.onReady = { [weak self] in
+            guard let self else { return }
+            // Migrate v1.0.x UserDefaults settings into a Default profile
+            if let migrated = self.profileManager.migrateFromUserDefaults() {
+                self.selectedProfileID = migrated.id
+            }
+            // Ensure a Private Browsing profile always exists
+            if self.profileManager.allProfiles.isEmpty {
+                var settings = ProfileSettings()
+                settings.enableGPU = true
+                settings.enableAudio = true
+                settings.enableClipboardSharing = true
+                settings.enableLinkSender = true
+                settings.allowAutomation = true
+                let defaultProfile = self.profileManager.createProfile(
+                    name: "Private Browsing",
+                    comments: "Fully stateless browsing. Nothing is saved between sessions \u{2014} no cookies, no history, no cache. Only the clipboard is shared with your Mac.",
+                    color: nil,
+                    settings: settings
+                )
+                self.selectedProfileID = defaultProfile.id
+            }
+            // Select first profile if none selected
+            if self.selectedProfileID == nil {
+                self.selectedProfileID = self.profileManager.allProfiles.first?.id
+            }
         }
     }
 
     func checkState() {
+        if pool != nil {
+            return
+        }
         if imageManager.baseImageExists {
             phase = .warmingUp
             startPool()
@@ -99,6 +123,7 @@ final class AppState: @unchecked Sendable {
         let keyboard = defaults.string(forKey: "vm.keyboardLayout")
         let scrolling = defaults.object(forKey: "vm.naturalScrolling") as? Bool
         let scale = defaults.object(forKey: "vm.displayScale") as? Int
+        let kernelOpts = defaults.string(forKey: "vm.extraKernelOptions") ?? VMConfig.defaultExtraKernelOptions
 
         initTask = Task {
             do {
@@ -106,7 +131,8 @@ final class AppState: @unchecked Sendable {
                     diskSizeGB: 4,
                     keyboardLayout: keyboard,
                     naturalScrolling: scrolling,
-                    displayScale: scale
+                    displayScale: scale,
+                    extraKernelOptions: kernelOpts
                 ) { [weak self] event in
                     Task { @MainActor in
                         self?.handleProgress(event)
@@ -145,8 +171,7 @@ final class AppState: @unchecked Sendable {
         case .install(let fraction):
             phase = .initializing(status: "Installing...", progress: fraction)
         case .consoleOutput(let text):
-            consoleLog += text
-            // Keep only the last 8KB to avoid unbounded growth
+            consoleLog.append(text)
             if consoleLog.count > 8192 {
                 consoleLog = String(consoleLog.suffix(4096))
             }
@@ -154,7 +179,18 @@ final class AppState: @unchecked Sendable {
     }
 
     /// Shut down the current pool and start a fresh one with updated config.
+    /// No-op if an image build is in progress (no base image to warm up).
     func restartPool() {
+        if case .initializing = phase { return }
+        guard imageManager.baseImageExists else {
+            // Image was deleted or never created — show setup screen
+            warmUpTask?.cancel()
+            warmUpTask = nil
+            pool = nil
+            poolReady = false
+            phase = .needsSetup
+            return
+        }
         warmUpTask?.cancel()
         warmUpTask = nil
         Task {
@@ -169,9 +205,11 @@ final class AppState: @unchecked Sendable {
         let config = buildBaseConfig()
         pool = VMPool(config: config, storageDir: storageDir)
         poolReady = false
-        if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil {
+        let env = ProcessInfo.processInfo.environment
+        if env["BROMURE_DEBUG"] != nil && env["BROMURE_DEBUG_PREWARM"] == nil {
             // Skip pre-warming in debug mode to keep logs clean.
             // The pool is still needed for bootDedicated() — just don't warm up.
+            // Set BROMURE_DEBUG_PREWARM=1 to re-enable pre-warming in debug mode.
             poolReady = true
             phase = .ready
             return
@@ -182,6 +220,7 @@ final class AppState: @unchecked Sendable {
                 guard !Task.isCancelled else { return }
                 poolReady = true
                 phase = .ready
+                onPoolReady?()
             } catch {
                 guard !Task.isCancelled else { return }
                 phase = .error(error.localizedDescription)
@@ -196,10 +235,16 @@ final class AppState: @unchecked Sendable {
         let defaults = UserDefaults.standard
         let memGB = defaults.integer(forKey: "vm.memoryGB")
         let cpus = defaults.integer(forKey: "vm.cpuCount")
+        let defaultMemGB: Int = {
+            let hostMemGB = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
+            if hostMemGB < 18 { return 2 }
+            if hostMemGB < 36 { return 3 }
+            return 4
+        }()
         return VMConfig(
             cpuCount: cpus > 0 ? cpus : nil,
-            memorySize: UInt64(memGB > 0 ? memGB : 2) * 1024 * 1024 * 1024,
-            enableAudio: defaults.object(forKey: "vm.enableAudio") as? Bool ?? true,
+            memorySize: UInt64(memGB > 0 ? memGB : defaultMemGB) * 1024 * 1024 * 1024,
+            enableAudio: true,
             enableFileTransfer: true,
             enableClipboardSharing: true
         )

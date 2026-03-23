@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Bromure File Picker",
+  "version": "1.0.0",
+  "description": "Intercepts file upload dialogs and routes them through the host file picker.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwUPVglV0oJW4ZhVi+67rqzCSbW/9vVsPkE/hsubDucrNJOhwq453qwmySVpI64AcwODZuYm9unZBB59DbXuOlbfeZ/LpgQ1/oILkJ4RR/aeW3VWBeSSe+mrSVqtJCq0eVl1vPGChJ432g+pcGD94E+3wzgVdjtthjCnPeV/yHeODIee8ycIZkq9rctCK9zzJVs+QvuBt7oMNxstODwcFEdRMyACVa7OcEPszte67hAbktTy4V8rneub8pVquPoBDOp60IIDlYiTy73eUxWWitfiEURgxW6q+hicnQaJ7P94qeePmF5MdsSxeWM8gSeoXaiBqz+AD1RE2gf8WU+db2wIDAQAB",
+  "permissions": [
+    "nativeMessaging",
+    "debugger"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

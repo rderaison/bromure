@@ -11,7 +11,7 @@ import Virtualization
 /// - virtio drivers for GPU, network, and disk
 public final class LinuxImageManager {
     /// Bump this to force a rebuild of the base image on next launch.
-    public static let imageVersion = "11"
+    public static let imageVersion = "221"
 
     private let storageDir: URL
 
@@ -48,6 +48,7 @@ public final class LinuxImageManager {
         naturalScrolling: Bool? = nil,
         locale: String? = nil,
         displayScale: Int? = nil,
+        extraKernelOptions: String = VMConfig.defaultExtraKernelOptions,
         progress: @escaping (ProgressEvent) -> Void
     ) async throws {
         let fm = FileManager.default
@@ -71,9 +72,9 @@ public final class LinuxImageManager {
         }
 
         // 2. Create raw disk image
-        progress(.stepStart("Creating \(diskSizeGB)GB disk image"))
+        progress(.stepStart("Creating disk image"))
         try createRawDisk(at: linuxDiskURL, sizeGB: diskSizeGB)
-        progress(.stepDone("Creating \(diskSizeGB)GB disk image"))
+        progress(.stepDone("Creating disk image"))
 
         // 3. Boot Alpine netboot, install to disk, add Chromium.
         progress(.stepStart("Installing Alpine Linux with Chromium"))
@@ -85,6 +86,7 @@ public final class LinuxImageManager {
             naturalScrolling: naturalScrolling,
             locale: locale,
             displayScale: displayScale,
+            extraKernelOptions: extraKernelOptions,
             progress: progress
         )
         progress(.stepDone("Installing Alpine Linux with Chromium"))
@@ -138,10 +140,14 @@ public final class LinuxImageManager {
     // MARK: - VM Configuration
 
     /// Build a VZVirtualMachineConfiguration for a Linux VM.
+    ///
+    /// - Parameter networkAttachment: Custom network attachment (e.g. from NetworkFilter).
+    ///   If nil, uses VZNATNetworkDeviceAttachment.
     public func buildLinuxVMConfig(
         diskURL: URL,
         config: VMConfig,
-        readOnlyDisk: Bool = false
+        readOnlyDisk: Bool = false,
+        networkAttachment: VZNetworkDeviceAttachment? = nil
     ) throws -> VZVirtualMachineConfiguration {
         let vzConfig = VZVirtualMachineConfiguration()
 
@@ -150,10 +156,7 @@ public final class LinuxImageManager {
         // console=hvc0 also outputs to serial for logging.
         let bootLoader = VZLinuxBootLoader(kernelURL: linuxKernelURL)
         bootLoader.initialRamdiskURL = linuxInitrdURL
-        // Alpine init reads modules= to know what to modprobe at boot.
-        // We need virtio_blk (for /dev/vda) and ext4 (for root filesystem).
-        // dm-crypt is needed for LUKS-encrypted profile disks.
-        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk,virtiofs,loop,dm-crypt rw"
+        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk,virtiofs,loop,dm-crypt rw \(config.extraKernelOptions)"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.cpuCount = config.cpuCount
@@ -176,10 +179,9 @@ public final class LinuxImageManager {
         let shareDevice = VZVirtioFileSystemDeviceConfiguration(tag: "share")
         vzConfig.directorySharingDevices = [shareDevice]
 
-        // Network — NAT mode (bridged networking requires com.apple.vm.networking
-        // entitlement which needs an Apple Developer provisioning profile)
+        // Network — use custom attachment (e.g. filtered vmnet) or fall back to NAT
         let net = VZVirtioNetworkDeviceConfiguration()
-        net.attachment = VZNATNetworkDeviceAttachment()
+        net.attachment = networkAttachment ?? VZNATNetworkDeviceAttachment()
         vzConfig.networkDevices = [net]
 
         // Graphics — virtio GPU
@@ -192,14 +194,18 @@ public final class LinuxImageManager {
         ]
         vzConfig.graphicsDevices = [graphics]
 
-        // Audio
-        if config.enableAudio {
-            let audio = VZVirtioSoundDeviceConfiguration()
-            let outputStream = VZVirtioSoundDeviceOutputStreamConfiguration()
-            outputStream.sink = VZHostAudioOutputStreamSink()
-            audio.streams = [outputStream]
-            vzConfig.audioDevices = [audio]
-        }
+        // Audio — always attach hardware so pre-warmed VMs work for any profile.
+        // PipeWire in the guest only starts when the profile has audio enabled.
+        let audio = VZVirtioSoundDeviceConfiguration()
+
+        let outputStream = VZVirtioSoundDeviceOutputStreamConfiguration()
+        outputStream.sink = VZHostAudioOutputStreamSink()
+
+        let inputStream = VZVirtioSoundDeviceInputStreamConfiguration()
+        inputStream.source = VZHostAudioInputStreamSource()
+
+        audio.streams = [outputStream, inputStream]
+        vzConfig.audioDevices = [audio]
 
         // Input
         vzConfig.keyboards = [VZUSBKeyboardConfiguration()]
@@ -211,7 +217,7 @@ public final class LinuxImageManager {
         // Memory balloon — allows host to reclaim unused guest memory
         vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
 
-        // Vsock device — always enabled (used by credential bridge and file transfer)
+        // Vsock device — always attached (config-agent, file transfer, webcam, link sender, credential bridge)
         vzConfig.socketDevices = [VZVirtioSocketDeviceConfiguration()]
 
 
@@ -232,8 +238,8 @@ public final class LinuxImageManager {
 
     // MARK: - Private
 
-    private static let alpineVersion = "3.23"
-    private static let alpineRelease = "3.23.3"
+    private static let alpineVersion = "3.22"
+    private static let alpineRelease = "3.22.3"
     private static let releasesBase =
         "https://dl-cdn.alpinelinux.org/alpine/v\(alpineVersion)/releases/aarch64"
     private static let netbootBase = "\(releasesBase)/netboot-\(alpineRelease)"
@@ -273,7 +279,7 @@ public final class LinuxImageManager {
             )
         }
 
-        // Extract vmlinuz-virt and initramfs-virt from tarball
+        // Extract vmlinuz-virt and initramfs-virt from netboot tarball
         progress(.message("Extracting netboot files..."))
         let extractDir = storageDir.appendingPathComponent("netboot-extract")
         try? FileManager.default.removeItem(at: extractDir)
@@ -321,7 +327,7 @@ public final class LinuxImageManager {
 
     /// Extract the raw ARM64 Image from an EFI stub vmlinuz.
     ///
-    /// Alpine's vmlinuz-virt is an EFI PE binary that wraps a gzip-compressed
+    /// Alpine's vmlinuz is an EFI PE binary that wraps a gzip-compressed
     /// ARM64 Image. VZLinuxBootLoader cannot boot EFI stubs directly — it
     /// needs the raw Image. We find the embedded gzip stream (magic bytes
     /// 1F 8B 08) and decompress it.
@@ -409,6 +415,7 @@ public final class LinuxImageManager {
         naturalScrolling: Bool? = nil,
         locale: String? = nil,
         displayScale: Int? = nil,
+        extraKernelOptions: String = VMConfig.defaultExtraKernelOptions,
         progress: @escaping (ProgressEvent) -> Void
     ) async throws {
         // Create transfer disk for extracting initramfs
@@ -425,7 +432,7 @@ public final class LinuxImageManager {
 
         let bootLoader = VZLinuxBootLoader(kernelURL: netbootKernel)
         bootLoader.initialRamdiskURL = netbootInitrd
-        bootLoader.commandLine = "console=hvc0 ip=dhcp alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main modloop=\(Self.netbootBase)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk"
+        bootLoader.commandLine = "console=hvc0 ip=dhcp alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main modloop=\(Self.netbootBase)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk \(extraKernelOptions)"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.platform = VZGenericPlatformConfiguration()
@@ -444,9 +451,34 @@ public final class LinuxImageManager {
             VZVirtioBlockDeviceConfiguration(attachment: transferAttachment),
         ]
 
-        // Network (needed for apk)
+        // Network (needed for apk) — respect the same network mode (NAT/bridged)
+        // and DNS override settings used by regular VMs.
+        var buildNetworkFilter: NetworkFilter?
         let net = VZVirtioNetworkDeviceConfiguration()
-        net.attachment = VZNATNetworkDeviceAttachment()
+        if let netInfo = HostNetworkInfo.detect() {
+            let defaults = UserDefaults.standard
+            let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
+            let bridgedIface: String? = (networkMode == "bridged")
+                ? defaults.string(forKey: "vm.bridgedInterface")
+                : nil
+
+            let dnsOverride: [UInt32]
+            if let dnsString = defaults.string(forKey: "vm.dnsServers"),
+               !dnsString.trimmingCharacters(in: .whitespaces).isEmpty {
+                dnsOverride = dnsString.split(separator: ",")
+                    .compactMap { HostNetworkInfo.parseIPv4(String($0).trimmingCharacters(in: .whitespaces)) }
+            } else {
+                dnsOverride = []
+            }
+            if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, bridgedInterface: bridgedIface) {
+                buildNetworkFilter = filter
+                net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
+            } else {
+                net.attachment = VZNATNetworkDeviceAttachment()
+            }
+        } else {
+            net.attachment = VZNATNetworkDeviceAttachment()
+        }
         vzConfig.networkDevices = [net]
 
         // Serial console via pipe
@@ -462,6 +494,36 @@ public final class LinuxImageManager {
         vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         vzConfig.keyboards = [VZUSBKeyboardConfiguration()]
         vzConfig.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
+
+        // VirtioFS shares — replace slow base64-over-serial file transfer
+        guard let setupDir = Self.resourceBundle.url(forResource: "vm-setup", withExtension: nil) else {
+            throw SandboxError.diskCreationFailed("vm-setup resources not found in bundle")
+        }
+        let setupFS = VZVirtioFileSystemDeviceConfiguration(tag: "setup")
+        setupFS.share = VZSingleDirectoryShare(
+            directory: VZSharedDirectory(url: setupDir, readOnly: true)
+        )
+
+        // Share macOS system fonts so the guest renders pages identically
+        let systemFontsURL = URL(fileURLWithPath: "/System/Library/Fonts")
+        let fontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "fonts")
+        fontsFS.share = VZSingleDirectoryShare(
+            directory: VZSharedDirectory(url: systemFontsURL, readOnly: true)
+        )
+
+        var shares: [VZDirectorySharingDeviceConfiguration] = [setupFS, fontsFS]
+
+        // Also share /Library/Fonts (user-installed fonts) if present
+        let userFontsURL = URL(fileURLWithPath: "/Library/Fonts")
+        if FileManager.default.fileExists(atPath: userFontsURL.path) {
+            let userFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "userfonts")
+            userFontsFS.share = VZSingleDirectoryShare(
+                directory: VZSharedDirectory(url: userFontsURL, readOnly: true)
+            )
+            shares.append(userFontsFS)
+        }
+
+        vzConfig.directorySharingDevices = shares
 
         try vzConfig.validate()
 
@@ -495,39 +557,39 @@ public final class LinuxImageManager {
         let writer = inputPipe.fileHandleForWriting
 
         progress(.message("Waiting for Alpine to boot..."))
-        try await consoleOutput.waitFor(
-            marker: "localhost login:",
-            timeout: 120,
-            progress: progress
-        )
+        do {
+            try await consoleOutput.waitFor(
+                marker: "localhost login:",
+                timeout: 120,
+                progress: progress,
+                failMarkers: [
+                    (marker: "OK: 0 B in 0 packages", error: .diskCreationFailed(
+                        "Alpine Linux could not download packages during boot. This usually means a VPN, firewall, or DNS issue is blocking network access from the VM. Try setting override DNS servers (e.g. 1.1.1.1, 8.8.8.8) in Settings \u{2192} Network \u{2192} DNS Servers."
+                    ))
+                ]
+            )
+        } catch {
+            writer.write(Data("poweroff\n".utf8))
+            try? await Task.sleep(for: .seconds(2))
+            if vm.state != .stopped { try? await vm.stop() }
+            withExtendedLifetime(buildNetworkFilter) { buildNetworkFilter?.stop() }
+            throw error
+        }
 
         progress(.message("Logging in..."))
         writer.write(Data("root\n".utf8))
         try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
 
-        progress(.message("Transferring setup files..."))
+        progress(.message("Mounting setup files via VirtioFS..."))
 
-        // Create a tar.gz archive of the bundled vm-setup resources and
-        // transfer it to the installer VM via base64 over serial.
-        let archive = try Self.createSetupArchive()
-        let base64 = archive.base64EncodedString()
-        let chunkSize = 800
-        writer.write(Data("mkdir -p /tmp/vm-setup\n".utf8))
+        // Mount the vm-setup resources shared from the host via VirtioFS.
+        // This replaces the old base64-over-serial transfer which was very slow.
+        writer.write(Data("modprobe virtiofs\n".utf8))
         try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
-        var offset = base64.startIndex
-        while offset < base64.endIndex {
-            let end = base64.index(offset, offsetBy: chunkSize, limitedBy: base64.endIndex) ?? base64.endIndex
-            let chunk = base64[offset..<end]
-            writer.write(Data("echo '\(chunk)' >> /tmp/s.b64\n".utf8))
-            try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
-            offset = end
-        }
-        writer.write(Data("base64 -d /tmp/s.b64 | tar xz -C /tmp\n".utf8))
-        try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
-        writer.write(Data("rm -f /tmp/s.b64\n".utf8))
-        try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
+        writer.write(Data("mkdir -p /tmp/vm-setup && mount -t virtiofs setup /tmp/vm-setup\n".utf8))
+        try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 60, progress: progress)
 
-        progress(.message("Running setup script (installing packages, this may take a few minutes)..."))
+        progress(.message("Running setup script (installing packages)"))
 
         // Run the setup script as a single command. It will print
         // SANDBOX_SETUP_DONE on success or SANDBOX_SETUP_FAILED on error.
@@ -547,6 +609,12 @@ public final class LinuxImageManager {
                     "The image could not be created. Package installation failed, likely due to network issues. Please check your internet connection and try again."
                 )
             }
+            let dnsSnapshot = consoleOutput.pollAndTrim(marker: "APKINDEX.tar.gz: DNS:")
+            if dnsSnapshot.found {
+                throw SandboxError.diskCreationFailed(
+                    "DNS resolution failed inside the VM. If you use a VPN or security software that modifies DNS, set override DNS servers (e.g. 1.1.1.1, 1.0.0.1) in Settings \u{2192} Troubleshooting \u{2192} DNS Servers."
+                )
+            }
             throw error
         }
 
@@ -562,9 +630,9 @@ public final class LinuxImageManager {
             "printf '%s\\n' 'features=\"base ext4 virtio\"' > /mnt/etc/mkinitfs/mkinitfs.conf",
             // Rebuild initramfs with correct modules
             "chroot /mnt sh -c 'KVER=$(ls /lib/modules/ | head -1) && mkinitfs -o /boot/initramfs-custom $KVER'",
-            // Find the installed kernel (vmlinuz-virt is the EFI stub,
+            // Find the installed kernel (vmlinuz-lts is the EFI stub,
             // but we need the raw Image for VZLinuxBootLoader)
-            "KERNEL=/mnt/boot/vmlinuz-virt",
+            "KERNEL=/mnt/boot/vmlinuz-lts",
             "INITRD=/mnt/boot/initramfs-custom",
             "KSIZE=$(stat -c%s $KERNEL)",
             "ISIZE=$(stat -c%s $INITRD)",
@@ -604,6 +672,10 @@ public final class LinuxImageManager {
         }
         if vm.state != .stopped {
             try? await vm.stop()
+        }
+        // Keep the network filter alive for the VM's lifetime, then clean up
+        withExtendedLifetime(buildNetworkFilter) {
+            buildNetworkFilter?.stop()
         }
     }
 
@@ -655,30 +727,6 @@ public final class LinuxImageManager {
         }
         try? FileManager.default.removeItem(at: initrdDest)
         try initrdData.write(to: initrdDest)
-    }
-
-    /// Create a tar.gz archive of the bundled vm-setup resources.
-    private static func createSetupArchive() throws -> Data {
-        guard let setupDir = Self.resourceBundle.url(forResource: "vm-setup", withExtension: nil) else {
-            throw SandboxError.diskCreationFailed("vm-setup resources not found in bundle")
-        }
-        let tempTar = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vm-setup-\(UUID().uuidString).tar.gz")
-        defer { try? FileManager.default.removeItem(at: tempTar) }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        process.arguments = [
-            "-czf", tempTar.path,
-            "-C", setupDir.deletingLastPathComponent().path,
-            setupDir.lastPathComponent,
-        ]
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw SandboxError.diskCreationFailed("Failed to create setup archive (tar exit \(process.terminationStatus))")
-        }
-        return try Data(contentsOf: tempTar)
     }
 
     /// Escape a string for safe use in a shell command.
@@ -755,7 +803,8 @@ private final class ConsoleBuffer: @unchecked Sendable {
     func waitFor(
         marker: String,
         timeout: TimeInterval,
-        progress: @escaping (ProgressEvent) -> Void
+        progress: @escaping (ProgressEvent) -> Void,
+        failMarkers: [(marker: String, error: SandboxError)] = []
     ) async throws {
         var deadline = Date().addingTimeInterval(timeout)
         var lastBufferLength = 0
@@ -765,6 +814,13 @@ private final class ConsoleBuffer: @unchecked Sendable {
             recentOutput = snapshot.recentOutput
 
             if snapshot.found { return }
+
+            // Check for known failure patterns
+            for fail in failMarkers {
+                let failSnapshot = pollAndTrim(marker: fail.marker)
+                if failSnapshot.found { throw fail.error }
+            }
+
             // Reset deadline whenever new console output appears
             if snapshot.length != lastBufferLength {
                 lastBufferLength = snapshot.length

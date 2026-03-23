@@ -6,11 +6,37 @@
     <key>com.apple.security.virtualization</key>
     <true/>
     <!-- Required for ASAuthorization (passkeys + passwords) -->
+    <key>com.apple.developer.web-browser.public-key-credential</key>
+    <true/>
     <key>com.apple.application-identifier</key>
     <string>W3RD8G85BC.io.bromure.app</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>W3RD8G85BC</string>
     <key>keychain-access-groups</key>
     <array>
         <string>W3RD8G85BC.io.bromure.app</string>
     </array>
+    <!-- iCloud Documents for syncing profile definitions across Macs -->
+    <key>com.apple.developer.ubiquity-container-identifiers</key>
+    <array>
+        <string>iCloud.io.bromure.app</string>
+    </array>
+    <key>com.apple.developer.icloud-container-identifiers</key>
+    <array>
+        <string>iCloud.io.bromure.app</string>
+    </array>
+    <key>com.apple.developer.icloud-services</key>
+    <string>*</string>
+    <key>com.apple.developer.icloud-container-environment</key>
+    <string>Production</string>
+    <!-- vmnet framework for host-side network filtering (LAN isolation) -->
+    <key>com.apple.developer.networking.vmnet</key>
+    <true/>
+    <!-- Camera access for webcam passthrough to VM -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    <!-- Microphone access for audio input passthrough to VM -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
 </dict>
 </plist>

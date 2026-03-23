@@ -22,6 +22,7 @@ public struct VirusTotalResult: Sendable {
 /// Errors specific to VirusTotal API operations.
 public enum VirusTotalError: Error, LocalizedError {
     case missingAPIKey
+    case invalidAPIKey
     case rateLimited
     case notFound
     case uploadFailed(statusCode: Int)
@@ -33,6 +34,8 @@ public enum VirusTotalError: Error, LocalizedError {
         switch self {
         case .missingAPIKey:
             return "VirusTotal API key is not configured."
+        case .invalidAPIKey:
+            return "The VirusTotal API key is invalid. Sign up for a free key at https://www.virustotal.com/gui/join-us"
         case .rateLimited:
             return "VirusTotal rate limit exceeded. Please wait before retrying."
         case .notFound:
@@ -66,6 +69,26 @@ public final class VirusTotalClient: @unchecked Sendable {
         guard !apiKey.isEmpty else { throw VirusTotalError.missingAPIKey }
         self.apiKey = apiKey
         self.session = URLSession(configuration: .default)
+    }
+
+    /// Validate an API key by hitting GET /users/me.
+    /// Throws `invalidAPIKey` for 401/403, or a network error on failure.
+    public static func validateAPIKey(_ key: String) async throws {
+        guard !key.isEmpty else { throw VirusTotalError.missingAPIKey }
+        var request = URLRequest(url: URL(string: "https://www.virustotal.com/api/v3/users/me")!)
+        request.setValue(key, forHTTPHeaderField: "x-apikey")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw VirusTotalError.networkError(
+                NSError(domain: "VirusTotal", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
+            )
+        }
+        switch http.statusCode {
+        case 200: return
+        case 401, 403: throw VirusTotalError.invalidAPIKey
+        case 429: throw VirusTotalError.rateLimited
+        default: throw VirusTotalError.uploadFailed(statusCode: http.statusCode)
+        }
     }
 
     // MARK: - Public API

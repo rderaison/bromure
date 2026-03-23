@@ -1,0 +1,7 @@
+{
+  "name": "com.bromure.file_picker",
+  "description": "Bromure file picker agent — routes file uploads through host macOS file picker.",
+  "path": "/usr/local/bin/file-picker-host.py",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://cjdidalalgkgekmhonlcaleiafjbkdfn/"]
+}

@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Bromure WebRTC Block",
+  "version": "1.0.0",
+  "description": "Blocks WebRTC IP leak by overriding RTCPeerConnection.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv0dcU3YUCJMrdo2oIJMkQZpPEXGRCRTxRQ2knM4iYmatAJb6BORdCw+0wHAicuUhiAF9KVcKMlmkWY0qM9VJJ8vXs4JTWoX7pBUsV1RxAXNEabMdd9rDyDyAcaH9zpINBF4kHBewLw8iNIF+BiNBXb5VGpIRSmlGpcZQRiQhRD80wze+FKn57+zbQ9Bw5LVRJkCTMjTuYukBDFOW8BBHJWtpJPpF1/FK74iUmKpLFjeyFH5keoesr/KoK6ZbNN+oPRRfDU+GAeRGLg6OkdaL/SkPvco65iRJfNtwf35rwJ5RH3/ALkM2ByzWMVtnDduHalDLaKeu0oQ7Iu61t3ps0QIDAQAB",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["block.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ]
+}

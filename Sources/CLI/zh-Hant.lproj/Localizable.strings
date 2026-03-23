@@ -1,0 +1,484 @@
+/* Localizable.strings — Traditional Chinese */
+
+/* MainView — Header */
+"Bromure" = "Bromure";
+"Secure, ephemeral browsing in a disposable VM" = "在拋棄式虛擬機器中安全、短暫地瀏覽";
+
+/* MainView — Setup */
+"First-Time Setup" = "首次設定";
+"Downloads Alpine Linux (~50 MB) and installs\nChromium. This only needs to happen once." = "下載 Alpine Linux（約 50 MB）並安裝\nChromium。此步驟只需執行一次。";
+"Get Started" = "開始使用";
+
+/* MainView — Warming up */
+"Starting browser engine..." = "正在啟動瀏覽器引擎⋯";
+"First launch is slower, subsequent ones will be faster." = "首次啟動較慢，之後會更快。";
+
+/* MainView — Initializing */
+"Console Output" = "主控台輸出";
+
+/* MainView — Ready */
+"Encrypted" = "已加密";
+"Edit profile settings" = "編輯設定檔設定";
+"Add a new profile" = "新增設定檔";
+"Delete selected profile" = "刪除所選設定檔";
+"Starting..." = "正在啟動⋯";
+"Open Browser" = "開啟瀏覽器";
+"Ready" = "就緒";
+"Warming up..." = "正在暖機⋯";
+"%lld open" = "%lld 個已開啟";
+
+/* MainView — New Profile sheet */
+"New Profile" = "新增設定檔";
+"Profile Name" = "設定檔名稱";
+"Color" = "顏色";
+"None" = "無";
+"Cancel" = "取消";
+"Create" = "建立";
+
+/* MainView — Delete confirmation */
+"Delete" = "刪除";
+"This will permanently delete the profile and all its saved browsing data." = "這將永久刪除此設定檔及其所有已儲存的瀏覽資料。";
+"This will delete the profile." = "這將刪除此設定檔。";
+
+/* MainView — Error */
+"Something went wrong" = "發生錯誤";
+"Try Again" = "重試";
+
+/* ProfileSettingsView — Categories */
+"General" = "一般";
+"Performance" = "效能";
+"Media" = "媒體";
+"Privacy & Safety" = "隱私與安全";
+"Network Isolation" = "網路隔離";
+"VPN & Ads" = "VPN 與廣告";
+"Enterprise" = "企業";
+"Advanced" = "進階";
+
+/* ProfileSettingsView — Buttons */
+"Save" = "儲存";
+
+/* ProfileSettingsView — General */
+"Basic profile settings" = "基本設定檔設定";
+"Name" = "名稱";
+"Comments" = "備註";
+"A short note about this profile. Shown when you hover over it in the profile list." = "關於此設定檔的簡短備註。將游標移至設定檔列表中的項目上方時會顯示。";
+"e.g. Work browsing, banking only, etc." = "例如：工作瀏覽、僅限銀行等";
+"Window Color" = "視窗顏色";
+"A colored border around the browser window helps you tell profiles apart at a glance." = "瀏覽器視窗周圍的彩色邊框可幫助你快速區分不同設定檔。";
+"Home Page" = "首頁";
+"The website that opens when you launch this profile." = "啟動此設定檔時開啟的網站。";
+"Language" = "語言";
+"The language used by the browser. \U201CSame as System\U201D follows your Mac\U2019s language. Choosing a specific language reduces browser fingerprinting." = "瀏覽器使用的語言。\U201C與系統相同\U201D會跟隨您 Mac 的語言。選擇特定語言可減少瀏覽器指紋識別。";
+"Retain Browsing Data" = "保留瀏覽資料";
+"Keep your bookmarks, history, cookies, and passwords between sessions. When turned off, everything is erased each time you close the browser." = "在各次工作階段之間保留書籤、歷史記錄、Cookie 和密碼。關閉時，每次關閉瀏覽器都會清除所有資料。";
+
+/* ProfileSettingsView — Performance */
+"Control how the browser uses your Mac\U2019s hardware" = "控制瀏覽器如何使用你 Mac\U2019s 的硬體";
+"GPU Acceleration" = "GPU 加速";
+"Uses your Mac\U2019s graphics chip to make web pages render faster. Turn this off if you notice visual glitches or display problems." = "使用你 Mac\U2019s 的圖形晶片加快網頁算繪速度。如果你發現畫面異常或顯示問題，請關閉此選項。";
+"WebGL" = "WebGL";
+"Lets websites display 3D graphics and interactive content. Required by some games, maps, and data visualizations." = "允許網站顯示 3D 圖形和互動內容。部分遊戲、地圖和資料視覺化需要此功能。";
+
+/* ProfileSettingsView — Media */
+"Audio and device sharing" = "音訊與裝置共享";
+"Audio" = "音訊";
+"Play sounds, music, and video audio from websites." = "播放來自網站的音效、音樂和影片音訊。";
+"Volume" = "音量";
+"Share Webcam" = "共享網路攝影機";
+"Let websites in this browser access your Mac\U2019s camera for video calls and meetings." = "允許此瀏覽器中的網站存取你 Mac\U2019s 的相機，以進行視訊通話和會議。";
+"Share Microphone" = "共享麥克風";
+"Let websites in this browser access your Mac\U2019s microphone for calls and voice input." = "允許此瀏覽器中的網站存取你 Mac\U2019s 的麥克風，以進行通話和語音輸入。";
+"Device Selection" = "裝置選擇";
+"Choose which camera, microphone, and speaker to use with this profile." = "選擇要搭配此設定檔使用的相機、麥克風和揚聲器。";
+"Speaker" = "揚聲器";
+"Choose which speaker to use for audio output." = "選擇要用於音訊輸出的揚聲器。";
+"Default" = "預設";
+
+/* ProfileSettingsView — File Transfer */
+"Control file uploads and downloads between your Mac and this browser" = "管理 Mac 與此瀏覽器之間的檔案上傳和下載";
+
+/* ProfileSettingsView — Privacy & Safety */
+"Control what this browser can access and share" = "控制此瀏覽器可存取和共享的內容";
+"Shared Clipboard" = "共享剪貼板";
+"Copy and paste text and images between your Mac and this browser. When turned off, the browser\U2019s clipboard is completely isolated." = "在你的 Mac 和此瀏覽器之間拷貝和貼上文字與圖片。關閉時，瀏覽器\U2019s 的剪貼板會完全隔離。";
+"File Upload" = "檔案上傳";
+"Allow sending files from your Mac to websites in this browser." = "允許從你的 Mac 傳送檔案至此瀏覽器中的網站。";
+"File Download" = "檔案下載";
+"Allow saving files from websites to your Mac." = "允許從網站儲存檔案至你的 Mac。";
+"Scan Downloads with VirusTotal" = "使用 VirusTotal 掃描下載檔案";
+"Automatically check downloaded files for viruses and malware before they reach your Mac." = "在下載檔案送達你的 Mac 之前，自動檢查是否含有病毒和惡意軟體。";
+"VirusTotal API Key" = "VirusTotal API 金鑰";
+"Block Threats" = "封鎖威脅";
+"Automatically block files that VirusTotal identifies as malicious. Blocked files cannot be saved or dragged to your Mac." = "自動封鎖 VirusTotal 識別為惡意的檔案。被封鎖的檔案無法儲存或拖移至你的 Mac。";
+"Block Unscannable Files" = "封鎖無法掃描的檔案";
+"Block files that could not be scanned by VirusTotal (too large, rate-limited, or unknown). When turned off, unscannable files can still be saved manually." = "封鎖 VirusTotal 無法掃描的檔案（檔案過大、頻率受限或無法辨識）。關閉時，無法掃描的檔案仍可手動儲存。";
+"Block Malware Sites" = "封鎖惡意軟體網站";
+"Blocks access to websites known to distribute viruses or steal information, using Cloudflare\U2019s security DNS." = "使用 Cloudflare\U2019s 安全 DNS 封鎖已知散佈病毒或竊取資訊的網站。";
+"Phishing Warning" = "釣魚警告";
+"Shows a warning when you\U2019re about to enter a password on a website that looks suspicious or fake." = "當你\U2019 即將在看似可疑或偽造的網站上輸入密碼時顯示警告。";
+"Beta" = "Beta";
+"Send Link to Other Session" = "傳送連結至其他工作階段";
+"Adds a right-click menu option to send a web page link to another Bromure profile." = "新增右鍵選單選項，可將網頁連結傳送至其他 Bromure 設定檔。";
+
+/* ProfileSettingsView — Network Isolation */
+"Restrict which networks and ports this browser can reach" = "限制此瀏覽器可連線的網路和連接埠";
+"Isolate from Local Network" = "與區域網路隔離";
+"Prevents this browser from reaching devices on your home or office network, like printers, NAS drives, or internal servers. Internet access is not affected." = "防止此瀏覽器存取你家中或辦公室網路上的裝置，例如印表機、NAS 磁碟機或內部伺服器。網際網路連線不受影響。";
+"Restrict Outgoing Ports" = "限制連出連接埠";
+"Only allow the browser to connect on specific network ports. Useful for locking down which services the browser can reach." = "僅允許瀏覽器透過特定網路連接埠連線。適用於限制瀏覽器可存取的服務。";
+"Allowed ports (e.g. 80, 443, 8000-9000)" = "允許的連接埠（例如 80、443、8000-9000）";
+"DNS (port 53) is always allowed. Separate ports with commas. Use a dash for ranges." = "DNS（連接埠 53）一律允許。以逗號分隔連接埠，使用破折號表示範圍。";
+
+/* ProfileSettingsView — VPN & Ads */
+"Network privacy and ad blocking" = "網路隱私與廣告封鎖";
+"Cloudflare WARP" = "Cloudflare WARP";
+"Routes all browser traffic through Cloudflare\U2019s encrypted network, hiding your IP address from websites. Works like a VPN." = "透過 Cloudflare\U2019s 加密網路傳送所有瀏覽器流量，對網站隱藏你的 IP 位址。運作方式類似 VPN。";
+"Block Ads" = "封鎖廣告";
+"Blocks ads and tracking scripts from loading on websites. This can make pages load faster and protects your privacy." = "封鎖網站上的廣告和追蹤指令碼載入。這可以加快頁面載入速度並保護你的隱私。";
+
+/* ProfileSettingsView — Enterprise */
+"Settings for managed environments" = "受管理環境的設定";
+"Root Certificates" = "根憑證";
+"Install custom root CA certificates so the browser trusts your organization\U2019s internal websites and services. Accepts PEM, DER, CRT, and CER files." = "安裝自訂根 CA 憑證，讓瀏覽器信任你組織\U2019s 的內部網站和服務。接受 PEM、DER、CRT 和 CER 檔案。";
+"Add Certificate\U2026" = "加入憑證\U2026";
+
+/* ProfileSettingsView — Advanced */
+"Additional options for power users" = "進階使用者的額外選項";
+"Encrypt Browsing Data" = "加密瀏覽資料";
+"Encrypts all saved browsing data on your Mac\U2019s disk using LUKS. The encryption key is stored securely in your macOS Keychain. If you lose the key, your data cannot be recovered." = "使用 LUKS 加密儲存在你 Mac\U2019s 磁碟上的所有瀏覽資料。加密金鑰安全地儲存在你的 macOS 鑰匙圈中。如果遺失金鑰，資料將無法復原。";
+"Encryption" = "加密";
+"Turn on \U201CRetain Browsing Data\U201D in General to access disk encryption options." = "在「一般」中開啟\U201C保留瀏覽資料\U201D以存取磁碟加密選項。";
+
+/* ProfileSettingsView — Confirmation dialogs */
+"Increase VM memory?" = "增加虛擬機器記憶體？";
+"Increase to 2 GB" = "增加至 2 GB";
+"Keep current" = "維持目前設定";
+"Cloudflare WARP requires at least 2 GB of RAM to run reliably. Would you like to increase the VM memory?" = "Cloudflare WARP 需要至少 2 GB 的 RAM 才能穩定執行。是否要增加虛擬機器記憶體？";
+"Enable encryption?" = "啟用加密？";
+"Disable encryption?" = "停用加密？";
+"Delete data and continue" = "刪除資料並繼續";
+"Changing the encryption setting will delete all existing browsing data for this profile. This cannot be undone." = "變更加密設定將刪除此設定檔的所有現有瀏覽資料。此操作無法復原。";
+"Delete Browsing Data\U2026" = "刪除瀏覽資料\U2026";
+"Close the session before deleting browsing data" = "請先關閉工作階段再刪除瀏覽資料";
+"Permanently delete all saved browsing data for this profile" = "永久刪除此設定檔的所有已儲存瀏覽資料";
+"Delete browsing data?" = "刪除瀏覽資料？";
+"Delete All Data" = "刪除所有資料";
+"This will permanently delete all bookmarks, history, cookies, and passwords for this profile. This cannot be undone." = "這將永久刪除此設定檔的所有書籤、歷史記錄、Cookie 和密碼。此操作無法復原。";
+
+/* SettingsView — Categories */
+"Hardware" = "硬體";
+"Input" = "輸入";
+"Display" = "顯示器";
+"Network" = "網路";
+"Storage" = "儲存空間";
+
+/* SettingsView — Hardware */
+"Resources allocated to each browser session" = "分配給每個瀏覽器工作階段的資源";
+"Memory" = "記憶體";
+"How much RAM each browser gets. 2 GB works for most websites. Increase to 4 GB or more for heavy web apps." = "每個瀏覽器分配的 RAM 容量。2 GB 適用於大多數網站。如使用大型網頁應用程式，請增加至 4 GB 或以上。";
+"1 GB" = "1 GB";
+"2 GB" = "2 GB";
+"3 GB" = "3 GB";
+"4 GB" = "4 GB";
+"8 GB" = "8 GB";
+"16 GB" = "16 GB";
+"CPU Cores" = "CPU 核心數";
+"Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac." = "瀏覽器可用的處理器核心數。「自動」會隨記憶體自動調整（每 GB 2 個核心），最多不超過此 Mac 的核心數。";
+"Automatic (%lld)" = "自動（%lld）";
+"Changes take effect when the next browser session starts." = "變更將在下一個瀏覽器工作階段啟動時生效。";
+
+/* SettingsView — Input */
+"Keyboard and trackpad settings" = "鍵盤和觸控式軌跡板設定";
+"Keyboard Layout" = "鍵盤佈局";
+"Match this to your physical keyboard. Changing the layout requires rebuilding the base image." = "請配合你的實體鍵盤設定。變更佈局需要重新建構基本映像檔。";
+"Natural Scrolling" = "自然捲動";
+"Scroll content in the same direction as your finger moves on the trackpad, matching the macOS default." = "內容的捲動方向與手指在觸控式軌跡板上移動的方向相同，與 macOS 預設值一致。";
+"Use Command as Control" = "將 Command 鍵作為 Control 鍵使用";
+"Makes familiar shortcuts like \U2318C, \U2318V, and \U2318T work inside the browser by swapping the Command and Control keys." = "透過交換 Command 鍵和 Control 鍵，讓 \U2318C、\U2318V 和 \U2318T 等常用快速鍵在瀏覽器中正常運作。";
+
+/* SettingsView — Display */
+"Screen and appearance settings" = "螢幕與外觀設定";
+"Scale Factor" = "縮放比例";
+"Match your Mac\U2019s display. Use 2x for Retina screens (most modern Macs). Changing this requires rebuilding the base image." = "請配合你 Mac\U2019s 的顯示器。Retina 螢幕（大多數新款 Mac）請使用 2x。變更此設定需要重新建構基本映像檔。";
+"1x (Standard)" = "1x（標準）";
+"2x (Retina)" = "2x（Retina）";
+"Appearance" = "外觀";
+"Controls whether the browser uses a light or dark color scheme. \U201CSame as System\U201D follows your Mac\U2019s current setting." = "控制瀏覽器使用淺色或深色配色。\U201C與系統相同\U201D會依照你 Mac\U2019s 目前的設定。";
+"Same as System" = "與系統相同";
+"Light" = "淺色";
+"Dark" = "深色";
+
+/* SettingsView — Network */
+"Connection mode and DNS settings" = "連線模式與 DNS 設定";
+"You probably don\U2019t need to change anything here." = "你可能不需要變更此處的任何設定。";
+"These settings are only useful if you\U2019re having trouble during installation or if a VPN, firewall, or other local software is preventing the browser from connecting to the internet." = "只有在安裝過程中遇到問題，或 VPN、防火牆或其他本機軟體阻止瀏覽器連線至網際網路時，這些設定才會有用。";
+"Connection Mode" = "連線模式";
+"NAT (recommended) gives the browser its own private network address. Bridged mode places the browser directly on your network, as if it were a separate device." = "NAT（建議使用）會為瀏覽器提供專用的私人網路位址。橋接模式會將瀏覽器直接放在你的網路上，如同一部獨立的裝置。";
+"NAT (Recommended)" = "NAT（建議）";
+"Bridged" = "橋接";
+"Network Interface" = "網路介面";
+"Choose which network connection the browser should use. Typically this is your Wi-Fi or Ethernet adapter." = "選擇瀏覽器應使用的網路連線。通常是你的 Wi-Fi 或乙太網路轉接器。";
+"No network interfaces available." = "沒有可用的網路介面。";
+"Select\U2026" = "選擇\U2026";
+"LAN isolation and port restriction are not available in bridged mode." = "橋接模式下無法使用區域網路隔離和連接埠限制。";
+"DNS Servers" = "DNS 伺服器";
+"Override which DNS servers the browser uses to look up website addresses. Leave empty to use the default. Set this if you\U2019re on a VPN or security software that breaks internet access in the browser." = "覆蓋瀏覽器用來查詢網站位址的 DNS 伺服器。留空以使用預設值。如果你使用的 VPN 或安全軟體導致瀏覽器無法連線至網際網路，請設定此項目。";
+"e.g. 1.1.1.1, 8.8.8.8" = "例如 1.1.1.1、8.8.8.8";
+"DNS override only works in NAT mode." = "DNS 覆蓋僅在 NAT 模式下有效。";
+
+/* SettingsView — Storage */
+"Disk usage and base image management" = "磁碟用量與基本映像檔管理";
+"Disk Usage" = "磁碟用量";
+"Total disk space used by the base image and all profile data." = "基本映像檔和所有設定檔資料使用的總磁碟空間。";
+"Storage Location" = "儲存位置";
+"Reset" = "重置";
+"Delete the Linux base image. You\U2019ll need to run the initial setup again. This does not delete your profile data or settings." = "刪除 Linux 基本映像檔。你\U2019 需要重新執行初始設定。這不會刪除你的設定檔資料或設定。";
+"Delete Base Image & Reset\U2026" = "刪除基本映像檔並重置\U2026";
+
+/* SettingsView — Dialogs */
+"Delete the base image?" = "刪除基本映像檔？";
+"This will delete the Linux base image. You\U2019ll need to run setup again." = "這將刪除 Linux 基本映像檔。你\U2019 需要重新執行設定。";
+"Rebuild required" = "需要重新建構";
+"Rebuild Image" = "重新建構映像檔";
+"Changing this setting requires rebuilding the base image. All open browser windows will be closed and any unsaved data will be lost." = "變更此設定需要重新建構基本映像檔。所有已開啟的瀏覽器視窗將會關閉，未儲存的資料將會遺失。";
+
+/* FileDrawerView */
+"File Transfer" = "檔案傳輸";
+"Drop files here to upload to VM" = "將檔案拖放至此處以上傳至虛擬機器";
+"Files downloaded in the VM appear here \U2014 drag or save to keep" = "在虛擬機器中下載的檔案會出現在此處\U2014拖移或儲存以保留";
+"Blocked" = "已封鎖";
+"Saved \U2014 Show in Finder" = "已儲存\U2014在 Finder 中顯示";
+"Save to Downloads" = "儲存至「下載項目」";
+"Pending" = "待處理";
+"Scanning" = "掃描中";
+"Clean" = "安全";
+
+/* MediaPreviewView */
+"No camera" = "沒有相機";
+"Camera" = "相機";
+"Microphone" = "麥克風";
+
+/* WarpEULAView */
+"Bromure can route your VM traffic through Cloudflare\U2019s encrypted WARP network for additional privacy and security." = "Bromure 可透過 Cloudflare\U2019s 加密 WARP 網路傳送你的虛擬機器流量，以提供額外的隱私和安全保護。";
+"By clicking Accept, you agree to the Cloudflare Application Terms of Service and Privacy Policy." = "按一下「接受」，即表示你同意 Cloudflare 應用程式服務條款和隱私權政策。";
+"Decline" = "拒絕";
+"Accept" = "接受";
+
+/* Init steps — Linux image creation */
+"Preparing..." = "準備中…";
+"Downloading Alpine Linux netboot files" = "正在下載 Alpine Linux 網路開機檔案";
+"Using cached Alpine netboot files" = "使用已快取的 Alpine 網路開機檔案";
+"Creating disk image" = "正在建立磁碟映像";
+"Installing Alpine Linux with Chromium" = "正在安裝 Alpine Linux 與 Chromium";
+"Preparing boot files" = "正在準備開機檔案";
+
+/* Init steps — macOS image creation */
+"Fetching latest macOS restore image metadata" = "正在擷取最新的 macOS 回復映像中繼資料";
+"Creating auxiliary storage" = "正在建立輔助儲存空間";
+"Installing macOS" = "正在安裝 macOS";
+"Saving base image metadata" = "正在儲存基礎映像中繼資料";
+
+/* Menu — App */
+"About Bromure" = "關於 Bromure";
+"Settings..." = "設定\U2026";
+"Quit Bromure" = "結束 Bromure";
+
+/* Menu — File */
+"File" = "檔案";
+"New Browser" = "新增瀏覽器";
+"Recreate Base Image\U2026" = "重新建立基礎映像\U2026";
+"Close Window" = "關閉視窗";
+
+/* Menu — View */
+"View" = "顯示方式";
+"Toggle File Drawer" = "切換檔案面板";
+
+/* Menu — Edit */
+"Edit" = "編輯";
+"Cut" = "剪下";
+"Copy" = "拷貝";
+"Paste" = "貼上";
+"Select All" = "全選";
+
+/* Menu — Window */
+"Window" = "視窗";
+"Minimize" = "縮小";
+
+/* Alerts — Profile chooser */
+"Choose a profile" = "選擇設定檔";
+"Which profile should open %@?" = "要以哪個設定檔開啟 %@？";
+"Open" = "開啟";
+
+/* Alerts — Recreate base image */
+"Recreate base image?" = "重新建立基礎映像？";
+"This will close all browser windows, delete the current base image, and rebuild it from scratch. This may take several minutes." = "這將關閉所有瀏覽器視窗，刪除目前的基礎映像並從頭重建。此過程可能需要幾分鐘。";
+"Recreate" = "重新建立";
+
+/* Alerts — Restore tabs */
+"Restore previous tabs?" = "要還原先前的標籤頁嗎？";
+"This profile has data from a previous session. Would you like to restore your open tabs?" = "此設定檔含有先前工作階段的資料。是否要還原已開啟的標籤頁？";
+"Restore" = "還原";
+"Start Fresh" = "重新開始";
+
+/* Alerts — Quit */
+"Quit Bromure?" = "結束 Bromure？";
+"There is 1 open browser session. All session data will be lost." = "有 1 個開啟的瀏覽器工作階段。所有工作階段資料將會遺失。";
+"There are %lld open browser sessions. All session data will be lost." = "有 %lld 個開啟的瀏覽器工作階段。所有工作階段資料將會遺失。";
+"Quit" = "結束";
+
+/* Alerts — Close browser */
+"Close this browser?" = "關閉此瀏覽器？";
+"All browsing data in this window will be permanently lost. This cannot be undone." = "此視窗中的所有瀏覽資料將永久遺失。此操作無法復原。";
+"Close" = "關閉";
+
+/* Window titles */
+"Cloudflare WARP Terms of Service" = "Cloudflare WARP 服務條款";
+"Settings" = "設定";
+"Bromure \U2014 %@" = "Bromure \U2014 %@";
+"Bromure \U2014 Chromium" = "Bromure \U2014 Chromium";
+"Bromure \U2014 Base Image Setup" = "Bromure \U2014 基礎映像設定";
+"Profile Settings \U2014 %@" = "設定檔設定 \U2014 %@";
+
+/* Init steps */
+"Running setup script (installing packages)" = "正在執行設定指令稿（安裝套件）";
+
+/* ProfileColor labels */
+"Blue" = "藍色";
+"Red" = "紅色";
+"Green" = "綠色";
+"Orange" = "橘色";
+"Purple" = "紫色";
+"Pink" = "粉紅色";
+"Teal" = "藍綠色";
+"Gray" = "灰色";
+
+/* ProfileSettingsView — Allow Automation */
+"Allow Automation" = "允許自動化";
+"Let external tools (Claude Code, Puppeteer, Playwright) create browser sessions and control this profile remotely. When turned off, this profile is hidden from the automation API." = "允許外部工具（Claude Code、Puppeteer、Playwright）建立瀏覽器工作階段並遠端控制此設定檔。關閉後，此設定檔將從自動化 API 中隱藏。";
+"The automation server is currently disabled. Enable it in Bromure \U2192 Settings \U2192 Automation." = "自動化伺服器目前已停用。請在 Bromure \U2192 設定 \U2192 自動化中啟用。";
+
+/* ProfileSettingsView — Session Recording */
+"Session Recording" = "工作階段錄製";
+"Record all HTTP requests made during this browsing session. Useful for analyzing what a suspicious link does behind the scenes. When the session ends, you can save or discard the recording." = "記錄此瀏覽工作階段期間的所有 HTTP 要求。有助於分析可疑連結在幕後做了什麼。工作階段結束時，您可以儲存或捨棄錄製內容。";
+"Capture Level" = "擷取級別";
+"Disabled" = "已停用";
+"Basic \U2014 URLs only" = "基本 \U2014 僅 URL";
+"Headers \U2014 URLs + headers + POST data" = "標頭 \U2014 URL + 標頭 + POST 資料";
+"Full \U2014 URLs + headers + response bodies" = "完整 \U2014 URL + 標頭 + 回應內容";
+"This level captures POST data which may include passwords, tokens, and form submissions in clear text." = "此級別會擷取 POST 資料，可能包含明文形式的密碼、權杖和表單提交內容。";
+"Full capture records all request and response bodies including passwords, authentication tokens, personal data, and any sensitive content transmitted over the network. Use only for security analysis of untrusted links." = "完整擷取會記錄所有要求和回應的內容，包括密碼、認證權杖、個人資料以及透過網路傳輸的任何敏感內容。僅用於不可信連結的安全分析。";
+
+/* SettingsView — Automation */
+"Remote browser control via HTTP API, CDP, and MCP" = "透過 HTTP API、CDP 和 MCP 遠端控制瀏覽器";
+"MCP Server" = "MCP 伺服器";
+"Bromure includes a built-in MCP server for Claude Code, Openclaws, and other MCP-compatible AI tools. Add this to your MCP configuration:" = "Bromure 內建了適用於 Claude Code、Openclaws 及其他 MCP 相容 AI 工具的 MCP 伺服器。請將以下內容加入您的 MCP 設定：";
+"Add --debug to the args to include VM shell access and app state tools." = "在參數中加入 --debug 以啟用虛擬機器 Shell 存取和應用狀態工具。";
+"Binding to all interfaces exposes the automation API to your entire network. Anyone on your LAN can create browser sessions, execute JavaScript, and take screenshots. Only use this on trusted networks." = "綁定到所有介面會將自動化 API 暴露到整個網路。區域網路上的任何人都可以建立瀏覽器工作階段、執行 JavaScript 和擷取螢幕截圖。僅在可信任的網路上使用。";
+
+/* Session Recording — Save Dialog */
+"Save session recording?" = "儲存工作階段錄製？";
+"This session captured %lld HTTP requests. Save the recording before closing?" = "此工作階段已擷取 %lld 個 HTTP 要求。關閉前要儲存錄製內容嗎？";
+"Save\U2026" = "儲存\U2026";
+"Discard" = "捨棄";
+"Invalid Trace File" = "無效的追蹤檔案";
+"The file could not be read as a Bromure session recording." = "無法將此檔案讀取為 Bromure 工作階段錄製。";
+"Open a saved session recording" = "開啟已儲存的工作階段錄製";
+
+/* Trace Viewer */
+"Time" = "時間";
+"Method" = "方法";
+"Host" = "主機";
+"URL" = "URL";
+"Status" = "狀態";
+"Waterfall" = "瀑布圖";
+"Duration" = "持續時間";
+"Type" = "類型";
+"Page" = "頁面";
+"Request" = "要求";
+"Response" = "回應";
+"Form Fields" = "表單欄位";
+"Navigation" = "導覽";
+"Timing" = "時序";
+"Copied" = "已拷貝";
+"Response body was truncated" = "回應內容已被截斷";
+"No form fields captured for this request." = "未擷取此要求的表單欄位。";
+"Form field snapshots are recorded when a form is submitted." = "表單欄位快照會在表單提交時記錄。";
+"Field Name" = "欄位名稱";
+"Value" = "值";
+"This section compares the form field values at capture time with the actual POST data sent. Differences may indicate client-side transformation (e.g., hashing, encoding)." = "此部分將擷取時的表單欄位值與實際傳送的 POST 資料進行對比。差異可能表示用戶端進行了轉換（如雜湊、編碼等）。";
+"Form:" = "表單：";
+"Sent:" = "已傳送：";
+
+/* Flow Graph */
+"Drag nodes \U2022 Click page to expand sub-resources" = "拖曳節點 \U2022 點按頁面展開子資源";
+"No navigation events captured" = "未擷取到導覽事件";
+"Freeze" = "凍結";
+"Resume" = "繼續";
+"Start" = "開始";
+"req" = "\U500B";
+
+/* ProfileSettingsView — Performance (additional) */
+"Zero-Copy Rasterization" = "\U96F6\U62F7\U8C9D\U5149\U67F5\U5316";
+"Reduces memory copies during page rendering. Improves performance on most systems." = "\U6E1B\U5C11\U9801\U9762\U7E6A\U88FD\U6642\U7684\U8A18\U61B6\U9AD4\U62F7\U8C9D\U3002\U5728\U5927\U591A\U6578\U7CFB\U7D71\U4E0A\U63D0\U9AD8\U6548\U80FD\U3002";
+"Smooth Scrolling" = "\U5E73\U6ED1\U6372\U52D5";
+"Animates scrolling for a smoother feel. Disable for instant, jump-style scrolling." = "\U52D5\U756B\U6372\U52D5\U4EE5\U7372\U5F97\U66F4\U6D41\U66A2\U7684\U9AD4\U9A57\U3002\U505C\U7528\U5F8C\U4F7F\U7528\U5373\U6642\U8DF3\U8E8D\U5F0F\U6372\U52D5\U3002";
+
+/* ProfileSettingsView — Privacy & Safety (additional) */
+"Block Screen Capture" = "\U963B\U6B62\U87A2\U5E55\U64F7\U53D6";
+"Hides this browser window from screenshots, screen recordings, and screen sharing apps like Zoom." = "\U5C07\U6B64\U700F\U89BD\U5668\U8996\U7A97\U5F9E\U87A2\U5E55\U622A\U5716\U3001\U87A2\U5E55\U9304\U88FD\U548C Zoom \U7B49\U87A2\U5E55\U5171\U4EAB\U61C9\U7528\U7A0B\U5F0F\U4E2D\U96B1\U85CF\U3002";
+
+/* ProfileSettingsView — VPN & Ads (additional) */
+"Connect on Startup" = "\U555F\U52D5\U6642\U9023\U7DDA";
+"Automatically connect the VPN when the browser session starts. You can always toggle it from the window\U2019s VPN button." = "\U700F\U89BD\U5668\U5DE5\U4F5C\U968E\U6BB5\U555F\U52D5\U6642\U81EA\U52D5\U9023\U63A5 VPN\U3002\U60A8\U53EF\U4EE5\U96A8\U6642\U900F\U904E\U8996\U7A97\U7684 VPN \U6309\U9215\U5207\U63DB\U3002";
+
+/* ProfileSettingsView — Enterprise (additional) */
+"HTTP Proxy" = "HTTP \U4EE3\U7406";
+"Route all browser traffic through a corporate proxy server. When a proxy is configured, VPN and ad blocking are automatically disabled." = "\U900F\U904E\U4F01\U696D\U4EE3\U7406\U4F3A\U670D\U5668\U8DEF\U7531\U6240\U6709\U700F\U89BD\U5668\U6D41\U91CF\U3002\U8A2D\U5B9A\U4EE3\U7406\U5F8C\UFF0CVPN \U548C\U5EE3\U544A\U651D\U622A\U6703\U81EA\U52D5\U505C\U7528\U3002";
+"Hostname" = "\U4E3B\U6A5F\U540D\U7A31";
+"Port" = "\U9023\U63A5\U57E0";
+"Username" = "\U4F7F\U7528\U8005\U540D\U7A31";
+"Password" = "\U5BC6\U78BC";
+
+/* ProfileSettingsView — Advanced (additional) */
+"Start Recording Automatically" = "\U81EA\U52D5\U958B\U59CB\U9304\U88FD";
+"Begin capturing requests as soon as the session opens. When off, recording starts only when you click the record button in the titlebar." = "\U5DE5\U4F5C\U968E\U6BB5\U958B\U555F\U5F8C\U7ACB\U5373\U958B\U59CB\U64F7\U53D6\U8ACB\U6C42\U3002\U95DC\U9589\U6642\UFF0C\U50C5\U5728\U9EDE\U64CA\U6A19\U984C\U5217\U4E2D\U7684\U9304\U88FD\U6309\U9215\U6642\U624D\U958B\U59CB\U9304\U88FD\U3002";
+
+/* SettingsView — Hardware (additional) */
+"Kernel Boot Options" = "\U6838\U5FC3\U555F\U52D5\U9078\U9805";
+"Additional Linux kernel command-line parameters appended to the virtual machine boot command. The default disables SME to work around a crash on Apple M4 processors." = "\U9644\U52A0\U5230\U865B\U64EC\U6A5F\U555F\U52D5\U547D\U4EE4\U7684 Linux \U6838\U5FC3\U547D\U4EE4\U5217\U53C3\U6578\U3002\U9810\U8A2D\U505C\U7528 SME \U4EE5\U89E3\U6C7A Apple M4 \U8655\U7406\U5668\U4E0A\U7684\U7576\U6A5F\U554F\U984C\U3002";
+"Incorrect kernel options will prevent the browser from booting." = "\U932F\U8AA4\U7684\U6838\U5FC3\U9078\U9805\U5C07\U5C0E\U81F4\U700F\U89BD\U5668\U7121\U6CD5\U555F\U52D5\U3002";
+"Only change this if you know what you are doing. Removing arm64.nosme may cause crashes on M4 Macs. Invalid options may prevent the browser from booting." = "\U50C5\U5728\U77AD\U89E3\U64CD\U4F5C\U5F8C\U679C\U6642\U4FEE\U6539\U3002\U522A\U9664 arm64.nosme \U53EF\U80FD\U5C0E\U81F4 M4 Mac \U7576\U6A5F\U3002\U7121\U6548\U9078\U9805\U53EF\U80FD\U5C0E\U81F4\U700F\U89BD\U5668\U7121\U6CD5\U555F\U52D5\U3002";
+"Reset to Default" = "\U6062\U5FA9\U9810\U8A2D\U503C";
+
+/* SettingsView — Automation (additional) */
+"Automation" = "\U81EA\U52D5\U5316";
+"Enable Automation" = "\U555F\U7528\U81EA\U52D5\U5316";
+"Start an HTTP server that lets external tools (Puppeteer, Playwright, Claude Code, Codex) create browser sessions and control them via CDP." = "啟動 HTTP 伺服器，讓外部工具（Puppeteer、Playwright、Claude Code、Codex）建立瀏覽器工作階段並透過 CDP 控制。";
+"API Port" = "API \U9023\U63A5\U57E0";
+"The port for the automation API server. Tools connect here to list profiles, create sessions, and get CDP endpoints." = "\U81EA\U52D5\U5316 API \U4F3A\U670D\U5668\U7684\U9023\U63A5\U57E0\U3002\U5DE5\U5177\U9023\U63A5\U6B64\U8655\U4EE5\U5217\U51FA\U8A2D\U5B9A\U6A94\U3001\U5EFA\U7ACB\U5DE5\U4F5C\U968E\U6BB5\U548C\U53D6\U5F97 CDP \U7AEF\U9EDE\U3002";
+"Bind Address" = "\U7D81\U5B9A\U4F4D\U5740";
+"Use 127.0.0.1 to only allow connections from this Mac. Use 0.0.0.0 to allow connections from other machines on the network." = "\U4F7F\U7528 127.0.0.1 \U50C5\U5141\U8A31\U4F86\U81EA\U6B64 Mac \U7684\U9023\U7DDA\U3002\U4F7F\U7528 0.0.0.0 \U5141\U8A31\U4F86\U81EA\U7DB2\U8DEF\U4E0A\U5176\U4ED6\U96FB\U8166\U7684\U9023\U7DDA\U3002";
+"127.0.0.1 (localhost only)" = "127.0.0.1\UFF08\U50C5\U672C\U6A5F\UFF09";
+"0.0.0.0 (all interfaces)" = "0.0.0.0\UFF08\U6240\U6709\U4ECB\U9762\UFF09";
+"Usage" = "\U7528\U6CD5";
+"Once enabled, external tools can connect to the API:" = "\U555F\U7528\U5F8C\UFF0C\U5916\U90E8\U5DE5\U5177\U53EF\U4EE5\U9023\U63A5\U5230 API\UFF1A";
+"List profiles:" = "\U5217\U51FA\U8A2D\U5B9A\U6A94\UFF1A";
+"Create session:" = "\U5EFA\U7ACB\U5DE5\U4F5C\U968E\U6BB5\UFF1A";
+"List sessions:" = "\U5217\U51FA\U5DE5\U4F5C\U968E\U6BB5\UFF1A";
+"Close session:" = "\U95DC\U9589\U5DE5\U4F5C\U968E\U6BB5\UFF1A";
+/* SettingsView — API Reference */
+"API Reference" = "API 參考";
+"HTTP endpoints available when automation is enabled:" = "啟用自動化後可用的 HTTP 端點：";
+"Health check" = "健康檢查";
+"List available profiles" = "列出可用的設定檔";
+"List active sessions" = "列出使用中的工作階段";
+"Create a new browser session" = "建立新的瀏覽器工作階段";
+"Get session info" = "取得工作階段資訊";
+"Close a session" = "關閉工作階段";
+"Get session trace events" = "取得工作階段追蹤事件";
+"Chrome DevTools Protocol WebSocket proxy" = "Chrome DevTools Protocol WebSocket 代理";
+"Copy to clipboard" = "複製到剪貼簿";
+
+/* ProfileSettingsView — General (additional) */
+"Match Keyboard Layout" = "跟隨鍵盤佈局";
+"Automatically switch the browser\U2019s keyboard layout when you change it on your Mac. Turn this off to always use the layout set in Bromure \U2192 Settings \U2192 Input." = "當您在 Mac 上更改鍵盤佈局時，瀏覽器會自動切換。關閉此選項後將始終使用 Bromure → 設定 → 輸入中設定的佈局。";

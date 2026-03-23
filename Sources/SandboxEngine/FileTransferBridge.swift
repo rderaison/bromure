@@ -8,31 +8,41 @@ private let ftDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != ni
 /// Uses a single vsock port:
 /// - Port 5100: file transfer (bidirectional)
 ///
-/// Protocol: newline-delimited JSON (one JSON object per line).
+/// Binary protocol (length-prefixed frames):
 ///
-/// Message types:
-/// - "file_upload"   (host → guest): push a file into the guest ~/Downloads
-/// - "file_download" (guest → host): guest sends a file to the host
-/// - "file_list"     (host → guest): request listing of guest ~/Downloads
-/// - "file_list_response" (guest → host): response with file listing
+///   Each frame: [type: u8] [reserved: 7 bytes] [length: u64be] [payload: length bytes]
 ///
-/// JSON envelope:
-/// ```
-/// {"type":"file_upload","filename":"example.pdf","size":12345,"data":"<base64>"}
-/// ```
+///   Type 0x01 — FILE_META:  filename(UTF-8) + NUL + filesize(u64be)
+///   Type 0x02 — FILE_DATA:  raw binary chunk (follows a FILE_META)
+///   Type 0x03 — FILE_END:   empty payload (marks end of file)
+///   Type 0x04 — LIST_REQ:   empty payload (host → guest)
+///   Type 0x05 — LIST_RESP:  NUL-separated filenames (guest → host)
 @MainActor
 public final class FileTransferBridge: NSObject, @unchecked Sendable {
     private static let transferPort: UInt32 = 5100
+
+    // Frame types
+    private static let typeMeta:     UInt8 = 0x01
+    private static let typeData:     UInt8 = 0x02
+    private static let typeEnd:      UInt8 = 0x03
+    private static let typeListReq:  UInt8 = 0x04
+    private static let typeListResp: UInt8 = 0x05
+
+    private static let headerSize = 16  // 1 byte type + 7 reserved + 8 bytes length (u64be)
+    private static let sendChunkSize = 1024 * 1024  // 1 MB raw chunks
+    private static let maxFramePayload = 16 * 1024 * 1024  // 16 MB max per frame
+    private static let maxFileSize = 10 * 1024 * 1024 * 1024  // 10 GB max per file
 
     private weak var socketDevice: VZVirtioSocketDevice?
     private var listenerDelegate: ListenerDelegate?
     private var connection: VZVirtioSocketConnection?
     private var readSource: DispatchSourceRead?
 
-    // Chunked transfer state
-    private var chunkedFilename: String?
-    private var chunkedSize: Int = 0
-    private var chunkedData = Data()
+    // Receive state machine
+    private var pendingData = Data()
+    private var rxFilename: String?
+    private var rxFileSize: Int = 0
+    private var rxData = Data()
 
     /// Called when a file is received from the guest.
     /// Parameters: filename, file data.
@@ -44,7 +54,7 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
     /// Called when the connection state changes (guest connects/disconnects).
     public var onConnectionChanged: ((Bool) -> Void)?
 
-    /// Called during chunked transfer with progress (filename, bytesReceived, totalBytes).
+    /// Called during transfer with progress (filename, bytesReceived, totalBytes).
     public var onTransferProgress: ((String, Int, Int) -> Void)?
 
     /// Start file transfer bridging on the given socket device.
@@ -89,15 +99,28 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
             return
         }
 
-        let envelope: [String: Any] = [
-            "type": "file_upload",
-            "filename": url.lastPathComponent,
-            "size": fileData.count,
-            "data": fileData.base64EncodedString(),
-        ]
+        let fd = conn.fileDescriptor
+        let filename = url.lastPathComponent
 
-        sendMessage(envelope, on: conn)
-        if ftDebug { print("[FileTransfer] sendFile: sent \(url.lastPathComponent) (\(fileData.count) bytes)") }
+        // Send FILE_META
+        var metaPayload = Data(filename.utf8)
+        metaPayload.append(0) // NUL separator
+        var size = UInt64(fileData.count).bigEndian
+        metaPayload.append(Data(bytes: &size, count: 8))
+        writeFrame(fd: fd, type: Self.typeMeta, payload: metaPayload)
+
+        // Send FILE_DATA chunks
+        var offset = 0
+        while offset < fileData.count {
+            let end = min(offset + Self.sendChunkSize, fileData.count)
+            writeFrame(fd: fd, type: Self.typeData, payload: fileData[offset..<end])
+            offset = end
+        }
+
+        // Send FILE_END
+        writeFrame(fd: fd, type: Self.typeEnd, payload: Data())
+
+        if ftDebug { print("[FileTransfer] sendFile: sent \(filename) (\(fileData.count) bytes)") }
     }
 
     /// Request a file listing from the guest.
@@ -106,28 +129,26 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
             if ftDebug { print("[FileTransfer] requestFileList: no connection") }
             return
         }
-
-        let envelope: [String: Any] = [
-            "type": "file_list",
-        ]
-
-        sendMessage(envelope, on: conn)
+        writeFrame(fd: conn.fileDescriptor, type: Self.typeListReq, payload: Data())
         if ftDebug { print("[FileTransfer] requestFileList: sent") }
     }
 
     // MARK: - Connection handling
 
     private func handleConnection(_ conn: VZVirtioSocketConnection) {
-        if ftDebug { print("[FileTransfer] guest connected (fd=\(conn.fileDescriptor), src=\(conn.sourcePort), dst=\(conn.destinationPort))") }
+        if ftDebug { print("[FileTransfer] guest connected (fd=\(conn.fileDescriptor))") }
 
         // Tear down previous connection
         readSource?.cancel()
         connection = conn
+        pendingData = Data()
+        rxFilename = nil
+        rxFileSize = 0
+        rxData = Data()
         onConnectionChanged?(true)
 
         let fd = conn.fileDescriptor
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
-        var pendingData = Data()
 
         source.setEventHandler { [weak self] in
             var buf = [UInt8](repeating: 0, count: 1_048_576) // 1MB read buffer
@@ -137,17 +158,8 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
                 source.cancel()
                 return
             }
-            pendingData.append(contentsOf: buf[0..<n])
-
-            // Process complete newline-delimited JSON messages
-            while let newlineIndex = pendingData.firstIndex(of: UInt8(ascii: "\n")) {
-                let lineData = pendingData[pendingData.startIndex..<newlineIndex]
-                pendingData = Data(pendingData[(newlineIndex + 1)...])
-
-                if !lineData.isEmpty {
-                    self?.handleMessage(Data(lineData))
-                }
-            }
+            self?.pendingData.append(contentsOf: buf[0..<n])
+            self?.drainFrames()
         }
 
         source.setCancelHandler { [weak self] in
@@ -161,92 +173,147 @@ public final class FileTransferBridge: NSObject, @unchecked Sendable {
         readSource = source
     }
 
-    private func handleMessage(_ jsonData: Data) {
-        guard let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-              let type = json["type"] as? String else {
-            if ftDebug { print("[FileTransfer] invalid JSON message") }
-            return
+    /// Process complete frames from the receive buffer.
+    private func drainFrames() {
+        while pendingData.count >= Self.headerSize {
+            let s = pendingData.startIndex
+            let frameType = pendingData[s]
+            // Bytes 1..7 are reserved (skip them), 8..15 are length (u64be)
+            let payloadLen = readU64BE(pendingData, offset: s + 8)
+
+            // Reject oversized frames from a potentially compromised guest.
+            guard payloadLen <= Self.maxFramePayload else {
+                print("[FileTransfer] dropping connection: frame payload \(payloadLen) exceeds \(Self.maxFramePayload)")
+                readSource?.cancel()
+                return
+            }
+
+            let totalFrameSize = Self.headerSize + payloadLen
+            guard pendingData.count >= totalFrameSize else { break }
+
+            let payload = pendingData[(s + Self.headerSize) ..< (s + totalFrameSize)]
+            pendingData = Data(pendingData[(s + totalFrameSize)...])
+
+            handleFrame(type: frameType, payload: Data(payload))
         }
+    }
 
+    private func handleFrame(type: UInt8, payload: Data) {
         switch type {
-        case "file_download":
-            // Single-shot transfer (small files)
-            guard let filename = json["filename"] as? String,
-                  let base64 = json["data"] as? String,
-                  let fileData = Data(base64Encoded: base64) else {
-                if ftDebug { print("[FileTransfer] file_download: missing fields") }
+        case Self.typeMeta:
+            // Parse: filename(UTF-8) + NUL + filesize(u64be)
+            guard let nulIndex = payload.firstIndex(of: 0),
+                  payload.count >= nulIndex - payload.startIndex + 1 + 8 else {
+                if ftDebug { print("[FileTransfer] FILE_META: invalid payload") }
                 return
             }
+            let nameData = payload[payload.startIndex..<nulIndex]
+            let rawFilename = String(data: nameData, encoding: .utf8) ?? "unknown"
+            let sizeOffset = nulIndex + 1
+            let fileSize = readU64BE(payload, offset: sizeOffset)
+
+            // Sanitize filename: strip path components to prevent directory traversal.
+            let filename = (rawFilename as NSString).lastPathComponent
+            if filename.isEmpty || filename == "." || filename == ".." || filename.contains("/") || filename.contains("\0") {
+                if ftDebug { print("[FileTransfer] FILE_META: rejected unsafe filename: \(rawFilename)") }
+                rxFilename = nil
+                return
+            }
+
             if filename.hasSuffix(".crdownload") {
                 if ftDebug { print("[FileTransfer] ignoring temp file: \(filename)") }
+                rxFilename = nil
                 return
             }
-            if ftDebug { print("[FileTransfer] received file: \(filename) (\(fileData.count) bytes)") }
-            onFileReceived?(filename, fileData)
 
-        case "file_start":
-            // Begin chunked transfer
-            guard let filename = json["filename"] as? String,
-                  let size = json["size"] as? Int else {
-                if ftDebug { print("[FileTransfer] file_start: missing fields") }
+            // Reject files that exceed the size limit.
+            guard fileSize <= Self.maxFileSize else {
+                if ftDebug { print("[FileTransfer] FILE_META: rejected \(filename) — size \(fileSize) exceeds limit") }
+                rxFilename = nil
                 return
             }
-            if filename.hasSuffix(".crdownload") {
-                if ftDebug { print("[FileTransfer] ignoring temp file: \(filename)") }
-                chunkedFilename = nil
+
+            rxFilename = filename
+            rxFileSize = fileSize
+            rxData = Data()
+            rxData.reserveCapacity(fileSize)
+            if ftDebug { print("[FileTransfer] FILE_META: \(filename) (\(fileSize) bytes)") }
+
+        case Self.typeData:
+            guard let filename = rxFilename else { return }
+            guard rxData.count + payload.count <= Self.maxFileSize else {
+                print("[FileTransfer] dropping transfer \(filename): cumulative size exceeds \(Self.maxFileSize)")
+                rxFilename = nil
+                rxData = Data()
                 return
             }
-            chunkedFilename = filename
-            chunkedSize = size
-            chunkedData = Data()
-            chunkedData.reserveCapacity(size)
-            if ftDebug { print("[FileTransfer] file_start: \(filename) (\(size) bytes)") }
-
-        case "file_chunk":
-            guard let filename = chunkedFilename,
-                  let base64 = json["data"] as? String,
-                  let chunkData = Data(base64Encoded: base64) else { return }
-            chunkedData.append(chunkData)
-            if ftDebug, let seq = json["seq"] as? Int {
-                print("[FileTransfer] file_chunk #\(seq): +\(chunkData.count) bytes (total: \(chunkedData.count)/\(chunkedSize))")
+            rxData.append(payload)
+            if ftDebug && rxData.count % (5 * 1024 * 1024) < payload.count {
+                print("[FileTransfer] FILE_DATA: \(rxData.count)/\(rxFileSize) bytes")
             }
-            onTransferProgress?(filename, chunkedData.count, chunkedSize)
+            onTransferProgress?(filename, rxData.count, rxFileSize)
 
-        case "file_end":
-            guard let filename = chunkedFilename else { return }
-            if ftDebug { print("[FileTransfer] file_end: \(filename) (\(chunkedData.count) bytes)") }
-            onFileReceived?(filename, chunkedData)
-            chunkedFilename = nil
-            chunkedSize = 0
-            chunkedData = Data()
+        case Self.typeEnd:
+            guard let filename = rxFilename else { return }
+            if ftDebug { print("[FileTransfer] FILE_END: \(filename) (\(rxData.count) bytes)") }
+            onFileReceived?(filename, rxData)
+            rxFilename = nil
+            rxFileSize = 0
+            rxData = Data()
 
-        case "file_list_response":
-            let files = json["files"] as? [String] ?? []
+        case Self.typeListResp:
+            let files = String(data: payload, encoding: .utf8)?
+                .split(separator: "\0")
+                .map(String.init) ?? []
             if ftDebug { print("[FileTransfer] file list: \(files)") }
             onFileListReceived?(files)
 
         default:
-            if ftDebug { print("[FileTransfer] unknown message type: \(type)") }
+            if ftDebug { print("[FileTransfer] unknown frame type: 0x\(String(type, radix: 16))") }
         }
+    }
+
+    // MARK: - Helpers
+
+    /// Read a big-endian UInt64 from Data at the given absolute index.
+    private func readU64BE(_ data: Data, offset: Data.Index) -> Int {
+        var val: UInt64 = 0
+        for i in 0..<8 {
+            val = val << 8 | UInt64(data[offset + i])
+        }
+        guard val <= UInt64(Int.max) else { return Int.max }
+        return Int(val)
     }
 
     // MARK: - Wire format
 
-    /// Send a JSON message as a newline-terminated line.
-    private func sendMessage(_ envelope: [String: Any], on conn: VZVirtioSocketConnection) {
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: envelope) else {
-            if ftDebug { print("[FileTransfer] sendMessage: JSON serialization failed") }
-            return
+    /// Write a single frame: [type: u8][reserved: 7][length: u64be][payload].
+    private func writeFrame(fd: Int32, type: UInt8, payload: some DataProtocol) {
+        let payloadCount = payload.count
+        var header = Data(count: Self.headerSize)  // zero-initialized (reserved bytes = 0)
+        header[0] = type
+        // Bytes 1..7 reserved (already zero)
+        header[8] = UInt8((payloadCount >> 56) & 0xFF)
+        header[9] = UInt8((payloadCount >> 48) & 0xFF)
+        header[10] = UInt8((payloadCount >> 40) & 0xFF)
+        header[11] = UInt8((payloadCount >> 32) & 0xFF)
+        header[12] = UInt8((payloadCount >> 24) & 0xFF)
+        header[13] = UInt8((payloadCount >> 16) & 0xFF)
+        header[14] = UInt8((payloadCount >> 8) & 0xFF)
+        header[15] = UInt8(payloadCount & 0xFF)
+
+        writeAll(fd: fd, data: header)
+        if payloadCount > 0 {
+            writeAll(fd: fd, data: Data(payload))
         }
+    }
 
-        var frame = jsonData
-        frame.append(UInt8(ascii: "\n"))
-
-        let fd = conn.fileDescriptor
-        frame.withUnsafeBytes { ptr in
+    /// Write all bytes, retrying on partial writes.
+    private func writeAll(fd: Int32, data: Data) {
+        data.withUnsafeBytes { ptr in
             var offset = 0
-            while offset < frame.count {
-                let written = Darwin.write(fd, ptr.baseAddress! + offset, frame.count - offset)
+            while offset < data.count {
+                let written = Darwin.write(fd, ptr.baseAddress! + offset, data.count - offset)
                 if written <= 0 { break }
                 offset += written
             }

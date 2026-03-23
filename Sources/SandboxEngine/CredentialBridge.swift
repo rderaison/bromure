@@ -3,12 +3,12 @@ import AuthenticationServices
 import Foundation
 import Virtualization
 
-private let cbDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil
+private let cbDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG_KEYCHAIN"] != nil
 
 /// Bridges WebAuthn passkey and password requests between the guest VM and macOS
 /// AuthenticationServices + Keychain over vsock.
 ///
-/// Protocol: newline-delimited JSON on vsock port 5200.
+/// Protocol: newline-delimited JSON on vsock port 5201.
 ///
 /// Security model (assume the VM is compromised):
 /// - **Passkeys**: User must approve via Touch ID / system prompt for every operation.
@@ -23,7 +23,7 @@ private let cbDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != ni
 ///   malicious guest sending unbounded data.
 @MainActor
 public final class CredentialBridge: NSObject, @unchecked Sendable {
-    private static let credentialPort: UInt32 = 5200
+    private static let credentialPort: UInt32 = 5201
 
     /// Max pending data from guest before we disconnect (1 MB).
     private static let maxPendingData = 1_048_576
@@ -36,6 +36,13 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
     private var connection: VZVirtioSocketConnection?
     private var readSource: DispatchSourceRead?
     private weak var window: NSWindow?
+
+    /// Shared iCloud Passwords bridge for password autofill.
+    public var icloudBridge: ICloudPasswordsBridge?
+
+    /// Called to lazily connect to iCloud Passwords on first password request.
+    /// Set by the app layer (SafariSandbox.swift) since it owns the shared bridge.
+    public var onConnectICloudPasswords: (() async -> ICloudPasswordsBridge?)?
 
     // Only one ASAuthorization request at a time
     private var activeProvider: PasskeyProvider?
@@ -51,9 +58,10 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
     private var consecutiveDenials = 0
     private static let maxConsecutiveDenials = 3
 
-    public init(socketDevice: VZVirtioSocketDevice, window: NSWindow) {
+    public init(socketDevice: VZVirtioSocketDevice, window: NSWindow, icloudBridge: ICloudPasswordsBridge? = nil) {
         self.socketDevice = socketDevice
         self.window = window
+        self.icloudBridge = icloudBridge
         super.init()
 
         if cbDebug { print("[CredentialBridge] init: setting up vsock listener on port \(Self.credentialPort)") }
@@ -227,6 +235,7 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
         }
 
         let displayName = user["displayName"] as? String ?? userName
+        let origin = json["origin"] as? String ?? "https://\(rpId)"
 
         // Passkeys: Touch ID prompt is the user confirmation (system shows rpId).
         let provider = PasskeyProvider(window: window)
@@ -241,6 +250,7 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
             do {
                 let result = try await provider.createPasskey(
                     rpId: rpId,
+                    origin: origin,
                     challenge: challenge,
                     userId: userId,
                     userName: userName,
@@ -287,6 +297,8 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
             }
         }
 
+        let origin = json["origin"] as? String ?? "https://\(rpId)"
+
         // Passkeys: Touch ID prompt is the user confirmation.
         let provider = PasskeyProvider(window: window)
         activeProvider = provider
@@ -300,6 +312,7 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
             do {
                 let result = try await provider.getCredential(
                     rpId: rpId,
+                    origin: origin,
                     challenge: challenge,
                     allowedCredentialIDs: allowedCredentialIDs
                 )
@@ -336,48 +349,101 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
         }
     }
 
-    // MARK: - Password Get (user approval required)
+    // MARK: - Password Get (via iCloud Passwords bridge)
 
     private func handlePasswordGet(_ json: [String: Any], requestId: String) {
-        guard let window else {
-            sendError(requestId: requestId, type: "password_get_response", error: "no_window")
-            return
-        }
         guard let domain = json["domain"] as? String, !domain.isEmpty else {
             sendError(requestId: requestId, type: "password_get_response", error: "invalid_params")
             return
         }
 
-        // Use ASAuthorizationPasswordProvider to access iCloud Keychain passwords
-        // (SecItemCopyMatching cannot access Safari/iCloud Keychain passwords)
-        let provider = PasskeyProvider(window: window)
-        activeProvider = provider
         requestInFlight = true
 
         Task { @MainActor in
-            defer {
-                activeProvider = nil
-                requestInFlight = false
+            defer { requestInFlight = false }
+
+            // Lazily connect to iCloud Passwords on first password request
+            if self.icloudBridge == nil, let connect = self.onConnectICloudPasswords {
+                self.icloudBridge = await connect()
             }
-            do {
-                let result = try await provider.getPassword()
+
+            guard let bridge = self.icloudBridge else {
+                // No iCloud bridge — fallback to Bromure's own keychain entries
+                let entries = Self.searchKeychainPasswords(domain: domain)
+                if entries.isEmpty {
+                    sendError(requestId: requestId, type: "password_get_response", error: "no_credentials")
+                } else {
+                    sendResponse([
+                        "type": "password_get_response",
+                        "requestId": requestId,
+                        "success": true,
+                        "credentials": entries.map { ["username": $0.0, "password": $0.1] },
+                    ])
+                }
+                return
+            }
+
+            // First get login names for this domain
+            let loginEntries = await bridge.getLoginNames(hostname: domain)
+            if loginEntries.isEmpty {
+                // Fall back to Bromure keychain
+                let entries = Self.searchKeychainPasswords(domain: domain)
+                if entries.isEmpty {
+                    if cbDebug { print("[CredentialBridge] password_get for \(domain): no credentials") }
+                    sendError(requestId: requestId, type: "password_get_response", error: "no_credentials")
+                } else {
+                    sendResponse([
+                        "type": "password_get_response",
+                        "requestId": requestId,
+                        "success": true,
+                        "credentials": entries.map { ["username": $0.0, "password": $0.1] },
+                    ])
+                }
+                return
+            }
+
+            // Fetch passwords for each entry
+            var credentials: [[String: String]] = []
+            for entry in loginEntries {
+                if let pwd = await bridge.getPassword(url: domain, username: entry.username) {
+                    credentials.append(["username": entry.username, "password": pwd])
+                }
+            }
+
+            if credentials.isEmpty {
+                if cbDebug { print("[CredentialBridge] password_get for \(domain): no passwords returned") }
+                sendError(requestId: requestId, type: "password_get_response", error: "no_credentials")
+            } else {
                 handleUserApproval()
-                if cbDebug { print("[CredentialBridge] password_get for \(domain): got \(result.username)") }
+                if cbDebug { print("[CredentialBridge] password_get for \(domain): got \(credentials.count) credential(s)") }
                 sendResponse([
                     "type": "password_get_response",
                     "requestId": requestId,
                     "success": true,
-                    "credentials": [
-                        ["username": result.username, "password": result.password]
-                    ],
+                    "credentials": credentials,
                 ])
-            } catch {
-                let cancelled = (error as? ASAuthorizationError)?.code == .canceled
-                if cancelled { handleUserDenial() }
-                if cbDebug { print("[CredentialBridge] password_get for \(domain): \(cancelled ? "cancelled" : "failed: \(error)")") }
-                sendError(requestId: requestId, type: "password_get_response",
-                          error: cancelled ? "user_cancelled" : "no_credentials")
             }
+        }
+    }
+
+    /// Search Bromure's own keychain entries for a domain.
+    private static func searchKeychainPasswords(domain: String) -> [(String, String)] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassInternetPassword,
+            kSecAttrServer as String: domain,
+            kSecAttrLabel as String: keychainLabel,
+            kSecReturnAttributes as String: true,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let items = result as? [[String: Any]] else { return [] }
+        return items.compactMap { item in
+            guard let account = item[kSecAttrAccount as String] as? String,
+                  let data = item[kSecValueData as String] as? Data,
+                  let password = String(data: data, encoding: .utf8) else { return nil }
+            return (account, password)
         }
     }
 

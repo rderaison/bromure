@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Virtualization
 
 /// Manages a pool of pre-warmed Linux VMs for instant browser windows.
@@ -15,6 +16,10 @@ public final class VMPool {
         public let ephemeralDisk: EphemeralDisk
         public let serialInput: Pipe
         public let serialOutput: Pipe
+        /// Host-side network filter (must stay alive for the VM's lifetime).
+        public var networkFilter: NetworkFilter?
+        /// Monitors serial output for completion markers (used by applyConfig).
+        public let serialWaiter: SerialWaiter
     }
 
     private var config: VMConfig
@@ -22,8 +27,14 @@ public final class VMPool {
     private let imageManager: LinuxImageManager
     private var warmVM: WarmVM?
     private var isWarming = false
+    private var configListenerDelegate: ConfigListenerDelegate?
+    private var configListenerCleanup: (() -> Void)?
+    private var rejectListenerDelegate: RejectListenerDelegate?
 
     public var hasWarmVM: Bool { warmVM != nil }
+
+    /// Access the pre-warmed VM (e.g. to install serial handlers before claiming).
+    public var currentWarmVM: WarmVM? { warmVM }
 
     public var baseImageExists: Bool { imageManager.baseImageExists }
 
@@ -56,9 +67,49 @@ public final class VMPool {
         let ephDisk = EphemeralDisk(baseImageURL: imageManager.linuxDiskURL)
         try ephDisk.create()
 
+        // Network mode: NAT (default, via vmnet shared) or Bridged (via vmnet bridged)
+        let defaults = UserDefaults.standard
+        let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
+
+        var networkFilter: NetworkFilter?
+        var networkAttachment: VZNetworkDeviceAttachment?
+
+        // Read DNS override from preferences (e.g. "1.1.1.1,1.0.0.1")
+        let dnsOverride: [UInt32]
+        if let dnsString = defaults.string(forKey: "vm.dnsServers"),
+           !dnsString.trimmingCharacters(in: .whitespaces).isEmpty {
+            dnsOverride = dnsString.split(separator: ",")
+                .compactMap { HostNetworkInfo.parseIPv4(String($0).trimmingCharacters(in: .whitespaces)) }
+        } else {
+            dnsOverride = []
+        }
+
+        if let netInfo = HostNetworkInfo.detect() {
+            let bridgedIface: String? = (networkMode == "bridged")
+                ? defaults.string(forKey: "vm.bridgedInterface")
+                : nil
+
+            if let filter = NetworkFilter(
+                networkInfo: netInfo,
+                dnsOverrideServers: dnsOverride,
+                bridgedInterface: bridgedIface
+            ) {
+                networkFilter = filter
+                networkAttachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
+                if bridgedIface != nil {
+                    print("[VMPool] Using bridged networking via vmnet on \(bridgedIface!)")
+                }
+            } else {
+                print("[VMPool] NetworkFilter unavailable (missing vmnet entitlement?), falling back to NAT")
+            }
+        } else {
+            print("[VMPool] Could not detect host network info, falling back to NAT")
+        }
+
         let vzConfig = try imageManager.buildLinuxVMConfig(
             diskURL: ephDisk.ephemeralURL,
-            config: config
+            config: config,
+            networkAttachment: networkAttachment
         )
 
         let inputPipe = Pipe()
@@ -86,13 +137,16 @@ public final class VMPool {
         // Wait for boot (shell prompt), just create /tmp/bromure — no config yet.
         // After boot detection, the handler switches to drain mode (keeps reading
         // so the pipe buffer doesn't fill up and block the VM's shell).
-        await waitForBoot(outputPipe: outputPipe, inputPipe: inputPipe, onBootDetected: "/usr/local/bin/on-boot.sh")
+        let onBoot = "/usr/local/bin/on-boot.sh"
+        let waiter = await waitForBoot(outputPipe: outputPipe, inputPipe: inputPipe, onBootDetected: onBoot)
 
         warmVM = WarmVM(
             vm: vm,
             ephemeralDisk: ephDisk,
             serialInput: inputPipe,
-            serialOutput: outputPipe
+            serialOutput: outputPipe,
+            networkFilter: networkFilter,
+            serialWaiter: waiter
         )
 
         // Inflate balloon to reclaim unused guest memory while VM is idle.
@@ -116,9 +170,19 @@ public final class VMPool {
         profileDiskKey: String? = nil,
         restoreSession: Bool = false
     ) async -> WarmVM? {
-        // If no pre-warmed VM is available, warm up on demand
+        // If no pre-warmed VM is available, warm up on demand.
+        // If another task is already warming up, wait for it to finish.
         if warmVM == nil {
-            try? await warmUp()
+            if isWarming {
+                // Another task is warming up — poll until it finishes
+                for _ in 0..<300 { // up to 30s
+                    try? await Task.sleep(for: .milliseconds(100))
+                    if warmVM != nil || !isWarming { break }
+                }
+            }
+            if warmVM == nil {
+                try? await warmUp()
+            }
         }
         guard let warm = warmVM else { return nil }
         warmVM = nil
@@ -143,7 +207,7 @@ public final class VMPool {
 
     /// Schedule a warm-up after a delay, to avoid resource contention with the
     /// session that just launched.
-    public func scheduleWarmUp(delay: Duration = .seconds(5)) {
+    public func scheduleWarmUp(delay: Duration = .seconds(20)) {
         Task {
             try? await Task.sleep(for: delay)
             try? await warmUp()
@@ -156,71 +220,208 @@ public final class VMPool {
     /// and THEN touches chrome-ready to unblock xinitrc.
     /// The output pipe must remain readable (drain handler) to prevent the VM
     /// from blocking on console writes.
+    /// Send a shell command over serial and wait for a unique marker in the output.
+    private func serialExec(_ cmd: String, marker: String, input: FileHandle, waiter: SerialWaiter, timeout: TimeInterval = 10) async {
+        input.write(Data((cmd + " && echo \(marker)\n").utf8))
+        await waiter.waitFor(marker, timeout: timeout)
+    }
+
+    /// Config agent vsock port — must match config-agent.py.
+    private static let configPort: UInt32 = 5000
+
     private func applyConfig(_ config: VMConfig, to warm: WarmVM, profileID: UUID?, hasProfileDisk: Bool, profileDiskKey: String?, restoreSession: Bool) async {
         let t0 = CFAbsoluteTimeGetCurrent()
-        let input = warm.serialInput.fileHandleForWriting
 
         print("[VMPool] Applying config: homePage='\(config.homePage)' forceDarkMode=\(config.forceDarkMode) adBlocking=\(config.enableAdBlocking)")
 
-        // Mount profile disk via virtio-fs share + loop device.
-        // The host sets fsDevice.share in claim() before calling applyConfig,
-        // so we mount virtio-fs here (it wasn't available at boot time).
-        let profileMountPoint = profileID.map { "/home/chrome/.\($0.uuidString)" }
-        if hasProfileDisk, let mountPoint = profileMountPoint {
-            let t1 = CFAbsoluteTimeGetCurrent()
-            let diskPath = "/mnt/share/profile.img"
 
-            // Mount virtio-fs first (the share was just pointed to the image dir)
-            input.write(Data("mount -t virtiofs share /mnt/share\n".utf8))
-            try? await Task.sleep(for: .seconds(1))
-
-            if let profileDiskKey {
-                // Encrypted: LUKS format (if new), unlock, and mount via loop
-                print("[VMPool] Unlocking LUKS profile disk...")
-                let loopSetup = "LOOP=$(losetup -f) && losetup $LOOP \(diskPath)"
-                input.write(Data((loopSetup + "\n").utf8))
-                try? await Task.sleep(for: .seconds(1))
-
-                let formatCmd = "cryptsetup isLuks $LOOP 2>/dev/null || { " + ProfileDisk.luksFormatCommand(key: profileDiskKey, device: "$LOOP") + "; }"
-                input.write(Data((formatCmd + "\n").utf8))
-                try? await Task.sleep(for: .seconds(2))
-
-                let unlockCmd = ProfileDisk.luksUnlockAndMountCommand(key: profileDiskKey, device: "$LOOP", mountPoint: mountPoint)
-                input.write(Data((unlockCmd + "\n").utf8))
-                try? await Task.sleep(for: .seconds(2))
-                print("[VMPool] LUKS unlocked in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t1))s")
+        // Activate network filtering based on profile config
+        if config.isolateFromLAN {
+            if let filter = warm.networkFilter {
+                filter.activateFiltering()
             } else {
-                // Unencrypted: format if new, then loop-mount
-                print("[VMPool] Mounting unencrypted profile disk...")
-                let mountCmd = "mkdir -p \(mountPoint) && (blkid \(diskPath) >/dev/null 2>&1 || mkfs.ext4 -q \(diskPath)) && mount -o loop \(diskPath) \(mountPoint) && chown chrome:chrome \(mountPoint)"
-                input.write(Data((mountCmd + "\n").utf8))
-                try? await Task.sleep(for: .seconds(1))
-                print("[VMPool] Disk mounted in \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t1))s")
+                print("[VMPool] WARNING: isolateFromLAN=true but no NetworkFilter available")
+            }
+        }
+        if let allowedPorts = config.allowedPorts {
+            if let filter = warm.networkFilter {
+                filter.activatePortFiltering(allowedPorts)
+            } else {
+                print("[VMPool] WARNING: port restriction requested but no NetworkFilter available")
             }
         }
 
-        // Build environment variables for apply-config.sh
-        var envVars: [String] = []
-        if config.forceDarkMode { envVars.append("DARK_MODE=1") }
-        if config.enableAdBlocking || config.enableWarp || config.blockMalwareSites { envVars.append("USE_PROXY=1") }
-        if !config.enableGPU { envVars.append("DISABLE_GPU=1") }
-        if !config.enableWebGL { envVars.append("DISABLE_WEBGL=1") }
-        if config.phishingWarning { envVars.append("PHISHING_GUARD=1") }
-        if let mountPoint = profileMountPoint, hasProfileDisk {
-            envVars.append("PROFILE_DIR=\(mountPoint)")
-            if restoreSession { envVars.append("RESTORE_SESSION=1") }
-        }
-        envVars.append("CHROME_URL=\(shellEscape(config.homePage))")
-        if config.swapCmdCtrl { envVars.append("SWAP_CMD_CTRL=1") }
-        if config.enableFileTransfer { envVars.append("FILE_TRANSFER=1") }
-        if config.enableClipboardSharing { envVars.append("CLIPBOARD=1") }
-        if config.enableKeychainIntegration { envVars.append("KEYCHAIN=1") }
-        if config.blockMalwareSites { envVars.append("BLOCK_MALWARE=1") }
-        if config.enableAdBlocking { envVars.append("AD_BLOCKING=1") }
-        if config.enableWarp { envVars.append("ENABLE_WARP=1") }
+        // Build JSON config for the guest config-agent
+        let profileMountPoint = profileID.map { "/home/chrome/.\($0.uuidString)" }
+        var cfg: [String: Any] = [
+            "chromeURL": config.homePage
+        ]
 
-        let cmd = envVars.joined(separator: " ") + " /usr/local/bin/apply-config.sh"
-        input.write(Data((cmd + "\n").utf8))
+        // Profile disk
+        if hasProfileDisk, let mountPoint = profileMountPoint {
+            cfg["profileDisk"] = true
+            cfg["profileMount"] = mountPoint
+            cfg["profileDir"] = mountPoint
+            if let profileDiskKey { cfg["profileDiskKey"] = profileDiskKey }
+            if restoreSession { cfg["restoreSession"] = true }
+        }
+
+        if config.forceDarkMode { cfg["darkMode"] = true }
+        // Squid always runs (unless custom proxy is set), so always flag useProxy
+        if config.proxyHost == nil { cfg["useProxy"] = true }
+        if !config.enableGPU { cfg["disableGPU"] = true }
+        if !config.enableWebGL { cfg["disableWebGL"] = true }
+        if config.enableGPU { cfg["gpuAccel"] = true }
+        if config.enableZeroCopy { cfg["zeroCopy"] = true }
+        if config.enableSmoothScrolling { cfg["smoothScrolling"] = true }
+        if config.phishingWarning { cfg["phishingGuard"] = true }
+        if config.swapCmdCtrl { cfg["swapCmdCtrl"] = true }
+        if config.enableFileTransfer { cfg["fileTransfer"] = true }
+        if config.enableClipboardSharing { cfg["clipboard"] = true }
+        if config.enableKeychainIntegration { cfg["keychain"] = true }
+        if config.blockMalwareSites { cfg["blockMalware"] = true }
+        if config.enableAdBlocking { cfg["adBlocking"] = true }
+        if config.enableWarp { cfg["enableWarp"] = true }
+        if config.warpAutoConnect { cfg["warpAutoConnect"] = true }
+        if let proxyHost = config.proxyHost, let proxyPort = config.proxyPort {
+            cfg["proxyHost"] = proxyHost
+            cfg["proxyPort"] = proxyPort
+            if let u = config.proxyUsername { cfg["proxyUsername"] = u }
+            if let p = config.proxyPassword { cfg["proxyPassword"] = p }
+        }
+        if config.enableLinkSender { cfg["linkSender"] = true }
+        if config.enableWebcam {
+            cfg["webcam"] = true
+            let probeT0 = CFAbsoluteTimeGetCurrent()
+            let res = WebcamBridge.queryCameraResolution(cameraID: config.webcamDeviceID, quality: config.webcamQuality)
+            print("[VMPool] webcam probe: \(res.width)x\(res.height) in \(Int((CFAbsoluteTimeGetCurrent() - probeT0) * 1000))ms")
+            cfg["webcamWidth"] = res.width
+            cfg["webcamHeight"] = res.height
+        }
+        if config.enableAudio {
+            cfg["audio"] = true
+            if config.audioVolume < 100 { cfg["audioVolume"] = config.audioVolume }
+        }
+        if config.enableMicrophone { cfg["microphone"] = true }
+        if config.blockDownloads { cfg["blockDownloads"] = true }
+        if config.enableAutomation { cfg["automation"] = true }
+        if ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil {
+            cfg["debugShell"] = true
+        }
+        if config.traceLevel != .disabled { cfg["traceLevel"] = config.traceLevel.rawValue }
+        if !config.rootCAs.isEmpty { cfg["rootCAs"] = config.rootCAs }
+        cfg["locale"] = config.locale
+
+        // Display scale: read from UserDefaults so changing 1x/2x doesn't require image rebuild
+        let displayScale = UserDefaults.standard.object(forKey: "vm.displayScale") as? Int ?? VMConfig.detectDisplayScale()
+        cfg["displayScale"] = displayScale
+
+        // App version for user-agent suffix
+        if let version = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
+            cfg["appVersion"] = version
+        }
+
+        // Test suite: inject TEST_SUITE flag and expectations for guest test-runner.sh
+        if config.testSuite {
+            cfg["TEST_SUITE"] = "1"
+            cfg["TEST_EXPECT_URL"] = config.homePage
+            cfg["TEST_EXPECT_DARK_MODE"] = config.forceDarkMode ? "1" : "0"
+            cfg["TEST_EXPECT_GPU"] = config.enableGPU ? "1" : "0"
+            cfg["TEST_EXPECT_WEBGL"] = config.enableWebGL ? "1" : "0"
+            cfg["TEST_EXPECT_AUDIO"] = config.enableAudio ? "1" : "0"
+            if config.enableAudio && config.audioVolume < 100 {
+                cfg["TEST_EXPECT_VOLUME"] = "\(config.audioVolume)"
+            }
+            cfg["TEST_EXPECT_CLIPBOARD"] = config.enableClipboardSharing ? "1" : "0"
+            cfg["TEST_EXPECT_FILE_TRANSFER"] = config.enableFileTransfer ? "1" : "0"
+            cfg["TEST_EXPECT_BLOCK_DOWNLOADS"] = config.blockDownloads ? "1" : "0"
+            if let proxyHost = config.proxyHost {
+                cfg["TEST_EXPECT_PROXY_HOST"] = proxyHost
+            }
+            let needsInternalProxy = config.enableAdBlocking || config.enableWarp || config.blockMalwareSites
+            cfg["TEST_EXPECT_INTERNAL_PROXY"] = needsInternalProxy && config.proxyHost == nil ? "1" : "0"
+            cfg["TEST_EXPECT_DNSMASQ"] = needsInternalProxy ? "1" : "0"
+            cfg["TEST_EXPECT_SQUID"] = needsInternalProxy ? "1" : "0"
+            cfg["TEST_EXPECT_MALWARE_DNS"] = config.blockMalwareSites ? "1" : "0"
+            cfg["TEST_EXPECT_PHISHING"] = config.phishingWarning ? "1" : "0"
+            cfg["TEST_EXPECT_LINK_SENDER"] = config.enableLinkSender ? "1" : "0"
+            cfg["TEST_EXPECT_WEBCAM"] = config.enableWebcam ? "1" : "0"
+            cfg["TEST_EXPECT_MICROPHONE"] = config.enableMicrophone ? "1" : "0"
+            cfg["TEST_EXPECT_WEBRTC_BLOCKED"] = (!config.enableWebcam && !config.enableMicrophone) ? "1" : "0"
+            cfg["TEST_EXPECT_LOCALE"] = config.locale
+            cfg["TEST_EXPECT_CA_COUNT"] = "\(config.rootCAs.count)"
+            cfg["TEST_EXPECT_SWAP_CMD_CTRL"] = config.swapCmdCtrl ? "1" : "0"
+            cfg["TEST_EXPECT_USER_AGENT"] = "1"
+        }
+
+        // Send config to guest via vsock.
+        // Host listens on port 5000; guest config-agent.py connects to it.
+        guard let socketDevice = warm.vm.socketDevices.first as? VZVirtioSocketDevice else {
+            print("[VMPool] ERROR: no vsock device available for config agent")
+            return
+        }
+
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: cfg)
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                // Guard against double-resume (timeout vs cancel handler race)
+                let resumed = OSAllocatedUnfairLock(initialState: false)
+                let safeResume = {
+                    let alreadyResumed = resumed.withLock { val -> Bool in
+                        if val { return true }
+                        val = true
+                        return false
+                    }
+                    if !alreadyResumed { cont.resume() }
+                }
+
+                let cleanup = {
+                    socketDevice.removeSocketListener(forPort: Self.configPort)
+                    self.configListenerDelegate = nil
+                    self.configListenerCleanup = nil
+                }
+                let delegate = ConfigListenerDelegate(jsonData: jsonData, onDone: {
+                    cleanup()
+                    safeResume()
+                })
+                let listener = VZVirtioSocketListener()
+                listener.delegate = delegate
+                socketDevice.setSocketListener(listener, forPort: Self.configPort)
+                self.configListenerDelegate = delegate
+                self.configListenerCleanup = cleanup
+
+                // No timeout — the config-agent retries indefinitely and will
+                // always connect eventually. A timeout here would silently
+                // leave the VM without config (black screen, no Chrome).
+            }
+        } catch {
+            print("[VMPool] ERROR: failed to serialize config JSON: \(error)")
+        }
+
+        // Close vsock for disabled agents so they exit cleanly instead of retrying.
+        // Agents started at boot will connect and get an immediate EOF → clean exit.
+        let rejectPorts: [UInt32] = [
+            config.enableFileTransfer ? 0 : 5100,
+            config.enableLinkSender   ? 0 : 5300,
+            config.enableWebcam       ? 0 : 5400,
+        ].filter { $0 != 0 }
+
+        if !rejectPorts.isEmpty {
+            let rejectDelegate = RejectListenerDelegate()
+            for port in rejectPorts {
+                let listener = VZVirtioSocketListener()
+                listener.delegate = rejectDelegate
+                socketDevice.setSocketListener(listener, forPort: port)
+            }
+            self.rejectListenerDelegate = rejectDelegate
+            // Remove reject listeners after a few seconds (agents will have connected and exited)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                for port in rejectPorts {
+                    socketDevice.removeSocketListener(forPort: port)
+                }
+                self?.rejectListenerDelegate = nil
+            }
+        }
 
         print("[VMPool] applyConfig total: \(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - t0))s")
     }
@@ -254,21 +455,87 @@ public final class VMPool {
         var accumulated = ""
     }
 
+    /// Tracks pending marker waits so the drain handler can resolve them.
+    public final class SerialWaiter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var buffer = ""
+        private var pending: [(marker: String, continuation: CheckedContinuation<Void, Never>)] = []
+
+        /// Optional observer callback — called with every chunk of text fed to the waiter.
+        public var observer: ((String) -> Void)?
+
+        public func feed(_ text: String) {
+            observer?(text)
+            lock.lock()
+            buffer += text
+            var resolved: [CheckedContinuation<Void, Never>] = []
+            pending.removeAll { entry in
+                if buffer.contains(entry.marker) {
+                    resolved.append(entry.continuation)
+                    return true
+                }
+                return false
+            }
+            // Clear old data but keep the tail for partial marker matches
+            if buffer.count > 4096 {
+                buffer = String(buffer.suffix(1024))
+            }
+            lock.unlock()
+            for cont in resolved { cont.resume() }
+        }
+
+        public func waitFor(_ marker: String, timeout: TimeInterval = 10) async {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                self.lock.lock()
+                if self.buffer.contains(marker) {
+                    self.lock.unlock()
+                    cont.resume()
+                    return
+                }
+                self.pending.append((marker: marker, continuation: cont))
+                self.lock.unlock()
+
+                // Timeout fallback
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+                    guard let self else { return }
+                    self.lock.lock()
+                    if let idx = self.pending.firstIndex(where: { $0.marker == marker }) {
+                        let entry = self.pending.remove(at: idx)
+                        self.lock.unlock()
+                        print("[VMPool] Marker wait timed out: \(marker)")
+                        entry.continuation.resume()
+                    } else {
+                        self.lock.unlock()
+                    }
+                }
+            }
+        }
+    }
+
     /// Wait for the VM to boot (shell prompt), then switch to a drain handler
     /// that keeps reading output so the pipe buffer never fills up.
-    private func waitForBoot(outputPipe: Pipe, inputPipe: Pipe, onBootDetected: String) async {
+    /// Returns a SerialWaiter that continues to monitor drain output for markers.
+    private func waitForBoot(outputPipe: Pipe, inputPipe: Pipe, onBootDetected: String) async -> SerialWaiter {
+        let waiter = SerialWaiter()
         let t0 = CFAbsoluteTimeGetCurrent()
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             let state = BootState()
 
-            outputPipe.fileHandleForReading.readabilityHandler = { handle in
+            outputPipe.fileHandleForReading.readabilityHandler = { [waiter] handle in
                 let data = handle.availableData
                 guard !data.isEmpty else { return }
-                if bromureDebug, let text = String(data: data, encoding: .utf8) {
+                let text = String(data: data, encoding: .utf8)
+                if bromureDebug, let text {
                     print(text, terminator: "")
                 }
 
-                if !state.resolved, let text = String(data: data, encoding: .utf8) {
+                // After boot, feed the waiter so applyConfig can wait on markers
+                if state.resolved {
+                    if let text { waiter.feed(text) }
+                    return
+                }
+
+                if let text {
                     state.accumulated += text
 
                     // Shell prompt means Alpine has booted
@@ -298,6 +565,7 @@ public final class VMPool {
         }
         // NOTE: Do NOT nil out readabilityHandler here.
         // It must keep draining output or the VM will block.
+        return waiter
     }
 
     // MARK: - Memory Balloon
@@ -307,7 +575,7 @@ public final class VMPool {
     private func inflateBalloon(vm: VZVirtualMachine) {
         guard let balloon = vm.memoryBalloonDevices.first
                 as? VZVirtioTraditionalMemoryBalloonDevice else { return }
-        let keep: UInt64 = 128 * 1024 * 1024  // 128 MB for idle guest
+        let keep: UInt64 = 512 * 1024 * 1024  // 512 MB for idle guest
         let total = config.memorySize
         let target = total > keep ? total - keep : 0
         balloon.targetVirtualMachineMemorySize = keep
@@ -324,5 +592,73 @@ public final class VMPool {
         if bromureDebug {
             print("[VMPool] Balloon deflated: guest has full \(config.memorySize / 1024 / 1024) MB")
         }
+    }
+}
+
+// MARK: - Config agent vsock listener delegate
+
+/// Accepts a single vsock connection from the guest config-agent,
+/// sends length-prefixed JSON config, waits for "OK", then calls onDone.
+private final class ConfigListenerDelegate: NSObject, VZVirtioSocketListenerDelegate {
+    private let jsonData: Data
+    private let onDone: () -> Void
+    private var handled = false
+
+    init(jsonData: Data, onDone: @escaping () -> Void) {
+        self.jsonData = jsonData
+        self.onDone = onDone
+    }
+
+    func listener(
+        _ listener: VZVirtioSocketListener,
+        shouldAcceptNewConnection conn: VZVirtioSocketConnection,
+        from socketDevice: VZVirtioSocketDevice
+    ) -> Bool {
+        guard !handled else { return false }
+        handled = true
+
+        let fd = conn.fileDescriptor
+        // Send [u32be length][json]
+        var length = UInt32(jsonData.count).bigEndian
+        _ = withUnsafeBytes(of: &length) { Darwin.write(fd, $0.baseAddress!, 4) }
+        jsonData.withUnsafeBytes { buf in
+            var sent = 0
+            while sent < buf.count {
+                let n = Darwin.write(fd, buf.baseAddress! + sent, buf.count - sent)
+                if n <= 0 { break }
+                sent += n
+            }
+        }
+
+        // Wait for "OK" response on a background queue
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
+        source.setEventHandler {
+            var buf = [UInt8](repeating: 0, count: 16)
+            let n = Darwin.read(fd, &buf, buf.count)
+            if n > 0 {
+                print("[VMPool] config-agent responded: \(String(bytes: buf[0..<n], encoding: .utf8) ?? "?")")
+            }
+            source.cancel()
+        }
+        source.setCancelHandler {
+            _ = conn  // prevent conn from being deallocated before cancel
+            self.onDone()
+        }
+        source.resume()
+        return true
+    }
+}
+
+/// Accepts vsock connections and immediately closes them,
+/// signalling pre-started guest agents to exit for disabled features.
+private final class RejectListenerDelegate: NSObject, VZVirtioSocketListenerDelegate {
+    func listener(
+        _ listener: VZVirtioSocketListener,
+        shouldAcceptNewConnection conn: VZVirtioSocketConnection,
+        from socketDevice: VZVirtioSocketDevice
+    ) -> Bool {
+        // Close the fd immediately so the guest agent gets EOF and exits.
+        Darwin.close(conn.fileDescriptor)
+        return true
     }
 }

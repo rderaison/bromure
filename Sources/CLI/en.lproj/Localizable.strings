@@ -1,0 +1,484 @@
+/* Localizable.strings — English (Base) */
+
+/* MainView — Header */
+"Bromure" = "Bromure";
+"Secure, ephemeral browsing in a disposable VM" = "Secure, ephemeral browsing in a disposable VM";
+
+/* MainView — Setup */
+"First-Time Setup" = "First-Time Setup";
+"Downloads Alpine Linux (~50 MB) and installs\nChromium. This only needs to happen once." = "Downloads Alpine Linux (~50 MB) and installs\nChromium. This only needs to happen once.";
+"Get Started" = "Get Started";
+
+/* MainView — Warming up */
+"Starting browser engine..." = "Starting browser engine...";
+"First launch is slower, subsequent ones will be faster." = "First launch is slower, subsequent ones will be faster.";
+
+/* MainView — Initializing */
+"Console Output" = "Console Output";
+
+/* MainView — Ready */
+"Encrypted" = "Encrypted";
+"Edit profile settings" = "Edit profile settings";
+"Add a new profile" = "Add a new profile";
+"Delete selected profile" = "Delete selected profile";
+"Starting..." = "Starting...";
+"Open Browser" = "Open Browser";
+"Ready" = "Ready";
+"Warming up..." = "Warming up...";
+"%lld open" = "%lld open";
+
+/* MainView — New Profile sheet */
+"New Profile" = "New Profile";
+"Profile Name" = "Profile Name";
+"Color" = "Color";
+"None" = "None";
+"Cancel" = "Cancel";
+"Create" = "Create";
+
+/* MainView — Delete confirmation */
+"Delete" = "Delete";
+"This will permanently delete the profile and all its saved browsing data." = "This will permanently delete the profile and all its saved browsing data.";
+"This will delete the profile." = "This will delete the profile.";
+
+/* MainView — Error */
+"Something went wrong" = "Something went wrong";
+"Try Again" = "Try Again";
+
+/* ProfileSettingsView — Categories */
+"General" = "General";
+"Performance" = "Performance";
+"Media" = "Media";
+"Privacy & Safety" = "Privacy & Safety";
+"Network Isolation" = "Network Isolation";
+"VPN & Ads" = "VPN & Ads";
+"Enterprise" = "Enterprise";
+"Advanced" = "Advanced";
+
+/* ProfileSettingsView — Buttons */
+"Save" = "Save";
+
+/* ProfileSettingsView — General */
+"Basic profile settings" = "Basic profile settings";
+"Name" = "Name";
+"Comments" = "Comments";
+"A short note about this profile. Shown when you hover over it in the profile list." = "A short note about this profile. Shown when you hover over it in the profile list.";
+"e.g. Work browsing, banking only, etc." = "e.g. Work browsing, banking only, etc.";
+"Window Color" = "Window Color";
+"A colored border around the browser window helps you tell profiles apart at a glance." = "A colored border around the browser window helps you tell profiles apart at a glance.";
+"Home Page" = "Home Page";
+"The website that opens when you launch this profile." = "The website that opens when you launch this profile.";
+"Language" = "Language";
+"The language used by the browser. \U201CSame as System\U201D follows your Mac\U2019s language. Choosing a specific language reduces browser fingerprinting." = "The language used by the browser. \U201CSame as System\U201D follows your Mac\U2019s language. Choosing a specific language reduces browser fingerprinting.";
+"Retain Browsing Data" = "Retain Browsing Data";
+"Keep your bookmarks, history, cookies, and passwords between sessions. When turned off, everything is erased each time you close the browser." = "Keep your bookmarks, history, cookies, and passwords between sessions. When turned off, everything is erased each time you close the browser.";
+
+/* ProfileSettingsView — Performance */
+"Control how the browser uses your Mac\U2019s hardware" = "Control how the browser uses your Mac\U2019s hardware";
+"GPU Acceleration" = "GPU Acceleration";
+"Uses your Mac\U2019s graphics chip to make web pages render faster. Turn this off if you notice visual glitches or display problems." = "Uses your Mac\U2019s graphics chip to make web pages render faster. Turn this off if you notice visual glitches or display problems.";
+"WebGL" = "WebGL";
+"Lets websites display 3D graphics and interactive content. Required by some games, maps, and data visualizations." = "Lets websites display 3D graphics and interactive content. Required by some games, maps, and data visualizations.";
+
+/* ProfileSettingsView — Media */
+"Audio and device sharing" = "Audio and device sharing";
+"Audio" = "Audio";
+"Play sounds, music, and video audio from websites." = "Play sounds, music, and video audio from websites.";
+"Volume" = "Volume";
+"Share Webcam" = "Share Webcam";
+"Let websites in this browser access your Mac\U2019s camera for video calls and meetings." = "Let websites in this browser access your Mac\U2019s camera for video calls and meetings.";
+"Share Microphone" = "Share Microphone";
+"Let websites in this browser access your Mac\U2019s microphone for calls and voice input." = "Let websites in this browser access your Mac\U2019s microphone for calls and voice input.";
+"Device Selection" = "Device Selection";
+"Choose which camera, microphone, and speaker to use with this profile." = "Choose which camera, microphone, and speaker to use with this profile.";
+"Speaker" = "Speaker";
+"Choose which speaker to use for audio output." = "Choose which speaker to use for audio output.";
+"Default" = "Default";
+
+/* ProfileSettingsView — File Transfer */
+"Control file uploads and downloads between your Mac and this browser" = "Control file uploads and downloads between your Mac and this browser";
+
+/* ProfileSettingsView — Privacy & Safety */
+"Control what this browser can access and share" = "Control what this browser can access and share";
+"Shared Clipboard" = "Shared Clipboard";
+"Copy and paste text and images between your Mac and this browser. When turned off, the browser\U2019s clipboard is completely isolated." = "Copy and paste text and images between your Mac and this browser. When turned off, the browser\U2019s clipboard is completely isolated.";
+"File Upload" = "File Upload";
+"Allow sending files from your Mac to websites in this browser." = "Allow sending files from your Mac to websites in this browser.";
+"File Download" = "File Download";
+"Allow saving files from websites to your Mac." = "Allow saving files from websites to your Mac.";
+"Scan Downloads with VirusTotal" = "Scan Downloads with VirusTotal";
+"Automatically check downloaded files for viruses and malware before they reach your Mac." = "Automatically check downloaded files for viruses and malware before they reach your Mac.";
+"VirusTotal API Key" = "VirusTotal API Key";
+"Block Threats" = "Block Threats";
+"Automatically block files that VirusTotal identifies as malicious. Blocked files cannot be saved or dragged to your Mac." = "Automatically block files that VirusTotal identifies as malicious. Blocked files cannot be saved or dragged to your Mac.";
+"Block Unscannable Files" = "Block Unscannable Files";
+"Block files that could not be scanned by VirusTotal (too large, rate-limited, or unknown). When turned off, unscannable files can still be saved manually." = "Block files that could not be scanned by VirusTotal (too large, rate-limited, or unknown). When turned off, unscannable files can still be saved manually.";
+"Block Malware Sites" = "Block Malware Sites";
+"Blocks access to websites known to distribute viruses or steal information, using Cloudflare\U2019s security DNS." = "Blocks access to websites known to distribute viruses or steal information, using Cloudflare\U2019s security DNS.";
+"Phishing Warning" = "Phishing Warning";
+"Shows a warning when you\U2019re about to enter a password on a website that looks suspicious or fake." = "Shows a warning when you\U2019re about to enter a password on a website that looks suspicious or fake.";
+"Beta" = "Beta";
+"Send Link to Other Session" = "Send Link to Other Session";
+"Adds a right-click menu option to send a web page link to another Bromure profile." = "Adds a right-click menu option to send a web page link to another Bromure profile.";
+
+/* ProfileSettingsView — Network Isolation */
+"Restrict which networks and ports this browser can reach" = "Restrict which networks and ports this browser can reach";
+"Isolate from Local Network" = "Isolate from Local Network";
+"Prevents this browser from reaching devices on your home or office network, like printers, NAS drives, or internal servers. Internet access is not affected." = "Prevents this browser from reaching devices on your home or office network, like printers, NAS drives, or internal servers. Internet access is not affected.";
+"Restrict Outgoing Ports" = "Restrict Outgoing Ports";
+"Only allow the browser to connect on specific network ports. Useful for locking down which services the browser can reach." = "Only allow the browser to connect on specific network ports. Useful for locking down which services the browser can reach.";
+"Allowed ports (e.g. 80, 443, 8000-9000)" = "Allowed ports (e.g. 80, 443, 8000-9000)";
+"DNS (port 53) is always allowed. Separate ports with commas. Use a dash for ranges." = "DNS (port 53) is always allowed. Separate ports with commas. Use a dash for ranges.";
+
+/* ProfileSettingsView — VPN & Ads */
+"Network privacy and ad blocking" = "Network privacy and ad blocking";
+"Cloudflare WARP" = "Cloudflare WARP";
+"Routes all browser traffic through Cloudflare\U2019s encrypted network, hiding your IP address from websites. Works like a VPN." = "Routes all browser traffic through Cloudflare\U2019s encrypted network, hiding your IP address from websites. Works like a VPN.";
+"Block Ads" = "Block Ads";
+"Blocks ads and tracking scripts from loading on websites. This can make pages load faster and protects your privacy." = "Blocks ads and tracking scripts from loading on websites. This can make pages load faster and protects your privacy.";
+
+/* ProfileSettingsView — Enterprise */
+"Settings for managed environments" = "Settings for managed environments";
+"Root Certificates" = "Root Certificates";
+"Install custom root CA certificates so the browser trusts your organization\U2019s internal websites and services. Accepts PEM, DER, CRT, and CER files." = "Install custom root CA certificates so the browser trusts your organization\U2019s internal websites and services. Accepts PEM, DER, CRT, and CER files.";
+"Add Certificate\U2026" = "Add Certificate\U2026";
+
+/* ProfileSettingsView — Advanced */
+"Additional options for power users" = "Additional options for power users";
+"Encrypt Browsing Data" = "Encrypt Browsing Data";
+"Encrypts all saved browsing data on your Mac\U2019s disk using LUKS. The encryption key is stored securely in your macOS Keychain. If you lose the key, your data cannot be recovered." = "Encrypts all saved browsing data on your Mac\U2019s disk using LUKS. The encryption key is stored securely in your macOS Keychain. If you lose the key, your data cannot be recovered.";
+"Encryption" = "Encryption";
+"Turn on \U201CRetain Browsing Data\U201D in General to access disk encryption options." = "Turn on \U201CRetain Browsing Data\U201D in General to access disk encryption options.";
+
+/* ProfileSettingsView — Confirmation dialogs */
+"Increase VM memory?" = "Increase VM memory?";
+"Increase to 2 GB" = "Increase to 2 GB";
+"Keep current" = "Keep current";
+"Cloudflare WARP requires at least 2 GB of RAM to run reliably. Would you like to increase the VM memory?" = "Cloudflare WARP requires at least 2 GB of RAM to run reliably. Would you like to increase the VM memory?";
+"Enable encryption?" = "Enable encryption?";
+"Disable encryption?" = "Disable encryption?";
+"Delete data and continue" = "Delete data and continue";
+"Changing the encryption setting will delete all existing browsing data for this profile. This cannot be undone." = "Changing the encryption setting will delete all existing browsing data for this profile. This cannot be undone.";
+"Delete Browsing Data\U2026" = "Delete Browsing Data\U2026";
+"Close the session before deleting browsing data" = "Close the session before deleting browsing data";
+"Permanently delete all saved browsing data for this profile" = "Permanently delete all saved browsing data for this profile";
+"Delete browsing data?" = "Delete browsing data?";
+"Delete All Data" = "Delete All Data";
+"This will permanently delete all bookmarks, history, cookies, and passwords for this profile. This cannot be undone." = "This will permanently delete all bookmarks, history, cookies, and passwords for this profile. This cannot be undone.";
+
+/* SettingsView — Categories */
+"Hardware" = "Hardware";
+"Input" = "Input";
+"Display" = "Display";
+"Network" = "Network";
+"Storage" = "Storage";
+
+/* SettingsView — Hardware */
+"Resources allocated to each browser session" = "Resources allocated to each browser session";
+"Memory" = "Memory";
+"How much RAM each browser gets. 2 GB works for most websites. Increase to 4 GB or more for heavy web apps." = "How much RAM each browser gets. 2 GB works for most websites. Increase to 4 GB or more for heavy web apps.";
+"1 GB" = "1 GB";
+"2 GB" = "2 GB";
+"3 GB" = "3 GB";
+"4 GB" = "4 GB";
+"8 GB" = "8 GB";
+"16 GB" = "16 GB";
+"CPU Cores" = "CPU Cores";
+"Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac." = "Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac.";
+"Automatic (%lld)" = "Automatic (%lld)";
+"Changes take effect when the next browser session starts." = "Changes take effect when the next browser session starts.";
+
+/* SettingsView — Input */
+"Keyboard and trackpad settings" = "Keyboard and trackpad settings";
+"Keyboard Layout" = "Keyboard Layout";
+"Match this to your physical keyboard. Changing the layout requires rebuilding the base image." = "Match this to your physical keyboard. Changing the layout requires rebuilding the base image.";
+"Natural Scrolling" = "Natural Scrolling";
+"Scroll content in the same direction as your finger moves on the trackpad, matching the macOS default." = "Scroll content in the same direction as your finger moves on the trackpad, matching the macOS default.";
+"Use Command as Control" = "Use Command as Control";
+"Makes familiar shortcuts like \U2318C, \U2318V, and \U2318T work inside the browser by swapping the Command and Control keys." = "Makes familiar shortcuts like \U2318C, \U2318V, and \U2318T work inside the browser by swapping the Command and Control keys.";
+
+/* SettingsView — Display */
+"Screen and appearance settings" = "Screen and appearance settings";
+"Scale Factor" = "Scale Factor";
+"Match your Mac\U2019s display. Use 2x for Retina screens (most modern Macs). Changing this requires rebuilding the base image." = "Match your Mac\U2019s display. Use 2x for Retina screens (most modern Macs). Changing this requires rebuilding the base image.";
+"1x (Standard)" = "1x (Standard)";
+"2x (Retina)" = "2x (Retina)";
+"Appearance" = "Appearance";
+"Controls whether the browser uses a light or dark color scheme. \U201CSame as System\U201D follows your Mac\U2019s current setting." = "Controls whether the browser uses a light or dark color scheme. \U201CSame as System\U201D follows your Mac\U2019s current setting.";
+"Same as System" = "Same as System";
+"Light" = "Light";
+"Dark" = "Dark";
+
+/* SettingsView — Network */
+"Connection mode and DNS settings" = "Connection mode and DNS settings";
+"You probably don\U2019t need to change anything here." = "You probably don\U2019t need to change anything here.";
+"These settings are only useful if you\U2019re having trouble during installation or if a VPN, firewall, or other local software is preventing the browser from connecting to the internet." = "These settings are only useful if you\U2019re having trouble during installation or if a VPN, firewall, or other local software is preventing the browser from connecting to the internet.";
+"Connection Mode" = "Connection Mode";
+"NAT (recommended) gives the browser its own private network address. Bridged mode places the browser directly on your network, as if it were a separate device." = "NAT (recommended) gives the browser its own private network address. Bridged mode places the browser directly on your network, as if it were a separate device.";
+"NAT (Recommended)" = "NAT (Recommended)";
+"Bridged" = "Bridged";
+"Network Interface" = "Network Interface";
+"Choose which network connection the browser should use. Typically this is your Wi-Fi or Ethernet adapter." = "Choose which network connection the browser should use. Typically this is your Wi-Fi or Ethernet adapter.";
+"No network interfaces available." = "No network interfaces available.";
+"Select\U2026" = "Select\U2026";
+"LAN isolation and port restriction are not available in bridged mode." = "LAN isolation and port restriction are not available in bridged mode.";
+"DNS Servers" = "DNS Servers";
+"Override which DNS servers the browser uses to look up website addresses. Leave empty to use the default. Set this if you\U2019re on a VPN or security software that breaks internet access in the browser." = "Override which DNS servers the browser uses to look up website addresses. Leave empty to use the default. Set this if you\U2019re on a VPN or security software that breaks internet access in the browser.";
+"e.g. 1.1.1.1, 8.8.8.8" = "e.g. 1.1.1.1, 8.8.8.8";
+"DNS override only works in NAT mode." = "DNS override only works in NAT mode.";
+
+/* SettingsView — Storage */
+"Disk usage and base image management" = "Disk usage and base image management";
+"Disk Usage" = "Disk Usage";
+"Total disk space used by the base image and all profile data." = "Total disk space used by the base image and all profile data.";
+"Storage Location" = "Storage Location";
+"Reset" = "Reset";
+"Delete the Linux base image. You\U2019ll need to run the initial setup again. This does not delete your profile data or settings." = "Delete the Linux base image. You\U2019ll need to run the initial setup again. This does not delete your profile data or settings.";
+"Delete Base Image & Reset\U2026" = "Delete Base Image & Reset\U2026";
+
+/* SettingsView — Dialogs */
+"Delete the base image?" = "Delete the base image?";
+"This will delete the Linux base image. You\U2019ll need to run setup again." = "This will delete the Linux base image. You\U2019ll need to run setup again.";
+"Rebuild required" = "Rebuild required";
+"Rebuild Image" = "Rebuild Image";
+"Changing this setting requires rebuilding the base image. All open browser windows will be closed and any unsaved data will be lost." = "Changing this setting requires rebuilding the base image. All open browser windows will be closed and any unsaved data will be lost.";
+
+/* FileDrawerView */
+"File Transfer" = "File Transfer";
+"Drop files here to upload to VM" = "Drop files here to upload to VM";
+"Files downloaded in the VM appear here \U2014 drag or save to keep" = "Files downloaded in the VM appear here \U2014 drag or save to keep";
+"Blocked" = "Blocked";
+"Saved \U2014 Show in Finder" = "Saved \U2014 Show in Finder";
+"Save to Downloads" = "Save to Downloads";
+"Pending" = "Pending";
+"Scanning" = "Scanning";
+"Clean" = "Clean";
+
+/* MediaPreviewView */
+"No camera" = "No camera";
+"Camera" = "Camera";
+"Microphone" = "Microphone";
+
+/* WarpEULAView */
+"Bromure can route your VM traffic through Cloudflare\U2019s encrypted WARP network for additional privacy and security." = "Bromure can route your VM traffic through Cloudflare\U2019s encrypted WARP network for additional privacy and security.";
+"By clicking Accept, you agree to the Cloudflare Application Terms of Service and Privacy Policy." = "By clicking Accept, you agree to the Cloudflare Application Terms of Service and Privacy Policy.";
+"Decline" = "Decline";
+"Accept" = "Accept";
+
+/* Init steps — Linux image creation */
+"Preparing..." = "Preparing...";
+"Downloading Alpine Linux netboot files" = "Downloading Alpine Linux netboot files";
+"Using cached Alpine netboot files" = "Using cached Alpine netboot files";
+"Creating disk image" = "Creating disk image";
+"Installing Alpine Linux with Chromium" = "Installing Alpine Linux with Chromium";
+"Preparing boot files" = "Preparing boot files";
+
+/* Init steps — macOS image creation */
+"Fetching latest macOS restore image metadata" = "Fetching latest macOS restore image metadata";
+"Creating auxiliary storage" = "Creating auxiliary storage";
+"Installing macOS" = "Installing macOS";
+"Saving base image metadata" = "Saving base image metadata";
+
+/* Menu — App */
+"About Bromure" = "About Bromure";
+"Settings..." = "Settings...";
+"Quit Bromure" = "Quit Bromure";
+
+/* Menu — File */
+"File" = "File";
+"New Browser" = "New Browser";
+"Recreate Base Image\U2026" = "Recreate Base Image\U2026";
+"Close Window" = "Close Window";
+
+/* Menu — View */
+"View" = "View";
+"Toggle File Drawer" = "Toggle File Drawer";
+
+/* Menu — Edit */
+"Edit" = "Edit";
+"Cut" = "Cut";
+"Copy" = "Copy";
+"Paste" = "Paste";
+"Select All" = "Select All";
+
+/* Menu — Window */
+"Window" = "Window";
+"Minimize" = "Minimize";
+
+/* Alerts — Profile chooser */
+"Choose a profile" = "Choose a profile";
+"Which profile should open %@?" = "Which profile should open %@?";
+"Open" = "Open";
+
+/* Alerts — Recreate base image */
+"Recreate base image?" = "Recreate base image?";
+"This will close all browser windows, delete the current base image, and rebuild it from scratch. This may take several minutes." = "This will close all browser windows, delete the current base image, and rebuild it from scratch. This may take several minutes.";
+"Recreate" = "Recreate";
+
+/* Alerts — Restore tabs */
+"Restore previous tabs?" = "Restore previous tabs?";
+"This profile has data from a previous session. Would you like to restore your open tabs?" = "This profile has data from a previous session. Would you like to restore your open tabs?";
+"Restore" = "Restore";
+"Start Fresh" = "Start Fresh";
+
+/* Alerts — Quit */
+"Quit Bromure?" = "Quit Bromure?";
+"There is 1 open browser session. All session data will be lost." = "There is 1 open browser session. All session data will be lost.";
+"There are %lld open browser sessions. All session data will be lost." = "There are %lld open browser sessions. All session data will be lost.";
+"Quit" = "Quit";
+
+/* Alerts — Close browser */
+"Close this browser?" = "Close this browser?";
+"All browsing data in this window will be permanently lost. This cannot be undone." = "All browsing data in this window will be permanently lost. This cannot be undone.";
+"Close" = "Close";
+
+/* Window titles */
+"Cloudflare WARP Terms of Service" = "Cloudflare WARP Terms of Service";
+"Settings" = "Settings";
+"Bromure \U2014 %@" = "Bromure \U2014 %@";
+"Bromure \U2014 Chromium" = "Bromure \U2014 Chromium";
+"Bromure \U2014 Base Image Setup" = "Bromure \U2014 Base Image Setup";
+"Profile Settings \U2014 %@" = "Profile Settings \U2014 %@";
+
+/* Init steps */
+"Running setup script (installing packages)" = "Running setup script (installing packages)";
+
+/* ProfileColor labels */
+"Blue" = "Blue";
+"Red" = "Red";
+"Green" = "Green";
+"Orange" = "Orange";
+"Purple" = "Purple";
+"Pink" = "Pink";
+"Teal" = "Teal";
+"Gray" = "Gray";
+
+/* ProfileSettingsView — Allow Automation */
+"Allow Automation" = "Allow Automation";
+"Let external tools (Claude Code, Puppeteer, Playwright) create browser sessions and control this profile remotely. When turned off, this profile is hidden from the automation API." = "Let external tools (Claude Code, Puppeteer, Playwright) create browser sessions and control this profile remotely. When turned off, this profile is hidden from the automation API.";
+"The automation server is currently disabled. Enable it in Bromure \U2192 Settings \U2192 Automation." = "The automation server is currently disabled. Enable it in Bromure \U2192 Settings \U2192 Automation.";
+
+/* ProfileSettingsView — Session Recording */
+"Session Recording" = "Session Recording";
+"Record all HTTP requests made during this browsing session. Useful for analyzing what a suspicious link does behind the scenes. When the session ends, you can save or discard the recording." = "Record all HTTP requests made during this browsing session. Useful for analyzing what a suspicious link does behind the scenes. When the session ends, you can save or discard the recording.";
+"Capture Level" = "Capture Level";
+"Disabled" = "Disabled";
+"Basic \U2014 URLs only" = "Basic \U2014 URLs only";
+"Headers \U2014 URLs + headers + POST data" = "Headers \U2014 URLs + headers + POST data";
+"Full \U2014 URLs + headers + response bodies" = "Full \U2014 URLs + headers + response bodies";
+"This level captures POST data which may include passwords, tokens, and form submissions in clear text." = "This level captures POST data which may include passwords, tokens, and form submissions in clear text.";
+"Full capture records all request and response bodies including passwords, authentication tokens, personal data, and any sensitive content transmitted over the network. Use only for security analysis of untrusted links." = "Full capture records all request and response bodies including passwords, authentication tokens, personal data, and any sensitive content transmitted over the network. Use only for security analysis of untrusted links.";
+
+/* SettingsView — Automation */
+"Remote browser control via HTTP API, CDP, and MCP" = "Remote browser control via HTTP API, CDP, and MCP";
+"MCP Server" = "MCP Server";
+"Bromure includes a built-in MCP server for Claude Code, Openclaws, and other MCP-compatible AI tools. Add this to your MCP configuration:" = "Bromure includes a built-in MCP server for Claude Code, Openclaws, and other MCP-compatible AI tools. Add this to your MCP configuration:";
+"Add --debug to the args to include VM shell access and app state tools." = "Add --debug to the args to include VM shell access and app state tools.";
+"Binding to all interfaces exposes the automation API to your entire network. Anyone on your LAN can create browser sessions, execute JavaScript, and take screenshots. Only use this on trusted networks." = "Binding to all interfaces exposes the automation API to your entire network. Anyone on your LAN can create browser sessions, execute JavaScript, and take screenshots. Only use this on trusted networks.";
+
+/* Session Recording — Save Dialog */
+"Save session recording?" = "Save session recording?";
+"This session captured %lld HTTP requests. Save the recording before closing?" = "This session captured %lld HTTP requests. Save the recording before closing?";
+"Save\U2026" = "Save\U2026";
+"Discard" = "Discard";
+"Invalid Trace File" = "Invalid Trace File";
+"The file could not be read as a Bromure session recording." = "The file could not be read as a Bromure session recording.";
+"Open a saved session recording" = "Open a saved session recording";
+
+/* Trace Viewer */
+"Time" = "Time";
+"Method" = "Method";
+"Host" = "Host";
+"URL" = "URL";
+"Status" = "Status";
+"Waterfall" = "Waterfall";
+"Duration" = "Duration";
+"Type" = "Type";
+"Page" = "Page";
+"Request" = "Request";
+"Response" = "Response";
+"Form Fields" = "Form Fields";
+"Navigation" = "Navigation";
+"Timing" = "Timing";
+"Copied" = "Copied";
+"Response body was truncated" = "Response body was truncated";
+"No form fields captured for this request." = "No form fields captured for this request.";
+"Form field snapshots are recorded when a form is submitted." = "Form field snapshots are recorded when a form is submitted.";
+"Field Name" = "Field Name";
+"Value" = "Value";
+"This section compares the form field values at capture time with the actual POST data sent. Differences may indicate client-side transformation (e.g., hashing, encoding)." = "This section compares the form field values at capture time with the actual POST data sent. Differences may indicate client-side transformation (e.g., hashing, encoding).";
+"Form:" = "Form:";
+"Sent:" = "Sent:";
+
+/* Flow Graph */
+"Drag nodes \U2022 Click page to expand sub-resources" = "Drag nodes \U2022 Click page to expand sub-resources";
+"No navigation events captured" = "No navigation events captured";
+"Freeze" = "Freeze";
+"Resume" = "Resume";
+"Start" = "Start";
+"req" = "req";
+
+/* ProfileSettingsView — Performance (additional) */
+"Zero-Copy Rasterization" = "Zero-Copy Rasterization";
+"Reduces memory copies during page rendering. Improves performance on most systems." = "Reduces memory copies during page rendering. Improves performance on most systems.";
+"Smooth Scrolling" = "Smooth Scrolling";
+"Animates scrolling for a smoother feel. Disable for instant, jump-style scrolling." = "Animates scrolling for a smoother feel. Disable for instant, jump-style scrolling.";
+
+/* ProfileSettingsView — Privacy & Safety (additional) */
+"Block Screen Capture" = "Block Screen Capture";
+"Hides this browser window from screenshots, screen recordings, and screen sharing apps like Zoom." = "Hides this browser window from screenshots, screen recordings, and screen sharing apps like Zoom.";
+
+/* ProfileSettingsView — VPN & Ads (additional) */
+"Connect on Startup" = "Connect on Startup";
+"Automatically connect the VPN when the browser session starts. You can always toggle it from the window\U2019s VPN button." = "Automatically connect the VPN when the browser session starts. You can always toggle it from the window\U2019s VPN button.";
+
+/* ProfileSettingsView — Enterprise (additional) */
+"HTTP Proxy" = "HTTP Proxy";
+"Route all browser traffic through a corporate proxy server. When a proxy is configured, VPN and ad blocking are automatically disabled." = "Route all browser traffic through a corporate proxy server. When a proxy is configured, VPN and ad blocking are automatically disabled.";
+"Hostname" = "Hostname";
+"Port" = "Port";
+"Username" = "Username";
+"Password" = "Password";
+
+/* ProfileSettingsView — Advanced (additional) */
+"Start Recording Automatically" = "Start Recording Automatically";
+"Begin capturing requests as soon as the session opens. When off, recording starts only when you click the record button in the titlebar." = "Begin capturing requests as soon as the session opens. When off, recording starts only when you click the record button in the titlebar.";
+
+/* SettingsView — Hardware (additional) */
+"Kernel Boot Options" = "Kernel Boot Options";
+"Additional Linux kernel command-line parameters appended to the virtual machine boot command. The default disables SME to work around a crash on Apple M4 processors." = "Additional Linux kernel command-line parameters appended to the virtual machine boot command. The default disables SME to work around a crash on Apple M4 processors.";
+"Incorrect kernel options will prevent the browser from booting." = "Incorrect kernel options will prevent the browser from booting.";
+"Only change this if you know what you are doing. Removing arm64.nosme may cause crashes on M4 Macs. Invalid options may prevent the browser from booting." = "Only change this if you know what you are doing. Removing arm64.nosme may cause crashes on M4 Macs. Invalid options may prevent the browser from booting.";
+"Reset to Default" = "Reset to Default";
+
+/* SettingsView — Automation (additional) */
+"Automation" = "Automation";
+"Enable Automation" = "Enable Automation";
+"Start an HTTP server that lets external tools (Puppeteer, Playwright, Claude Code, Codex) create browser sessions and control them via CDP." = "Start an HTTP server that lets external tools (Puppeteer, Playwright, Claude Code, Codex) create browser sessions and control them via CDP.";
+"API Port" = "API Port";
+"The port for the automation API server. Tools connect here to list profiles, create sessions, and get CDP endpoints." = "The port for the automation API server. Tools connect here to list profiles, create sessions, and get CDP endpoints.";
+"Bind Address" = "Bind Address";
+"Use 127.0.0.1 to only allow connections from this Mac. Use 0.0.0.0 to allow connections from other machines on the network." = "Use 127.0.0.1 to only allow connections from this Mac. Use 0.0.0.0 to allow connections from other machines on the network.";
+"127.0.0.1 (localhost only)" = "127.0.0.1 (localhost only)";
+"0.0.0.0 (all interfaces)" = "0.0.0.0 (all interfaces)";
+"Usage" = "Usage";
+"Once enabled, external tools can connect to the API:" = "Once enabled, external tools can connect to the API:";
+"List profiles:" = "List profiles:";
+"Create session:" = "Create session:";
+"List sessions:" = "List sessions:";
+"Close session:" = "Close session:";
+/* SettingsView — API Reference */
+"API Reference" = "API Reference";
+"HTTP endpoints available when automation is enabled:" = "HTTP endpoints available when automation is enabled:";
+"Health check" = "Health check";
+"List available profiles" = "List available profiles";
+"List active sessions" = "List active sessions";
+"Create a new browser session" = "Create a new browser session";
+"Get session info" = "Get session info";
+"Close a session" = "Close a session";
+"Get session trace events" = "Get session trace events";
+"Chrome DevTools Protocol WebSocket proxy" = "Chrome DevTools Protocol WebSocket proxy";
+"Copy to clipboard" = "Copy to clipboard";
+
+/* ProfileSettingsView — General (additional) */
+"Match Keyboard Layout" = "Match Keyboard Layout";
+"Automatically switch the browser\U2019s keyboard layout when you change it on your Mac. Turn this off to always use the layout set in Bromure \U2192 Settings \U2192 Input." = "Automatically switch the browser\U2019s keyboard layout when you change it on your Mac. Turn this off to always use the layout set in Bromure \U2192 Settings \U2192 Input.";

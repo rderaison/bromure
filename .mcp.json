@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "bromure": {
+      "command": ".build/arm64-apple-macosx/release/Bromure.app/Contents/MacOS/bromure",
+      "args": ["mcp"]
+    },
+    "bromure-debug": {
+      "command": ".build/arm64-apple-macosx/release/Bromure.app/Contents/MacOS/bromure",
+      "args": ["mcp", "--debug"]
+    }
+  }
+}

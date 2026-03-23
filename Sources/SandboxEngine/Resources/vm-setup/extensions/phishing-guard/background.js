@@ -41,6 +41,40 @@ const BLOCKLIST_PATTERNS = [
   /(?:secure|login|verify|account)\..*\.(?:xyz|tk|ml|ga|cf|top|buzz|icu)$/i,
 ];
 
+// ---------------------------------------------------------------------------
+// Known auth/SSO provider domains — legitimate cross-domain login targets.
+// Forms posting passwords to these domains from a different site are normal
+// (OAuth, SSO, identity-as-a-service).
+// ---------------------------------------------------------------------------
+
+const AUTH_PROVIDER_DOMAINS = new Set([
+  // Google
+  "google.com", "googleapis.com", "gstatic.com",
+  // Microsoft
+  "microsoft.com", "microsoftonline.com", "live.com", "azure.com",
+  // Apple
+  "apple.com", "icloud.com",
+  // Amazon / AWS
+  "amazon.com", "amazonaws.com",
+  // Meta
+  "facebook.com", "instagram.com", "meta.com",
+  // Identity-as-a-Service
+  "auth0.com", "okta.com", "oktapreview.com", "onelogin.com",
+  "duosecurity.com", "duo.com", "pingidentity.com",
+  "forgerock.com", "cyberark.com",
+  // Developer platforms
+  "github.com", "gitlab.com", "bitbucket.org", "atlassian.com",
+  // Social login
+  "twitter.com", "x.com", "linkedin.com",
+  // Payment (checkout auth)
+  "paypal.com", "stripe.com", "braintreegateway.com",
+  // Cloud / SaaS
+  "salesforce.com", "force.com", "cloudflare.com",
+  "firebase.com", "firebaseapp.com",
+  // Other common auth endpoints
+  "yahoo.com", "dropbox.com", "spotify.com", "shopify.com",
+]);
+
 // Pending warnings: tabId -> { domain, url, verdict }
 const pendingWarnings = new Map();
 
@@ -78,6 +112,10 @@ function isDomainBlocked(domain) {
   return BLOCKLIST_PATTERNS.some((pattern) => pattern.test(domain));
 }
 
+function isAuthProvider(hostname) {
+  return AUTH_PROVIDER_DOMAINS.has(getRegistrableDomain(hostname));
+}
+
 // ---------------------------------------------------------------------------
 // Trusted domains (user-approved via "I know this site")
 // ---------------------------------------------------------------------------
@@ -101,8 +139,8 @@ async function addTrustedDomain(domain) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "passwordFieldDetected") {
-    handlePasswordDetection(message, sender).then((verdict) => {
-      sendResponse({ verdict, domain: message.domain });
+    handlePasswordDetection(message, sender).then((result) => {
+      sendResponse(result);
     });
     return true; // async response
   }
@@ -146,6 +184,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "checkFormAction") {
+    sendResponse({ isAuthProvider: isAuthProvider(message.actionDomain) });
+    return false;
+  }
+
   return false;
 });
 
@@ -154,9 +197,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ---------------------------------------------------------------------------
 
 async function handlePasswordDetection(message, sender) {
-  const { domain } = message;
+  const { domain, formActionDomains } = message;
   const tabId = sender.tab?.id;
-  if (!tabId) return "safe";
+  if (!tabId) return { verdict: "safe", domain };
 
   // Wait for the domain list to finish loading
   await domainsReady;
@@ -167,26 +210,68 @@ async function handlePasswordDetection(message, sender) {
     trusted.includes(domain) ||
     trusted.includes(getRegistrableDomain(domain))
   ) {
-    return "safe";
+    // Still check form actions even if page domain is trusted
+    const crossDomain = checkFormActions(domain, formActionDomains);
+    if (crossDomain) {
+      pendingWarnings.set(tabId, { domain, url: message.url, verdict: "cross-domain", actionDomain: crossDomain });
+      chrome.action.setBadgeText({ text: "!", tabId });
+      chrome.action.setBadgeBackgroundColor({ color: "#f59e0b", tabId });
+      return { verdict: "cross-domain", domain, actionDomain: crossDomain };
+    }
+    return { verdict: "safe", domain };
   }
 
   // 2. Known-blocked (phishing patterns)
   if (isDomainBlocked(domain)) {
     pendingWarnings.set(tabId, { domain, url: message.url, verdict: "blocked" });
     redirectToBlocked(tabId, domain);
-    return "blocked";
+    return { verdict: "blocked", domain };
   }
 
-  // 3. Popular domains (Tranco top 10k)
+  // 3. Check form action domains for cross-domain posting
+  const crossDomain = checkFormActions(domain, formActionDomains);
+  if (crossDomain) {
+    pendingWarnings.set(tabId, { domain, url: message.url, verdict: "cross-domain", actionDomain: crossDomain });
+    chrome.action.setBadgeText({ text: "!", tabId });
+    chrome.action.setBadgeBackgroundColor({ color: "#f59e0b", tabId });
+    return { verdict: "cross-domain", domain, actionDomain: crossDomain };
+  }
+
+  // 4. Popular domains (Tranco top 100k)
   if (isDomainPopular(domain)) {
-    return "safe";
+    return { verdict: "safe", domain };
   }
 
-  // 4. First-time domain — show informational notice
+  // 5. First-time domain — show informational notice
   pendingWarnings.set(tabId, { domain, url: message.url, verdict: "unknown" });
   chrome.action.setBadgeText({ text: "!", tabId });
   chrome.action.setBadgeBackgroundColor({ color: "#f59e0b", tabId });
-  return "unknown";
+  return { verdict: "unknown", domain };
+}
+
+/**
+ * Check if any form action domain is cross-domain and not an auth provider.
+ * Returns the first suspicious action domain, or null if all are fine.
+ */
+function checkFormActions(pageDomain, formActionDomains) {
+  if (!formActionDomains || formActionDomains.length === 0) return null;
+
+  const pageReg = getRegistrableDomain(pageDomain);
+
+  for (const actionDomain of formActionDomains) {
+    const actionReg = getRegistrableDomain(actionDomain);
+
+    // Same registrable domain is fine (www.ft.com → accounts.ft.com)
+    if (actionReg === pageReg) continue;
+
+    // Known auth/SSO provider is fine (any site → auth0.com)
+    if (isAuthProvider(actionDomain)) continue;
+
+    // Cross-domain to an unknown destination — suspicious
+    return actionDomain;
+  }
+
+  return null;
 }
 
 function redirectToBlocked(tabId, domain) {

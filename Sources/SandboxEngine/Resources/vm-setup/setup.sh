@@ -4,12 +4,18 @@
 # No set -e: non-critical sections (WARP, ad blocking) may fail gracefully
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-KB_LAYOUT="${1:-us}"
+KB_LAYOUT_SPEC="${1:-us}"
 NATURAL_SCROLLING="${2:-true}"
 LOCALE="${3:-en_US}"
 DISPLAY_SCALE="${4:-2}"
-ALPINE_VERSION="${5:-3.23}"
+ALPINE_VERSION="${5:-3.22}"
 CURSOR_SIZE=$((DISPLAY_SCALE * 24))
+
+# Parse layout:variant format (e.g. "ch:fr" → layout="ch", variant="fr")
+case "$KB_LAYOUT_SPEC" in
+    *:*) KB_LAYOUT="${KB_LAYOUT_SPEC%%:*}"; KB_VARIANT="${KB_LAYOUT_SPEC#*:}" ;;
+    *)   KB_LAYOUT="$KB_LAYOUT_SPEC"; KB_VARIANT="" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -34,11 +40,11 @@ install_config() {
 install_template() {
     # install_template <source> <dest> [mode]
     # Performs %%VAR%% substitution
-    sed -e "s|%%KEYBOARD_LAYOUT%%|$KB_LAYOUT|g" \
+    sed -e "s|%%KEYBOARD_LAYOUT%%|$KB_LAYOUT_SPEC|g" \
+        -e "s|%%XKB_LAYOUT%%|$KB_LAYOUT|g" \
+        -e "s|%%XKB_VARIANT%%|$KB_VARIANT|g" \
         -e "s|%%NATURAL_SCROLLING%%|$NATURAL_SCROLLING|g" \
         -e "s|%%LOCALE%%|$LOCALE|g" \
-        -e "s|%%DISPLAY_SCALE%%|$DISPLAY_SCALE|g" \
-        -e "s|%%CURSOR_SIZE%%|$CURSOR_SIZE|g" \
         "$SCRIPT_DIR/$1" > "$2"
     [ -n "$3" ] && chmod "$3" "$2"
 }
@@ -48,6 +54,17 @@ install_template() {
 # ---------------------------------------------------------------------------
 
 echo "Waiting for network..."
+
+# Append well-known public DNS as fallback.  The kernel's ip=dhcp provides
+# the vmnet gateway as nameserver, which forwards to the host's DNS.  This
+# works most of the time, but fails when the host uses VPN-only, Private
+# Relay, or corporate DNS that doesn't respond to queries from the VM subnet.
+# Appending public servers lets the resolver fall back if the primary fails.
+if ! grep -q '1\.1\.1\.1' /etc/resolv.conf 2>/dev/null; then
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    echo "nameserver 1.0.0.1" >> /etc/resolv.conf
+fi
+
 for i in $(seq 1 30); do
     wget -q -O /dev/null --spider http://dl-cdn.alpinelinux.org/alpine/ 2>/dev/null && break
     sleep 1
@@ -80,7 +97,12 @@ printf '%s\n' \
     "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community" \
     > /mnt/etc/apk/repositories
 
-cp /etc/resolv.conf /mnt/etc/resolv.conf
+# Write well-known public DNS as initial resolv.conf for the installed image.
+# DHCP (eth0 inet dhcp) will overwrite this at boot, but it serves as a sane
+# fallback if DHCP is slow or the DHCP-provided DNS doesn't work.
+# Don't copy the installer's resolv.conf — it contains the vmnet gateway IP
+# from the build-time vmnet instance, which may differ at runtime.
+printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /mnt/etc/resolv.conf
 
 # Bind-mount for chroot
 mount -t proc proc /mnt/proc
@@ -92,12 +114,12 @@ mount --bind /dev /mnt/dev
 # ---------------------------------------------------------------------------
 
 retry chroot /mnt apk update
-retry chroot /mnt apk add openrc linux-virt linux-firmware-none mkinitfs e2fsprogs
+retry chroot /mnt apk add openrc linux-lts linux-firmware-none mkinitfs e2fsprogs
 retry chroot /mnt apk add \
-    chromium xorg-server xinit mesa-dri-gallium mesa-egl mesa-gl mesa-gles \
-    mesa-gbm eudev dbus ttf-freefont ttf-dejavu font-noto-emoji font-liberation \
+    chromium chromium-lang xorg-server xinit mesa-dri-gallium mesa-egl mesa-gl mesa-gles \
+    mesa-gbm eudev dbus dbus-x11 ttf-freefont ttf-dejavu font-noto-emoji font-liberation \
     xf86-input-libinput agetty util-linux openbox xrandr xdotool setxkbmap \
-    pulseaudio pulseaudio-alsa alsa-utils alsa-plugins-pulse adwaita-icon-theme \
+    pipewire pipewire-pulse wireplumber pipewire-tools alsa-utils alsa-plugins-pulse adwaita-icon-theme \
     spice-vdagent
 
 ls -la /mnt/sbin/init || {
@@ -135,7 +157,8 @@ rm -f /tmp/resolv_stub.c
 # Install proxy and DNS tools
 # ---------------------------------------------------------------------------
 
-retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools jq python3
+retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools jq python3 \
+    v4l-utils nss-tools
 
 # ---------------------------------------------------------------------------
 # Configuration files (static)
@@ -169,6 +192,13 @@ install_config configs/sysctl-warp.conf    /mnt/etc/sysctl.d/warp.conf
 install_config configs/network-interfaces /mnt/etc/network/interfaces
 install_config configs/fstab              /mnt/etc/fstab
 
+# Font rendering (match macOS Core Text: no hinting, stem darkening, SF Pro default)
+install_config configs/fontconfig-local.conf /mnt/etc/fonts/local.conf
+
+# GTK3 settings (Chromium reads these for its UI chrome font)
+mkdir -p /mnt/home/chrome/.config/gtk-3.0
+install_config configs/gtk3-settings.ini /mnt/home/chrome/.config/gtk-3.0/settings.ini
+
 # ---------------------------------------------------------------------------
 # Configuration files (templated)
 # ---------------------------------------------------------------------------
@@ -182,6 +212,7 @@ install_template configs/locale.sh /mnt/etc/profile.d/locale.sh
 chroot /mnt sh -c 'echo "root:" | chpasswd'
 chroot /mnt adduser -D -s /bin/sh chrome
 chroot /mnt addgroup chrome video
+chroot /mnt addgroup -S render 2>/dev/null || true
 chroot /mnt addgroup chrome render
 chroot /mnt addgroup chrome input
 chroot /mnt addgroup chrome audio
@@ -206,6 +237,11 @@ chroot /mnt rc-update add spice-vdagentd default
 
 sed -i 's|^tty1::.*|tty1::respawn:/bin/login -f chrome|' /mnt/etc/inittab
 echo 'hvc0::respawn:/bin/login -f root' >> /mnt/etc/inittab
+echo '::once:/usr/local/bin/config-agent.py' >> /mnt/etc/inittab
+echo '::once:/usr/local/bin/resilient-launch.sh su -s /bin/sh chrome -c /usr/local/bin/file-agent.py' >> /mnt/etc/inittab
+echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/webcam-agent.py' >> /mnt/etc/inittab
+echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/warp-agent.py' >> /mnt/etc/inittab
+echo '::once:/usr/local/bin/resilient-launch.sh su -s /bin/sh chrome -c /usr/local/bin/keyboard-agent.py' >> /mnt/etc/inittab
 
 install_config scripts/debug.sh        /mnt/root/debug.sh          755
 install_config scripts/root-profile.sh /mnt/root/.profile
@@ -251,6 +287,26 @@ mkdir -p /mnt/home/chrome/.config/chromium/Default
 install_config configs/chromium-preferences.json /mnt/home/chrome/.config/chromium/Default/Preferences
 chroot /mnt chown -R chrome:chrome /home/chrome/.config /home/chrome/.cache
 
+# ---------------------------------------------------------------------------
+# macOS fonts (shared from host via VirtioFS for web rendering parity)
+# ---------------------------------------------------------------------------
+
+mkdir -p /mnt/usr/share/fonts/macos
+for tag in fonts userfonts; do
+    FMNT="/tmp/$tag"
+    mkdir -p "$FMNT"
+    mount -t virtiofs "$tag" "$FMNT" 2>/dev/null || continue
+    # Copy TrueType, OpenType, and TrueType Collection fonts (skip .dfont — Linux can't use them)
+    find "$FMNT" -type f \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.ttc' \) \
+        -exec cp {} /mnt/usr/share/fonts/macos/ \;
+    umount "$FMNT"
+done
+MACOS_FONT_COUNT=$(find /mnt/usr/share/fonts/macos/ -type f 2>/dev/null | wc -l)
+echo "Copied $MACOS_FONT_COUNT macOS font files"
+
+# Pre-compute font cache so X11/Chromium don't scan fonts on first boot
+chroot /mnt fc-cache -f
+
 # Chrome user profile (auto-starts X)
 install_config scripts/chrome-profile.sh /mnt/home/chrome/.profile
 chroot /mnt chown chrome:chrome /home/chrome/.profile
@@ -259,7 +315,20 @@ chroot /mnt chown chrome:chrome /home/chrome/.profile
 # File transfer agent
 # ---------------------------------------------------------------------------
 
-install_config scripts/file-agent.py /mnt/usr/local/bin/file-agent.py 755
+install_config scripts/file-agent.py        /mnt/usr/local/bin/file-agent.py        755
+install_config scripts/file-picker-host.py  /mnt/usr/local/bin/file-picker-host.py  755
+install_config scripts/link-agent.py        /mnt/usr/local/bin/link-agent.py        755
+install_config scripts/webcam-agent.py      /mnt/usr/local/bin/webcam-agent.py      755
+install_config scripts/warp-agent.py        /mnt/usr/local/bin/warp-agent.py        755
+install_config scripts/keyboard-agent.py    /mnt/usr/local/bin/keyboard-agent.py    755
+install_config scripts/routing-socks.py     /mnt/usr/local/bin/routing-socks.py     755
+install_config scripts/config-agent.py      /mnt/usr/local/bin/config-agent.py      755
+install_config scripts/cdp-agent.py         /mnt/usr/local/bin/cdp-agent.py         755
+install_config scripts/shell-agent.py       /mnt/usr/local/bin/shell-agent.py       755
+install_config scripts/trace-agent.py      /mnt/usr/local/bin/trace-agent.py      755
+install_config scripts/resilient-launch.sh /mnt/usr/local/bin/resilient-launch.sh 755
+install_config scripts/download-guard.sh    /mnt/usr/local/bin/download-guard.sh    755
+install_config scripts/test-runner.sh      /mnt/usr/local/bin/test-runner.sh       755
 
 # ---------------------------------------------------------------------------
 # Credential bridge (passkeys + passwords)
@@ -288,6 +357,52 @@ for f in manifest.json background.js content.js popup.html popup.css popup.js bl
         cp "$SCRIPT_DIR/extensions/phishing-guard/$f" /mnt/opt/bromure/extensions/phishing-guard/
 done
 
+# ---------------------------------------------------------------------------
+# Link sender extension
+# ---------------------------------------------------------------------------
+
+mkdir -p /mnt/opt/bromure/extensions/link-sender
+for f in manifest.json background.js; do
+    [ -f "$SCRIPT_DIR/extensions/link-sender/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/link-sender/$f" /mnt/opt/bromure/extensions/link-sender/
+done
+
+# ---------------------------------------------------------------------------
+# File picker extension
+# ---------------------------------------------------------------------------
+
+mkdir -p /mnt/opt/bromure/extensions/file-picker
+for f in manifest.json background.js content.js; do
+    [ -f "$SCRIPT_DIR/extensions/file-picker/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/file-picker/$f" /mnt/opt/bromure/extensions/file-picker/
+done
+
+# ---------------------------------------------------------------------------
+# WebRTC block extension (conditionally loaded at runtime)
+# ---------------------------------------------------------------------------
+
+mkdir -p /mnt/opt/bromure/extensions/webrtc-block
+for f in manifest.json block.js; do
+    [ -f "$SCRIPT_DIR/extensions/webrtc-block/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/webrtc-block/$f" /mnt/opt/bromure/extensions/webrtc-block/
+done
+
+# Trace extension
+mkdir -p /mnt/opt/bromure/extensions/trace
+for f in manifest.json background.js form-capture.js; do
+    [ -f "$SCRIPT_DIR/extensions/trace/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/trace/$f" /mnt/opt/bromure/extensions/trace/
+done
+
+# Native messaging hosts (link sender + file picker + trace)
+mkdir -p /mnt/etc/chromium/native-messaging-hosts
+install_config configs/com.bromure.link_sender.json \
+    /mnt/etc/chromium/native-messaging-hosts/com.bromure.link_sender.json
+install_config configs/com.bromure.file_picker.json \
+    /mnt/etc/chromium/native-messaging-hosts/com.bromure.file_picker.json
+install_config configs/com.bromure.trace.json \
+    /mnt/etc/chromium/native-messaging-hosts/com.bromure.trace.json
+
 # Download Tranco top domains list (research-grade popularity ranking)
 echo "SANDBOX_STEP_START:Downloading popular domains list"
 TRANCO_URL="https://tranco-list.eu/top-1m.csv.zip"
@@ -312,8 +427,45 @@ fi
 echo "SANDBOX_STEP_DONE:Downloading popular domains list"
 
 # ---------------------------------------------------------------------------
+# v4l2loopback (virtual webcam device, pre-built for linux-lts)
+# ---------------------------------------------------------------------------
+
+KVER=$(ls /mnt/lib/modules/)
+if [ -f "$SCRIPT_DIR/v4l2loopback/v4l2loopback.ko.gz" ]; then
+    mkdir -p "/mnt/lib/modules/$KVER/extra"
+    cp "$SCRIPT_DIR/v4l2loopback/v4l2loopback.ko.gz" "/mnt/lib/modules/$KVER/extra/"
+    gunzip "/mnt/lib/modules/$KVER/extra/v4l2loopback.ko.gz"
+    chroot /mnt depmod "$KVER"
+    echo "V4L2LOOPBACK_INSTALLED_OK"
+else
+    echo "Warning: v4l2loopback.ko not found — webcam sharing will not work"
+fi
+
+# ---------------------------------------------------------------------------
 # Kernel and initramfs
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# RTC PL031 (Virtualization.framework virtual RTC, pre-built for linux-lts)
+# ---------------------------------------------------------------------------
+
+KVER=$(ls /mnt/lib/modules/)
+if [ -f "$SCRIPT_DIR/rtc-pl031/rtc-pl031.ko.gz" ]; then
+    mkdir -p "/mnt/lib/modules/$KVER/extra"
+    cp "$SCRIPT_DIR/rtc-pl031/rtc-pl031.ko.gz" "/mnt/lib/modules/$KVER/extra/"
+    gunzip "/mnt/lib/modules/$KVER/extra/rtc-pl031.ko.gz"
+    chroot /mnt depmod "$KVER"
+    echo "rtc-pl031" >> /mnt/etc/modules
+    echo "RTC_PL031_INSTALLED_OK"
+elif [ -f "$SCRIPT_DIR/rtc-pl031/rtc-pl031.ko" ]; then
+    mkdir -p "/mnt/lib/modules/$KVER/extra"
+    cp "$SCRIPT_DIR/rtc-pl031/rtc-pl031.ko" "/mnt/lib/modules/$KVER/extra/"
+    chroot /mnt depmod "$KVER"
+    echo "rtc-pl031" >> /mnt/etc/modules
+    echo "RTC_PL031_INSTALLED_OK"
+else
+    echo "Warning: rtc-pl031.ko not found — guest clock will need manual sync"
+fi
 
 install_config configs/mkinitfs.conf /mnt/etc/mkinitfs/mkinitfs.conf
 chroot /mnt ls /etc/mkinitfs/features.d/ 2>/dev/null || true
@@ -321,6 +473,15 @@ chroot /mnt sh -c 'mkinitfs $(ls /lib/modules/)'
 
 # Kernel modules
 cat "$SCRIPT_DIR/configs/modules" >> /mnt/etc/modules
+
+# ---------------------------------------------------------------------------
+# Swap file (1 GB)
+# ---------------------------------------------------------------------------
+
+dd if=/dev/zero of=/mnt/swap bs=1M count=1024
+chmod 600 /mnt/swap
+mkswap /mnt/swap
+chroot /mnt rc-update add swap boot
 
 # ---------------------------------------------------------------------------
 # Cleanup and finish

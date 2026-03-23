@@ -3,9 +3,12 @@ import PackageDescription
 
 let package = Package(
     name: "bromure",
+    defaultLocalization: "en",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.7.0"),
+        .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager.git", from: "1.20.0"),
+        .package(url: "https://github.com/attaswift/BigInt.git", from: "5.3.0"),
     ],
     targets: [
         .executableTarget(
@@ -15,17 +18,28 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "Sources/CLI",
-            exclude: ["Info.plist", "SafariSandbox.entitlements"]
+            exclude: ["Info.plist", "SafariSandbox.entitlements", "Bromure.sdef"]
+        ),
+        .systemLibrary(
+            name: "CVmnet",
+            path: "Sources/CVmnet"
         ),
         .target(
             name: "SandboxEngine",
-            dependencies: [],
+            dependencies: [
+                "CVmnet",
+                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
+                .product(name: "BigInt", package: "BigInt"),
+            ],
             path: "Sources/SandboxEngine",
             resources: [.copy("Resources/vm-setup")],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("AppKit"),
                 .linkedFramework("AuthenticationServices"),
+                .linkedFramework("vmnet"),
+                .linkedFramework("SystemConfiguration"),
+                .linkedLibrary("sqlite3"),
             ]
         ),
         .target(

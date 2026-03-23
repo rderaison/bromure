@@ -1,0 +1,5 @@
+module CVmnet [system] {
+    header "include/cvmnet.h"
+    link framework "vmnet"
+    export *
+}

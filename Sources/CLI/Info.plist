@@ -7,9 +7,9 @@
     <key>CFBundleIdentifier</key>
     <string>io.bromure.app</string>
     <key>CFBundleVersion</key>
-    <string>1.2.0</string>
+    <string>2.2.1</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.2.0</string>
+    <string>2.2.1</string>
     <key>CFBundleExecutable</key>
     <string>bromure</string>
     <key>CFBundleIconFile</key>
@@ -20,8 +20,14 @@
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSAppleScriptEnabled</key>
+    <true/>
+    <key>OSAScriptingDefinition</key>
+    <string>Bromure.sdef</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Bromure needs microphone access to pass audio input to the virtual machine.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Bromure needs camera access to share your webcam with the virtual machine.</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

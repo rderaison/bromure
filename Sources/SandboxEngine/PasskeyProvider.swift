@@ -30,6 +30,11 @@ public enum CredentialGetResult {
 
 /// Wraps ASAuthorizationController for passkey create/get operations.
 ///
+/// Uses the browser-specific `clientData:` API path on
+/// `ASAuthorizationPlatformPublicKeyCredentialProvider`, which lets us set the
+/// web origin so relying parties see the correct origin in clientDataJSON.
+/// Requires `com.apple.developer.web-browser.public-key-credential` entitlement.
+///
 /// Each instance handles a single request. Create a new PasskeyProvider for each
 /// WebAuthn operation — ASAuthorizationController is not reusable.
 @MainActor
@@ -48,6 +53,7 @@ final class PasskeyProvider: NSObject, ASAuthorizationControllerDelegate,
 
     func createPasskey(
         rpId: String,
+        origin: String,
         challenge: Data,
         userId: Data,
         userName: String,
@@ -56,8 +62,12 @@ final class PasskeyProvider: NSObject, ASAuthorizationControllerDelegate,
         let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(
             relyingPartyIdentifier: rpId
         )
-        let request = provider.createCredentialRegistrationRequest(
+        let clientData = ASPublicKeyCredentialClientData(
             challenge: challenge,
+            origin: origin
+        )
+        let request = provider.createCredentialRegistrationRequest(
+            clientData: clientData,
             name: userName,
             userID: userId
         )
@@ -78,31 +88,25 @@ final class PasskeyProvider: NSObject, ASAuthorizationControllerDelegate,
 
     func getCredential(
         rpId: String,
+        origin: String,
         challenge: Data,
-        allowedCredentialIDs: [Data] = [],
-        includePasswords: Bool = true
+        allowedCredentialIDs: [Data] = []
     ) async throws -> CredentialGetResult {
-        var requests: [ASAuthorizationRequest] = []
-
-        // Passkey assertion request
-        let passkeyProvider = ASAuthorizationPlatformPublicKeyCredentialProvider(
+        let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(
             relyingPartyIdentifier: rpId
         )
-        let passkeyRequest = passkeyProvider.createCredentialAssertionRequest(challenge: challenge)
+        let clientData = ASPublicKeyCredentialClientData(
+            challenge: challenge,
+            origin: origin
+        )
+        let passkeyRequest = provider.createCredentialAssertionRequest(clientData: clientData)
         if !allowedCredentialIDs.isEmpty {
             passkeyRequest.allowedCredentials = allowedCredentialIDs.map {
                 ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: $0)
             }
         }
-        requests.append(passkeyRequest)
 
-        // Password request — lets the system sheet show saved iCloud Keychain passwords too
-        if includePasswords {
-            let passwordProvider = ASAuthorizationPasswordProvider()
-            requests.append(passwordProvider.createRequest())
-        }
-
-        let controller = ASAuthorizationController(authorizationRequests: requests)
+        let controller = ASAuthorizationController(authorizationRequests: [passkeyRequest])
         controller.delegate = self
         controller.presentationContextProvider = self
 
@@ -110,26 +114,6 @@ final class PasskeyProvider: NSObject, ASAuthorizationControllerDelegate,
             self.getContinuation = continuation
             controller.performRequests()
         }
-    }
-
-    /// Password-only request (no passkey). Used for password_get when there's no WebAuthn context.
-    func getPassword() async throws -> PasswordGetResult {
-        let passwordProvider = ASAuthorizationPasswordProvider()
-        let request = passwordProvider.createRequest()
-
-        let controller = ASAuthorizationController(authorizationRequests: [request])
-        controller.delegate = self
-        controller.presentationContextProvider = self
-
-        let result = try await withCheckedThrowingContinuation { continuation in
-            self.getContinuation = continuation
-            controller.performRequests()
-        }
-
-        guard case .password(let passwordResult) = result else {
-            throw ASAuthorizationError(.failed)
-        }
-        return passwordResult
     }
 
     // MARK: - ASAuthorizationControllerDelegate

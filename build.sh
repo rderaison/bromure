@@ -22,6 +22,9 @@ fi
 
 echo "Binary built at: $BINARY"
 
+# Signing identity: use CODESIGN_IDENTITY env var, or fall back to ad-hoc (-)
+SIGN_ID="${CODESIGN_IDENTITY:--}"
+
 # Sign the standalone binary too (for direct invocation without the app bundle)
 SIGN_ID="${CODESIGN_IDENTITY:--}"
 echo "Code signing standalone binary..."
@@ -43,6 +46,12 @@ mkdir -p "$MACOS_DIR"
 cp "$BINARY" "$MACOS_DIR/$PRODUCT_NAME"
 cp "$INFO_PLIST" "$CONTENTS/Info.plist"
 
+# Embed provisioning profile (required for iCloud and other entitlements)
+PROVISION_PROFILE="$SCRIPT_DIR/bromure.provisionprofile"
+if [ -f "$PROVISION_PROFILE" ]; then
+    cp "$PROVISION_PROFILE" "$CONTENTS/embedded.provisionprofile"
+fi
+
 # Copy app icon into Resources
 RESOURCES_DIR="$CONTENTS/Resources"
 mkdir -p "$RESOURCES_DIR"
@@ -51,29 +60,28 @@ if [ -f "$ICON_FILE" ]; then
     cp "$ICON_FILE" "$RESOURCES_DIR/AppIcon.icns"
 fi
 
+# Copy AppleScript scripting definition
+SDEF_FILE="$SCRIPT_DIR/Sources/CLI/Bromure.sdef"
+if [ -f "$SDEF_FILE" ]; then
+    cp "$SDEF_FILE" "$RESOURCES_DIR/Bromure.sdef"
+fi
+
 # Copy SPM resource bundles (needed for vm-setup resources at runtime).
 for bundle in "$BUILD_DIR"/*.bundle; do
     [ -e "$bundle" ] && cp -R "$bundle" "$RESOURCES_DIR/"
 done
 
+# Copy localization .lproj directories into the app bundle so Bundle.main can find them.
+# SwiftUI looks up localized strings in Bundle.main, not Bundle.module.
+for lproj in "$BUILD_DIR"/bromure_bromure.bundle/*.lproj; do
+    [ -d "$lproj" ] && cp -R "$lproj" "$RESOURCES_DIR/"
+done
+
 # Code sign with entitlements.
 # Virtualization.framework requires the com.apple.security.virtualization entitlement.
-# Set CODESIGN_IDENTITY to your Developer ID for full functionality (ASAuthorization/passkeys).
-# Falls back to ad-hoc signing (-) if not set.
-SIGN_ID="${CODESIGN_IDENTITY:--}"
+# Set CODESIGN_IDENTITY for Developer ID signing (required for iCloud, ASAuthorization/passkeys).
 echo "Code signing with entitlements (identity: $SIGN_ID)..."
-if [ "$SIGN_ID" != "-" ]; then
-    # Embed provisioning profile if available (required for ASAuthorization/passkeys).
-    # Place your Developer ID provisioning profile at the repo root as Bromure.provisionprofile.
-    PROV_PROFILE="$SCRIPT_DIR/bromureprofile1.provisionprofile"
-    if [ -f "$PROV_PROFILE" ]; then
-        cp "$PROV_PROFILE" "$CONTENTS/embedded.provisionprofile"
-        echo "Embedded provisioning profile"
-    fi
-    codesign --force --sign "$SIGN_ID" --entitlements "$ENTITLEMENTS" --options runtime "$APP_BUNDLE"
-else
-    codesign --force --sign - --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
-fi
+codesign --force --sign "$SIGN_ID" --entitlements "$ENTITLEMENTS" --options runtime "$APP_BUNDLE"
 
 echo ""
 echo "=== Build Complete ==="

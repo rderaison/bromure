@@ -20,7 +20,7 @@ import struct
 import sys
 import threading
 
-VSOCK_PORT = 5200
+VSOCK_PORT = 5201
 HOST_CID = 2  # Apple Virtualization.framework host CID
 
 # Native messaging reads/writes on stdin/stdout with 4-byte LE length prefix.

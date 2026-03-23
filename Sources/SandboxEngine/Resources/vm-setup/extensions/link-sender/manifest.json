@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Bromure Link Sender",
+  "version": "1.0.0",
+  "description": "Send a link to another Bromure browser session.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3w7oFCxMj49cxNFpYq7pUujnmqbqP4YiMKg3vixUGzafImy9n0tGHrKi77d5KR37OYh8izs2foJHMbN9xIbSz2W6Zo9ht3P+XDtGPICOdonX3fQP7hOS6kiS34sz/aXI396o8mAJQIkQjvBT9sCUrq9BuJ2LmDNhfNJpCVA8UPw/Suw3TNXQSaZbl9zve28netqk7GaijV/rexamhTE+amDAIo2SUIsx+J8x+OXrBhSHRI2cB/2IirAD+6FU/YF9Ix0o8JHBtk6C29C41AeRS9sx/0DxbdKMiZCmRGuhHOoPMVHakM3LIGSmdPMYnW36zE6a4bOHyaytBUKk/Z8WUwIDAQAB",
+  "permissions": [
+    "contextMenus",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

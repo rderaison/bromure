@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Bromure Trace",
+  "version": "1.0.0",
+  "description": "Captures web request telemetry and forwards it to the host for session tracing.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAkzoCx+4lARh5cHtBoUp9zwCLWFWj7/Y9UUdcnc9i8kyQ64BmIo3WKDh13bW6w/SolAvbmBrVZOamcl9s2KiaXS2cYNFXsA1NuaF2eB2tIvRPqpAj6QAI51ttOJQFhgwRUdD69rt/gvuBH1+mSOXCBe0sFLEFVYdjlS5WyVu3HTN6+2s5fThICJWl4fPkvY/h2UOisZyPkKh+ulZ6dald3JvoOEuqZccDYhx3r2vsTEavRoWdaF3y8Nt8BhAE099sKrq6W3UvN0q4pvHLyIjv5m5cXyQ1MojOMFow4SmLv4QGuBv85QKSTJHghPorxEDq6L2yzODBIsZGScbMhefEIQIDAQAB",
+  "permissions": [
+    "webRequest",
+    "webNavigation",
+    "nativeMessaging",
+    "debugger"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["form-capture.js"],
+    "run_at": "document_idle",
+    "all_frames": true
+  }]
+}

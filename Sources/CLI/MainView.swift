@@ -11,6 +11,8 @@ struct MainView: View {
     @State private var newProfileName = ""
     @State private var newProfileColor: ProfileColor? = .blue
     @State private var editingProfile: Profile?
+    @State private var settingsPanel: NSWindow?
+    @State private var settingsDelegateHelper: SettingsWindowDelegate?
     @State private var profileToDelete: Profile?
 
     /// Colors already used by other profiles.
@@ -38,6 +40,11 @@ struct MainView: View {
         .background(.background)
         .onAppear {
             state.checkState()
+            state.onOpenProfileSettings = { [self] profileID, category in
+                guard let profile = state.profileManager.profile(withID: profileID) else { return }
+                editingProfile = profile
+                openSettingsPanel(for: profile, category: category)
+            }
         }
     }
 
@@ -138,7 +145,7 @@ struct MainView: View {
                             ProgressView()
                                 .controlSize(.small)
                         }
-                        Text(step.name)
+                        Text(LocalizedStringKey(step.name))
                             .font(.subheadline)
                             .foregroundStyle(step.done ? .secondary : .primary)
                     }
@@ -159,7 +166,7 @@ struct MainView: View {
                 .padding(.horizontal, 40)
             }
 
-            Text(status)
+            Text(LocalizedStringKey(status))
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -228,6 +235,7 @@ struct MainView: View {
                         .help("Edit profile settings")
                     }
                     .tag(profile.id)
+                    .help(profile.comments.isEmpty ? "" : profile.comments)
                 }
             }
             .listStyle(.bordered(alternatesRowBackgrounds: true))
@@ -340,7 +348,7 @@ struct MainView: View {
                             Circle()
                                 .fill(ProfileSettingsView.swiftUIColor(for: color))
                                 .frame(width: 10, height: 10)
-                            Text(color.label)
+                            Text(LocalizedStringKey(color.label))
                         }
                         .tag(Optional(color))
                     }
@@ -354,9 +362,14 @@ struct MainView: View {
                     Button("Create") {
                         let trimmed = newProfileName.trimmingCharacters(in: .whitespaces)
                         guard !trimmed.isEmpty else { return }
+                        var settings = ProfileSettings()
+                        settings.persistent = true
+                        settings.enableClipboardSharing = true
+                        settings.enableLinkSender = true
                         let profile = state.profileManager.createProfile(
                             name: trimmed,
-                            color: newProfileColor
+                            color: newProfileColor,
+                            settings: settings
                         )
                         state.selectedProfileID = profile.id
                         state.profileVersion += 1
@@ -370,28 +383,11 @@ struct MainView: View {
             .padding(24)
         }
 
-        .sheet(item: $editingProfile) { profile in
-            ProfileSettingsView(
-                draft: profile,
-                usedColors: usedColors(excluding: profile.id),
-                profileDiskExists: ProfileDisk.diskExists(
-                    at: state.profileManager.profileDiskURL(for: profile.id)
-                ),
-                onDeleteProfileDisk: {
-                    let diskURL = state.profileManager.profileDiskURL(for: profile.id)
-                    try? FileManager.default.removeItem(at: diskURL)
-                },
-                onSave: { updated in
-                    state.profileManager.updateProfile(updated)
-                    state.profileVersion += 1
-                    editingProfile = nil
-                },
-                onCancel: {
-                    editingProfile = nil
-                },
-                onShowWarpEULA: onShowWarpEULA
-            )
-            .frame(width: 420, height: 560)
+        .onChange(of: editingProfile?.id) { _, newID in
+            // Only open from sidebar click (not AppleScript — that calls openSettingsPanel directly)
+            if let profile = editingProfile, newID != nil, settingsPanel == nil {
+                openSettingsPanel(for: profile)
+            }
         }
 
         .confirmationDialog(
@@ -444,5 +440,143 @@ struct MainView: View {
             .controlSize(.regular)
         }
         .padding()
+    }
+
+    // MARK: - Profile settings window
+
+    private func openSettingsPanel(for profile: Profile, category: String? = nil) {
+        // Close existing panel if open
+        settingsPanel?.close()
+
+        let originalProfile = profile
+
+        // Map category string to enum
+        let initialCat: SettingsCategory
+        switch category {
+        case "general": initialCat = .general
+        case "performance": initialCat = .performance
+        case "media": initialCat = .media
+        case "fileTransfer": initialCat = .fileTransfer
+        case "privacy": initialCat = .privacy
+        case "network": initialCat = .network
+        case "vpnAds": initialCat = .vpnAds
+        case "enterprise": initialCat = .enterprise
+        case "advanced": initialCat = .advanced
+        default: initialCat = .general
+        }
+
+        let hasActiveSession: Bool = {
+            guard let delegate = NSApp.delegate as? GUIAppDelegate else { return false }
+            return delegate.sessions.contains { $0.profile?.id == profile.id }
+        }()
+        let settingsView = ProfileSettingsView(
+            draft: profile,
+            usedColors: usedColors(excluding: profile.id),
+            profileDiskExists: ProfileDisk.diskExists(
+                at: state.profileManager.profileDiskURL(for: profile.id)
+            ),
+            hasActiveSession: hasActiveSession,
+            onDeleteProfileDisk: {
+                let diskURL = state.profileManager.profileDiskURL(for: profile.id)
+                try? FileManager.default.removeItem(at: diskURL)
+            },
+            onSave: { [self] updated in
+                let hasChanges = updated.settings != originalProfile.settings
+                state.profileManager.updateProfile(updated)
+                state.profileVersion += 1
+                editingProfile = nil
+                settingsPanel?.close()
+                settingsPanel = nil
+                settingsDelegateHelper = nil
+
+                // If settings changed and there's an active session for this profile, offer restart
+                if hasChanges {
+                    offerSessionRestart(for: updated)
+                }
+            },
+            onCancel: { [self] in
+                editingProfile = nil
+                settingsPanel?.close()
+                settingsPanel = nil
+                settingsDelegateHelper = nil
+            },
+            onShowWarpEULA: onShowWarpEULA,
+            initialCategory: initialCat
+        )
+
+        let hostingView = NSHostingView(rootView: settingsView)
+        hostingView.setFrameSize(NSSize(width: 680, height: 560))
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 680, height: 560),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.title = String(format: NSLocalizedString("Profile Settings \u{2014} %@", comment: ""), profile.name)
+        window.isReleasedWhenClosed = false
+        window.center()
+
+        // Window delegate to intercept close → treat as cancel
+        let delegateHelper = SettingsWindowDelegate(
+            originalProfile: originalProfile,
+            onCancel: { [self] in
+                editingProfile = nil
+                settingsPanel = nil
+                settingsDelegateHelper = nil
+            }
+        )
+        window.delegate = delegateHelper
+        self.settingsDelegateHelper = delegateHelper
+
+        window.makeKeyAndOrderFront(nil)
+        self.settingsPanel = window
+    }
+
+    /// Offer to restart active sessions for a profile after settings change.
+    private func offerSessionRestart(for profile: Profile) {
+        guard let delegate = NSApp.delegate as? GUIAppDelegate else { return }
+        let activeSessions = delegate.sessions.filter { $0.profile?.id == profile.id }
+        guard !activeSessions.isEmpty else { return }
+
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Restart session?", comment: "")
+        let count = activeSessions.count
+        alert.informativeText = count == 1
+            ? NSLocalizedString("Settings have changed. Restart the browser session to apply them?", comment: "")
+            : String(format: NSLocalizedString("Settings have changed. Restart %lld browser sessions to apply them?", comment: ""), count)
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: NSLocalizedString("Restart", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            Task { @MainActor in
+                for session in activeSessions {
+                    await delegate.restartSession(session, profile: profile)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Settings Window Delegate
+
+/// Intercepts close to treat as cancel and prompt for unsaved changes.
+final class SettingsWindowDelegate: NSObject, NSWindowDelegate {
+    let originalProfile: Profile
+    let onCancel: () -> Void
+
+    init(originalProfile: Profile, onCancel: @escaping () -> Void) {
+        self.originalProfile = originalProfile
+        self.onCancel = onCancel
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // Check if the ProfileSettingsView has unsaved changes.
+        // Since we can't easily access the SwiftUI @State from here,
+        // just close — the onCancel callback discards changes.
+        onCancel()
+        return true
     }
 }

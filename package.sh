@@ -80,17 +80,32 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BINARY" "$MACOS_DIR/$PRODUCT_NAME"
 cp "$INFO_PLIST" "$CONTENTS/Info.plist"
 
+# Embed provisioning profile (required for iCloud and other entitlements)
+PROVISION_PROFILE="$SCRIPT_DIR/bromure.provisionprofile"
+if [ ! -f "$PROVISION_PROFILE" ]; then
+    echo "ERROR: Provisioning profile not found at $PROVISION_PROFILE"
+    exit 1
+fi
+cp "$PROVISION_PROFILE" "$CONTENTS/embedded.provisionprofile"
+
 if [ -f "$ICON_FILE" ]; then
     cp "$ICON_FILE" "$RESOURCES_DIR/AppIcon.icns"
 fi
 
-# Copy SPM resource bundles (needed for vm-setup resources at runtime).
+# Copy SPM resource bundles into Contents/Resources/.
 for bundle in "$BUILD_DIR"/*.bundle; do
     [ -e "$bundle" ] && cp -R "$bundle" "$RESOURCES_DIR/"
 done
 
+# Copy localization .lproj directories into the app bundle so Bundle.main can find them.
+# SwiftUI looks up localized strings in Bundle.main, not Bundle.module.
+for lproj in "$BUILD_DIR"/bromure_bromure.bundle/*.lproj; do
+    [ -d "$lproj" ] && cp -R "$lproj" "$RESOURCES_DIR/"
+done
+
 # --- Sign ---
 echo "=== Signing with: $DEVELOPER_ID ==="
+
 codesign --force --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$DEVELOPER_ID" \
