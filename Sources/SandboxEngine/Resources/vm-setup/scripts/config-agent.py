@@ -100,7 +100,6 @@ def write_chrome_env(cfg):
 
     if cfg.get("darkMode"):
         extra_flags.append("--force-dark-mode")
-        enable_features.append("WebContentsForceDark")
     if cfg.get("proxyHost"):
         # Custom proxy: point Chrome directly at the external proxy
         proxy_host = cfg["proxyHost"]

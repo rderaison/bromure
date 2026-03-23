@@ -66,8 +66,7 @@ EXTRA_FLAGS=""
 ENABLE_FEATURES=""
 
 [ "$DARK_MODE" = "1" ] && \
-    EXTRA_FLAGS="$EXTRA_FLAGS --force-dark-mode" && \
-    ENABLE_FEATURES="${ENABLE_FEATURES:+$ENABLE_FEATURES,}WebContentsForceDark"
+    EXTRA_FLAGS="$EXTRA_FLAGS --force-dark-mode"
 
 if [ -n "$PROXY_HOST" ] && [ -n "$PROXY_PORT" ]; then
     if [ -n "$PROXY_USERNAME" ] && [ -n "$PROXY_PASSWORD" ]; then
