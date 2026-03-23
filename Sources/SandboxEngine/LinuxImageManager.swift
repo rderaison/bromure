@@ -11,7 +11,7 @@ import Virtualization
 /// - virtio drivers for GPU, network, and disk
 public final class LinuxImageManager {
     /// Bump this to force a rebuild of the base image on next launch.
-    public static let imageVersion = "221"
+    public static let imageVersion = "240"
 
     private let storageDir: URL
 
