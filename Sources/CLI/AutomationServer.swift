@@ -132,13 +132,38 @@ final class AutomationServer {
 
     private func handleRequest(fd: Int32) {
         var buf = [UInt8](repeating: 0, count: 65536)
+        var totalRead = 0
+
+        // Initial read — may contain headers + partial/full body
         let n = Darwin.read(fd, &buf, buf.count)
         guard n > 0 else {
             Darwin.close(fd)
             return
         }
+        totalRead = n
 
-        let raw = String(bytes: buf[0..<n], encoding: .utf8) ?? ""
+        // Check if we have the full body by parsing Content-Length
+        if let raw = String(bytes: buf[0..<totalRead], encoding: .utf8),
+           let headerEnd = raw.range(of: "\r\n\r\n") {
+            let headers = String(raw[..<headerEnd.lowerBound]).lowercased()
+            if let clRange = headers.range(of: "content-length: "),
+               let clValue = Int(headers[clRange.upperBound...].prefix(while: { $0.isNumber })) {
+                let bodyStart = raw.distance(from: raw.startIndex, to: headerEnd.upperBound)
+                let bodyReceived = totalRead - bodyStart
+                // Read remaining body bytes if needed
+                var remaining = clValue - bodyReceived
+                while remaining > 0 && totalRead < buf.count {
+                    var tmp = [UInt8](repeating: 0, count: min(remaining, buf.count - totalRead))
+                    let extra = Darwin.read(fd, &tmp, tmp.count)
+                    if extra <= 0 { break }
+                    buf.replaceSubrange(totalRead..<totalRead + extra, with: tmp[0..<extra])
+                    totalRead += extra
+                    remaining -= extra
+                }
+            }
+        }
+
+        let raw = String(bytes: buf[0..<totalRead], encoding: .utf8) ?? ""
         let lines = raw.components(separatedBy: "\r\n")
         guard let requestLine = lines.first else {
             sendResponse(fd: fd, status: 400, body: ["error": "Bad request"])

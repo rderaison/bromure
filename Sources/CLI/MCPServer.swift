@@ -307,12 +307,63 @@ private actor MCPServerImpl {
     // MARK: - HTTP API
 
     private func apiCall(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> [String: Any] {
-        var req = URLRequest(url: URL(string: "\(apiBase)\(path)")!)
-        req.httpMethod = method
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body) }
-        let (data, _) = try await URLSession.shared.data(for: req)
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        // Use a raw HTTP request to avoid URLSession's chunked transfer encoding,
+        // which our simple automation server can't parse.
+        guard let url = URL(string: "\(apiBase)\(path)"),
+              let host = url.host, let port = url.port else {
+            return ["error": "Invalid API URL"]
+        }
+
+        let bodyData = body != nil ? try JSONSerialization.data(withJSONObject: body!) : nil
+        var request = "\(method) \(url.path) HTTP/1.1\r\n"
+        request += "Host: \(host):\(port)\r\n"
+        request += "Content-Type: application/json\r\n"
+        request += "Content-Length: \(bodyData?.count ?? 0)\r\n"
+        request += "Connection: close\r\n"
+        request += "\r\n"
+
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return ["error": "Socket creation failed"] }
+        defer { Darwin.close(fd) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connectResult = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connectResult == 0 else { return ["error": "Connect failed"] }
+
+        // Send request
+        let headerBytes = Array(request.utf8)
+        _ = headerBytes.withUnsafeBufferPointer { ptr in
+            Darwin.write(fd, ptr.baseAddress!, ptr.count)
+        }
+        if let bodyData {
+            _ = bodyData.withUnsafeBytes { ptr in
+                Darwin.write(fd, ptr.baseAddress!, bodyData.count)
+            }
+        }
+
+        // Read response
+        var response = Data()
+        var buf = [UInt8](repeating: 0, count: 65536)
+        while true {
+            let n = Darwin.read(fd, &buf, buf.count)
+            if n <= 0 { break }
+            response.append(contentsOf: buf[0..<n])
+        }
+
+        // Parse HTTP response — find body after \r\n\r\n
+        guard let responseStr = String(data: response, encoding: .utf8),
+              let bodyRange = responseStr.range(of: "\r\n\r\n") else {
+            return ["error": "Invalid HTTP response"]
+        }
+        let responseBody = Data(responseStr[bodyRange.upperBound...].utf8)
+        guard let json = try? JSONSerialization.jsonObject(with: responseBody) as? [String: Any] else {
             return ["error": "Invalid JSON response"]
         }
         return json
