@@ -390,9 +390,11 @@ private actor MCPServerImpl {
         }
 
         // Get page targets — retry up to 30s while Chromium boots in the VM
+
         var targets: [[String: Any]]?
         for attempt in 0..<30 {
             if attempt > 0 { try await Task.sleep(for: .seconds(1)) }
+
             if let data = await apiCallRaw("GET", "/cdp/\(sessionId)/json/list"),
                let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
                !arr.isEmpty {
@@ -412,8 +414,10 @@ private actor MCPServerImpl {
         let targetId = pageTarget["id"] as? String ?? ""
         let proxyWS = "\(apiBase.replacingOccurrences(of: "http://", with: "ws://"))/cdp/\(sessionId)/devtools/page/\(targetId)"
 
+
         let conn = CDPConnection(url: proxyWS)
         try await conn.connect()
+
         cdpConns[sessionId] = conn
         return conn
     }
@@ -843,31 +847,81 @@ private actor MCPServerImpl {
 
 private final class CDPConnection: @unchecked Sendable {
     private let url: URL
-    private var ws: URLSessionWebSocketTask?
-    private let session = URLSession(configuration: .default)
+    private var fd: Int32 = -1
     private var nextId = 1
     private let lock = NSLock()
     private var pending: [Int: CheckedContinuation<[String: Any], any Error>] = [:]
-    private var receiveTask: Task<Void, Never>?
     private(set) var isConnected = false
 
     init(url: String) {
         self.url = URL(string: url)!
     }
 
+    /// Connect via raw socket + WebSocket handshake on a background thread.
     func connect() async throws {
-        let task = session.webSocketTask(with: url)
-        self.ws = task
-        task.resume()
+        let connectURL = url
+        let result: Int32 = try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let host = connectURL.host, let port = connectURL.port else {
+                    continuation.resume(throwing: MCPError.cdpFailed("Invalid CDP URL"))
+                    return
+                }
+
+                let sockFD = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+                guard sockFD >= 0 else {
+                    continuation.resume(throwing: MCPError.cdpFailed("Socket failed"))
+                    return
+                }
+
+                var addr = sockaddr_in()
+                addr.sin_family = sa_family_t(AF_INET)
+                addr.sin_port = UInt16(port).bigEndian
+                addr.sin_addr.s_addr = inet_addr(host)
+                let ok = withUnsafePointer(to: &addr) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        Darwin.connect(sockFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+                guard ok == 0 else {
+                    Darwin.close(sockFD)
+                    continuation.resume(throwing: MCPError.cdpFailed("Connect failed"))
+                    return
+                }
+
+                // WebSocket upgrade handshake
+                var keyBytes = [UInt8](repeating: 0, count: 16)
+                _ = SecRandomCopyBytes(kSecRandomDefault, 16, &keyBytes)
+                let wsKey = Data(keyBytes).base64EncodedString()
+                let path = connectURL.path.isEmpty ? "/" : connectURL.path
+
+                let upgradeReq = "GET \(path) HTTP/1.1\r\nHost: \(host):\(port)\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: \(wsKey)\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                _ = upgradeReq.withCString { Darwin.write(sockFD, $0, strlen($0)) }
+
+                // Read upgrade response
+                var buf = [UInt8](repeating: 0, count: 4096)
+                let n = Darwin.read(sockFD, &buf, buf.count)
+                guard n > 0, let resp = String(bytes: buf[0..<n], encoding: .utf8), resp.contains("101") else {
+                    Darwin.close(sockFD)
+                    continuation.resume(throwing: MCPError.cdpFailed("WebSocket upgrade failed"))
+                    return
+                }
+
+                continuation.resume(returning: sockFD)
+            }
+        }
+
+        self.fd = result
         isConnected = true
-        receiveTask = Task { [weak self] in await self?.receiveLoop() }
+
+        // Start reading frames on a background thread
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.receiveLoop()
+        }
     }
 
     func disconnect() {
         isConnected = false
-        receiveTask?.cancel()
-        ws?.cancel(with: .goingAway, reason: nil)
-        ws = nil
+        if fd >= 0 { Darwin.close(fd); fd = -1 }
         lock.lock()
         let p = pending
         pending.removeAll()
@@ -876,18 +930,19 @@ private final class CDPConnection: @unchecked Sendable {
     }
 
     func send(_ method: String, params: [String: Any]? = nil) async throws -> [String: Any] {
-        guard let ws, isConnected else { throw MCPError.cdpFailed("Not connected") }
+        guard fd >= 0, isConnected else { throw MCPError.cdpFailed("Not connected") }
         let id: Int = lock.withLock { let v = nextId; nextId += 1; return v }
 
         var msg: [String: Any] = ["id": id, "method": method]
         if let params { msg["params"] = params }
         let data = try JSONSerialization.data(withJSONObject: msg)
-        try await ws.send(.data(data))
 
+        // Store continuation BEFORE writing frame to avoid race with receiveLoop
         return try await withCheckedThrowingContinuation { cont in
             lock.lock()
             pending[id] = cont
             lock.unlock()
+            Self.writeWSFrame(fd: fd, data: data)
         }
     }
 
@@ -904,27 +959,86 @@ private final class CDPConnection: @unchecked Sendable {
 
     func waitForLoad(timeout: TimeInterval = 15) async throws {
         _ = try? await send("Page.enable")
-        // Simple approach: wait for loadEventFired or timeout
         _ = try? await evaluate("await new Promise(r => { if (document.readyState === 'complete') r(); else window.addEventListener('load', r, {once: true}); setTimeout(r, \(Int(timeout * 1000))); })")
     }
 
-    private func receiveLoop() async {
-        guard let ws else { return }
-        while isConnected {
-            do {
-                let msg = try await ws.receive()
-                switch msg {
-                case .data(let data):
-                    handleMessage(data)
-                case .string(let str):
-                    if let data = str.data(using: .utf8) { handleMessage(data) }
-                @unknown default: break
-                }
-            } catch {
-                isConnected = false
-                break
+    // MARK: - Raw WebSocket frame I/O
+
+    /// Write a WebSocket text frame (masked, as required by client-to-server).
+    private static func writeWSFrame(fd: Int32, data: Data) {
+        var frame = Data()
+        frame.append(0x81) // FIN + text opcode
+        let len = data.count
+        if len < 126 {
+            frame.append(UInt8(len) | 0x80) // masked
+        } else if len < 65536 {
+            frame.append(126 | 0x80)
+            frame.append(UInt8((len >> 8) & 0xFF))
+            frame.append(UInt8(len & 0xFF))
+        } else {
+            frame.append(127 | 0x80)
+            for i in (0..<8).reversed() { frame.append(UInt8((len >> (i * 8)) & 0xFF)) }
+        }
+        // Mask key (random)
+        var mask = [UInt8](repeating: 0, count: 4)
+        _ = SecRandomCopyBytes(kSecRandomDefault, 4, &mask)
+        frame.append(contentsOf: mask)
+        // Masked payload
+        for (i, byte) in data.enumerated() {
+            frame.append(byte ^ mask[i % 4])
+        }
+        frame.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress!, frame.count) }
+    }
+
+    /// Read WebSocket frames continuously on a background thread.
+    private func receiveLoop() {
+        var buf = [UInt8](repeating: 0, count: 65536)
+        var accumulated = Data()
+
+        while isConnected && fd >= 0 {
+            let n = Darwin.read(fd, &buf, buf.count)
+            if n <= 0 { break }
+            accumulated.append(contentsOf: buf[0..<n])
+
+            // Parse complete frames from accumulated data
+            while let (payload, consumed) = Self.parseWSFrame(accumulated) {
+                accumulated = Data(accumulated.dropFirst(consumed))
+                handleMessage(payload)
             }
         }
+        isConnected = false
+        // Fail any pending continuations
+        lock.lock()
+        let p = pending
+        pending.removeAll()
+        lock.unlock()
+        for (_, cont) in p { cont.resume(throwing: MCPError.cdpFailed("Connection closed")) }
+    }
+
+    /// Parse one WebSocket frame from data. Returns (payload, bytesConsumed) or nil if incomplete.
+    private static func parseWSFrame(_ data: Data) -> (Data, Int)? {
+        guard data.count >= 2 else { return nil }
+        let byte1 = data[1] & 0x7F
+        var offset = 2
+        var payloadLen: Int
+
+        if byte1 < 126 {
+            payloadLen = Int(byte1)
+        } else if byte1 == 126 {
+            guard data.count >= 4 else { return nil }
+            payloadLen = Int(data[2]) << 8 | Int(data[3])
+            offset = 4
+        } else {
+            guard data.count >= 10 else { return nil }
+            payloadLen = 0
+            for i in 0..<8 { payloadLen = (payloadLen << 8) | Int(data[2 + i]) }
+            offset = 10
+        }
+
+        // Server frames are not masked
+        guard data.count >= offset + payloadLen else { return nil }
+        let payload = Data(data[offset..<offset + payloadLen])
+        return (payload, offset + payloadLen)
     }
 
     private func handleMessage(_ data: Data) {

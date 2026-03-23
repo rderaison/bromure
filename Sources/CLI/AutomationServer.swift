@@ -408,17 +408,53 @@ final class AutomationServer {
         }
         guard ok else {
             sendResponse(fd: fd, status: 502, body: ["error": "Failed to send to CDP"])
-            // Keep conn reference alive until we're done
             _ = proxy.conn
             return
         }
 
-        // Now bridge bidirectionally until either side closes.
-        // This handles both short HTTP responses and long-lived WebSocket.
-        Self.bridgeLoop(fd1: fd, fd2: vsockFD)
+        // Check if this is a WebSocket upgrade (needs bidirectional bridge)
+        // or a regular HTTP request (read response by Content-Length)
+        if finalRequest.contains("Upgrade: websocket") {
+            // WebSocket: bridge bidirectionally until either side closes
+            Self.bridgeLoop(fd1: fd, fd2: vsockFD)
+            Darwin.close(fd)
+        } else {
+            // HTTP: read response headers + body by Content-Length, then close
+            var responseBuf = Data()
+            var tmp = [UInt8](repeating: 0, count: 65536)
+            let headerSep = Data("\r\n\r\n".utf8)
 
-        Darwin.close(fd)
-        // Keep VZVirtioSocketConnection alive until bridge is done
+            // Read until we have headers
+            while responseBuf.range(of: headerSep) == nil {
+                let n = Darwin.read(vsockFD, &tmp, tmp.count)
+                if n <= 0 { break }
+                responseBuf.append(contentsOf: tmp[0..<n])
+            }
+
+            // Parse Content-Length and read remaining body
+            if let str = String(data: responseBuf, encoding: .utf8),
+               let headerEnd = str.range(of: "\r\n\r\n") {
+                let headers = str[..<headerEnd.lowerBound].lowercased()
+                if let clRange = headers.range(of: "content-length: "),
+                   let cl = Int(headers[clRange.upperBound...].prefix(while: { $0.isNumber })) {
+                    let headerBytes = str.distance(from: str.startIndex, to: headerEnd.upperBound)
+                    var remaining = cl - (responseBuf.count - headerBytes)
+                    while remaining > 0 {
+                        let n = Darwin.read(vsockFD, &tmp, min(tmp.count, remaining))
+                        if n <= 0 { break }
+                        responseBuf.append(contentsOf: tmp[0..<n])
+                        remaining -= n
+                    }
+                }
+            }
+
+            // Forward the complete response to the client
+            responseBuf.withUnsafeBytes { buf in
+                _ = Self.writeAll(fd: fd, buf: buf.baseAddress!, count: buf.count)
+            }
+            Darwin.close(fd)
+        }
+        // Keep VZVirtioSocketConnection alive until done
         _ = proxy.conn
     }
 
