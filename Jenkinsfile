@@ -27,6 +27,7 @@ stage('Package') {
                     file(credentialsId: 'PROVISION_PROFILE', variable: 'PROVISION_PROFILE')
                 ]) {
                     sh '''
+                        rm -f bromure.provisionprofile
                         cp "$PROVISION_PROFILE" bromure.provisionprofile
                         ./package.sh
                     '''

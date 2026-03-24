@@ -29,6 +29,7 @@ pipeline {
                     file(credentialsId: 'PROVISION_PROFILE', variable: 'PROVISION_PROFILE')
                 ]) {
                     sh '''
+                        rm -f bromure.provisionprofile
                         cp "$PROVISION_PROFILE" bromure.provisionprofile
                         ./build.sh 2>&1 | tee build.log
                         grep "^App bundle:" build.log | sed 's/App bundle: //' > .app_bundle_path
