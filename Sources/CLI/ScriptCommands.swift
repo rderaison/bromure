@@ -59,6 +59,7 @@ private func readSetting(_ s: ProfileSettings, key: String) -> String? {
     case "traceLevel":      return String(s.traceLevel.rawValue)
     case "traceAutoStart":  return String(s.traceAutoStart)
     case "matchKeyboardLayout": return String(s.matchKeyboardLayout)
+    case "networkInterface": return s.networkInterface
     case "locale":          return s.locale ?? "system"
     case "webcamDeviceID":  return s.webcamDeviceID ?? ""
     case "microphoneDeviceID": return s.microphoneDeviceID ?? ""
@@ -107,6 +108,7 @@ private func writeSetting(_ s: inout ProfileSettings, key: String, value: String
     case "traceLevel":      s.traceLevel = TraceLevel(rawValue: Int(value) ?? 0) ?? .disabled
     case "traceAutoStart":  s.traceAutoStart = b
     case "matchKeyboardLayout": s.matchKeyboardLayout = b
+    case "networkInterface": s.networkInterface = value
     case "locale":          s.locale = (value == "system" || value.isEmpty) ? nil : value
     case "webcamDeviceID":  s.webcamDeviceID = value.isEmpty ? nil : value
     case "microphoneDeviceID": s.microphoneDeviceID = value.isEmpty ? nil : value
@@ -292,6 +294,9 @@ final class SetAppSettingCommand: NSScriptCommand {
             let d = UserDefaults.standard
             let b = (value == "true" || value == "1" || value == "yes")
 
+            // Capture old value for pool-restart comparison
+            let oldValue = d.object(forKey: key).map { "\($0)" }
+
             switch key {
             case "vm.memoryGB":         d.set(Int(value) ?? 0, forKey: key)
             case "vm.cpuCount":         d.set(Int(value) ?? 0, forKey: key)
@@ -317,7 +322,7 @@ final class SetAppSettingCommand: NSScriptCommand {
             // need a pool restart.
             let poolKeys = ["vm.memoryGB", "vm.cpuCount",
                             "vm.networkMode", "vm.bridgedInterface", "vm.dnsServers"]
-            if poolKeys.contains(key) {
+            if poolKeys.contains(key), oldValue != value {
                 if let delegate = NSApp.delegate as? GUIAppDelegate {
                     delegate.state.restartPool()
                     // Offer to restart active sessions

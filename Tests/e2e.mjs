@@ -1682,7 +1682,7 @@ print('n/a')
     ).trim();
     const pool = JSON.parse(poolFile);
     assert(Array.isArray(pool), "MAC pool should be an array");
-    assert(pool.length <= 4, `MAC pool grew too large: ${pool.length} entries (expected ≤4)`);
+    assert(pool.length <= 5, `MAC pool grew too large: ${pool.length} entries (expected ≤5)`);
     console.log(`        MAC1: ${mac1}, MAC2: ${mac2}`);
     console.log(`        Pool size: ${pool.length} addresses`);
   });

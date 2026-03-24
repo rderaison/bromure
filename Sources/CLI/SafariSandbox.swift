@@ -677,6 +677,15 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showMainWindow()
     }
 
+    @MainActor private func showSessionError() {
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Cannot open browser", comment: "")
+        alert.informativeText = NSLocalizedString("Too many browser sessions are open. Close some windows and try again.", comment: "")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
+
     @MainActor func openNewBrowser(initialURL: URL? = nil) {
         guard state.pool != nil, state.poolReady else {
             if let url = initialURL { pendingURL = url }
@@ -690,7 +699,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Task { @MainActor in
             guard let warm = await state.pool?.claim(config: config) else {
                 if let url = initialURL { self.pendingURL = url }
-                self.showMainWindow()
+                self.showSessionError()
                 return
             }
             let networkReady = warm.networkReady
@@ -800,7 +809,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 restoreSession: restoreSession
             ) else {
                 self.state.isLaunching = false
-                self.showMainWindow()
+                self.showSessionError()
                 return
             }
             let networkReady = warm.networkReady

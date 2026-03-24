@@ -70,47 +70,80 @@ public final class VMPool {
     /// written later by `applyConfig(_:to:)` when the user claims the VM.
     public func warmUp() async throws {
         guard !isWarming, warmVM == nil else { return }
+        isWarming = true
+        defer { isWarming = false }
+
+        let defaults = UserDefaults.standard
+        let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
+        let bridgedIface: String?
+        if networkMode == "bridged",
+           let ifName = defaults.string(forKey: "vm.bridgedInterface"),
+           !ifName.isEmpty {
+            bridgedIface = ifName
+        } else {
+            bridgedIface = nil
+        }
+
+        let warm = try await bootVM(bridgedInterface: bridgedIface)
+        warmVM = warm
+        warmingMAC = nil  // Now tracked by warmVM.macAddress
+
+        // Inflate balloon to reclaim unused guest memory while VM is idle.
+        inflateBalloon(vm: warm.vm)
+
+        // Suspend the pre-warmed VM after 30s to save CPU while it waits.
+        // VZVirtualMachineView is created at claim time (after resume), so there's
+        // no black-screen issue — the view connects to an already-running framebuffer.
+        suspendTimer?.invalidate()
+        suspendTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let warm = self.warmVM, warm.vm.state == .running else { return }
+                Task { @MainActor in
+                    do {
+                        try await warm.vm.pause()
+                        print("[VMPool] Pre-warmed VM suspended to save CPU")
+                    } catch {
+                        print("[VMPool] Pre-warmed VM suspend failed: \(error)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Boot a fresh VM with the specified network mode.
+    /// - Parameter bridgedInterface: Interface name for bridged mode, or nil for NAT.
+    /// - Returns: A booted WarmVM ready for claim.
+    private func bootVM(bridgedInterface: String?) async throws -> WarmVM {
         guard imageManager.baseImageExists else {
             throw SandboxError.baseImageNotFound
         }
 
-        isWarming = true
-        defer { isWarming = false }
-
         let ephDisk = EphemeralDisk(baseImageURL: imageManager.linuxDiskURL)
         try ephDisk.create()
 
-        // Claim a recycled MAC address to avoid exhausting vmnet's DHCP lease pool
-        let mac = MACAddressPool.shared.claim()
+        guard let mac = MACAddressPool.shared.claim() else {
+            try? ephDisk.destroy()
+            throw SandboxError.macPoolExhausted
+        }
         warmingMAC = mac
 
-        // Network mode: use Apple's native attachments by default (no vmnet proxy).
-        // NetworkFilter is only created at claim time if the profile needs filtering
-        // or a specific bridged interface.
-        let defaults = UserDefaults.standard
-        let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
+        let bootedNetworkMode = bridgedInterface ?? "nat"
 
-        var networkFilter: NetworkFilter?
-        var networkAttachment: VZNetworkDeviceAttachment?
-        var bootedNetworkMode = "nat"
-
-        if networkMode == "bridged",
-           let ifName = defaults.string(forKey: "vm.bridgedInterface"),
-           !ifName.isEmpty {
-            // Bridged mode requires vmnet (VZBridgedNetworkDeviceAttachment needs a
-            // restricted entitlement), so use NetworkFilter in pass-through mode.
-            if let netInfo = HostNetworkInfo.detect(),
-               let filter = NetworkFilter(networkInfo: netInfo, bridgedInterface: ifName) {
-                networkFilter = filter
-                networkAttachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
-                bootedNetworkMode = ifName
-                print("[VMPool] Using bridged networking via vmnet on \(ifName)")
-            } else {
-                print("[VMPool] Bridged mode failed, falling back to NAT")
-            }
+        // Always use VZFileHandleNetworkDeviceAttachment backed by NetworkFilter.
+        // This avoids the NO-CARRIER bug from swapping attachment types at runtime.
+        guard let netInfo = HostNetworkInfo.detect(),
+              let networkFilter = NetworkFilter(networkInfo: netInfo, bridgedInterface: bridgedInterface) else {
+            print("[VMPool] Failed to create NetworkFilter")
+            MACAddressPool.shared.release(mac)
+            warmingMAC = nil
+            try? ephDisk.destroy()
+            throw SandboxError.vmStartFailed("NetworkFilter creation failed")
         }
-        // NAT mode: use VZNATNetworkDeviceAttachment (networkAttachment stays nil,
-        // buildLinuxVMConfig falls back to it). No vmnet proxy needed.
+
+        let networkAttachment = VZFileHandleNetworkDeviceAttachment(fileHandle: networkFilter.vmFileHandle)
+        if bridgedInterface != nil {
+            print("[VMPool] Booting VM with bridged networking on \(bridgedInterface!)")
+        }
 
         let vzConfig = try imageManager.buildLinuxVMConfig(
             diskURL: ephDisk.ephemeralURL,
@@ -141,17 +174,14 @@ public final class VMPool {
             }
         }
 
-        // Wait for boot (shell prompt), just create /tmp/bromure — no config yet.
-        // After boot detection, the handler switches to drain mode (keeps reading
-        // so the pipe buffer doesn't fill up and block the VM's shell).
         let onBoot = "/usr/local/bin/on-boot.sh"
         let waiter = await waitForBoot(outputPipe: outputPipe, inputPipe: inputPipe, onBootDetected: onBoot)
 
-        // Monitor the warm VM for unexpected stops/crashes
         let poolDelegate = PoolVMDelegate()
         vm.delegate = poolDelegate
+        self.poolVMDelegate = poolDelegate
 
-        warmVM = WarmVM(
+        return WarmVM(
             vm: vm,
             ephemeralDisk: ephDisk,
             serialInput: inputPipe,
@@ -162,30 +192,6 @@ public final class VMPool {
             networkReady: true,
             bootedNetworkMode: bootedNetworkMode
         )
-        self.poolVMDelegate = poolDelegate
-        warmingMAC = nil  // Now tracked by warmVM.macAddress
-
-        // Inflate balloon to reclaim unused guest memory while VM is idle.
-        // The idle Alpine shell uses ~80-100 MB; reclaim the rest.
-        inflateBalloon(vm: vm)
-
-        // Suspend the pre-warmed VM after 30s to save CPU while it waits.
-        // VZVirtualMachineView is created at claim time (after resume), so there's
-        // no black-screen issue — the view connects to an already-running framebuffer.
-        suspendTimer?.invalidate()
-        suspendTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self, let warm = self.warmVM, warm.vm.state == .running else { return }
-                Task { @MainActor in
-                    do {
-                        try await warm.vm.pause()
-                        print("[VMPool] Pre-warmed VM suspended to save CPU")
-                    } catch {
-                        print("[VMPool] Pre-warmed VM suspend failed: \(error)")
-                    }
-                }
-            }
-        }
     }
 
     /// Claim the pre-warmed VM with a specific config applied at claim time.
@@ -219,12 +225,57 @@ public final class VMPool {
             }
         }
         // If the warm VM died (e.g. pool was restarted), discard and warm a fresh one.
-        if let warm = warmVM, warm.vm.state != .running {
+        // Paused is valid (pool suspends after 30s idle).
+        if let warm = warmVM, warm.vm.state != .running && warm.vm.state != .paused {
             print("[VMPool] claim: discarding dead warm VM (state=\(warm.vm.state.rawValue))")
             if let mac = warm.macAddress { MACAddressPool.shared.release(mac) }
             try? warm.ephemeralDisk.destroy()
             warmVM = nil
             try? await warmUp()
+        }
+
+        // Check if the profile needs a different network mode than the pool VM.
+        // If so, boot a dedicated VM with the right network from the start.
+        // The pool VM is left for other profiles that match the global setting.
+        let profileNetwork: String
+        let profileBridgedIface: String?
+        if let profileIface = config.networkInterface, !profileIface.isEmpty {
+            if profileIface == "nat" {
+                profileNetwork = "nat"
+                profileBridgedIface = nil
+            } else {
+                profileNetwork = profileIface
+                profileBridgedIface = profileIface
+            }
+        } else {
+            profileNetwork = warmVM?.bootedNetworkMode ?? "nat"
+            profileBridgedIface = nil  // will use pool VM as-is
+        }
+
+        if let warm = warmVM, profileNetwork != warm.bootedNetworkMode {
+            print("[VMPool] claim: profile needs \(profileNetwork) but pool has \(warm.bootedNetworkMode) — booting dedicated VM")
+            do {
+                let dedicated = try await bootVM(bridgedInterface: profileBridgedIface)
+                warmingMAC = nil
+                deflateBalloon(vm: dedicated.vm)
+                var warm = dedicated
+                warm = applyNetworkFiltering(warm: warm, config: config)
+                if let fsDevice = dedicated.vm.directorySharingDevices.first as? VZVirtioFileSystemDevice {
+                    if let profileImageDir {
+                        fsDevice.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: profileImageDir, readOnly: false))
+                    } else {
+                        fsDevice.share = nil
+                    }
+                }
+                await applyConfig(config, to: warm, profileID: profileID, hasProfileDisk: profileImageDir != nil, profileDiskKey: profileDiskKey, restoreSession: restoreSession)
+                print("[VMPool] claim: dedicated VM ready")
+                // Schedule pool replacement
+                scheduleWarmUp(delay: .seconds(3))
+                return warm
+            } catch {
+                print("[VMPool] claim: dedicated VM boot failed: \(error)")
+                return nil
+            }
         }
 
         guard var warm = warmVM else {
@@ -253,22 +304,10 @@ public final class VMPool {
         deflateBalloon(vm: warm.vm)
         print("[VMPool] claim: balloon deflated")
 
-        // Hot-swap the network attachment if the profile requires a different
-        // interface or needs packet filtering (LAN isolation / port restriction).
-        warm = swapNetworkIfNeeded(warm: warm, config: config)
-        print("[VMPool] claim: network swap done")
-
-        // Suspend/resume cycle after network swap to work around a VZ API bug
-        // where the guest kernel doesn't re-probe the virtual NIC after hot-swap.
-        if warm.vm.state == .running {
-            do {
-                try await warm.vm.pause()
-                try await warm.vm.resume()
-                if bromureDebug { print("[VMPool] Suspend/resume after network swap") }
-            } catch {
-                print("[VMPool] Suspend/resume after network swap failed: \(error)")
-            }
-        }
+        // Apply filtering to the existing NetworkFilter (same attachment type,
+        // no VZ attachment swap needed — just host-side rule changes).
+        warm = applyNetworkFiltering(warm: warm, config: config)
+        print("[VMPool] claim: network filtering applied")
 
         // Point the virtio-fs share to the profile's image directory,
         // or disconnect it entirely for ephemeral sessions.
@@ -318,21 +357,7 @@ public final class VMPool {
         print("[VMPool] Applying config: homePage='\(config.homePage)' forceDarkMode=\(config.forceDarkMode) adBlocking=\(config.enableAdBlocking)")
 
 
-        // Activate network filtering based on profile config
-        if config.isolateFromLAN {
-            if let filter = warm.networkFilter {
-                filter.activateFiltering()
-            } else {
-                print("[VMPool] WARNING: isolateFromLAN=true but no NetworkFilter available")
-            }
-        }
-        if let allowedPorts = config.allowedPorts {
-            if let filter = warm.networkFilter {
-                filter.activatePortFiltering(allowedPorts)
-            } else {
-                print("[VMPool] WARNING: port restriction requested but no NetworkFilter available")
-            }
-        }
+        // Network filtering is already activated in claim() before applyConfig.
 
         // Build JSON config for the guest config-agent
         let profileMountPoint = profileID.map { "/home/chrome/.\($0.uuidString)" }
@@ -519,58 +544,20 @@ public final class VMPool {
             .compactMap { HostNetworkInfo.parseIPv4(String($0).trimmingCharacters(in: .whitespaces)) }
     }
 
-    /// Hot-swap the VM's network attachment if the profile requires filtering
-    /// or a different bridged interface than what the VM was booted with.
-    ///
-    /// Uses `VZNetworkDevice.attachment` (read-write at runtime) to replace the
-    /// attachment without rebooting the VM.
-    private func swapNetworkIfNeeded(warm: WarmVM, config: VMConfig) -> WarmVM {
-        var warm = warm
+    /// Enable filtering rules on the VM's existing NetworkFilter.
+    /// The attachment type is never changed — only host-side filter rules are applied.
+    private func applyNetworkFiltering(warm: WarmVM, config: VMConfig) -> WarmVM {
+        let warm = warm
 
-        // Determine the target network mode for this profile
-        let targetNetwork: String
-        if let profileIface = config.networkInterface {
-            targetNetwork = profileIface  // "nat" or interface name
-        } else {
-            targetNetwork = warm.bootedNetworkMode  // keep what warm VM has
+        if config.isolateFromLAN {
+            if let filter = warm.networkFilter {
+                filter.activateFiltering()
+            }
         }
-
-        let needsFilter = config.isolateFromLAN
-            || config.allowedPorts != nil
-            || !Self.readDNSOverride().isEmpty
-        let needsSwap = targetNetwork != warm.bootedNetworkMode
-
-        // If NAT with no filtering and no swap needed, keep the native attachment
-        guard needsFilter || needsSwap else { return warm }
-
-        let bridgedIface: String? = (targetNetwork != "nat") ? targetNetwork : nil
-        let dnsOverride = Self.readDNSOverride()
-
-        if let netInfo = HostNetworkInfo.detect(),
-           let filter = NetworkFilter(
-               networkInfo: netInfo,
-               dnsOverrideServers: dnsOverride,
-               bridgedInterface: bridgedIface
-           ) {
-            // Hot-swap the attachment on the running VM
-            if let device = warm.vm.networkDevices.first {
-                device.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
-                if bromureDebug { print("[VMPool] Hot-swapped network attachment") }
+        if let allowedPorts = config.allowedPorts {
+            if let filter = warm.networkFilter {
+                filter.activatePortFiltering(allowedPorts)
             }
-            // Stop old filter (if any) and store the new one
-            warm.networkFilter?.stop()
-            warm.networkFilter = filter
-            warm.bootedNetworkMode = targetNetwork
-
-            if needsSwap {
-                if bridgedIface != nil {
-                    print("[VMPool] Switched to bridged networking on \(bridgedIface!)")
-                } else {
-                    print("[VMPool] Switched to NAT networking via vmnet (filtering active)")
-                }
-            }
-        } else if needsSwap {
-            print("[VMPool] WARNING: could not create NetworkFilter for interface swap")
         }
 
         return warm

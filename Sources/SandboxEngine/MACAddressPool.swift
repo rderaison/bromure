@@ -33,7 +33,7 @@ public final class MACAddressPool: @unchecked Sendable {
     /// Typical usage: 2 active sessions + 1 warm = 3, with headroom for transient claims.
     private static let maxAddresses = 32
 
-    public func claim() -> String {
+    public func claim() -> String? {
         lock.lock()
         defer { lock.unlock() }
 
@@ -44,11 +44,10 @@ public final class MACAddressPool: @unchecked Sendable {
             return available
         }
 
-        // If the pool is at capacity, recycle the oldest unclaimed address.
-        // All are currently claimed, so we can't recycle — generate a new one
-        // but warn if we're growing too large.
+        // Refuse to grow beyond the cap — vmnet DHCP lease table is finite
         if addresses.count >= Self.maxAddresses {
-            print("[MACPool] WARNING: all \(addresses.count) addresses in use — vmnet DHCP may be exhausted")
+            print("[MACPool] ERROR: all \(Self.maxAddresses) addresses in use — cannot create more VMs")
+            return nil
         }
 
         // Generate and persist a new one

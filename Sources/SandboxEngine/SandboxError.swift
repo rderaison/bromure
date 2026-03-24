@@ -9,6 +9,7 @@ public enum SandboxError: LocalizedError {
     case diskCreationFailed(String)
     case cloneFailed(String)
     case vmStartFailed(String)
+    case macPoolExhausted
 
     public var errorDescription: String? {
         switch self {
@@ -26,6 +27,8 @@ public enum SandboxError: LocalizedError {
             return "Failed to create ephemeral disk clone: \(detail)"
         case .vmStartFailed(let detail):
             return "Failed to start virtual machine: \(detail)"
+        case .macPoolExhausted:
+            return "Too many browser sessions. Close some windows and try again."
         }
     }
 }
