@@ -235,7 +235,20 @@ public final class VMPool {
 
         // Hot-swap the network attachment if the profile requires a different
         // interface or needs packet filtering (LAN isolation / port restriction).
+        let hadNetwork = warm.networkFilter != nil
         warm = swapNetworkIfNeeded(warm: warm, config: config)
+
+        // A suspend/resume cycle after a NIC swap nudges the guest kernel to
+        // re-probe the virtual network device, avoiding stale routing state.
+        if warm.networkFilter != nil && !hadNetwork {
+            do {
+                try await warm.vm.pause()
+                try await warm.vm.resume()
+                if bromureDebug { print("[VMPool] Suspend/resume after network swap") }
+            } catch {
+                print("[VMPool] Suspend/resume after network swap failed: \(error)")
+            }
+        }
 
         // Point the virtio-fs share to the profile's image directory,
         // or disconnect it entirely for ephemeral sessions.
