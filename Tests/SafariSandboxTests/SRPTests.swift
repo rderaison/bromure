@@ -95,11 +95,11 @@ struct PadTests {
         #expect(serialized.count == 384)
     }
 
-    @Test("N ends with ...98D7F4FF")
+    @Test("N ends with ...FFFFFFFF")
     func nLastBytes() {
         let serialized = SRPClient.N.serialize()
         let lastFour = Array(serialized.suffix(4))
-        #expect(lastFour == [0x98, 0xD7, 0xF4, 0xFF])
+        #expect(lastFour == [0xFF, 0xFF, 0xFF, 0xFF])
     }
 
     @Test("N is odd (not divisible by 2)")
@@ -386,19 +386,12 @@ struct AESGCMTests {
         // ciphertext length = plaintext length (GCM is a stream cipher)
         #expect(encrypted.count == plaintext.count + 32)
 
-        // Last 4 bytes of IV should be zero (96-bit nonce padded to 128-bit)
-        let lastFour = Array(encrypted.suffix(4))
-        #expect(lastFour == [0, 0, 0, 0])
-
         // Rearrange to decrypt format: iv(16) || ciphertext || tag(16)
         let decryptInput = Self.encryptToDecryptFormat(encrypted, ptLen: plaintext.count)
 
         // Verify the rearranged format is correct
         let ivPart = decryptInput.prefix(16)
         #expect(ivPart.count == 16)
-        // IV should end with 4 zero bytes (96-bit nonce padded)
-        #expect(Array(ivPart.suffix(4)) == [0, 0, 0, 0],
-                "IV suffix should be zeros but got \(Array(ivPart.suffix(4)))")
         #expect(decryptInput.count == plaintext.count + 32)
 
         let decrypted = try client.decrypt(decryptInput)
@@ -455,9 +448,9 @@ struct AESGCMTests {
         // Total = 50 (ciphertext) + 16 (tag) + 16 (iv) = 82
         #expect(encrypted.count == 82)
 
-        // IV: last 16 bytes, with last 4 being zero
+        // IV: last 16 bytes (fully random, 128-bit)
         let ivPart = encrypted.suffix(16)
-        #expect(ivPart.suffix(4).allSatisfy { $0 == 0 })
+        #expect(ivPart.count == 16)
     }
 
     @Test("createSMSG produces valid JSON envelope with TID and SDATA (base64)")
