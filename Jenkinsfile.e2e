@@ -39,8 +39,8 @@ pipeline {
         stage('Init Base Image') {
             steps {
                 sh '''
-                    BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
-                    "$BUILD_DIR/bromure" init
+                    APP_BUNDLE="$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)/Bromure.app"
+                    "$APP_BUNDLE/Contents/MacOS/bromure" init
                 '''
             }
         }
@@ -48,9 +48,8 @@ pipeline {
         stage('Start App') {
             steps {
                 sh '''
-                    BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
-                    open "$BUILD_DIR/bromure.app"
-                    # Wait for the HTTP API to become available
+                    APP_BUNDLE="$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)/Bromure.app"
+                    open "$APP_BUNDLE"
                     for i in $(seq 1 60); do
                         curl -s http://127.0.0.1:9222/ > /dev/null 2>&1 && break
                         sleep 2
@@ -59,13 +58,111 @@ pipeline {
             }
         }
 
-        stage('E2E Tests') {
+        stage('Install Test Deps') {
             steps {
-                sh '''
-                    cd Tests
-                    npm ci
-                    node e2e.mjs
-                '''
+                sh 'cd Tests && npm ci'
+            }
+        }
+
+        stage('0. Automation Server') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^0\\."'
+            }
+        }
+
+        stage('1. Profile Management') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^1\\."'
+            }
+        }
+
+        stage('2. App Settings') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^2\\."'
+            }
+        }
+
+        stage('3. Home Page') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^3\\."'
+            }
+        }
+
+        stage('4. Performance (GPU/WebGL)') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^4\\."'
+            }
+        }
+
+        stage('5. Appearance') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^5\\."'
+            }
+        }
+
+        stage('6. Media (Audio/Webcam)') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^6\\."'
+            }
+        }
+
+        stage('7. Clipboard') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^7\\."'
+            }
+        }
+
+        stage('8. Privacy & Safety') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^8\\."'
+            }
+        }
+
+        stage('9. File Transfer') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^9\\."'
+            }
+        }
+
+        stage('10. WARP VPN') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^10\\."'
+            }
+        }
+
+        stage('11. Enterprise (Proxy/Certs)') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^11\\."'
+            }
+        }
+
+        stage('12. Language/Locale') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^12\\."'
+            }
+        }
+
+        stage('13. Session Lifecycle') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^13\\."'
+            }
+        }
+
+        stage('14. Automation API') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^14\\."'
+            }
+        }
+
+        stage('15. Allow Automation Flag') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^15\\."'
+            }
+        }
+
+        stage('16. Session Recording (Trace)') {
+            steps {
+                sh 'cd Tests && node e2e.mjs --filter "^16\\."'
             }
         }
     }
