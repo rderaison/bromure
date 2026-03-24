@@ -22,7 +22,11 @@ pipeline {
                 timeout(time: 10, unit: 'MINUTES')
             }
             steps {
-                sh 'script -q /dev/null swift test -c release'
+                sh '''
+                    swift build --build-tests -c release
+                    BUILD_DIR=$(swift build -c release --show-bin-path 2>/dev/null)
+                    "$BUILD_DIR/bromurePackageTests.xctest/Contents/MacOS/bromurePackageTests"
+                '''
             }
         }
 
