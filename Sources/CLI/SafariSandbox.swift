@@ -859,6 +859,11 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let defaults = UserDefaults.standard
         guard defaults.bool(forKey: "automation.enabled") else { return }
 
+        // Stop existing server to avoid bind conflicts on restart
+        if automationServer != nil {
+            stopAutomationServer()
+        }
+
         let port = UInt16(defaults.integer(forKey: "automation.port"))
         let bindAddr = defaults.string(forKey: "automation.bindAddress") ?? "127.0.0.1"
         let server = AutomationServer(port: port > 0 ? port : 9222, bindAddress: bindAddr)
