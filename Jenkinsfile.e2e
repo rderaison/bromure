@@ -1,0 +1,81 @@
+pipeline {
+    agent { label 'macosx-builder' }
+
+    triggers {
+        cron('H 4 * * *')  // daily at ~4am
+    }
+
+    environment {
+        KEYCHAIN_PASSWORD      = credentials('KEYCHAIN_PASSWORD')
+        BUILD_KEYCHAIN         = "${HOME}/build.keychain"
+        BROMURE_DEBUG_CLAUDE   = '1'
+    }
+
+    stages {
+        stage('Unlock Keychain') {
+            steps {
+                sh '''
+                    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$BUILD_KEYCHAIN"
+                    security list-keychains -s "$BUILD_KEYCHAIN" login.keychain-db
+                    security default-keychain -s "$BUILD_KEYCHAIN"
+                '''
+            }
+        }
+
+        stage('Build') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DEVELOPER_ID', variable: 'CODESIGN_IDENTITY'),
+                    file(credentialsId: 'PROVISION_PROFILE', variable: 'PROVISION_PROFILE')
+                ]) {
+                    sh '''
+                        cp "$PROVISION_PROFILE" bromure.provisionprofile
+                        ./build.sh
+                    '''
+                }
+            }
+        }
+
+        stage('Init Base Image') {
+            steps {
+                sh '''
+                    BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
+                    "$BUILD_DIR/bromure" init
+                '''
+            }
+        }
+
+        stage('Start App') {
+            steps {
+                sh '''
+                    BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
+                    open "$BUILD_DIR/bromure.app"
+                    # Wait for the HTTP API to become available
+                    for i in $(seq 1 60); do
+                        curl -s http://127.0.0.1:9222/ > /dev/null 2>&1 && break
+                        sleep 2
+                    done
+                '''
+            }
+        }
+
+        stage('E2E Tests') {
+            steps {
+                sh '''
+                    cd Tests
+                    npm ci
+                    node e2e.mjs
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                osascript -e 'tell application "Bromure" to quit' || true
+                security default-keychain -s login.keychain-db || true
+            '''
+        }
+    }
+}
