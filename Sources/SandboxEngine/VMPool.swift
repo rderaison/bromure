@@ -231,12 +231,14 @@ public final class VMPool {
 
         // A suspend/resume cycle nudges the guest kernel to re-probe the
         // virtual network device, avoiding stale routing state.
-        do {
-            try await warm.vm.pause()
-            try await warm.vm.resume()
-            if bromureDebug { print("[VMPool] Suspend/resume cycle completed") }
-        } catch {
-            print("[VMPool] Suspend/resume cycle failed: \(error)")
+        if warm.vm.state == .running {
+            do {
+                try await warm.vm.pause()
+                try await warm.vm.resume()
+                if bromureDebug { print("[VMPool] Suspend/resume cycle completed") }
+            } catch {
+                print("[VMPool] Suspend/resume cycle failed: \(error)")
+            }
         }
 
         // Point the virtio-fs share to the profile's image directory,
