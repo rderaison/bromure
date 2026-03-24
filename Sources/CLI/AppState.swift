@@ -193,10 +193,10 @@ final class AppState: @unchecked Sendable {
         }
         warmUpTask?.cancel()
         warmUpTask = nil
+        poolReady = false
         Task {
             await pool?.shutdown()
             pool = nil
-            poolReady = false
             startPool()
         }
     }
