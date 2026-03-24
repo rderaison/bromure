@@ -720,15 +720,17 @@ public final class ICloudPasswordsBridge {
 
             return entries.compactMap { entry in
                 guard let usr = entry["USR"] as? String, usr != "Passwords not saved" else { return nil }
+                let hld = entry["highLevelDomain"] as? String
                 let sites = entry["sites"] as? [String] ?? []
-                // Filter: only return entries whose sites list contains the requested hostname
-                // (iCloud matches by high-level domain, so we may get unrelated subdomains)
-                let matchesSite = sites.isEmpty || sites.contains(where: { $0 == hostname || hostname.hasSuffix("." + $0) })
-                guard matchesSite else {
-                    if icpDebug { print("[iCloudPasswords] skipping entry for \(sites) — doesn't match \(hostname)") }
+                // Filter by high-level domain: the entry is valid if the requested
+                // hostname shares the same registrable domain as the entry's HLD.
+                // The sites array only lists where the credential was previously used,
+                // not all subdomains where it's valid.
+                if let hld, !hostname.hasSuffix(hld) && hostname != hld {
+                    if icpDebug { print("[iCloudPasswords] skipping entry for HLD \(hld) — doesn't match \(hostname)") }
                     return nil
                 }
-                let site = sites.first ?? hostname
+                let site = sites.first(where: { $0 == hostname }) ?? sites.first ?? hostname
                 return iCloudCredentialEntry(username: usr, password: nil, domain: site)
             }
 
