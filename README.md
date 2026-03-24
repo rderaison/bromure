@@ -249,3 +249,7 @@ It is a pun on [Bromium](https://en.wikipedia.org/wiki/Bromium), a company that 
 
 - [Renaud Deraison](https://www.linkedin.com/in/rderaison/) (prompting)
 - [Claude + Opus 4.6](https://www.anthropic.com) (implementation)
+
+## Links
+
+[![Hypercommit](https://img.shields.io/badge/Hypercommit-DB2475)](https://hypercommit.com/bromure)
