@@ -22,7 +22,7 @@ pipeline {
                 timeout(time: 10, unit: 'MINUTES')
             }
             steps {
-                sh 'swift test -c release'
+                sh 'script -q /dev/null swift test -c release'
             }
         }
 
