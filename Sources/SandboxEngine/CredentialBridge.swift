@@ -196,6 +196,12 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
                 return
             }
             handlePasswordGet(json, requestId: requestId)
+        case "password_fill":
+            guard enablePasswords else {
+                sendError(requestId: requestId, type: "password_fill_response", error: "disabled")
+                return
+            }
+            handlePasswordFill(json, requestId: requestId)
         case "password_save":
             guard enablePasswords else {
                 sendError(requestId: requestId, type: "password_save_response", error: "disabled")
@@ -411,7 +417,7 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
             }
 
             guard let bridge = self.icloudBridge else {
-                // No iCloud bridge — fallback to Bromure's own keychain entries
+                // No iCloud bridge — fallback to Bromure's own keychain entries (includes passwords)
                 let entries = Self.searchKeychainPasswords(domain: domain)
                 if entries.isEmpty {
                     sendError(requestId: requestId, type: "password_get_response", error: "no_credentials")
@@ -426,45 +432,80 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
                 return
             }
 
-            // First get login names for this domain
+            // Get login names only (no passwords yet — avoids repeated Touch ID prompts).
+            // The guest will send password_fill when the user picks a credential.
             let loginEntries = await bridge.getLoginNames(hostname: domain)
-            if loginEntries.isEmpty {
-                // Fall back to Bromure keychain
-                let entries = Self.searchKeychainPasswords(domain: domain)
-                if entries.isEmpty {
-                    if cbDebug { print("[CredentialBridge] password_get for \(domain): no credentials") }
-                    sendError(requestId: requestId, type: "password_get_response", error: "no_credentials")
-                } else {
-                    sendResponse([
-                        "type": "password_get_response",
-                        "requestId": requestId,
-                        "success": true,
-                        "credentials": entries.map { ["username": $0.0, "password": $0.1] },
-                    ])
-                }
-                return
-            }
 
-            // Fetch passwords for each entry
-            var credentials: [[String: String]] = []
-            for entry in loginEntries {
-                if let pwd = await bridge.getPassword(url: domain, username: entry.username) {
-                    credentials.append(["username": entry.username, "password": pwd])
-                }
+            // Merge with Bromure's own keychain entries
+            let localEntries = Self.searchKeychainPasswords(domain: domain)
+
+            // iCloud entries: usernames only (password fetched on demand via password_fill)
+            var credentials: [[String: String]] = loginEntries.map {
+                ["username": $0.username, "source": "icloud"]
+            }
+            // Local entries: already have passwords
+            for entry in localEntries {
+                credentials.append(["username": entry.0, "password": entry.1, "source": "local"])
             }
 
             if credentials.isEmpty {
-                if cbDebug { print("[CredentialBridge] password_get for \(domain): no passwords returned") }
+                if cbDebug { print("[CredentialBridge] password_get for \(domain): no credentials") }
                 sendError(requestId: requestId, type: "password_get_response", error: "no_credentials")
             } else {
-                handleUserApproval()
-                if cbDebug { print("[CredentialBridge] password_get for \(domain): got \(credentials.count) credential(s)") }
+                if cbDebug { print("[CredentialBridge] password_get for \(domain): \(credentials.count) credential(s)") }
                 sendResponse([
                     "type": "password_get_response",
                     "requestId": requestId,
                     "success": true,
                     "credentials": credentials,
                 ])
+            }
+        }
+    }
+
+    // MARK: - Password Fill (fetch single password on user selection)
+
+    private func handlePasswordFill(_ json: [String: Any], requestId: String) {
+        guard let domain = json["domain"] as? String, !domain.isEmpty,
+              Self.isValidDomain(domain),
+              let username = json["username"] as? String, !username.isEmpty else {
+            sendError(requestId: requestId, type: "password_fill_response", error: "invalid_params")
+            return
+        }
+
+        requestInFlight = true
+
+        Task { @MainActor in
+            defer { requestInFlight = false }
+
+            // Try iCloud Passwords first
+            if let bridge = self.icloudBridge,
+               let pwd = await bridge.getPassword(url: domain, username: username) {
+                handleUserApproval()
+                if cbDebug { print("[CredentialBridge] password_fill for \(domain)/\(username): ok") }
+                sendResponse([
+                    "type": "password_fill_response",
+                    "requestId": requestId,
+                    "success": true,
+                    "username": username,
+                    "password": pwd,
+                ])
+                return
+            }
+
+            // Fallback to local keychain
+            let entries = Self.searchKeychainPasswords(domain: domain)
+            if let match = entries.first(where: { $0.0 == username }) {
+                handleUserApproval()
+                sendResponse([
+                    "type": "password_fill_response",
+                    "requestId": requestId,
+                    "success": true,
+                    "username": match.0,
+                    "password": match.1,
+                ])
+            } else {
+                sendError(requestId: requestId, type: "password_fill_response", error: "no_credentials")
             }
         }
     }

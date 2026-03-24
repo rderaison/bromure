@@ -91,6 +91,7 @@
       }
     } else if (
       data.type === "password_get_response" ||
+      data.type === "password_fill_response" ||
       data.type === "password_save_response"
     ) {
       pending.resolve(data);
@@ -305,17 +306,36 @@
   }
 
   function fillCredential(usernameField, passwordField, credential) {
-    if (usernameField) {
-      setNativeValue(usernameField, credential.username);
+    // If this is an iCloud credential without a password, fetch it first
+    if (credential.source === "icloud" && !credential.password) {
+      const requestId = crypto.randomUUID();
+      sendRequest({
+        requestId: requestId,
+        type: "password_fill",
+        origin: window.location.origin,
+        domain: window.location.hostname,
+        username: credential.username,
+      })
+        .then((response) => {
+          if (response.success && response.password) {
+            doFill(usernameField, passwordField, response.username, response.password);
+          }
+        })
+        .catch(() => {});
+      return;
     }
-    setNativeValue(passwordField, credential.password);
+    doFill(usernameField, passwordField, credential.username, credential.password);
+  }
+
+  function doFill(usernameField, passwordField, username, password) {
+    if (usernameField) {
+      setNativeValue(usernameField, username);
+    }
+    setNativeValue(passwordField, password);
     // Remember what we filled so we don't offer to save it back
     const form = passwordField.closest("form") || passwordField.parentElement;
     if (form) {
-      autofilledCredentials.set(form, {
-        username: credential.username,
-        password: credential.password,
-      });
+      autofilledCredentials.set(form, { username, password });
     }
   }
 
