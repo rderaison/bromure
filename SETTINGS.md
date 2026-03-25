@@ -86,6 +86,8 @@ Controls what the browser can access and share.
 |---|---|
 | **Block Malware Sites** | Blocks access to websites known to distribute viruses or steal information by routing DNS queries through Cloudflare's security-filtered resolvers (1.1.1.2 / 1.0.0.2). |
 | **Phishing Warning** (Beta) | Shows an in-browser warning banner when you are about to enter a password on a suspicious website. Uses a Chromium extension that compares the site against the Tranco top-10k domains list. This is a rough heuristic and will produce false positives. |
+| **Use macOS Passkeys** | Sign in to websites using passkeys stored on your Mac. Each request requires Touch ID or password approval. |
+| **Use macOS Passwords** | Autofill usernames and passwords from your Mac's saved passwords and iCloud Keychain. Disables Chromium's built-in password manager. |
 | **Block Screen Capture** | Hides this browser window from screenshots, screen recordings, and screen sharing apps like Zoom. Useful when sharing your screen in a meeting while keeping a browser session private. |
 | **Send Link to Other Session** | Adds a right-click context menu option to send a link to a different Bromure profile. Useful for opening a suspicious link in a more isolated profile. |
 
@@ -99,6 +101,7 @@ Restricts which networks and ports the browser can reach.
 
 | Setting | Description |
 |---|---|
+| **Network Interface** | Override the global network setting for this profile. Use this to attach different profiles to different network adapters. Options: Default (use global setting), NAT, or bridge on a specific physical interface. |
 | **Isolate from Local Network** | Prevents the browser VM from reaching any device on your home or office network -- printers, NAS drives, routers, internal servers. Internet access is unaffected. |
 | **Restrict Outgoing Ports** | Only allows the browser to connect on specific TCP ports. Enter a comma-separated list of ports or ranges (e.g., `80, 443, 8000-9000`). DNS (port 53) is always allowed. |
 
