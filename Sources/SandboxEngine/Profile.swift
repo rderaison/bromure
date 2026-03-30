@@ -86,6 +86,16 @@ public struct CustomRootCA: Codable, Equatable, Identifiable {
     }
 }
 
+/// VPN mode for the browser session.
+public enum VPNMode: String, Codable, CaseIterable, Equatable, Sendable {
+    /// No VPN — direct connection.
+    case none
+    /// Cloudflare WARP (SOCKS5 proxy inside the guest).
+    case cloudflareWarp
+    /// WireGuard (full network tunnel inside the guest, works with any provider).
+    case wireGuard
+}
+
 /// Trace verbosity level for HTTP session recording.
 public enum TraceLevel: Int, Codable, CaseIterable, Sendable {
     case disabled = 0
@@ -156,8 +166,14 @@ public struct ProfileSettings: Codable, Equatable {
 
     // Network
     public var enableAdBlocking: Bool = false
-    public var enableWarp: Bool = false
+    /// VPN mode — replaces the legacy `enableWarp` bool.
+    public var vpnMode: VPNMode = .none
+    /// Auto-connect WARP on session start (only used when vpnMode == .cloudflareWarp).
     public var warpAutoConnect: Bool = true
+    /// Raw WireGuard .conf file content (only used when vpnMode == .wireGuard).
+    public var wireGuardConfig: String = ""
+    /// Auto-connect WireGuard on session start (only used when vpnMode == .wireGuard).
+    public var wireGuardAutoConnect: Bool = true
 
     // Proxy
     public var proxyHost: String = ""
@@ -244,6 +260,7 @@ public struct ProfileSettings: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case homePage, enableGPU, enableWebGL, enableZeroCopy, enableSmoothScrolling
         case enableAdBlocking, enableWarp, warpAutoConnect
+        case vpnMode, wireGuardConfig, wireGuardAutoConnect
         case proxyHost, proxyPort, proxyUsername, proxyPassword
         case enableClipboardSharing
         case canUpload, canDownload, virusTotalEnabled, virusTotalAPIKey, blockThreats, blockUnscannable
@@ -268,8 +285,16 @@ public struct ProfileSettings: Codable, Equatable {
         enableZeroCopy = try c.decodeIfPresent(Bool.self, forKey: .enableZeroCopy) ?? defaults.enableZeroCopy
         enableSmoothScrolling = try c.decodeIfPresent(Bool.self, forKey: .enableSmoothScrolling) ?? defaults.enableSmoothScrolling
         enableAdBlocking = try c.decodeIfPresent(Bool.self, forKey: .enableAdBlocking) ?? defaults.enableAdBlocking
-        enableWarp = try c.decodeIfPresent(Bool.self, forKey: .enableWarp) ?? defaults.enableWarp
+        // Migration: legacy enableWarp bool → vpnMode enum
+        let legacyEnableWarp = try c.decodeIfPresent(Bool.self, forKey: .enableWarp) ?? false
+        if let decoded = try c.decodeIfPresent(VPNMode.self, forKey: .vpnMode) {
+            vpnMode = decoded
+        } else {
+            vpnMode = legacyEnableWarp ? .cloudflareWarp : .none
+        }
         warpAutoConnect = try c.decodeIfPresent(Bool.self, forKey: .warpAutoConnect) ?? defaults.warpAutoConnect
+        wireGuardConfig = try c.decodeIfPresent(String.self, forKey: .wireGuardConfig) ?? defaults.wireGuardConfig
+        wireGuardAutoConnect = try c.decodeIfPresent(Bool.self, forKey: .wireGuardAutoConnect) ?? defaults.wireGuardAutoConnect
         proxyHost = try c.decodeIfPresent(String.self, forKey: .proxyHost) ?? defaults.proxyHost
         proxyPort = try c.decodeIfPresent(Int.self, forKey: .proxyPort) ?? defaults.proxyPort
         proxyUsername = try c.decodeIfPresent(String.self, forKey: .proxyUsername) ?? defaults.proxyUsername
@@ -323,8 +348,12 @@ public struct ProfileSettings: Codable, Equatable {
         try c.encode(enableZeroCopy, forKey: .enableZeroCopy)
         try c.encode(enableSmoothScrolling, forKey: .enableSmoothScrolling)
         try c.encode(enableAdBlocking, forKey: .enableAdBlocking)
-        try c.encode(enableWarp, forKey: .enableWarp)
+        try c.encode(vpnMode, forKey: .vpnMode)
+        // Keep encoding enableWarp for compatibility with older app versions reading this profile
+        try c.encode(vpnMode == .cloudflareWarp, forKey: .enableWarp)
         try c.encode(warpAutoConnect, forKey: .warpAutoConnect)
+        try c.encode(wireGuardConfig, forKey: .wireGuardConfig)
+        try c.encode(wireGuardAutoConnect, forKey: .wireGuardAutoConnect)
         try c.encode(proxyHost, forKey: .proxyHost)
         try c.encode(proxyPort, forKey: .proxyPort)
         try c.encode(proxyUsername, forKey: .proxyUsername)
@@ -387,8 +416,8 @@ public struct ProfileSettings: Codable, Equatable {
         default: forceDark = VMConfig.detectDarkMode()
         }
 
-        // Custom proxy overrides WARP and ad blocking
-        let effectiveWarp = hasProxy ? false : enableWarp
+        // Custom proxy overrides VPN and ad blocking
+        let effectiveVPNMode: VPNMode = hasProxy ? .none : vpnMode
         let effectiveAdBlocking = hasProxy ? false : enableAdBlocking
 
         let isTestSuite = ProcessInfo.processInfo.environment["BROMURE_TEST_SUITE"] != nil
@@ -398,8 +427,10 @@ public struct ProfileSettings: Codable, Equatable {
             memorySize: UInt64(max(memGB > 0 ? memGB : defaultMemGB, 1)) * 1024 * 1024 * 1024,
             enableAudio: enableAudio,
             audioVolume: audioVolume,
-            enableWarp: effectiveWarp,
-            warpAutoConnect: effectiveWarp && warpAutoConnect,
+            vpnMode: effectiveVPNMode,
+            warpAutoConnect: effectiveVPNMode == .cloudflareWarp && warpAutoConnect,
+            wireGuardConfig: effectiveVPNMode == .wireGuard && !wireGuardConfig.isEmpty ? wireGuardConfig : nil,
+            wireGuardAutoConnect: effectiveVPNMode == .wireGuard && wireGuardAutoConnect,
             forceDarkMode: forceDark,
             enableAdBlocking: effectiveAdBlocking,
             swapCmdCtrl: defaults.object(forKey: "vm.swapCmdCtrl") as? Bool ?? true,

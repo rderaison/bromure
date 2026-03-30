@@ -791,18 +791,21 @@ struct ProfileSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                settingToggle(
-                    "Cloudflare WARP",
-                    description: "Routes all browser traffic through Cloudflare\u{2019}s encrypted network, hiding your IP address from websites. Works like a VPN.",
-                    isOn: $draft.settings.enableWarp
-                )
-                .disabled(proxyActive)
-                .onChange(of: draft.settings.enableWarp) { _, newValue in
-                    if newValue {
+            VStack(alignment: .leading, spacing: 12) {
+                // VPN mode picker
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker("VPN", selection: $draft.settings.vpnMode) {
+                        Text("No VPN").tag(VPNMode.none)
+                        Text("Cloudflare WARP").tag(VPNMode.cloudflareWarp)
+                        Text("WireGuard").tag(VPNMode.wireGuard)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(proxyActive)
+                    .onChange(of: draft.settings.vpnMode) { _, newMode in
+                        guard newMode == .cloudflareWarp else { return }
                         if let onShowWarpEULA, !UserDefaults.standard.bool(forKey: "warpEULAAccepted") {
-                            draft.settings.enableWarp = false
-                            onShowWarpEULA { draft.settings.enableWarp = true }
+                            draft.settings.vpnMode = .none
+                            onShowWarpEULA { draft.settings.vpnMode = .cloudflareWarp }
                             return
                         }
                         let memGB = UserDefaults.standard.integer(forKey: "vm.memoryGB")
@@ -810,13 +813,57 @@ struct ProfileSettingsView: View {
                             showWarpMemoryConfirm = true
                         }
                     }
+                    Text("Choose a VPN to route browser traffic through an encrypted tunnel, hiding your IP address from websites.")
+                        .settingDescription()
                 }
 
-                if draft.settings.enableWarp {
+                // WARP options
+                if draft.settings.vpnMode == .cloudflareWarp {
                     settingToggle(
                         "Connect on Startup",
-                        description: "Automatically connect the VPN when the browser session starts. You can always toggle it from the window\u{2019}s VPN button.",
+                        description: "Automatically connect WARP when the browser session starts. You can always toggle it from the window\u{2019}s VPN button.",
                         isOn: $draft.settings.warpAutoConnect
+                    )
+                    .padding(.leading, 20)
+                }
+
+                // WireGuard options
+                if draft.settings.vpnMode == .wireGuard {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("WireGuard Configuration")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Text("Paste your WireGuard .conf file below, or use the import button to load it from disk.")
+                            .settingDescription()
+                        TextEditor(text: $draft.settings.wireGuardConfig)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(minHeight: 120, maxHeight: 200)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                            )
+                            .padding(.top, 2)
+                        HStack {
+                            Spacer()
+                            Button("Import .conf File\u{2026}") {
+                                let panel = NSOpenPanel()
+                                panel.allowedContentTypes = [.init(filenameExtension: "conf")!]
+                                panel.allowsMultipleSelection = false
+                                if panel.runModal() == .OK, let url = panel.url,
+                                   let content = try? String(contentsOf: url, encoding: .utf8) {
+                                    draft.settings.wireGuardConfig = content
+                                }
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.blue)
+                        }
+                    }
+                    .padding(.leading, 20)
+
+                    settingToggle(
+                        "Connect on Startup",
+                        description: "Automatically bring up the WireGuard tunnel when the browser session starts. You can always toggle it from the window\u{2019}s VPN button.",
+                        isOn: $draft.settings.wireGuardAutoConnect
                     )
                     .padding(.leading, 20)
                 }

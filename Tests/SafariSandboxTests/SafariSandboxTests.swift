@@ -97,7 +97,7 @@ struct ProfileSettingsTests {
         #expect(s.enableGPU == true)
         #expect(s.enableWebGL == false)
         #expect(s.enableAdBlocking == false)
-        #expect(s.enableWarp == false)
+        #expect(s.vpnMode == .none)
         #expect(s.proxyHost.isEmpty)
         #expect(s.proxyPort == 0)
         #expect(!s.hasProxy)
@@ -163,7 +163,7 @@ struct ProfileSettingsTests {
         s.enableGPU = false
         s.enableWebGL = true
         s.enableAdBlocking = true
-        s.enableWarp = true
+        s.vpnMode = .cloudflareWarp
         s.proxyHost = "proxy.local"
         s.proxyPort = 3128
         s.proxyUsername = "user"
@@ -207,7 +207,7 @@ struct ProfileSettingsTests {
         defaults.removeObject(forKey: "vm.swapCmdCtrl")
 
         var s = ProfileSettings()
-        s.enableWarp = true
+        s.vpnMode = .cloudflareWarp
         s.enableAdBlocking = true
         s.proxyHost = "proxy.example.com"
         s.proxyPort = 8080
@@ -227,7 +227,7 @@ struct ProfileSettingsTests {
         defaults.set("light", forKey: "vm.appearance")
 
         var s = ProfileSettings()
-        s.enableWarp = true
+        s.vpnMode = .cloudflareWarp
         s.enableAdBlocking = true
 
         let config = s.toVMConfig()
@@ -506,7 +506,7 @@ struct VMConfigTests {
             pixelsPerInch: 220,
             enableAudio: false,
             audioVolume: 50,
-            enableWarp: true,
+            vpnMode: .cloudflareWarp,
             forceDarkMode: true,
             enableAdBlocking: true,
             swapCmdCtrl: false,

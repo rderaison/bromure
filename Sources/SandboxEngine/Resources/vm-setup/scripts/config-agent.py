@@ -315,6 +315,20 @@ def configure_services(cfg, ca_count):
                 stdout=svc_log,
                 stderr=svc_log)
 
+    # WireGuard: write config and boot markers for wireguard-agent.
+    # The agent handles bringing up the wg0 tunnel at boot and on
+    # enable/disable commands.  wg-quick routes all guest traffic
+    # through the tunnel at the kernel level — no proxy changes needed.
+    wg_config = cfg.get("wireGuardConfig")
+    if wg_config:
+        os.makedirs("/etc/wireguard", exist_ok=True)
+        with open("/etc/wireguard/wg0.conf", "w") as f:
+            f.write(wg_config)
+        os.chmod("/etc/wireguard/wg0.conf", 0o600)
+        open("/tmp/bromure/wireguard-boot-setup", "w").close()
+        if cfg.get("wireGuardAutoConnect"):
+            open("/tmp/bromure/wireguard-auto-connect", "w").close()
+
     # Webcam setup (background)
     if cfg.get("webcam"):
         pid = os.fork()
@@ -366,18 +380,35 @@ def configure_services(cfg, ca_count):
             print("config-agent: WARNING: eth0 has no IP after 5s, network may not work",
                   file=sys.stderr)
 
+    has_wireguard = bool(cfg.get("wireGuardConfig"))
+
     if cfg.get("blockMalware"):
         run("sed -i 's/^server=1\\.1\\.1\\.1/server=1.1.1.2/' /etc/dnsmasq.d/pihole.conf")
         run("sed -i 's/^server=1\\.0\\.0\\.1/server=1.0.0.2/' /etc/dnsmasq.d/pihole.conf")
 
-    # Start dnsmasq for DNS filtering (ad-blocking, malware blocking, or WARP)
-    if cfg.get("adBlocking") or cfg.get("blockMalware") or cfg.get("enableWarp"):
+    # For WireGuard profiles without ad-blocking: strip addn-hosts so dnsmasq
+    # acts as a pure DNS forwarder.  wireguard-agent will swap the server= lines
+    # at connect/disconnect time via SIGHUP.  We don't strip for other profiles
+    # (WARP, ad-blocking) to preserve their existing DNS behaviour.
+    if has_wireguard and not cfg.get("adBlocking"):
+        run("sed -i '/^addn-hosts/d' /etc/dnsmasq.d/pihole.conf")
+
+    # Start dnsmasq when needed.
+    # WireGuard always needs it: squid must use a local resolver so wireguard-agent
+    # can switch DNS upstreams at runtime without touching squid (squid does not
+    # handle SIGHUP cleanly in foreground -N mode).
+    needs_dnsmasq = (cfg.get("adBlocking") or cfg.get("blockMalware")
+                     or cfg.get("enableWarp") or has_wireguard)
+    if needs_dnsmasq and not has_custom_proxy:
         run("dnsmasq -C /etc/dnsmasq.d/pihole.conf")
 
-    # Configure squid DNS: use dnsmasq (127.0.0.1) when ad-blocking or
-    # malware-blocking is on, otherwise use system defaults (resolv.conf).
-    # The DHCP wait above ensures resolv.conf is populated before we get here.
-    if cfg.get("adBlocking") or cfg.get("blockMalware"):
+    # Configure squid DNS.
+    # For WireGuard profiles: always point squid at dnsmasq so the DNS upstream
+    # can be switched without reloading squid.
+    # For ad-blocking / malware-blocking: same (as before).
+    # For everything else (WARP without ad-blocking, plain profiles): delete the
+    # line so squid uses resolv.conf directly — preserving the original behaviour.
+    if cfg.get("adBlocking") or cfg.get("blockMalware") or has_wireguard:
         run("sed -i 's/^dns_nameservers.*/dns_nameservers 127.0.0.1/' /etc/squid/squid.conf")
     else:
         run("sed -i '/^dns_nameservers/d' /etc/squid/squid.conf")
@@ -418,6 +449,13 @@ def configure_services(cfg, ca_count):
 def main():
     os.makedirs("/tmp/bromure", exist_ok=True)
 
+    # Sync system clock from the PL031 hardware RTC immediately on boot.
+    # Alpine VMs start with the clock frozen at base-image build time; the RTC
+    # (backed by the host's wall clock) has the real time.  TLS certificate
+    # validation and WireGuard handshakes both fail with a wrong clock, so this
+    # must happen before squid, dnsmasq, or Chromium start.
+    os.system("hwclock --hctosys 2>/dev/null")
+
     # Connect to host on vsock (retry until host listener is ready).
     sock = None
     while True:
@@ -443,6 +481,16 @@ def main():
 
     cfg = json.loads(data.decode("utf-8"))
     print(f"config-agent: received config ({length} bytes)", file=sys.stderr)
+
+    # Sync system clock from host-provided Unix timestamp.
+    # hwclock --hctosys (called earlier) relies on the rtc-pl031 kernel module,
+    # which may not load if the Alpine linux-lts package was updated since the
+    # module was compiled (kernel version mismatch).  Injecting the timestamp
+    # directly from the host config is a reliable fallback that works regardless
+    # of RTC availability and requires no ongoing KVER maintenance.
+    if ts := cfg.get("currentTime"):
+        os.system(f"date -s @{int(ts)} >/dev/null 2>&1")
+        print(f"config-agent: clock set from host time ({int(ts)})", file=sys.stderr)
 
     # No global wait_for_on_boot — only WARP-dependent paths wait internally.
 

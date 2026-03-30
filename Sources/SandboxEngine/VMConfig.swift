@@ -50,12 +50,23 @@ public struct VMConfig {
     /// Audio output volume (0-100%).
     public var audioVolume: Int
 
-    /// Whether to enable Cloudflare WARP VPN in proxy mode.
-    public var enableWarp: Bool
+    /// Active VPN mode for this session.
+    public var vpnMode: VPNMode
+
+    /// Convenience accessor — true when Cloudflare WARP is the active VPN.
+    public var enableWarp: Bool { vpnMode == .cloudflareWarp }
 
     /// Whether to automatically connect WARP when the session starts.
-    /// Only meaningful when ``enableWarp`` is true.
+    /// Only meaningful when ``vpnMode`` is ``.cloudflareWarp``.
     public var warpAutoConnect: Bool
+
+    /// Raw WireGuard .conf file content to install in the guest.
+    /// Only meaningful when ``vpnMode`` is ``.wireGuard``.
+    public var wireGuardConfig: String?
+
+    /// Whether to automatically bring up the WireGuard tunnel on session start.
+    /// Only meaningful when ``vpnMode`` is ``.wireGuard``.
+    public var wireGuardAutoConnect: Bool
 
     /// Whether to force dark mode in the browser.
     public var forceDarkMode: Bool
@@ -195,8 +206,10 @@ public struct VMConfig {
         pixelsPerInch: Int = 144,
         enableAudio: Bool = true,
         audioVolume: Int = 100,
-        enableWarp: Bool = false,
+        vpnMode: VPNMode = .none,
         warpAutoConnect: Bool = false,
+        wireGuardConfig: String? = nil,
+        wireGuardAutoConnect: Bool = false,
         forceDarkMode: Bool = false,
         enableAdBlocking: Bool = false,
         swapCmdCtrl: Bool = true,
@@ -245,8 +258,10 @@ public struct VMConfig {
         self.pixelsPerInch = pixelsPerInch
         self.enableAudio = enableAudio
         self.audioVolume = audioVolume
-        self.enableWarp = enableWarp
+        self.vpnMode = vpnMode
         self.warpAutoConnect = warpAutoConnect
+        self.wireGuardConfig = wireGuardConfig
+        self.wireGuardAutoConnect = wireGuardAutoConnect
         self.forceDarkMode = forceDarkMode
         self.enableAdBlocking = enableAdBlocking
         self.swapCmdCtrl = swapCmdCtrl

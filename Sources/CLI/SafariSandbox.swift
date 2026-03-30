@@ -1302,6 +1302,7 @@ final class BrowserSession {
     private var filePickerBridge: FilePickerBridge?
     private var webcamBridge: WebcamBridge?
     private var warpBridge: WarpBridge?
+    private var wireGuardBridge: WireGuardBridge?
     private(set) var cdpBridge: CDPBridge?
     private(set) var shellBridge: ShellBridge?
     private(set) var traceBridge: TraceBridge?
@@ -1530,14 +1531,11 @@ final class BrowserSession {
             }
         }
 
-        // Set up WARP bridge (vsock port 5700) for dynamic VPN control.
-        // Only created when VPN is enabled in the profile — when disabled,
+        // Set up VPN bridge for dynamic VPN control.
+        // Only created when a VPN is enabled in the profile — when disabled,
         // no button, no agent interaction, full isolation.
-        if config.enableWarp, let dev = linkSocketDevice {
-            let bridge = MainActor.assumeIsolated { WarpBridge(socketDevice: dev) }
-            self.warpBridge = bridge
-
-            // VPN toggle button in the titlebar
+        if config.vpnMode != .none, let dev = linkSocketDevice {
+            // VPN toggle button in the titlebar (shared by WARP and WireGuard)
             let vpnButton = NSButton(
                 image: NSImage(systemSymbolName: "powerplug", accessibilityDescription: "VPN Status")!,
                 target: nil,
@@ -1553,11 +1551,22 @@ final class BrowserSession {
             vpnAccessory.layoutAttribute = .trailing
             window.addTitlebarAccessoryViewController(vpnAccessory)
 
-            // React to state changes
-            MainActor.assumeIsolated {
-                bridge.onStateChanged = { [weak self] state in
-                    MainActor.assumeIsolated {
-                        self?.updateWarpButton(state: state)
+            if config.vpnMode == .cloudflareWarp {
+                // WARP bridge on vsock port 5700
+                let bridge = MainActor.assumeIsolated { WarpBridge(socketDevice: dev) }
+                self.warpBridge = bridge
+                MainActor.assumeIsolated {
+                    bridge.onStateChanged = { [weak self] state in
+                        MainActor.assumeIsolated { self?.updateWarpButton(state: state) }
+                    }
+                }
+            } else if config.vpnMode == .wireGuard {
+                // WireGuard bridge on vsock port 5701
+                let bridge = MainActor.assumeIsolated { WireGuardBridge(socketDevice: dev) }
+                self.wireGuardBridge = bridge
+                MainActor.assumeIsolated {
+                    bridge.onStateChanged = { [weak self] state in
+                        MainActor.assumeIsolated { self?.updateWarpButton(state: state) }
                     }
                 }
             }
@@ -1705,6 +1714,7 @@ final class BrowserSession {
     func toggleWarp() {
         MainActor.assumeIsolated {
             warpBridge?.toggle()
+            wireGuardBridge?.toggle()
         }
     }
 
@@ -2103,6 +2113,8 @@ final class BrowserSession {
             filePickerBridge = nil
             warpBridge?.stop()
             warpBridge = nil
+            wireGuardBridge?.stop()
+            wireGuardBridge = nil
             webcamBridge?.stop()
             webcamBridge = nil
             cdpBridge?.stop()
@@ -2197,6 +2209,13 @@ final class BrowserSession {
             name: "WARP VPN",
             port: 5700,
             state: warpBridge.map { $0.isAgentConnected ? .connected : .listening } ?? .disabled
+        ))
+
+        services.append(VsockServiceStatus(
+            id: "\(id)-wireguard",
+            name: "WireGuard VPN",
+            port: 5701,
+            state: wireGuardBridge.map { $0.isAgentConnected ? .connected : .listening } ?? .disabled
         ))
 
         services.append(VsockServiceStatus(

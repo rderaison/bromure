@@ -161,7 +161,9 @@ public final class ProfileManager {
         settings.enableGPU = defaults.object(forKey: "vm.enableGPU") as? Bool ?? true
         settings.enableWebGL = defaults.object(forKey: "vm.enableWebGL") as? Bool ?? false
         settings.enableAdBlocking = defaults.object(forKey: "vm.enableAdBlocking") as? Bool ?? false
-        settings.enableWarp = defaults.object(forKey: "vm.enableWarp") as? Bool ?? false
+        if defaults.object(forKey: "vm.enableWarp") as? Bool ?? false {
+            settings.vpnMode = .cloudflareWarp
+        }
         settings.enableAudio = defaults.object(forKey: "vm.enableAudio") as? Bool ?? true
         settings.enableClipboardSharing = defaults.object(forKey: "vm.enableClipboardSharing") as? Bool ?? false
         settings.blockMalwareSites = defaults.object(forKey: "vm.blockMalwareSites") as? Bool ?? false

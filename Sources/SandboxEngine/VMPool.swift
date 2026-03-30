@@ -390,8 +390,14 @@ public final class VMPool {
         if config.enablePasswords { cfg["passwords"] = true }
         if config.blockMalwareSites { cfg["blockMalware"] = true }
         if config.enableAdBlocking { cfg["adBlocking"] = true }
-        if config.enableWarp { cfg["enableWarp"] = true }
+        cfg["currentTime"] = Int(Date().timeIntervalSince1970)
+        if config.vpnMode == .cloudflareWarp { cfg["enableWarp"] = true }
         if config.warpAutoConnect { cfg["warpAutoConnect"] = true }
+        if config.vpnMode == .wireGuard, let wgConf = config.wireGuardConfig, !wgConf.isEmpty {
+            cfg["enableWireGuard"] = true
+            cfg["wireGuardConfig"] = wgConf
+            if config.wireGuardAutoConnect { cfg["wireGuardAutoConnect"] = true }
+        }
         if let proxyHost = config.proxyHost, let proxyPort = config.proxyPort {
             cfg["proxyHost"] = proxyHost
             cfg["proxyPort"] = proxyPort
@@ -447,7 +453,7 @@ public final class VMPool {
             if let proxyHost = config.proxyHost {
                 cfg["TEST_EXPECT_PROXY_HOST"] = proxyHost
             }
-            let needsInternalProxy = config.enableAdBlocking || config.enableWarp || config.blockMalwareSites
+            let needsInternalProxy = config.enableAdBlocking || config.vpnMode == .cloudflareWarp || config.blockMalwareSites
             cfg["TEST_EXPECT_INTERNAL_PROXY"] = needsInternalProxy && config.proxyHost == nil ? "1" : "0"
             cfg["TEST_EXPECT_DNSMASQ"] = needsInternalProxy ? "1" : "0"
             cfg["TEST_EXPECT_SQUID"] = needsInternalProxy ? "1" : "0"

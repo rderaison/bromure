@@ -57,9 +57,11 @@ Every profile carries its own independent settings -- home page, VPN, ad blockin
 
 ## Built-in VPN
 
-Bromure integrates [Cloudflare WARP](https://one.one.one.one/) directly into each VM. When enabled, all browser traffic is routed through Cloudflare's encrypted network -- your IP address is hidden from every website you visit. No system-wide VPN required.
+Bromure supports two VPN options, both running entirely inside the disposable VM. No system-wide VPN required.
 
-WARP runs entirely inside the disposable VM, so Cloudflare never sees your host machine's identity. When the session ends, the WARP registration is destroyed along with everything else.
+**Cloudflare WARP** — routes all browser traffic through Cloudflare's encrypted network for free. Your IP address is hidden from every website you visit. The WARP registration is destroyed when the session ends.
+
+**WireGuard** — bring your own `.conf` file from any provider (Mullvad, ProtonVPN, self-hosted, etc.). All guest traffic is tunnelled at the network level via `wg-quick`. Paste or import the config in profile settings and it stays encrypted on disk.
 
 ## Network-Level Ad Blocking
 
@@ -217,9 +219,9 @@ No. The very first time you launch Bromure, it needs to boot a VM from scratch, 
 
 The default of 2 GB is sufficient for most browsing. Video playback works great thanks to GPU hardware acceleration, but if you notice choppy playback on high-definition videos or use memory-heavy web apps, consider increasing it to 4 GB in Settings. Going above 4 GB is rarely necessary.
 
-**How do I enable the VPN? Is it free?**
+**How do I enable the VPN?**
 
-Open the profile settings and toggle "Cloudflare WARP" under VPN & Ads. The first time you enable it, you will be asked to accept Cloudflare's terms of service. WARP is a free service provided by [Cloudflare](https://one.one.one.one/) -- it encrypts your DNS queries and routes your traffic through Cloudflare's network. It runs entirely inside the disposable VM, so no configuration is needed on your host machine, and the WARP registration is destroyed when the session ends.
+Open the profile settings and select a VPN under VPN & Ads. **Cloudflare WARP** is free -- the first time you enable it you will be asked to accept Cloudflare's terms of service. **WireGuard** requires a config file from your provider; paste or import it in the settings. Both options run entirely inside the disposable VM with no configuration needed on your host machine.
 
 **Can I make my browsing data persistent?**
 

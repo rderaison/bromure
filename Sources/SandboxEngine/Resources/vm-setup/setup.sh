@@ -158,7 +158,7 @@ rm -f /tmp/resolv_stub.c
 # ---------------------------------------------------------------------------
 
 retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools jq python3 \
-    v4l-utils nss-tools
+    v4l-utils nss-tools bash wireguard-tools
 
 # ---------------------------------------------------------------------------
 # Configuration files (static)
@@ -241,6 +241,7 @@ echo '::once:/usr/local/bin/config-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh su -s /bin/sh chrome -c /usr/local/bin/file-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/webcam-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/warp-agent.py' >> /mnt/etc/inittab
+echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/wireguard-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh su -s /bin/sh chrome -c /usr/local/bin/keyboard-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh su -s /bin/sh chrome -c /usr/local/bin/cjk-input-agent.py' >> /mnt/etc/inittab
 
@@ -321,6 +322,7 @@ install_config scripts/file-picker-host.py  /mnt/usr/local/bin/file-picker-host.
 install_config scripts/link-agent.py        /mnt/usr/local/bin/link-agent.py        755
 install_config scripts/webcam-agent.py      /mnt/usr/local/bin/webcam-agent.py      755
 install_config scripts/warp-agent.py        /mnt/usr/local/bin/warp-agent.py        755
+install_config scripts/wireguard-agent.py  /mnt/usr/local/bin/wireguard-agent.py  755
 install_config scripts/keyboard-agent.py    /mnt/usr/local/bin/keyboard-agent.py    755
 install_config scripts/cjk-input-agent.py  /mnt/usr/local/bin/cjk-input-agent.py  755
 install_config scripts/routing-socks.py     /mnt/usr/local/bin/routing-socks.py     755
