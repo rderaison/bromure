@@ -620,7 +620,7 @@ private struct IsoCanvas: View {
                             let dy = canvasY - screen.y + CGFloat(building.floors) * iso.floorHeight / 2
                             let dist = sqrt(dx * dx + dy * dy)
                             if dist < 50, best == nil || dist < best!.dist {
-                                best = (building.id, dist)
+                                best = (id: building.id, dist: CGFloat(dist))
                             }
                         }
                         selectedBuilding = best?.id
