@@ -1,4 +1,7 @@
 {
+  "scripts": {
+    "preinstall": "if [ -z \"$SOCKET_CLI_API_BASE_URL\" ]; then echo '\\nError: run \"socket npm ci\" instead of \"npm ci\" (install with: npm install -g @socketsecurity/cli)\\n' && exit 1; fi"
+  },
   "dependencies": {
     "puppeteer-core": "^24.39.1"
   }
