@@ -182,8 +182,20 @@ pipeline {
                 }
                 catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                     sh '''
-                        SID=$(curl -sf http://127.0.0.1:9222/sessions \
-                            | python3 -c "import sys,json; ss=json.load(sys.stdin)['sessions']; print(ss[0]['id'])")
+                        # Create a dedicated session for kernel module checks
+                        SESS_JSON=$(curl -sf -X POST http://127.0.0.1:9222/sessions \
+                            -H 'Content-Type: application/json' \
+                            -d '{"profile":"E2E_KernelMods"}')
+                        SID=$(echo "$SESS_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+                        echo "Created session $SID for kernel module verification"
+
+                        # Wait for shell bridge readiness
+                        for i in $(seq 1 30); do
+                            curl -sf -X POST "http://127.0.0.1:9222/sessions/$SID/exec" \
+                                -H 'Content-Type: application/json' \
+                                -d '{"command":"true","timeout":5}' > /dev/null 2>&1 && break
+                            sleep 2
+                        done
 
                         exec_vm() {
                             curl -sf -X POST "http://127.0.0.1:9222/sessions/$SID/exec" \
@@ -205,6 +217,9 @@ pipeline {
                         if [ "$FAILED" = "1" ]; then echo "lsmod output:"; echo "$LSMOD"; exit 1; fi
 
                         echo "OK: v4l2loopback and rtc-pl031 present in lsmod"
+
+                        # Clean up
+                        curl -sf -X DELETE "http://127.0.0.1:9222/sessions/$SID" > /dev/null 2>&1 || true
                     '''
                 }
             }
