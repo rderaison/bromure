@@ -71,6 +71,46 @@ pipeline {
             }
         }
 
+        stage('Verify Kernel Modules') {
+            steps {
+                sh '''
+                    SID=$(curl -sf -X POST http://127.0.0.1:9222/sessions \
+                        -H 'Content-Type: application/json' \
+                        -d '{"profile":"Default"}' \
+                        | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+                    # Wait for shell agent to become available (exec endpoint retries for 10s internally)
+                    sleep 5
+
+                    exec_vm() {
+                        curl -sf -X POST "http://127.0.0.1:9222/sessions/$SID/exec" \
+                            -H 'Content-Type: application/json' \
+                            -d "{\"command\":\"$1\",\"timeout\":30}"
+                    }
+
+                    echo "Loading v4l2loopback..."
+                    R=$(exec_vm "modprobe v4l2loopback video_nr=0 card_label=test exclusive_caps=1")
+                    EC=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('exitCode',1))")
+                    [ "$EC" = "0" ] || { echo "FAIL: v4l2loopback did not load (exit $EC)"; echo "$R"; exit 1; }
+
+                    echo "Loading rtc-pl031..."
+                    R=$(exec_vm "modprobe rtc-pl031")
+                    EC=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('exitCode',1))")
+                    [ "$EC" = "0" ] || { echo "FAIL: rtc-pl031 did not load (exit $EC)"; echo "$R"; exit 1; }
+
+                    echo "Verifying modules are loaded..."
+                    R=$(exec_vm "lsmod")
+                    STDOUT=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stdout',''))")
+                    echo "$STDOUT" | grep -q v4l2loopback || { echo "FAIL: v4l2loopback not in lsmod"; exit 1; }
+                    echo "$STDOUT" | grep -q rtc_pl031 || { echo "FAIL: rtc_pl031 not in lsmod"; exit 1; }
+
+                    echo "OK: v4l2loopback and rtc-pl031 loaded successfully"
+
+                    curl -sf -X DELETE "http://127.0.0.1:9222/sessions/$SID" > /dev/null 2>&1 || true
+                '''
+            }
+        }
+
         stage('0. Automation Server') {
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {

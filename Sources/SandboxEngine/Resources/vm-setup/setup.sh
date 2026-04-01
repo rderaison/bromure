@@ -114,7 +114,7 @@ mount --bind /dev /mnt/dev
 # ---------------------------------------------------------------------------
 
 retry chroot /mnt apk update
-retry chroot /mnt apk add openrc linux-lts linux-firmware-none mkinitfs e2fsprogs
+retry chroot /mnt apk add openrc linux-lts=6.12.77-r0 linux-firmware-none mkinitfs e2fsprogs
 retry chroot /mnt apk add \
     chromium chromium-lang xorg-server xinit mesa-dri-gallium mesa-egl mesa-gl mesa-gles \
     mesa-gbm eudev dbus dbus-x11 ttf-freefont ttf-dejavu font-noto-emoji font-liberation \
