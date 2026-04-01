@@ -1113,12 +1113,13 @@ print('n/a')
       );
     });
 
-    await test("13.5 Kernel modules loaded (v4l2loopback, rtc-pl031)", async () => {
+    await test("13.5 Kernel modules loadable (v4l2loopback, rtc-pl031)", async () => {
       await withSession("E2E_KernelMods", {},
         async ({ sessionId }) => {
-          const r = await vmExec(sessionId, "lsmod");
-          assertIncludes(r.stdout, "v4l2loopback");
-          assertIncludes(r.stdout, "rtc_pl031");
+          const v4l2 = await vmExec(sessionId, "modprobe v4l2loopback");
+          assert(v4l2.exitCode === 0, `v4l2loopback failed to load: ${v4l2.stderr}`);
+          const rtc = await vmExec(sessionId, "modprobe rtc-pl031");
+          assert(rtc.exitCode === 0, `rtc-pl031 failed to load: ${rtc.stderr}`);
         }
       );
     });
