@@ -1113,13 +1113,19 @@ print('n/a')
       );
     });
 
-    await test("13.5 Kernel modules loadable (v4l2loopback, rtc-pl031)", async () => {
+    await test("13.5 Kernel modules installed (v4l2loopback, rtc-pl031)", async () => {
       await withSession("E2E_KernelMods", {},
         async ({ sessionId }) => {
-          const v4l2 = await vmExec(sessionId, "sudo modprobe v4l2loopback");
-          assert(v4l2.exitCode === 0, `v4l2loopback failed to load: ${v4l2.stderr}`);
-          const rtc = await vmExec(sessionId, "sudo modprobe rtc-pl031");
-          assert(rtc.exitCode === 0, `rtc-pl031 failed to load: ${rtc.stderr}`);
+          const uname = await vmExec(sessionId, "uname -r");
+          const kver = uname.stdout.trim();
+
+          const v4l2 = await vmExec(sessionId, "modinfo -F vermagic v4l2loopback");
+          assert(v4l2.exitCode === 0, `v4l2loopback not found: ${v4l2.stderr}`);
+          assert(v4l2.stdout.includes(kver), `v4l2loopback version mismatch: module has "${v4l2.stdout.trim()}", kernel is ${kver}`);
+
+          const rtc = await vmExec(sessionId, "modinfo -F vermagic rtc-pl031");
+          assert(rtc.exitCode === 0, `rtc-pl031 not found: ${rtc.stderr}`);
+          assert(rtc.stdout.includes(kver), `rtc-pl031 version mismatch: module has "${rtc.stdout.trim()}", kernel is ${kver}`);
         }
       );
     });
