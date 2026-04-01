@@ -133,6 +133,12 @@
 "Network privacy and ad blocking" = "ネットワークのプライバシーと広告ブロック";
 "Cloudflare WARP" = "Cloudflare WARP";
 "Routes all browser traffic through Cloudflare\U2019s encrypted network, hiding your IP address from websites. Works like a VPN." = "すべてのブラウザトラフィックをCloudflareの暗号化ネットワーク経由でルーティングし、WebサイトからIPアドレスを隠します。VPNのように機能します。";
+"No VPN" = "VPN\U306A\U3057";
+"WireGuard" = "WireGuard";
+"Choose a VPN to route browser traffic through an encrypted tunnel, hiding your IP address from websites." = "VPN\U3092\U9078\U629E\U3057\U3066\U3001\U6697\U53F7\U5316\U3055\U308C\U305F\U30C8\U30F3\U30CD\U30EB\U3092\U901A\U3058\U3066\U30D6\U30E9\U30A6\U30B6\U30C8\U30E9\U30D5\U30A3\U30C3\U30AF\U3092\U30EB\U30FC\U30C6\U30A3\U30F3\U30B0\U3057\U3001Web\U30B5\U30A4\U30C8\U304B\U3089IP\U30A2\U30C9\U30EC\U30B9\U3092\U96A0\U3057\U307E\U3059\U3002";
+"WireGuard Configuration" = "WireGuard \U8A2D\U5B9A";
+"Paste your WireGuard .conf file below, or use the import button to load it from disk." = "WireGuard \U306E .conf \U30D5\U30A1\U30A4\U30EB\U3092\U4E0B\U306B\U8CBC\U308A\U4ED8\U3051\U308B\U304B\u3001\U30A4\U30F3\U30DD\U30FC\U30C8\U30DC\U30BF\U30F3\U3092\U4F7F\U7528\U3057\U3066\U30C7\U30A3\U30B9\U30AF\U304B\U3089\U8AAD\U307F\U8FBC\U307F\U307E\U3059\U3002";
+"Import .conf File\U2026" = ".conf \U30D5\U30A1\U30A4\U30EB\U3092\U8AAD\U307F\U8FBC\U3080\U2026";
 "Block Ads" = "広告をブロック";
 "Blocks ads and tracking scripts from loading on websites. This can make pages load faster and protects your privacy." = "Webサイト上の広告やトラッキングスクリプトの読み込みをブロックします。ページの読み込みが高速になり、プライバシーが保護されます。";
 

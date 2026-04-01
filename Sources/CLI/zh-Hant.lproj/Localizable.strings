@@ -133,6 +133,12 @@
 "Network privacy and ad blocking" = "網路隱私與廣告封鎖";
 "Cloudflare WARP" = "Cloudflare WARP";
 "Routes all browser traffic through Cloudflare\U2019s encrypted network, hiding your IP address from websites. Works like a VPN." = "透過 Cloudflare\U2019s 加密網路傳送所有瀏覽器流量，對網站隱藏你的 IP 位址。運作方式類似 VPN。";
+"No VPN" = "\U7121 VPN";
+"WireGuard" = "WireGuard";
+"Choose a VPN to route browser traffic through an encrypted tunnel, hiding your IP address from websites." = "\U9078\U64C7 VPN \U5C07\U700F\U89BD\u5668\u6D41\u91CF\u900F\u904E\u52A0\u5BC6\u96A7\u9053\u50B3\u9001\uFF0C\u5C0D\u7DB2\u7AD9\u96B1\u85CF\u4F60\u7684 IP \u4F4D\u5740\u3002";
+"WireGuard Configuration" = "WireGuard \U8A2D\U5B9A";
+"Paste your WireGuard .conf file below, or use the import button to load it from disk." = "\U5728\U4E0B\U65B9\U8CBC\U4E0A\U4F60\u7684 WireGuard .conf \U6A94\u6848\uFF0C\u6216\u4F7F\u7528\u532F\u5165\u6309\u9215\u5F9E\u78C1\u789F\u8F09\u5165\u3002";
+"Import .conf File\U2026" = "\U532F\U5165 .conf \U6A94\U6848\U2026";
 "Block Ads" = "封鎖廣告";
 "Blocks ads and tracking scripts from loading on websites. This can make pages load faster and protects your privacy." = "封鎖網站上的廣告和追蹤指令碼載入。這可以加快頁面載入速度並保護你的隱私。";
 

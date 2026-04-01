@@ -133,6 +133,12 @@
 "Network privacy and ad blocking" = "\U7f51\U7edc\U9690\U79c1\U548c\U5e7f\U544a\U62e6\U622a";
 "Cloudflare WARP" = "Cloudflare WARP";
 "Routes all browser traffic through Cloudflare\U2019s encrypted network, hiding your IP address from websites. Works like a VPN." = "\U5c06\U6240\U6709\U6d4f\U89c8\U5668\U6d41\U91cf\U901a\U8fc7 Cloudflare \U7684\U52a0\U5bc6\U7f51\U7edc\U8def\U7531\Uff0c\U5bf9\U7f51\U7ad9\U9690\U85cf\U4f60\U7684 IP \U5730\U5740\U3002\U5de5\U4f5c\U539f\U7406\U7c7b\U4f3c VPN\U3002";
+"No VPN" = "\U65E0 VPN";
+"WireGuard" = "WireGuard";
+"Choose a VPN to route browser traffic through an encrypted tunnel, hiding your IP address from websites." = "\U9009\U62E9 VPN \U5C06\U6D4F\U89C8\U5668\U6D41\U91CF\U901A\U8FC7\U52A0\U5BC6\U96A7\U9053\U8DEF\U7531\uFF0C\u5BF9\u7F51\u7AD9\u9690\u85CF\u4F60\u7684 IP \u5730\u5740\u3002";
+"WireGuard Configuration" = "WireGuard \U914D\U7F6E";
+"Paste your WireGuard .conf file below, or use the import button to load it from disk." = "\U5728\U4E0B\U65B9\U7C98\U8D34\U4F60\U7684 WireGuard .conf \U6587\U4EF6\uFF0C\u6216\u4F7F\u7528\u5BFC\u5165\u6309\u94AE\u4ECE\u78C1\u76D8\u52A0\u8F7D\u3002";
+"Import .conf File\U2026" = "\U5BFC\U5165 .conf \U6587\U4EF6\U2026";
 "Block Ads" = "\U62e6\U622a\U5e7f\U544a";
 "Blocks ads and tracking scripts from loading on websites. This can make pages load faster and protects your privacy." = "\U963b\U6b62\U7f51\U7ad9\U52a0\U8f7d\U5e7f\U544a\U548c\U8ddf\U8e2a\U811a\U672c\U3002\U8fd9\U53ef\U4ee5\U52a0\U5feb\U9875\U9762\U52a0\U8f7d\U901f\U5ea6\U5e76\U4fdd\U62a4\U4f60\U7684\U9690\U79c1\U3002";
 

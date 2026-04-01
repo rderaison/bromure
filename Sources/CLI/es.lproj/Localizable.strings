@@ -133,6 +133,12 @@
 "Network privacy and ad blocking" = "Privacidad de red y bloqueo de anuncios";
 "Cloudflare WARP" = "Cloudflare WARP";
 "Routes all browser traffic through Cloudflare\U2019s encrypted network, hiding your IP address from websites. Works like a VPN." = "Enruta todo el tr\U00E1fico del navegador a trav\U00E9s de la red cifrada de Cloudflare, ocultando su direcci\U00F3n IP de los sitios web. Funciona como una VPN.";
+"No VPN" = "Sin VPN";
+"WireGuard" = "WireGuard";
+"Choose a VPN to route browser traffic through an encrypted tunnel, hiding your IP address from websites." = "Elija una VPN para enrutar el tr\U00E1fico del navegador a trav\U00E9s de un t\U00FAnel cifrado, ocultando su direcci\U00F3n IP de los sitios web.";
+"WireGuard Configuration" = "Configuraci\U00F3n de WireGuard";
+"Paste your WireGuard .conf file below, or use the import button to load it from disk." = "Pegue su archivo WireGuard .conf a continuaci\U00F3n, o use el bot\U00F3n de importar para cargarlo desde el disco.";
+"Import .conf File\U2026" = "Importar archivo .conf\U2026";
 "Block Ads" = "Bloquear anuncios";
 "Blocks ads and tracking scripts from loading on websites. This can make pages load faster and protects your privacy." = "Bloquea anuncios y scripts de rastreo en los sitios web. Esto puede hacer que las p\U00E1ginas carguen m\U00E1s r\U00E1pido y protege su privacidad.";
 

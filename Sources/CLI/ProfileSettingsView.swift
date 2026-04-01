@@ -821,7 +821,7 @@ struct ProfileSettingsView: View {
                 if draft.settings.vpnMode == .cloudflareWarp {
                     settingToggle(
                         "Connect on Startup",
-                        description: "Automatically connect WARP when the browser session starts. You can always toggle it from the window\u{2019}s VPN button.",
+                        description: "Automatically connect the VPN when the browser session starts. You can always toggle it from the window\u{2019}s VPN button.",
                         isOn: $draft.settings.warpAutoConnect
                     )
                     .padding(.leading, 20)
@@ -862,7 +862,7 @@ struct ProfileSettingsView: View {
 
                     settingToggle(
                         "Connect on Startup",
-                        description: "Automatically bring up the WireGuard tunnel when the browser session starts. You can always toggle it from the window\u{2019}s VPN button.",
+                        description: "Automatically connect the VPN when the browser session starts. You can always toggle it from the window\u{2019}s VPN button.",
                         isOn: $draft.settings.wireGuardAutoConnect
                     )
                     .padding(.leading, 20)
