@@ -19,10 +19,9 @@ LOCALE_NAMES=(en fr de es pt ja zh-TW zh-CN)
 
 capture_settings_window() {
     local outfile="$1"
-    local rect
+    local wid
     # The settings window is always the non-"Bromure" window (main window is just "Bromure")
-    # In any locale, the settings window title contains "—" (em dash) and the profile name
-    rect=$(osascript -e '
+    osascript -e '
         tell application "Bromure" to activate
         delay 0.3
         tell application "System Events"
@@ -30,18 +29,22 @@ capture_settings_window() {
                 repeat with w in windows
                     if name of w is not "Bromure" then
                         perform action "AXRaise" of w
-                        delay 0.2
-                        set p to position of w
-                        set s to size of w
-                        return "" & (item 1 of p) & "," & (item 2 of p) & "," & (item 1 of s) & "," & (item 2 of s)
                     end if
                 end repeat
             end tell
         end tell
-    ')
-    if [ -n "$rect" ]; then
-        echo "  rect: $rect"
-        screencapture -x -t jpg -R "$rect" "$outfile"
+    '
+    sleep 0.2
+    # Get the CGWindowID for the settings window
+    wid=$(python3 -c "
+import Quartz
+for w in Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, 0):
+    if w.get('kCGWindowOwnerName') == 'Bromure' and w.get('kCGWindowName', '') != 'Bromure':
+        print(w['kCGWindowNumber']); break
+")
+    if [ -n "$wid" ]; then
+        echo "  windowID: $wid"
+        screencapture -x -t jpg -l "$wid" "$outfile"
         return 0
     fi
     return 1
