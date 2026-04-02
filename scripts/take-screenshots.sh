@@ -76,6 +76,8 @@ for locale_idx in "${!LOCALES[@]}"; do
         sleep 1.5
 
         outfile="$OUTPUT_DIR/prefs_${category}_${locale_name}.jpg"
+        rm -f "$outfile"
+        echo "  Writing to $outfile"
         if capture_settings_window "$outfile"; then
             echo "OK → $outfile"
         else
