@@ -10,7 +10,7 @@
 set -euo pipefail
 
 PROFILE="Work"
-OUTPUT_DIR="$(pwd)/Resources"
+OUTPUT_DIR="/Users/jenkins/workspace/Bromure/bromure-screenshots/Resources"
 mkdir -p "$OUTPUT_DIR"
 
 CATEGORIES=(general performance media fileTransfer privacy network vpnAds enterprise advanced)
