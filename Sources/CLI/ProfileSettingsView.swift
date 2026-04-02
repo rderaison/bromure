@@ -794,7 +794,7 @@ struct ProfileSettingsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 // VPN mode picker
                 VStack(alignment: .leading, spacing: 4) {
-                    Picker("VPN", selection: $draft.settings.vpnMode) {
+                    Picker("", selection: $draft.settings.vpnMode) {
                         Text("No VPN").tag(VPNMode.none)
                         Text("Cloudflare WARP").tag(VPNMode.cloudflareWarp)
                         Text("WireGuard").tag(VPNMode.wireGuard)
