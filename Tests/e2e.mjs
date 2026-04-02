@@ -1129,6 +1129,18 @@ print('n/a')
         }
       );
     });
+
+    await test("13.6 At least 10% disk free", async () => {
+      await withSession("E2E_DiskFree", {},
+        async ({ sessionId }) => {
+          const r = await vmExec(sessionId, "df / | awk 'NR==2 {print $5}'");
+          assert(r.exitCode === 0, `df failed: ${r.stderr}`);
+          const usedPct = parseInt(r.stdout.trim().replace("%", ""), 10);
+          assert(!isNaN(usedPct), `Could not parse df output: '${r.stdout.trim()}'`);
+          assert(usedPct <= 90, `Root disk is ${usedPct}% used, less than 10% free`);
+        }
+      );
+    });
   }
 
   // ======================================================================
