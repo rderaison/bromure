@@ -56,6 +56,8 @@ public final class EphemeralDisk {
         let parentDir = ephemeralURL.deletingLastPathComponent()
         try fm.createDirectory(at: parentDir, withIntermediateDirectories: true)
 
+        try Self.checkDiskSpace(at: parentDir.path)
+
         // Remove any stale clone from a previous crashed session
         try? fm.removeItem(at: ephemeralURL)
         try? fm.removeItem(at: ephemeralAuxURL)
@@ -114,6 +116,17 @@ public final class EphemeralDisk {
     deinit {
         if !destroyed && !persist {
             try? destroy()
+        }
+    }
+
+    /// Minimum free space (1 GB) required before creating a disk image.
+    private static let minimumFreeBytes: UInt64 = 1_073_741_824
+
+    /// Throw ``SandboxError/diskFull`` if the volume at `path` has less than 1 GB free.
+    static func checkDiskSpace(at path: String) throws {
+        let attrs = try FileManager.default.attributesOfFileSystem(forPath: path)
+        if let free = attrs[.systemFreeSize] as? UInt64, free < minimumFreeBytes {
+            throw SandboxError.diskFull(availableMB: free / (1024 * 1024), path: path)
         }
     }
 

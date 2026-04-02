@@ -43,6 +43,8 @@
 /* MainView — Error */
 "Something went wrong" = "エラーが発生しました";
 "Try Again" = "やり直す";
+"Not enough disk space (%llu MB available). Free up space and try again." = "ディスク容量が不足しています（%llu MB 空き）。空き容量を確保してからやり直してください。";
+"Failed to initialize networking. Please quit and reopen Bromure." = "ネットワークの初期化に失敗しました。Bromure を終了して再度開いてください。";
 
 /* ProfileSettingsView — Categories */
 "General" = "一般";

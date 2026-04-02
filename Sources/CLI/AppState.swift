@@ -143,7 +143,7 @@ final class AppState: @unchecked Sendable {
                 self.startPool()
             } catch {
                 guard !Task.isCancelled else { return }
-                self.phase = .error(error.localizedDescription)
+                self.phase = .error(Self.localizedMessage(for: error))
             }
         }
     }
@@ -223,9 +223,32 @@ final class AppState: @unchecked Sendable {
                 onPoolReady?()
             } catch {
                 guard !Task.isCancelled else { return }
-                phase = .error(error.localizedDescription)
+                phase = .error(Self.localizedMessage(for: error))
             }
         }
+    }
+
+    static func localizedMessage(for error: Error) -> String {
+        if let sandbox = error as? SandboxError {
+            switch sandbox {
+            case .diskFull(let mb, _):
+                return String(
+                    format: NSLocalizedString(
+                        "Not enough disk space (%llu MB available). Free up space and try again.",
+                        comment: "Error shown when the host disk is nearly full"
+                    ),
+                    mb
+                )
+            case .networkFilterFailed:
+                return NSLocalizedString(
+                    "Failed to initialize networking. Please quit and reopen Bromure.",
+                    comment: "Error shown when vmnet entitlement is not yet effective"
+                )
+            default:
+                break
+            }
+        }
+        return error.localizedDescription
     }
 
     /// Minimal config for booting a VM (hardware only — no browser-specific flags).

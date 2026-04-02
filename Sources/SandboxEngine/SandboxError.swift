@@ -9,6 +9,8 @@ public enum SandboxError: LocalizedError {
     case diskCreationFailed(String)
     case cloneFailed(String)
     case vmStartFailed(String)
+    case networkFilterFailed
+    case diskFull(availableMB: UInt64, path: String)
     case macPoolExhausted
 
     public var errorDescription: String? {
@@ -27,6 +29,11 @@ public enum SandboxError: LocalizedError {
             return "Failed to create ephemeral disk clone: \(detail)"
         case .vmStartFailed(let detail):
             return "Failed to start virtual machine: \(detail)"
+        case .networkFilterFailed:
+            return "Failed to initialize networking. Please quit and reopen Bromure."
+        case .diskFull(let availableMB, let path):
+            return "Not enough disk space to create image at \(path) "
+                + "(\(availableMB) MB available). Free up space and try again."
         case .macPoolExhausted:
             return "Too many browser sessions. Close some windows and try again."
         }

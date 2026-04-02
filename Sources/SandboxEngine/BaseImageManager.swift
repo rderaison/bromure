@@ -217,6 +217,8 @@ public final class BaseImageManager {
     }
 
     private func createSparseDiskImage(at url: URL, sizeGB: UInt64) throws {
+        try EphemeralDisk.checkDiskSpace(at: url.deletingLastPathComponent().path)
+
         let fd = open(url.path, O_RDWR | O_CREAT | O_TRUNC, 0o644)
         guard fd >= 0 else {
             throw SandboxError.diskCreationFailed("Failed to create disk image: \(String(cString: strerror(errno)))")

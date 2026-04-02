@@ -131,13 +131,25 @@ public final class VMPool {
 
         // Always use VZFileHandleNetworkDeviceAttachment backed by NetworkFilter.
         // This avoids the NO-CARRIER bug from swapping attachment types at runtime.
-        guard let netInfo = HostNetworkInfo.detect(),
-              let networkFilter = NetworkFilter(networkInfo: netInfo, bridgedInterface: bridgedInterface) else {
-            print("[VMPool] Failed to create NetworkFilter")
+        // Retry up to 3 times with backoff: on first launch after Gatekeeper approval
+        // the vmnet entitlement may not be effective immediately.
+        var networkFilter: NetworkFilter?
+        for attempt in 1...3 {
+            if let netInfo = HostNetworkInfo.detect() {
+                networkFilter = NetworkFilter(networkInfo: netInfo, bridgedInterface: bridgedInterface)
+            }
+            if networkFilter != nil { break }
+            if attempt < 3 {
+                print("[VMPool] NetworkFilter creation failed (attempt \(attempt)/3), retrying in \(attempt)s...")
+                try await Task.sleep(for: .seconds(attempt))
+            }
+        }
+        guard let networkFilter else {
+            print("[VMPool] Failed to create NetworkFilter after 3 attempts")
             MACAddressPool.shared.release(mac)
             warmingMAC = nil
             try? ephDisk.destroy()
-            throw SandboxError.vmStartFailed("NetworkFilter creation failed")
+            throw SandboxError.networkFilterFailed
         }
 
         let networkAttachment = VZFileHandleNetworkDeviceAttachment(fileHandle: networkFilter.vmFileHandle)

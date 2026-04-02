@@ -43,6 +43,8 @@
 /* MainView — Error */
 "Something went wrong" = "Algo deu errado";
 "Try Again" = "Tentar Novamente";
+"Not enough disk space (%llu MB available). Free up space and try again." = "Espa\U00E7o em disco insuficiente (%llu MB dispon\U00EDveis). Libere espa\U00E7o e tente novamente.";
+"Failed to initialize networking. Please quit and reopen Bromure." = "Falha ao inicializar a rede. Feche e reabra o Bromure.";
 
 /* ProfileSettingsView — Categories */
 "General" = "Geral";

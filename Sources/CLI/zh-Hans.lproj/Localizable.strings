@@ -43,6 +43,8 @@
 /* MainView — Error */
 "Something went wrong" = "\U51fa\U4e86\U70b9\U95ee\U9898";
 "Try Again" = "\U91cd\U8bd5";
+"Not enough disk space (%llu MB available). Free up space and try again." = "\U78c1\U76d8\U7a7a\U95f4\U4e0d\U8db3\Uff08\U53ef\U7528 %llu MB\Uff09\U3002\U8bf7\U91ca\U653e\U7a7a\U95f4\U540e\U91cd\U8bd5\U3002";
+"Failed to initialize networking. Please quit and reopen Bromure." = "\U7f51\U7edc\U521d\U59cb\U5316\U5931\U8d25\U3002\U8bf7\U9000\U51fa\U5e76\U91cd\U65b0\U6253\U5f00 Bromure\U3002";
 
 /* ProfileSettingsView — Categories */
 "General" = "\U901a\U7528";

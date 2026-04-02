@@ -26,6 +26,8 @@ public final class ProfileDisk {
         let parentDir = url.deletingLastPathComponent()
         try fm.createDirectory(at: parentDir, withIntermediateDirectories: true)
 
+        try EphemeralDisk.checkDiskSpace(at: parentDir.path)
+
         // Remove any existing disk
         try? fm.removeItem(at: url)
 
