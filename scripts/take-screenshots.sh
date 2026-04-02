@@ -36,7 +36,7 @@ capture_settings_window() {
     '
     sleep 0.2
     # Get the CGWindowID for the settings window
-    wid=$(python3 -c "
+    wid=$(/usr/bin/python3 -c "
 import Quartz
 for w in Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, 0):
     if w.get('kCGWindowOwnerName') == 'Bromure' and w.get('kCGWindowName', '') != 'Bromure':
