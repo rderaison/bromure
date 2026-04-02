@@ -1133,6 +1133,8 @@ print('n/a')
     await test("13.6 At least 10% disk free", async () => {
       await withSession("E2E_DiskFree", {},
         async ({ sessionId }) => {
+          const full = await vmExec(sessionId, "df -h");
+          if (full.exitCode === 0) console.log(`df -h output:\n${full.stdout}`);
           const r = await vmExec(sessionId, "df / | awk 'NR==2 {print $5}'");
           assert(r.exitCode === 0, `df failed: ${r.stderr}`);
           const usedPct = parseInt(r.stdout.trim().replace("%", ""), 10);
