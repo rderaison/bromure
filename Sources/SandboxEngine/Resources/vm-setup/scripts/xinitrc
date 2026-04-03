@@ -88,7 +88,37 @@ fi
 
 LANG_FLAG=
 [ -n "$CHROME_LANG" ] && LANG_FLAG="--lang=$CHROME_LANG"
-chromium-browser --no-first-run --start-maximized --force-device-scale-factor="$DISPLAY_SCALE" --disable-vulkan $LANG_FLAG $EXTRA_FLAGS "$CHROME_URL"
+CHROME_CMD="chromium-browser --no-first-run --start-maximized --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
+
+start_ts=$(date +%s)
+prefs_backup=
+for attempt in 1 2 3 4 5; do
+    $CHROME_CMD
+    now_ts=$(date +%s)
+    elapsed=$((now_ts - start_ts))
+    # If Chrome ran for more than 10 seconds, treat it as a real session
+    [ "$elapsed" -gt 10 ] && break
+
+    if [ "$attempt" -eq 3 ] && [ -n "$PROFILE_DIR" ] && [ -d "$PROFILE_DIR" ]; then
+        # Chrome crashed 3 times quickly — suspect corrupt prefs; move them aside
+        prefs_backup="disabled-prefs.$((now_ts % 3600))"
+        mkdir -p "$PROFILE_DIR/$prefs_backup"
+        cd "$PROFILE_DIR"
+        for f in *; do
+            [ "$f" = "$prefs_backup" ] && continue
+            mv "$f" "$prefs_backup/" 2>/dev/null
+        done
+        echo "xinitrc: moved profile prefs aside to $prefs_backup (attempt $attempt)" > /dev/hvc0
+    elif [ "$attempt" -eq 4 ] && [ -n "$prefs_backup" ] && [ -d "$PROFILE_DIR/$prefs_backup" ]; then
+        # Still crashing without prefs — restore them
+        cd "$PROFILE_DIR"
+        mv "$prefs_backup"/* . 2>/dev/null
+        rm -rf "$prefs_backup"
+        prefs_backup=
+        echo "xinitrc: restored profile prefs (attempt $attempt)" > /dev/hvc0
+    fi
+done
+
 doas udhcpc -R -i eth0 2>/dev/null
 doas poweroff
 
