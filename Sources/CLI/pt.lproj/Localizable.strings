@@ -439,6 +439,23 @@
 "Connect on Startup" = "Conectar ao iniciar";
 "Automatically connect the VPN when the browser session starts. You can always toggle it from the window\U2019s VPN button." = "Conecta automaticamente a VPN quando a sess\U00E3o do navegador inicia. Voc\U00EA pode sempre alter\U00E1-la pelo bot\U00E3o VPN da janela.";
 
+/* ProfileSettingsView — VPN & Ads (IKEv2) */
+"IKEv2" = "IKEv2";
+"IKEv2 Configuration" = "Configura\U00E7\U00E3o IKEv2";
+"Server address" = "Endere\U00E7o do servidor";
+"Same as server if empty" = "Igual ao servidor se vazio";
+"Remote ID" = "ID remoto";
+"Authentication" = "Autentica\U00E7\U00E3o";
+"User authentication" = "Autentica\U00E7\U00E3o do usu\U00E1rio";
+"Certificate" = "Certificado";
+"None (PSK)" = "Nenhuma (PSK)";
+"Shared secret" = "Segredo compartilhado";
+"Passphrase" = "Frase secreta";
+"VPN Proxy" = "Proxy VPN";
+"Route browser traffic through an HTTP proxy reachable inside the VPN tunnel." = "Direciona o tr\U00E1fego do navegador por um proxy HTTP acess\U00EDvel dentro do t\U00FAnel VPN.";
+"Use VPN DNS" = "Usar DNS da VPN";
+"Use DNS servers pushed by the IKEv2 gateway, preventing DNS leaks outside the tunnel." = "Usa os servidores DNS fornecidos pelo gateway IKEv2, evitando vazamentos de DNS fora do t\U00FAnel.";
+
 /* ProfileSettingsView — Enterprise (additional) */
 "HTTP Proxy" = "Proxy HTTP";
 "Route all browser traffic through a corporate proxy server. When a proxy is configured, VPN and ad blocking are automatically disabled." = "Roteia todo o tr\U00E1fego do navegador atrav\U00E9s de um servidor proxy corporativo. Quando um proxy est\U00E1 configurado, VPN e bloqueio de an\U00FAncios s\U00E3o automaticamente desativados.";

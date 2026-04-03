@@ -439,6 +439,23 @@
 "Connect on Startup" = "Connect on Startup";
 "Automatically connect the VPN when the browser session starts. You can always toggle it from the window\U2019s VPN button." = "Automatically connect the VPN when the browser session starts. You can always toggle it from the window\U2019s VPN button.";
 
+/* ProfileSettingsView — VPN & Ads (IKEv2) */
+"IKEv2" = "IKEv2";
+"IKEv2 Configuration" = "IKEv2 Configuration";
+"Server address" = "Server address";
+"Same as server if empty" = "Same as server if empty";
+"Remote ID" = "Remote ID";
+"Authentication" = "Authentication";
+"User authentication" = "User authentication";
+"Certificate" = "Certificate";
+"None (PSK)" = "None (PSK)";
+"Shared secret" = "Shared secret";
+"Passphrase" = "Passphrase";
+"VPN Proxy" = "VPN Proxy";
+"Route browser traffic through an HTTP proxy reachable inside the VPN tunnel." = "Route browser traffic through an HTTP proxy reachable inside the VPN tunnel.";
+"Use VPN DNS" = "Use VPN DNS";
+"Use DNS servers pushed by the IKEv2 gateway, preventing DNS leaks outside the tunnel." = "Use DNS servers pushed by the IKEv2 gateway, preventing DNS leaks outside the tunnel.";
+
 /* ProfileSettingsView — Enterprise (additional) */
 "HTTP Proxy" = "HTTP Proxy";
 "Route all browser traffic through a corporate proxy server. When a proxy is configured, VPN and ad blocking are automatically disabled." = "Route all browser traffic through a corporate proxy server. When a proxy is configured, VPN and ad blocking are automatically disabled.";

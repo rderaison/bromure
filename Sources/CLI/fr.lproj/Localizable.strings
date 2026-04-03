@@ -439,6 +439,23 @@
 "Connect on Startup" = "Connexion au d\U00E9marrage";
 "Automatically connect the VPN when the browser session starts. You can always toggle it from the window\U2019s VPN button." = "Connecte automatiquement le VPN au d\U00E9marrage de la session de navigation. Vous pouvez toujours le basculer depuis le bouton VPN de la fen\U00EAtre.";
 
+/* ProfileSettingsView — VPN & Ads (IKEv2) */
+"IKEv2" = "IKEv2";
+"IKEv2 Configuration" = "Configuration IKEv2";
+"Server address" = "Adresse du serveur";
+"Same as server if empty" = "Identique au serveur si vide";
+"Remote ID" = "Identifiant distant";
+"Authentication" = "Authentification";
+"User authentication" = "Authentification utilisateur";
+"Certificate" = "Certificat";
+"None (PSK)" = "Aucune (PSK)";
+"Shared secret" = "Secret partag\U00E9";
+"Passphrase" = "Phrase secr\U00E8te";
+"VPN Proxy" = "Proxy VPN";
+"Route browser traffic through an HTTP proxy reachable inside the VPN tunnel." = "Achemine le trafic du navigateur via un proxy HTTP accessible dans le tunnel VPN.";
+"Use VPN DNS" = "Utiliser le DNS du VPN";
+"Use DNS servers pushed by the IKEv2 gateway, preventing DNS leaks outside the tunnel." = "Utilise les serveurs DNS fournis par la passerelle IKEv2, emp\U00EAchant les fuites DNS hors du tunnel.";
+
 /* ProfileSettingsView — Enterprise (additional) */
 "HTTP Proxy" = "Proxy HTTP";
 "Route all browser traffic through a corporate proxy server. When a proxy is configured, VPN and ad blocking are automatically disabled." = "Achemine tout le trafic du navigateur via un serveur proxy d\U2019entreprise. Lorsqu\U2019un proxy est configur\U00E9, le VPN et le blocage des publicit\U00E9s sont automatiquement d\U00E9sactiv\U00E9s.";

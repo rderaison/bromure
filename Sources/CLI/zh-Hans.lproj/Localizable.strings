@@ -439,6 +439,23 @@
 "Connect on Startup" = "\U542F\U52A8\U65F6\U8FDE\U63A5";
 "Automatically connect the VPN when the browser session starts. You can always toggle it from the window\U2019s VPN button." = "\U6D4F\U89C8\U5668\U4F1A\U8BDD\U542F\U52A8\U65F6\U81EA\U52A8\U8FDE\U63A5 VPN\U3002\U60A8\U53EF\U4EE5\U968F\U65F6\U901A\U8FC7\U7A97\U53E3\U7684 VPN \U6309\U94AE\U5207\U6362\U3002";
 
+/* ProfileSettingsView — VPN & Ads (IKEv2) */
+"IKEv2" = "IKEv2";
+"IKEv2 Configuration" = "IKEv2 \U914D\U7F6E";
+"Server address" = "\U670D\U52A1\U5668\U5730\U5740";
+"Same as server if empty" = "\U7A7A\U65F6\U4E0E\U670D\U52A1\U5668\U76F8\U540C";
+"Remote ID" = "\U8FDC\U7A0B ID";
+"Authentication" = "\U8EAB\U4EFD\U9A8C\U8BC1";
+"User authentication" = "\U7528\U6237\U8EAB\U4EFD\U9A8C\U8BC1";
+"Certificate" = "\U8BC1\U4E66";
+"None (PSK)" = "\U65E0 (PSK)";
+"Shared secret" = "\U5171\U4EAB\U5BC6\U94A5";
+"Passphrase" = "\U5BC6\U7801\U77ED\U8BED";
+"VPN Proxy" = "VPN \U4EE3\U7406";
+"Route browser traffic through an HTTP proxy reachable inside the VPN tunnel." = "\U901A\U8FC7 VPN \U96A7\U9053\U5185\U53EF\U8BBF\U95EE\U7684 HTTP \U4EE3\U7406\U8DEF\U7531\U6D4F\U89C8\U5668\U6D41\U91CF\U3002";
+"Use VPN DNS" = "\U4F7F\U7528 VPN DNS";
+"Use DNS servers pushed by the IKEv2 gateway, preventing DNS leaks outside the tunnel." = "\U4F7F\U7528 IKEv2 \U7F51\U5173\U63D0\U4F9B\U7684 DNS \U670D\U52A1\U5668\UFF0C\U9632\U6B62\U96A7\U9053\U5916\U7684 DNS \U6CC4\U6F0F\U3002";
+
 /* ProfileSettingsView — Enterprise (additional) */
 "HTTP Proxy" = "HTTP \U4EE3\U7406";
 "Route all browser traffic through a corporate proxy server. When a proxy is configured, VPN and ad blocking are automatically disabled." = "\U901A\U8FC7\U4F01\U4E1A\U4EE3\U7406\U670D\U52A1\U5668\U8DEF\U7531\U6240\U6709\U6D4F\U89C8\U5668\U6D41\U91CF\U3002\U914D\U7F6E\U4EE3\U7406\U540E\UFF0CVPN \U548C\U5E7F\U544A\U62E6\U622A\U4F1A\U81EA\U52A8\U7981\U7528\U3002";
