@@ -152,9 +152,10 @@ echo "=== Creating DMG ==="
 
 DMG_DIR="$BUILD_DIR/dmg-staging"
 DMG_PATH="$BUILD_DIR/$DMG_NAME"
+DMG_RW="$BUILD_DIR/${APP_NAME}_rw.dmg"
 
-rm -rf "$DMG_DIR" "$DMG_PATH"
-mkdir -p "$DMG_DIR"
+rm -rf "$DMG_DIR" "$DMG_PATH" "$DMG_RW"
+mkdir -p "$DMG_DIR/.background"
 
 # Copy app into staging
 cp -R "$APP_BUNDLE" "$DMG_DIR/"
@@ -162,12 +163,89 @@ cp -R "$APP_BUNDLE" "$DMG_DIR/"
 # Create Applications symlink for drag-to-install
 ln -s /Applications "$DMG_DIR/Applications"
 
-# Create the DMG
+# Generate a background image with a drag arrow using Python/CoreGraphics
+python3 -c "
+import objc
+from Quartz import *
+from CoreText import *
+
+W, H = 660, 400
+cs = CGColorSpaceCreateDeviceRGB()
+ctx = CGBitmapContextCreate(None, W, H, 8, W*4, cs, kCGImageAlphaPremultipliedLast)
+
+# White background
+CGContextSetRGBFillColor(ctx, 1, 1, 1, 1)
+CGContextFillRect(ctx, CGRectMake(0, 0, W, H))
+
+# Draw arrow from left icon area to right icon area
+# Arrow body
+CGContextSetRGBStrokeColor(ctx, 0.6, 0.6, 0.6, 1)
+CGContextSetLineWidth(ctx, 4)
+CGContextSetLineCap(ctx, kCGLineCapRound)
+
+# Horizontal line (y=200 is vertical center, from x=240 to x=420)
+CGContextMoveToPoint(ctx, 240, 200)
+CGContextAddLineToPoint(ctx, 400, 200)
+CGContextStrokePath(ctx)
+
+# Arrowhead
+CGContextMoveToPoint(ctx, 380, 220)
+CGContextAddLineToPoint(ctx, 400, 200)
+CGContextAddLineToPoint(ctx, 380, 180)
+CGContextStrokePath(ctx)
+
+# Save as PNG
+image = CGBitmapContextCreateImage(ctx)
+url = CFURLCreateWithFileSystemPath(None, '$DMG_DIR/.background/bg.png', kCFURLPOSIXPathStyle, False)
+dest = CGImageDestinationCreateWithURL(url, 'public.png', 1, None)
+CGImageDestinationAddImage(dest, image, None)
+CGImageDestinationFinalize(dest)
+"
+
+# Create a read-write DMG first
 hdiutil create -volname "$APP_NAME" \
     -srcfolder "$DMG_DIR" \
-    -ov -format UDZO \
-    "$DMG_PATH"
+    -ov -format UDRW \
+    "$DMG_RW"
 
+# Mount the read-write DMG
+MOUNT_DIR=$(hdiutil attach -readwrite -noverify "$DMG_RW" | grep "/Volumes/$APP_NAME" | awk '{print $NF}')
+# Wait for Finder to register the volume
+sleep 2
+
+# Use AppleScript to set icon size, positions, and background
+osascript <<APPLESCRIPT
+tell application "Finder"
+    tell disk "$APP_NAME"
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set bounds of container window to {100, 100, 760, 500}
+        set viewOptions to the icon view options of container window
+        set arrangement of viewOptions to not arranged
+        set icon size of viewOptions to 128
+        set background picture of viewOptions to file ".background:bg.png"
+        set position of item "$APP_NAME.app" of container window to {165, 200}
+        set position of item "Applications" of container window to {495, 200}
+        close
+        open
+        update without registering applications
+        delay 2
+        close
+    end tell
+end tell
+APPLESCRIPT
+
+# Ensure .background and .DS_Store are hidden
+SetFile -a V "$MOUNT_DIR/.background" 2>/dev/null || true
+
+sync
+hdiutil detach "$MOUNT_DIR"
+
+# Convert to compressed read-only DMG
+hdiutil convert "$DMG_RW" -format UDZO -o "$DMG_PATH"
+rm -f "$DMG_RW"
 rm -rf "$DMG_DIR"
 
 # Sign the DMG itself
