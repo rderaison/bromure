@@ -151,10 +151,15 @@ pipeline {
             }
         }
 
-        stage('10. WARP VPN') {
+        stage('10. VPN') {
             steps {
-                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                    sh 'cd Tests && node e2e.mjs --filter "^10\\."'
+                withCredentials([
+                    string(credentialsId: 'IKEV2_SERVER', variable: 'IKEV2_SERVER'),
+                    usernamePassword(credentialsId: 'IKEV2_CREDENTIALS', usernameVariable: 'IKEV2_USERNAME', passwordVariable: 'IKEV2_PASSWORD')
+                ]) {
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                        sh 'cd Tests && node e2e.mjs --filter "^10\\."'
+                    }
                 }
             }
         }

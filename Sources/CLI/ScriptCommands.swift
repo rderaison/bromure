@@ -264,6 +264,16 @@ final class SetProfileSettingCommand: NSScriptCommand {
                 return nil
             default: break
             }
+            // Handle keychain-backed secrets (not stored in profile JSON)
+            switch key {
+            case "ikev2Secret":
+                VPNKeychain.store(profileID: profile.id, key: VPNKeychain.ikev2Password, secret: value)
+                return nil
+            case "ikev2PSKSecret":
+                VPNKeychain.store(profileID: profile.id, key: VPNKeychain.ikev2PSK, secret: value)
+                return nil
+            default: break
+            }
             guard writeSetting(&profile.settings, key: key, value: value) else {
                 scriptErrorNumber = errOSAScriptError
                 scriptErrorString = "Unknown setting key: \(key)"
