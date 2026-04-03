@@ -163,44 +163,34 @@ cp -R "$APP_BUNDLE" "$DMG_DIR/"
 # Create Applications symlink for drag-to-install
 ln -s /Applications "$DMG_DIR/Applications"
 
-# Generate a background image with a drag arrow using Python/CoreGraphics
-python3 -c "
-import objc
-from Quartz import *
-from CoreText import *
-
-W, H = 660, 400
-cs = CGColorSpaceCreateDeviceRGB()
-ctx = CGBitmapContextCreate(None, W, H, 8, W*4, cs, kCGImageAlphaPremultipliedLast)
-
-# White background
-CGContextSetRGBFillColor(ctx, 1, 1, 1, 1)
-CGContextFillRect(ctx, CGRectMake(0, 0, W, H))
-
-# Draw arrow from left icon area to right icon area
-# Arrow body
-CGContextSetRGBStrokeColor(ctx, 0.6, 0.6, 0.6, 1)
-CGContextSetLineWidth(ctx, 4)
-CGContextSetLineCap(ctx, kCGLineCapRound)
-
-# Horizontal line (y=200 is vertical center, from x=240 to x=420)
-CGContextMoveToPoint(ctx, 240, 200)
-CGContextAddLineToPoint(ctx, 400, 200)
-CGContextStrokePath(ctx)
-
-# Arrowhead
-CGContextMoveToPoint(ctx, 380, 220)
-CGContextAddLineToPoint(ctx, 400, 200)
-CGContextAddLineToPoint(ctx, 380, 180)
-CGContextStrokePath(ctx)
-
-# Save as PNG
-image = CGBitmapContextCreateImage(ctx)
-url = CFURLCreateWithFileSystemPath(None, '$DMG_DIR/.background/bg.png', kCFURLPOSIXPathStyle, False)
-dest = CGImageDestinationCreateWithURL(url, 'public.png', 1, None)
-CGImageDestinationAddImage(dest, image, None)
-CGImageDestinationFinalize(dest)
-"
+# Generate a background image with a drag arrow using Swift
+swift -e '
+import Cocoa
+let W = 660, H = 400
+let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: W, pixelsHigh: H,
+    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+let ctx = NSGraphicsContext.current!.cgContext
+// White background
+ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
+// Arrow
+ctx.setStrokeColor(CGColor(red: 0.6, green: 0.6, blue: 0.6, alpha: 1))
+ctx.setLineWidth(4)
+ctx.setLineCap(.round)
+ctx.move(to: CGPoint(x: 240, y: 200))
+ctx.addLine(to: CGPoint(x: 400, y: 200))
+ctx.strokePath()
+ctx.move(to: CGPoint(x: 380, y: 220))
+ctx.addLine(to: CGPoint(x: 400, y: 200))
+ctx.addLine(to: CGPoint(x: 380, y: 180))
+ctx.strokePath()
+NSGraphicsContext.restoreGraphicsState()
+let png = rep.representation(using: .png, properties: [:])!
+try! png.write(to: URL(fileURLWithPath: "'"$DMG_DIR"'/.background/bg.png"))
+'
 
 # Create a read-write DMG first
 hdiutil create -volname "$APP_NAME" \
