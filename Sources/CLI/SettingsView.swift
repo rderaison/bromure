@@ -48,6 +48,7 @@ struct SettingsView: View {
     @AppStorage("vm.networkMode") private var networkMode = "nat"
     @AppStorage("vm.bridgedInterface") private var bridgedInterface = ""
     @AppStorage("vm.extraKernelOptions") private var extraKernelOptions = VMConfig.defaultExtraKernelOptions
+    @AppStorage("phishingAnalysis.serverURL") private var phishingServerURL = PhishingAnalysisBridge.defaultServerBaseURL.absoluteString
     @AppStorage("automation.enabled") private var automationEnabled = false
     @AppStorage("automation.port") private var automationPort = 9222
     @AppStorage("automation.bindAddress") private var automationBindAddress = "127.0.0.1"
@@ -459,6 +460,22 @@ struct SettingsView: View {
                     Text("DNS override only works in NAT mode.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+            }
+
+            settingsDivider
+
+            Text("Phishing Analysis Server").font(.headline)
+            Text("URL of the server used for AI-powered phishing detection. Change this to use a self-hosted instance.")
+                .settingDescription()
+            HStack {
+                TextField("https://bromure.io/api", text: $phishingServerURL)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 350)
+                if phishingServerURL != PhishingAnalysisBridge.defaultServerBaseURL.absoluteString {
+                    Button("Reset") {
+                        phishingServerURL = PhishingAnalysisBridge.defaultServerBaseURL.absoluteString
+                    }
                 }
             }
         }

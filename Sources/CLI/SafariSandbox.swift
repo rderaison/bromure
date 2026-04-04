@@ -1301,6 +1301,7 @@ final class BrowserSession {
     private var linkSenderBridge: LinkSenderBridge?
     private var filePickerBridge: FilePickerBridge?
     private var webcamBridge: WebcamBridge?
+    private var phishingAnalysisBridge: PhishingAnalysisBridge?
     private var warpBridge: WarpBridge?
     private var wireGuardBridge: WireGuardBridge?
     private var ikev2Bridge: IKEv2Bridge?
@@ -1464,6 +1465,12 @@ final class BrowserSession {
                 return bridge
             }
             self.credentialBridge = credBridge
+        }
+
+        // Phishing analysis bridge — when phishing guard is enabled
+        if config.phishingWarning, let dev = linkSocketDevice {
+            let bridge = MainActor.assumeIsolated { PhishingAnalysisBridge(socketDevice: dev) }
+            self.phishingAnalysisBridge = bridge
         }
 
         if config.enableLinkSender, let dev = linkSocketDevice {
@@ -2124,8 +2131,10 @@ final class BrowserSession {
             fileDrawerModel?.detach()
             fileTransferBridge?.stop()
             credentialBridge?.stop()
+            phishingAnalysisBridge?.stop()
             fileTransferBridge = nil
             credentialBridge = nil
+            phishingAnalysisBridge = nil
             fileDrawerModel = nil
             linkSenderBridge?.stop()
             linkSenderBridge = nil
@@ -2250,6 +2259,13 @@ final class BrowserSession {
             name: "HTTP Trace",
             port: 5900,
             state: traceBridge.map { $0.isConnected ? .connected : .listening } ?? .disabled
+        ))
+
+        services.append(VsockServiceStatus(
+            id: "\(id)-phishing",
+            name: "Phishing Analysis",
+            port: 5950,
+            state: phishingAnalysisBridge.map { $0.isConnected ? .connected : .listening } ?? .disabled
         ))
 
         return SessionDiagnostic(id: id, name: name, services: services)

@@ -2167,6 +2167,259 @@ print('n/a')
   });
 
   // ======================================================================
+  // Phishing Analysis API (direct server tests — no VM required)
+  // ======================================================================
+  console.log("\n--- Phishing Analysis API ---");
+
+  const PHISHING_API = process.env.PHISHING_API_URL || "https://bromure.io/api";
+
+  async function phishingAPI(method, path, body, token) {
+    const opts = {
+      method,
+      headers: { "Content-Type": "application/json" },
+    };
+    if (token) opts.headers["Authorization"] = `Bearer ${token}`;
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch(`${PHISHING_API}${path}`, opts);
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = null; }
+    return { status: res.status, json, text };
+  }
+
+  /**
+   * Solve proof-of-work: find nonce where SHA-256(challenge + nonce) has
+   * `difficulty` leading zero bits.
+   */
+  async function solvePoW(challenge, difficulty) {
+    const { createHash } = await import("node:crypto");
+    let nonce = 0;
+    while (true) {
+      const hash = createHash("sha256")
+        .update(challenge + String(nonce))
+        .digest();
+      let remaining = difficulty;
+      let valid = true;
+      for (let i = 0; i < hash.length && remaining > 0; i++) {
+        if (remaining >= 8) {
+          if (hash[i] !== 0) { valid = false; break; }
+          remaining -= 8;
+        } else {
+          if ((hash[i] & (0xff << (8 - remaining))) !== 0) { valid = false; break; }
+          remaining = 0;
+        }
+      }
+      if (valid) return nonce;
+      nonce++;
+    }
+  }
+
+  // Shared state across phishing tests
+  let phishingToken = null;
+
+  await test("phishing: register — get PoW challenge", async () => {
+    const { status, json } = await phishingAPI("POST", "/v1/register", {});
+    assert(status === 200, `Expected 200, got ${status}`);
+    assert(json.challengeId, "Missing challengeId");
+    assert(json.challenge, "Missing challenge");
+    assert(json.difficulty > 0, "Missing or zero difficulty");
+    assert(json.algorithm === "sha256", `Unexpected algorithm: ${json.algorithm}`);
+    // Store for next test
+    phishingToken = { challengeId: json.challengeId, challenge: json.challenge, difficulty: json.difficulty };
+    console.log(`        Challenge received, difficulty=${json.difficulty}`);
+  });
+
+  await test("phishing: register — solve PoW and get token", async () => {
+    assert(phishingToken?.challenge, "No challenge from previous test");
+    const t0 = Date.now();
+    const nonce = await solvePoW(phishingToken.challenge, phishingToken.difficulty);
+    const solveMs = Date.now() - t0;
+    console.log(`        PoW solved in ${solveMs}ms (nonce=${nonce})`);
+
+    const { status, json } = await phishingAPI("POST", "/v1/register/solve", {
+      challengeId: phishingToken.challengeId,
+      nonce,
+    });
+    assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.token, "Missing token");
+    assert(json.token.startsWith("phg_"), `Token should start with phg_, got: ${json.token.slice(0, 10)}`);
+    phishingToken = json.token;
+    console.log(`        Token received: ${json.token.slice(0, 12)}...`);
+  });
+
+  await test("phishing: analyze — reject without auth", async () => {
+    const { status } = await phishingAPI("POST", "/v1/analyze", {
+      domain: "example.com",
+      path: "/",
+      triggerType: "password-field",
+    });
+    assert(status === 401, `Expected 401, got ${status}`);
+  });
+
+  await test("phishing: analyze — reject with bad token", async () => {
+    const { status } = await phishingAPI("POST", "/v1/analyze", {
+      domain: "example.com",
+      path: "/",
+      triggerType: "password-field",
+    }, "phg_bogus_token_12345");
+    assert(status === 401, `Expected 401, got ${status}`);
+  });
+
+  await test("phishing: analyze — safe site (known benign)", async () => {
+    assert(phishingToken, "No token from registration");
+    const { status, json } = await phishingAPI("POST", "/v1/analyze", {
+      domain: "mycompany-internal.example.com",
+      path: "/login",
+      triggerType: "password-field",
+      sensitiveFields: ["password"],
+      formActions: [],
+      brandSignals: {
+        title: "My Company Portal - Sign In",
+        headings: ["Sign in to your account"],
+      },
+      domainMismatch: null,
+      homoglyphDomain: null,
+      urlSuspicion: [],
+      pageStructure: [],
+    }, phishingToken);
+    assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.verdict === "safe" || json.verdict === "suspicious",
+      `Expected safe or suspicious for benign login, got: ${json.verdict}`);
+    console.log(`        Verdict: ${json.verdict} (confidence: ${json.confidence})`);
+    console.log(`        Reason: ${json.reason}`);
+  });
+
+  await test("phishing: analyze — obvious phishing (brand impersonation)", async () => {
+    assert(phishingToken, "No token from registration");
+    const { status, json } = await phishingAPI("POST", "/v1/analyze", {
+      domain: "secure-paypal-login.xyz",
+      path: "/signin",
+      triggerType: "password-field",
+      sensitiveFields: ["password", "card-number"],
+      formActions: ["collect.evil-server.xyz"],
+      brandSignals: {
+        title: "PayPal - Log In to Your Account",
+        headings: ["Log in to PayPal", "Enter your email and password"],
+        logoSrcs: ["https://www.paypalobjects.com/webstatic/mktg/logo/pp_cc_mark_111x69.jpg"],
+        faviconHref: "https://www.paypal.com/favicon.ico",
+        metaOG: { siteName: "PayPal" },
+      },
+      domainMismatch: { claimedBrand: "paypal", mismatch: true },
+      homoglyphDomain: null,
+      urlSuspicion: [
+        "brand-in-subdomain:paypal",
+        "suspicious-tld:xyz",
+        "credential-path-keywords",
+      ],
+      pageStructure: [
+        "only-login-forms",
+        "minimal-navigation:1",
+        "minimal-content:320",
+        "password-autocomplete-off",
+        "hotlinked-images:paypalobjects.com",
+      ],
+    }, phishingToken);
+    assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.verdict === "phishing",
+      `Expected phishing verdict for PayPal impersonation on .xyz, got: ${json.verdict} (${json.reason})`);
+    assert(json.confidence >= 0.8, `Expected high confidence, got: ${json.confidence}`);
+    console.log(`        Verdict: ${json.verdict} (confidence: ${json.confidence})`);
+    console.log(`        Reason: ${json.reason}`);
+  });
+
+  await test("phishing: analyze — homoglyph domain", async () => {
+    assert(phishingToken, "No token from registration");
+    const { status, json } = await phishingAPI("POST", "/v1/analyze", {
+      domain: "g\u043e\u043egle.com",
+      path: "/accounts/signin",
+      triggerType: "password-field",
+      sensitiveFields: ["password"],
+      formActions: [],
+      brandSignals: {
+        title: "Sign in \u2013 Google Accounts",
+        headings: ["Sign in", "Use your Google Account"],
+      },
+      domainMismatch: { claimedBrand: "google", mismatch: true },
+      homoglyphDomain: { target: "google", normalizedDomain: "google.com", hasConfusables: true },
+      urlSuspicion: ["punycode"],
+      pageStructure: ["only-login-forms", "minimal-navigation:2"],
+    }, phishingToken);
+    assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.verdict === "phishing",
+      `Expected phishing for homoglyph Google domain, got: ${json.verdict} (${json.reason})`);
+    assert(json.confidence >= 0.85, `Expected very high confidence for homoglyph, got: ${json.confidence}`);
+    console.log(`        Verdict: ${json.verdict} (confidence: ${json.confidence})`);
+    console.log(`        Reason: ${json.reason}`);
+  });
+
+  await test("phishing: analyze — fake invoice scam", async () => {
+    assert(phishingToken, "No token from registration");
+    const { status, json } = await phishingAPI("POST", "/v1/analyze", {
+      domain: "invoice-notification-8372.top",
+      path: "/pay",
+      triggerType: "scam-content",
+      sensitiveFields: [],
+      formActions: [],
+      brandSignals: {
+        title: "Invoice #INV-38291 — Payment Required",
+        headings: ["URGENT: Payment Overdue", "Your account will be suspended"],
+      },
+      domainMismatch: null,
+      homoglyphDomain: null,
+      urlSuspicion: ["suspicious-tld:top", "long-domain:32"],
+      pageStructure: ["minimal-navigation:0"],
+      contentIndicators: {
+        matchedPatterns: ["invoice.*overdue", "pay.*immediate", "your.*account.*suspend"],
+        cryptoAddresses: ["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"],
+        urgencyLanguage: true,
+        amountMentioned: "$4,299.00",
+        externalPayLinks: ["https://pay.shady-processor.xyz/checkout"],
+      },
+    }, phishingToken);
+    assert(status === 200, `Expected 200, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.verdict === "phishing" || json.verdict === "suspicious",
+      `Expected phishing or suspicious for fake invoice, got: ${json.verdict} (${json.reason})`);
+    console.log(`        Verdict: ${json.verdict} (confidence: ${json.confidence})`);
+    console.log(`        Reason: ${json.reason}`);
+  });
+
+  await test("phishing: analyze — cached response", async () => {
+    assert(phishingToken, "No token from registration");
+    // Repeat the phishing request — should come from cache
+    const { status, json } = await phishingAPI("POST", "/v1/analyze", {
+      domain: "secure-paypal-login.xyz",
+      path: "/signin",
+      triggerType: "password-field",
+      sensitiveFields: ["password"],
+      formActions: [],
+      brandSignals: { title: "PayPal" },
+      domainMismatch: { claimedBrand: "paypal", mismatch: true },
+    }, phishingToken);
+    assert(status === 200, `Expected 200, got ${status}`);
+    assert(json.cached === true, `Expected cached response, got cached=${json.cached}`);
+    assert(json.verdict === "phishing", `Cached verdict should still be phishing, got: ${json.verdict}`);
+    console.log(`        Cached: ${json.cached}, verdict: ${json.verdict}`);
+  });
+
+  await test("phishing: register — challenge expires (replay rejected)", async () => {
+    // Request a challenge but don't solve it — request a second one,
+    // then try to solve the first with the second's solution
+    const { json: c1 } = await phishingAPI("POST", "/v1/register", {});
+    const { json: c2 } = await phishingAPI("POST", "/v1/register", {});
+    assert(c1.challengeId !== c2.challengeId, "Challenges should be unique");
+
+    // Solve c2 correctly
+    const nonce = await solvePoW(c2.challenge, c2.difficulty);
+
+    // Try to use c2's nonce with c1's challengeId
+    const { status } = await phishingAPI("POST", "/v1/register/solve", {
+      challengeId: c1.challengeId,
+      nonce,
+    });
+    assert(status === 400, `Expected 400 for wrong nonce/challenge pair, got ${status}`);
+  });
+
+  // ======================================================================
   // Summary
   // ======================================================================
   console.log("\n========================================");

@@ -56,7 +56,7 @@
         <!-- App Settings                                                 -->
         <!-- ============================================================ -->
 
-        <command name="get app setting" code="BrmrGaSt" description="Read a global app setting. Keys: vm.memoryGB, vm.cpuCount, vm.keyboardLayout, vm.naturalScrolling, vm.swapCmdCtrl, vm.displayScale, vm.appearance, vm.networkMode, vm.bridgedInterface, vm.dnsServers, automation.enabled, automation.port, automation.bindAddress.">
+        <command name="get app setting" code="BrmrGaSt" description="Read a global app setting. Keys: vm.memoryGB, vm.cpuCount, vm.keyboardLayout, vm.naturalScrolling, vm.swapCmdCtrl, vm.displayScale, vm.appearance, vm.networkMode, vm.bridgedInterface, vm.dnsServers, automation.enabled, automation.port, automation.bindAddress, phishingAnalysis.serverURL.">
             <cocoa class="BromureGetAppSettingCommand"/>
             <direct-parameter type="text" description="Setting key"/>
             <result type="text" description="Current value as string"/>
