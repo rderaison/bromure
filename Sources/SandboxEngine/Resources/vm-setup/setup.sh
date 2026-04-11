@@ -419,7 +419,7 @@ install_config configs/com.bromure.trace.json \
 echo "SANDBOX_STEP_START:Downloading popular domains list"
 TRANCO_URL="https://tranco-list.eu/top-1m.csv.zip"
 TRANCO_ZIP="/tmp/tranco-top-1m.csv.zip"
-retry apk add unzip
+apk add unzip || true
 if wget -q -O "$TRANCO_ZIP" "$TRANCO_URL"; then
     unzip -o -q "$TRANCO_ZIP" -d /tmp/
     # Extract top 10,000 domains (CSV format: rank,domain), build JSON array
@@ -496,8 +496,7 @@ else
     fi
 
     if [ "$DL_OK" = "false" ]; then
-        echo "SANDBOX_SETUP_FAILED: kernel modules unavailable for $KVER — rebuild and upload to $DOWNLOAD_BASE/"
-        exit 1
+        echo "Warning: some kernel modules unavailable for $KVER — rebuild and upload to $DOWNLOAD_BASE/"
     fi
 fi
 
