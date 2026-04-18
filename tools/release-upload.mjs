@@ -129,6 +129,8 @@ function signArtifact(path) {
 async function uploadToSpaces(path, key) {
   const { S3Client, PutObjectCommand } = await import("@aws-sdk/client-s3");
 
+  console.log(`      endpoint=${DO_SPACES_ENDPOINT} region=${DO_SPACES_REGION} bucket=${DO_SPACES_BUCKET}`);
+
   const client = new S3Client({
     endpoint: DO_SPACES_ENDPOINT,
     region: DO_SPACES_REGION,
