@@ -143,6 +143,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupMenu()
         NSApp.activate(ignoringOtherApps: true)
 
+        // Start watching for host network changes so bridged-mode VMs can
+        // renew their DHCP lease when Wi-Fi roams or Ethernet switches.
+        HostNetworkWatcher.shared.start()
+
         state.onCloseAllSessions = { [weak self] in
             guard let self else { return }
             for session in self.sessions {
@@ -1304,6 +1308,7 @@ final class BrowserSession {
     private var warpBridge: WarpBridge?
     private var wireGuardBridge: WireGuardBridge?
     private var ikev2Bridge: IKEv2Bridge?
+    private var networkRefreshBridge: NetworkRefreshBridge?
     private(set) var cdpBridge: CDPBridge?
     private(set) var shellBridge: ShellBridge?
     private(set) var traceBridge: TraceBridge?
@@ -1586,6 +1591,20 @@ final class BrowserSession {
         if config.enableAutomation, let dev = linkSocketDevice {
             let bridge = MainActor.assumeIsolated { CDPBridge(socketDevice: dev) }
             self.cdpBridge = bridge
+        }
+
+        // Network refresh bridge (vsock port 5703) — always attached so the
+        // guest agent has something to connect to. Registered with the host
+        // NWPathMonitor watcher only in bridged mode, where DHCP renewal on
+        // host network changes actually matters (NAT mode is handled by vmnet).
+        if let dev = linkSocketDevice {
+            let bridge = MainActor.assumeIsolated { NetworkRefreshBridge(socketDevice: dev) }
+            self.networkRefreshBridge = bridge
+            if warmVM.bootedNetworkMode != "nat" {
+                MainActor.assumeIsolated {
+                    HostNetworkWatcher.shared.register(bridge)
+                }
+            }
         }
 
         // Set up shell bridge for debug command execution (BROMURE_DEBUG_CLAUDE only).
@@ -2135,6 +2154,11 @@ final class BrowserSession {
             warpBridge = nil
             wireGuardBridge?.stop()
             wireGuardBridge = nil
+            if let nrb = networkRefreshBridge {
+                HostNetworkWatcher.shared.unregister(nrb)
+                nrb.stop()
+            }
+            networkRefreshBridge = nil
             webcamBridge?.stop()
             webcamBridge = nil
             cdpBridge?.stop()
@@ -2250,6 +2274,13 @@ final class BrowserSession {
             name: "HTTP Trace",
             port: 5900,
             state: traceBridge.map { $0.isConnected ? .connected : .listening } ?? .disabled
+        ))
+
+        services.append(VsockServiceStatus(
+            id: "\(id)-netrefresh",
+            name: "Network Refresh",
+            port: 5703,
+            state: networkRefreshBridge.map { $0.isAgentConnected ? .connected : .listening } ?? .disabled
         ))
 
         return SessionDiagnostic(id: id, name: name, services: services)
