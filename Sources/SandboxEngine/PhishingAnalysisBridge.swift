@@ -27,7 +27,7 @@ public final class PhishingAnalysisBridge: NSObject, @unchecked Sendable {
     public nonisolated static let defaultServerBaseURL = URL(string: "https://bromure.io/api")!
 
     /// UserDefaults key for overriding the server URL.
-    public static let serverURLKey = "phishingAnalysis.serverURL"
+    public nonisolated static let serverURLKey = "phishingAnalysis.serverURL"
 
     /// Base URL of the phishing analysis server (without path).
     public var serverBaseURL: URL

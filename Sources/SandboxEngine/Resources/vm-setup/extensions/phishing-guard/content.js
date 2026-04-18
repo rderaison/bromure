@@ -425,6 +425,46 @@
   }
 
   // -------------------------------------------------------------------------
+  // Trust check — gate every analyzer request so "I know this site" decisions
+  // are honored in-page (avoiding a stuck "Analyzing…" banner when background
+  // short-circuits the request silently).
+  // -------------------------------------------------------------------------
+
+  var domainTrustCache = null;
+
+  async function isPageDomainTrusted() {
+    if (domainTrustCache !== null) return domainTrustCache;
+    try {
+      var result = await chrome.storage.local.get("trustedDomains");
+      var trusted = result.trustedDomains || [];
+      var d = getDomain();
+      domainTrustCache = trusted.includes(d) || trusted.includes(getRegistrableDomain(d));
+      return domainTrustCache;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Invalidate the cache if the user's trust set changes mid-session (e.g.
+  // they just clicked "I know this site" on this tab).
+  if (chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener(function (changes, area) {
+      if (area === "local" && changes.trustedDomains) {
+        domainTrustCache = null;
+      }
+    });
+  }
+
+  async function requestLLMAnalysis(payload) {
+    if (await isPageDomainTrusted()) {
+      console.log("[Phishing Guard] skipping analysis — domain is user-trusted");
+      return;
+    }
+    showAnalyzingBanner();
+    chrome.runtime.sendMessage({ type: "analyzeWithLLM", payload: payload });
+  }
+
+  // -------------------------------------------------------------------------
   // QR-code extraction — quishing (QR phishing) context for the analyzer
   // -------------------------------------------------------------------------
 
@@ -600,8 +640,7 @@
     var payload = buildAnalysisPayload("clickfix-content");
     payload.clipboardPayload = text.substring(0, 1024);
     payload.clipboardSource = source;
-    showAnalyzingBanner();
-    chrome.runtime.sendMessage({ type: "analyzeWithLLM", payload: payload });
+    requestLLMAnalysis(payload);
   }
 
   window.addEventListener("message", function (ev) {
@@ -659,8 +698,7 @@
     // buildAnalysisPayload already ran extractQRCodes; ensure the decoded
     // list is attached even if the size-gate inside it changed.
     if (!payload.qrCodes) payload.qrCodes = qrCodes;
-    showAnalyzingBanner();
-    chrome.runtime.sendMessage({ type: "analyzeWithLLM", payload: payload });
+    requestLLMAnalysis(payload);
   }
 
   // -------------------------------------------------------------------------
@@ -838,8 +876,7 @@
 
     var payload = buildAnalysisPayload("suspicious-links");
     payload.suspiciousLinks = suspiciousLinks;
-    showAnalyzingBanner();
-    chrome.runtime.sendMessage({ type: "analyzeWithLLM", payload: payload });
+    requestLLMAnalysis(payload);
   }
 
   // -------------------------------------------------------------------------
@@ -869,11 +906,7 @@
 
     scamReported = true;
     var payload = buildAnalysisPayload("scam-content");
-    showAnalyzingBanner();
-    chrome.runtime.sendMessage({
-      type: "analyzeWithLLM",
-      payload: payload,
-    });
+    requestLLMAnalysis(payload);
   }
 
   // -------------------------------------------------------------------------
@@ -964,11 +997,7 @@
     var payload = buildAnalysisPayload("form-present");
     payload.formSummaries = formSummaries;
     if (freeHosting) payload.freeHostingPlatform = freeHosting;
-    showAnalyzingBanner();
-    chrome.runtime.sendMessage({
-      type: "analyzeWithLLM",
-      payload: payload,
-    });
+    requestLLMAnalysis(payload);
   }
 
   function getDomain() {

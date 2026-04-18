@@ -472,6 +472,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     domainsReady.then(async () => {
       if (isDomainPopular(message.payload.domain)) return;
 
+      // Respect user "I trust this site" decisions. Without this, the
+      // password-field scanner early-outs but forms/scam/links/QR/clickfix
+      // scanners still fire analyzeWithLLM and re-show the banner.
+      const trusted = await getTrustedDomains();
+      const domain = message.payload.domain;
+      const isTrusted =
+        trusted.includes(domain) ||
+        trusted.includes(getRegistrableDomain(domain));
+      if (isTrusted) {
+        console.log(`[Phishing Guard] skipping analysis — ${domain} is user-trusted`);
+        return;
+      }
+
       // Ensure we have a token before analyzing
       const registered = await ensureRegistered();
       if (!registered) {
