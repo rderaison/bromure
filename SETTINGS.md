@@ -86,7 +86,7 @@ Controls what the browser can access and share.
 | Setting | Description |
 |---|---|
 | **Block Malware Sites** | Blocks access to websites known to distribute viruses or steal information by routing DNS queries through Cloudflare's security-filtered resolvers (1.1.1.2 / 1.0.0.2). |
-| **Phishing Warning** (Beta) | Shows an in-browser warning banner when you are about to enter a password on a suspicious website. Uses a Chromium extension that compares the site against the Tranco top-10k domains list. This is a rough heuristic and will produce false positives. |
+| **AI Phishing Detection** (Beta) | Analyzes pages with an AI model to catch scams and phishing before you act on them. The page's URL, visible text, and form structure are sent to a Bromure analysis server for scoring — data leaves the local VM. |
 | **Use macOS Passkeys** | Sign in to websites using passkeys stored on your Mac. Each request requires Touch ID or password approval. |
 | **Use macOS Passwords** | Autofill usernames and passwords from your Mac's saved passwords and iCloud Keychain. Disables Chromium's built-in password manager. |
 | **Block Screen Capture** | Hides this browser window from screenshots, screen recordings, and screen sharing apps like Zoom. Useful when sharing your screen in a meeting while keeping a browser session private. |
@@ -120,6 +120,16 @@ Network privacy and ad blocking.
 | **WireGuard** | Routes all browser traffic through a WireGuard tunnel running inside the disposable VM. Works with any WireGuard provider (Mullvad, ProtonVPN, a self-hosted server, etc.). Select this option to reveal the configuration editor. |
 | **WireGuard Configuration** | The `.conf` file content for the WireGuard tunnel. Paste the file contents directly into the text editor or use the **Import .conf File…** button to load it from disk. Only visible when WireGuard is selected as the VPN mode. |
 | **Connect on Startup** | When WARP or WireGuard is enabled, automatically connect the VPN when the browser session starts. You can always toggle it from the VPN button in the window's titlebar. |
+| **IKEv2** | Routes all browser traffic through an IKEv2/IPsec tunnel running inside the disposable VM. Works with any standards-compliant IKEv2 server (Cisco, Juniper, strongSwan, Windows Server, etc.). Select this option to reveal the IKEv2 configuration fields. |
+| **IKEv2 — Server Address** | Hostname or IP address of the IKEv2 gateway. |
+| **IKEv2 — Remote ID** | IKE identity sent by the gateway. Leave empty to use the server address as the remote ID. |
+| **IKEv2 — User Authentication** | Authentication method: **Username** (EAP — username + password), **Certificate** (a `.p12`/`.pfx` client certificate), or **None (PSK)** (a pre-shared secret). |
+| **IKEv2 — Username / Password** | Credentials for EAP authentication. Stored in your macOS Keychain, not in the profile file. Visible only when Username authentication is selected. |
+| **IKEv2 — Shared Secret** | Pre-shared key for PSK authentication. Stored in your macOS Keychain. Visible only when None (PSK) is selected. |
+| **IKEv2 — Certificate / Passphrase** | Client certificate (`.p12` or `.pfx`) and its passphrase for certificate-based authentication. Stored in your macOS Keychain. Visible only when Certificate authentication is selected. |
+| **IKEv2 — VPN Proxy** | Route browser traffic through an HTTP proxy reachable inside the VPN tunnel. Enter a hostname and port; username and password fields appear when a hostname is set. |
+| **IKEv2 — Use VPN DNS** | Use DNS servers pushed by the IKEv2 gateway, preventing DNS leaks outside the tunnel. |
+| **IKEv2 — Connect on Startup** | Automatically connect the IKEv2 tunnel when the browser session starts. You can always toggle it from the window's VPN button. |
 | **Block Ads** | Blocks ads and tracking scripts at the network layer using a built-in DNS sinkhole and Squid proxy. Ads are intercepted before they reach the browser. |
 
 > **Note:** If an HTTP proxy is configured in the Enterprise tab, both WARP and ad blocking are disabled.
@@ -158,6 +168,12 @@ Additional options for power users.
 
 Global settings that apply to all profiles and sessions. Opened via the Bromure menu or keyboard shortcut.
 
+### General
+
+| Setting | Description |
+|---|---|
+| **Default Profile for Links** | When Bromure is your default browser, links clicked in other apps open with this profile. Choose "Ask Every Time" to pick a profile on each click. |
+
 ### Hardware
 
 Resources allocated to each browser session.
@@ -167,6 +183,7 @@ Resources allocated to each browser session.
 | **Memory** | RAM allocated to each VM. Options: 1 GB, 2 GB (default), 3 GB, 4 GB, 8 GB, 16 GB. 2 GB is sufficient for most browsing. WARP requires at least 2 GB. |
 | **CPU Cores** | Number of CPU cores assigned to each VM. "Automatic" (default) allocates 2 cores per GB of memory, up to the number of cores on your Mac. |
 | **Kernel Boot Options** | Additional Linux kernel command-line parameters appended to the VM boot command. The default (`arm64.nosme`) disables SME to work around a crash on Apple M4 processors. A warning appears if you change this from the default. |
+| **Energy Mode** | Controls when idle browser sessions pause to save battery. **Automatic** follows your Mac's Low Power Mode. **Low Power** pauses idle sessions after 3 minutes of inactivity regardless of system power state. **High Power** never pauses sessions. |
 
 ### Input
 
@@ -196,6 +213,7 @@ Connection mode and DNS settings. These settings are rarely needed -- the defaul
 | **Connection Mode** | **NAT** (default): The VM shares your Mac's network connection. **Bridged**: The VM gets its own IP address on your physical network. Bridged mode disables LAN isolation and port restriction. |
 | **Network Interface** | When using bridged mode, select which physical network interface the VM bridges to. |
 | **DNS Servers** | Override the DNS servers used inside the VM. Only applies in NAT mode. Leave empty to use your Mac's default DNS. |
+| **Phishing Analysis Server** | URL of the server used for AI-powered phishing detection. Defaults to the Bromure-hosted analysis endpoint. Change this to point at a self-hosted instance. |
 
 ### Automation
 
