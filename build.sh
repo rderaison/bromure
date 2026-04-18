@@ -71,6 +71,37 @@ for bundle in "$BUILD_DIR"/*.bundle; do
     [ -e "$bundle" ] && cp -R "$bundle" "$RESOURCES_DIR/"
 done
 
+# Copy SPM-provided frameworks (Sparkle, etc.) so dyld can resolve them
+# via @rpath at runtime. The SPM build leaves them alongside the binary
+# but doesn't relocate them into the bundle.
+FRAMEWORKS_DIR="$CONTENTS/Frameworks"
+for fw in "$BUILD_DIR"/*.framework; do
+    if [ -d "$fw" ]; then
+        mkdir -p "$FRAMEWORKS_DIR"
+        cp -R "$fw" "$FRAMEWORKS_DIR/"
+    fi
+done
+
+# Sign nested frameworks before the outer bundle — codesign validates
+# contained bundles even when not explicitly deep-signing, so missing
+# or mismatched sub-signatures fail the outer sign.
+if [ -d "$FRAMEWORKS_DIR" ]; then
+    for fw in "$FRAMEWORKS_DIR"/*.framework; do
+        [ -d "$fw" ] || continue
+        VB="$fw/Versions/B"
+        [ -d "$VB" ] || VB="$fw/Versions/A"
+        if [ -d "$VB/XPCServices" ]; then
+            for xpc in "$VB/XPCServices"/*.xpc; do
+                [ -e "$xpc" ] && codesign --force --sign "$SIGN_ID" "$xpc"
+            done
+        fi
+        for helper in "$VB/Autoupdate" "$VB/Updater.app"; do
+            [ -e "$helper" ] && codesign --force --sign "$SIGN_ID" "$helper"
+        done
+        codesign --force --sign "$SIGN_ID" "$fw"
+    done
+fi
+
 # Copy localization .lproj directories into the app bundle so Bundle.main can find them.
 # SwiftUI looks up localized strings in Bundle.main, not Bundle.module.
 for lproj in "$BUILD_DIR"/bromure_bromure.bundle/*.lproj; do

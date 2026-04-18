@@ -109,9 +109,47 @@ for lproj in "$BUILD_DIR"/bromure_bromure.bundle/*.lproj; do
     [ -d "$lproj" ] && cp -R "$lproj" "$RESOURCES_DIR/"
 done
 
+# Copy SPM-provided frameworks (Sparkle, etc.) into Contents/Frameworks.
+FRAMEWORKS_DIR="$CONTENTS/Frameworks"
+for fw in "$BUILD_DIR"/*.framework; do
+    if [ -d "$fw" ]; then
+        mkdir -p "$FRAMEWORKS_DIR"
+        cp -R "$fw" "$FRAMEWORKS_DIR/"
+    fi
+done
+
 # --- Sign ---
 echo "=== Signing with: $DEVELOPER_ID ==="
 
+# Sign nested code inside any embedded frameworks first (inside-out ordering
+# is required for notarisation). Sparkle.framework ships helper tools and
+# XPC services that each need their own signature with the hardened runtime
+# option before we sign the framework bundle itself.
+if [ -d "$FRAMEWORKS_DIR" ]; then
+    for fw in "$FRAMEWORKS_DIR"/*.framework; do
+        [ -d "$fw" ] || continue
+        VB="$fw/Versions/B"
+        [ -d "$VB" ] || VB="$fw/Versions/A"
+
+        # XPC services
+        if [ -d "$VB/XPCServices" ]; then
+            for xpc in "$VB/XPCServices"/*.xpc; do
+                [ -e "$xpc" ] && codesign --force --options runtime \
+                    --timestamp --sign "$DEVELOPER_ID" "$xpc"
+            done
+        fi
+        # Helper tools (Sparkle's Autoupdate, Updater.app, etc.)
+        for helper in "$VB/Autoupdate" "$VB/Updater.app"; do
+            [ -e "$helper" ] && codesign --force --options runtime \
+                --timestamp --sign "$DEVELOPER_ID" "$helper"
+        done
+        # Framework bundle itself (last within the framework).
+        codesign --force --options runtime \
+            --timestamp --sign "$DEVELOPER_ID" "$fw"
+    done
+fi
+
+# Finally sign the outer app with entitlements.
 codesign --force --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$DEVELOPER_ID" \
