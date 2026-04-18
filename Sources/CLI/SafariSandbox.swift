@@ -1419,6 +1419,7 @@ final class BrowserSession {
     private(set) var traceBridge: TraceBridge?
     private var keyboardBridge: KeyboardBridge?
     private var cjkInputBridge: CJKInputBridge?
+    private var gestureBridge: GestureBridge?
     private(set) var autoSuspend: VMAutoSuspend?
     private var traceWindow: NSWindow?
     private var traceRecordButton: NSButton?
@@ -1777,6 +1778,18 @@ final class BrowserSession {
             let bridge = MainActor.assumeIsolated { CJKInputBridge(socketDevice: dev) }
             MainActor.assumeIsolated { bridge.install(in: window, vmView: vmView) }
             self.cjkInputBridge = bridge
+        }
+
+        // Pinch-to-zoom: forward trackpad magnify gestures to Chromium as
+        // synthetic Ctrl+wheel events (VZ's USB pointing device drops them).
+        if let dev = linkSocketDevice {
+            let bridge = MainActor.assumeIsolated { GestureBridge(socketDevice: dev) }
+            self.gestureBridge = bridge
+            MainActor.assumeIsolated {
+                dropTarget.onMagnify = { [weak bridge] delta, guestX, guestY in
+                    bridge?.sendPinchZoom(magnification: delta, guestX: guestX, guestY: guestY)
+                }
+            }
         }
 
         // Auto-suspend on idle — whether idle actually triggers a suspend is
@@ -2998,6 +3011,9 @@ private final class VMDropTargetView: NSView {
     var onDragEnter: ((Int, Int) -> Void)?
     var onDragMove: ((Int, Int) -> Void)?
     var onDragExit: (() -> Void)?
+    /// Fires on each trackpad pinch tick. `magnification` is the per-event
+    /// delta (positive = pinch-out = zoom in), coords are guest display-space.
+    var onMagnify: ((Double, Int, Int) -> Void)?
 
     /// Throttle draggingUpdated to avoid flooding the vsock channel.
     private var lastMoveTime: CFAbsoluteTime = 0
@@ -3017,15 +3033,41 @@ private final class VMDropTargetView: NSView {
             vmView.leadingAnchor.constraint(equalTo: leadingAnchor),
             vmView.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
+
+        // Pinch-to-zoom: VZ's USB pointing device has no gesture channel, so
+        // catch pinches here and forward each tick via GestureBridge. The
+        // recognizer lives on the parent (rather than the VZ view) because
+        // gesture recognizers on an NSView receive events from any subview.
+        let magnify = NSMagnificationGestureRecognizer(target: self, action: #selector(handleMagnify(_:)))
+        addGestureRecognizer(magnify)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private func guestCoordinates(from sender: NSDraggingInfo) -> (Int, Int) {
-        let pt = convert(sender.draggingLocation, from: nil)
-        let guestX = Int(pt.x * CGFloat(displayWidth) / bounds.width)
-        let guestY = Int((bounds.height - pt.y) * CGFloat(displayHeight) / bounds.height)
+    private func guestCoordinates(for point: NSPoint) -> (Int, Int) {
+        let guestX = Int(point.x * CGFloat(displayWidth) / bounds.width)
+        let guestY = Int((bounds.height - point.y) * CGFloat(displayHeight) / bounds.height)
         return (guestX, guestY)
+    }
+
+    private func guestCoordinates(from sender: NSDraggingInfo) -> (Int, Int) {
+        guestCoordinates(for: convert(sender.draggingLocation, from: nil))
+    }
+
+    @objc private func handleMagnify(_ recognizer: NSMagnificationGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            recognizer.magnification = 0
+        case .changed:
+            let delta = Double(recognizer.magnification)
+            // Reset so the next .changed reads as a pure delta, not cumulative.
+            recognizer.magnification = 0
+            guard abs(delta) > 0.0001 else { return }
+            let (gx, gy) = guestCoordinates(for: recognizer.location(in: self))
+            onMagnify?(delta, gx, gy)
+        default:
+            break
+        }
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {

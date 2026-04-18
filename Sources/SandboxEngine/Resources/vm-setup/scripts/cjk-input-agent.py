@@ -1,18 +1,20 @@
 #!/usr/bin/python3 -u
-"""Bromure CJK input agent — bridges macOS IME to Chromium via CDP.
+"""Bromure Chromium input agent — injects host input events via CDP.
 
 Runs inside the guest VM. The host sends JSON messages over vsock port 5007:
 
-  {"type": "compose", "text": "みち"}   → show inline composition (underlined)
-  {"type": "commit",  "text": "道"}     → insert final committed text
-  {"type": "clear"}                     → cancel composition
+  {"type": "compose", "text": "みち"}              → inline IME composition
+  {"type": "commit",  "text": "道"}                → insert final committed text
+  {"type": "clear"}                                → cancel composition
+  {"type": "rawKeyDown"|"keyUp"|"char", ...}       → passthrough key event
+  {"type": "wheel", "x", "y", "deltaX", "deltaY",  → synthetic mouse-wheel
+                    "ctrl", ...}                     (used for pinch-to-zoom)
 
 The agent translates these into Chrome DevTools Protocol calls:
-  - Input.imeSetComposition  (compose)
+  - Input.imeSetComposition  (compose / clear)
   - Input.insertText         (commit)
-
-This gives CJK users a native macOS IME experience with inline composition
-display inside the browser.
+  - Input.dispatchKeyEvent   (keyDown / keyUp / rawKeyDown / char)
+  - Input.dispatchMouseEvent (wheel)
 
 Started at boot via inittab (runs as chrome user).
 """
@@ -24,6 +26,7 @@ import os
 import socket
 import struct
 import sys
+import threading
 import time
 
 VSOCK_PORT = 5007
@@ -146,11 +149,32 @@ def ws_recv(sock):
 # ---------------------------------------------------------------------------
 
 class CDPClient:
-    """Minimal Chrome DevTools Protocol client."""
+    """Minimal Chrome DevTools Protocol client.
+
+    Design note: the response-drain path runs on a dedicated blocking
+    reader thread rather than a per-send non-blocking drain. The previous
+    non-blocking approach used `ws_recv` against a non-blocking socket;
+    when a response frame arrived split across two kernel-buffer deliveries
+    (rare at low rates, common at ~60 Hz pinch-zoom), `read_exact` would
+    consume the header bytes, then raise `BlockingIOError` mid-payload,
+    leaving the WebSocket stream in a corrupt half-parsed state. The next
+    read would interpret random payload bytes as a frame header and
+    eventually raise `OSError`, which was silently caught and closed the
+    socket — breaking all subsequent CDP sends with no log trace.
+    """
 
     def __init__(self):
         self.sock = None
         self.msg_id = 0
+        # Serialises writes against the reader thread's pong response in
+        # ws_recv. Individual WebSocket frames must be delivered atomically
+        # or the peer sees garbage.
+        self._send_lock = threading.Lock()
+        # Chromium's devicePixelRatio — host sends coordinates in guest device
+        # pixels (matching the X11/Xorg framebuffer), but CDP expects CSS
+        # pixels (= device / DPR). Queried once at connect time; defaults to
+        # 1.0 if the query fails.
+        self.dpr = 1.0
 
     def connect(self):
         """Connect to Chromium's first page target via CDP WebSocket."""
@@ -173,34 +197,78 @@ class CDPClient:
 
         self.sock = ws_connect(ws_url)
 
+        # Synchronously probe devicePixelRatio BEFORE spawning the drain
+        # thread (otherwise the drain would consume our reply). Chromium
+        # typically runs at --force-device-scale-factor=2 here, so coords
+        # from the host — which are in guest device pixels — must be
+        # divided by 2 before being dispatched as CSS-pixel CDP events.
+        try:
+            probe = json.dumps({
+                "id": 0,
+                "method": "Runtime.evaluate",
+                "params": {"expression": "devicePixelRatio", "returnByValue": True},
+            })
+            ws_send(self.sock, probe)
+            for _ in range(10):
+                raw = ws_recv(self.sock)
+                try:
+                    msg = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode("utf-8"))
+                except (ValueError, AttributeError):
+                    continue
+                if msg.get("id") == 0:
+                    value = msg.get("result", {}).get("result", {}).get("value")
+                    if isinstance(value, (int, float)) and value > 0:
+                        self.dpr = float(value)
+                    break
+            # msg_id stays where it was — probe used id=0 which can't collide.
+            print(f"cjk-input-agent: DPR={self.dpr}", file=sys.stderr)
+        except (OSError, ConnectionError, ValueError) as e:
+            print(f"cjk-input-agent: DPR probe failed ({e}); assuming 1.0", file=sys.stderr)
+            self.dpr = 1.0
+
+        # Spawn a blocking reader that continuously drains response frames.
+        # Running it on a thread (instead of draining in `send`) avoids the
+        # non-blocking partial-frame corruption described in the class
+        # docstring. Binding to the local `sock` value makes the loop exit
+        # cleanly if `self.sock` is swapped out by `close()` or reconnect.
+        sock = self.sock
+        def drain():
+            try:
+                while self.sock is sock:
+                    ws_recv(sock)
+            except (ConnectionError, OSError):
+                pass
+            if self.sock is sock:
+                self.sock = None
+            try:
+                sock.close()
+            except OSError:
+                pass
+        threading.Thread(target=drain, daemon=True).start()
+
     def send(self, method, params=None):
         """Send a CDP command (fire-and-forget)."""
-        if not self.sock:
+        sock = self.sock
+        if not sock:
             return
         self.msg_id += 1
         msg = {"id": self.msg_id, "method": method}
         if params:
             msg["params"] = params
-        ws_send(self.sock, json.dumps(msg))
-        # Drain the response (we don't need it but must read to avoid backpressure)
         try:
-            self.sock.setblocking(False)
-            try:
-                ws_recv(self.sock)
-            except BlockingIOError:
-                pass
-            finally:
-                self.sock.setblocking(True)
-        except Exception:
-            pass
+            with self._send_lock:
+                ws_send(sock, json.dumps(msg))
+        except (OSError, ConnectionError):
+            self.close()
 
     def close(self):
-        if self.sock:
+        sock = self.sock
+        self.sock = None
+        if sock:
             try:
-                self.sock.close()
+                sock.close()
             except OSError:
                 pass
-            self.sock = None
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +321,37 @@ def handle_message(cdp, msg):
         if modifiers:
             params["modifiers"] = modifiers
         cdp.send("Input.dispatchKeyEvent", params)
+    elif msg_type == "wheel":
+        # Synthetic mouse-wheel (used for trackpad pinch-to-zoom on the host).
+        # Host coords are in guest DEVICE pixels; CDP expects CSS pixels.
+        # `document.elementFromPoint` and viewport hit-testing both work in
+        # CSS units, so sending device-pixel coordinates silently lands the
+        # wheel event outside the viewport on DPR>1 setups — Chromium acks
+        # the command but dispatches to nothing, looking exactly like the
+        # page is ignoring us.
+        try:
+            dpr = cdp.dpr or 1.0
+            params = {
+                "type": "mouseWheel",
+                "x": float(msg.get("x", 0)) / dpr,
+                "y": float(msg.get("y", 0)) / dpr,
+                "deltaX": float(msg.get("deltaX", 0)),
+                "deltaY": float(msg.get("deltaY", 0)),
+            }
+        except (TypeError, ValueError):
+            return
+        # Use CDP-correct modifier bits here (Alt=1, Ctrl=2, Meta=4, Shift=8).
+        # The key-event path above intentionally swaps Ctrl/Meta to remap
+        # macOS Cmd → Linux Ctrl, but for wheel zoom we need the literal Ctrl
+        # bit so Chromium triggers page zoom (and web apps see ctrlKey=true).
+        wheel_mods = 0
+        if msg.get("alt"):   wheel_mods |= 1
+        if msg.get("ctrl"):  wheel_mods |= 2
+        if msg.get("meta"):  wheel_mods |= 4
+        if msg.get("shift"): wheel_mods |= 8
+        if wheel_mods:
+            params["modifiers"] = wheel_mods
+        cdp.send("Input.dispatchMouseEvent", params)
     else:
         print(f"cjk-input-agent: unknown message type: {msg_type}", file=sys.stderr)
 
@@ -297,6 +396,15 @@ def main():
             while True:
                 conn, _ = srv.accept()
                 try:
+                    # Transparent reconnect: the background reader thread
+                    # clears cdp.sock when CDP closes (peer shutdown, read
+                    # error, etc.). Without this check we'd keep accepting
+                    # vsock messages and silently drop every one forever
+                    # because cdp.send() bails early on a None socket.
+                    if not cdp.sock:
+                        cdp.connect()
+                        print("cjk-input-agent: reconnected to CDP", file=sys.stderr)
+
                     data = conn.recv(4096)
                     if not data:
                         continue
