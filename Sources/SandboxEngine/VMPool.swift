@@ -595,11 +595,66 @@ public final class VMPool {
         }
         if let allowedPorts = config.allowedPorts {
             if let filter = warm.networkFilter {
-                filter.activatePortFiltering(allowedPorts)
+                // If a VPN is configured, its tunnel endpoint must stay
+                // reachable regardless of how strict the user's allowlist is —
+                // otherwise locking the list to e.g. "80,443" would prevent
+                // WARP / WireGuard / IKEv2 from ever connecting.
+                let vpnPorts = Self.vpnEndpointPorts(for: config)
+                let merged: String
+                if vpnPorts.isEmpty {
+                    merged = allowedPorts
+                } else {
+                    let vpnSpec = vpnPorts.map(String.init).joined(separator: ",")
+                    merged = allowedPorts.isEmpty ? vpnSpec : "\(allowedPorts),\(vpnSpec)"
+                }
+                filter.activatePortFiltering(merged)
             }
         }
 
         return warm
+    }
+
+    /// Ports the restrict-outgoing-ports filter must always allow so the
+    /// configured VPN can establish its tunnel. Pure function — safe to call
+    /// from any context.
+    nonisolated static func vpnEndpointPorts(for config: VMConfig) -> [UInt16] {
+        switch config.vpnMode {
+        case .none:
+            return []
+        case .cloudflareWarp:
+            // WARP's MASQUE tunnel runs over UDP/2408.
+            return [2408]
+        case .wireGuard:
+            // Parse the `Endpoint = host:port` line(s) from the .conf.
+            // Fall back to WireGuard's conventional port if missing.
+            guard let conf = config.wireGuardConfig, !conf.isEmpty else { return [51820] }
+            let ports = parseWireGuardEndpointPorts(conf)
+            return ports.isEmpty ? [51820] : ports
+        case .ikev2:
+            // strongSwan defaults: IKE on UDP/500, NAT traversal on UDP/4500.
+            return [500, 4500]
+        }
+    }
+
+    nonisolated private static func parseWireGuardEndpointPorts(_ conf: String) -> [UInt16] {
+        var ports: [UInt16] = []
+        for line in conf.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.lowercased().hasPrefix("endpoint") else { continue }
+            guard let eq = trimmed.firstIndex(of: "=") else { continue }
+            let value = trimmed[trimmed.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            // IPv6 endpoints look like [::1]:51820; strip the bracketed host.
+            let portPart: Substring
+            if value.hasPrefix("["), let closeBracket = value.firstIndex(of: "]") {
+                portPart = value[value.index(after: closeBracket)...].drop(while: { $0 == ":" })
+            } else if let lastColon = value.lastIndex(of: ":") {
+                portPart = value[value.index(after: lastColon)...]
+            } else {
+                continue
+            }
+            if let port = UInt16(portPart) { ports.append(port) }
+        }
+        return ports
     }
 
     /// Shut down the pool and clean up.

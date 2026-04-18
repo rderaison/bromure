@@ -1500,3 +1500,79 @@ struct E2EIntegrationTests {
         #expect(result.exitCode == 0, "stress.mjs failed with exit code \(result.exitCode)")
     }
 }
+
+// MARK: - VPN endpoint port allowlisting
+
+@Suite("VPN endpoint ports for port restriction")
+struct VPNEndpointPortTests {
+    private func config(
+        vpnMode: VPNMode,
+        wireGuardConfig: String? = nil
+    ) -> VMConfig {
+        VMConfig(
+            vpnMode: vpnMode,
+            warpAutoConnect: false,
+            wireGuardConfig: wireGuardConfig,
+            wireGuardAutoConnect: false
+        )
+    }
+
+    @Test(".none returns no extra ports")
+    func noneReturnsEmpty() {
+        #expect(VMPool.vpnEndpointPorts(for: config(vpnMode: .none)) == [])
+    }
+
+    @Test("Cloudflare WARP pins UDP/2408")
+    func warpReturnsMasquePort() {
+        #expect(VMPool.vpnEndpointPorts(for: config(vpnMode: .cloudflareWarp)) == [2408])
+    }
+
+    @Test("IKEv2 pins UDP/500 and UDP/4500")
+    func ikev2ReturnsStandardPorts() {
+        #expect(VMPool.vpnEndpointPorts(for: config(vpnMode: .ikev2)) == [500, 4500])
+    }
+
+    @Test("WireGuard with no config falls back to 51820")
+    func wireGuardFallback() {
+        #expect(VMPool.vpnEndpointPorts(for: config(vpnMode: .wireGuard)) == [51820])
+    }
+
+    @Test("WireGuard extracts IPv4 Endpoint port")
+    func wireGuardExtractsIPv4Port() {
+        let conf = """
+        [Interface]
+        PrivateKey = abc=
+
+        [Peer]
+        Endpoint = vpn.example.com:51822
+        """
+        #expect(VMPool.vpnEndpointPorts(for: config(vpnMode: .wireGuard, wireGuardConfig: conf)) == [51822])
+    }
+
+    @Test("WireGuard extracts IPv6 Endpoint port")
+    func wireGuardExtractsIPv6Port() {
+        let conf = """
+        [Peer]
+        Endpoint = [2001:db8::1]:1234
+        """
+        #expect(VMPool.vpnEndpointPorts(for: config(vpnMode: .wireGuard, wireGuardConfig: conf)) == [1234])
+    }
+
+    @Test("WireGuard extracts ports from multiple peers")
+    func wireGuardExtractsMultiplePorts() {
+        let conf = """
+        [Peer]
+        Endpoint = a.example.com:1111
+
+        [Peer]
+        Endpoint = b.example.com:2222
+        """
+        #expect(VMPool.vpnEndpointPorts(for: config(vpnMode: .wireGuard, wireGuardConfig: conf)) == [1111, 2222])
+    }
+
+    @Test("WireGuard parser is case-insensitive on key")
+    func wireGuardCaseInsensitive() {
+        let conf = "endpoint = vpn.example.com:9999"
+        #expect(VMPool.vpnEndpointPorts(for: config(vpnMode: .wireGuard, wireGuardConfig: conf)) == [9999])
+    }
+}
