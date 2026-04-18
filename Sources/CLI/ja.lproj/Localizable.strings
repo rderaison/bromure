@@ -193,6 +193,11 @@
 "CPU Cores" = "CPUコア数";
 "Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac." = "ブラウザで使用可能なプロセッサコアの数です。「自動」はメモリに応じて調整され（1 GBあたり2コア）、このMacのコア数が上限となります。";
 "Automatic (%lld)" = "自動（%lld）";
+"Energy Mode" = "エネルギーモード";
+"Controls when idle browser sessions pause to save battery. Automatic follows your Mac\U2019s Low Power Mode. Low Power pauses after 3 minutes of inactivity regardless. High Power never pauses." = "アイドル状態のブラウザセッションを一時停止してバッテリーを節約するタイミングを制御します。「自動」はMacの低電力モードに従います。「省エネ」はMacの設定に関係なく、3分間操作がないと一時停止します。「高パフォーマンス」は一時停止しません。";
+"High Power" = "高パフォーマンス";
+"Automatic" = "自動";
+"Low Power" = "省エネ";
 "Changes take effect when the next browser session starts." = "変更は次のブラウザセッションの開始時に反映されます。";
 
 /* SettingsView — Input */

@@ -193,6 +193,11 @@
 "CPU Cores" = "CPU-Kerne";
 "Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac." = "Anzahl der Prozessorkerne, die dem Browser zur Verf\U00FCgung stehen. \U201CAutomatisch\U201D skaliert mit dem Arbeitsspeicher (2 Kerne pro GB), bis zur Anzahl der Kerne dieses Mac.";
 "Automatic (%lld)" = "Automatisch (%lld)";
+"Energy Mode" = "Energiemodus";
+"Controls when idle browser sessions pause to save battery. Automatic follows your Mac\U2019s Low Power Mode. Low Power pauses after 3 minutes of inactivity regardless. High Power never pauses." = "Legt fest, wann inaktive Browsersitzungen pausiert werden, um Akku zu sparen. \U201EAutomatisch\U201C folgt dem Stromsparmodus deines Mac. \U201EEnergiesparen\U201C pausiert nach 3 Minuten Inaktivit\U00E4t unabh\U00E4ngig davon. \U201EHohe Leistung\U201C pausiert nie.";
+"High Power" = "Hohe Leistung";
+"Automatic" = "Automatisch";
+"Low Power" = "Energiesparen";
 "Changes take effect when the next browser session starts." = "\U00C4nderungen werden beim n\U00E4chsten Start einer Browsersitzung wirksam.";
 
 /* SettingsView — Input */

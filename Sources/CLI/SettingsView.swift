@@ -48,6 +48,7 @@ struct SettingsView: View {
     @AppStorage("vm.networkMode") private var networkMode = "nat"
     @AppStorage("vm.bridgedInterface") private var bridgedInterface = ""
     @AppStorage("vm.extraKernelOptions") private var extraKernelOptions = VMConfig.defaultExtraKernelOptions
+    @AppStorage("vm.energyMode") private var energyMode = EnergyMode.default.rawValue
     @AppStorage("automation.enabled") private var automationEnabled = false
     @AppStorage("automation.port") private var automationPort = 9222
     @AppStorage("automation.bindAddress") private var automationBindAddress = "127.0.0.1"
@@ -228,6 +229,21 @@ struct SettingsView: View {
                     ForEach(1...ProcessInfo.processInfo.processorCount, id: \.self) { n in
                         Text("\(n)").tag(n)
                     }
+                }
+                .labelsHidden()
+                .frame(width: 200)
+            }
+
+            settingsDivider
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Energy Mode").font(.headline)
+                Text("Controls when idle browser sessions pause to save battery. Automatic follows your Mac\u{2019}s Low Power Mode. Low Power pauses after 3 minutes of inactivity regardless. High Power never pauses.")
+                    .settingDescription()
+                Picker("", selection: $energyMode) {
+                    Text("High Power").tag(EnergyMode.highPower.rawValue)
+                    Text("Automatic").tag(EnergyMode.automatic.rawValue)
+                    Text("Low Power").tag(EnergyMode.lowPower.rawValue)
                 }
                 .labelsHidden()
                 .frame(width: 200)

@@ -920,18 +920,36 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         server.onGetCDPConnection = { [weak self] sessionID in
             guard let self else { return nil }
-            guard let session = self.sessions.first(where: { $0.id.uuidString == sessionID }),
-                  let conn = session.cdpBridge?.dequeueConnection() else { return nil }
-            session.autoSuspend?.resumeForAPIRequest()
-            return CDPProxyConnection(fd: conn.fileDescriptor, conn: conn)
+            guard let session = self.sessions.first(where: { $0.id.uuidString == sessionID }) else { return nil }
+            // Resume BEFORE dequeue: if the VM is suspended the guest cdp-agent
+            // can't refill the connection pool, so the dequeue would return nil
+            // and we'd never wake anyone up. Always kick the VM awake when
+            // the automation API asks for a connection.
+            let autoSuspend = session.autoSuspend
+            autoSuspend?.resumeForAPIRequest()
+            guard let conn = session.cdpBridge?.dequeueConnection() else { return nil }
+            return CDPProxyConnection(
+                fd: conn.fileDescriptor,
+                conn: conn,
+                onClientActivity: { [weak autoSuspend] in
+                    Task { @MainActor in autoSuspend?.resumeForAPIRequest() }
+                }
+            )
         }
 
         server.onGetShellConnection = { [weak self] sessionID in
             guard let self else { return nil }
-            guard let session = self.sessions.first(where: { $0.id.uuidString == sessionID }),
-                  let conn = session.shellBridge?.dequeueConnection() else { return nil }
-            session.autoSuspend?.resumeForAPIRequest()
-            return ShellProxyConnection(fd: conn.fileDescriptor, conn: conn)
+            guard let session = self.sessions.first(where: { $0.id.uuidString == sessionID }) else { return nil }
+            let autoSuspend = session.autoSuspend
+            autoSuspend?.resumeForAPIRequest()
+            guard let conn = session.shellBridge?.dequeueConnection() else { return nil }
+            return ShellProxyConnection(
+                fd: conn.fileDescriptor,
+                conn: conn,
+                onClientActivity: { [weak autoSuspend] in
+                    Task { @MainActor in autoSuspend?.resumeForAPIRequest() }
+                }
+            )
         }
 
         server.onGetTrace = { [weak self] sessionID, filters in
@@ -1668,15 +1686,18 @@ final class BrowserSession {
             self.cjkInputBridge = bridge
         }
 
-        // Auto-suspend on idle — only actually suspends while macOS is in
-        // Low Power Mode (the gate lives inside VMAutoSuspend). Outside LPM
-        // it's inert, which avoids the "passive viewing" false-positive.
+        // Auto-suspend on idle — whether idle actually triggers a suspend is
+        // decided by the user's Energy Mode setting, read live each tick so
+        // the user can flip modes in Settings without restarting sessions.
         self.autoSuspend = MainActor.assumeIsolated {
             VMAutoSuspend(
                 vm: warmVM.vm,
                 window: window,
                 networkFilter: warmVM.networkFilter,
-                isMicrophoneEnabled: config.enableMicrophone
+                isMicrophoneEnabled: config.enableMicrophone,
+                modeProvider: {
+                    EnergyMode(storageValue: UserDefaults.standard.string(forKey: "vm.energyMode") ?? "")
+                }
             )
         }
 

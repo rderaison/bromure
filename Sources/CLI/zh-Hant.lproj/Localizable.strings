@@ -193,6 +193,11 @@
 "CPU Cores" = "CPU 核心數";
 "Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac." = "瀏覽器可用的處理器核心數。「自動」會隨記憶體自動調整（每 GB 2 個核心），最多不超過此 Mac 的核心數。";
 "Automatic (%lld)" = "自動（%lld）";
+"Energy Mode" = "能源模式";
+"Controls when idle browser sessions pause to save battery. Automatic follows your Mac\U2019s Low Power Mode. Low Power pauses after 3 minutes of inactivity regardless. High Power never pauses." = "控制閒置的瀏覽器工作階段何時暫停以節省電力。「自動」會跟隨 Mac 的低耗電模式。「低功耗」無論 Mac 設定為何，閒置 3 分鐘後都會暫停。「高效能」從不暫停。";
+"High Power" = "高效能";
+"Automatic" = "自動";
+"Low Power" = "低功耗";
 "Changes take effect when the next browser session starts." = "變更將在下一個瀏覽器工作階段啟動時生效。";
 
 /* SettingsView — Input */

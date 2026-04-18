@@ -193,6 +193,11 @@
 "CPU Cores" = "CPU Cores";
 "Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac." = "Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac.";
 "Automatic (%lld)" = "Automatic (%lld)";
+"Energy Mode" = "Energy Mode";
+"Controls when idle browser sessions pause to save battery. Automatic follows your Mac\U2019s Low Power Mode. Low Power pauses after 3 minutes of inactivity regardless. High Power never pauses." = "Controls when idle browser sessions pause to save battery. Automatic follows your Mac\U2019s Low Power Mode. Low Power pauses after 3 minutes of inactivity regardless. High Power never pauses.";
+"High Power" = "High Power";
+"Automatic" = "Automatic";
+"Low Power" = "Low Power";
 "Changes take effect when the next browser session starts." = "Changes take effect when the next browser session starts.";
 
 /* SettingsView — Input */

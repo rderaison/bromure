@@ -416,8 +416,10 @@ final class AutomationServer {
         // Check if this is a WebSocket upgrade (needs bidirectional bridge)
         // or a regular HTTP request (read response by Content-Length)
         if finalRequest.contains("Upgrade: websocket") {
-            // WebSocket: bridge bidirectionally until either side closes
-            Self.bridgeLoop(fd1: fd, fd2: vsockFD)
+            // WebSocket: bridge bidirectionally until either side closes.
+            // Pass the activity callback so a command sent on an idle
+            // WebSocket resumes the VM if it suspended in the meantime.
+            Self.bridgeLoop(fd1: fd, fd2: vsockFD, onFd1Activity: proxy.onClientActivity)
             Darwin.close(fd)
         } else {
             // HTTP: read response headers + body by Content-Length, then close
@@ -460,10 +462,18 @@ final class AutomationServer {
     }
 
     /// Bidirectional byte bridge between two file descriptors. Blocks until done.
-    private static func bridgeLoop(fd1: Int32, fd2: Int32) {
+    ///
+    /// - Parameter onFd1Activity: Fired (throttled) when bytes are read from
+    ///   fd1. Used to resume a suspended VM on the first client command after
+    ///   an idle WebSocket.
+    private static func bridgeLoop(fd1: Int32, fd2: Int32,
+                                   onFd1Activity: (@Sendable () -> Void)? = nil) {
         var buf = [UInt8](repeating: 0, count: 65536)
         var fds = [pollfd(fd: fd1, events: Int16(POLLIN), revents: 0),
                    pollfd(fd: fd2, events: Int16(POLLIN), revents: 0)]
+        // Throttle the activity callback to at most once per 10s — a chatty
+        // client shouldn't spam resume() calls (it's cheap but noisy).
+        var lastActivityFire: Date?
 
         while true {
             fds[0].revents = 0
@@ -477,6 +487,13 @@ final class AutomationServer {
                 let dstFD = fds[1 - i].fd
                 let n = Darwin.read(srcFD, &buf, buf.count)
                 if n <= 0 { return }
+                if i == 0, let cb = onFd1Activity {
+                    let now = Date()
+                    if lastActivityFire == nil || now.timeIntervalSince(lastActivityFire!) > 10 {
+                        lastActivityFire = now
+                        cb()
+                    }
+                }
                 let ok = buf.withUnsafeBytes { ptr in
                     writeAll(fd: dstFD, buf: ptr.baseAddress!, count: n)
                 }
@@ -586,6 +603,15 @@ struct CDPProxyConnection {
     let fd: Int32
     /// Keep alive to prevent VZ from closing the file descriptor.
     let conn: Any
+    /// Called when client-to-VM bytes are observed on the bridge, so the VM
+    /// can be resumed if it went idle while a WebSocket was open.
+    let onClientActivity: (@Sendable () -> Void)?
+
+    init(fd: Int32, conn: Any, onClientActivity: (@Sendable () -> Void)? = nil) {
+        self.fd = fd
+        self.conn = conn
+        self.onClientActivity = onClientActivity
+    }
 }
 
 struct AutomationSessionInfo {
@@ -611,6 +637,15 @@ struct ShellProxyConnection {
     let fd: Int32
     /// Keep alive to prevent VZ from closing the file descriptor.
     let conn: Any
+    /// Called when client-to-VM bytes are observed, so the VM can be resumed
+    /// if it went idle between commands on the same connection.
+    let onClientActivity: (@Sendable () -> Void)?
+
+    init(fd: Int32, conn: Any, onClientActivity: (@Sendable () -> Void)? = nil) {
+        self.fd = fd
+        self.conn = conn
+        self.onClientActivity = onClientActivity
+    }
 }
 
 struct ShellExecResult {
