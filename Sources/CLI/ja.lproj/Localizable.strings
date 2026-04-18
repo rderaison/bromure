@@ -306,12 +306,14 @@
 /* Menu — File */
 "File" = "ファイル";
 "New Browser" = "新規ブラウザ";
+"Open Trace\U2026" = "トレースを開く\U2026";
 "Recreate Base Image\U2026" = "ベースイメージを再作成\U2026";
 "Close Window" = "ウインドウを閉じる";
 
 /* Menu — View */
 "View" = "表示";
 "Toggle File Drawer" = "ファイルドロワーの表示切替";
+"VM Services" = "VMサービス";
 
 /* Menu — Edit */
 "Edit" = "編集";

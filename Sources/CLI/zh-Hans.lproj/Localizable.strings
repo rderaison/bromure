@@ -306,12 +306,14 @@
 /* Menu — File */
 "File" = "文件";
 "New Browser" = "新建浏览器";
+"Open Trace\U2026" = "打开跟踪\U2026";
 "Recreate Base Image\U2026" = "重新创建基础镜像\U2026";
 "Close Window" = "关闭窗口";
 
 /* Menu — View */
 "View" = "显示";
 "Toggle File Drawer" = "切换文件面板";
+"VM Services" = "VM 服务";
 
 /* Menu — Edit */
 "Edit" = "编辑";

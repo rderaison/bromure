@@ -306,12 +306,14 @@
 /* Menu — File */
 "File" = "Ficheiro";
 "New Browser" = "Novo navegador";
+"Open Trace\U2026" = "Abrir trace\U2026";
 "Recreate Base Image\U2026" = "Recriar imagem base\U2026";
 "Close Window" = "Fechar janela";
 
 /* Menu — View */
 "View" = "Visualização";
 "Toggle File Drawer" = "Mostrar/ocultar painel de ficheiros";
+"VM Services" = "Serviços de VM";
 
 /* Menu — Edit */
 "Edit" = "Edição";
