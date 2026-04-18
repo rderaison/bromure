@@ -6,8 +6,9 @@ const domain = params.get("domain") || "unknown";
 document.getElementById("blocked-domain").textContent = domain;
 
 document.getElementById("go-back").addEventListener("click", () => {
-  if (history.length > 1) {
-    history.back();
+  // Go back past the phishing page itself (blocked.html is current, phishing page is -1)
+  if (history.length > 2) {
+    history.go(-2);
   } else {
     chrome.tabs.update({ url: "about:blank" });
   }

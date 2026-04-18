@@ -63,6 +63,7 @@ struct ProfileSettingsView: View {
     var onSave: (Profile) -> Void
     var onCancel: () -> Void
     var onShowWarpEULA: ((@escaping () -> Void) -> Void)?
+    var onShowPhishingConsent: ((@escaping () -> Void) -> Void)?
     var initialCategory: SettingsCategory = .general
 
     // Initialized from initialCategory via init
@@ -72,6 +73,7 @@ struct ProfileSettingsView: View {
          hasActiveSession: Bool = false,
          onDeleteProfileDisk: (() -> Void)? = nil, onSave: @escaping (Profile) -> Void,
          onCancel: @escaping () -> Void, onShowWarpEULA: ((@escaping () -> Void) -> Void)? = nil,
+         onShowPhishingConsent: ((@escaping () -> Void) -> Void)? = nil,
          initialCategory: SettingsCategory = .general) {
         self._draft = State(initialValue: draft)
         self.usedColors = usedColors
@@ -81,6 +83,7 @@ struct ProfileSettingsView: View {
         self.onSave = onSave
         self.onCancel = onCancel
         self.onShowWarpEULA = onShowWarpEULA
+        self.onShowPhishingConsent = onShowPhishingConsent
         self.initialCategory = initialCategory
         self._selectedCategory = State(initialValue: initialCategory)
 
@@ -692,15 +695,22 @@ struct ProfileSettingsView: View {
             settingsDivider
 
             settingToggle(
-                "Phishing Warning",
-                description: "Shows a warning when you\u{2019}re about to enter a password on a website that looks suspicious or fake.",
+                "AI Phishing Detection",
+                description: "Analyzes pages with an AI model to catch scams and phishing before you act on them. When enabled, the page\u{2019}s URL, visible text, and form structure are sent to a Bromure analysis server for scoring \u{2014} data leaves the local VM.",
                 isOn: $draft.settings.phishingWarning,
                 badge: "Beta"
             )
             .onChange(of: draft.settings.phishingWarning) { _, newValue in
-                if newValue && !draft.settings.persistent {
+                guard newValue else { return }
+                if !draft.settings.persistent {
                     draft.settings.phishingWarning = false
                     showPhishingPersistenceAlert = true
+                    return
+                }
+                if let onShowPhishingConsent,
+                   !UserDefaults.standard.bool(forKey: "phishingConsentAccepted") {
+                    draft.settings.phishingWarning = false
+                    onShowPhishingConsent { draft.settings.phishingWarning = true }
                 }
             }
 

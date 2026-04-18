@@ -79,6 +79,273 @@ const AUTH_PROVIDER_DOMAINS = new Set([
 const pendingWarnings = new Map();
 
 // ---------------------------------------------------------------------------
+// Service state
+// ---------------------------------------------------------------------------
+
+let serviceStatus = "ok"; // "ok" | "token_limit" | "degraded"
+
+// ---------------------------------------------------------------------------
+// Native messaging connection to phishing-agent (vsock relay to host)
+// ---------------------------------------------------------------------------
+
+let nativePort = null;
+let nativeReconnectTimer = null;
+const pendingAnalyses = new Map(); // requestId -> { tabId, domain }
+const pendingRegistration = new Map(); // requestId -> resolve callback
+let analysisIdCounter = 0;
+
+function connectNative() {
+  if (nativePort) return;
+  try {
+    nativePort = chrome.runtime.connectNative("com.bromure.phishing_guard");
+  } catch (err) {
+    console.error("[Phishing Guard] Native connect failed:", err);
+    scheduleReconnect();
+    return;
+  }
+
+  nativePort.onMessage.addListener((msg) => {
+    handleNativeResponse(msg);
+  });
+
+  nativePort.onDisconnect.addListener(() => {
+    console.warn("[Phishing Guard] Native port disconnected:", chrome.runtime.lastError?.message);
+    nativePort = null;
+    pendingAnalyses.clear();
+    pendingRegistration.clear();
+    scheduleReconnect();
+  });
+}
+
+function scheduleReconnect() {
+  if (nativeReconnectTimer) return;
+  nativeReconnectTimer = setTimeout(() => {
+    nativeReconnectTimer = null;
+    connectNative();
+  }, 5000);
+}
+
+function sendToNative(msg) {
+  if (!nativePort) connectNative();
+  if (nativePort) {
+    try {
+      nativePort.postMessage(msg);
+    } catch (err) {
+      console.error("[Phishing Guard] Native send error:", err);
+      nativePort = null;
+      scheduleReconnect();
+    }
+  }
+}
+
+function handleNativeResponse(msg) {
+  // Registration responses
+  if (msg.type === "registerResult") {
+    const resolve = pendingRegistration.get(msg.requestId);
+    pendingRegistration.delete(msg.requestId);
+    if (resolve) resolve(msg);
+    return;
+  }
+
+  if (msg.type !== "analysisResult") return;
+
+  const info = pendingAnalyses.get(msg.requestId);
+  pendingAnalyses.delete(msg.requestId);
+  if (!info) return;
+
+  const { tabId, domain } = info;
+
+  // Handle rate limit / degraded responses
+  if (msg.error === "token_limit") {
+    serviceStatus = "token_limit";
+    console.warn("[Phishing Guard] Daily limit reached for this token");
+    chrome.tabs.sendMessage(tabId, {
+      type: "llmServiceStatus",
+      status: "token_limit",
+      reason: msg.reason || "Daily analysis limit reached.",
+    }).catch(() => {});
+    return;
+  }
+
+  if (msg.error === "degraded") {
+    serviceStatus = "degraded";
+    console.warn("[Phishing Guard] Service in degraded mode");
+    chrome.tabs.sendMessage(tabId, {
+      type: "llmServiceStatus",
+      status: "degraded",
+      reason: msg.reason || "Service is temporarily in degraded mode.",
+    }).catch(() => {});
+    return;
+  }
+
+  // Server doesn't recognize our token — clear it and re-register
+  if (msg.error === "invalid_token") {
+    console.warn("[Phishing Guard] Token rejected, re-registering...");
+    authToken = null;
+    chrome.storage.local.remove("phishingToken").then(() => {
+      ensureRegistered().then((ok) => {
+        if (ok && info) {
+          const retryId = "phish-" + (++analysisIdCounter);
+          pendingAnalyses.set(retryId, { tabId, domain, payload: info.payload });
+          sendToNative({
+            type: "analyze",
+            requestId: retryId,
+            token: authToken,
+            payload: info.payload,
+          });
+          setTimeout(() => pendingAnalyses.delete(retryId), 15000);
+        }
+      });
+    });
+    return;
+  }
+
+  // Reset status on successful responses
+  if (msg.verdict && msg.verdict !== "error") {
+    serviceStatus = "ok";
+  }
+
+  const verdict = msg.verdict; // "phishing", "suspicious", "safe", "error"
+
+  console.log(`[Phishing Guard] LLM response for ${domain}:`, JSON.stringify(msg));
+
+  const reason = msg.reason || "";
+
+  if (verdict === "phishing") {
+    pendingWarnings.delete(tabId);
+    chrome.tabs.sendMessage(tabId, { type: "llmVerdict", verdict: "phishing", reason }).catch(() => {});
+    redirectToBlocked(tabId, domain);
+  } else if (verdict === "suspicious") {
+    pendingWarnings.set(tabId, { domain, verdict: "suspicious", reason });
+    chrome.action.setBadgeText({ text: "!", tabId });
+    chrome.action.setBadgeBackgroundColor({ color: "#f59e0b", tabId });
+    chrome.tabs.sendMessage(tabId, { type: "llmVerdict", verdict: "suspicious", reason, confidence: msg.confidence || 0.5 }).catch(() => {});
+  } else if (verdict === "safe") {
+    pendingWarnings.delete(tabId);
+    chrome.action.setBadgeText({ text: "", tabId });
+    chrome.tabs.sendMessage(tabId, { type: "llmVerdict", verdict: "safe", reason }).catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Registration: proof-of-work based token acquisition
+// ---------------------------------------------------------------------------
+
+let authToken = null;
+let registering = false;
+
+async function loadToken() {
+  const result = await chrome.storage.local.get("phishingToken");
+  if (result.phishingToken) {
+    authToken = result.phishingToken;
+    return true;
+  }
+  return false;
+}
+
+async function ensureRegistered() {
+  if (authToken) return true;
+  if (await loadToken()) return true;
+  if (registering) return false;
+
+  registering = true;
+  try {
+    // Step 1: request challenge via native messaging → host → server
+    const challengeId = "reg-" + (++analysisIdCounter);
+    const challengeResult = await new Promise((resolve) => {
+      pendingRegistration.set(challengeId, resolve);
+      sendToNative({ type: "register", requestId: challengeId });
+      setTimeout(() => {
+        pendingRegistration.delete(challengeId);
+        resolve({ error: "timeout" });
+      }, 30000);
+    });
+
+    if (challengeResult.error || !challengeResult.challenge) {
+      console.error("[Phishing Guard] Registration challenge failed:", challengeResult.error);
+      return false;
+    }
+
+    // Step 2: solve PoW
+    console.log(`[Phishing Guard] Solving PoW (difficulty=${challengeResult.difficulty})...`);
+    const nonce = await solvePoW(challengeResult.challenge, challengeResult.difficulty);
+    console.log("[Phishing Guard] PoW solved, submitting...");
+
+    // Step 3: submit solution
+    const solveId = "reg-" + (++analysisIdCounter);
+    const solveResult = await new Promise((resolve) => {
+      pendingRegistration.set(solveId, resolve);
+      sendToNative({
+        type: "registerSolve",
+        requestId: solveId,
+        challengeId: challengeResult.challengeId,
+        nonce: nonce,
+      });
+      setTimeout(() => {
+        pendingRegistration.delete(solveId);
+        resolve({ error: "timeout" });
+      }, 15000);
+    });
+
+    if (solveResult.error || !solveResult.token) {
+      console.error("[Phishing Guard] Registration solve failed:", solveResult.error);
+      return false;
+    }
+
+    authToken = solveResult.token;
+    await chrome.storage.local.set({ phishingToken: authToken });
+    console.log("[Phishing Guard] Registered successfully");
+    return true;
+  } finally {
+    registering = false;
+  }
+}
+
+/**
+ * Solve proof-of-work: find nonce such that SHA-256(challenge + nonce)
+ * has `difficulty` leading zero bits. Runs in a chunked loop to avoid
+ * blocking the service worker.
+ */
+async function solvePoW(challenge, difficulty) {
+  const encoder = new TextEncoder();
+  const batchSize = 50000;
+  let nonce = 0;
+
+  while (true) {
+    for (let i = 0; i < batchSize; i++) {
+      const data = encoder.encode(challenge + nonce);
+      const hash = await crypto.subtle.digest("SHA-256", data);
+      if (hasLeadingZeroBits(new Uint8Array(hash), difficulty)) {
+        return nonce;
+      }
+      nonce++;
+    }
+    // Yield to event loop between batches
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
+function hasLeadingZeroBits(buf, bits) {
+  let remaining = bits;
+  for (let i = 0; i < buf.length && remaining > 0; i++) {
+    if (remaining >= 8) {
+      if (buf[i] !== 0) return false;
+      remaining -= 8;
+    } else {
+      const mask = 0xff << (8 - remaining);
+      if ((buf[i] & mask) !== 0) return false;
+      remaining = 0;
+    }
+  }
+  return true;
+}
+
+// Start registration eagerly on startup
+loadToken().then((found) => {
+  if (!found) ensureRegistered();
+});
+
+// ---------------------------------------------------------------------------
 // Domain matching
 // ---------------------------------------------------------------------------
 
@@ -101,10 +368,7 @@ function getRegistrableDomain(hostname) {
 }
 
 function isDomainPopular(hostname) {
-  const reg = getRegistrableDomain(hostname);
-  if (POPULAR_DOMAINS.has(reg)) return true;
-  // Also check the full hostname (some entries include subdomains)
-  if (POPULAR_DOMAINS.has(hostname.replace(/^www\./, ""))) return true;
+  // TODO: re-enable when phishing analysis is fully tested
   return false;
 }
 
@@ -189,6 +453,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.type === "analyzeWithLLM") {
+    const tabId = sender.tab?.id;
+    if (!tabId || !message.payload) return false;
+
+    // Don't send requests if we've hit limits
+    if (serviceStatus === "token_limit" || serviceStatus === "degraded") {
+      chrome.tabs.sendMessage(tabId, {
+        type: "llmServiceStatus",
+        status: serviceStatus,
+        reason: serviceStatus === "degraded"
+          ? "Service is temporarily in degraded mode."
+          : "Daily analysis limit reached.",
+      }).catch(() => {});
+      return false;
+    }
+
+    domainsReady.then(async () => {
+      if (isDomainPopular(message.payload.domain)) return;
+
+      // Ensure we have a token before analyzing
+      const registered = await ensureRegistered();
+      if (!registered) {
+        console.warn("[Phishing Guard] Not registered, skipping LLM analysis");
+        return;
+      }
+
+      const requestId = "phish-" + (++analysisIdCounter);
+      pendingAnalyses.set(requestId, { tabId, domain: message.payload.domain, payload: message.payload });
+
+      sendToNative({
+        type: "analyze",
+        requestId: requestId,
+        token: authToken,
+        payload: message.payload,
+      });
+
+      setTimeout(() => {
+        pendingAnalyses.delete(requestId);
+      }, 15000);
+    });
+    return false;
+  }
+
+  if (message.type === "getServiceStatus") {
+    sendResponse({ status: serviceStatus });
+    return false;
+  }
+
   return false;
 });
 
@@ -204,12 +516,14 @@ async function handlePasswordDetection(message, sender) {
   // Wait for the domain list to finish loading
   await domainsReady;
 
-  // 1. User-trusted domains
+  // 1. User-trusted domains — skip the warning banner but still run LLM analysis
   const trusted = await getTrustedDomains();
-  if (
-    trusted.includes(domain) ||
-    trusted.includes(getRegistrableDomain(domain))
-  ) {
+  console.log(`[Phishing Guard] handlePasswordDetection domain=${domain} trusted=[${trusted.join(",")}]`);
+  const isTrusted = trusted.includes(domain) || trusted.includes(getRegistrableDomain(domain));
+  if (isTrusted) {
+    console.log(`[Phishing Guard] domain ${domain} is trusted`);
+  }
+  if (isTrusted) {
     // Still check form actions even if page domain is trusted
     const crossDomain = checkFormActions(domain, formActionDomains);
     if (crossDomain) {
@@ -218,11 +532,12 @@ async function handlePasswordDetection(message, sender) {
       chrome.action.setBadgeBackgroundColor({ color: "#f59e0b", tabId });
       return { verdict: "cross-domain", domain, actionDomain: crossDomain };
     }
-    return { verdict: "safe", domain };
+    return { verdict: "trusted", domain };
   }
 
   // 2. Known-blocked (phishing patterns)
   if (isDomainBlocked(domain)) {
+    console.log(`[Phishing Guard] domain ${domain} matched blocklist — blocking`);
     pendingWarnings.set(tabId, { domain, url: message.url, verdict: "blocked" });
     redirectToBlocked(tabId, domain);
     return { verdict: "blocked", domain };
@@ -239,9 +554,11 @@ async function handlePasswordDetection(message, sender) {
 
   // 4. Popular domains (Tranco top 100k)
   if (isDomainPopular(domain)) {
+    console.log(`[Phishing Guard] domain ${domain} is popular — safe`);
     return { verdict: "safe", domain };
   }
 
+  console.log(`[Phishing Guard] domain ${domain} is unknown — will show warning`);
   // 5. First-time domain — show informational notice
   pendingWarnings.set(tabId, { domain, url: message.url, verdict: "unknown" });
   chrome.action.setBadgeText({ text: "!", tabId });

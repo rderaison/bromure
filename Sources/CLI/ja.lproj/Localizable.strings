@@ -524,3 +524,19 @@
 "Sign in to websites using passkeys stored on your Mac. Each request requires Touch ID or password approval." = "Mac\U306B\U4FDD\U5B58\U3055\U308C\U305F\U30D1\U30B9\U30AD\U30FC\U3092\U4F7F\U7528\U3057\U3066Web\U30B5\U30A4\U30C8\U306B\U30B5\U30A4\U30F3\U30A4\U30F3\U3057\U307E\U3059\U3002\U30EA\U30AF\U30A8\U30B9\U30C8\U3054\U3068\U306BTouch ID\U307E\U305F\U306F\U30D1\U30B9\U30EF\U30FC\U30C9\U306E\U627F\U8A8D\U304C\U5FC5\U8981\U3067\U3059\U3002";
 "Use macOS Passwords" = "macOS\U306E\U30D1\U30B9\U30EF\U30FC\U30C9\U3092\U4F7F\U7528";
 "Autofill usernames and passwords from your Mac\U2019s saved passwords and iCloud Keychain. Disables Chromium\U2019s built-in password manager." = "Mac\U306E\U4FDD\U5B58\U6E08\U307F\U30D1\U30B9\U30EF\U30FC\U30C9\U3068iCloud\U30AD\U30FC\U30C1\U30A7\U30FC\U30F3\U304B\U3089\U30E6\U30FC\U30B6\U30FC\U540D\U3068\U30D1\U30B9\U30EF\U30FC\U30C9\U3092\U81EA\U52D5\U5165\U529B\U3057\U307E\U3059\U3002Chromium\U5185\U8535\U306E\U30D1\U30B9\U30EF\U30FC\U30C9\U30DE\U30CD\U30FC\U30B8\U30E3\U30FC\U3092\U7121\U52B9\U306B\U3057\U307E\U3059\U3002";
+
+/* ProfileSettingsView — AI Phishing Detection */
+"AI Phishing Detection" = "AIフィッシング検出";
+"Analyzes pages with an AI model to catch scams and phishing before you act on them. When enabled, the page\U2019s URL, visible text, and form structure are sent to a Bromure analysis server for scoring \U2014 data leaves the local VM." = "AIモデルでページを分析し、行動を起こす前に詐欺やフィッシングを検出します。有効にすると、ページのURL、表示されているテキスト、フォーム構造がスコアリングのためBromureの分析サーバーに送信されます \U2014 データはローカルVMから外部に出ます。";
+
+/* PhishingConsent — modal */
+"Bromure can analyze pages with a large language model to flag scams and phishing attempts before you fall for them." = "Bromureは大規模言語モデルでページを分析し、あなたが騙される前に詐欺やフィッシングを警告できます。";
+"What gets sent" = "送信される内容";
+"When a page looks suspicious, Bromure sends the URL, the page\U2019s visible text, form structure, and detected warning signals (e.g. look-alike domains, credential prompts) to the analysis server." = "ページが疑わしい場合、BromureはURL、ページの表示テキスト、フォーム構造、検出された警告シグナル（類似ドメイン、認証情報の要求など）を分析サーバーに送信します。";
+"Where it goes" = "送信先";
+"Requests go to %@, operated by Bromure. This is a third-party server from the browser\U2019s perspective \U2014 data leaves the local VM." = "リクエストは %@（Bromureが運営）に送信されます。ブラウザから見ると、これは第三者サーバーです \U2014 データはローカルVMから外部に出ます。";
+"Retention" = "保持";
+"Analysis requests may be logged for abuse prevention and model improvement. Don\U2019t enable this on profiles that browse highly sensitive content." = "分析リクエストは不正利用防止とモデル改善のために記録される場合があります。機密性の極めて高い内容を閲覧するプロファイルでは有効にしないでください。";
+"Your choice" = "選択はあなた次第";
+"You can turn this off at any time in Profile Settings \U2192 Privacy & Safety. It is disabled by default on every new profile." = "プロファイル設定 \U2192 プライバシーとセキュリティでいつでも無効にできます。新規プロファイルではデフォルトで無効になっています。";
+"By clicking Accept, you agree to have the pages you browse in this profile analyzed by the Bromure phishing-detection service." = "「同意する」をクリックすると、このプロファイルで閲覧するページがBromureのフィッシング検出サービスによって分析されることに同意したものとみなされます。";

@@ -524,3 +524,19 @@
 "Sign in to websites using passkeys stored on your Mac. Each request requires Touch ID or password approval." = "Fa\U00E7a login em sites usando chaves-senha armazenadas no seu Mac. Cada solicita\U00E7\U00E3o requer Touch ID ou aprova\U00E7\U00E3o por senha.";
 "Use macOS Passwords" = "Usar senhas do macOS";
 "Autofill usernames and passwords from your Mac\U2019s saved passwords and iCloud Keychain. Disables Chromium\U2019s built-in password manager." = "Preenche automaticamente nomes de usu\U00E1rio e senhas das senhas salvas no seu Mac e das Chaves do iCloud. Desativa o gerenciador de senhas integrado do Chromium.";
+
+/* ProfileSettingsView — AI Phishing Detection */
+"AI Phishing Detection" = "Detec\U00E7\U00E3o de phishing por IA";
+"Analyzes pages with an AI model to catch scams and phishing before you act on them. When enabled, the page\U2019s URL, visible text, and form structure are sent to a Bromure analysis server for scoring \U2014 data leaves the local VM." = "Analisa p\U00E1ginas com um modelo de IA para detectar golpes e phishing antes que voc\U00EA aja. Quando ativado, a URL, o texto vis\U00EDvel e a estrutura de formul\U00E1rios da p\U00E1gina s\U00E3o enviados a um servidor de an\U00E1lise da Bromure para avalia\U00E7\U00E3o \U2014 os dados saem da VM local.";
+
+/* PhishingConsent — modal */
+"Bromure can analyze pages with a large language model to flag scams and phishing attempts before you fall for them." = "A Bromure pode analisar p\U00E1ginas com um grande modelo de linguagem para sinalizar golpes e tentativas de phishing antes que voc\U00EA seja enganado.";
+"What gets sent" = "O que \U00E9 enviado";
+"When a page looks suspicious, Bromure sends the URL, the page\U2019s visible text, form structure, and detected warning signals (e.g. look-alike domains, credential prompts) to the analysis server." = "Quando uma p\U00E1gina parece suspeita, a Bromure envia ao servidor de an\U00E1lise a URL, o texto vis\U00EDvel da p\U00E1gina, a estrutura do formul\U00E1rio e os sinais de alerta detectados (por ex., dom\U00EDnios similares, solicita\U00E7\U00F5es de credenciais).";
+"Where it goes" = "Para onde vai";
+"Requests go to %@, operated by Bromure. This is a third-party server from the browser\U2019s perspective \U2014 data leaves the local VM." = "As solicita\U00E7\U00F5es v\U00E3o para %@, operado pela Bromure. Do ponto de vista do navegador, \U00E9 um servidor de terceiros \U2014 os dados saem da VM local.";
+"Retention" = "Reten\U00E7\U00E3o";
+"Analysis requests may be logged for abuse prevention and model improvement. Don\U2019t enable this on profiles that browse highly sensitive content." = "As solicita\U00E7\U00F5es de an\U00E1lise podem ser registradas para prevenir abusos e melhorar o modelo. N\U00E3o ative isto em perfis que naveguem por conte\U00FAdos altamente sens\U00EDveis.";
+"Your choice" = "Sua escolha";
+"You can turn this off at any time in Profile Settings \U2192 Privacy & Safety. It is disabled by default on every new profile." = "Voc\U00EA pode desativar isto a qualquer momento em Configura\U00E7\U00F5es do perfil \U2192 Privacidade e seguran\U00E7a. Est\U00E1 desativado por padr\U00E3o em cada novo perfil.";
+"By clicking Accept, you agree to have the pages you browse in this profile analyzed by the Bromure phishing-detection service." = "Ao clicar em Aceitar, voc\U00EA concorda que as p\U00E1ginas que voc\U00EA navega neste perfil sejam analisadas pelo servi\U00E7o de detec\U00E7\U00E3o de phishing da Bromure.";

@@ -524,3 +524,19 @@
 "Sign in to websites using passkeys stored on your Mac. Each request requires Touch ID or password approval." = "\U4F7F\U7528\U50A8\U5B58\U5728 Mac \U4E0A\U7684\U901A\U884C\U5BC6\U94A5\U767B\U5F55\U7F51\U7AD9\U3002\U6BCF\U6B21\U8BF7\U6C42\U9700\U8981 Touch ID \U6216\U5BC6\U7801\U786E\U8BA4\U3002";
 "Use macOS Passwords" = "\U4F7F\U7528 macOS \U5BC6\U7801";
 "Autofill usernames and passwords from your Mac\U2019s saved passwords and iCloud Keychain. Disables Chromium\U2019s built-in password manager." = "\U4ECE Mac \U4FDD\U5B58\U7684\U5BC6\U7801\U548C iCloud \U94A5\U5319\U4E32\U81EA\U52A8\U586B\U5145\U7528\U6237\U540D\U548C\U5BC6\U7801\U3002\U7981\U7528 Chromium \U5185\U7F6E\U7684\U5BC6\U7801\U7BA1\U7406\U5668\U3002";
+
+/* ProfileSettingsView — AI Phishing Detection */
+"AI Phishing Detection" = "AI 钓鱼检测";
+"Analyzes pages with an AI model to catch scams and phishing before you act on them. When enabled, the page\U2019s URL, visible text, and form structure are sent to a Bromure analysis server for scoring \U2014 data leaves the local VM." = "使用 AI 模型分析页面，在您采取行动之前捕获骗局和钓鱼攻击。启用后，页面的 URL、可见文本和表单结构将发送到 Bromure 分析服务器进行评分 \U2014 数据会离开本地虚拟机。";
+
+/* PhishingConsent — modal */
+"Bromure can analyze pages with a large language model to flag scams and phishing attempts before you fall for them." = "Bromure 可以使用大型语言模型分析页面，在您上当受骗之前标记骗局和钓鱼尝试。";
+"What gets sent" = "发送的内容";
+"When a page looks suspicious, Bromure sends the URL, the page\U2019s visible text, form structure, and detected warning signals (e.g. look-alike domains, credential prompts) to the analysis server." = "当页面看起来可疑时，Bromure 会将 URL、页面可见文本、表单结构和检测到的警告信号（例如仿冒域名、凭据提示）发送到分析服务器。";
+"Where it goes" = "数据去向";
+"Requests go to %@, operated by Bromure. This is a third-party server from the browser\U2019s perspective \U2014 data leaves the local VM." = "请求发送到 %@（由 Bromure 运营）。从浏览器的角度看，这是一个第三方服务器 \U2014 数据会离开本地虚拟机。";
+"Retention" = "保留";
+"Analysis requests may be logged for abuse prevention and model improvement. Don\U2019t enable this on profiles that browse highly sensitive content." = "分析请求可能会被记录以防止滥用并改进模型。请勿在浏览高度敏感内容的配置文件上启用此功能。";
+"Your choice" = "您的选择";
+"You can turn this off at any time in Profile Settings \U2192 Privacy & Safety. It is disabled by default on every new profile." = "您可以随时在\U201C配置文件设置 \U2192 隐私与安全\U201D中将其关闭。新配置文件默认禁用此功能。";
+"By clicking Accept, you agree to have the pages you browse in this profile analyzed by the Bromure phishing-detection service." = "点击\U201C接受\U201D即表示您同意在此配置文件中浏览的页面由 Bromure 钓鱼检测服务进行分析。";

@@ -362,14 +362,19 @@ mkdir -p /mnt/etc/chromium/native-messaging-hosts
 install_config configs/com.bromure.credential_bridge.json /mnt/etc/chromium/native-messaging-hosts/com.bromure.credential_bridge.json
 
 # ---------------------------------------------------------------------------
-# Phishing guard extension
+# Phishing guard extension + analysis agent
 # ---------------------------------------------------------------------------
 
+install_config scripts/phishing-agent.py /mnt/usr/local/bin/phishing-agent.py 755
+
 mkdir -p /mnt/opt/bromure/extensions/phishing-guard
-for f in manifest.json background.js content.js popup.html popup.css popup.js blocked.html blocked.css blocked.js; do
+for f in manifest.json background.js content.js jsQR.min.js clickfix-inject.js popup.html popup.css popup.js blocked.html blocked.css blocked.js; do
     [ -f "$SCRIPT_DIR/extensions/phishing-guard/$f" ] && \
         cp "$SCRIPT_DIR/extensions/phishing-guard/$f" /mnt/opt/bromure/extensions/phishing-guard/
 done
+
+# Native messaging host manifest for phishing analysis
+install_config configs/com.bromure.phishing_guard.json /mnt/etc/chromium/native-messaging-hosts/com.bromure.phishing_guard.json
 
 # ---------------------------------------------------------------------------
 # Link sender extension

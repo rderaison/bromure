@@ -320,6 +320,7 @@ final class GetAppSettingCommand: NSScriptCommand {
         case "automation.enabled": return String(d.bool(forKey: key))
         case "automation.port":   return String(d.integer(forKey: key))
         case "automation.bindAddress": return d.string(forKey: key) ?? "127.0.0.1"
+        case "phishingAnalysis.serverURL": return d.string(forKey: key) ?? PhishingAnalysisBridge.defaultServerBaseURL.absoluteString
         default:
             scriptErrorNumber = errOSAScriptError
             scriptErrorString = "Unknown app setting: \(key)"
@@ -354,6 +355,7 @@ final class SetAppSettingCommand: NSScriptCommand {
             case "automation.enabled":  d.set(b, forKey: key)
             case "automation.port":     d.set(Int(value) ?? 9222, forKey: key)
             case "automation.bindAddress": d.set(value, forKey: key)
+            case "phishingAnalysis.serverURL": d.set(value, forKey: key)
             default:
                 scriptErrorNumber = errOSAScriptError
                 scriptErrorString = "Unknown app setting: \(key)"

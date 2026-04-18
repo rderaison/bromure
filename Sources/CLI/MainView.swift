@@ -6,6 +6,7 @@ struct MainView: View {
     var onNewBrowser: @MainActor () -> Void
     var onNewBrowserWithProfile: @MainActor (Profile) -> Void
     var onShowWarpEULA: ((@escaping () -> Void) -> Void)?
+    var onShowPhishingConsent: ((@escaping () -> Void) -> Void)?
     @State private var buttonCooldown = false
     @State private var showNewProfile = false
     @State private var newProfileName = ""
@@ -503,6 +504,7 @@ struct MainView: View {
                 settingsDelegateHelper = nil
             },
             onShowWarpEULA: onShowWarpEULA,
+            onShowPhishingConsent: onShowPhishingConsent,
             initialCategory: initialCat
         )
 

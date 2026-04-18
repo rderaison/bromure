@@ -110,6 +110,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var settingsWindow: NSWindow?
     private var diagnosticWindow: NSWindow?
     private var eulaWindow: NSWindow?
+    private var consentWindow: NSWindow?
     private var isTerminating = false
     private var pendingURL: URL?
     private var automationServer: AutomationServer?
@@ -389,6 +390,46 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    // MARK: - Phishing Consent
+
+    func showPhishingConsent(onAccepted: @escaping () -> Void) {
+        let serverURLString = UserDefaults.standard.string(forKey: PhishingAnalysisBridge.serverURLKey)
+            ?? PhishingAnalysisBridge.defaultServerBaseURL.absoluteString
+        let serverHost = URL(string: serverURLString)?.host ?? serverURLString
+
+        let consentView = PhishingConsentView(
+            serverHost: serverHost,
+            onAccept: { [weak self] in
+                UserDefaults.standard.set(true, forKey: "phishingConsentAccepted")
+                DispatchQueue.main.async {
+                    self?.consentWindow?.orderOut(nil)
+                    self?.consentWindow = nil
+                    onAccepted()
+                }
+            },
+            onDecline: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.consentWindow?.orderOut(nil)
+                    self?.consentWindow = nil
+                }
+            }
+        )
+
+        let hostingView = NSHostingView(rootView: consentView)
+        let window = NSWindow(
+            contentRect: .zero,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.title = NSLocalizedString("AI Phishing Detection", comment: "")
+        window.animationBehavior = .none
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        self.consentWindow = window
+    }
+
     // MARK: - WARP EULA
 
     func showWarpEULA(onAccepted: @escaping () -> Void) {
@@ -441,7 +482,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let onShowWarpEULA: (@escaping () -> Void) -> Void = { [weak self] onAccepted in
             self?.showWarpEULA(onAccepted: onAccepted)
         }
-        let mainView = MainView(state: state, onNewBrowser: onNewBrowser, onNewBrowserWithProfile: onNewBrowserWithProfile, onShowWarpEULA: onShowWarpEULA)
+        let onShowPhishingConsent: (@escaping () -> Void) -> Void = { [weak self] onAccepted in
+            self?.showPhishingConsent(onAccepted: onAccepted)
+        }
+        let mainView = MainView(state: state, onNewBrowser: onNewBrowser, onNewBrowserWithProfile: onNewBrowserWithProfile, onShowWarpEULA: onShowWarpEULA, onShowPhishingConsent: onShowPhishingConsent)
 
         let hostingView = NSHostingView(rootView: mainView)
         let window = NSWindow(
@@ -1341,6 +1385,7 @@ final class BrowserSession {
     private var linkSenderBridge: LinkSenderBridge?
     private var filePickerBridge: FilePickerBridge?
     private var webcamBridge: WebcamBridge?
+    private var phishingAnalysisBridge: PhishingAnalysisBridge?
     private var warpBridge: WarpBridge?
     private var wireGuardBridge: WireGuardBridge?
     private var ikev2Bridge: IKEv2Bridge?
@@ -1505,6 +1550,12 @@ final class BrowserSession {
                 return bridge
             }
             self.credentialBridge = credBridge
+        }
+
+        // Phishing analysis bridge — when phishing guard is enabled
+        if config.phishingWarning, let dev = linkSocketDevice {
+            let bridge = MainActor.assumeIsolated { PhishingAnalysisBridge(socketDevice: dev) }
+            self.phishingAnalysisBridge = bridge
         }
 
         if config.enableLinkSender, let dev = linkSocketDevice {
@@ -2190,8 +2241,10 @@ final class BrowserSession {
             fileDrawerModel?.detach()
             fileTransferBridge?.stop()
             credentialBridge?.stop()
+            phishingAnalysisBridge?.stop()
             fileTransferBridge = nil
             credentialBridge = nil
+            phishingAnalysisBridge = nil
             fileDrawerModel = nil
             linkSenderBridge?.stop()
             linkSenderBridge = nil
@@ -2328,6 +2381,13 @@ final class BrowserSession {
             name: "Network Refresh",
             port: 5703,
             state: networkRefreshBridge.map { $0.isAgentConnected ? .connected : .listening } ?? .disabled
+        ))
+
+        services.append(VsockServiceStatus(
+            id: "\(id)-phishing",
+            name: "Phishing Analysis",
+            port: 5950,
+            state: phishingAnalysisBridge.map { $0.isConnected ? .connected : .listening } ?? .disabled
         ))
 
         return SessionDiagnostic(id: id, name: name, services: services)
