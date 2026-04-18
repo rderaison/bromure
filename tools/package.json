@@ -1,0 +1,16 @@
+{
+  "name": "bromure-release-tools",
+  "version": "1.0.0",
+  "description": "Release upload tooling for Bromure. Run from repo root after package.sh.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "release": "node release-upload.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0"
+  }
+}

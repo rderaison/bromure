@@ -2,6 +2,7 @@ import ArgumentParser
 import Cocoa
 import Foundation
 import SandboxEngine
+import Sparkle
 import SwiftUI
 @preconcurrency import Virtualization
 
@@ -111,6 +112,9 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var diagnosticWindow: NSWindow?
     private var eulaWindow: NSWindow?
     private var consentWindow: NSWindow?
+    /// Sparkle auto-updater. Retained strongly — if this deallocates, scheduled
+    /// update checks stop firing. Initialised in applicationDidFinishLaunching.
+    private var updaterController: SPUStandardUpdaterController?
     private var isTerminating = false
     private var pendingURL: URL?
     private var automationServer: AutomationServer?
@@ -141,6 +145,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Sparkle must be started before we wire up the menu so the menu item
+        // has a live target. The standard controller begins its first check
+        // after SUScheduledCheckInterval; immediate checks come from the menu.
+        // Silently no-op when SUPublicEDKey is not populated (dev builds) —
+        // Sparkle logs the reason internally and refuses updates.
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
         setupMenu()
         NSApp.activate(ignoringOtherApps: true)
 
@@ -547,6 +561,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                         keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
+        if let updaterController {
+            let checkItem = NSMenuItem(
+                title: NSLocalizedString("Check for Updates\u{2026}", comment: ""),
+                action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+                keyEquivalent: ""
+            )
+            checkItem.target = updaterController
+            appMenu.addItem(checkItem)
+            appMenu.addItem(NSMenuItem.separator())
+        }
         appMenu.addItem(withTitle: NSLocalizedString("Settings...", comment: ""),
                         action: #selector(showSettings(_:)),
                         keyEquivalent: ",")

@@ -40,6 +40,20 @@
             </array>
         </dict>
     </array>
+    <!-- Sparkle auto-update -->
+    <key>SUFeedURL</key>
+    <string>https://bromure.io/api/v1/release</string>
+    <!-- Base64 Ed25519 public key generated with Sparkle's generate_keys.
+         MUST be populated before shipping — Sparkle refuses updates without it.
+         The matching private key lives in the Jenkins SPARKLE_PRIVATE_KEY credential. -->
+    <key>SUPublicEDKey</key>
+    <string>G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <key>SUEnableInstallerLauncherService</key>
+    <true/>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
