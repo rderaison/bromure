@@ -20,10 +20,10 @@ pipeline {
 
         // Non-secret Spaces config. The secrets (access key, private key,
         // auth token) live in Jenkins credentials.
-        DO_SPACES_ENDPOINT    = 'https://sfo3.digitaloceanspaces.com'
-        DO_SPACES_REGION      = 'sfo3'
-        DO_SPACES_BUCKET      = 'bromure'
-        DO_SPACES_PUBLIC_BASE = 'https://bromure.sfo3.cdn.digitaloceanspaces.com'
+        DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+        DO_SPACES_REGION      = 'nyc3'
+        DO_SPACES_BUCKET      = 'bromure-dl'
+        DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
         RELEASE_API_URL       = 'https://bromure.io/api/v1/release'
     }
 
