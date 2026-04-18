@@ -55,6 +55,10 @@ WARP_ENV = dict(os.environ, LD_PRELOAD=RESOLV_STUB,
 
 LOG_FILE = "/tmp/bromure/warp-agent.log"
 
+# xinitrc shows a splash until this file appears; it then reads the contents
+# to decide whether to launch Chrome or show the error panel.
+VPN_STATUS_FILE = "/tmp/bromure/vpn-status"
+
 
 def log(msg):
     """Log to stderr (visible in inittab output) and to a file for post-mortem."""
@@ -65,6 +69,18 @@ def log(msg):
             f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
     except OSError:
         pass
+
+
+def write_vpn_status(ok, error=None):
+    """Write the auto-connect result atomically so xinitrc can gate Chrome on it."""
+    try:
+        body = "ok\n" if ok else f"error\n{error or 'Unknown error'}\n"
+        tmp = VPN_STATUS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(body)
+        os.replace(tmp, VPN_STATUS_FILE)
+    except OSError as e:
+        log(f"write_vpn_status failed: {e}")
 
 
 def run(cmd, env=None, quiet=False):
@@ -408,11 +424,13 @@ def run_session():
         except OSError:
             pass
 
+        auto_connect_requested = os.path.exists(auto_marker)
+
         send_json(s, {"type": "status", "state": "connecting"})
 
         ok, err = ensure_warp_connected()
         if ok:
-            if os.path.exists(auto_marker):
+            if auto_connect_requested:
                 # Auto-connect: enable routing immediately
                 try:
                     os.unlink(auto_marker)
@@ -420,6 +438,7 @@ def run_session():
                     pass
                 open(WARP_FLAG, "w").close()
                 send_json(s, {"type": "status", "state": "connected"})
+                write_vpn_status(True)
                 log("boot: VPN connected, routing enabled (auto-connect)")
             else:
                 send_json(s, {"type": "status", "state": "disconnected"})
@@ -427,6 +446,8 @@ def run_session():
         else:
             send_json(s, {"type": "status", "state": "error", "error": err})
             log(f"boot: VPN setup failed: {err}")
+            if auto_connect_requested:
+                write_vpn_status(False, err)
     elif os.path.exists(auto_marker):
         # Legacy path: auto-connect marker without boot-setup
         log("auto-connect marker found (legacy path)")
@@ -438,9 +459,11 @@ def run_session():
         ok, error = do_enable()
         if ok:
             send_json(s, {"type": "status", "state": "connected"})
+            write_vpn_status(True)
             log("auto-connect succeeded")
         else:
             send_json(s, {"type": "status", "state": "error", "error": error})
+            write_vpn_status(False, error)
             log(f"auto-connect failed: {error}")
 
     # Start background status poller

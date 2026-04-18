@@ -230,6 +230,16 @@ def write_chrome_env(cfg):
     if cfg.get("traceLevel", 0) > 0:
         lines.append(f"TRACE_LEVEL={cfg['traceLevel']}")
 
+    # Signal to xinitrc that a VPN auto-connect is in flight: xinitrc shows a
+    # splash screen until the VPN agent writes /tmp/bromure/vpn-status so the
+    # user's first HTTP request never leaves the VM before the tunnel is up.
+    if cfg.get("warpAutoConnect"):
+        lines.append("VPN_AUTO_CONNECT=warp")
+    elif cfg.get("wireGuardAutoConnect"):
+        lines.append("VPN_AUTO_CONNECT=wireguard")
+    elif cfg.get("ikev2AutoConnect"):
+        lines.append("VPN_AUTO_CONNECT=ikev2")
+
     # Display scale: passed at runtime so changing 1x/2x doesn't require image rebuild
     display_scale = cfg.get("displayScale", 2)
     lines.append(f"DISPLAY_SCALE={display_scale}")

@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; connect-src 'self' file:; img-src 'self' data: file:;">
+<title>Bromure — Connecting VPN</title>
+<style>
+  :root {
+    --bg: hsl(216, 50%, 6%);
+    --fg: hsl(0, 0%, 98%);
+    --primary: hsl(214, 50%, 70%);
+    --accent: hsl(30, 80%, 55%);
+    --muted-fg: hsl(216, 20%, 65%);
+    --border: rgba(255, 255, 255, 0.1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; width: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, Arial, sans-serif;
+    background-color: var(--bg);
+    color: var(--fg);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    position: relative;
+  }
+  .bg {
+    position: absolute; inset: 0;
+    background-image: url('night.jpg');
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+  }
+  .bg-overlay {
+    position: absolute; inset: 0;
+    background: linear-gradient(
+      to bottom,
+      hsla(216, 50%, 6%, 0.40) 0%,
+      hsla(216, 50%, 6%, 0.60) 50%,
+      hsla(216, 50%, 6%, 1.00) 100%
+    );
+  }
+  .stage {
+    position: relative; z-index: 1;
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    padding: 48px 24px;
+  }
+  .card {
+    width: 100%; max-width: 560px;
+    background: rgba(255, 255, 255, 0.05);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    padding: 56px 48px;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  }
+  .brand {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    opacity: 0.55;
+    margin-bottom: 32px;
+  }
+  .gradient-text {
+    background: linear-gradient(135deg, hsl(214, 50%, 70%) 0%, hsl(30, 80%, 55%) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    color: transparent;
+  }
+  h1 {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    margin-bottom: 14px;
+  }
+  p {
+    font-size: 16px;
+    color: var(--muted-fg);
+    line-height: 1.55;
+    max-width: 420px;
+    margin: 0 auto;
+  }
+
+  /* Spinner */
+  .spinner {
+    width: 64px; height: 64px;
+    margin: 0 auto 28px;
+    border: 3px solid rgba(255, 255, 255, 0.12);
+    border-top-color: hsl(214, 50%, 70%);
+    border-right-color: hsl(30, 80%, 55%);
+    border-radius: 50%;
+    animation: spin 1.1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Error */
+  .error-icon {
+    width: 64px; height: 64px;
+    margin: 0 auto 28px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #ff3b30 0%, #d70015 100%);
+    color: white;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 36px;
+    font-weight: 600;
+    box-shadow: 0 10px 30px rgba(215, 0, 21, 0.35);
+  }
+  .msg {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    text-align: left;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border);
+    padding: 14px 18px;
+    border-radius: 12px;
+    margin: 24px auto 20px;
+    max-width: 440px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 30vh;
+    overflow: auto;
+    line-height: 1.55;
+    color: var(--fg);
+  }
+  .hint { font-size: 14px; margin-bottom: 28px; }
+  .btn {
+    -webkit-appearance: none; appearance: none;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 12px 28px;
+    border-radius: 999px;
+    background: hsl(30, 80%, 55%);
+    color: white;
+    border: none;
+    font-size: 15px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    box-shadow: 0 8px 24px hsla(30, 80%, 55%, 0.35);
+    transition: transform 0.12s ease, opacity 0.12s ease;
+  }
+  .btn:hover { opacity: 0.92; transform: scale(1.03); }
+  .btn:active { opacity: 0.85; transform: scale(0.99); }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="bg"></div>
+<div class="bg-overlay"></div>
+<div class="stage">
+  <div class="card">
+    <div class="brand gradient-text">Bromure</div>
+
+    <div id="loading">
+      <div class="spinner" aria-hidden="true"></div>
+      <h1><span id="t-title" class="gradient-text">Connecting to VPN</span></h1>
+      <p id="t-subtitle">Your browser session will start automatically once the VPN is ready.</p>
+    </div>
+
+    <div id="error" class="hidden">
+      <div class="error-icon" aria-hidden="true">!</div>
+      <h1 id="t-error-title">VPN connection failed</h1>
+      <div class="msg" id="msg">Unknown error</div>
+      <p class="hint" id="t-error-hint">Adjust the VPN settings in the profile and try again.</p>
+      <button class="btn" onclick="window.close()" id="t-close">Close session</button>
+    </div>
+  </div>
+</div>
+<script>
+  // --- Localization ---------------------------------------------------------
+  // Subset of UI strings translated for every Bromure-supported locale.
+  // Key matches the lowercase form of the host-provided ?lang= query.
+  const T = {
+    en: {
+      title: "Connecting to VPN",
+      subtitle: "Your browser session will start automatically once the VPN is ready.",
+      errorTitle: "VPN connection failed",
+      errorHint: "Adjust the VPN settings in the profile and try again.",
+      close: "Close session",
+      errorUnknown: "Unknown error"
+    },
+    fr: {
+      title: "Connexion au VPN",
+      subtitle: "Votre session de navigation démarrera automatiquement dès que le VPN sera prêt.",
+      errorTitle: "Échec de la connexion VPN",
+      errorHint: "Ajustez les paramètres VPN dans le profil et réessayez.",
+      close: "Fermer la session",
+      errorUnknown: "Erreur inconnue"
+    },
+    de: {
+      title: "Verbindung zum VPN",
+      subtitle: "Ihre Browsersitzung startet automatisch, sobald das VPN bereit ist.",
+      errorTitle: "VPN-Verbindung fehlgeschlagen",
+      errorHint: "Passen Sie die VPN-Einstellungen im Profil an und versuchen Sie es erneut.",
+      close: "Sitzung schließen",
+      errorUnknown: "Unbekannter Fehler"
+    },
+    es: {
+      title: "Conectando al VPN",
+      subtitle: "Su sesión del navegador se iniciará automáticamente en cuanto el VPN esté listo.",
+      errorTitle: "Error de conexión al VPN",
+      errorHint: "Ajuste la configuración del VPN en el perfil e inténtelo de nuevo.",
+      close: "Cerrar sesión",
+      errorUnknown: "Error desconocido"
+    },
+    pt: {
+      title: "A ligar ao VPN",
+      subtitle: "A sua sessão do navegador iniciará automaticamente assim que o VPN estiver pronto.",
+      errorTitle: "Falha na ligação VPN",
+      errorHint: "Ajuste as definições do VPN no perfil e tente novamente.",
+      close: "Fechar sessão",
+      errorUnknown: "Erro desconhecido"
+    },
+    ja: {
+      title: "VPN に接続しています",
+      subtitle: "VPN の準備が整い次第、ブラウザーセッションが自動的に開始されます。",
+      errorTitle: "VPN 接続に失敗しました",
+      errorHint: "プロファイルの VPN 設定を調整してから、もう一度お試しください。",
+      close: "セッションを終了",
+      errorUnknown: "不明なエラー"
+    },
+    "zh-cn": {
+      title: "正在连接 VPN",
+      subtitle: "VPN 准备就绪后，浏览器会话将自动开始。",
+      errorTitle: "VPN 连接失败",
+      errorHint: "请调整该配置文件的 VPN 设置后重试。",
+      close: "关闭会话",
+      errorUnknown: "未知错误"
+    },
+    "zh-tw": {
+      title: "正在連接 VPN",
+      subtitle: "VPN 就緒後，瀏覽器工作階段將自動開始。",
+      errorTitle: "VPN 連線失敗",
+      errorHint: "請調整設定檔的 VPN 設定後再試一次。",
+      close: "關閉工作階段",
+      errorUnknown: "未知錯誤"
+    }
+  };
+
+  function resolveLocale() {
+    const raw = (new URLSearchParams(location.search).get('lang') || '').toLowerCase();
+    if (!raw) return 'en';
+    // Chinese script variants: map zh-Hans / zh-CN → zh-cn, zh-Hant / zh-TW / zh-HK → zh-tw.
+    if (raw.startsWith('zh')) {
+      if (raw.includes('hant') || raw.includes('tw') || raw.includes('hk')) return 'zh-tw';
+      return 'zh-cn';
+    }
+    const base = raw.split('-')[0];
+    return T[base] ? base : 'en';
+  }
+
+  const L = T[resolveLocale()];
+  document.documentElement.lang = resolveLocale();
+  document.getElementById('t-title').textContent = L.title;
+  document.getElementById('t-subtitle').textContent = L.subtitle;
+  document.getElementById('t-error-title').textContent = L.errorTitle;
+  document.getElementById('t-error-hint').textContent = L.errorHint;
+  document.getElementById('t-close').textContent = L.close;
+  document.getElementById('msg').textContent = L.errorUnknown;
+  document.title = 'Bromure — ' + L.title;
+
+  // --- Status polling -------------------------------------------------------
+  // Poll the status file written by the VPN agent. The file appears only
+  // after auto-connect either succeeds ("ok") or fails ("error\n<message>").
+  const STATUS_URL = 'file:///tmp/bromure/vpn-status';
+  const loading = document.getElementById('loading');
+  const errorPanel = document.getElementById('error');
+  const msgEl = document.getElementById('msg');
+  let settled = false;
+
+  async function poll() {
+    if (settled) return;
+    try {
+      const r = await fetch(STATUS_URL + '?t=' + Date.now(), { cache: 'no-store' });
+      if (r.ok) {
+        const text = (await r.text()).replace(/\s+$/, '');
+        const firstLine = text.split('\n', 1)[0].trim();
+        if (firstLine === 'ok') {
+          settled = true;
+          // The host-side watcher also kills this window, but self-closing
+          // keeps the success path snappy when window.close() is permitted.
+          window.close();
+          return;
+        }
+        if (firstLine === 'error') {
+          settled = true;
+          const errText = text.split('\n').slice(1).join('\n').trim() || L.errorUnknown;
+          msgEl.textContent = errText;
+          loading.classList.add('hidden');
+          errorPanel.classList.remove('hidden');
+          return;
+        }
+      }
+    } catch (_) {
+      // File not ready yet — keep spinning.
+    }
+    setTimeout(poll, 400);
+  }
+  poll();
+</script>
+</body>
+</html>

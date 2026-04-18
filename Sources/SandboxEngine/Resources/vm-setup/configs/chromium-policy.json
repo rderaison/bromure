@@ -7,5 +7,9 @@
     "https://chromewebstore.google.com",
     "https://chrome.google.com/webstore"
   ],
-  "URLAllowlist": ["file:///home/chrome/"]
+  "URLAllowlist": [
+    "file:///home/chrome/",
+    "file:///opt/bromure/splash/",
+    "file:///tmp/bromure/vpn-status"
+  ]
 }

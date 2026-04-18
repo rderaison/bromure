@@ -50,6 +50,9 @@ AUTO_CONNECT_MARKER = "/tmp/bromure/wireguard-auto-connect"
 
 LOG_FILE = "/tmp/bromure/wireguard-agent.log"
 
+# xinitrc gates Chrome on this file when auto-connect was requested.
+VPN_STATUS_FILE = "/tmp/bromure/vpn-status"
+
 DNSMASQ_CONF = "/etc/dnsmasq.d/pihole.conf"
 DNSMASQ_CONF_BACKUP = "/tmp/bromure/pihole.conf.wg-backup"
 RESOLV_CONF = "/etc/resolv.conf"
@@ -65,6 +68,18 @@ def log(msg):
             f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
     except OSError:
         pass
+
+
+def write_vpn_status(ok, error=None):
+    """Write the auto-connect result atomically so xinitrc can gate Chrome on it."""
+    try:
+        body = "ok\n" if ok else f"error\n{error or 'Unknown error'}\n"
+        tmp = VPN_STATUS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(body)
+        os.replace(tmp, VPN_STATUS_FILE)
+    except OSError as e:
+        log(f"write_vpn_status failed: {e}")
 
 
 def run(cmd, quiet=False):
@@ -310,6 +325,8 @@ def run_session(conn):
                     log(f"auto-connect failed (attempt {attempt}): {err}")
                 if not ok:
                     log("auto-connect: all attempts failed")
+            # Signal xinitrc: it's been showing a splash since boot; unblock it.
+            write_vpn_status(ok, err)
 
     # Send initial status
     state, err = effective_state()

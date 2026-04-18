@@ -90,6 +90,69 @@ LANG_FLAG=
 [ -n "$CHROME_LANG" ] && LANG_FLAG="--lang=$CHROME_LANG"
 CHROME_CMD="chromium-browser --no-first-run --start-maximized --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
 
+# VPN splash: when a VPN is configured to connect at startup, the tunnel
+# takes a few seconds to establish. Loading the user's URL in that window
+# would leak the real IP. Block Chrome behind a local splash page until
+# the VPN agent signals via /tmp/bromure/vpn-status.
+if [ -n "$VPN_AUTO_CONNECT" ]; then
+    echo "xinitrc: VPN auto-connect ($VPN_AUTO_CONNECT) — gating Chrome on tunnel" > /dev/hvc0
+
+    SPLASH_PID=
+    if [ -f /opt/bromure/splash/splash.html ]; then
+        SPLASH_LANG="${CHROME_LANG:-en}"
+        chromium-browser \
+            --kiosk \
+            --app="file:///opt/bromure/splash/splash.html?lang=$SPLASH_LANG" \
+            --user-data-dir=/tmp/bromure/splash-profile \
+            --no-proxy-server \
+            --allow-file-access-from-files \
+            --no-first-run \
+            --disable-background-networking \
+            --disable-component-update \
+            --disable-default-apps \
+            --disable-sync \
+            --disable-features=Translate \
+            --force-device-scale-factor="$DISPLAY_SCALE" \
+            >/dev/null 2>&1 &
+        SPLASH_PID=$!
+    fi
+
+    # Wait up to 120s for the VPN agent to write a status. WireGuard/IKEv2
+    # complete in seconds; WARP registration + handshake can take ~30s.
+    for _ in $(seq 1 120); do
+        [ -f /tmp/bromure/vpn-status ] && break
+        sleep 1
+    done
+
+    if [ ! -f /tmp/bromure/vpn-status ]; then
+        # Agent never wrote a status — synthesize a timeout so the splash
+        # shows *something* instead of spinning forever.
+        printf 'error\nVPN connection timed out after 120s. The VPN agent did not respond.\n' > /tmp/bromure/vpn-status
+    fi
+
+    VPN_STATUS=$(head -n 1 /tmp/bromure/vpn-status 2>/dev/null)
+    echo "xinitrc: VPN status = $VPN_STATUS" > /dev/hvc0
+
+    if [ "$VPN_STATUS" = "ok" ]; then
+        # Tunnel is up — kill splash and proceed to Chrome.
+        if [ -n "$SPLASH_PID" ]; then
+            kill "$SPLASH_PID" 2>/dev/null
+            wait "$SPLASH_PID" 2>/dev/null
+        fi
+    else
+        # Tunnel failed. The splash has already rendered the error.
+        # Wait for the user to close that window, then end the session
+        # WITHOUT launching Chrome (launching now would leak the IP).
+        if [ -n "$SPLASH_PID" ]; then
+            wait "$SPLASH_PID"
+        fi
+        echo "xinitrc: VPN failed, skipping Chrome launch" > /dev/hvc0
+        doas udhcpc -R -i eth0 2>/dev/null
+        doas poweroff
+        exit 0
+    fi
+fi
+
 start_ts=$(date +%s)
 prefs_backup=
 for attempt in 1 2 3 4 5; do

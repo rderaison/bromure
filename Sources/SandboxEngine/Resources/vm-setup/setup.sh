@@ -413,6 +413,12 @@ for f in manifest.json background.js form-capture.js; do
         cp "$SCRIPT_DIR/extensions/trace/$f" /mnt/opt/bromure/extensions/trace/
 done
 
+# VPN-connecting splash page (shown by xinitrc before Chrome when a
+# connect-at-startup VPN is configured — prevents IP leak during handshake).
+mkdir -p /mnt/opt/bromure/splash
+install_config splash/splash.html /mnt/opt/bromure/splash/splash.html
+install_config splash/night.jpg   /mnt/opt/bromure/splash/night.jpg
+
 # Native messaging hosts (link sender + file picker + trace)
 mkdir -p /mnt/etc/chromium/native-messaging-hosts
 install_config configs/com.bromure.link_sender.json \
