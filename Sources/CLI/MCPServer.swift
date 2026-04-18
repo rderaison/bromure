@@ -826,9 +826,51 @@ private actor MCPServerImpl {
     }
 
     nonisolated private func jsonString(_ obj: Any) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
-              let s = String(data: data, encoding: .utf8) else { return String(describing: obj) }
+        // JSONSerialization.data(withJSONObject:) throws an NSInvalidArgumentException
+        // (Obj-C, not catchable with try?) when the graph contains NaN/Infinity or
+        // non-String keys — which can happen with CDP eval results from pages that
+        // return non-finite numbers. Sanitize first.
+        let safe = Self.sanitizeForJSON(obj)
+        guard JSONSerialization.isValidJSONObject(safe),
+              let data = try? JSONSerialization.data(withJSONObject: safe, options: [.prettyPrinted, .sortedKeys]),
+              let s = String(data: data, encoding: .utf8)
+        else { return String(describing: obj) }
         return s
+    }
+
+    /// Recursively replace values that would crash JSONSerialization:
+    ///   - NaN / ±Infinity doubles → NSNull
+    ///   - non-String dictionary keys → their String(describing:) form
+    ///   - unknown reference types → their String(describing:) form
+    nonisolated private static func sanitizeForJSON(_ obj: Any) -> Any {
+        if let dict = obj as? [String: Any] {
+            return dict.mapValues { sanitizeForJSON($0) }
+        }
+        if let dict = obj as? [AnyHashable: Any] {
+            var out: [String: Any] = [:]
+            for (k, v) in dict { out[String(describing: k)] = sanitizeForJSON(v) }
+            return out
+        }
+        if let arr = obj as? [Any] {
+            return arr.map { sanitizeForJSON($0) }
+        }
+        if let d = obj as? Double {
+            return d.isFinite ? d : NSNull()
+        }
+        if let f = obj as? Float {
+            return f.isFinite ? f : NSNull()
+        }
+        if let n = obj as? NSNumber {
+            // NSNumber may wrap a non-finite double. CFNumber's type check is
+            // the only reliable way to know it's floating-point before reading.
+            let t = CFNumberGetType(n)
+            if t == .doubleType || t == .float32Type || t == .float64Type || t == .cgFloatType {
+                let d = n.doubleValue
+                if !d.isFinite { return NSNull() }
+            }
+            return n
+        }
+        return obj
     }
 
     nonisolated private func jsQuote(_ s: String) -> String {
