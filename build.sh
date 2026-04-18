@@ -46,6 +46,11 @@ mkdir -p "$MACOS_DIR"
 cp "$BINARY" "$MACOS_DIR/$PRODUCT_NAME"
 cp "$INFO_PLIST" "$CONTENTS/Info.plist"
 
+# SPM only sets @loader_path / /usr/lib/swift / Xcode rpaths on the binary;
+# neither resolves to Contents/Frameworks. Add the standard macOS app rpath
+# so dyld finds Sparkle.framework and any other SPM framework we embed.
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$PRODUCT_NAME" 2>/dev/null || true
+
 # Embed provisioning profile (required for iCloud and other entitlements)
 PROVISION_PROFILE="$SCRIPT_DIR/bromure.provisionprofile"
 if [ -f "$PROVISION_PROFILE" ]; then
