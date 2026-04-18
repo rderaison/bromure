@@ -180,6 +180,12 @@
 "Network" = "Network";
 "Storage" = "Storage";
 
+/* SettingsView — General */
+"App-wide preferences" = "App-wide preferences";
+"Default Profile for Links" = "Default Profile for Links";
+"When Bromure is your default browser, links clicked in other apps open with this profile. Choose \U201CAsk Every Time\U201D to pick a profile on each click." = "When Bromure is your default browser, links clicked in other apps open with this profile. Choose \U201CAsk Every Time\U201D to pick a profile on each click.";
+"Ask Every Time" = "Ask Every Time";
+
 /* SettingsView — Hardware */
 "Resources allocated to each browser session" = "Resources allocated to each browser session";
 "Memory" = "Memory";

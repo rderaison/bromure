@@ -180,6 +180,12 @@
 "Network" = "\U7f51\U7edc";
 "Storage" = "\U5b58\U50a8";
 
+/* SettingsView — General */
+"App-wide preferences" = "\U5e94\U7528\U7a0b\U5e8f\U8303\U56f4\U7684\U504f\U597d\U8bbe\U7f6e";
+"Default Profile for Links" = "\U94fe\U63a5\U7684\U9ed8\U8ba4\U914d\U7f6e\U6587\U4ef6";
+"When Bromure is your default browser, links clicked in other apps open with this profile. Choose \U201CAsk Every Time\U201D to pick a profile on each click." = "\U5f53 Bromure \U662f\U60a8\U7684\U9ed8\U8ba4\U6d4f\U89c8\U5668\U65f6\Uff0c\U4ece\U5176\U4ed6\U5e94\U7528\U70b9\U51fb\U7684\U94fe\U63a5\U5c06\U4ee5\U6b64\U914d\U7f6e\U6587\U4ef6\U6253\U5f00\U3002\U9009\U62e9\U201c\U6bcf\U6b21\U8be2\U95ee\U201d\U53ef\U5728\U6bcf\U6b21\U70b9\U51fb\U65f6\U9009\U62e9\U914d\U7f6e\U6587\U4ef6\U3002";
+"Ask Every Time" = "\U6bcf\U6b21\U8be2\U95ee";
+
 /* SettingsView — Hardware */
 "Resources allocated to each browser session" = "\U5206\U914d\U7ed9\U6bcf\U4e2a\U6d4f\U89c8\U5668\U4f1a\U8bdd\U7684\U8d44\U6e90";
 "Memory" = "\U5185\U5b58";

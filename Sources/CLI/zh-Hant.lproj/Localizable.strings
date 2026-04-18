@@ -180,6 +180,12 @@
 "Network" = "網路";
 "Storage" = "儲存空間";
 
+/* SettingsView — General */
+"App-wide preferences" = "應用程式全域偏好設定";
+"Default Profile for Links" = "連結的預設設定檔";
+"When Bromure is your default browser, links clicked in other apps open with this profile. Choose \U201CAsk Every Time\U201D to pick a profile on each click." = "當 Bromure 是您的預設瀏覽器時，從其他應用程式點選的連結會以此設定檔開啟。選擇「每次詢問」可在每次點選時選擇設定檔。";
+"Ask Every Time" = "每次詢問";
+
 /* SettingsView — Hardware */
 "Resources allocated to each browser session" = "分配給每個瀏覽器工作階段的資源";
 "Memory" = "記憶體";

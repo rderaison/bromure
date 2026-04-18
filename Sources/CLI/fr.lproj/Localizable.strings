@@ -180,6 +180,12 @@
 "Network" = "R\U00E9seau";
 "Storage" = "Stockage";
 
+/* SettingsView — General */
+"App-wide preferences" = "Pr\U00E9f\U00E9rences g\U00E9n\U00E9rales de l\U2019application";
+"Default Profile for Links" = "Profil par d\U00E9faut pour les liens";
+"When Bromure is your default browser, links clicked in other apps open with this profile. Choose \U201CAsk Every Time\U201D to pick a profile on each click." = "Lorsque Bromure est votre navigateur par d\U00E9faut, les liens cliqu\U00E9s dans d\U2019autres applications s\U2019ouvrent avec ce profil. Choisissez \U00AB\U202FDemander \U00E0 chaque fois\U202F\U00BB pour s\U00E9lectionner un profil \U00E0 chaque clic.";
+"Ask Every Time" = "Demander \U00E0 chaque fois";
+
 /* SettingsView — Hardware */
 "Resources allocated to each browser session" = "Ressources allou\U00E9es \U00E0 chaque session de navigation";
 "Memory" = "M\U00E9moire";

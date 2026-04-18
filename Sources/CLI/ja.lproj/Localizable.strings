@@ -180,6 +180,12 @@
 "Network" = "ネットワーク";
 "Storage" = "ストレージ";
 
+/* SettingsView — General */
+"App-wide preferences" = "アプリ全体の設定";
+"Default Profile for Links" = "リンクのデフォルトプロファイル";
+"When Bromure is your default browser, links clicked in other apps open with this profile. Choose \U201CAsk Every Time\U201D to pick a profile on each click." = "Bromureがデフォルトブラウザの場合、他のアプリで開いたリンクはこのプロファイルで開きます。クリックごとにプロファイルを選ぶには「毎回確認」を選択してください。";
+"Ask Every Time" = "毎回確認";
+
 /* SettingsView — Hardware */
 "Resources allocated to each browser session" = "各ブラウザセッションに割り当てるリソース";
 "Memory" = "メモリ";

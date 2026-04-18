@@ -200,6 +200,24 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let profiles = state.profileManager.allProfiles
 
+        // If the user has pinned a default profile for external links, use it
+        // directly and skip the chooser. The stored value is a UUID string; if
+        // it no longer matches (profile was deleted), fall through to the
+        // regular flow so the chooser still appears when applicable.
+        let defaultID = UserDefaults.standard.string(forKey: "links.defaultProfileID") ?? ""
+        if !defaultID.isEmpty, state.phase == .ready,
+           let chosen = profiles.first(where: { $0.id.uuidString == defaultID }) {
+            let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
+            if let session = existingSession {
+                print("[URL] default profile '\(chosen.name)' → existing session")
+                session.navigateTo(url: url)
+            } else {
+                print("[URL] default profile '\(chosen.name)' → new browser")
+                openNewBrowser(with: chosen, initialURL: url)
+            }
+            return
+        }
+
         // If there's more than one profile, ask the user which one to use.
         // If there's a running session for the chosen profile, route the URL
         // to it; otherwise spin up a new VM.

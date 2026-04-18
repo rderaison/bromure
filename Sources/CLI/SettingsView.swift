@@ -4,6 +4,7 @@ import SandboxEngine
 // MARK: - Settings Category
 
 private enum AppSettingsCategory: String, CaseIterable, Identifiable {
+    case general = "General"
     case hardware = "Hardware"
     case input = "Input"
     case display = "Display"
@@ -15,6 +16,7 @@ private enum AppSettingsCategory: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
+        case .general: "gearshape.fill"
         case .hardware: "cpu.fill"
         case .input: "keyboard.fill"
         case .display: "display"
@@ -26,6 +28,7 @@ private enum AppSettingsCategory: String, CaseIterable, Identifiable {
 
     var iconColor: Color {
         switch self {
+        case .general: .gray
         case .hardware: .orange
         case .input: .blue
         case .display: .purple
@@ -52,10 +55,11 @@ struct SettingsView: View {
     @AppStorage("automation.enabled") private var automationEnabled = false
     @AppStorage("automation.port") private var automationPort = 9222
     @AppStorage("automation.bindAddress") private var automationBindAddress = "127.0.0.1"
+    @AppStorage("links.defaultProfileID") private var defaultProfileID = ""
 
     var state: AppState?
 
-    @State private var selectedCategory: AppSettingsCategory = .hardware
+    @State private var selectedCategory: AppSettingsCategory = .general
     @State private var showResetConfirm = false
     @State private var showRebuildConfirm = false
     @State private var pendingKeyboard: String?
@@ -187,12 +191,35 @@ struct SettingsView: View {
     @ViewBuilder
     private var detailView: some View {
         switch selectedCategory {
+        case .general: generalView
         case .hardware: hardwareView
         case .input: inputView
         case .display: displayView
         case .network: networkView
         case .automation: automationView
         case .storage: storageView
+        }
+    }
+
+    // MARK: - General
+
+    private var generalView: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            sectionHeader("General", subtitle: "App-wide preferences")
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Default Profile for Links").font(.headline)
+                Text("When Bromure is your default browser, links clicked in other apps open with this profile. Choose \u{201C}Ask Every Time\u{201D} to pick a profile on each click.")
+                    .settingDescription()
+                Picker("", selection: $defaultProfileID) {
+                    Text("Ask Every Time").tag("")
+                    ForEach(state?.profileManager.allProfiles ?? []) { profile in
+                        Text(profile.name).tag(profile.id.uuidString)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 260)
+            }
         }
     }
 
