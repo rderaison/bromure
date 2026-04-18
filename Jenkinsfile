@@ -74,7 +74,7 @@ pipeline {
                     string(credentialsId: 'SPARKLE_PRIVATE_KEY', variable: 'SPARKLE_PRIVATE_KEY'),
                     string(credentialsId: 'DO_SPACES_KEY',       variable: 'DO_SPACES_KEY'),
                     string(credentialsId: 'DO_SPACES_SECRET',    variable: 'DO_SPACES_SECRET'),
-                    string(credentialsId: 'RELEASE_AUTH_TOKEN',  variable: 'RELEASE_AUTH_TOKEN')
+                    string(credentialsId: 'RELEASES_TOKEN',  variable: 'RELEASE_AUTH_TOKEN')
                 ]) {
                     sh '''
                         set -euo pipefail
