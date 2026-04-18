@@ -3,19 +3,22 @@ import Virtualization
 
 /// Automatically pauses a VM when the session is idle and resumes it on interaction.
 ///
+/// Suspending is gated on macOS Low Power Mode — when LPM is off, the auto
+/// suspend is inert and the VM stays running even when idle. This matches
+/// user intent: they've opted into power savings system-wide.
+///
 /// Idle is defined as ALL of the following being true for ``idleThreshold`` seconds:
+///   - Low Power Mode is enabled
 ///   - Window is not key (out of focus)
 ///   - No network traffic (packet count unchanged)
 ///   - No camera or microphone active
 ///
-/// When the window becomes key again, the VM is resumed immediately.
-///
-/// This is a prototype for CPU savings research — sound monitoring is not
-/// yet implemented (TODO: tap VZVirtioSoundDevice output stream).
+/// When the window becomes key again or LPM turns off, the VM is resumed
+/// immediately.
 @MainActor
 public final class VMAutoSuspend {
     /// How long all idle conditions must hold before suspending.
-    public static let idleThreshold: TimeInterval = 30
+    public var idleThreshold: TimeInterval = 180
 
     /// How often to check idle conditions.
     private static let checkInterval: TimeInterval = 5
@@ -34,6 +37,7 @@ public final class VMAutoSuspend {
     private var idleStart: Date?
     private var checkTimer: Timer?
     private var focusObservers: [NSObjectProtocol] = []
+    private var powerObserver: NSObjectProtocol?
 
     /// Called when the VM is suspended or resumed. Bool = isSuspended.
     public var onStateChanged: ((Bool) -> Void)?
@@ -73,7 +77,18 @@ public final class VMAutoSuspend {
             }
         }
 
-        print("[VMAutoSuspend] armed — idle threshold: \(Int(Self.idleThreshold))s")
+        // Observe Low Power Mode changes: resume immediately on transition off,
+        // reset idle tracking on transition on.
+        powerObserver = nc.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handlePowerStateChanged() }
+        }
+
+        let lpm = ProcessInfo.processInfo.isLowPowerModeEnabled
+        print("[VMAutoSuspend] armed — idle threshold: \(Int(self.idleThreshold))s, low-power-mode: \(lpm)")
     }
 
     nonisolated deinit {
@@ -87,6 +102,10 @@ public final class VMAutoSuspend {
             NotificationCenter.default.removeObserver(obs)
         }
         focusObservers.removeAll()
+        if let powerObserver {
+            NotificationCenter.default.removeObserver(powerObserver)
+            self.powerObserver = nil
+        }
 
         // Resume if we're being torn down while suspended
         if isSuspended {
@@ -107,6 +126,28 @@ public final class VMAutoSuspend {
         // If webcam just started, resume immediately
         if streaming && isSuspended {
             resumeVM()
+        }
+    }
+
+    // MARK: - Power handling
+
+    private func handlePowerStateChanged() {
+        let lpm = ProcessInfo.processInfo.isLowPowerModeEnabled
+        print("[VMAutoSuspend] low-power-mode changed: \(lpm)")
+        if !lpm {
+            // Coming out of LPM: resume right away so the user isn't surprised
+            // by a frozen tab the first time they glance at it.
+            if isSuspended {
+                resumeVM()
+            }
+            idleStart = nil
+        } else {
+            // Entering LPM: start accumulating idle time from now if the
+            // window is already backgrounded.
+            if let window, !window.isKeyWindow {
+                idleStart = Date()
+                lastPacketCount = networkFilter?.packetCount ?? 0
+            }
         }
     }
 
@@ -132,6 +173,14 @@ public final class VMAutoSuspend {
     private func checkIdle() {
         guard vm != nil, let window else { return }
         guard !isSuspended else { return }
+
+        // Condition 0: macOS is in Low Power Mode. Outside of LPM the VM keeps
+        // running even when idle — users on AC power don't want "why is my tab
+        // frozen" surprises. LPM is an explicit opt-in for aggressive savings.
+        guard ProcessInfo.processInfo.isLowPowerModeEnabled else {
+            idleStart = nil
+            return
+        }
 
         // Condition 1: window must not be key
         guard !window.isKeyWindow else {
@@ -162,7 +211,7 @@ public final class VMAutoSuspend {
         }
 
         let idleDuration = Date().timeIntervalSince(start)
-        if idleDuration >= Self.idleThreshold {
+        if idleDuration >= idleThreshold {
             suspendVM()
         }
     }
@@ -172,7 +221,7 @@ public final class VMAutoSuspend {
     private func suspendVM() {
         guard let vm, !isSuspended, vm.canPause else { return }
         isSuspended = true
-        print("[VMAutoSuspend] suspending VM (idle for \(Int(Self.idleThreshold))s)")
+        print("[VMAutoSuspend] suspending VM (idle for \(Int(idleThreshold))s)")
         Task { @MainActor in
             do {
                 try await vm.pause()

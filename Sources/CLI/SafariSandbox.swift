@@ -1668,9 +1668,17 @@ final class BrowserSession {
             self.cjkInputBridge = bridge
         }
 
-        // Auto-suspend disabled: the idle heuristic (no network traffic + unfocused)
-        // can't detect passive viewing (animations, videos) and incorrectly suspends
-        // active sessions. Pre-warmed VMs are suspended by VMPool instead.
+        // Auto-suspend on idle — only actually suspends while macOS is in
+        // Low Power Mode (the gate lives inside VMAutoSuspend). Outside LPM
+        // it's inert, which avoids the "passive viewing" false-positive.
+        self.autoSuspend = MainActor.assumeIsolated {
+            VMAutoSuspend(
+                vm: warmVM.vm,
+                window: window,
+                networkFilter: warmVM.networkFilter,
+                isMicrophoneEnabled: config.enableMicrophone
+            )
+        }
 
         let helper = SessionDelegateHelper(session: self)
         self.delegateHelper = helper
