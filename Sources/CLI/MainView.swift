@@ -17,6 +17,12 @@ struct MainView: View {
     @State private var profileToDelete: Profile?
 
     /// Colors already used by other profiles.
+    private func managedTooltip(for profile: Profile) -> String? {
+        guard state.profileManager.isManaged(profile.id) else { return nil }
+        let org = state.profileManager.managedOrgSlug(for: profile.id) ?? "your admin"
+        return "Managed by \(org). Settings are not editable on this device."
+    }
+
     private func usedColors(excluding profileID: UUID? = nil) -> Set<ProfileColor> {
         Set(state.profileManager.allProfiles.compactMap { profile in
             if profile.id == profileID { return nil }
@@ -215,8 +221,15 @@ struct MainView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(profile.name)
-                                .font(.body)
+                            HStack(spacing: 4) {
+                                Text(profile.name).font(.body)
+                                if state.profileManager.isManaged(profile.id) {
+                                    Image(systemName: "lock.shield.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .help("Managed by \(state.profileManager.managedOrgSlug(for: profile.id) ?? "your admin") — not editable")
+                                }
+                            }
                             if profile.isEncrypted {
                                 Label("Encrypted", systemImage: "lock.fill")
                                     .font(.caption2)
@@ -226,17 +239,19 @@ struct MainView: View {
 
                         Spacer()
 
-                        Button {
-                            editingProfile = profile
-                        } label: {
-                            Image(systemName: "gearshape")
-                                .font(.caption)
+                        if !state.profileManager.isManaged(profile.id) {
+                            Button {
+                                editingProfile = profile
+                            } label: {
+                                Image(systemName: "gearshape")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Edit profile settings")
                         }
-                        .buttonStyle(.borderless)
-                        .help("Edit profile settings")
                     }
                     .tag(profile.id)
-                    .help(profile.comments.isEmpty ? "" : profile.comments)
+                    .help(managedTooltip(for: profile) ?? (profile.comments.isEmpty ? "" : profile.comments))
                 }
             }
             .listStyle(.bordered(alternatesRowBackgrounds: true))
@@ -266,8 +281,15 @@ struct MainView: View {
                         .frame(width: 24, height: 20)
                 }
                 .buttonStyle(.borderless)
-                .disabled(state.selectedProfileID == nil)
-                .help("Delete selected profile")
+                .disabled(
+                    state.selectedProfileID == nil ||
+                    (state.selectedProfileID.map { state.profileManager.isManaged($0) } ?? false)
+                )
+                .help(
+                    state.selectedProfileID.map { state.profileManager.isManaged($0) } == true
+                        ? "Managed profiles can only be removed by unenrolling (Settings → Managed Profile)."
+                        : "Delete selected profile"
+                )
 
                 Spacer()
             }

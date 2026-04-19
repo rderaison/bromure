@@ -37,6 +37,11 @@ final class AppState: @unchecked Sendable {
     var initSteps: [InitStep] = []
     var consoleLog: String = ""
 
+    /// Last-observed managed-profile sync state, surfaced in Settings.
+    var managedSyncStatus: String = ""
+    var managedLastSyncedAt: Date?
+    var managedSyncInFlight: Bool = false
+
     struct InitStep: Identifiable {
         let id = UUID()
         let name: String
@@ -58,10 +63,22 @@ final class AppState: @unchecked Sendable {
     var onPoolReady: (() -> Void)?
     var onOpenProfileSettings: ((_ profileID: UUID, _ category: String?) -> Void)?
 
+    /// Periodic managed-profile sync timer; invalidated at teardown.
+    private var managedSyncTimer: Timer?
+
     init() {
         self.storageDir = VMConfig.defaultStorageDirectory
         self.imageManager = LinuxImageManager(storageDir: storageDir)
         self.profileManager = ProfileManager(storageDir: storageDir)
+
+        // Refresh the sidebar whenever sync writes to disk.
+        ManagedProfileSync.onSyncComplete = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                self.profileManager.reloadManaged()
+                self.profileVersion &+= 1
+            }
+        }
 
         // Profiles load asynchronously (iCloud discovery happens in background).
         // Defer migration and default-profile creation until profiles are ready.
@@ -92,6 +109,63 @@ final class AppState: @unchecked Sendable {
                 self.selectedProfileID = self.profileManager.allProfiles.first?.id
             }
         }
+    }
+
+    // MARK: - Managed profile sync
+
+    /// Kick off an initial sync (no-op if not enrolled) and schedule a
+    /// periodic refresh every 15 min while the app is running.
+    func startManagedSync() {
+        syncManagedProfiles(trigger: "launch")
+        managedSyncTimer?.invalidate()
+        managedSyncTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.syncManagedProfiles(trigger: "timer") }
+        }
+    }
+
+    /// Fire a manual sync, e.g. after the user enrolls or clicks "Sync now".
+    func syncManagedProfiles(trigger: String) {
+        guard InstallIdentityStore.load() != nil else {
+            managedSyncStatus = ""
+            return
+        }
+        guard !managedSyncInFlight else { return }
+        managedSyncInFlight = true
+        managedSyncStatus = "Syncing…"
+        Task { @MainActor in
+            defer { self.managedSyncInFlight = false }
+            do {
+                let profiles = try await ManagedProfileSync.shared.syncProfiles()
+                self.managedLastSyncedAt = Date()
+                self.managedSyncStatus = profiles.isEmpty
+                    ? "Enrolled — no profiles assigned."
+                    : "Synced \(profiles.count) profile\(profiles.count == 1 ? "" : "s")."
+                self.profileManager.reloadManaged()
+                self.profileVersion &+= 1
+                print("[managed] sync (\(trigger)) ok: \(profiles.count) profile(s)")
+            } catch {
+                self.managedSyncStatus = "Sync failed: \(error.localizedDescription)"
+                print("[managed] sync (\(trigger)) failed: \(error)")
+            }
+        }
+    }
+
+    func enrollManagedProfile(code: String, serverURL: URL?) async throws {
+        managedSyncInFlight = true
+        defer { managedSyncInFlight = false }
+        let url = serverURL ?? ManagedProfileSync.defaultServerURL
+        _ = try await ManagedProfileSync.shared.enroll(code: code, serverURL: url)
+        managedLastSyncedAt = Date()
+        profileManager.reloadManaged()
+        profileVersion &+= 1
+    }
+
+    func unenrollManagedProfile() {
+        ManagedProfileSync.shared.destroyLocalState()
+        managedLastSyncedAt = nil
+        managedSyncStatus = ""
+        profileManager.reloadManaged()
+        profileVersion &+= 1
     }
 
     func checkState() {

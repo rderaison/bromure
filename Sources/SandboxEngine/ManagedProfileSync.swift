@@ -26,6 +26,10 @@ public final class ManagedProfileSync {
 
     // MARK: - Enroll
 
+    /// Post-sync callback fired on the main actor so UI state (ProfileManager,
+    /// AppState) can react to changes in the managed profile set.
+    public static var onSyncComplete: (@Sendable () -> Void)?
+
     @discardableResult
     public func enroll(
         code: String,
@@ -135,6 +139,7 @@ public final class ManagedProfileSync {
             deleteMTLSPrivateKey(for: existing.id)
         }
 
+        Self.onSyncComplete?()
         return saved
     }
 

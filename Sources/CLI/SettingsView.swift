@@ -10,6 +10,7 @@ private enum AppSettingsCategory: String, CaseIterable, Identifiable {
     case display = "Display"
     case network = "Network"
     case automation = "Automation"
+    case managed = "Managed Profile"
     case storage = "Storage"
 
     var id: String { rawValue }
@@ -22,6 +23,7 @@ private enum AppSettingsCategory: String, CaseIterable, Identifiable {
         case .display: "display"
         case .network: "network"
         case .automation: "terminal.fill"
+        case .managed: "building.2.fill"
         case .storage: "internaldrive.fill"
         }
     }
@@ -34,6 +36,7 @@ private enum AppSettingsCategory: String, CaseIterable, Identifiable {
         case .display: .purple
         case .network: .green
         case .automation: .indigo
+        case .managed: .pink
         case .storage: .gray
         }
     }
@@ -198,8 +201,162 @@ struct SettingsView: View {
         case .display: displayView
         case .network: networkView
         case .automation: automationView
+        case .managed: managedView
         case .storage: storageView
         }
+    }
+
+    // MARK: - Managed Profile
+
+    @State private var enrollCodeInput: String = ""
+    @State private var managedServerURL: String = ""
+    @State private var enrollInFlight: Bool = false
+    @State private var enrollError: String?
+    @State private var showUnenrollConfirm: Bool = false
+
+    private var managedView: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            sectionHeader("Managed Profile", subtitle: "Enterprise-provisioned profile delivered from a Bromure control plane")
+
+            if let identity = InstallIdentityStore.load() {
+                enrolledStatusView(identity)
+            } else {
+                enrollEntryView
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func enrolledStatusView(_ identity: InstallIdentity) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            row("Organization", identity.orgSlug)
+            row("User",         identity.userEmail)
+            row("Device",       identity.deviceName)
+            row("Server",       identity.serverURL.absoluteString)
+            if let ts = state?.managedLastSyncedAt {
+                row("Last sync", DateFormatter.localizedString(from: ts, dateStyle: .medium, timeStyle: .medium))
+            }
+            if let s = state?.managedSyncStatus, !s.isEmpty {
+                Text(s).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+
+        settingsDivider
+
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Assigned profiles").font(.headline)
+            let assigned = (state?.profileManager.allProfiles ?? []).filter {
+                state?.profileManager.isManaged($0.id) == true
+            }
+            if assigned.isEmpty {
+                Text("No managed profiles are currently assigned to this user.")
+                    .settingDescription()
+            } else {
+                ForEach(assigned) { p in
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.fill").font(.caption).foregroundStyle(.secondary)
+                        Text(p.name)
+                    }
+                }
+            }
+        }
+
+        settingsDivider
+
+        HStack {
+            Button {
+                state?.syncManagedProfiles(trigger: "settings")
+            } label: {
+                if state?.managedSyncInFlight == true {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Text("Sync Now")
+                }
+            }
+            .disabled(state?.managedSyncInFlight == true)
+
+            Button("Unenroll\u{2026}", role: .destructive) {
+                showUnenrollConfirm = true
+            }
+        }
+        .confirmationDialog(
+            "Remove managed profile from this device?",
+            isPresented: $showUnenrollConfirm,
+            titleVisibility: .visible,
+        ) {
+            Button("Unenroll", role: .destructive) {
+                state?.unenrollManagedProfile()
+            }
+        } message: {
+            Text("Local managed profile data and any issued mTLS certs will be deleted. Local profiles you created yourself are untouched.")
+        }
+    }
+
+    @ViewBuilder
+    private var enrollEntryView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Not enrolled.").font(.headline)
+            Text("Your administrator will give you a 6-word enrollment code (e.g. `acid-aloe-arson-bench-cat-drum`). Paste it below to receive your managed profile.")
+                .settingDescription()
+        }
+
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Enrollment Code").font(.headline)
+            TextField("six-word-enrollment-code", text: $enrollCodeInput)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+                .disableAutocorrection(true)
+                .frame(maxWidth: 420)
+
+            Text("Server URL (optional)").font(.headline).padding(.top, 6)
+            TextField(ManagedProfileSync.defaultServerURL.absoluteString, text: $managedServerURL)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+                .disableAutocorrection(true)
+                .frame(maxWidth: 420)
+
+            HStack {
+                Button {
+                    enrollTapped()
+                } label: {
+                    if enrollInFlight {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Enroll")
+                    }
+                }
+                .disabled(enrollInFlight || enrollCodeInput.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                if let err = enrollError {
+                    Text(err).font(.caption).foregroundStyle(.red)
+                }
+            }
+            .padding(.top, 6)
+        }
+    }
+
+    private func enrollTapped() {
+        enrollError = nil
+        enrollInFlight = true
+        let code = enrollCodeInput.trimmingCharacters(in: .whitespaces)
+        let url = URL(string: managedServerURL.trimmingCharacters(in: .whitespaces))
+        Task { @MainActor in
+            defer { enrollInFlight = false }
+            do {
+                try await state?.enrollManagedProfile(code: code, serverURL: url)
+                enrollCodeInput = ""
+            } catch {
+                enrollError = error.localizedDescription
+            }
+        }
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
+            Text(value).textSelection(.enabled)
+        }
+        .font(.callout)
     }
 
     // MARK: - General

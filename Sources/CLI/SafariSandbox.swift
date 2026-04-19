@@ -162,6 +162,20 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // renew their DHCP lease when Wi-Fi roams or Ethernet switches.
         HostNetworkWatcher.shared.start()
 
+        // Managed-profile sync: initial fetch on launch, periodic refresh
+        // every 15 min while the app is running. No-op if not enrolled.
+        state.startManagedSync()
+
+        // Re-sync whenever the app becomes active (user comes back from a
+        // different app or unlocks the machine).
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main,
+        ) { [weak self] _ in
+            Task { @MainActor in self?.state.syncManagedProfiles(trigger: "activate") }
+        }
+
         state.onCloseAllSessions = { [weak self] in
             guard let self else { return }
             for session in self.sessions {
