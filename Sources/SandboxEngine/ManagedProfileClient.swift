@@ -14,7 +14,8 @@ public struct ManagedProfileClient {
         public let installId: String
         public let installToken: String
         public let orgSlug: String
-        public let profileId: String
+        public let userId: String
+        public let userEmail: String
     }
 
     public func enroll(code: String, installPubkeyHex: String, deviceName: String) async throws -> EnrollResponse {
@@ -32,15 +33,20 @@ public struct ManagedProfileClient {
         return try JSONDecoder().decode(EnrollResponse.self, from: data)
     }
 
-    // MARK: - Profile sync
+    // MARK: - Profile sync (list)
 
-    public struct ProfileResponse: Decodable {
+    public struct ProfilesResponse: Decodable {
+        public let profiles: [ProfileEntry]
+        public let revoked: Bool
+    }
+
+    public struct ProfileEntry: Decodable {
+        public let profileId: String
         public let version: Int
         public let manifest: ManifestPayload
         public let signatureB64: String
         public let signingKeyPublicPem: String
         public let sealedPayloadB64: String
-        public let revoked: Bool
     }
 
     public struct ManifestPayload: Decodable {
@@ -69,41 +75,52 @@ public struct ManagedProfileClient {
         }
     }
 
-    public func fetchProfile(installId: String, bearer: String) async throws -> (ProfileResponse, Data) {
-        var req = URLRequest(url: serverURL.appendingPathComponent("v1/installs/\(installId)/profile"))
+    /// Returns both the parsed struct and the raw `profiles[i].manifest` JSON
+    /// bytes (one blob per profile, sorted-keys normalized) so the caller can
+    /// verify signatures against the exact bytes the server signed.
+    public func fetchProfiles(
+        installId: String, bearer: String,
+    ) async throws -> (ProfilesResponse, [String: Data]) {
+        var req = URLRequest(url: serverURL.appendingPathComponent("v1/installs/\(installId)/profiles"))
         req.httpMethod = "GET"
         req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         let (data, resp) = try await URLSession.shared.data(for: req)
         try Self.assertOK(resp, data)
-        let decoded = try JSONDecoder().decode(ProfileResponse.self, from: data)
-        // Pull the raw `manifest` sub-object bytes out of the top-level body.
-        // We need them verbatim for signature verification on reload.
-        let raw = try Self.extractManifestBytes(from: data)
-        return (decoded, raw)
+        let decoded = try JSONDecoder().decode(ProfilesResponse.self, from: data)
+        let manifests = try Self.extractManifestBytes(from: data)
+        return (decoded, manifests)
     }
 
-    private static func extractManifestBytes(from responseData: Data) throws -> Data {
-        // The response is a JSON object with a `manifest` key whose value is
-        // itself a JSON object. Re-parse-and-re-serialize the sub-object so
-        // whitespace is normalized — the *content* is still what got signed
-        // because the server signs canonicalize(manifest), not the raw bytes.
+    private static func extractManifestBytes(from responseData: Data) throws -> [String: Data] {
         guard
             let top = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-            let manifest = top["manifest"]
+            let profiles = top["profiles"] as? [[String: Any]]
         else {
             throw ManagedProfileClientError.sealedPayloadInvalid
         }
-        return try JSONSerialization.data(
-            withJSONObject: manifest,
-            options: [.sortedKeys],
-        )
+        var out: [String: Data] = [:]
+        for entry in profiles {
+            guard let pid = entry["profileId"] as? String,
+                  let m = entry["manifest"]
+            else { continue }
+            out[pid] = try JSONSerialization.data(
+                withJSONObject: m,
+                options: [.sortedKeys],
+            )
+        }
+        return out
     }
 
     // MARK: - Heartbeat
 
     public struct HeartbeatResponse: Decodable {
-        public let latestVersion: Int
+        public let profiles: [ProfileVersion]
         public let revoked: Bool
+
+        public struct ProfileVersion: Decodable {
+            public let profileId: String
+            public let version: Int
+        }
     }
 
     public func heartbeat(installId: String, bearer: String) async throws -> HeartbeatResponse {
@@ -117,7 +134,7 @@ public struct ManagedProfileClient {
         return try JSONDecoder().decode(HeartbeatResponse.self, from: data)
     }
 
-    // MARK: - mTLS CSR signing
+    // MARK: - mTLS CSR signing (per profile)
 
     public struct CertResponse: Decodable {
         public let certPem: String
@@ -142,12 +159,14 @@ public struct ManagedProfileClient {
         }
     }
 
-    public func signCSR(installId: String, bearer: String, csrPem: String) async throws -> CertResponse {
+    public func signCSR(
+        installId: String, bearer: String, profileId: String, csrPem: String,
+    ) async throws -> CertResponse {
         var req = URLRequest(url: serverURL.appendingPathComponent("v1/installs/\(installId)/cert"))
         req.httpMethod = "POST"
         req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = ["csrPem": csrPem]
+        let body: [String: Any] = ["profileId": profileId, "csrPem": csrPem]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, resp) = try await URLSession.shared.data(for: req)
         try Self.assertOK(resp, data)
@@ -177,7 +196,7 @@ public enum ManagedProfileClientError: Error, LocalizedError {
         switch self {
         case .httpError(let status, let body):
             return "HTTP \(status): \(body)"
-        case .notEnrolled: return "Bromure is not enrolled in a managed profile"
+        case .notEnrolled: return "Bromure is not enrolled"
         case .signatureInvalid: return "Managed profile signature did not verify"
         case .sealedPayloadInvalid: return "Could not open sealed profile payload"
         }

@@ -14,7 +14,8 @@ import Security
 public struct InstallIdentity: Codable, Equatable {
     public let installId: String
     public let orgSlug: String
-    public let profileId: String
+    public let userId: String
+    public let userEmail: String
     public let serverURL: URL
     public let enrolledAt: Date
     public var deviceName: String

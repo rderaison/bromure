@@ -24,17 +24,18 @@ struct Enroll: AsyncParsableCommand {
         }()
         let name = deviceName ?? Host.current().localizedName ?? "unnamed"
         print("Enrolling against \(serverURL.absoluteString) as \(name)…")
-        let profile = try await ManagedProfileSync.shared.enroll(
+        let profiles = try await ManagedProfileSync.shared.enroll(
             code: code,
             serverURL: serverURL,
             deviceName: name,
         )
-        print("Enrolled.")
-        print("  org:       \(profile.orgSlug)")
-        print("  profile:   \(profile.name) (\(profile.id.uuidString))")
-        print("  version:   \(profile.version)")
-        print("  assets:    \(profile.assets.count)")
-        print("  mTLS:      \(profile.mtls.enabled ? "yes" : "no")")
+        print("Enrolled. Received \(profiles.count) managed profile(s):")
+        for p in profiles {
+            print("  - \(p.name)  v\(p.version)  mTLS=\(p.mtls.enabled ? "yes" : "no")  assets=\(p.assets.count)")
+        }
+        if profiles.isEmpty {
+            print("  (no profiles currently assigned to this user — ask your admin)")
+        }
     }
 }
 
