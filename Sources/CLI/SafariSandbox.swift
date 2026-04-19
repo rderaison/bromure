@@ -11,7 +11,7 @@ struct Bromure: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure",
         abstract: "Run a browser in an isolated, ephemeral VM.",
-        subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self],
+        subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self, Enroll.self, Unenroll.self],
         defaultSubcommand: Launch.self
     )
 
