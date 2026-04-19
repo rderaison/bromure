@@ -96,7 +96,10 @@ def write_chrome_env(cfg):
 
     extra_flags = []
     enable_features = []
-    disable_features = []
+    # LcdText: Chromium's subpixel text in compositor layers. macOS Chrome uses
+    # grayscale AA; disabling here matches that path and avoids the slight
+    # chromatic fringing/blur that subpixel rendering produces on this display.
+    disable_features = ["LcdText"]
 
     if cfg.get("darkMode"):
         extra_flags.append("--force-dark-mode")

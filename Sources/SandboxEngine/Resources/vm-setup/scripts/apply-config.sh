@@ -113,7 +113,8 @@ fi
     EXTRA_FLAGS="$EXTRA_FLAGS --restore-last-session"
 
 # Media device access: run audio in-process (out-of-process can't find PipeWire).
-DISABLE_FEATURES=""
+# LcdText: disable subpixel compositor text to match macOS Chrome's grayscale AA.
+DISABLE_FEATURES="LcdText"
 [ "$MICROPHONE" = "1" ] && \
     DISABLE_FEATURES="${DISABLE_FEATURES:+$DISABLE_FEATURES,}AudioServiceOutOfProcess"
 
