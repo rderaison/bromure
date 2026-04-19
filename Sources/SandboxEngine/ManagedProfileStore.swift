@@ -82,6 +82,15 @@ public final class ManagedProfileStore {
         assetsPlaintext: [String: Data],
         rawManifestJSON: Data,
     ) throws {
+        // Defense in depth: reject any unsafe filename before we so much as
+        // compute a directory. Upstream sync also filters, but this ensures
+        // no future caller can slip past.
+        for name in profile.assets.map(\.filename) + Array(assetsPlaintext.keys) {
+            guard ManagedProfileSync.isSafeAssetFilename(name) else {
+                throw ManagedBundleError.assetHashMismatch(name)
+            }
+        }
+
         let base = dir(for: profile.id)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: assetsDir(for: profile.id), withIntermediateDirectories: true)
@@ -97,8 +106,16 @@ public final class ManagedProfileStore {
         for url in current where !wanted.contains(url.lastPathComponent) {
             try? FileManager.default.removeItem(at: url)
         }
+        // Belt-and-suspenders: resolve the destination and assert it stays
+        // inside the assets directory before opening the file.
+        let assetsRoot = assetsDir(for: profile.id).standardizedFileURL.path
         for (name, data) in assetsPlaintext {
-            try data.write(to: assetsDir(for: profile.id).appendingPathComponent(name), options: .atomic)
+            let dest = assetsDir(for: profile.id).appendingPathComponent(name)
+            let resolved = dest.standardizedFileURL.path
+            guard resolved.hasPrefix(assetsRoot + "/") else {
+                throw ManagedBundleError.assetHashMismatch(name)
+            }
+            try data.write(to: dest, options: .atomic)
         }
 
         let encoder = JSONEncoder()

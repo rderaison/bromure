@@ -97,11 +97,41 @@ public final class ManagedProfileSync {
             }
             struct AssetsEnvelope: Decodable { let assets: [String: String] }
             let env = try JSONDecoder().decode(AssetsEnvelope.self, from: plaintext)
+
+            // Drive asset ingestion from the SIGNED manifest, not the sealed
+            // envelope — sealed-box is unauthenticated (any holder of the
+            // install's public key can craft one), so we only accept filenames
+            // present in the signed manifest whose bytes hash to the declared
+            // sha256.
             var assetsPlain: [String: Data] = [:]
-            for (filename, b64) in env.assets {
-                guard let bytes = Data(base64Encoded: b64) else { continue }
-                assetsPlain[filename] = bytes
+            var assetsOK = true
+            for declared in entry.manifest.assets {
+                guard Self.isSafeAssetFilename(declared.filename) else {
+                    print("[ManagedProfileSync] skipping profile \(entry.profileId) — unsafe filename \(declared.filename)")
+                    assetsOK = false
+                    break
+                }
+                guard let b64 = env.assets[declared.filename],
+                      let bytes = Data(base64Encoded: b64)
+                else {
+                    print("[ManagedProfileSync] skipping profile \(entry.profileId) — missing asset \(declared.filename)")
+                    assetsOK = false
+                    break
+                }
+                guard bytes.count == declared.sizeBytes else {
+                    print("[ManagedProfileSync] skipping profile \(entry.profileId) — size mismatch on \(declared.filename)")
+                    assetsOK = false
+                    break
+                }
+                let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                guard digest == declared.sha256 else {
+                    print("[ManagedProfileSync] skipping profile \(entry.profileId) — sha256 mismatch on \(declared.filename)")
+                    assetsOK = false
+                    break
+                }
+                assetsPlain[declared.filename] = bytes
             }
+            if !assetsOK { continue }
 
             guard let pid = UUID(uuidString: entry.profileId) else { continue }
             let managed = ManagedProfile(
@@ -198,6 +228,19 @@ public final class ManagedProfileSync {
     }
 
     // MARK: - Private helpers
+
+    /// Whitelist-style check against path-traversal filenames in server-delivered
+    /// assets. Applied at the sync boundary and again in `ManagedProfileStore.save`.
+    static func isSafeAssetFilename(_ name: String) -> Bool {
+        if name.isEmpty || name.count > 255 { return false }
+        if name == "." || name == ".." { return false }
+        if name.hasPrefix(".") { return false }
+        for scalar in name.unicodeScalars {
+            if scalar.value == 0 { return false }           // NUL
+            if scalar == "/" || scalar == "\\" { return false }
+        }
+        return true
+    }
 
     private func parseISO(_ s: String) -> Date {
         let f = ISO8601DateFormatter()
