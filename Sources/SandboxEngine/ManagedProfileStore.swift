@@ -1,6 +1,13 @@
 import Foundation
 import CryptoKit
 
+/// Triple of PEMs the guest needs to install a client cert into its NSS db.
+public struct ManagedMTLSMaterial: Sendable {
+    public let certPem: String
+    public let keyPem: String   // PKCS#8 PEM
+    public let caPem: String
+}
+
 /// On-disk store for the set of managed profiles currently assigned to this
 /// install. One subdirectory per profile; the store handles reconciliation
 /// (add/remove) driven by sync.
@@ -41,6 +48,27 @@ public final class ManagedProfileStore {
     }
     public func mtlsCertURL(for id: UUID) -> URL { mtlsDir(for: id).appendingPathComponent("cert.pem") }
     public func mtlsCAURL(for id: UUID) -> URL { mtlsDir(for: id).appendingPathComponent("ca.pem") }
+
+    /// Bundle of mTLS material ready to be pushed into a guest VM at session
+    /// launch. Returns nil if the profile isn't managed, doesn't have mTLS
+    /// enabled, or a leaf cert hasn't been issued yet.
+    public func mtlsMaterial(profileId: UUID) -> ManagedMTLSMaterial? {
+        let certURL = mtlsCertURL(for: profileId)
+        let caURL = mtlsCAURL(for: profileId)
+        guard FileManager.default.fileExists(atPath: certURL.path),
+              FileManager.default.fileExists(atPath: caURL.path),
+              let certPem = try? String(contentsOf: certURL, encoding: .utf8),
+              let caPem = try? String(contentsOf: caURL, encoding: .utf8)
+        else { return nil }
+        guard let privKey = try? ManagedProfileSync.shared.loadMTLSPrivateKey(for: profileId) else {
+            return nil
+        }
+        return ManagedMTLSMaterial(
+            certPem: certPem,
+            keyPem: privKey.pemRepresentation,
+            caPem: caPem,
+        )
+    }
 
     // MARK: - Read
 

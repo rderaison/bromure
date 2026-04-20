@@ -84,6 +84,26 @@ def write_custom_cas(cas):
     return len(cas)
 
 
+def install_managed_mtls(mtls):
+    """Drop the managed-profile mTLS material on disk and import it into
+    the chrome user's NSS database. No-op if the host didn't send any."""
+    if not mtls:
+        return
+    cert_pem = mtls.get("certPem")
+    key_pem = mtls.get("keyPem")
+    ca_pem = mtls.get("caPem")
+    if not cert_pem or not key_pem or not ca_pem:
+        return
+    os.makedirs("/tmp/bromure/mtls", exist_ok=True)
+    for fn, data in [("cert.pem", cert_pem), ("key.pem", key_pem), ("ca.pem", ca_pem)]:
+        with open(f"/tmp/bromure/mtls/{fn}", "w") as f:
+            f.write(data)
+    os.chmod("/tmp/bromure/mtls/key.pem", 0o600)
+    rc, out = run("/usr/local/bin/install-mtls.sh")
+    if rc != 0:
+        print(f"config-agent: install-mtls.sh failed (rc={rc}): {out}", file=sys.stderr)
+
+
 def sh_escape(s):
     """Escape a string for safe use as a single-quoted shell value."""
     return "'" + str(s).replace("'", "'\\''") + "'"
@@ -802,6 +822,9 @@ def main():
 
     # Write custom CAs
     ca_count = write_custom_cas(cfg.get("rootCAs"))
+
+    # Managed-profile mTLS client cert → NSS database
+    install_managed_mtls(cfg.get("mtls"))
 
     # Write chrome-env
     write_chrome_env(cfg)

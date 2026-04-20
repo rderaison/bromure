@@ -457,6 +457,20 @@ public final class VMPool {
         }
         if config.traceLevel != .disabled { cfg["traceLevel"] = config.traceLevel.rawValue }
         if !config.rootCAs.isEmpty { cfg["rootCAs"] = config.rootCAs }
+
+        // Managed-profile mTLS: if this session's profile has a server-issued
+        // leaf cert on disk, hand the cert + key + CA to the guest so it can
+        // import them into the chrome user's NSS database before Chromium
+        // starts. The private key material is kept in Keychain on the host
+        // and copied into the (ephemeral) guest only for this session.
+        if let pid = profileID,
+           let mtls = ManagedProfileStore.shared.mtlsMaterial(profileId: pid) {
+            cfg["mtls"] = [
+                "certPem": mtls.certPem,
+                "keyPem":  mtls.keyPem,
+                "caPem":   mtls.caPem,
+            ]
+        }
         cfg["locale"] = config.locale
 
         // Display scale: read from UserDefaults so changing 1x/2x doesn't require image rebuild
