@@ -67,10 +67,7 @@ public enum ManagedBundleCrypto {
         }
         if let b = value as? Bool { return b ? "true" : "false" }
         if let s = value as? String {
-            let data = try JSONSerialization.data(withJSONObject: [s], options: [])
-            let arr = String(data: data, encoding: .utf8) ?? "[\"\"]"
-            // Strip the surrounding [ and ].
-            return String(arr.dropFirst().dropLast())
+            return jsonEscapeString(s)
         }
         if let arr = value as? [Any] {
             let parts = try arr.map { try canonicalize($0) }
@@ -91,6 +88,44 @@ public enum ManagedBundleCrypto {
             options: [.fragmentsAllowed],
         )
         return String(data: data, encoding: .utf8) ?? "null"
+    }
+
+    /// JSON string escaper matching Node's `JSON.stringify` byte-for-byte.
+    ///
+    /// Apple's `JSONSerialization` escapes `/` as `\/` (legal per RFC 8259
+    /// §7, but not required). Node's `JSON.stringify` does not. Using the
+    /// system serializer would make canonical output diverge across the
+    /// two sides whenever a string contains `/` (very common in base64-
+    /// encoded PEM bodies), breaking signature verification.
+    ///
+    /// Matches Node's rules:
+    /// - `\b \t \n \f \r \" \\` get the short escape.
+    /// - Control characters < 0x20 get `\uXXXX`.
+    /// - All other code points (including non-BMP) are emitted literally;
+    ///   their UTF-8 encoding in the final canonical bytes is what the
+    ///   server signs.
+    private static func jsonEscapeString(_ s: String) -> String {
+        var out = "\""
+        out.reserveCapacity(s.utf8.count + 2)
+        for scalar in s.unicodeScalars {
+            switch scalar {
+            case "\"":        out.append("\\\"")
+            case "\\":        out.append("\\\\")
+            case "\u{08}":    out.append("\\b")
+            case "\u{09}":    out.append("\\t")
+            case "\u{0A}":    out.append("\\n")
+            case "\u{0C}":    out.append("\\f")
+            case "\u{0D}":    out.append("\\r")
+            default:
+                if scalar.value < 0x20 {
+                    out.append(String(format: "\\u%04x", scalar.value))
+                } else {
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        out.append("\"")
+        return out
     }
 
     private static func numberString(_ n: NSNumber) -> String {
