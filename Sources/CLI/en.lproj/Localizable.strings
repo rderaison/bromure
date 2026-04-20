@@ -543,3 +543,46 @@
 "Your choice" = "Your choice";
 "You can turn this off at any time in Profile Settings \U2192 Privacy & Safety. It is disabled by default on every new profile." = "You can turn this off at any time in Profile Settings \U2192 Privacy & Safety. It is disabled by default on every new profile.";
 "By clicking Accept, you agree to have the pages you browse in this profile analyzed by the Bromure phishing-detection service." = "By clicking Accept, you agree to have the pages you browse in this profile analyzed by the Bromure phishing-detection service.";
+
+/* Enterprise Management — shared */
+"Enroll in Enterprise Management" = "Enroll in Enterprise Management";
+"Unenroll from this organization?" = "Unenroll from this organization?";
+"Unenroll" = "Unenroll";
+"Unenroll\U2026" = "Unenroll\U2026";
+
+/* EnrollmentView */
+"Your administrator will give you a 6-word enrollment code. Paste it below to receive managed profiles for this organization." = "Your administrator will give you a 6-word enrollment code. Paste it below to receive managed profiles for this organization.";
+"Enrollment Code" = "Enrollment Code";
+"Device Name" = "Device Name";
+"Shown to your administrator so they can recognize this device." = "Shown to your administrator so they can recognize this device.";
+"Server URL (optional)" = "Server URL (optional)";
+"Enroll" = "Enroll";
+
+/* SettingsView — Managed Profile (multi-install) */
+"Managed Profile" = "Managed Profile";
+"Enterprise-provisioned profile delivered from a Bromure control plane" = "Enterprise-provisioned profile delivered from a Bromure control plane";
+"Not enrolled." = "Not enrolled.";
+"Your administrator will give you a 6-word enrollment code (e.g. `acid-aloe-arson-bench-cat-drum`). Paste it below to receive your managed profile." = "Your administrator will give you a 6-word enrollment code (e.g. `acid-aloe-arson-bench-cat-drum`). Paste it below to receive your managed profile.";
+"Assigned profiles" = "Assigned profiles";
+"No managed profiles are currently assigned." = "No managed profiles are currently assigned.";
+"Sync Now" = "Sync Now";
+"Enroll Another\U2026" = "Enroll Another\U2026";
+"Managed profiles and any issued mTLS certificates from this organization will be removed. Profiles you created yourself are untouched." = "Managed profiles and any issued mTLS certificates from this organization will be removed. Profiles you created yourself are untouched.";
+"User" = "User";
+"Device" = "Device";
+"Server" = "Server";
+"Last sync" = "Last sync";
+
+/* Managed profile sync status */
+"Syncing\U2026" = "Syncing\U2026";
+"Enrolled — no profiles assigned." = "Enrolled — no profiles assigned.";
+"Synced %lld profile(s)." = "Synced %lld profile(s).";
+"Sync failed: %@" = "Sync failed: %@";
+
+/* Session window — trace controls + managed-recording banner */
+"Recording \U2014 click to pause" = "Recording \U2014 click to pause";
+"Paused \U2014 click to start recording" = "Paused \U2014 click to start recording";
+"View trace" = "View trace";
+"Recording is enforced by your organization (%@)." = "Recording is enforced by your organization (%@).";
+"Recording — shared with %@" = "Recording — shared with %@";
+"Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off.";

@@ -212,30 +212,28 @@ struct SettingsView: View {
     @State private var managedServerURL: String = ""
     @State private var enrollInFlight: Bool = false
     @State private var enrollError: String?
-    @State private var showUnenrollConfirm: Bool = false
+    @State private var pendingUnenrollInstallId: String?
 
     private var managedView: some View {
         VStack(alignment: .leading, spacing: 20) {
             sectionHeader("Managed Profile", subtitle: "Enterprise-provisioned profile delivered from a Bromure control plane")
 
-            if let identity = InstallIdentityStore.load() {
-                enrolledStatusView(identity)
-            } else {
+            let enrollments = state?.managedEnrollments ?? []
+            if enrollments.isEmpty {
                 enrollEntryView
+            } else {
+                enrolledListView(enrollments)
             }
         }
     }
 
     @ViewBuilder
-    private func enrolledStatusView(_ identity: InstallIdentity) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            row("Organization", identity.orgSlug)
-            row("User",         identity.userEmail)
-            row("Device",       identity.deviceName)
-            row("Server",       identity.serverURL.absoluteString)
-            if let ts = state?.managedLastSyncedAt {
-                row("Last sync", DateFormatter.localizedString(from: ts, dateStyle: .medium, timeStyle: .medium))
+    private func enrolledListView(_ enrollments: [InstallIdentity]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(enrollments) { identity in
+                enrollmentCard(identity)
             }
+
             if let s = state?.managedSyncStatus, !s.isEmpty {
                 Text(s).font(.caption).foregroundStyle(.secondary)
             }
@@ -249,7 +247,7 @@ struct SettingsView: View {
                 state?.profileManager.isManaged($0.id) == true
             }
             if assigned.isEmpty {
-                Text("No managed profiles are currently assigned to this user.")
+                Text("No managed profiles are currently assigned.")
                     .settingDescription()
             } else {
                 ForEach(assigned) { p in
@@ -275,21 +273,53 @@ struct SettingsView: View {
             }
             .disabled(state?.managedSyncInFlight == true)
 
-            Button("Unenroll\u{2026}", role: .destructive) {
-                showUnenrollConfirm = true
+            Button("Enroll Another\u{2026}") {
+                state?.onShowEnrollment?()
             }
         }
         .confirmationDialog(
-            "Remove managed profile from this device?",
-            isPresented: $showUnenrollConfirm,
+            "Unenroll from this organization?",
+            isPresented: Binding(
+                get: { pendingUnenrollInstallId != nil },
+                set: { if !$0 { pendingUnenrollInstallId = nil } },
+            ),
             titleVisibility: .visible,
         ) {
             Button("Unenroll", role: .destructive) {
-                state?.unenrollManagedProfile()
+                if let id = pendingUnenrollInstallId {
+                    state?.unenrollManagedProfile(installId: id)
+                }
+                pendingUnenrollInstallId = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingUnenrollInstallId = nil
             }
         } message: {
-            Text("Local managed profile data and any issued mTLS certs will be deleted. Local profiles you created yourself are untouched.")
+            Text("Managed profiles and any issued mTLS certificates from this organization will be removed. Profiles you created yourself are untouched.")
         }
+    }
+
+    @ViewBuilder
+    private func enrollmentCard(_ identity: InstallIdentity) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(identity.orgSlug).font(.headline)
+                Spacer()
+                Button("Unenroll\u{2026}", role: .destructive) {
+                    pendingUnenrollInstallId = identity.installId
+                }
+                .controlSize(.small)
+            }
+            row("User",   identity.userEmail)
+            row("Device", identity.deviceName)
+            row("Server", identity.serverURL.absoluteString)
+            if let ts = state?.managedLastSyncedAt {
+                row("Last sync", DateFormatter.localizedString(
+                    from: ts, dateStyle: .medium, timeStyle: .medium))
+            }
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 
     @ViewBuilder

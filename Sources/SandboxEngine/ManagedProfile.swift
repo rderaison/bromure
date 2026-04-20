@@ -60,6 +60,63 @@ public struct ManagedMTLSConfig: Codable, Equatable {
     public var certValiditySeconds: Int?
 }
 
+/// Server-controlled session-trace upload policy for a managed profile.
+///
+/// When `enabled` is true, the client is required to capture HTTP traces for
+/// every session opened against this profile and upload them to `endpoint`
+/// via mTLS (using the profile's issued leaf cert). The user cannot disable
+/// it — that's the point. `level` tunes what fields ship per event:
+///   - `.basic`   — URL/method/status/timing only, no headers, no bodies.
+///   - `.headers` — also request/response headers.
+///   - `.full`    — headers + post body + response body + form-field values.
+public struct CloudTracePolicy: Equatable, Sendable {
+    public enum Level: String, Codable, Sendable {
+        case basic, headers, full
+    }
+
+    public let enabled: Bool
+    public let endpoint: URL?
+    public let level: Level
+
+    public static let disabled = CloudTracePolicy(enabled: false, endpoint: nil, level: .basic)
+}
+
+public extension ManagedProfile {
+    /// Extract the `cloudTrace` block from the settings manifest, if any.
+    ///
+    /// Manifest shape (all fields optional — sensible defaults below):
+    /// ```json
+    /// "cloudTrace": {
+    ///   "enabled":  true,
+    ///   "endpoint": "https://analytics.bromure.io/ingest",
+    ///   "level":    "full"
+    /// }
+    /// ```
+    var cloudTrace: CloudTracePolicy {
+        guard case .object(let obj) = settings["cloudTrace"] ?? .null else {
+            return .disabled
+        }
+        let enabled: Bool = {
+            if case .bool(let b) = obj["enabled"] ?? .null { return b }
+            return false
+        }()
+        let endpoint: URL? = {
+            if case .string(let s) = obj["endpoint"] ?? .null, let url = URL(string: s) {
+                return url
+            }
+            return nil
+        }()
+        let level: CloudTracePolicy.Level = {
+            if case .string(let s) = obj["level"] ?? .null,
+               let lvl = CloudTracePolicy.Level(rawValue: s.lowercased()) {
+                return lvl
+            }
+            return .full
+        }()
+        return CloudTracePolicy(enabled: enabled, endpoint: endpoint, level: level)
+    }
+}
+
 /// Tiny Codable wrapper for arbitrary JSON values inside the settings dict.
 public enum AnyCodable: Codable, Equatable {
     case null

@@ -5,9 +5,10 @@ import X509
 import SwiftASN1
 
 /// Orchestrates enrollment + profile-list sync + mTLS leaf issuance on the
-/// client. The install is bound to a user in the org; the set of managed
-/// profiles delivered is the union of direct + group assignments, resolved
-/// server-side on every sync.
+/// client. Each install may be enrolled in multiple orgs simultaneously —
+/// sync reconciles across every enrollment. Within a single enrollment the
+/// set of managed profiles delivered is the union of direct + group
+/// assignments, resolved server-side on every sync.
 public final class ManagedProfileSync {
     public static let shared = ManagedProfileSync()
 
@@ -44,7 +45,7 @@ public final class ManagedProfileSync {
             installPubkeyHex: x25519.publicKeyHex,
             deviceName: deviceName,
         )
-        try InstallIdentityStore.storeInstallToken(resp.installToken)
+        try InstallIdentityStore.storeInstallToken(resp.installToken, for: resp.installId)
         let identity = InstallIdentity(
             installId: resp.installId,
             orgSlug: resp.orgSlug,
@@ -55,15 +56,64 @@ public final class ManagedProfileSync {
             deviceName: deviceName,
         )
         try InstallIdentityStore.save(identity)
-        return try await syncProfiles()
+        return try await syncProfiles(for: identity.installId)
     }
 
     // MARK: - Sync — reconcile local state with server-assigned set
 
+    /// Sync every enrolled install and return the aggregated list of managed
+    /// profiles saved on disk. Per-install errors are rethrown as the first
+    /// failure to keep the existing single-install call sites working; once
+    /// multi-install sync becomes the default, callers may want to surface
+    /// per-install failures via `syncProfiles(for:)`.
     @discardableResult
     public func syncProfiles() async throws -> [ManagedProfile] {
-        guard let identity = InstallIdentityStore.load(),
-              let token = InstallIdentityStore.loadInstallToken()
+        let installs = InstallIdentityStore.loadAll()
+        guard !installs.isEmpty else {
+            throw ManagedProfileClientError.notEnrolled
+        }
+        var aggregate: [ManagedProfile] = []
+        var firstError: Error?
+        var syncedIds: Set<UUID> = []
+        for identity in installs {
+            do {
+                let saved = try await syncProfiles(for: identity.installId, fireCallback: false)
+                for p in saved { syncedIds.insert(p.id) }
+                aggregate.append(contentsOf: saved)
+            } catch {
+                firstError = firstError ?? error
+            }
+        }
+        // Remove any locally-stored profile that no enrollment still claims.
+        for existing in ManagedProfileStore.shared.loadAll() where !syncedIds.contains(existing.id) {
+            // Only drop profiles whose owning install is still present — if the
+            // install itself is gone (unenrolled separately) the caller will
+            // have pruned already. Here we only want to expire profiles that
+            // the server dropped from an install we did successfully sync.
+            if installs.contains(where: { $0.installId == existing.installId }) {
+                ManagedProfileStore.shared.remove(id: existing.id)
+                deleteMTLSPrivateKey(for: existing.id)
+            }
+        }
+        Self.onSyncComplete?()
+        if let err = firstError, aggregate.isEmpty { throw err }
+        return aggregate
+    }
+
+    /// Sync a single enrollment. Separating this out lets UI surfaces retry
+    /// one failing install without re-hitting every other server.
+    @discardableResult
+    public func syncProfiles(for installId: String) async throws -> [ManagedProfile] {
+        try await syncProfiles(for: installId, fireCallback: true)
+    }
+
+    @discardableResult
+    private func syncProfiles(
+        for installId: String,
+        fireCallback: Bool,
+    ) async throws -> [ManagedProfile] {
+        guard let identity = InstallIdentityStore.load(installId: installId),
+              let token = InstallIdentityStore.loadInstallToken(for: installId)
         else {
             throw ManagedProfileClientError.notEnrolled
         }
@@ -164,21 +214,22 @@ public final class ManagedProfileSync {
             }
         }
 
-        // Remove any locally-stored profile the server no longer assigns.
-        for existing in ManagedProfileStore.shared.loadAll() where !kept.contains(existing.id) {
+        // Within this install only, prune profiles the server no longer assigns.
+        for existing in ManagedProfileStore.shared.loadAll()
+        where existing.installId == identity.installId && !kept.contains(existing.id) {
             ManagedProfileStore.shared.remove(id: existing.id)
             deleteMTLSPrivateKey(for: existing.id)
         }
 
-        Self.onSyncComplete?()
+        if fireCallback { Self.onSyncComplete?() }
         return saved
     }
 
     // MARK: - mTLS
 
     public func issueMTLSLeaf(for profile: ManagedProfile) async throws {
-        guard let identity = InstallIdentityStore.load(),
-              let token = InstallIdentityStore.loadInstallToken()
+        guard let identity = InstallIdentityStore.load(installId: profile.installId),
+              let token = InstallIdentityStore.loadInstallToken(for: profile.installId)
         else { throw ManagedProfileClientError.notEnrolled }
 
         // RSA-2048 for broad compatibility. The server-side CSR parser
@@ -225,12 +276,26 @@ public final class ManagedProfileSync {
 
     // MARK: - Sign-out
 
+    /// Remove a single enrollment and every profile / mTLS leaf tied to it.
+    /// Other enrollments are untouched.
+    public func unenroll(installId: String) {
+        for p in ManagedProfileStore.shared.loadAll() where p.installId == installId {
+            deleteMTLSPrivateKey(for: p.id)
+            ManagedProfileStore.shared.remove(id: p.id)
+        }
+        InstallIdentityStore.remove(installId: installId)
+        Self.onSyncComplete?()
+    }
+
+    /// Wipe every enrollment (equivalent to `unenroll` on each install,
+    /// plus the shared X25519 key).
     public func destroyLocalState() {
         for p in ManagedProfileStore.shared.loadAll() {
             deleteMTLSPrivateKey(for: p.id)
         }
         ManagedProfileStore.shared.removeAll()
         InstallIdentityStore.destroy()
+        Self.onSyncComplete?()
     }
 
     // MARK: - Private helpers

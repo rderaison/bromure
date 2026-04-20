@@ -543,3 +543,46 @@
 "Your choice" = "Sua escolha";
 "You can turn this off at any time in Profile Settings \U2192 Privacy & Safety. It is disabled by default on every new profile." = "Voc\U00EA pode desativar isto a qualquer momento em Configura\U00E7\U00F5es do perfil \U2192 Privacidade e seguran\U00E7a. Est\U00E1 desativado por padr\U00E3o em cada novo perfil.";
 "By clicking Accept, you agree to have the pages you browse in this profile analyzed by the Bromure phishing-detection service." = "Ao clicar em Aceitar, voc\U00EA concorda que as p\U00E1ginas que voc\U00EA navega neste perfil sejam analisadas pelo servi\U00E7o de detec\U00E7\U00E3o de phishing da Bromure.";
+
+/* Enterprise Management — shared */
+"Enroll in Enterprise Management" = "Inscrever-se no gerenciamento corporativo";
+"Unenroll from this organization?" = "Cancelar inscri\U00E7\U00E3o desta organiza\U00E7\U00E3o?";
+"Unenroll" = "Cancelar inscri\U00E7\U00E3o";
+"Unenroll\U2026" = "Cancelar inscri\U00E7\U00E3o\U2026";
+
+/* EnrollmentView */
+"Your administrator will give you a 6-word enrollment code. Paste it below to receive managed profiles for this organization." = "Seu administrador fornecer\U00E1 um c\U00F3digo de inscri\U00E7\U00E3o de 6 palavras. Cole-o abaixo para receber os perfis gerenciados desta organiza\U00E7\U00E3o.";
+"Enrollment Code" = "C\U00F3digo de inscri\U00E7\U00E3o";
+"Device Name" = "Nome do dispositivo";
+"Shown to your administrator so they can recognize this device." = "Exibido para o seu administrador, para que ele possa identificar este dispositivo.";
+"Server URL (optional)" = "URL do servidor (opcional)";
+"Enroll" = "Inscrever-se";
+
+/* SettingsView — Managed Profile (multi-install) */
+"Managed Profile" = "Perfil gerenciado";
+"Enterprise-provisioned profile delivered from a Bromure control plane" = "Perfil fornecido pela empresa, entregue a partir de um plano de controle Bromure";
+"Not enrolled." = "N\U00E3o inscrito.";
+"Your administrator will give you a 6-word enrollment code (e.g. `acid-aloe-arson-bench-cat-drum`). Paste it below to receive your managed profile." = "Seu administrador fornecer\U00E1 um c\U00F3digo de inscri\U00E7\U00E3o de 6 palavras (ex. `acid-aloe-arson-bench-cat-drum`). Cole-o abaixo para receber seu perfil gerenciado.";
+"Assigned profiles" = "Perfis atribu\U00EDdos";
+"No managed profiles are currently assigned." = "Nenhum perfil gerenciado est\U00E1 atribu\U00EDdo no momento.";
+"Sync Now" = "Sincronizar agora";
+"Enroll Another\U2026" = "Inscrever outra\U2026";
+"Managed profiles and any issued mTLS certificates from this organization will be removed. Profiles you created yourself are untouched." = "Os perfis gerenciados e todos os certificados mTLS emitidos por esta organiza\U00E7\U00E3o ser\U00E3o removidos. Os perfis que voc\U00EA mesmo criou n\U00E3o ser\U00E3o afetados.";
+"User" = "Usu\U00E1rio";
+"Device" = "Dispositivo";
+"Server" = "Servidor";
+"Last sync" = "\U00DAltima sincro";
+
+/* Managed profile sync status */
+"Syncing\U2026" = "Sincronizando\U2026";
+"Enrolled — no profiles assigned." = "Inscrito \U2014 nenhum perfil atribu\U00EDdo.";
+"Synced %lld profile(s)." = "%lld perfil(is) sincronizado(s).";
+"Sync failed: %@" = "Falha na sincroniza\U00E7\U00E3o: %@";
+
+/* Session window — trace controls + managed-recording banner */
+"Recording \U2014 click to pause" = "Gravando \U2014 clique para pausar";
+"Paused \U2014 click to start recording" = "Pausado \U2014 clique para come\U00E7ar a gravar";
+"View trace" = "Ver grava\U00E7\U00E3o";
+"Recording is enforced by your organization (%@)." = "A grava\U00E7\U00E3o \U00E9 exigida pela sua organiza\U00E7\U00E3o (%@).";
+"Recording — shared with %@" = "Gravando \U2014 compartilhado com %@";
+"Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "Cada requisi\U00E7\U00E3o nesta janela \U00E9 gravada e enviada para a equipe de seguran\U00E7a da sua organiza\U00E7\U00E3o. Isto \U00E9 exigido pelo seu administrador e n\U00E3o pode ser desativado.";

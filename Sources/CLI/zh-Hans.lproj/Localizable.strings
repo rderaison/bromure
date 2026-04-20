@@ -543,3 +543,46 @@
 "Your choice" = "您的选择";
 "You can turn this off at any time in Profile Settings \U2192 Privacy & Safety. It is disabled by default on every new profile." = "您可以随时在\U201C配置文件设置 \U2192 隐私与安全\U201D中将其关闭。新配置文件默认禁用此功能。";
 "By clicking Accept, you agree to have the pages you browse in this profile analyzed by the Bromure phishing-detection service." = "点击\U201C接受\U201D即表示您同意在此配置文件中浏览的页面由 Bromure 钓鱼检测服务进行分析。";
+
+/* Enterprise Management — shared */
+"Enroll in Enterprise Management" = "加入企业管理";
+"Unenroll from this organization?" = "是否退出此组织的管理？";
+"Unenroll" = "退出";
+"Unenroll\U2026" = "退出\U2026";
+
+/* EnrollmentView */
+"Your administrator will give you a 6-word enrollment code. Paste it below to receive managed profiles for this organization." = "您的管理员将提供一个由 6 个单词组成的加入代码。将其粘贴到下方以接收此组织的受管配置文件。";
+"Enrollment Code" = "加入代码";
+"Device Name" = "设备名称";
+"Shown to your administrator so they can recognize this device." = "显示给您的管理员，以便识别此设备。";
+"Server URL (optional)" = "服务器 URL（可选）";
+"Enroll" = "加入";
+
+/* SettingsView — Managed Profile (multi-install) */
+"Managed Profile" = "受管配置文件";
+"Enterprise-provisioned profile delivered from a Bromure control plane" = "由企业配置、通过 Bromure 控制平面下发的配置文件";
+"Not enrolled." = "未加入。";
+"Your administrator will give you a 6-word enrollment code (e.g. `acid-aloe-arson-bench-cat-drum`). Paste it below to receive your managed profile." = "您的管理员将提供一个由 6 个单词组成的加入代码（例如 `acid-aloe-arson-bench-cat-drum`）。将其粘贴到下方以接收您的受管配置文件。";
+"Assigned profiles" = "已分配的配置文件";
+"No managed profiles are currently assigned." = "当前没有分配任何受管配置文件。";
+"Sync Now" = "立即同步";
+"Enroll Another\U2026" = "加入其他组织\U2026";
+"Managed profiles and any issued mTLS certificates from this organization will be removed. Profiles you created yourself are untouched." = "将移除此组织下发的受管配置文件和已签发的 mTLS 证书。您自己创建的配置文件不受影响。";
+"User" = "用户";
+"Device" = "设备";
+"Server" = "服务器";
+"Last sync" = "上次同步";
+
+/* Managed profile sync status */
+"Syncing\U2026" = "同步中\U2026";
+"Enrolled — no profiles assigned." = "已加入 \U2014 未分配任何配置文件。";
+"Synced %lld profile(s)." = "已同步 %lld 个配置文件。";
+"Sync failed: %@" = "同步失败：%@";
+
+/* Session window — trace controls + managed-recording banner */
+"Recording \U2014 click to pause" = "录制中 \U2014 点击暂停";
+"Paused \U2014 click to start recording" = "已暂停 \U2014 点击开始录制";
+"View trace" = "查看录制";
+"Recording is enforced by your organization (%@)." = "您的组织（%@）已强制启用录制。";
+"Recording — shared with %@" = "录制中 \U2014 与 %@ 共享";
+"Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "此窗口中的每个请求都会被记录并发送给您所在组织的信息安全团队。这是管理员要求的，无法关闭。";

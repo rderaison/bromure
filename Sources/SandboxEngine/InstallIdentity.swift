@@ -2,16 +2,18 @@ import Foundation
 import CryptoKit
 import Security
 
-/// Per-machine install identity for the managed-profiles control plane.
+/// Per-machine enrollment into the managed-profiles control plane. A single
+/// Bromure install may be enrolled in multiple orgs at the same time, one
+/// `InstallIdentity` per enrollment.
 ///
 /// Holds:
-///   - an X25519 keypair used to receive sealed-box bundle payloads,
-///   - the install bearer token returned at enrollment,
+///   - a shared X25519 keypair used to receive sealed-box bundle payloads,
+///   - one install bearer token per enrollment (keyed by `installId`),
 ///   - metadata linking us to an org and a managed profile.
 ///
 /// All secrets live in the macOS Keychain (WhenUnlockedThisDeviceOnly).
-/// Plain metadata lives in a JSON file next to the managed profiles.
-public struct InstallIdentity: Codable, Equatable {
+/// Plain metadata lives in JSON files next to the managed profiles.
+public struct InstallIdentity: Codable, Equatable, Identifiable {
     public let installId: String
     public let orgSlug: String
     public let userId: String
@@ -19,6 +21,8 @@ public struct InstallIdentity: Codable, Equatable {
     public let serverURL: URL
     public let enrolledAt: Date
     public var deviceName: String
+
+    public var id: String { installId }
 }
 
 public enum InstallIdentityError: Error {
@@ -30,24 +34,95 @@ public enum InstallIdentityError: Error {
 public enum InstallIdentityStore {
     private static let service = "io.bromure.app.managed-install"
     private static let x25519PrivKey = "x25519-private"
-    private static let installTokenKey = "install-token"
+    private static let installTokenPrefix = "install-token-"
 
     // MARK: - Metadata persistence
 
-    private static var metadataURL: URL {
+    /// Directory holding one `install-<installId>.json` per enrollment.
+    private static var installsDir: URL {
         let base = VMConfig.defaultStorageDirectory
         let dir = base.appendingPathComponent("managed", isDirectory: true)
+            .appendingPathComponent("installs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("install.json")
+        migrateLegacyIfNeeded()
+        return dir
     }
 
-    /// Load the persisted install identity, if any.
-    public static func load() -> InstallIdentity? {
-        let url = metadataURL
+    private static var legacyMetadataURL: URL {
+        VMConfig.defaultStorageDirectory
+            .appendingPathComponent("managed", isDirectory: true)
+            .appendingPathComponent("install.json")
+    }
+
+    private static func metadataURL(for installId: String) -> URL {
+        let safe = sanitizedInstallId(installId)
+        return installsDir.appendingPathComponent("install-\(safe).json")
+    }
+
+    /// Only [A-Za-z0-9_.-] — guards the filename against path traversal even
+    /// though the installId is server-issued.
+    private static func sanitizedInstallId(_ id: String) -> String {
+        let allowed = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
+        return String(id.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" })
+    }
+
+    /// Migration: v1 stored a single `install.json` with its install token at
+    /// Keychain account `install-token`. On first access of the new store,
+    /// rename the file and keychain entry to the multi-install layout.
+    private static var migrationRan = false
+    private static func migrateLegacyIfNeeded() {
+        guard !migrationRan else { return }
+        migrationRan = true
+        let fm = FileManager.default
+        let legacy = legacyMetadataURL
+        guard fm.fileExists(atPath: legacy.path) else { return }
+        guard let data = try? Data(contentsOf: legacy) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let identity = try? decoder.decode(InstallIdentity.self, from: data) else { return }
+        let newURL = installsDir.appendingPathComponent(
+            "install-\(sanitizedInstallId(identity.installId)).json")
+        try? data.write(to: newURL, options: .atomic)
+        try? fm.removeItem(at: legacy)
+        if let legacyToken = readKeychain(account: "install-token") {
+            try? storeKeychain(account: installTokenPrefix + identity.installId, data: legacyToken)
+            deleteKeychain(account: "install-token")
+        }
+    }
+
+    /// Load all persisted install identities (may be empty).
+    public static func loadAll() -> [InstallIdentity] {
+        let fm = FileManager.default
+        let dir = installsDir
+        guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var out: [InstallIdentity] = []
+        for name in names {
+            guard name.hasPrefix("install-"), name.hasSuffix(".json") else { continue }
+            let url = dir.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url),
+                  let identity = try? decoder.decode(InstallIdentity.self, from: data)
+            else { continue }
+            out.append(identity)
+        }
+        return out.sorted { $0.enrolledAt < $1.enrolledAt }
+    }
+
+    /// Load a specific enrollment by install id.
+    public static func load(installId: String) -> InstallIdentity? {
+        let url = metadataURL(for: installId)
         guard let data = try? Data(contentsOf: url) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try? decoder.decode(InstallIdentity.self, from: data)
+    }
+
+    /// Back-compat accessor: returns the earliest-enrolled install, if any.
+    /// New code should prefer `loadAll()`.
+    public static func load() -> InstallIdentity? {
+        loadAll().first
     }
 
     public static func save(_ identity: InstallIdentity) throws {
@@ -55,17 +130,29 @@ public enum InstallIdentityStore {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(identity)
-        try data.write(to: metadataURL, options: .atomic)
+        try data.write(to: metadataURL(for: identity.installId), options: .atomic)
     }
 
-    /// Wipe the install identity, Keychain entries, and on-disk metadata.
+    /// Remove one enrollment's metadata + bearer token. X25519 key stays
+    /// (shared across remaining enrollments).
+    public static func remove(installId: String) {
+        try? FileManager.default.removeItem(at: metadataURL(for: installId))
+        deleteKeychain(account: installTokenPrefix + installId)
+    }
+
+    /// Wipe every enrollment, keychain tokens, and the shared X25519 key.
     public static func destroy() {
-        try? FileManager.default.removeItem(at: metadataURL)
+        for identity in loadAll() {
+            deleteKeychain(account: installTokenPrefix + identity.installId)
+        }
+        try? FileManager.default.removeItem(at: installsDir)
         deleteKeychain(account: x25519PrivKey)
-        deleteKeychain(account: installTokenKey)
+        // Clean up any legacy artefacts that somehow survived migration.
+        try? FileManager.default.removeItem(at: legacyMetadataURL)
+        deleteKeychain(account: "install-token")
     }
 
-    // MARK: - X25519 key
+    // MARK: - X25519 key (shared across enrollments)
 
     /// Return the existing X25519 keypair, generating + persisting one on first call.
     public static func ensureX25519Key() throws -> Curve25519.KeyAgreement.PrivateKey {
@@ -84,14 +171,14 @@ public enum InstallIdentityStore {
         return try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: data)
     }
 
-    // MARK: - Install bearer token
+    // MARK: - Install bearer token (one per enrollment)
 
-    public static func storeInstallToken(_ token: String) throws {
-        try storeKeychain(account: installTokenKey, data: Data(token.utf8))
+    public static func storeInstallToken(_ token: String, for installId: String) throws {
+        try storeKeychain(account: installTokenPrefix + installId, data: Data(token.utf8))
     }
 
-    public static func loadInstallToken() -> String? {
-        guard let data = readKeychain(account: installTokenKey) else { return nil }
+    public static func loadInstallToken(for installId: String) -> String? {
+        guard let data = readKeychain(account: installTokenPrefix + installId) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 

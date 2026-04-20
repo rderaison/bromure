@@ -11,7 +11,7 @@ struct Bromure: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure",
         abstract: "Run a browser in an isolated, ephemeral VM.",
-        subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self, Enroll.self, Unenroll.self],
+        subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self, Enroll.self, Unenroll.self, ListEnrollments.self],
         defaultSubcommand: Launch.self
     )
 
@@ -112,6 +112,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var diagnosticWindow: NSWindow?
     private var eulaWindow: NSWindow?
     private var consentWindow: NSWindow?
+    private var enrollmentWindow: NSWindow?
     /// Sparkle auto-updater. Retained strongly — if this deallocates, scheduled
     /// update checks stop firing. Initialised in applicationDidFinishLaunching.
     private var updaterController: SPUStandardUpdaterController?
@@ -191,6 +192,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.pendingURL = nil
             // Re-enter the normal URL handling flow now that the pool is ready
             self.application(NSApp, open: [url])
+        }
+
+        state.onShowEnrollment = { [weak self] in
+            self?.showEnrollmentAction(nil)
         }
 
         // Start automation server if enabled
@@ -728,6 +733,31 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
               let session = sessions.first(where: { $0.window === keyWindow }),
               session.hasWebcam else { return }
         session.showEffectsPanel()
+    }
+
+    @MainActor @objc func showEnrollmentAction(_ sender: Any?) {
+        if let win = enrollmentWindow, win.isVisible {
+            win.makeKeyAndOrderFront(nil)
+            return
+        }
+        let view = EnrollmentView(state: state) { [weak self] in
+            self?.enrollmentWindow?.close()
+            self?.enrollmentWindow = nil
+        }
+        let hosting = NSHostingView(rootView: view)
+        let window = NSWindow(
+            contentRect: .zero,
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false,
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.title = NSLocalizedString("Enroll in Enterprise Management",
+                                         comment: "Enrollment window title bar")
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        self.enrollmentWindow = window
     }
 
     @MainActor @objc func showVsockDiagnosticAction(_ sender: Any?) {
@@ -1431,12 +1461,15 @@ final class BrowserSession {
     private(set) var cdpBridge: CDPBridge?
     private(set) var shellBridge: ShellBridge?
     private(set) var traceBridge: TraceBridge?
+    private var cloudTraceUploader: CloudTraceUploader?
+    fileprivate var cloudTraceEnforced: Bool = false
     private var keyboardBridge: KeyboardBridge?
     private var cjkInputBridge: CJKInputBridge?
     private var gestureBridge: GestureBridge?
     private(set) var autoSuspend: VMAutoSuspend?
     private var traceWindow: NSWindow?
     private var traceRecordButton: NSButton?
+    private var managedRecordingBanner: NSTitlebarAccessoryViewController?
     private var warpButton: NSButton?
     private var warpPulseTimer: Timer?
     private var effectsPanel: NSWindow?
@@ -1741,15 +1774,52 @@ final class BrowserSession {
             self.shellBridge = bridge
         }
 
+        // Look up the managed profile (if any) that backs this session so we
+        // can decide whether cloud trace upload is policy-enforced. When it
+        // is, we force-enable local trace capture regardless of the user's
+        // profile settings and disable the session-window toggle.
+        let managed = profile.flatMap { ManagedProfileStore.shared.profile(id: $0.id) }
+        let cloudPolicy = managed?.cloudTrace ?? .disabled
+        let enforced = cloudPolicy.enabled && cloudPolicy.endpoint != nil
+        self.cloudTraceEnforced = enforced
+
         // Set up trace bridge for HTTP trace capture.
-        if config.traceLevel != .disabled, let dev = linkSocketDevice {
-            let autoStart = profile?.settings.traceAutoStart ?? true
+        if (config.traceLevel != .disabled || enforced), let dev = linkSocketDevice {
+            // Enforced tracing always starts recording; user-tracing respects
+            // the per-profile auto-start preference.
+            let autoStart = enforced || (profile?.settings.traceAutoStart ?? true)
             let bridge = MainActor.assumeIsolated {
                 let b = TraceBridge(socketDevice: dev)
                 if !autoStart { b.isRecording = false }
                 return b
             }
             self.traceBridge = bridge
+
+            // Wire the cloud uploader before anything has a chance to publish.
+            // We install a compound onNewEvent handler so the existing trace
+            // viewer (which reads from `store` directly) keeps working and
+            // the uploader gets the same event stream.
+            if enforced,
+               let mp = managed,
+               let identity = InstallIdentityStore.load(installId: mp.installId) {
+                let ctx = CloudTraceUploader.SessionContext(
+                    sessionId: UUID().uuidString,
+                    profileId: mp.id,
+                    installId: mp.installId,
+                    orgSlug: mp.orgSlug,
+                    userEmail: identity.userEmail,
+                )
+                if let uploader = CloudTraceUploader(ctx: ctx, policy: cloudPolicy) {
+                    self.cloudTraceUploader = uploader
+                    MainActor.assumeIsolated {
+                        let existing = bridge.onNewEvent
+                        bridge.onNewEvent = { event in
+                            existing?(event)
+                            uploader.ingest(event)
+                        }
+                    }
+                }
+            }
 
             // Record/pause button — uses a composed image with a red dot when recording
             let recording = autoStart
@@ -1759,14 +1829,42 @@ final class BrowserSession {
                 action: #selector(GUIAppDelegate.toggleTraceRecordingAction(_:))
             )
             recordBtn.bezelStyle = NSButton.BezelStyle.recessed
-            recordBtn.contentTintColor = recording ? .systemRed : .secondaryLabelColor
-            recordBtn.toolTip = recording ? "Recording \u{2014} click to pause" : "Paused \u{2014} click to start recording"
+            recordBtn.contentTintColor = enforced ? .systemRed
+                : (recording ? .systemRed : .secondaryLabelColor)
+            if enforced {
+                recordBtn.isEnabled = false
+                recordBtn.toolTip = String(
+                    format: NSLocalizedString(
+                        "Recording is enforced by your organization (%@).",
+                        comment: "Tooltip on disabled trace toggle when cloud trace is policy-enforced",
+                    ),
+                    managed?.orgSlug ?? "",
+                )
+            } else {
+                recordBtn.toolTip = recording
+                    ? NSLocalizedString("Recording \u{2014} click to pause",
+                                        comment: "Trace record button tooltip, recording")
+                    : NSLocalizedString("Paused \u{2014} click to start recording",
+                                        comment: "Trace record button tooltip, paused")
+            }
             self.traceRecordButton = recordBtn
 
             let recordAccessory = NSTitlebarAccessoryViewController()
             recordAccessory.view = recordBtn
             recordAccessory.layoutAttribute = .trailing
             window.addTitlebarAccessoryViewController(recordAccessory)
+
+            // Policy banner (leading titlebar accessory): persistent, visible,
+            // explicit about who the data is going to. Only shown when cloud
+            // trace is enforced — not for opt-in local tracing.
+            if enforced, let mp = managed {
+                let banner = Self.makeManagedRecordingBanner(orgSlug: mp.orgSlug)
+                let accessory = NSTitlebarAccessoryViewController()
+                accessory.view = banner
+                accessory.layoutAttribute = .leading
+                window.addTitlebarAccessoryViewController(accessory)
+                self.managedRecordingBanner = accessory
+            }
 
             // View trace button
             let viewBtn = NSButton(
@@ -1775,7 +1873,8 @@ final class BrowserSession {
                 action: #selector(GUIAppDelegate.showTraceAction(_:))
             )
             viewBtn.bezelStyle = NSButton.BezelStyle.recessed
-            viewBtn.toolTip = "View trace"
+            viewBtn.toolTip = NSLocalizedString("View trace",
+                                                comment: "Trace viewer button tooltip")
             let viewAccessory = NSTitlebarAccessoryViewController()
             viewAccessory.view = viewBtn
             viewAccessory.layoutAttribute = .trailing
@@ -1906,16 +2005,22 @@ final class BrowserSession {
         }
     }
 
-    /// Toggle trace recording on/off.
+    /// Toggle trace recording on/off. No-op when cloud trace is enforced by
+    /// managed policy — in that case the record button is disabled upstream
+    /// too, but we guard here as well to stay safe against stray callers.
     func toggleTraceRecording() {
         MainActor.assumeIsolated {
-            guard let bridge = traceBridge else { return }
+            guard !cloudTraceEnforced, let bridge = traceBridge else { return }
             bridge.isRecording.toggle()
             // Update button appearance
             if let btn = traceRecordButton {
                 btn.image = Self.traceButtonImage(recording: bridge.isRecording)
                 btn.contentTintColor = bridge.isRecording ? .systemRed : .secondaryLabelColor
-                btn.toolTip = bridge.isRecording ? "Recording \u{2014} click to pause" : "Paused \u{2014} click to start recording"
+                btn.toolTip = bridge.isRecording
+                    ? NSLocalizedString("Recording \u{2014} click to pause",
+                                        comment: "Trace record button tooltip, recording")
+                    : NSLocalizedString("Paused \u{2014} click to start recording",
+                                        comment: "Trace record button tooltip, paused")
             }
         }
     }
@@ -1923,6 +2028,45 @@ final class BrowserSession {
     /// Whether trace is currently recording.
     var isTraceRecording: Bool {
         MainActor.assumeIsolated { traceBridge?.isRecording ?? false }
+    }
+
+    /// Build the leading-titlebar banner that advertises mandatory corporate
+    /// recording. Red-tinted, persistent, and impossible to miss — that's the
+    /// point. Click-through opens a popover explaining what's captured.
+    private static func makeManagedRecordingBanner(orgSlug: String) -> NSView {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 28))
+        let icon = NSImageView(image: NSImage(
+            systemSymbolName: "eye.fill",
+            accessibilityDescription: "Session is being recorded")!)
+        icon.contentTintColor = .systemRed
+        icon.imageScaling = .scaleProportionallyDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: String(
+            format: NSLocalizedString("Recording — shared with %@",
+                                      comment: "Titlebar banner text on managed recording sessions"),
+            orgSlug,
+        ))
+        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .systemRed
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.toolTip = NSLocalizedString(
+            "Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off.",
+            comment: "Titlebar banner tooltip explaining managed recording",
+        )
+
+        host.addSubview(icon)
+        host.addSubview(label)
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 8),
+            icon.centerYAnchor.constraint(equalTo: host.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 14),
+            icon.heightAnchor.constraint(equalToConstant: 14),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -8),
+            label.centerYAnchor.constraint(equalTo: host.centerYAnchor),
+        ])
+        return host
     }
 
     /// Build the trace button image: the base symbol with a red recording dot overlay when active.
@@ -2318,6 +2462,11 @@ final class BrowserSession {
             shellBridge = nil
             traceBridge?.stop()
             traceBridge = nil
+            // Flush the cloud uploader on the way out. Blocks up to 5s so
+            // the last batch of events still makes it to analytics even if
+            // the user slams the window shut right after a sensitive action.
+            cloudTraceUploader?.close()
+            cloudTraceUploader = nil
             keyboardBridge?.stop()
             keyboardBridge = nil
             cjkInputBridge?.stop()

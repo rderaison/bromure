@@ -42,6 +42,11 @@ final class AppState: @unchecked Sendable {
     var managedLastSyncedAt: Date?
     var managedSyncInFlight: Bool = false
 
+    /// Current list of enrollments. Updated after enroll/unenroll/sync so the
+    /// menu bar and Settings can reflect multi-org state without re-reading
+    /// the keychain on every tick.
+    var managedEnrollments: [InstallIdentity] = InstallIdentityStore.loadAll()
+
     struct InitStep: Identifiable {
         let id = UUID()
         let name: String
@@ -62,6 +67,10 @@ final class AppState: @unchecked Sendable {
     var onCloseAllSessions: (() async -> Void)?
     var onPoolReady: (() -> Void)?
     var onOpenProfileSettings: ((_ profileID: UUID, _ category: String?) -> Void)?
+    /// Called when UI (settings pane, etc.) wants to open the enrollment
+    /// window. Wired up by the app delegate so the same window can be reached
+    /// from the menu item and from Settings.
+    var onShowEnrollment: (() -> Void)?
 
     /// Periodic managed-profile sync timer; invalidated at teardown.
     private var managedSyncTimer: Timer?
@@ -76,6 +85,7 @@ final class AppState: @unchecked Sendable {
             guard let self else { return }
             Task { @MainActor in
                 self.profileManager.reloadManaged()
+                self.managedEnrollments = InstallIdentityStore.loadAll()
                 self.profileVersion &+= 1
             }
         }
@@ -125,48 +135,69 @@ final class AppState: @unchecked Sendable {
 
     /// Fire a manual sync, e.g. after the user enrolls or clicks "Sync now".
     func syncManagedProfiles(trigger: String) {
-        guard InstallIdentityStore.load() != nil else {
+        managedEnrollments = InstallIdentityStore.loadAll()
+        guard !managedEnrollments.isEmpty else {
             managedSyncStatus = ""
             return
         }
         guard !managedSyncInFlight else { return }
         managedSyncInFlight = true
-        managedSyncStatus = "Syncing…"
+        managedSyncStatus = NSLocalizedString("Syncing…", comment: "Managed profile sync in progress")
         Task { @MainActor in
             defer { self.managedSyncInFlight = false }
             do {
                 let profiles = try await ManagedProfileSync.shared.syncProfiles()
                 self.managedLastSyncedAt = Date()
                 self.managedSyncStatus = profiles.isEmpty
-                    ? "Enrolled — no profiles assigned."
-                    : "Synced \(profiles.count) profile\(profiles.count == 1 ? "" : "s")."
+                    ? NSLocalizedString("Enrolled — no profiles assigned.",
+                                        comment: "Managed profile sync status when no profiles assigned")
+                    : String(format: NSLocalizedString("Synced %lld profile(s).",
+                                        comment: "Managed profile sync status (count)"),
+                             profiles.count)
                 self.profileManager.reloadManaged()
                 self.profileVersion &+= 1
                 print("[managed] sync (\(trigger)) ok: \(profiles.count) profile(s)")
             } catch {
-                self.managedSyncStatus = "Sync failed: \(error.localizedDescription)"
+                self.managedSyncStatus = String(
+                    format: NSLocalizedString("Sync failed: %@",
+                                              comment: "Managed profile sync error"),
+                    error.localizedDescription)
                 print("[managed] sync (\(trigger)) failed: \(error)")
             }
         }
     }
 
-    func enrollManagedProfile(code: String, serverURL: URL?) async throws {
+    func enrollManagedProfile(code: String, serverURL: URL?, deviceName: String? = nil) async throws {
         managedSyncInFlight = true
-        defer { managedSyncInFlight = false }
+        defer {
+            managedSyncInFlight = false
+            managedEnrollments = InstallIdentityStore.loadAll()
+        }
         let url = serverURL ?? ManagedProfileSync.defaultServerURL
-        _ = try await ManagedProfileSync.shared.enroll(code: code, serverURL: url)
+        let trimmed = deviceName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let name = trimmed.isEmpty
+            ? (Host.current().localizedName ?? "unnamed")
+            : trimmed
+        _ = try await ManagedProfileSync.shared.enroll(
+            code: code, serverURL: url, deviceName: name,
+        )
         managedLastSyncedAt = Date()
         profileManager.reloadManaged()
         profileVersion &+= 1
     }
 
-    func unenrollManagedProfile() {
-        ManagedProfileSync.shared.destroyLocalState()
-        managedLastSyncedAt = nil
-        managedSyncStatus = ""
+    /// Remove a single enrollment. Other enrollments are untouched.
+    func unenrollManagedProfile(installId: String) {
+        ManagedProfileSync.shared.unenroll(installId: installId)
+        managedEnrollments = InstallIdentityStore.loadAll()
+        if managedEnrollments.isEmpty {
+            managedLastSyncedAt = nil
+            managedSyncStatus = ""
+        }
         profileManager.reloadManaged()
         profileVersion &+= 1
     }
+
 
     func checkState() {
         if pool != nil {

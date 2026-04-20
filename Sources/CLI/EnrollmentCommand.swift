@@ -50,15 +50,90 @@ struct Enroll: ParsableCommand {
     }
 }
 
-/// `bromure unenroll` — clear the managed profile + associated Keychain state.
+/// `bromure unenroll` — remove a managed-profile enrollment and its Keychain
+/// state. With no arguments, removes every enrollment on this install; pass
+/// `--install <id>` or `--org <slug>` to drop a single one.
 struct Unenroll: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Remove the managed profile and forget the enrollment.",
+        abstract: "Remove a managed-profile enrollment.",
+    )
+
+    @Option(name: .long, help: "Install ID to unenroll (see `bromure list-enrollments`).")
+    var install: String?
+
+    @Option(name: .long, help: "Org slug to unenroll. If multiple enrollments share the slug, use --install.")
+    var org: String?
+
+    @Flag(name: .long, help: "Remove every enrollment on this install.")
+    var all: Bool = false
+
+    func run() throws {
+        let installs = InstallIdentityStore.loadAll()
+        if installs.isEmpty {
+            print("No managed enrollments found.")
+            return
+        }
+
+        if all {
+            ManagedProfileSync.shared.destroyLocalState()
+            print("All managed enrollments removed (\(installs.count)).")
+            return
+        }
+
+        let target: InstallIdentity? = {
+            if let id = install {
+                return installs.first { $0.installId == id }
+            }
+            if let slug = org {
+                let matches = installs.filter { $0.orgSlug == slug }
+                if matches.count > 1 {
+                    print("Multiple enrollments share org '\(slug)'. Use --install <id>:")
+                    for m in matches { print("  \(m.installId)  user=\(m.userEmail)") }
+                    return nil
+                }
+                return matches.first
+            }
+            return nil
+        }()
+
+        if let target {
+            ManagedProfileSync.shared.unenroll(installId: target.installId)
+            print("Unenrolled from \(target.orgSlug) (install \(target.installId)).")
+            return
+        }
+
+        if installs.count == 1 {
+            let only = installs[0]
+            ManagedProfileSync.shared.unenroll(installId: only.installId)
+            print("Unenrolled from \(only.orgSlug) (install \(only.installId)).")
+            return
+        }
+
+        print("Multiple enrollments exist. Specify one:")
+        for i in installs {
+            print("  --install \(i.installId)   org=\(i.orgSlug)  user=\(i.userEmail)")
+        }
+        print("Or pass --all to remove every enrollment.")
+        throw ExitCode.failure
+    }
+}
+
+/// `bromure list-enrollments` — print each enrollment's install id, org, and user.
+struct ListEnrollments: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list-enrollments",
+        abstract: "List every managed-profile enrollment on this install.",
     )
 
     func run() throws {
-        ManagedProfileSync.shared.destroyLocalState()
-        print("Managed profile removed.")
+        let installs = InstallIdentityStore.loadAll()
+        if installs.isEmpty {
+            print("No managed enrollments.")
+            return
+        }
+        for i in installs {
+            print("\(i.installId)  org=\(i.orgSlug)  user=\(i.userEmail)  server=\(i.serverURL.absoluteString)  device=\(i.deviceName)")
+        }
     }
 }
 

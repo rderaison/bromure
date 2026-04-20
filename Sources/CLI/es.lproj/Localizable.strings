@@ -543,3 +543,46 @@
 "Your choice" = "Tu elecci\U00F3n";
 "You can turn this off at any time in Profile Settings \U2192 Privacy & Safety. It is disabled by default on every new profile." = "Puedes desactivarlo en cualquier momento en Ajustes del perfil \U2192 Privacidad y seguridad. Est\U00E1 desactivado por defecto en cada perfil nuevo.";
 "By clicking Accept, you agree to have the pages you browse in this profile analyzed by the Bromure phishing-detection service." = "Al hacer clic en Aceptar, aceptas que las p\U00E1ginas que navegues en este perfil sean analizadas por el servicio de detecci\U00F3n de phishing de Bromure.";
+
+/* Enterprise Management — shared */
+"Enroll in Enterprise Management" = "Inscribirse en la gesti\U00F3n empresarial";
+"Unenroll from this organization?" = "\U00BFCancelar inscripci\U00F3n en esta organizaci\U00F3n?";
+"Unenroll" = "Cancelar inscripci\U00F3n";
+"Unenroll\U2026" = "Cancelar inscripci\U00F3n\U2026";
+
+/* EnrollmentView */
+"Your administrator will give you a 6-word enrollment code. Paste it below to receive managed profiles for this organization." = "Tu administrador te dar\U00E1 un c\U00F3digo de inscripci\U00F3n de 6 palabras. P\U00E9galo abajo para recibir los perfiles gestionados de esta organizaci\U00F3n.";
+"Enrollment Code" = "C\U00F3digo de inscripci\U00F3n";
+"Device Name" = "Nombre del dispositivo";
+"Shown to your administrator so they can recognize this device." = "Se muestra a tu administrador para que pueda identificar este dispositivo.";
+"Server URL (optional)" = "URL del servidor (opcional)";
+"Enroll" = "Inscribirse";
+
+/* SettingsView — Managed Profile (multi-install) */
+"Managed Profile" = "Perfil gestionado";
+"Enterprise-provisioned profile delivered from a Bromure control plane" = "Perfil aprovisionado por la empresa, entregado desde un plano de control de Bromure";
+"Not enrolled." = "No inscrito.";
+"Your administrator will give you a 6-word enrollment code (e.g. `acid-aloe-arson-bench-cat-drum`). Paste it below to receive your managed profile." = "Tu administrador te dar\U00E1 un c\U00F3digo de inscripci\U00F3n de 6 palabras (p. ej. `acid-aloe-arson-bench-cat-drum`). P\U00E9galo abajo para recibir tu perfil gestionado.";
+"Assigned profiles" = "Perfiles asignados";
+"No managed profiles are currently assigned." = "Actualmente no hay perfiles gestionados asignados.";
+"Sync Now" = "Sincronizar ahora";
+"Enroll Another\U2026" = "Inscribir otra\U2026";
+"Managed profiles and any issued mTLS certificates from this organization will be removed. Profiles you created yourself are untouched." = "Se eliminar\U00E1n los perfiles gestionados y los certificados mTLS emitidos por esta organizaci\U00F3n. Los perfiles que t\U00FA mismo creaste no se ver\U00E1n afectados.";
+"User" = "Usuario";
+"Device" = "Dispositivo";
+"Server" = "Servidor";
+"Last sync" = "\U00DAltima sincro";
+
+/* Managed profile sync status */
+"Syncing\U2026" = "Sincronizando\U2026";
+"Enrolled — no profiles assigned." = "Inscrito \U2014 sin perfiles asignados.";
+"Synced %lld profile(s)." = "%lld perfil(es) sincronizado(s).";
+"Sync failed: %@" = "Error al sincronizar: %@";
+
+/* Session window — trace controls + managed-recording banner */
+"Recording \U2014 click to pause" = "Grabando \U2014 haz clic para pausar";
+"Paused \U2014 click to start recording" = "En pausa \U2014 haz clic para empezar a grabar";
+"View trace" = "Ver grabaci\U00F3n";
+"Recording is enforced by your organization (%@)." = "La grabaci\U00F3n es obligatoria por tu organizaci\U00F3n (%@).";
+"Recording — shared with %@" = "Grabando \U2014 compartido con %@";
+"Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "Cada solicitud de esta ventana se graba y se env\U00EDa al equipo de seguridad de tu organizaci\U00F3n. Lo exige tu administrador y no se puede desactivar.";
