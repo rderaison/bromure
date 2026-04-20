@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import _CryptoExtras
 import X509
 import SwiftASN1
 
@@ -180,7 +181,10 @@ public final class ManagedProfileSync {
               let token = InstallIdentityStore.loadInstallToken()
         else { throw ManagedProfileClientError.notEnrolled }
 
-        let priv = P256.Signing.PrivateKey()
+        // RSA-2048 for broad compatibility. The server-side CSR parser
+        // (node-forge) only reads RSA public keys; switching to ECDSA means
+        // swapping the server to @peculiar/x509 or equivalent.
+        let priv = try _RSA.Signing.PrivateKey(keySize: .bits2048)
         let privKey = Certificate.PrivateKey(priv)
         let subject = try DistinguishedName {
             CommonName("bromure-install-\(identity.installId)")
@@ -190,7 +194,7 @@ public final class ManagedProfileSync {
             subject: subject,
             privateKey: privKey,
             attributes: CertificateSigningRequest.Attributes(),
-            signatureAlgorithm: .ecdsaWithSHA256,
+            signatureAlgorithm: .sha256WithRSAEncryption,
         )
         var ser = DER.Serializer()
         try csr.serialize(into: &ser)
@@ -209,12 +213,14 @@ public final class ManagedProfileSync {
         try resp.caCertPem.write(
             to: ManagedProfileStore.shared.mtlsCAURL(for: profile.id),
             atomically: true, encoding: .utf8)
-        try storeMTLSPrivateKey(priv.rawRepresentation, for: profile.id, serial: resp.serialHex)
+        // RSA private keys have no compact "raw" representation; store the
+        // DER-encoded PKCS#8 blob instead.
+        try storeMTLSPrivateKey(priv.derRepresentation, for: profile.id, serial: resp.serialHex)
     }
 
-    public func loadMTLSPrivateKey(for profileId: UUID) throws -> P256.Signing.PrivateKey {
-        let raw = try readMTLSPrivateKey(for: profileId)
-        return try P256.Signing.PrivateKey(rawRepresentation: raw)
+    public func loadMTLSPrivateKey(for profileId: UUID) throws -> _RSA.Signing.PrivateKey {
+        let der = try readMTLSPrivateKey(for: profileId)
+        return try _RSA.Signing.PrivateKey(derRepresentation: der)
     }
 
     // MARK: - Sign-out
