@@ -89,7 +89,7 @@ public struct CloudTracePolicy: Equatable, Sendable {
     /// Fallback endpoint used when the manifest turns tracing on without
     /// specifying a destination — every Bromure-hosted control plane ships
     /// traces here by default.
-    public static let defaultEndpoint = URL(string: "https://analytics.bromure.io")!
+    public static let defaultEndpoint = URL(string: "https://analytics.bromure.io/ingest")!
 }
 
 
