@@ -18,7 +18,7 @@ struct Enroll: ParsableCommand {
     @Argument(help: "Enrollment code (e.g. acid-aloe-arson-bench-cat-drum).")
     var code: String
 
-    @Option(name: .long, help: "Control-plane server URL (default: http://localhost:3847).")
+    @Option(name: .long, help: "Control-plane server URL (default: https://bromure.io/api).")
     var server: String?
 
     @Option(name: .long, help: "Device name to register with the server.")

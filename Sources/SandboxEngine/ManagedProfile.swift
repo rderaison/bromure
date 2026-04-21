@@ -78,44 +78,20 @@ public struct CloudTracePolicy: Equatable, Sendable {
     public let endpoint: URL?
     public let level: Level
 
+    public init(enabled: Bool, endpoint: URL?, level: Level) {
+        self.enabled = enabled
+        self.endpoint = endpoint
+        self.level = level
+    }
+
     public static let disabled = CloudTracePolicy(enabled: false, endpoint: nil, level: .basic)
+
+    /// Fallback endpoint used when the manifest turns tracing on without
+    /// specifying a destination — every Bromure-hosted control plane ships
+    /// traces here by default.
+    public static let defaultEndpoint = URL(string: "https://analytics.bromure.io")!
 }
 
-public extension ManagedProfile {
-    /// Extract the `cloudTrace` block from the settings manifest, if any.
-    ///
-    /// Manifest shape (all fields optional — sensible defaults below):
-    /// ```json
-    /// "cloudTrace": {
-    ///   "enabled":  true,
-    ///   "endpoint": "https://analytics.bromure.io/ingest",
-    ///   "level":    "full"
-    /// }
-    /// ```
-    var cloudTrace: CloudTracePolicy {
-        guard case .object(let obj) = settings["cloudTrace"] ?? .null else {
-            return .disabled
-        }
-        let enabled: Bool = {
-            if case .bool(let b) = obj["enabled"] ?? .null { return b }
-            return false
-        }()
-        let endpoint: URL? = {
-            if case .string(let s) = obj["endpoint"] ?? .null, let url = URL(string: s) {
-                return url
-            }
-            return nil
-        }()
-        let level: CloudTracePolicy.Level = {
-            if case .string(let s) = obj["level"] ?? .null,
-               let lvl = CloudTracePolicy.Level(rawValue: s.lowercased()) {
-                return lvl
-            }
-            return .full
-        }()
-        return CloudTracePolicy(enabled: enabled, endpoint: endpoint, level: level)
-    }
-}
 
 /// Tiny Codable wrapper for arbitrary JSON values inside the settings dict.
 public enum AnyCodable: Codable, Equatable {

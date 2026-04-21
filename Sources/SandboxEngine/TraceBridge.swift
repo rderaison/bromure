@@ -143,9 +143,13 @@ public final class TraceBridge: NSObject, @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    public init(socketDevice: VZVirtioSocketDevice, sessionID: String = UUID().uuidString) {
+    public init(
+        socketDevice: VZVirtioSocketDevice,
+        sessionID: String = UUID().uuidString,
+        inMemory: Bool = false,
+    ) {
         self.socketDevice = socketDevice
-        self.store = TraceStore(sessionID: sessionID)
+        self.store = TraceStore(sessionID: sessionID, inMemory: inMemory)
         super.init()
 
         if traceDebug { print("[Trace] init: setting up vsock listener on port \(Self.tracePort)") }

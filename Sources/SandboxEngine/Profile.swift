@@ -114,6 +114,17 @@ public enum TraceLevel: Int, Codable, CaseIterable, Sendable {
     case basic = 1     // timestamp, method, URL, status, duration
     case headers = 2   // basic + request/response headers + post data
     case full = 3      // headers + response body
+
+    /// Verbosity the cloud uploader should ship at when this level is set
+    /// on a managed profile. `.disabled` has no cloud equivalent — callers
+    /// must gate on enablement before reading this.
+    public var cloudLevel: CloudTracePolicy.Level {
+        switch self {
+        case .disabled, .basic: return .basic
+        case .headers:          return .headers
+        case .full:             return .full
+        }
+    }
 }
 
 /// Webcam capture quality — maps to AVCaptureSession presets.

@@ -48,6 +48,7 @@ public final class TraceStore {
     private var db: OpaquePointer?
     public let databaseURL: URL
     private let sessionID: String
+    private let inMemory: Bool
 
     // Prepared statements for hot paths
     private var insertEventStmt: OpaquePointer?
@@ -55,8 +56,9 @@ public final class TraceStore {
     private var insertBodyStmt: OpaquePointer?
     private var insertFormStmt: OpaquePointer?
 
-    public init(sessionID: String) {
+    public init(sessionID: String, inMemory: Bool = false) {
         self.sessionID = sessionID
+        self.inMemory = inMemory
         self.databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("bromure-trace-\(sessionID).sqlite")
 
@@ -78,7 +80,7 @@ public final class TraceStore {
     // MARK: - Database setup
 
     private func openDatabase() {
-        let path = databaseURL.path
+        let path = inMemory ? ":memory:" : databaseURL.path
         let rc = sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil)
         guard rc == SQLITE_OK else {
             if traceDebug { print("[Trace-Store] failed to open database: \(rc)") }
@@ -375,6 +377,11 @@ public final class TraceStore {
     }
 
     public func exportDatabase(to url: URL) throws {
+        // No on-disk file exists for in-memory stores — export is meaningless.
+        // (Policy-enforced managed recording runs in this mode.)
+        if inMemory {
+            throw CocoaError(.fileWriteNoPermission)
+        }
         // Checkpoint WAL to ensure all data is in the main db file
         if let db = db {
             sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_FULL, nil, nil)
@@ -389,14 +396,16 @@ public final class TraceStore {
             self.db = nil
         }
 
-        let fm = FileManager.default
-        try? fm.removeItem(at: databaseURL)
+        if !inMemory {
+            let fm = FileManager.default
+            try? fm.removeItem(at: databaseURL)
 
-        // Also remove WAL and SHM files
-        let walURL = databaseURL.appendingPathExtension("wal")
-        let shmURL = databaseURL.appendingPathExtension("shm")
-        try? fm.removeItem(at: walURL)
-        try? fm.removeItem(at: shmURL)
+            // Also remove WAL and SHM files
+            let walURL = databaseURL.appendingPathExtension("wal")
+            let shmURL = databaseURL.appendingPathExtension("shm")
+            try? fm.removeItem(at: walURL)
+            try? fm.removeItem(at: shmURL)
+        }
 
         // Reopen fresh
         openDatabase()

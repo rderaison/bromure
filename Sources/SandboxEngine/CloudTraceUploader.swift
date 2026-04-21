@@ -13,10 +13,10 @@ import Security
 /// infosec.
 ///
 /// This uploader is intended for managed profiles only and is wired in at
-/// session construction time. When the managed profile's `cloudTrace.enabled`
-/// is true the user cannot turn it off — recording is forced on and the
-/// session-window toggle becomes read-only. That policy is enforced by the
-/// call site, not here.
+/// session construction time. A managed profile with a non-disabled
+/// `traceLevel` opts the session into cloud trace — recording is forced
+/// on, the session-window toggle becomes read-only, and nothing lands on
+/// disk. That policy is enforced by the call site, not here.
 public final class CloudTraceUploader: @unchecked Sendable {
     public struct SessionContext: Sendable {
         public let sessionId: String

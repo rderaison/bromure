@@ -1774,13 +1774,20 @@ final class BrowserSession {
             self.shellBridge = bridge
         }
 
-        // Look up the managed profile (if any) that backs this session so we
-        // can decide whether cloud trace upload is policy-enforced. When it
-        // is, we force-enable local trace capture regardless of the user's
-        // profile settings and disable the session-window toggle.
+        // On a managed profile, any non-disabled traceLevel means cloud
+        // trace: the session streams to the org's analytics endpoint, can't
+        // be stopped, and never writes to disk. The manifest's traceLevel
+        // is the only knob — there's no separate `cloudTrace` block.
         let managed = profile.flatMap { ManagedProfileStore.shared.profile(id: $0.id) }
-        let cloudPolicy = managed?.cloudTrace ?? .disabled
-        let enforced = cloudPolicy.enabled && cloudPolicy.endpoint != nil
+        let managedTraceLevel = (managed == nil) ? .disabled : (profile?.settings.traceLevel ?? .disabled)
+        let enforced = managedTraceLevel != .disabled
+        let cloudPolicy: CloudTracePolicy = enforced
+            ? CloudTracePolicy(
+                enabled: true,
+                endpoint: CloudTracePolicy.defaultEndpoint,
+                level: managedTraceLevel.cloudLevel,
+            )
+            : .disabled
         self.cloudTraceEnforced = enforced
 
         // Set up trace bridge for HTTP trace capture.
@@ -1789,7 +1796,10 @@ final class BrowserSession {
             // the per-profile auto-start preference.
             let autoStart = enforced || (profile?.settings.traceAutoStart ?? true)
             let bridge = MainActor.assumeIsolated {
-                let b = TraceBridge(socketDevice: dev)
+                // Enforced recording is upload-only: keep events in memory so
+                // they can flow to the cloud uploader without ever touching
+                // disk. No local SQLite file, no WAL, no shm.
+                let b = TraceBridge(socketDevice: dev, inMemory: enforced)
                 if !autoStart { b.isRecording = false }
                 return b
             }
@@ -1866,19 +1876,24 @@ final class BrowserSession {
                 self.managedRecordingBanner = accessory
             }
 
-            // View trace button
-            let viewBtn = NSButton(
-                image: NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "Session Recording")!,
-                target: nil,
-                action: #selector(GUIAppDelegate.showTraceAction(_:))
-            )
-            viewBtn.bezelStyle = NSButton.BezelStyle.recessed
-            viewBtn.toolTip = NSLocalizedString("View trace",
-                                                comment: "Trace viewer button tooltip")
-            let viewAccessory = NSTitlebarAccessoryViewController()
-            viewAccessory.view = viewBtn
-            viewAccessory.layoutAttribute = .trailing
-            window.addTitlebarAccessoryViewController(viewAccessory)
+            // View trace button — opt-in local tracing only. Policy-enforced
+            // recording hides the viewer entirely (no graph, no export): the
+            // data belongs to the org, not the user, and mustn't surface in
+            // the session window.
+            if !enforced {
+                let viewBtn = NSButton(
+                    image: NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "Session Recording")!,
+                    target: nil,
+                    action: #selector(GUIAppDelegate.showTraceAction(_:))
+                )
+                viewBtn.bezelStyle = NSButton.BezelStyle.recessed
+                viewBtn.toolTip = NSLocalizedString("View trace",
+                                                    comment: "Trace viewer button tooltip")
+                let viewAccessory = NSTitlebarAccessoryViewController()
+                viewAccessory.view = viewBtn
+                viewAccessory.layoutAttribute = .trailing
+                window.addTitlebarAccessoryViewController(viewAccessory)
+            }
         }
 
         // Set up keyboard bridge for dynamic layout matching.
@@ -2170,6 +2185,9 @@ final class BrowserSession {
     /// Returns true if the caller should proceed with closing.
     fileprivate func promptSaveTraceIfNeeded() -> Bool {
         MainActor.assumeIsolated {
+            // Policy-enforced recording has no user-facing local save path —
+            // the trace is shipped to the org, not to the user's disk.
+            if cloudTraceEnforced { return true }
             guard let traceBridge, !traceBridge.traceEvents.isEmpty else { return true }
             let alert = NSAlert()
             alert.messageText = NSLocalizedString("Save session recording?", comment: "")

@@ -21,7 +21,7 @@ public final class ManagedProfileSync {
            let url = URL(string: s) {
             return url
         }
-        return URL(string: "http://localhost:3847")!
+        return URL(string: "https://bromure.io/api")!
     }
 
     private init() {}
