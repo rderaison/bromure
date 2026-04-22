@@ -158,7 +158,7 @@ rm -f /tmp/resolv_stub.c
 # ---------------------------------------------------------------------------
 
 retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools jq python3 \
-    v4l-utils nss-tools bash wireguard-tools strongswan openssl openssh-server
+    v4l-utils nss-tools bash wireguard-tools strongswan openssl
 
 # ---------------------------------------------------------------------------
 # Configuration files (static)
@@ -230,25 +230,6 @@ chroot /mnt rc-update add networking boot
 chroot /mnt rc-update add modules boot
 chroot /mnt rc-update add dbus default
 chroot /mnt rc-update add spice-vdagentd default
-
-# ---------------------------------------------------------------------------
-# sshd — DEBUG ONLY: passwordless root login for diagnosing managed-profile
-# network issues. Never ship a base image built with this branch.
-# ---------------------------------------------------------------------------
-
-chroot /mnt ssh-keygen -A
-cat > /mnt/etc/ssh/sshd_config <<'EOF'
-Port 22
-PermitRootLogin yes
-PermitEmptyPasswords yes
-PasswordAuthentication yes
-PubkeyAuthentication no
-UsePAM no
-KbdInteractiveAuthentication no
-ChallengeResponseAuthentication no
-EOF
-chroot /mnt passwd -d root
-chroot /mnt rc-update add sshd default
 
 # ---------------------------------------------------------------------------
 # Console and login
