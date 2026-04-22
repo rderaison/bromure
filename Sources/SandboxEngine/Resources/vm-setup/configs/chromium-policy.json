@@ -3,7 +3,6 @@
   "MemorySaverModeSavings": 1,
   "URLBlocklist": [
     "file://*",
-    "chrome://extensions",
     "https://chromewebstore.google.com",
     "https://chrome.google.com/webstore"
   ],
