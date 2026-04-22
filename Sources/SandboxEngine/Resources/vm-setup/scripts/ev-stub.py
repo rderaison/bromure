@@ -44,6 +44,7 @@ the extension rejects a message or refuses to register the device
 with Google, iterate on the log.
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -92,15 +93,20 @@ def write_message(obj):
     sys.stdout.buffer.flush()
 
 
-def sha256_hex_of_pem(path):
-    """SHA-256 fingerprint (upper-case hex, colon-less) of a PEM cert's
-    DER bytes. Returns None if the file is missing or unparseable."""
+def sha256_b64_of_pem(path):
+    """SHA-256 fingerprint of a PEM cert's DER bytes, encoded as
+    base64url with padding stripped — the format Google's CAA
+    evaluator expects for the `root_ca_fingerprint` / `fingerprint`
+    fields (example from their docs:
+    `v2yJUfpL6LkfUFmKVsPr0Czj+Z0LoJzLIk3j4ffJfSg`). Returns None if
+    the file is missing or unparseable."""
     try:
         der = subprocess.check_output(
             ["openssl", "x509", "-in", path, "-outform", "DER"],
             stderr=subprocess.DEVNULL,
         )
-        return hashlib.sha256(der).hexdigest().upper()
+        digest = hashlib.sha256(der).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     except Exception as e:
         log("fingerprint fail:", path, e)
         return None
@@ -134,8 +140,8 @@ def build_device_state():
         "certificates": [],
     }
     if os.path.exists(CERT_PATH) and os.path.exists(CA_PATH):
-        leaf_fp = sha256_hex_of_pem(CERT_PATH)
-        ca_fp = sha256_hex_of_pem(CA_PATH)
+        leaf_fp = sha256_b64_of_pem(CERT_PATH)
+        ca_fp = sha256_b64_of_pem(CA_PATH)
         subj, issuer = cert_subject_issuer(CERT_PATH)
         if leaf_fp and ca_fp:
             state["certificates"].append({
