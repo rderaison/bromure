@@ -245,11 +245,12 @@ private final class MTLSDelegate: NSObject, URLSessionDelegate {
     ) {
         let method = challenge.protectionSpace.authenticationMethod
         if method == NSURLAuthenticationMethodClientCertificate {
-            if let identity = try? AnalyticsMTLSIdentity.identity(for: profileId) {
+            do {
+                let identity = try AnalyticsMTLSIdentity.identity(for: profileId)
                 let cred = URLCredential(identity: identity, certificates: nil, persistence: .forSession)
                 completionHandler(.useCredential, cred)
-            } else {
-                print("[CloudTraceUploader] no mTLS identity available for profile \(profileId)")
+            } catch {
+                print("[CloudTraceUploader] no mTLS identity for profile \(profileId): \(error)")
                 completionHandler(.cancelAuthenticationChallenge, nil)
             }
             return
@@ -316,9 +317,12 @@ enum AnalyticsMTLSIdentity {
         guard let privKey = try? ManagedProfileSync.shared.loadMTLSPrivateKey(for: profileId) else {
             throw Error.missingMaterial
         }
-        // `_RSA.Signing.PrivateKey.derRepresentation` is PKCS#8 DER —
-        // exactly what fits inside a PKCS#12 keyBag as the bagValue.
-        let keyDer = privKey.derRepresentation
+        // Use `pkcs8DERRepresentation` (PrivateKeyInfo), NOT
+        // `derRepresentation` (RSAPrivateKey / PKCS#1) — the shrouded
+        // key bag in PKCS#12 encrypts a PKCS#8 plaintext, and
+        // SecPKCS12Import won't pair an RSAPrivateKey-shaped blob with
+        // its cert.
+        let keyDer = privKey.pkcs8DERRepresentation
 
         // Random per-invocation PKCS#12 password. We're both producer and
         // consumer; it never leaves this function.
