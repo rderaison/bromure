@@ -153,6 +153,55 @@ def write_chromium_mtls_policy(url):
     os.chmod(path, 0o644)
 
 
+# Stable Chromium extension id for our corporate-guard extension,
+# derived from the RSA public key in its manifest. If the manifest key
+# changes, this ID must be recomputed.
+CORPORATE_GUARD_EXT_ID = "nneafipcodbpeapjcagfcinodkidcjcp"
+
+
+def write_corporate_guard_policy(cfg):
+    """Push the corporate-guard extension's per-session settings via
+    chrome.storage.managed. The extension reads these at load time and
+    on managed-storage change events. No-op when the admin didn't ship
+    any corporate-guard settings for this profile.
+
+    Payload shape (matches extensions/corporate-guard/schema.json):
+      {
+        "corporateWebsites":      ["www.google.com", ...],
+        "openExternalInPrivate":  true|false,
+        "tracingEnabled":         true|false
+      }
+
+    Chromium's managed-storage delivery is nested under
+    `3rdparty.extensions.<ext_id>` in a regular managed-policy file.
+    """
+    guard = cfg.get("corporateGuard")
+    if not guard:
+        return
+    settings = {
+        "corporateWebsites": guard.get("corporateWebsites", []),
+        "openExternalInPrivate": bool(guard.get("openExternalInPrivate", False)),
+        # The extension uses tracingEnabled to decide whether to show
+        # the banner in non-private mode. Pulled from the session-level
+        # traceLevel rather than the profile setting so that host-side
+        # runtime overrides (via the session toggle) are respected.
+        "tracingEnabled": int(cfg.get("traceLevel", 0)) > 0,
+    }
+    policy = {
+        "3rdparty": {
+            "extensions": {
+                CORPORATE_GUARD_EXT_ID: settings,
+            }
+        }
+    }
+    policies_dir = "/etc/chromium/policies/managed"
+    os.makedirs(policies_dir, exist_ok=True)
+    path = f"{policies_dir}/bromure-corporate-guard.json"
+    with open(path, "w") as f:
+        json.dump(policy, f)
+    os.chmod(path, 0o644)
+
+
 def sh_escape(s):
     """Escape a string for safe use as a single-quoted shell value."""
     return "'" + str(s).replace("'", "'\\''") + "'"
@@ -234,6 +283,13 @@ def write_chrome_env(cfg):
     # neither exists.
     if cfg.get("mtls"):
         extensions.append("/opt/bromure/extensions/ip-register")
+    # Corporate Guard: banner-or-redirect non-corporate sites per managed
+    # profile settings. Only makes sense when there's a managed profile
+    # AND the admin supplied corporateWebsites / openExternalInPrivate.
+    # The managed-storage policy is written separately (see
+    # write_corporate_guard_policy() below).
+    if cfg.get("mtls") and cfg.get("corporateGuard"):
+        extensions.append("/opt/bromure/extensions/corporate-guard")
     if extensions:
         extra_flags.append(f"--load-extension={','.join(extensions)}")
         # Only allow our bundled extensions — disable every other extension
@@ -889,6 +945,10 @@ def main():
 
     # Managed-profile mTLS client cert → NSS database
     install_managed_mtls(cfg.get("mtls"))
+
+    # Corporate-guard extension's managed-storage config (only when the
+    # admin configured corporateWebsites / openExternalInPrivate).
+    write_corporate_guard_policy(cfg)
 
     # Write chrome-env
     write_chrome_env(cfg)

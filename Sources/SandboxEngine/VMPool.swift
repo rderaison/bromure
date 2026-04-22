@@ -480,6 +480,31 @@ public final class VMPool {
                 mtlsCfg["autoSelectURL"] = "\(scheme)://\(host)"
             }
             cfg["mtls"] = mtlsCfg
+
+            // Corporate-site gating. `corporateWebsites` is a list of
+            // hostnames (with or without www., scheme, port, path — the
+            // guest-side extension normalizes them). `openExternalInPrivate`
+            // toggles between the redirect-to-private and banner behaviors.
+            // Managed sessions only; unmanaged flows don't get the extension
+            // loaded at all (config-agent gates on cfg["corporateGuard"]).
+            if let profile = ManagedProfileStore.shared.profile(id: pid) {
+                var guardCfg: [String: Any] = [:]
+                if case .array(let arr) = profile.settings["corporateWebsites"] {
+                    let hosts = arr.compactMap { entry -> String? in
+                        if case .string(let s) = entry { return s }
+                        return nil
+                    }
+                    guardCfg["corporateWebsites"] = hosts
+                }
+                if case .bool(let b) = profile.settings["openExternalInPrivate"] {
+                    guardCfg["openExternalInPrivate"] = b
+                }
+                // Only plumb when the admin actually configured at least
+                // one of the keys. Absence of both → extension stays off.
+                if !guardCfg.isEmpty {
+                    cfg["corporateGuard"] = guardCfg
+                }
+            }
         }
         cfg["locale"] = config.locale
 

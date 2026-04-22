@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "corporateWebsites": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "openExternalInPrivate": {
+      "type": "boolean"
+    },
+    "tracingEnabled": {
+      "type": "boolean"
+    }
+  }
+}

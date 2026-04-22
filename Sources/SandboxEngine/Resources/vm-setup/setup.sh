@@ -416,6 +416,15 @@ for f in manifest.json background.js; do
         cp "$SCRIPT_DIR/extensions/ip-register/$f" /mnt/opt/bromure/extensions/ip-register/
 done
 
+# Corporate Guard extension (managed-session only; banner mode or
+# redirect-to-incognito, configured per managed profile via
+# chrome.storage.managed).
+mkdir -p /mnt/opt/bromure/extensions/corporate-guard
+for f in manifest.json schema.json common.js background.js content.js; do
+    [ -f "$SCRIPT_DIR/extensions/corporate-guard/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/corporate-guard/$f" /mnt/opt/bromure/extensions/corporate-guard/
+done
+
 # Trace extension
 mkdir -p /mnt/opt/bromure/extensions/trace
 for f in manifest.json background.js form-capture.js; do
