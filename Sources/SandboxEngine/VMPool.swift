@@ -463,13 +463,23 @@ public final class VMPool {
         // import them into the chrome user's NSS database before Chromium
         // starts. The private key material is kept in Keychain on the host
         // and copied into the (ephemeral) guest only for this session.
+        //
+        // We also pass the analytics endpoint's scheme+host so the guest can
+        // drop a Chromium `AutoSelectCertificateForUrls` policy — that's
+        // what stops Chrome from showing a cert-picker dialog every time
+        // something under the guest hits the endpoint in-browser.
         if let pid = profileID,
            let mtls = ManagedProfileStore.shared.mtlsMaterial(profileId: pid) {
-            cfg["mtls"] = [
+            var mtlsCfg: [String: Any] = [
                 "certPem": mtls.certPem,
                 "keyPem":  mtls.keyPem,
                 "caPem":   mtls.caPem,
             ]
+            let endpoint = CloudTracePolicy.defaultEndpoint
+            if let scheme = endpoint.scheme, let host = endpoint.host {
+                mtlsCfg["autoSelectURL"] = "\(scheme)://\(host)"
+            }
+            cfg["mtls"] = mtlsCfg
         }
         cfg["locale"] = config.locale
 

@@ -103,6 +103,34 @@ def install_managed_mtls(mtls):
     if rc != 0:
         print(f"config-agent: install-mtls.sh failed (rc={rc}): {out}", file=sys.stderr)
 
+    # Tell Chromium to auto-select this leaf for the analytics URL so the
+    # browser doesn't pop its cert-picker dialog whenever the managed
+    # profile hits the endpoint. Only the managed-profile NSS db has a
+    # client cert, and this policy file only gets written when the host
+    # sent managed-profile mTLS material — default (unmanaged) sessions
+    # never see it.
+    auto_select_url = mtls.get("autoSelectURL")
+    if auto_select_url:
+        write_chromium_auto_select_policy(auto_select_url)
+
+
+def write_chromium_auto_select_policy(url):
+    """Write a Chromium managed-policy file that forces auto-selection of
+    the bromure-mtls leaf cert for `url`. Merges with the static
+    bromure.json policy at runtime (Chromium unions all JSON files under
+    /etc/chromium/policies/managed/)."""
+    policies_dir = "/etc/chromium/policies/managed"
+    os.makedirs(policies_dir, exist_ok=True)
+    # Entries are *stringified* JSON per Chromium's schema — a nested
+    # object, not a nested string, gets silently ignored. Empty filter
+    # matches any cert in the NSS db; the db only contains our leaf.
+    entry = json.dumps({"pattern": url, "filter": {}}, separators=(",", ":"))
+    policy = {"AutoSelectCertificateForUrls": [entry]}
+    path = f"{policies_dir}/bromure-mtls.json"
+    with open(path, "w") as f:
+        json.dump(policy, f)
+    os.chmod(path, 0o644)
+
 
 def sh_escape(s):
     """Escape a string for safe use as a single-quoted shell value."""
