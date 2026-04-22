@@ -13,7 +13,6 @@ This replaces serial-based config delivery for lower latency.
 
 import json
 import os
-import re
 import socket
 import struct
 import subprocess
@@ -85,53 +84,19 @@ def write_custom_cas(cas):
     return len(cas)
 
 
-def set_hostname(cfg):
-    """Replace Alpine's default `localhost` with `Bromure-<version>` so
-    the name shows up consistently in Endpoint Verification reports,
-    system logs, and anywhere else Bromure sessions surface.
-    Idempotent and safe for every session (managed or not) — defaults
-    to `Bromure` when the host doesn't send a version.
+def write_bromure_version(cfg):
+    """Drop the host-supplied appVersion at a known guest-side path so
+    later hooks (notably the EV native-messaging stub) can report
+    `Bromure-<version>` as the device identity to Google, without
+    us having to touch the kernel hostname. Changing the real
+    hostname mid-boot races X's Xauthority setup; this file doesn't.
     """
-    version = cfg.get("appVersion") or ""
-    # Reduce to a valid RFC-952 label: A-Z, a-z, 0-9, '-'. Also trim
-    # lone leading/trailing hyphens that sed-style collapsing can leave.
-    suffix = re.sub(r"[^A-Za-z0-9]+", "-", version).strip("-")
-    name = (f"Bromure-{suffix}" if suffix else "Bromure")[:63]
-
-    try:
-        subprocess.run(["hostname", name], check=False)
-        with open("/etc/hostname", "w") as f:
-            f.write(name + "\n")
-    except Exception as e:
-        print(f"config-agent: hostname set failed: {e}", file=sys.stderr)
+    version = (cfg.get("appVersion") or "").strip()
+    if not version:
         return
-
-    # /etc/hosts: keep every existing line (crucially the loopback line
-    # for `localhost`, and anything user-added), drop any stale Bromure-*
-    # loopback mapping from an earlier boot, then append our fresh one.
-    try:
-        with open("/etc/hosts") as f:
-            existing = f.read().splitlines()
-    except FileNotFoundError:
-        existing = []
-    kept = []
-    for line in existing:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            kept.append(line)
-            continue
-        parts = stripped.split()
-        if (len(parts) >= 2 and parts[0] == "127.0.0.1"
-                and any(p == "Bromure" or p.startswith("Bromure-") for p in parts[1:])):
-            continue  # drop stale Bromure loopback
-        kept.append(line)
-    kept.append(f"127.0.0.1\t{name}")
-    try:
-        with open("/etc/hosts", "w") as f:
-            f.write("\n".join(kept) + "\n")
-    except Exception as e:
-        print(f"config-agent: /etc/hosts update failed: {e}", file=sys.stderr)
-    print(f"config-agent: hostname set to {name}", file=sys.stderr)
+    os.makedirs("/tmp/bromure", exist_ok=True)
+    with open("/tmp/bromure/app-version", "w") as f:
+        f.write(version)
 
 
 def install_managed_mtls(mtls):
@@ -163,24 +128,12 @@ def install_managed_mtls(mtls):
     if auto_select_url:
         write_chromium_mtls_policy(auto_select_url)
 
-    # Force-install the Endpoint Verification extension and plumb it to
-    # our stub native-messaging helper. This is what populates
-    # `device.certificates` on Google's Context-Aware Access side so a
-    # Workspace admin can write a CEL rule requiring the Bromure CA.
-    install_endpoint_verification_shim()
-
-
-# Google's Endpoint Verification extension ID (Chrome Web Store).
-EV_EXTENSION_ID = "callobklhcbilhphinckomhgkigmfocg"
-
 
 def write_chromium_mtls_policy(url):
-    """Write the managed-policy file that (a) auto-selects the Bromure
-    leaf for the analytics URL so Chromium never prompts, and (b)
-    force-installs the Endpoint Verification extension so Google's CAA
-    sees our `device.certificates` signal. Merges with the static
-    bromure.json at runtime (Chromium unions all JSON files under
-    /etc/chromium/policies/managed/)."""
+    """Write a Chromium managed-policy file that auto-selects the
+    Bromure leaf cert for the analytics URL so Chromium never prompts.
+    Merges with the static bromure.json at runtime (Chromium unions
+    all JSON files under /etc/chromium/policies/managed/)."""
     policies_dir = "/etc/chromium/policies/managed"
     os.makedirs(policies_dir, exist_ok=True)
 
@@ -193,67 +146,11 @@ def write_chromium_mtls_policy(url):
 
     policy = {
         "AutoSelectCertificateForUrls": [auto_select_entry],
-        # Force-install + pin to the Chrome Web Store update URL. Chromium
-        # honors this the same way Google Chrome does.
-        "ExtensionInstallForcelist": [
-            f"{EV_EXTENSION_ID};https://clients2.google.com/service/update2/crx",
-        ],
     }
     path = f"{policies_dir}/bromure-mtls.json"
     with open(path, "w") as f:
         json.dump(policy, f)
     os.chmod(path, 0o644)
-
-
-def install_chrome_enrollment_token(token):
-    """Write Chromium's machine-level CBCM enrollment token to the
-    dedicated path the Linux enrollment code reads from. The JSON
-    policy key of the same name is a different, user-scoped setting
-    that the enrollment path ignores on Linux — which is why this
-    goes in its own file. No-op when the host didn't ship a token."""
-    if not token:
-        return
-    enrollment_dir = "/etc/chromium/policies/enrollment"
-    os.makedirs(enrollment_dir, exist_ok=True)
-    token_path = f"{enrollment_dir}/CloudManagementEnrollmentToken"
-    with open(token_path, "w") as f:
-        f.write(str(token).strip())
-    os.chmod(token_path, 0o644)
-
-
-def install_endpoint_verification_shim():
-    """Drop Chromium Native Messaging manifests pointing at our stub
-    helper (/usr/local/bin/bromure-ev-stub, baked into the image by
-    setup.sh). The EV extension calls two different endpoints:
-
-      com.google.endpoint_verification.api_helper — device-state RPC
-      com.google.secure_connect.native_helper     — cert-attestation RPC
-
-    Both are served by the same stub binary, which always replies with
-    a fully-compliant 'device is Bromure, has the leaf cert' payload.
-    See ev-stub.py for protocol details and caveats.
-    """
-    manifests_dir = "/etc/chromium/native-messaging-hosts"
-    os.makedirs(manifests_dir, exist_ok=True)
-    stub_path = "/usr/local/bin/bromure-ev-stub"
-
-    for name in (
-        "com.google.endpoint_verification.api_helper",
-        "com.google.secure_connect.native_helper",
-    ):
-        manifest = {
-            "name": name,
-            "description": "Bromure stub for Google Endpoint Verification",
-            "path": stub_path,
-            "type": "stdio",
-            # Restrict invocation to the real EV extension ID so random
-            # extensions can't spawn this helper.
-            "allowed_origins": [f"chrome-extension://{EV_EXTENSION_ID}/"],
-        }
-        path = f"{manifests_dir}/{name}.json"
-        with open(path, "w") as f:
-            json.dump(manifest, f)
-        os.chmod(path, 0o644)
 
 
 def sh_escape(s):
@@ -266,15 +163,7 @@ def write_chrome_env(cfg):
     env_file = "/tmp/bromure/chrome-env"
     lines = []
 
-    # CBCM (Chrome Browser Cloud Management) is compiled out of unofficial
-    # Chromium builds and skipped unless this flag is on. Only add it
-    # when the session actually has an enrollment token to use —
-    # otherwise the flag is noise that makes chrome://policy logs
-    # misleading (they'll say 'Starting CBCM' on sessions that can
-    # never enroll).
     extra_flags = []
-    if cfg.get("chromeEnrollmentToken"):
-        extra_flags.append("--enable-chrome-browser-cloud-management")
     enable_features = []
     # LcdText: Chromium's subpixel text in compositor layers. macOS Chrome uses
     # grayscale AA; disabling here matches that path and avoids the slight
@@ -338,17 +227,19 @@ def write_chrome_env(cfg):
     # WebRTC block extension: loaded only when both webcam and microphone are off
     if not cfg.get("webcam") and not cfg.get("microphone"):
         extensions.append("/opt/bromure/extensions/webrtc-block")
+    # IP-register: heartbeats the browser's egress IP to analytics.bromure.io
+    # so the control plane can keep customer IdP allowlists in sync. Managed
+    # sessions only — it piggybacks on the same mTLS leaf + AutoSelect policy
+    # we already deploy for cfg["mtls"], so there's no point running it where
+    # neither exists.
+    if cfg.get("mtls"):
+        extensions.append("/opt/bromure/extensions/ip-register")
     if extensions:
         extra_flags.append(f"--load-extension={','.join(extensions)}")
-        # Only allow our extensions, disable any others. Skip this in
-        # managed-mTLS mode: force-installed extensions (currently
-        # Endpoint Verification, pushed via ExtensionInstallForcelist)
-        # live in a Chromium-managed directory that doesn't exist at
-        # launch time — adding it to --disable-extensions-except isn't
-        # possible, and leaving the flag in blocks the CAA signal
-        # reporting that managed sessions are built around.
-        if not cfg.get("mtls"):
-            extra_flags.append(f"--disable-extensions-except={','.join(extensions)}")
+        # Only allow our bundled extensions — disable every other extension
+        # Chromium might try to load (policy-pushed, user-installed in a
+        # persistent profile, etc.).
+        extra_flags.append(f"--disable-extensions-except={','.join(extensions)}")
 
     profile_dir = cfg.get("profileDir")
     if profile_dir:
@@ -981,9 +872,11 @@ def main():
         os.system(f"date -s @{int(ts)} >/dev/null 2>&1")
         print(f"config-agent: clock set from host time ({int(ts)})", file=sys.stderr)
 
-    # Bromure-<version> hostname. Runs for every session (safe default
-    # even when the host doesn't send a version).
-    set_hostname(cfg)
+    # Drop the app version on disk so the EV native-messaging stub can
+    # synthesize `Bromure-<version>` as the reported device identity
+    # without changing the kernel hostname (which would race X's
+    # Xauthority and crash Chromium).
+    write_bromure_version(cfg)
 
     # No global wait_for_on_boot — only WARP-dependent paths wait internally.
 
@@ -996,11 +889,6 @@ def main():
 
     # Managed-profile mTLS client cert → NSS database
     install_managed_mtls(cfg.get("mtls"))
-
-    # Chrome Enterprise Core (CBCM) enrollment token, if the managed
-    # profile shipped one. Only meaningful alongside the mTLS install
-    # above (default / unmanaged sessions never get one).
-    install_chrome_enrollment_token(cfg.get("chromeEnrollmentToken"))
 
     # Write chrome-env
     write_chrome_env(cfg)

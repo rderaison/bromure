@@ -277,7 +277,6 @@ install_config   configs/Xwrapper.conf         /mnt/etc/X11/Xwrapper.config
 install_config   scripts/resize-watcher.sh  /mnt/usr/local/bin/resize-watcher.sh 755
 install_config   scripts/apply-config.sh   /mnt/usr/local/bin/apply-config.sh 755
 install_config   scripts/install-mtls.sh   /mnt/usr/local/bin/install-mtls.sh 755
-install_config   scripts/ev-stub.py        /mnt/usr/local/bin/bromure-ev-stub 755
 install_config   scripts/on-boot.sh        /mnt/usr/local/bin/on-boot.sh 755
 install_template scripts/xinitrc           /mnt/home/chrome/.xinitrc
 chroot /mnt chown chrome:chrome /home/chrome/.xinitrc
@@ -406,6 +405,15 @@ mkdir -p /mnt/opt/bromure/extensions/webrtc-block
 for f in manifest.json block.js; do
     [ -f "$SCRIPT_DIR/extensions/webrtc-block/$f" ] && \
         cp "$SCRIPT_DIR/extensions/webrtc-block/$f" /mnt/opt/bromure/extensions/webrtc-block/
+done
+
+# IP-register extension (only loaded for managed sessions at runtime;
+# heartbeats the browser's egress IP to analytics.bromure.io so the
+# control plane can keep customer SaaS allowlists in sync).
+mkdir -p /mnt/opt/bromure/extensions/ip-register
+for f in manifest.json background.js; do
+    [ -f "$SCRIPT_DIR/extensions/ip-register/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/ip-register/$f" /mnt/opt/bromure/extensions/ip-register/
 done
 
 # Trace extension

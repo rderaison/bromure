@@ -480,19 +480,6 @@ public final class VMPool {
                 mtlsCfg["autoSelectURL"] = "\(scheme)://\(host)"
             }
             cfg["mtls"] = mtlsCfg
-
-            // Optional Chrome Browser Cloud Management enrollment token
-            // from the managed profile's server-delivered settings. When
-            // present, the guest drops it at the canonical
-            // `/etc/chromium/policies/enrollment/CloudManagementEnrollmentToken`
-            // path — which is where Chromium's machine-level enrollment
-            // code reads from on Linux (the JSON policy key is unrelated
-            // and ignored by the enrollment path). Absence is fine;
-            // enrollment just doesn't happen.
-            if let profile = ManagedProfileStore.shared.profile(id: pid),
-               case .string(let token) = profile.settings["chromeEnrollmentToken"] {
-                cfg["chromeEnrollmentToken"] = token
-            }
         }
         cfg["locale"] = config.locale
 

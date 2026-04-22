@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Bromure IP Register",
+  "version": "1.0.0",
+  "description": "Managed-profile heartbeat: POSTs the browser's current egress IP to analytics.bromure.io so the control plane can keep customer SaaS allowlists in sync.",
+  "permissions": ["alarms"],
+  "host_permissions": ["https://analytics.bromure.io/*"],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
