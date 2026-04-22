@@ -231,9 +231,9 @@ public final class CloudTraceUploader: @unchecked Sendable {
 // MARK: - mTLS challenge handler
 
 /// URLSession delegate that answers TLS client-cert challenges with the
-/// managed profile's issued leaf cert. Identity lookup is lazy: the first
-/// time this session opens a connection, we load cert+key into the default
-/// Keychain under a stable label and query a `SecIdentity` back.
+/// managed profile's issued leaf cert. Resolves the identity via
+/// `AnalyticsMTLSIdentity`, which caches the result — so the keychain is
+/// hit at most once per profile per process, not once per HTTPS request.
 private final class MTLSDelegate: NSObject, URLSessionDelegate {
     private let profileId: UUID
     init(profileId: UUID) { self.profileId = profileId }
@@ -258,46 +258,56 @@ private final class MTLSDelegate: NSObject, URLSessionDelegate {
     }
 }
 
-/// Converts the on-disk cert PEM + Keychain-resident DER PKCS#8 private key
-/// into a `SecIdentity` usable as a URL credential. Imports both items into
-/// the user's default Keychain on first call, then queries the identity by
-/// a stable per-profile label on subsequent calls. Kept in this file (not in
-/// ManagedProfileSync) because this particular import path is only needed
-/// for host-side HTTPS — the guest-side NSS-DB install uses raw PEM.
+/// Builds a `SecIdentity` from *exactly* the leaf cert and private key that
+/// were issued for a given managed profile — without ever writing to a
+/// file-based keychain, which means no unlock prompts, no Keychain Access
+/// entries, no interference with the user's login keychain.
+///
+/// We package the cert + PKCS#8 private key into a PKCS#12 blob in memory
+/// (via `/usr/bin/openssl pkcs12 -export`, which LibreSSL ships with macOS)
+/// and then hand the blob to `SecPKCS12Import` with *no*
+/// `kSecImportExportKeychain` entry in the options dictionary. Per the
+/// Security framework contract, items in that case "will not be written to
+/// any keychain and will only be accessible via references returned by
+/// this function" — the resulting `SecIdentity` is a pure in-memory
+/// reference. The identity is cached per-profile so the packaging only
+/// runs once per process.
+///
+/// History: this used to live in the user's login keychain (random
+/// identities got picked for mTLS challenges, and every sign op popped an
+/// ACL prompt), and then briefly in a process-private file-based keychain
+/// in `$TMPDIR` (which still prompted the user for the keychain password).
+/// Both are gone — no `SecKeychain` is created at any point on this path.
 enum AnalyticsMTLSIdentity {
     enum Error: Swift.Error {
         case missingMaterial
-        case importFailed(OSStatus)
-        case queryFailed(OSStatus)
+        case pkcs12BuildFailed(code: Int32, stderr: String)
+        case pkcs12ImportFailed(OSStatus)
+        case identityExtractionFailed
     }
 
-    private static let labelPrefix = "io.bromure.app.analytics-mtls"
+    private static let cacheLock = NSLock()
+    private static var cache: [UUID: SecIdentity] = [:]
 
     static func identity(for profileId: UUID) throws -> SecIdentity {
-        let label = "\(labelPrefix).\(profileId.uuidString.lowercased())"
-        if let existing = queryIdentity(label: label) { return existing }
-        try importToKeychain(label: label, profileId: profileId)
-        guard let ready = queryIdentity(label: label) else {
-            throw Error.queryFailed(errSecItemNotFound)
-        }
-        return ready
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let cached = cache[profileId] { return cached }
+        let ident = try buildIdentity(for: profileId)
+        cache[profileId] = ident
+        return ident
     }
 
-    private static func queryIdentity(label: String) -> SecIdentity? {
-        let q: [String: Any] = [
-            kSecClass as String: kSecClassIdentity,
-            kSecAttrLabel as String: label,
-            kSecReturnRef as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: AnyObject?
-        let s = SecItemCopyMatching(q as CFDictionary, &result)
-        guard s == errSecSuccess else { return nil }
-        // SecIdentity is typed as AnyObject here; force the CFTypeID-safe cast.
-        return (result as! SecIdentity)
+    /// Drop the cached identity for a profile — call on unenroll /
+    /// destroy-local-state so a rotated cert isn't served by a stale
+    /// identity ref.
+    static func purge(profileId: UUID) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        cache.removeValue(forKey: profileId)
     }
 
-    private static func importToKeychain(label: String, profileId: UUID) throws {
+    private static func buildIdentity(for profileId: UUID) throws -> SecIdentity {
         let certURL = ManagedProfileStore.shared.mtlsCertURL(for: profileId)
         guard let certPem = try? String(contentsOf: certURL, encoding: .utf8) else {
             throw Error.missingMaterial
@@ -306,34 +316,84 @@ enum AnalyticsMTLSIdentity {
             throw Error.missingMaterial
         }
         let keyPem = privKey.pemRepresentation
-        guard let blob = (certPem + "\n" + keyPem).data(using: .utf8) else {
-            throw Error.missingMaterial
+
+        // Random per-invocation PKCS#12 password. We're both producer and
+        // consumer so the value only lives for the duration of this call;
+        // it never leaves this function.
+        var pwdBytes = [UInt8](repeating: 0, count: 24)
+        _ = SecRandomCopyBytes(kSecRandomDefault, pwdBytes.count, &pwdBytes)
+        let password = Data(pwdBytes).base64EncodedString()
+
+        let pkcs12 = try buildPKCS12(certPem: certPem, keyPem: keyPem, password: password)
+
+        // Import with no `kSecImportExportKeychain` entry: items stay
+        // in-memory, referenced only by the returned identity.
+        let options: [String: Any] = [kSecImportExportPassphrase as String: password]
+        var items: CFArray?
+        let status = SecPKCS12Import(pkcs12 as CFData, options as CFDictionary, &items)
+        guard status == errSecSuccess, let itemsArr = items as? [[String: Any]] else {
+            throw Error.pkcs12ImportFailed(status)
         }
-        var format: SecExternalFormat = .formatPEMSequence
-        var itemType: SecExternalItemType = .itemTypeAggregate
-        var importedItems: CFArray?
-        let opts: SecItemImportExportFlags = []
-        var keyParams = SecItemImportExportKeyParameters()
-        let status = SecItemImport(
-            blob as CFData,
-            nil, &format, &itemType,
-            opts, &keyParams, nil, &importedItems,
-        )
-        guard status == errSecSuccess, let items = importedItems as? [AnyObject] else {
-            throw Error.importFailed(status)
+        guard let entry = itemsArr.first,
+              let identityAny = entry[kSecImportItemIdentity as String]
+        else {
+            throw Error.identityExtractionFailed
         }
-        // Tag each imported ref with our label + persist to default keychain.
-        // We ignore duplicate-item errors so a second session for the same
-        // profile doesn't error out noisily.
-        for item in items {
-            let attrs: [String: Any] = [
-                kSecValueRef as String: item,
-                kSecAttrLabel as String: label,
-            ]
-            let addStatus = SecItemAdd(attrs as CFDictionary, nil)
-            if addStatus != errSecSuccess && addStatus != errSecDuplicateItem {
-                throw Error.importFailed(addStatus)
-            }
+        return identityAny as! SecIdentity
+    }
+
+    /// Package cert + key into a PKCS#12 blob using the system `openssl`
+    /// binary. Shelling out gets us a battle-tested PKCS#12 encoder for a
+    /// few dozen lines of glue — the alternative is hand-rolling the
+    /// ASN.1 + PBKDF2 + PBE ourselves, which is security-sensitive code
+    /// we'd rather not own.
+    ///
+    /// The cert and key PEMs are written to a freshly-created 0700
+    /// directory under `$TMPDIR` for the duration of the subprocess and
+    /// deleted immediately after. The key is already persisted unencrypted
+    /// in the ManagedProfileSync keychain entry, so the brief on-disk
+    /// copy here doesn't expand the trust boundary.
+    private static func buildPKCS12(
+        certPem: String, keyPem: String, password: String,
+    ) throws -> Data {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bromure-p12-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: base.path)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let certFile = base.appendingPathComponent("c.pem")
+        let keyFile = base.appendingPathComponent("k.pem")
+        try certPem.write(to: certFile, atomically: true, encoding: .utf8)
+        try keyPem.write(to: keyFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: certFile.path)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: keyFile.path)
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
+        proc.arguments = [
+            "pkcs12", "-export",
+            "-in", certFile.path,
+            "-inkey", keyFile.path,
+            "-passout", "pass:\(password)",
+        ]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+
+        try proc.run()
+        let out = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let err = errPipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+
+        guard proc.terminationStatus == 0 else {
+            let msg = String(data: err, encoding: .utf8) ?? "<non-utf8>"
+            throw Error.pkcs12BuildFailed(code: proc.terminationStatus, stderr: msg)
         }
+        return out
     }
 }
