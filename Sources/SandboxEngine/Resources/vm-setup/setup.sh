@@ -296,6 +296,7 @@ install_config   configs/Xwrapper.conf         /mnt/etc/X11/Xwrapper.config
 install_config   scripts/resize-watcher.sh  /mnt/usr/local/bin/resize-watcher.sh 755
 install_config   scripts/apply-config.sh   /mnt/usr/local/bin/apply-config.sh 755
 install_config   scripts/install-mtls.sh   /mnt/usr/local/bin/install-mtls.sh 755
+install_config   scripts/ev-stub.py        /mnt/usr/local/bin/bromure-ev-stub 755
 install_config   scripts/on-boot.sh        /mnt/usr/local/bin/on-boot.sh 755
 install_template scripts/xinitrc           /mnt/home/chrome/.xinitrc
 chroot /mnt chown chrome:chrome /home/chrome/.xinitrc

@@ -111,25 +111,83 @@ def install_managed_mtls(mtls):
     # never see it.
     auto_select_url = mtls.get("autoSelectURL")
     if auto_select_url:
-        write_chromium_auto_select_policy(auto_select_url)
+        write_chromium_mtls_policy(auto_select_url)
+
+    # Force-install the Endpoint Verification extension and plumb it to
+    # our stub native-messaging helper. This is what populates
+    # `device.certificates` on Google's Context-Aware Access side so a
+    # Workspace admin can write a CEL rule requiring the Bromure CA.
+    install_endpoint_verification_shim()
 
 
-def write_chromium_auto_select_policy(url):
-    """Write a Chromium managed-policy file that forces auto-selection of
-    the bromure-mtls leaf cert for `url`. Merges with the static
-    bromure.json policy at runtime (Chromium unions all JSON files under
+# Google's Endpoint Verification extension ID (Chrome Web Store).
+EV_EXTENSION_ID = "callobklhcbilhphinckomhgkigmfocg"
+
+
+def write_chromium_mtls_policy(url):
+    """Write the managed-policy file that (a) auto-selects the Bromure
+    leaf for the analytics URL so Chromium never prompts, and (b)
+    force-installs the Endpoint Verification extension so Google's CAA
+    sees our `device.certificates` signal. Merges with the static
+    bromure.json at runtime (Chromium unions all JSON files under
     /etc/chromium/policies/managed/)."""
     policies_dir = "/etc/chromium/policies/managed"
     os.makedirs(policies_dir, exist_ok=True)
-    # Entries are *stringified* JSON per Chromium's schema — a nested
-    # object, not a nested string, gets silently ignored. Empty filter
-    # matches any cert in the NSS db; the db only contains our leaf.
-    entry = json.dumps({"pattern": url, "filter": {}}, separators=(",", ":"))
-    policy = {"AutoSelectCertificateForUrls": [entry]}
+
+    # AutoSelectCertificateForUrls entries are *stringified* JSON per
+    # Chromium's schema — a nested object, not a nested string, gets
+    # silently ignored. Empty filter matches any cert in the NSS db;
+    # the db only contains our leaf.
+    auto_select_entry = json.dumps(
+        {"pattern": url, "filter": {}}, separators=(",", ":"))
+
+    policy = {
+        "AutoSelectCertificateForUrls": [auto_select_entry],
+        # Force-install + pin to the Chrome Web Store update URL. Chromium
+        # honors this the same way Google Chrome does.
+        "ExtensionInstallForcelist": [
+            f"{EV_EXTENSION_ID};https://clients2.google.com/service/update2/crx",
+        ],
+    }
     path = f"{policies_dir}/bromure-mtls.json"
     with open(path, "w") as f:
         json.dump(policy, f)
     os.chmod(path, 0o644)
+
+
+def install_endpoint_verification_shim():
+    """Drop Chromium Native Messaging manifests pointing at our stub
+    helper (/usr/local/bin/bromure-ev-stub, baked into the image by
+    setup.sh). The EV extension calls two different endpoints:
+
+      com.google.endpoint_verification.api_helper — device-state RPC
+      com.google.secure_connect.native_helper     — cert-attestation RPC
+
+    Both are served by the same stub binary, which always replies with
+    a fully-compliant 'device is Bromure, has the leaf cert' payload.
+    See ev-stub.py for protocol details and caveats.
+    """
+    manifests_dir = "/etc/chromium/native-messaging-hosts"
+    os.makedirs(manifests_dir, exist_ok=True)
+    stub_path = "/usr/local/bin/bromure-ev-stub"
+
+    for name in (
+        "com.google.endpoint_verification.api_helper",
+        "com.google.secure_connect.native_helper",
+    ):
+        manifest = {
+            "name": name,
+            "description": "Bromure stub for Google Endpoint Verification",
+            "path": stub_path,
+            "type": "stdio",
+            # Restrict invocation to the real EV extension ID so random
+            # extensions can't spawn this helper.
+            "allowed_origins": [f"chrome-extension://{EV_EXTENSION_ID}/"],
+        }
+        path = f"{manifests_dir}/{name}.json"
+        with open(path, "w") as f:
+            json.dump(manifest, f)
+        os.chmod(path, 0o644)
 
 
 def sh_escape(s):
