@@ -1,7 +1,7 @@
 import Foundation
 import Virtualization
 
-private let traceDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil
+private let traceDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG_TRACE"] != nil
 
 /// An HTTP trace event captured from the guest browser via CDP Network domain.
 public struct TraceEvent: Codable, Identifiable, Sendable {

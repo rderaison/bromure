@@ -1,7 +1,7 @@
 import Foundation
 import SQLite3
 
-private let traceDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil
+private let traceDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG_TRACE"] != nil
 
 // MARK: - Filter
 
