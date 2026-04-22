@@ -258,30 +258,30 @@ private final class MTLSDelegate: NSObject, URLSessionDelegate {
     }
 }
 
-/// Builds a `SecIdentity` from *exactly* the leaf cert and private key that
-/// were issued for a given managed profile — without ever writing to a
-/// file-based keychain, which means no unlock prompts, no Keychain Access
-/// entries, no interference with the user's login keychain.
+/// Builds a `SecIdentity` from *exactly* the leaf cert and private key
+/// that were issued for a given managed profile — without ever writing to
+/// a file-based keychain, which means no unlock prompts, no Keychain
+/// Access entries, no interference with the user's login keychain.
 ///
-/// We package the cert + PKCS#8 private key into a PKCS#12 blob in memory
-/// (via `/usr/bin/openssl pkcs12 -export`, which LibreSSL ships with macOS)
-/// and then hand the blob to `SecPKCS12Import` with *no*
-/// `kSecImportExportKeychain` entry in the options dictionary. Per the
-/// Security framework contract, items in that case "will not be written to
-/// any keychain and will only be accessible via references returned by
-/// this function" — the resulting `SecIdentity` is a pure in-memory
-/// reference. The identity is cached per-profile so the packaging only
-/// runs once per process.
+/// The cert + PKCS#8 private key are packaged into a PKCS#12 blob
+/// entirely in memory by `PKCS12Builder`, then handed to
+/// `SecPKCS12Import` with no `kSecImportExportKeychain` option. Per the
+/// Security framework contract, items in that case "will not be written
+/// to any keychain and will only be accessible via references returned
+/// by this function" — so the resulting `SecIdentity` is a pure
+/// in-memory reference. The identity is cached per-profile so the
+/// packaging only runs once per process.
 ///
 /// History: this used to live in the user's login keychain (random
-/// identities got picked for mTLS challenges, and every sign op popped an
-/// ACL prompt), and then briefly in a process-private file-based keychain
-/// in `$TMPDIR` (which still prompted the user for the keychain password).
-/// Both are gone — no `SecKeychain` is created at any point on this path.
+/// identities got picked for mTLS challenges, and every sign op popped
+/// an ACL prompt), then briefly in a process-private file-based keychain
+/// in `$TMPDIR` (which still prompted the user for the keychain
+/// password), and briefly went through `/usr/bin/openssl`. All gone —
+/// no `SecKeychain` is created, and no subprocess is spawned.
 enum AnalyticsMTLSIdentity {
     enum Error: Swift.Error {
         case missingMaterial
-        case pkcs12BuildFailed(code: Int32, stderr: String)
+        case invalidCertificate
         case pkcs12ImportFailed(OSStatus)
         case identityExtractionFailed
     }
@@ -309,25 +309,28 @@ enum AnalyticsMTLSIdentity {
 
     private static func buildIdentity(for profileId: UUID) throws -> SecIdentity {
         let certURL = ManagedProfileStore.shared.mtlsCertURL(for: profileId)
-        guard let certPem = try? String(contentsOf: certURL, encoding: .utf8) else {
-            throw Error.missingMaterial
-        }
+        guard let certPem = try? String(contentsOf: certURL, encoding: .utf8),
+              let certDer = derFromPEM(certPem, type: "CERTIFICATE")
+        else { throw Error.invalidCertificate }
+
         guard let privKey = try? ManagedProfileSync.shared.loadMTLSPrivateKey(for: profileId) else {
             throw Error.missingMaterial
         }
-        let keyPem = privKey.pemRepresentation
+        // `_RSA.Signing.PrivateKey.derRepresentation` is PKCS#8 DER —
+        // exactly what fits inside a PKCS#12 keyBag as the bagValue.
+        let keyDer = privKey.derRepresentation
 
         // Random per-invocation PKCS#12 password. We're both producer and
-        // consumer so the value only lives for the duration of this call;
-        // it never leaves this function.
+        // consumer; it never leaves this function.
         var pwdBytes = [UInt8](repeating: 0, count: 24)
         _ = SecRandomCopyBytes(kSecRandomDefault, pwdBytes.count, &pwdBytes)
         let password = Data(pwdBytes).base64EncodedString()
 
-        let pkcs12 = try buildPKCS12(certPem: certPem, keyPem: keyPem, password: password)
+        let pkcs12 = PKCS12Builder.build(
+            certDER: certDer, privateKeyDER: keyDer, password: password)
 
-        // Import with no `kSecImportExportKeychain` entry: items stay
-        // in-memory, referenced only by the returned identity.
+        // No `kSecImportExportKeychain` option ⇒ items stay in memory,
+        // referenced only by the returned identity.
         let options: [String: Any] = [kSecImportExportPassphrase as String: password]
         var items: CFArray?
         let status = SecPKCS12Import(pkcs12 as CFData, options as CFDictionary, &items)
@@ -342,58 +345,14 @@ enum AnalyticsMTLSIdentity {
         return identityAny as! SecIdentity
     }
 
-    /// Package cert + key into a PKCS#12 blob using the system `openssl`
-    /// binary. Shelling out gets us a battle-tested PKCS#12 encoder for a
-    /// few dozen lines of glue — the alternative is hand-rolling the
-    /// ASN.1 + PBKDF2 + PBE ourselves, which is security-sensitive code
-    /// we'd rather not own.
-    ///
-    /// The cert and key PEMs are written to a freshly-created 0700
-    /// directory under `$TMPDIR` for the duration of the subprocess and
-    /// deleted immediately after. The key is already persisted unencrypted
-    /// in the ManagedProfileSync keychain entry, so the brief on-disk
-    /// copy here doesn't expand the trust boundary.
-    private static func buildPKCS12(
-        certPem: String, keyPem: String, password: String,
-    ) throws -> Data {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("bromure-p12-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o700], ofItemAtPath: base.path)
-        defer { try? FileManager.default.removeItem(at: base) }
-
-        let certFile = base.appendingPathComponent("c.pem")
-        let keyFile = base.appendingPathComponent("k.pem")
-        try certPem.write(to: certFile, atomically: true, encoding: .utf8)
-        try keyPem.write(to: keyFile, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: certFile.path)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: keyFile.path)
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
-        proc.arguments = [
-            "pkcs12", "-export",
-            "-in", certFile.path,
-            "-inkey", keyFile.path,
-            "-passout", "pass:\(password)",
-        ]
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        proc.standardOutput = outPipe
-        proc.standardError = errPipe
-
-        try proc.run()
-        let out = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let err = errPipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-
-        guard proc.terminationStatus == 0 else {
-            let msg = String(data: err, encoding: .utf8) ?? "<non-utf8>"
-            throw Error.pkcs12BuildFailed(code: proc.terminationStatus, stderr: msg)
-        }
-        return out
+    private static func derFromPEM(_ pem: String, type: String) -> Data? {
+        let begin = "-----BEGIN \(type)-----"
+        let end = "-----END \(type)-----"
+        guard let beginRange = pem.range(of: begin),
+              let endRange = pem.range(of: end, range: beginRange.upperBound..<pem.endIndex)
+        else { return nil }
+        let b64 = pem[beginRange.upperBound..<endRange.lowerBound]
+            .filter { !$0.isWhitespace }
+        return Data(base64Encoded: String(b64))
     }
 }
