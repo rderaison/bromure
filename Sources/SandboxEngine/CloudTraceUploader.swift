@@ -234,17 +234,39 @@ public final class CloudTraceUploader: @unchecked Sendable {
     /// a field was present, just not its content.
     static let redactionMask = "***"
 
-    /// Names we treat as secret regardless of where they appear (form
-    /// field, url-encoded body key, JSON key). Matched case-insensitively
-    /// against the trimmed name; substrings count so `new_password` and
-    /// `password_confirmation` both hit.
-    static let secretNamePatterns: [String] = [
+    /// Hard ceilings — redaction runs on the uploader queue and must
+    /// never spike CPU or stack on adversarial input.
+    private static let maxBodyBytes = 256 * 1024
+    private static let maxJSONDepth = 64
+    private static let maxHeaderValueBytes = 8 * 1024
+
+    /// Names we treat as secret regardless of where they appear. Matched
+    /// case-insensitively against decoded name; substrings count so
+    /// `new_password`, `password_confirmation`, `my_api_key` all hit.
+    /// Stored already-lowercased to avoid re-lowercasing per check.
+    private static let secretNamePatterns: [String] = [
         "password", "passwd", "pwd",
         "secret", "token", "api_key", "apikey",
         "authorization", "auth_token",
+        "credential",
     ]
 
+    /// Full-header names whose entire value we redact (they don't fit
+    /// the "name pattern on an inner key" shape — the header value IS
+    /// the secret).
+    private static let secretHeaderNames: Set<String> = [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "x-auth-token",
+    ]
+
+    @inline(__always)
     private static func isSecretName(_ name: String) -> Bool {
+        // Short-circuit on empty — happens a lot with form bodies.
+        if name.isEmpty { return false }
         let lower = name.lowercased()
         for p in secretNamePatterns where lower.contains(p) { return true }
         return false
@@ -253,10 +275,21 @@ public final class CloudTraceUploader: @unchecked Sendable {
     /// Scrub password-shaped values out of an event in place. Run on
     /// every event before it's uploaded, regardless of level — the call
     /// sites above nil-out the fields at lower levels anyway, but it's
-    /// cheaper to belt-and-suspenders than risk leaking a password
-    /// because someone added a new level above `.headers`.
+    /// cheaper to belt-and-suspenders than risk leaking because someone
+    /// adds a new level above `.headers`.
+    ///
+    /// Guarantees (for airtightness):
+    /// * Never traps. Every parse failure falls back to returning a
+    ///   safe value (either the input unchanged, or fully masked).
+    /// * Never recurses unbounded — JSON depth is capped.
+    /// * Never chews CPU on pathological payloads — bodies over
+    ///   `maxBodyBytes` are masked wholesale instead of parsed.
     private static func redactSecrets(_ e: inout TraceEvent) {
-        // 1. form fields — any input typed password, plus any named like one.
+        // 1. Headers — outright sensitive header values.
+        e.requestHeaders = redactHeaders(e.requestHeaders)
+        e.responseHeaders = redactHeaders(e.responseHeaders)
+
+        // 2. form fields — any input typed password, plus any named like one.
         if let fields = e.formFields {
             e.formFields = fields.map { f in
                 if f.type.lowercased() == "password" || isSecretName(f.name) {
@@ -266,18 +299,43 @@ public final class CloudTraceUploader: @unchecked Sendable {
             }
         }
 
-        // 2. request body — parse by content-type and redact secret keys.
+        // 3. request body — parse by content-type and redact secret keys.
         if let body = e.postData {
-            let ct = contentType(from: e.requestHeaders) ?? ""
-            if ct.contains("application/x-www-form-urlencoded") {
-                e.postData = redactURLEncoded(body)
-            } else if ct.contains("application/json") || ct.contains("+json") {
-                e.postData = redactJSON(body)
+            if body.utf8.count > maxBodyBytes {
+                // Too big to parse safely — mask wholesale. Better to
+                // drop content than risk leaking via partial parse or
+                // DoS on the upload queue.
+                e.postData = redactionMask
+            } else {
+                let ct = contentType(from: e.requestHeaders) ?? ""
+                if ct.contains("application/x-www-form-urlencoded") {
+                    e.postData = redactURLEncoded(body)
+                } else if ct.contains("application/json") || ct.contains("+json") {
+                    e.postData = redactJSON(body)
+                }
+                // Multipart + other content types are left alone — a
+                // per-format parser would be needed to avoid
+                // corrupting the body.
             }
-            // Multipart + other content types are left alone — they'd
-            // need a per-format parser and the risk of corrupting the
-            // body outweighs the leak surface for a research trace.
         }
+    }
+
+    private static func redactHeaders(_ headers: [String: String]?) -> [String: String]? {
+        guard let headers else { return nil }
+        var out: [String: String] = [:]
+        out.reserveCapacity(headers.count)
+        for (k, v) in headers {
+            if secretHeaderNames.contains(k.lowercased()) {
+                out[k] = redactionMask
+            } else if v.utf8.count > maxHeaderValueBytes {
+                // Overlong header values are almost always attack
+                // surface — mask rather than ship.
+                out[k] = redactionMask
+            } else {
+                out[k] = v
+            }
+        }
+        return out
     }
 
     private static func contentType(from headers: [String: String]?) -> String? {
@@ -287,42 +345,63 @@ public final class CloudTraceUploader: @unchecked Sendable {
     }
 
     private static func redactURLEncoded(_ body: String) -> String {
-        // URLComponents handles percent-encoding + empty values correctly.
-        var comps = URLComponents()
-        comps.percentEncodedQuery = body
-        guard let items = comps.queryItems else { return body }
-        let redacted = items.map { item -> URLQueryItem in
-            if isSecretName(item.name) {
-                return URLQueryItem(name: item.name, value: redactionMask)
+        // Manual parse — URLComponents.percentEncodedQuery asserts on
+        // any body it can't parse (raw '#', unescaped reserved chars,
+        // malformed %XX, etc.). Browsers POST a wide range of
+        // malformed-but-consumable bodies.
+        let pairs = body.split(separator: "&", omittingEmptySubsequences: false)
+        var out: [String] = []
+        out.reserveCapacity(pairs.count)
+        for pair in pairs {
+            let s = String(pair)
+            guard let eq = s.firstIndex(of: "=") else {
+                out.append(s)
+                continue
             }
-            return item
+            let rawName = String(s[..<eq])
+            let rawValue = String(s[s.index(after: eq)...])
+            // Match on the decoded name so `user%2Fpassword` still hits,
+            // but keep the wire form of the name in the output so we
+            // don't accidentally re-encode it differently than the
+            // browser sent it.
+            let decodedName = rawName.removingPercentEncoding ?? rawName
+            if isSecretName(decodedName) {
+                out.append("\(rawName)=\(redactionMask)")
+            } else {
+                out.append("\(rawName)=\(rawValue)")
+            }
         }
-        comps.queryItems = redacted
-        return comps.percentEncodedQuery ?? body
+        return out.joined(separator: "&")
     }
 
     private static func redactJSON(_ body: String) -> String {
         guard let data = body.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
         else { return body }
-        let scrubbed = redactJSONValue(obj)
+        let scrubbed = redactJSONValue(obj, depth: 0)
         guard let out = try? JSONSerialization.data(withJSONObject: scrubbed, options: [.fragmentsAllowed]),
               let s = String(data: out, encoding: .utf8)
         else { return body }
         return s
     }
 
-    private static func redactJSONValue(_ value: Any) -> Any {
+    /// Depth-capped recursion: past `maxJSONDepth`, mask the subtree
+    /// rather than keep walking. Adversarial nesting can't crash us.
+    private static func redactJSONValue(_ value: Any, depth: Int) -> Any {
+        if depth >= maxJSONDepth { return redactionMask }
         if let dict = value as? [String: Any] {
             var out: [String: Any] = [:]
             out.reserveCapacity(dict.count)
             for (k, v) in dict {
-                out[k] = isSecretName(k) ? redactionMask : redactJSONValue(v)
+                out[k] = isSecretName(k) ? redactionMask : redactJSONValue(v, depth: depth + 1)
             }
             return out
         }
         if let arr = value as? [Any] {
-            return arr.map(redactJSONValue)
+            var out: [Any] = []
+            out.reserveCapacity(arr.count)
+            for v in arr { out.append(redactJSONValue(v, depth: depth + 1)) }
+            return out
         }
         return value
     }
