@@ -393,7 +393,7 @@ done
 # ---------------------------------------------------------------------------
 
 mkdir -p /mnt/opt/bromure/extensions/file-picker
-for f in manifest.json background.js content.js; do
+for f in manifest.json background.js content.js schema.json; do
     [ -f "$SCRIPT_DIR/extensions/file-picker/$f" ] && \
         cp "$SCRIPT_DIR/extensions/file-picker/$f" /mnt/opt/bromure/extensions/file-picker/
 done

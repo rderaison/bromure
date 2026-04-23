@@ -22,7 +22,39 @@ const pendingRequests = new Map(); // requestId -> { tabId, frameId }
 // Drag hover state — keeps debugger attached between dragEnter and drop/dragExit
 let dragState = null; // { tabId, dpr, toolbarHeight }
 
+// Managed-storage policy. Extension always loads so content.js can
+// show an in-page "uploads disabled" overlay; but we only stand up
+// the native port when uploads are actually enabled — otherwise we'd
+// churn file-picker-host.py against a host bridge that isn't listening.
+let uploadEnabled = true;
+
+async function loadPolicy() {
+  try {
+    const stored = await chrome.storage.managed.get(null);
+    if (stored && typeof stored.fileUploadEnabled === "boolean") {
+      uploadEnabled = stored.fileUploadEnabled;
+    }
+  } catch (_) { /* unmanaged / not yet delivered — assume enabled */ }
+  // Keep content scripts in sync; they also read storage directly
+  // but this covers the race on SW cold start.
+  chrome.tabs.query({}, (tabs) => {
+    for (const t of tabs) {
+      chrome.tabs.sendMessage(t.id, { type: "upload_policy", enabled: uploadEnabled }).catch(() => {});
+    }
+  });
+  if (uploadEnabled && !nativePort) connectNative();
+  if (!uploadEnabled && nativePort) {
+    try { nativePort.disconnect(); } catch (_) {}
+    nativePort = null;
+  }
+}
+loadPolicy();
+chrome.storage.onChanged.addListener((_changes, area) => {
+  if (area === "managed") loadPolicy();
+});
+
 function connectNative() {
+  if (!uploadEnabled) return;
   try {
     nativePort = chrome.runtime.connectNative(NATIVE_HOST);
   } catch (e) {
@@ -393,13 +425,20 @@ async function handleDrop(msg) {
   }
 }
 
-connectNative();
+// Initial connect happens from loadPolicy() once it has read managed
+// storage and confirmed uploads are enabled. No unconditional connect
+// here — on sessions with uploads disabled it would just churn.
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type !== "pick_file") return;
 
   console.log("[FilePicker] pick_file request from tab", sender.tab?.id,
     "frame", sender.frameId, "requestId:", msg.requestId);
+
+  if (!uploadEnabled) {
+    sendResponse({ error: "uploads disabled for this session" });
+    return;
+  }
 
   if (!nativePort) {
     connectNative();

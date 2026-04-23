@@ -172,6 +172,11 @@ def write_chromium_mtls_policy(url):
 # changes, this ID must be recomputed.
 CORPORATE_GUARD_EXT_ID = "nneafipcodbpeapjcagfcinodkidcjcp"
 
+# Stable ID derived from the RSA key in
+# extensions/file-picker/manifest.json. Must match for the 3rdparty
+# managed-storage policy to reach the extension.
+FILE_PICKER_EXT_ID = "cjdidalalgkgekmhonlcaleiafjbkdfn"
+
 
 def write_corporate_guard_policy(cfg):
     """Push the corporate-guard extension's per-session settings via
@@ -211,6 +216,30 @@ def write_corporate_guard_policy(cfg):
     policies_dir = "/etc/chromium/policies/managed"
     os.makedirs(policies_dir, exist_ok=True)
     path = f"{policies_dir}/bromure-corporate-guard.json"
+    with open(path, "w") as f:
+        json.dump(policy, f)
+    os.chmod(path, 0o644)
+
+
+def write_file_picker_policy(cfg):
+    """Push the file-picker extension's per-session `fileUploadEnabled`
+    flag via chrome.storage.managed. Always written so the extension
+    can tell the difference between "policy explicitly says off" and
+    "policy not yet delivered".
+    """
+    settings = {
+        "fileUploadEnabled": bool(cfg.get("fileTransfer", False)),
+    }
+    policy = {
+        "3rdparty": {
+            "extensions": {
+                FILE_PICKER_EXT_ID: settings,
+            }
+        }
+    }
+    policies_dir = "/etc/chromium/policies/managed"
+    os.makedirs(policies_dir, exist_ok=True)
+    path = f"{policies_dir}/bromure-file-picker.json"
     with open(path, "w") as f:
         json.dump(policy, f)
     os.chmod(path, 0o644)
@@ -271,9 +300,17 @@ def write_chrome_env(cfg):
         extensions.append("/opt/bromure/extensions/phishing-guard")
     if cfg.get("linkSender"):
         extensions.append("/opt/bromure/extensions/link-sender")
+    # file-picker is always loaded — when uploads are disabled it still
+    # intercepts file-input clicks to show an in-page "uploads disabled"
+    # overlay, much friendlier than Chromium's fallback Linux file
+    # dialog. The per-session `fileUploadEnabled` policy written below
+    # tells the extension which mode to run in.
+    extensions.append("/opt/bromure/extensions/file-picker")
     if cfg.get("fileTransfer"):
+        # Only the enabled branch needs chrome.debugger attachment, so
+        # only suppress the "extensions are debugging your browser"
+        # banner in that case.
         extra_flags.append("--silent-debugger-extension-api")
-        extensions.append("/opt/bromure/extensions/file-picker")
     # Trace extension: loaded when traceLevel > 0
     trace_level = cfg.get("traceLevel", 0)
     if trace_level > 0:
@@ -963,6 +1000,11 @@ def main():
     # Corporate-guard extension's managed-storage config (only when the
     # admin configured corporateWebsites / openExternalInPrivate).
     write_corporate_guard_policy(cfg)
+
+    # File-picker extension runs unconditionally but reads its enabled
+    # flag from managed storage — write it so the overlay-vs-real-picker
+    # branch is correct from first page load.
+    write_file_picker_policy(cfg)
 
     # Write chrome-env
     write_chrome_env(cfg)
