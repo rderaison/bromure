@@ -1,7 +1,7 @@
 import Foundation
 import Virtualization
 
-private let traceDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil
+private let traceDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG_TRACE"] != nil
 
 /// An HTTP trace event captured from the guest browser via CDP Network domain.
 public struct TraceEvent: Codable, Identifiable, Sendable {
@@ -143,9 +143,13 @@ public final class TraceBridge: NSObject, @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    public init(socketDevice: VZVirtioSocketDevice, sessionID: String = UUID().uuidString) {
+    public init(
+        socketDevice: VZVirtioSocketDevice,
+        sessionID: String = UUID().uuidString,
+        inMemory: Bool = false,
+    ) {
         self.socketDevice = socketDevice
-        self.store = TraceStore(sessionID: sessionID)
+        self.store = TraceStore(sessionID: sessionID, inMemory: inMemory)
         super.init()
 
         if traceDebug { print("[Trace] init: setting up vsock listener on port \(Self.tracePort)") }

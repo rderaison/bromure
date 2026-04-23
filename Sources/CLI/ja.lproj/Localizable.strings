@@ -543,3 +543,46 @@
 "Your choice" = "選択はあなた次第";
 "You can turn this off at any time in Profile Settings \U2192 Privacy & Safety. It is disabled by default on every new profile." = "プロファイル設定 \U2192 プライバシーとセキュリティでいつでも無効にできます。新規プロファイルではデフォルトで無効になっています。";
 "By clicking Accept, you agree to have the pages you browse in this profile analyzed by the Bromure phishing-detection service." = "「同意する」をクリックすると、このプロファイルで閲覧するページがBromureのフィッシング検出サービスによって分析されることに同意したものとみなされます。";
+
+/* Enterprise Management — shared */
+"Enroll in Enterprise Management" = "エンタープライズ管理に登録";
+"Unenroll from this organization?" = "この組織から登録解除しますか？";
+"Unenroll" = "登録解除";
+"Unenroll\U2026" = "登録解除\U2026";
+
+/* EnrollmentView */
+"Your administrator will give you a 6-word enrollment code. Paste it below to receive managed profiles for this organization." = "管理者から6つの単語からなる登録コードが提供されます。下に貼り付けて、この組織の管理対象プロファイルを受け取ります。";
+"Enrollment Code" = "登録コード";
+"Device Name" = "デバイス名";
+"Shown to your administrator so they can recognize this device." = "管理者がこのデバイスを識別できるように表示されます。";
+"Server URL (optional)" = "サーバーURL（任意）";
+"Enroll" = "登録";
+
+/* SettingsView — Managed Profile (multi-install) */
+"Managed Profile" = "管理対象プロファイル";
+"Enterprise-provisioned profile delivered from a Bromure control plane" = "Bromureコントロールプレーンから配信されるエンタープライズ提供プロファイル";
+"Not enrolled." = "未登録です。";
+"Your administrator will give you a 6-word enrollment code (e.g. `acid-aloe-arson-bench-cat-drum`). Paste it below to receive your managed profile." = "管理者から6つの単語からなる登録コード（例：`acid-aloe-arson-bench-cat-drum`）が提供されます。下に貼り付けて、管理対象プロファイルを受け取ります。";
+"Assigned profiles" = "割り当てられたプロファイル";
+"No managed profiles are currently assigned." = "現在、割り当てられている管理対象プロファイルはありません。";
+"Sync Now" = "今すぐ同期";
+"Enroll Another\U2026" = "別の組織に登録\U2026";
+"Managed profiles and any issued mTLS certificates from this organization will be removed. Profiles you created yourself are untouched." = "この組織から配信された管理対象プロファイルと発行済みのmTLS証明書がすべて削除されます。ご自分で作成したプロファイルには影響しません。";
+"User" = "ユーザー";
+"Device" = "デバイス";
+"Server" = "サーバー";
+"Last sync" = "前回の同期";
+
+/* Managed profile sync status */
+"Syncing\U2026" = "同期中\U2026";
+"Enrolled — no profiles assigned." = "登録済み \U2014 割り当てられたプロファイルはありません。";
+"Synced %lld profile(s)." = "%lld 件のプロファイルを同期しました。";
+"Sync failed: %@" = "同期に失敗しました: %@";
+
+/* Session window — trace controls + managed-recording banner */
+"Recording \U2014 click to pause" = "記録中 \U2014 クリックで一時停止";
+"Paused \U2014 click to start recording" = "一時停止中 \U2014 クリックで記録開始";
+"View trace" = "記録を表示";
+"Recording is enforced by your organization (%@)." = "記録は所属組織（%@）によって必須化されています。";
+"Recording — shared with %@" = "記録中 \U2014 %@ と共有されています";
+"Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "このウィンドウ内のすべてのリクエストは記録され、所属組織のセキュリティチームに送信されます。これは管理者により必須化されており、無効化できません。";

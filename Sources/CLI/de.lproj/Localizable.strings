@@ -543,3 +543,46 @@
 "Your choice" = "Deine Entscheidung";
 "You can turn this off at any time in Profile Settings \U2192 Privacy & Safety. It is disabled by default on every new profile." = "Du kannst dies jederzeit unter Profileinstellungen \U2192 Datenschutz & Sicherheit ausschalten. Bei jedem neuen Profil ist es standardm\U00E4\U00DFig deaktiviert.";
 "By clicking Accept, you agree to have the pages you browse in this profile analyzed by the Bromure phishing-detection service." = "Mit einem Klick auf Akzeptieren erkl\U00E4rst du dich damit einverstanden, dass die Seiten, die du in diesem Profil durchsuchst, vom Bromure-Phishing-Erkennungsdienst analysiert werden.";
+
+/* Enterprise Management — shared */
+"Enroll in Enterprise Management" = "Bei Unternehmensverwaltung anmelden";
+"Unenroll from this organization?" = "Von dieser Organisation abmelden?";
+"Unenroll" = "Abmelden";
+"Unenroll\U2026" = "Abmelden\U2026";
+
+/* EnrollmentView */
+"Your administrator will give you a 6-word enrollment code. Paste it below to receive managed profiles for this organization." = "Dein Administrator gibt dir einen 6-w\U00F6rtigen Anmeldecode. F\U00FCge ihn unten ein, um verwaltete Profile f\U00FCr diese Organisation zu erhalten.";
+"Enrollment Code" = "Anmeldecode";
+"Device Name" = "Ger\U00E4tename";
+"Shown to your administrator so they can recognize this device." = "Wird deinem Administrator angezeigt, damit dieses Ger\U00E4t erkennbar ist.";
+"Server URL (optional)" = "Server-URL (optional)";
+"Enroll" = "Anmelden";
+
+/* SettingsView — Managed Profile (multi-install) */
+"Managed Profile" = "Verwaltetes Profil";
+"Enterprise-provisioned profile delivered from a Bromure control plane" = "Vom Unternehmen bereitgestelltes Profil, ausgeliefert \U00FCber eine Bromure-Steuerebene";
+"Not enrolled." = "Nicht angemeldet.";
+"Your administrator will give you a 6-word enrollment code (e.g. `acid-aloe-arson-bench-cat-drum`). Paste it below to receive your managed profile." = "Dein Administrator gibt dir einen 6-w\U00F6rtigen Anmeldecode (z.\U00A0B. `acid-aloe-arson-bench-cat-drum`). F\U00FCge ihn unten ein, um dein verwaltetes Profil zu erhalten.";
+"Assigned profiles" = "Zugewiesene Profile";
+"No managed profiles are currently assigned." = "Zurzeit sind keine verwalteten Profile zugewiesen.";
+"Sync Now" = "Jetzt synchronisieren";
+"Enroll Another\U2026" = "Weitere Organisation anmelden\U2026";
+"Managed profiles and any issued mTLS certificates from this organization will be removed. Profiles you created yourself are untouched." = "Verwaltete Profile und alle ausgestellten mTLS-Zertifikate dieser Organisation werden entfernt. Von dir selbst erstellte Profile bleiben unver\U00E4ndert.";
+"User" = "Benutzer";
+"Device" = "Ger\U00E4t";
+"Server" = "Server";
+"Last sync" = "Letzte Synchronisation";
+
+/* Managed profile sync status */
+"Syncing\U2026" = "Synchronisiere\U2026";
+"Enrolled — no profiles assigned." = "Angemeldet \U2014 keine Profile zugewiesen.";
+"Synced %lld profile(s)." = "%lld Profil(e) synchronisiert.";
+"Sync failed: %@" = "Synchronisation fehlgeschlagen: %@";
+
+/* Session window — trace controls + managed-recording banner */
+"Recording \U2014 click to pause" = "Aufnahme l\U00E4uft \U2014 Klicken zum Pausieren";
+"Paused \U2014 click to start recording" = "Pausiert \U2014 Klicken zum Starten der Aufnahme";
+"View trace" = "Aufzeichnung anzeigen";
+"Recording is enforced by your organization (%@)." = "Die Aufzeichnung ist durch deine Organisation vorgeschrieben (%@).";
+"Recording — shared with %@" = "Aufzeichnung \U2014 geteilt mit %@";
+"Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "Jede Anfrage in diesem Fenster wird aufgezeichnet und an das Infosec-Team deiner Organisation gesendet. Dies ist von deinem Administrator vorgeschrieben und kann nicht deaktiviert werden.";

@@ -88,7 +88,7 @@ fi
 
 LANG_FLAG=
 [ -n "$CHROME_LANG" ] && LANG_FLAG="--lang=$CHROME_LANG"
-CHROME_CMD="chromium-browser --no-first-run --start-maximized --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
+CHROME_CMD="chromium-browser --no-first-run --start-maximized --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan --font-render-hinting=none $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
 
 # VPN splash: when a VPN is configured to connect at startup, the tunnel
 # takes a few seconds to establish. Loading the user's URL in that window
@@ -111,7 +111,8 @@ if [ -n "$VPN_AUTO_CONNECT" ]; then
             --disable-component-update \
             --disable-default-apps \
             --disable-sync \
-            --disable-features=Translate \
+            --disable-features=Translate,LcdText \
+            --font-render-hinting=none \
             --force-device-scale-factor="$DISPLAY_SCALE" \
             >/dev/null 2>&1 &
         SPLASH_PID=$!

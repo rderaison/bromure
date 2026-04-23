@@ -158,7 +158,7 @@ rm -f /tmp/resolv_stub.c
 # ---------------------------------------------------------------------------
 
 retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools jq python3 \
-    v4l-utils nss-tools bash wireguard-tools strongswan
+    v4l-utils nss-tools bash wireguard-tools strongswan openssl
 
 # ---------------------------------------------------------------------------
 # Configuration files (static)
@@ -276,6 +276,7 @@ install_config   configs/Xwrapper.conf         /mnt/etc/X11/Xwrapper.config
 
 install_config   scripts/resize-watcher.sh  /mnt/usr/local/bin/resize-watcher.sh 755
 install_config   scripts/apply-config.sh   /mnt/usr/local/bin/apply-config.sh 755
+install_config   scripts/install-mtls.sh   /mnt/usr/local/bin/install-mtls.sh 755
 install_config   scripts/on-boot.sh        /mnt/usr/local/bin/on-boot.sh 755
 install_template scripts/xinitrc           /mnt/home/chrome/.xinitrc
 chroot /mnt chown chrome:chrome /home/chrome/.xinitrc
@@ -328,6 +329,7 @@ chroot /mnt chown chrome:chrome /home/chrome/.profile
 install_config scripts/file-agent.py        /mnt/usr/local/bin/file-agent.py        755
 install_config scripts/file-picker-host.py  /mnt/usr/local/bin/file-picker-host.py  755
 install_config scripts/link-agent.py        /mnt/usr/local/bin/link-agent.py        755
+install_config scripts/mtls-reload-agent.py /mnt/usr/local/bin/mtls-reload-agent.py 755
 install_config scripts/webcam-agent.py      /mnt/usr/local/bin/webcam-agent.py      755
 install_config scripts/warp-agent.py        /mnt/usr/local/bin/warp-agent.py        755
 install_config scripts/wireguard-agent.py  /mnt/usr/local/bin/wireguard-agent.py  755
@@ -391,7 +393,7 @@ done
 # ---------------------------------------------------------------------------
 
 mkdir -p /mnt/opt/bromure/extensions/file-picker
-for f in manifest.json background.js content.js; do
+for f in manifest.json background.js content.js schema.json; do
     [ -f "$SCRIPT_DIR/extensions/file-picker/$f" ] && \
         cp "$SCRIPT_DIR/extensions/file-picker/$f" /mnt/opt/bromure/extensions/file-picker/
 done
@@ -404,6 +406,24 @@ mkdir -p /mnt/opt/bromure/extensions/webrtc-block
 for f in manifest.json block.js; do
     [ -f "$SCRIPT_DIR/extensions/webrtc-block/$f" ] && \
         cp "$SCRIPT_DIR/extensions/webrtc-block/$f" /mnt/opt/bromure/extensions/webrtc-block/
+done
+
+# IP-register extension (only loaded for managed sessions at runtime;
+# heartbeats the browser's egress IP to analytics.bromure.io so the
+# control plane can keep customer SaaS allowlists in sync).
+mkdir -p /mnt/opt/bromure/extensions/ip-register
+for f in manifest.json background.js; do
+    [ -f "$SCRIPT_DIR/extensions/ip-register/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/ip-register/$f" /mnt/opt/bromure/extensions/ip-register/
+done
+
+# Corporate Guard extension (managed-session only; banner mode or
+# redirect-to-incognito, configured per managed profile via
+# chrome.storage.managed).
+mkdir -p /mnt/opt/bromure/extensions/corporate-guard
+for f in manifest.json schema.json common.js background.js content.js blocked.html; do
+    [ -f "$SCRIPT_DIR/extensions/corporate-guard/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/corporate-guard/$f" /mnt/opt/bromure/extensions/corporate-guard/
 done
 
 # Trace extension
@@ -419,7 +439,7 @@ mkdir -p /mnt/opt/bromure/splash
 install_config splash/splash.html /mnt/opt/bromure/splash/splash.html
 install_config splash/night.jpg   /mnt/opt/bromure/splash/night.jpg
 
-# Native messaging hosts (link sender + file picker + trace)
+# Native messaging hosts (link sender + file picker + trace + corporate guard)
 mkdir -p /mnt/etc/chromium/native-messaging-hosts
 install_config configs/com.bromure.link_sender.json \
     /mnt/etc/chromium/native-messaging-hosts/com.bromure.link_sender.json

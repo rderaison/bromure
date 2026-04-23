@@ -84,6 +84,167 @@ def write_custom_cas(cas):
     return len(cas)
 
 
+def write_bromure_version(cfg):
+    """Drop the host-supplied appVersion at a known guest-side path so
+    later hooks (notably the EV native-messaging stub) can report
+    `Bromure-<version>` as the device identity to Google, without
+    us having to touch the kernel hostname. Changing the real
+    hostname mid-boot races X's Xauthority setup; this file doesn't.
+    """
+    version = (cfg.get("appVersion") or "").strip()
+    if not version:
+        return
+    os.makedirs("/tmp/bromure", exist_ok=True)
+    with open("/tmp/bromure/app-version", "w") as f:
+        f.write(version)
+
+
+def install_managed_mtls(mtls):
+    """Drop the managed-profile mTLS material on disk and import it into
+    the chrome user's NSS database. No-op if the host didn't send any."""
+    if not mtls:
+        return
+    cert_pem = mtls.get("certPem")
+    key_pem = mtls.get("keyPem")
+    ca_pem = mtls.get("caPem")
+    if not cert_pem or not key_pem or not ca_pem:
+        return
+    os.makedirs("/tmp/bromure/mtls", exist_ok=True)
+    for fn, data in [("cert.pem", cert_pem), ("key.pem", key_pem), ("ca.pem", ca_pem)]:
+        with open(f"/tmp/bromure/mtls/{fn}", "w") as f:
+            f.write(data)
+    os.chmod("/tmp/bromure/mtls/key.pem", 0o600)
+    rc, out = run("/usr/local/bin/install-mtls.sh")
+    if rc != 0:
+        print(f"config-agent: install-mtls.sh failed (rc={rc}): {out}", file=sys.stderr)
+
+    # Long-lived reload agent: dials the host on vsock 5320 and waits
+    # for live cert rotations. Only spawned for managed sessions (we're
+    # already inside `if not mtls: return`-guarded install flow). Runs
+    # detached so config-agent can still exit cleanly.
+    try:
+        subprocess.Popen(
+            ["/usr/local/bin/mtls-reload-agent.py"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        print(f"config-agent: mtls-reload-agent spawn failed: {e}", file=sys.stderr)
+
+    # Tell Chromium to auto-select this leaf for the analytics URL so the
+    # browser doesn't pop its cert-picker dialog whenever the managed
+    # profile hits the endpoint. Only the managed-profile NSS db has a
+    # client cert, and this policy file only gets written when the host
+    # sent managed-profile mTLS material — default (unmanaged) sessions
+    # never see it.
+    auto_select_url = mtls.get("autoSelectURL")
+    if auto_select_url:
+        write_chromium_mtls_policy(auto_select_url)
+
+
+def write_chromium_mtls_policy(url):
+    """Write a Chromium managed-policy file that auto-selects the
+    Bromure leaf cert for the analytics URL so Chromium never prompts.
+    Merges with the static bromure.json at runtime (Chromium unions
+    all JSON files under /etc/chromium/policies/managed/)."""
+    policies_dir = "/etc/chromium/policies/managed"
+    os.makedirs(policies_dir, exist_ok=True)
+
+    # AutoSelectCertificateForUrls entries are *stringified* JSON per
+    # Chromium's schema — a nested object, not a nested string, gets
+    # silently ignored. Empty filter matches any cert in the NSS db;
+    # the db only contains our leaf.
+    auto_select_entry = json.dumps(
+        {"pattern": url, "filter": {}}, separators=(",", ":"))
+
+    policy = {
+        "AutoSelectCertificateForUrls": [auto_select_entry],
+    }
+    path = f"{policies_dir}/bromure-mtls.json"
+    with open(path, "w") as f:
+        json.dump(policy, f)
+    os.chmod(path, 0o644)
+
+
+# Stable Chromium extension id for our corporate-guard extension,
+# derived from the RSA public key in its manifest. If the manifest key
+# changes, this ID must be recomputed.
+CORPORATE_GUARD_EXT_ID = "nneafipcodbpeapjcagfcinodkidcjcp"
+
+# Stable ID derived from the RSA key in
+# extensions/file-picker/manifest.json. Must match for the 3rdparty
+# managed-storage policy to reach the extension.
+FILE_PICKER_EXT_ID = "cjdidalalgkgekmhonlcaleiafjbkdfn"
+
+
+def write_corporate_guard_policy(cfg):
+    """Push the corporate-guard extension's per-session settings via
+    chrome.storage.managed. The extension reads these at load time and
+    on managed-storage change events. No-op when the admin didn't ship
+    any corporate-guard settings for this profile.
+
+    Payload shape (matches extensions/corporate-guard/schema.json):
+      {
+        "corporateWebsites":      ["www.google.com", ...],
+        "openExternalInPrivate":  true|false,
+        "tracingEnabled":         true|false
+      }
+
+    Chromium's managed-storage delivery is nested under
+    `3rdparty.extensions.<ext_id>` in a regular managed-policy file.
+    """
+    guard = cfg.get("corporateGuard")
+    if not guard:
+        return
+    settings = {
+        "corporateWebsites": guard.get("corporateWebsites", []),
+        "openExternalInPrivate": bool(guard.get("openExternalInPrivate", False)),
+        # The extension uses tracingEnabled to decide whether to show
+        # the banner in non-private mode. Pulled from the session-level
+        # traceLevel rather than the profile setting so that host-side
+        # runtime overrides (via the session toggle) are respected.
+        "tracingEnabled": int(cfg.get("traceLevel", 0)) > 0,
+    }
+    policy = {
+        "3rdparty": {
+            "extensions": {
+                CORPORATE_GUARD_EXT_ID: settings,
+            }
+        }
+    }
+    policies_dir = "/etc/chromium/policies/managed"
+    os.makedirs(policies_dir, exist_ok=True)
+    path = f"{policies_dir}/bromure-corporate-guard.json"
+    with open(path, "w") as f:
+        json.dump(policy, f)
+    os.chmod(path, 0o644)
+
+
+def write_file_picker_policy(cfg):
+    """Push the file-picker extension's per-session `fileUploadEnabled`
+    flag via chrome.storage.managed. Always written so the extension
+    can tell the difference between "policy explicitly says off" and
+    "policy not yet delivered".
+    """
+    settings = {
+        "fileUploadEnabled": bool(cfg.get("fileTransfer", False)),
+    }
+    policy = {
+        "3rdparty": {
+            "extensions": {
+                FILE_PICKER_EXT_ID: settings,
+            }
+        }
+    }
+    policies_dir = "/etc/chromium/policies/managed"
+    os.makedirs(policies_dir, exist_ok=True)
+    path = f"{policies_dir}/bromure-file-picker.json"
+    with open(path, "w") as f:
+        json.dump(policy, f)
+    os.chmod(path, 0o644)
+
+
 def sh_escape(s):
     """Escape a string for safe use as a single-quoted shell value."""
     return "'" + str(s).replace("'", "'\\''") + "'"
@@ -96,7 +257,10 @@ def write_chrome_env(cfg):
 
     extra_flags = []
     enable_features = []
-    disable_features = []
+    # LcdText: Chromium's subpixel text in compositor layers. macOS Chrome uses
+    # grayscale AA; disabling here matches that path and avoids the slight
+    # chromatic fringing/blur that subpixel rendering produces on this display.
+    disable_features = ["LcdText"]
 
     if cfg.get("darkMode"):
         extra_flags.append("--force-dark-mode")
@@ -136,9 +300,17 @@ def write_chrome_env(cfg):
         extensions.append("/opt/bromure/extensions/phishing-guard")
     if cfg.get("linkSender"):
         extensions.append("/opt/bromure/extensions/link-sender")
+    # file-picker is always loaded — when uploads are disabled it still
+    # intercepts file-input clicks to show an in-page "uploads disabled"
+    # overlay, much friendlier than Chromium's fallback Linux file
+    # dialog. The per-session `fileUploadEnabled` policy written below
+    # tells the extension which mode to run in.
+    extensions.append("/opt/bromure/extensions/file-picker")
     if cfg.get("fileTransfer"):
+        # Only the enabled branch needs chrome.debugger attachment, so
+        # only suppress the "extensions are debugging your browser"
+        # banner in that case.
         extra_flags.append("--silent-debugger-extension-api")
-        extensions.append("/opt/bromure/extensions/file-picker")
     # Trace extension: loaded when traceLevel > 0
     trace_level = cfg.get("traceLevel", 0)
     if trace_level > 0:
@@ -155,9 +327,25 @@ def write_chrome_env(cfg):
     # WebRTC block extension: loaded only when both webcam and microphone are off
     if not cfg.get("webcam") and not cfg.get("microphone"):
         extensions.append("/opt/bromure/extensions/webrtc-block")
+    # IP-register: heartbeats the browser's egress IP to analytics.bromure.io
+    # so the control plane can keep customer IdP allowlists in sync. Managed
+    # sessions only — it piggybacks on the same mTLS leaf + AutoSelect policy
+    # we already deploy for cfg["mtls"], so there's no point running it where
+    # neither exists.
+    if cfg.get("mtls"):
+        extensions.append("/opt/bromure/extensions/ip-register")
+    # Corporate Guard: banner-or-redirect non-corporate sites per managed
+    # profile settings. Only makes sense when there's a managed profile
+    # AND the admin supplied corporateWebsites / openExternalInPrivate.
+    # The managed-storage policy is written separately (see
+    # write_corporate_guard_policy() below).
+    if cfg.get("mtls") and cfg.get("corporateGuard"):
+        extensions.append("/opt/bromure/extensions/corporate-guard")
     if extensions:
         extra_flags.append(f"--load-extension={','.join(extensions)}")
-        # Only allow our extensions, disable any others
+        # Only allow our bundled extensions — disable every other extension
+        # Chromium might try to load (policy-pushed, user-installed in a
+        # persistent profile, etc.).
         extra_flags.append(f"--disable-extensions-except={','.join(extensions)}")
 
     profile_dir = cfg.get("profileDir")
@@ -791,6 +979,12 @@ def main():
         os.system(f"date -s @{int(ts)} >/dev/null 2>&1")
         print(f"config-agent: clock set from host time ({int(ts)})", file=sys.stderr)
 
+    # Drop the app version on disk so the EV native-messaging stub can
+    # synthesize `Bromure-<version>` as the reported device identity
+    # without changing the kernel hostname (which would race X's
+    # Xauthority and crash Chromium).
+    write_bromure_version(cfg)
+
     # No global wait_for_on_boot — only WARP-dependent paths wait internally.
 
     # Mount profile disk (if persistent)
@@ -799,6 +993,18 @@ def main():
 
     # Write custom CAs
     ca_count = write_custom_cas(cfg.get("rootCAs"))
+
+    # Managed-profile mTLS client cert → NSS database
+    install_managed_mtls(cfg.get("mtls"))
+
+    # Corporate-guard extension's managed-storage config (only when the
+    # admin configured corporateWebsites / openExternalInPrivate).
+    write_corporate_guard_policy(cfg)
+
+    # File-picker extension runs unconditionally but reads its enabled
+    # flag from managed storage — write it so the overlay-vs-real-picker
+    # branch is correct from first page load.
+    write_file_picker_policy(cfg)
 
     # Write chrome-env
     write_chrome_env(cfg)

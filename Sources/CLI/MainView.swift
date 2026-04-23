@@ -17,6 +17,12 @@ struct MainView: View {
     @State private var profileToDelete: Profile?
 
     /// Colors already used by other profiles.
+    private func managedTooltip(for profile: Profile) -> String? {
+        guard state.profileManager.isManaged(profile.id) else { return nil }
+        let org = state.profileManager.managedOrgSlug(for: profile.id) ?? "your admin"
+        return "Managed by \(org). Settings are not editable on this device."
+    }
+
     private func usedColors(excluding profileID: UUID? = nil) -> Set<ProfileColor> {
         Set(state.profileManager.allProfiles.compactMap { profile in
             if profile.id == profileID { return nil }
@@ -215,8 +221,15 @@ struct MainView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(profile.name)
-                                .font(.body)
+                            HStack(spacing: 4) {
+                                Text(profile.name).font(.body)
+                                if state.profileManager.isManaged(profile.id) {
+                                    Image(systemName: "lock.shield.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .help("Managed by \(state.profileManager.managedOrgSlug(for: profile.id) ?? "your admin") — not editable")
+                                }
+                            }
                             if profile.isEncrypted {
                                 Label("Encrypted", systemImage: "lock.fill")
                                     .font(.caption2)
@@ -229,14 +242,14 @@ struct MainView: View {
                         Button {
                             editingProfile = profile
                         } label: {
-                            Image(systemName: "gearshape")
+                            Image(systemName: state.profileManager.isManaged(profile.id) ? "eye" : "gearshape")
                                 .font(.caption)
                         }
                         .buttonStyle(.borderless)
-                        .help("Edit profile settings")
+                        .help(state.profileManager.isManaged(profile.id) ? "View profile settings (read-only)" : "Edit profile settings")
                     }
                     .tag(profile.id)
-                    .help(profile.comments.isEmpty ? "" : profile.comments)
+                    .help(managedTooltip(for: profile) ?? (profile.comments.isEmpty ? "" : profile.comments))
                 }
             }
             .listStyle(.bordered(alternatesRowBackgrounds: true))
@@ -266,8 +279,15 @@ struct MainView: View {
                         .frame(width: 24, height: 20)
                 }
                 .buttonStyle(.borderless)
-                .disabled(state.selectedProfileID == nil)
-                .help("Delete selected profile")
+                .disabled(
+                    state.selectedProfileID == nil ||
+                    (state.selectedProfileID.map { state.profileManager.isManaged($0) } ?? false)
+                )
+                .help(
+                    state.selectedProfileID.map { state.profileManager.isManaged($0) } == true
+                        ? "Managed profiles can only be removed by unenrolling (Settings → Managed Profile)."
+                        : "Delete selected profile"
+                )
 
                 Spacer()
             }
@@ -472,6 +492,7 @@ struct MainView: View {
             guard let delegate = NSApp.delegate as? GUIAppDelegate else { return false }
             return delegate.sessions.contains { $0.profile?.id == profile.id }
         }()
+        let isManaged = state.profileManager.isManaged(profile.id)
         let settingsView = ProfileSettingsView(
             draft: profile,
             usedColors: usedColors(excluding: profile.id),
@@ -479,6 +500,7 @@ struct MainView: View {
                 at: state.profileManager.profileDiskURL(for: profile.id)
             ),
             hasActiveSession: hasActiveSession,
+            isReadOnly: isManaged,
             onDeleteProfileDisk: {
                 let diskURL = state.profileManager.profileDiskURL(for: profile.id)
                 try? FileManager.default.removeItem(at: diskURL)
@@ -518,7 +540,10 @@ struct MainView: View {
             defer: false
         )
         window.contentView = hostingView
-        window.title = String(format: NSLocalizedString("Profile Settings \u{2014} %@", comment: ""), profile.name)
+        let titleFormat = isManaged
+            ? NSLocalizedString("Managed Profile \u{2014} %@", comment: "")
+            : NSLocalizedString("Profile Settings \u{2014} %@", comment: "")
+        window.title = String(format: titleFormat, profile.name)
         window.isReleasedWhenClosed = false
         window.center()
 

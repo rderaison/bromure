@@ -11,7 +11,7 @@ struct Bromure: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure",
         abstract: "Run a browser in an isolated, ephemeral VM.",
-        subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self],
+        subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self, Enroll.self, Unenroll.self, ListEnrollments.self],
         defaultSubcommand: Launch.self
     )
 
@@ -112,6 +112,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var diagnosticWindow: NSWindow?
     private var eulaWindow: NSWindow?
     private var consentWindow: NSWindow?
+    private var enrollmentWindow: NSWindow?
     /// Sparkle auto-updater. Retained strongly — if this deallocates, scheduled
     /// update checks stop firing. Initialised in applicationDidFinishLaunching.
     private var updaterController: SPUStandardUpdaterController?
@@ -162,6 +163,31 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // renew their DHCP lease when Wi-Fi roams or Ethernet switches.
         HostNetworkWatcher.shared.start()
 
+        // Managed-profile sync: initial fetch on launch, periodic refresh
+        // every 15 min while the app is running. No-op if not enrolled.
+        state.startManagedSync()
+
+        // Live mTLS rotation: when the sync pipeline issues a fresh leaf
+        // for a managed profile, push the new cert+key+CA into every
+        // open session for that profile so long-running VMs don't have
+        // to restart to pick it up. Also invalidates the host-side
+        // SecIdentity cache used by CloudTraceUploader so its own mTLS
+        // connections to analytics.bromure.io start using the new leaf
+        // on the next handshake.
+        ManagedProfileSync.onProfileMTLSRenewed = { [weak self] profileId in
+            Task { @MainActor in self?.handleMTLSRenewed(profileId: profileId) }
+        }
+
+        // Re-sync whenever the app becomes active (user comes back from a
+        // different app or unlocks the machine).
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main,
+        ) { [weak self] _ in
+            Task { @MainActor in self?.state.syncManagedProfiles(trigger: "activate") }
+        }
+
         state.onCloseAllSessions = { [weak self] in
             guard let self else { return }
             for session in self.sessions {
@@ -177,6 +203,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.pendingURL = nil
             // Re-enter the normal URL handling flow now that the pool is ready
             self.application(NSApp, open: [url])
+        }
+
+        state.onShowEnrollment = { [weak self] in
+            self?.showEnrollmentAction(nil)
         }
 
         // Start automation server if enabled
@@ -233,22 +263,28 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
-        // If there's more than one profile, ask the user which one to use.
-        // If there's a running session for the chosen profile, route the URL
-        // to it; otherwise spin up a new VM.
-        if profiles.count > 1, state.phase == .ready {
-            guard let chosen = promptProfileForURL(url, profiles: profiles) else {
-                print("[URL] user cancelled profile picker")
+        // Show the picker when there's more than one destination to choose
+        // from (multiple profiles, or a single profile + at least one
+        // external browser installed on the host).
+        let externals = Self.externalBrowsers()
+        if state.phase == .ready, profiles.count + externals.count > 1 {
+            guard let choice = promptTargetForURL(url, profiles: profiles, externals: externals) else {
+                print("[URL] user cancelled picker")
                 return
             }
-            // Prefer an active session that already uses this profile
-            let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
-            if let session = existingSession {
-                print("[URL] sending to existing session for profile '\(chosen.name)'")
-                session.navigateTo(url: url)
-            } else {
-                print("[URL] opening new browser for profile '\(chosen.name)' with URL")
-                openNewBrowser(with: chosen, initialURL: url)
+            switch choice {
+            case .profile(let chosen):
+                let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
+                if let session = existingSession {
+                    print("[URL] sending to existing session for profile '\(chosen.name)'")
+                    session.navigateTo(url: url)
+                } else {
+                    print("[URL] opening new browser for profile '\(chosen.name)' with URL")
+                    openNewBrowser(with: chosen, initialURL: url)
+                }
+            case .externalApp(let appURL, let name):
+                print("[URL] opening in external app '\(name)'")
+                openInExternalApp(url: url, appURL: appURL)
             }
             return
         }
@@ -275,28 +311,90 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Profile Picker for URL
 
-    /// Shows a modal dialog asking which profile to use when opening a URL.
-    /// Returns the chosen profile, or nil if the user cancels.
-    private func promptProfileForURL(_ url: URL, profiles: [Profile]) -> Profile? {
+    /// What the user chose in the picker: a Bromure profile or another
+    /// browser on the host.
+    enum LinkTarget {
+        case profile(Profile)
+        case externalApp(url: URL, name: String)
+    }
+
+    /// Other browsers installed on the host that can open http(s) URLs.
+    /// Bromure itself is filtered out. Ordered as macOS returns them
+    /// (typically default browser first).
+    static func externalBrowsers() -> [(name: String, url: URL)] {
+        guard let probe = URL(string: "https://example.com") else { return [] }
+        let apps = NSWorkspace.shared.urlsForApplications(toOpen: probe)
+        let ourBundleID = Bundle.main.bundleIdentifier ?? "io.bromure.app"
+        var out: [(name: String, url: URL)] = []
+        for appURL in apps {
+            guard let bundle = Bundle(url: appURL) else { continue }
+            if bundle.bundleIdentifier == ourBundleID { continue }
+            let rawName = FileManager.default.displayName(atPath: appURL.path)
+            let name = rawName.hasSuffix(".app") ? String(rawName.dropLast(4)) : rawName
+            // Skip other Bromure copies on disk (dev builds, etc.)
+            if name.lowercased().contains("bromure") { continue }
+            out.append((name: name, url: appURL))
+        }
+        return out
+    }
+
+    /// Shows a modal dialog asking which profile (or external browser) to
+    /// use when opening a URL. Returns the chosen target, or nil if the
+    /// user cancels.
+    private func promptTargetForURL(
+        _ url: URL,
+        profiles: [Profile],
+        externals: [(name: String, url: URL)],
+    ) -> LinkTarget? {
         let urlString = url.absoluteString
         let truncatedURL = urlString.count > 60
             ? String(urlString.prefix(57)) + "..."
             : urlString
 
         let alert = NSAlert()
-        alert.messageText = NSLocalizedString("Choose a profile", comment: "")
-        alert.informativeText = String(format: NSLocalizedString("Which profile should open %@?", comment: ""), truncatedURL)
+        alert.messageText = NSLocalizedString("Choose where to open this link", comment: "")
+        alert.informativeText = String(format: NSLocalizedString("Which application should open %@?", comment: ""), truncatedURL)
         alert.addButton(withTitle: NSLocalizedString("Open", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         alert.alertStyle = .informational
 
         let containerWidth: CGFloat = 400
 
-        // Profile picker popup
+        // Target picker — profiles first, then a separator, then other
+        // installed browsers. Each menu item's representedObject is a
+        // LinkTarget so we can map the selection back without relying
+        // on indices across the separator.
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: containerWidth, height: 25), pullsDown: false)
+        let menu = popup.menu ?? NSMenu()
         for profile in profiles {
             let colorDot = profile.color.map { Self.colorDot(for: $0) } ?? ""
-            popup.addItem(withTitle: "\(colorDot)\(profile.name)")
+            let item = NSMenuItem(title: "\(colorDot)\(profile.name)", action: nil, keyEquivalent: "")
+            item.representedObject = LinkTarget.profile(profile)
+            menu.addItem(item)
+        }
+        if !externals.isEmpty {
+            if !profiles.isEmpty {
+                menu.addItem(NSMenuItem.separator())
+                let header = NSMenuItem(title: NSLocalizedString("Other browsers", comment: ""), action: nil, keyEquivalent: "")
+                header.isEnabled = false
+                menu.addItem(header)
+            }
+            for app in externals {
+                let item = NSMenuItem(title: app.name, action: nil, keyEquivalent: "")
+                item.image = {
+                    let icon = NSWorkspace.shared.icon(forFile: app.url.path)
+                    icon.size = NSSize(width: 16, height: 16)
+                    return icon
+                }()
+                item.representedObject = LinkTarget.externalApp(url: app.url, name: app.name)
+                menu.addItem(item)
+            }
+        }
+        popup.menu = menu
+        // Default-select the first real (profile or external) item, skipping any
+        // disabled header row we inserted.
+        if let first = menu.items.firstIndex(where: { $0.representedObject != nil }) {
+            popup.selectItem(at: first)
         }
 
         // Full URL label (small, grey, multiline).
@@ -357,9 +455,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return nil }
-        let index = popup.indexOfSelectedItem
-        guard index >= 0, index < profiles.count else { return nil }
-        return profiles[index]
+        return popup.selectedItem?.representedObject as? LinkTarget
+    }
+
+    /// Opens a URL in a non-Bromure browser installed on the host.
+    private func openInExternalApp(url: URL, appURL: URL) {
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: config) { _, err in
+            if let err { print("[URL] external app open failed: \(err)") }
+        }
     }
 
     /// Returns a colored circle character for a profile color.
@@ -378,29 +483,58 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Cross-Profile URL Opening
 
-    /// Handles a request from a guest VM to open a URL in a different profile.
+    /// Handles a request from a guest VM to open a URL in a different
+    /// profile (or another browser on the host).
     @MainActor private func handleOpenInProfile(url: URL) {
         let profiles = state.profileManager.allProfiles
-        guard !profiles.isEmpty, state.phase == .ready else { return }
+        guard state.phase == .ready else { return }
+        let externals = Self.externalBrowsers()
 
-        if profiles.count == 1 {
-            // Only one profile — open directly if there's no session for it yet
-            let profile = profiles[0]
-            let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == profile.id })
-            if let session = existingSession {
-                session.navigateTo(url: url)
-            } else {
-                openNewBrowser(with: profile, initialURL: url)
+        // With exactly one destination available, skip the picker.
+        if profiles.count + externals.count <= 1 {
+            if let profile = profiles.first {
+                let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == profile.id })
+                if let session = existingSession {
+                    session.navigateTo(url: url)
+                } else {
+                    openNewBrowser(with: profile, initialURL: url)
+                }
+            } else if let app = externals.first {
+                openInExternalApp(url: url, appURL: app.url)
             }
             return
         }
 
-        guard let chosen = promptProfileForURL(url, profiles: profiles) else { return }
-        let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
-        if let session = existingSession {
-            session.navigateTo(url: url)
-        } else {
-            openNewBrowser(with: chosen, initialURL: url)
+        guard let choice = promptTargetForURL(url, profiles: profiles, externals: externals) else { return }
+        switch choice {
+        case .profile(let chosen):
+            let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
+            if let session = existingSession {
+                session.navigateTo(url: url)
+            } else {
+                openNewBrowser(with: chosen, initialURL: url)
+            }
+        case .externalApp(let appURL, _):
+            openInExternalApp(url: url, appURL: appURL)
+        }
+    }
+
+    /// Called by ManagedProfileSync after a fresh leaf cert has landed
+    /// on disk + keychain for the given managed profile. Purges the
+    /// host-side SecIdentity cache so the next CloudTraceUploader
+    /// handshake uses the new leaf, then pushes the new material over
+    /// vsock to every live session for this profile.
+    @MainActor private func handleMTLSRenewed(profileId: UUID) {
+        AnalyticsMTLSIdentity.purge(profileId: profileId)
+        guard let material = ManagedProfileStore.shared.mtlsMaterial(profileId: profileId) else {
+            return
+        }
+        for session in sessions where !session.closing && session.profile?.id == profileId {
+            session.pushMTLSUpdate(
+                certPem: material.certPem,
+                keyPem: material.keyPem,
+                caPem: material.caPem,
+            )
         }
     }
 
@@ -716,6 +850,31 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         session.showEffectsPanel()
     }
 
+    @MainActor @objc func showEnrollmentAction(_ sender: Any?) {
+        if let win = enrollmentWindow, win.isVisible {
+            win.makeKeyAndOrderFront(nil)
+            return
+        }
+        let view = EnrollmentView(state: state) { [weak self] in
+            self?.enrollmentWindow?.close()
+            self?.enrollmentWindow = nil
+        }
+        let hosting = NSHostingView(rootView: view)
+        let window = NSWindow(
+            contentRect: .zero,
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false,
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.title = NSLocalizedString("Enroll in Enterprise Management",
+                                         comment: "Enrollment window title bar")
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        self.enrollmentWindow = window
+    }
+
     @MainActor @objc func showVsockDiagnosticAction(_ sender: Any?) {
         if let existing = diagnosticWindow, existing.isVisible {
             existing.makeKeyAndOrderFront(nil)
@@ -869,16 +1028,27 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
-        // Ask whether to restore previous tabs for persistent profiles with existing data
+        // Ask whether to restore previous tabs for persistent profiles with existing data.
+        // Prior remembered decision (via "Remember my decision" checkbox) skips the prompt.
         var restoreSession = false
         if profile.isPersistent, !isFirstBoot, profileImageDir != nil {
-            let alert = NSAlert()
-            alert.messageText = NSLocalizedString("Restore previous tabs?", comment: "")
-            alert.informativeText = NSLocalizedString("This profile has data from a previous session. Would you like to restore your open tabs?", comment: "")
-            alert.addButton(withTitle: NSLocalizedString("Restore", comment: ""))
-            alert.addButton(withTitle: NSLocalizedString("Start Fresh", comment: ""))
-            alert.alertStyle = .informational
-            restoreSession = alert.runModal() == .alertFirstButtonReturn
+            if let remembered = ProfilePrefs.restoreTabsDecision(for: profile.id) {
+                restoreSession = (remembered == .restore)
+            } else {
+                let alert = NSAlert()
+                alert.messageText = NSLocalizedString("Restore previous tabs?", comment: "")
+                alert.informativeText = NSLocalizedString("This profile has data from a previous session. Would you like to restore your open tabs?", comment: "")
+                alert.addButton(withTitle: NSLocalizedString("Restore", comment: ""))
+                alert.addButton(withTitle: NSLocalizedString("Start Fresh", comment: ""))
+                alert.alertStyle = .informational
+                alert.showsSuppressionButton = true
+                alert.suppressionButton?.title = NSLocalizedString("Remember my decision", comment: "")
+                let response = alert.runModal()
+                restoreSession = (response == .alertFirstButtonReturn)
+                if alert.suppressionButton?.state == .on {
+                    ProfilePrefs.setRestoreTabsDecision(restoreSession ? .restore : .fresh, for: profile.id)
+                }
+            }
         }
 
         // Switch system default audio devices before claiming VM
@@ -1407,6 +1577,7 @@ final class BrowserSession {
     private var credentialBridge: CredentialBridge?
     private var fileDrawerModel: FileDrawerModel?
     private var linkSenderBridge: LinkSenderBridge?
+    private var mtlsReloadBridge: MTLSReloadBridge?
     private var filePickerBridge: FilePickerBridge?
     private var webcamBridge: WebcamBridge?
     private var phishingAnalysisBridge: PhishingAnalysisBridge?
@@ -1417,12 +1588,15 @@ final class BrowserSession {
     private(set) var cdpBridge: CDPBridge?
     private(set) var shellBridge: ShellBridge?
     private(set) var traceBridge: TraceBridge?
+    private var cloudTraceUploader: CloudTraceUploader?
+    fileprivate var cloudTraceEnforced: Bool = false
     private var keyboardBridge: KeyboardBridge?
     private var cjkInputBridge: CJKInputBridge?
     private var gestureBridge: GestureBridge?
     private(set) var autoSuspend: VMAutoSuspend?
     private var traceWindow: NSWindow?
     private var traceRecordButton: NSButton?
+    private var managedRecordingBanner: NSTitlebarAccessoryViewController?
     private var warpButton: NSButton?
     private var warpPulseTimer: Timer?
     private var effectsPanel: NSWindow?
@@ -1583,7 +1757,19 @@ final class BrowserSession {
             self.phishingAnalysisBridge = bridge
         }
 
-        if config.enableLinkSender, let dev = linkSocketDevice {
+        // Corporate-guard's `openExternalInPrivate` flow reuses LinkSender
+        // infrastructure (vsock port 5300 + host-side bridge) to hand URLs
+        // back to the profile picker. Force the bridge on when a managed
+        // profile requires it, even if the user's own profile flag is off —
+        // this mirrors the guest-side override in VMPool.swift.
+        let managedForcesLinkSender: Bool = {
+            guard let pid = profile?.id,
+                  let mp = ManagedProfileStore.shared.profile(id: pid),
+                  case .bool(let b) = mp.settings["openExternalInPrivate"]
+            else { return false }
+            return b
+        }()
+        if (config.enableLinkSender || managedForcesLinkSender), let dev = linkSocketDevice {
             let bridge = MainActor.assumeIsolated { LinkSenderBridge(socketDevice: dev) }
             MainActor.assumeIsolated {
                 bridge.onOpenInProfile = { [weak self] url in
@@ -1591,6 +1777,15 @@ final class BrowserSession {
                 }
             }
             self.linkSenderBridge = bridge
+        }
+
+        // mTLS-reload bridge (vsock port 5320). Also unconditional — only
+        // the guest-side agent knows whether to dial in, and it only
+        // starts when config-agent ran install_managed_mtls. The
+        // listener sits idle for non-managed sessions.
+        if let dev = linkSocketDevice {
+            let bridge = MainActor.assumeIsolated { MTLSReloadBridge(socketDevice: dev) }
+            self.mtlsReloadBridge = bridge
         }
 
         // Set up file picker bridge (vsock port 5600) for host-side file upload dialogs.
@@ -1727,15 +1922,62 @@ final class BrowserSession {
             self.shellBridge = bridge
         }
 
+        // On a managed profile, any non-disabled traceLevel means cloud
+        // trace: the session streams to the org's analytics endpoint, can't
+        // be stopped, and never writes to disk. The manifest's traceLevel
+        // is the only knob — there's no separate `cloudTrace` block.
+        let managed = profile.flatMap { ManagedProfileStore.shared.profile(id: $0.id) }
+        let managedTraceLevel = (managed == nil) ? .disabled : (profile?.settings.traceLevel ?? .disabled)
+        let enforced = managedTraceLevel != .disabled
+        let cloudPolicy: CloudTracePolicy = enforced
+            ? CloudTracePolicy(
+                enabled: true,
+                endpoint: CloudTracePolicy.defaultEndpoint,
+                level: managedTraceLevel.cloudLevel,
+            )
+            : .disabled
+        self.cloudTraceEnforced = enforced
+
         // Set up trace bridge for HTTP trace capture.
-        if config.traceLevel != .disabled, let dev = linkSocketDevice {
-            let autoStart = profile?.settings.traceAutoStart ?? true
+        if (config.traceLevel != .disabled || enforced), let dev = linkSocketDevice {
+            // Enforced tracing always starts recording; user-tracing respects
+            // the per-profile auto-start preference.
+            let autoStart = enforced || (profile?.settings.traceAutoStart ?? true)
             let bridge = MainActor.assumeIsolated {
-                let b = TraceBridge(socketDevice: dev)
+                // Enforced recording is upload-only: keep events in memory so
+                // they can flow to the cloud uploader without ever touching
+                // disk. No local SQLite file, no WAL, no shm.
+                let b = TraceBridge(socketDevice: dev, inMemory: enforced)
                 if !autoStart { b.isRecording = false }
                 return b
             }
             self.traceBridge = bridge
+
+            // Wire the cloud uploader before anything has a chance to publish.
+            // We install a compound onNewEvent handler so the existing trace
+            // viewer (which reads from `store` directly) keeps working and
+            // the uploader gets the same event stream.
+            if enforced,
+               let mp = managed,
+               let identity = InstallIdentityStore.load(installId: mp.installId) {
+                let ctx = CloudTraceUploader.SessionContext(
+                    sessionId: UUID().uuidString,
+                    profileId: mp.id,
+                    installId: mp.installId,
+                    orgSlug: mp.orgSlug,
+                    userEmail: identity.userEmail,
+                )
+                if let uploader = CloudTraceUploader(ctx: ctx, policy: cloudPolicy) {
+                    self.cloudTraceUploader = uploader
+                    MainActor.assumeIsolated {
+                        let existing = bridge.onNewEvent
+                        bridge.onNewEvent = { event in
+                            existing?(event)
+                            uploader.ingest(event)
+                        }
+                    }
+                }
+            }
 
             // Record/pause button — uses a composed image with a red dot when recording
             let recording = autoStart
@@ -1745,8 +1987,24 @@ final class BrowserSession {
                 action: #selector(GUIAppDelegate.toggleTraceRecordingAction(_:))
             )
             recordBtn.bezelStyle = NSButton.BezelStyle.recessed
-            recordBtn.contentTintColor = recording ? .systemRed : .secondaryLabelColor
-            recordBtn.toolTip = recording ? "Recording \u{2014} click to pause" : "Paused \u{2014} click to start recording"
+            recordBtn.contentTintColor = enforced ? .systemRed
+                : (recording ? .systemRed : .secondaryLabelColor)
+            if enforced {
+                recordBtn.isEnabled = false
+                recordBtn.toolTip = String(
+                    format: NSLocalizedString(
+                        "Recording is enforced by your organization (%@).",
+                        comment: "Tooltip on disabled trace toggle when cloud trace is policy-enforced",
+                    ),
+                    managed?.orgSlug ?? "",
+                )
+            } else {
+                recordBtn.toolTip = recording
+                    ? NSLocalizedString("Recording \u{2014} click to pause",
+                                        comment: "Trace record button tooltip, recording")
+                    : NSLocalizedString("Paused \u{2014} click to start recording",
+                                        comment: "Trace record button tooltip, paused")
+            }
             self.traceRecordButton = recordBtn
 
             let recordAccessory = NSTitlebarAccessoryViewController()
@@ -1754,18 +2012,36 @@ final class BrowserSession {
             recordAccessory.layoutAttribute = .trailing
             window.addTitlebarAccessoryViewController(recordAccessory)
 
-            // View trace button
-            let viewBtn = NSButton(
-                image: NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "Session Recording")!,
-                target: nil,
-                action: #selector(GUIAppDelegate.showTraceAction(_:))
-            )
-            viewBtn.bezelStyle = NSButton.BezelStyle.recessed
-            viewBtn.toolTip = "View trace"
-            let viewAccessory = NSTitlebarAccessoryViewController()
-            viewAccessory.view = viewBtn
-            viewAccessory.layoutAttribute = .trailing
-            window.addTitlebarAccessoryViewController(viewAccessory)
+            // Policy banner (leading titlebar accessory): persistent, visible,
+            // explicit about who the data is going to. Only shown when cloud
+            // trace is enforced — not for opt-in local tracing.
+            if enforced, let mp = managed {
+                let banner = Self.makeManagedRecordingBanner(orgSlug: mp.orgSlug)
+                let accessory = NSTitlebarAccessoryViewController()
+                accessory.view = banner
+                accessory.layoutAttribute = .leading
+                window.addTitlebarAccessoryViewController(accessory)
+                self.managedRecordingBanner = accessory
+            }
+
+            // View trace button — opt-in local tracing only. Policy-enforced
+            // recording hides the viewer entirely (no graph, no export): the
+            // data belongs to the org, not the user, and mustn't surface in
+            // the session window.
+            if !enforced {
+                let viewBtn = NSButton(
+                    image: NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "Session Recording")!,
+                    target: nil,
+                    action: #selector(GUIAppDelegate.showTraceAction(_:))
+                )
+                viewBtn.bezelStyle = NSButton.BezelStyle.recessed
+                viewBtn.toolTip = NSLocalizedString("View trace",
+                                                    comment: "Trace viewer button tooltip")
+                let viewAccessory = NSTitlebarAccessoryViewController()
+                viewAccessory.view = viewBtn
+                viewAccessory.layoutAttribute = .trailing
+                window.addTitlebarAccessoryViewController(viewAccessory)
+            }
         }
 
         // Set up keyboard bridge for dynamic layout matching.
@@ -1892,16 +2168,22 @@ final class BrowserSession {
         }
     }
 
-    /// Toggle trace recording on/off.
+    /// Toggle trace recording on/off. No-op when cloud trace is enforced by
+    /// managed policy — in that case the record button is disabled upstream
+    /// too, but we guard here as well to stay safe against stray callers.
     func toggleTraceRecording() {
         MainActor.assumeIsolated {
-            guard let bridge = traceBridge else { return }
+            guard !cloudTraceEnforced, let bridge = traceBridge else { return }
             bridge.isRecording.toggle()
             // Update button appearance
             if let btn = traceRecordButton {
                 btn.image = Self.traceButtonImage(recording: bridge.isRecording)
                 btn.contentTintColor = bridge.isRecording ? .systemRed : .secondaryLabelColor
-                btn.toolTip = bridge.isRecording ? "Recording \u{2014} click to pause" : "Paused \u{2014} click to start recording"
+                btn.toolTip = bridge.isRecording
+                    ? NSLocalizedString("Recording \u{2014} click to pause",
+                                        comment: "Trace record button tooltip, recording")
+                    : NSLocalizedString("Paused \u{2014} click to start recording",
+                                        comment: "Trace record button tooltip, paused")
             }
         }
     }
@@ -1909,6 +2191,45 @@ final class BrowserSession {
     /// Whether trace is currently recording.
     var isTraceRecording: Bool {
         MainActor.assumeIsolated { traceBridge?.isRecording ?? false }
+    }
+
+    /// Build the leading-titlebar banner that advertises mandatory corporate
+    /// recording. Red-tinted, persistent, and impossible to miss — that's the
+    /// point. Click-through opens a popover explaining what's captured.
+    private static func makeManagedRecordingBanner(orgSlug: String) -> NSView {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 28))
+        let icon = NSImageView(image: NSImage(
+            systemSymbolName: "eye.fill",
+            accessibilityDescription: "Session is being recorded")!)
+        icon.contentTintColor = .systemRed
+        icon.imageScaling = .scaleProportionallyDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: String(
+            format: NSLocalizedString("Recording — shared with %@",
+                                      comment: "Titlebar banner text on managed recording sessions"),
+            orgSlug,
+        ))
+        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .systemRed
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.toolTip = NSLocalizedString(
+            "Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off.",
+            comment: "Titlebar banner tooltip explaining managed recording",
+        )
+
+        host.addSubview(icon)
+        host.addSubview(label)
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 8),
+            icon.centerYAnchor.constraint(equalTo: host.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 14),
+            icon.heightAnchor.constraint(equalToConstant: 14),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -8),
+            label.centerYAnchor.constraint(equalTo: host.centerYAnchor),
+        ])
+        return host
     }
 
     /// Build the trace button image: the base symbol with a red recording dot overlay when active.
@@ -2012,6 +2333,9 @@ final class BrowserSession {
     /// Returns true if the caller should proceed with closing.
     fileprivate func promptSaveTraceIfNeeded() -> Bool {
         MainActor.assumeIsolated {
+            // Policy-enforced recording has no user-facing local save path —
+            // the trace is shipped to the org, not to the user's disk.
+            if cloudTraceEnforced { return true }
             guard let traceBridge, !traceBridge.traceEvents.isEmpty else { return true }
             let alert = NSAlert()
             alert.messageText = NSLocalizedString("Save session recording?", comment: "")
@@ -2118,6 +2442,14 @@ final class BrowserSession {
     /// For persistent profiles the --user-data-dir must match the running
     /// instance, otherwise Chromium looks in the default dir, finds no lock,
     /// and starts a separate process.
+    /// Push a freshly-issued managed-profile mTLS bundle into the guest
+    /// over the MTLSReloadBridge. No-op if the session has no bridge
+    /// (pre-managed-profile code paths) or the guest agent hasn't
+    /// dialed in yet.
+    @MainActor func pushMTLSUpdate(certPem: String, keyPem: String, caPem: String) {
+        mtlsReloadBridge?.push(certPem: certPem, keyPem: keyPem, caPem: caPem)
+    }
+
     func navigateTo(url: URL) {
         guard let warmVM else {
             print("[URL] navigateTo: no warmVM")
@@ -2304,6 +2636,11 @@ final class BrowserSession {
             shellBridge = nil
             traceBridge?.stop()
             traceBridge = nil
+            // Flush the cloud uploader on the way out. Blocks up to 5s so
+            // the last batch of events still makes it to analytics even if
+            // the user slams the window shut right after a sensitive action.
+            cloudTraceUploader?.close()
+            cloudTraceUploader = nil
             keyboardBridge?.stop()
             keyboardBridge = nil
             cjkInputBridge?.stop()
@@ -2467,14 +2804,29 @@ private final class SessionDelegateHelper: NSObject, VZVirtualMachineDelegate, N
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard let session else { return true }
         if session.closing || session.confirmed { return true }
+        // Skip the prompt when the user previously checked "Remember my decision"
+        // on the Close button. Cancel intentionally can't be remembered — that
+        // would make the window unclosable.
+        if let pid = session.profile?.id, ProfilePrefs.skipCloseConfirm(for: pid) {
+            if session.promptSaveTraceIfNeeded() {
+                session.confirmed = true
+                return true
+            }
+            return false
+        }
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Close this browser?", comment: "")
         alert.informativeText = NSLocalizedString("All browsing data in this window will be permanently lost. This cannot be undone.", comment: "")
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Close", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        alert.beginSheetModal(for: sender) { [weak session] response in
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = NSLocalizedString("Remember my decision", comment: "")
+        alert.beginSheetModal(for: sender) { [weak session, weak alert] response in
             guard response == .alertFirstButtonReturn, let session else { return }
+            if alert?.suppressionButton?.state == .on, let pid = session.profile?.id {
+                ProfilePrefs.setSkipCloseConfirm(true, for: pid)
+            }
             // If trace has data, offer to save before closing
             if session.promptSaveTraceIfNeeded() {
                 session.confirmed = true

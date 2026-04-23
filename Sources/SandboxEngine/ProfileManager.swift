@@ -16,6 +16,8 @@ public final class ProfileManager {
     /// Where profile metadata lives — iCloud if available, local fallback.
     private var metadataBaseDir: URL
     private var profiles: [Profile] = []
+    private var managedProfiles: [Profile] = []
+    private var managedOrgSlugs: [UUID: String] = [:]
     private var iCloudReady = false
 
     /// Called on the main thread once iCloud discovery completes and profiles are loaded.
@@ -73,6 +75,7 @@ public final class ProfileManager {
                     print("[Profiles] iCloud ready: \(dir.path)")
                     self.migrateLocalToCloud()
                     self.loadAll()
+                    self.reloadManaged()
                     self.iCloudReady = true
                     self.onReady?()
                 }
@@ -80,6 +83,7 @@ public final class ProfileManager {
                 DispatchQueue.main.async {
                     print("[Profiles] iCloud unavailable, using local storage")
                     self.loadAll()
+                    self.reloadManaged()
                     self.iCloudReady = true
                     self.onReady?()
                 }
@@ -92,18 +96,30 @@ public final class ProfileManager {
 
     // MARK: - Public API
 
-    /// All profiles, sorted by last used (most recent first), then creation date.
+    /// All profiles — local + managed, sorted by last used (most recent first),
+    /// then creation date.
     public var allProfiles: [Profile] {
-        profiles.sorted { a, b in
+        (profiles + managedProfiles).sorted { a, b in
             let aDate = a.lastUsedAt ?? a.createdAt
             let bDate = b.lastUsedAt ?? b.createdAt
             return aDate > bDate
         }
     }
 
-    /// Get a profile by ID.
+    /// Get a profile by ID (local or managed).
     public func profile(withID id: UUID) -> Profile? {
-        profiles.first { $0.id == id }
+        if let p = profiles.first(where: { $0.id == id }) { return p }
+        return managedProfiles.first { $0.id == id }
+    }
+
+    /// Is this profile backed by the managed-profiles control plane?
+    public func isManaged(_ id: UUID) -> Bool {
+        managedProfiles.contains { $0.id == id }
+    }
+
+    /// Org slug that administers this managed profile, if any.
+    public func managedOrgSlug(for id: UUID) -> String? {
+        managedOrgSlugs[id]
     }
 
     /// Create a new profile and save it.
@@ -115,16 +131,20 @@ public final class ProfileManager {
         return profile
     }
 
-    /// Update an existing profile.
+    /// Update an existing profile. Managed profiles are read-only — this is
+    /// a no-op on them.
     public func updateProfile(_ profile: Profile) {
+        if isManaged(profile.id) { return }
         if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
             profiles[idx] = profile
             save(profile)
         }
     }
 
-    /// Delete a profile and its data.
+    /// Delete a profile and its data. Managed profiles are read-only — this
+    /// is a no-op on them.
     public func deleteProfile(id: UUID) {
+        if isManaged(id) { return }
         profiles.removeAll { $0.id == id }
         // Remove metadata
         let metaDir = metadataDir(for: id)
@@ -132,6 +152,7 @@ public final class ProfileManager {
         // Remove local disk image
         let diskDir = localProfileDir(for: id)
         try? FileManager.default.removeItem(at: diskDir)
+        ProfilePrefs.clear(for: id)
     }
 
     /// Mark a profile as recently used.
@@ -192,6 +213,61 @@ public final class ProfileManager {
     /// Reload profiles from disk (e.g. after iCloud sync delivers changes).
     public func reload() {
         loadAll()
+        reloadManaged()
+    }
+
+    /// Refresh the managed-profiles list from `ManagedProfileStore`.
+    /// Called after enrollment and after each successful sync.
+    public func reloadManaged() {
+        let managed = ManagedProfileStore.shared.loadAll()
+        let identity = InstallIdentityStore.load()
+        managedProfiles = managed.map { mp in
+            var p = Profile(
+                name: mp.name,
+                comments: "Managed by \(mp.orgSlug)",
+                color: nil,
+                settings: decodeManagedSettings(mp.settings),
+            )
+            // Override id + createdAt so the synthesized Profile is stable
+            // across reloads and matches the server-issued UUID.
+            p = withID(p, id: mp.id, createdAt: mp.publishedAt)
+            return p
+        }
+        managedOrgSlugs = Dictionary(uniqueKeysWithValues:
+            managed.map { ($0.id, $0.orgSlug) })
+        _ = identity
+    }
+
+    /// Map a `[String: AnyCodable]` settings blob into `ProfileSettings` by
+    /// JSON round-trip. Unknown keys are silently ignored (ProfileSettings'
+    /// custom decoder already uses `decodeIfPresent` throughout).
+    private func decodeManagedSettings(_ dict: [String: AnyCodable]) -> ProfileSettings {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(dict) else { return ProfileSettings() }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode(ProfileSettings.self, from: data)) ?? ProfileSettings()
+    }
+
+    /// Helper: reconstruct a Profile with a specific id/createdAt. The Profile
+    /// init/decoder normally generate fresh ones.
+    private func withID(_ base: Profile, id: UUID, createdAt: Date) -> Profile {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(base) else { return base }
+        guard var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return base }
+        json["id"] = id.uuidString
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        json["createdAt"] = fmt.string(from: createdAt)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let patched = try? JSONSerialization.data(withJSONObject: json),
+              let profile = try? decoder.decode(Profile.self, from: patched)
+        else { return base }
+        return profile
     }
 
     // MARK: - Private

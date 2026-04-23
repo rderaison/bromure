@@ -436,7 +436,9 @@ public final class VMPool {
             if let u = config.proxyUsername { cfg["proxyUsername"] = u }
             if let p = config.proxyPassword { cfg["proxyPassword"] = p }
         }
-        if config.enableLinkSender { cfg["linkSender"] = true }
+        if config.enableLinkSender {
+            cfg["linkSender"] = true
+        }
         if config.enableWebcam {
             cfg["webcam"] = true
             let probeT0 = CFAbsoluteTimeGetCurrent()
@@ -457,6 +459,66 @@ public final class VMPool {
         }
         if config.traceLevel != .disabled { cfg["traceLevel"] = config.traceLevel.rawValue }
         if !config.rootCAs.isEmpty { cfg["rootCAs"] = config.rootCAs }
+
+        // Managed-profile mTLS: if this session's profile has a server-issued
+        // leaf cert on disk, hand the cert + key + CA to the guest so it can
+        // import them into the chrome user's NSS database before Chromium
+        // starts. The private key material is kept in Keychain on the host
+        // and copied into the (ephemeral) guest only for this session.
+        //
+        // We also pass the analytics endpoint's scheme+host so the guest can
+        // drop a Chromium `AutoSelectCertificateForUrls` policy — that's
+        // what stops Chrome from showing a cert-picker dialog every time
+        // something under the guest hits the endpoint in-browser.
+        if let pid = profileID,
+           let mtls = ManagedProfileStore.shared.mtlsMaterial(profileId: pid) {
+            var mtlsCfg: [String: Any] = [
+                "certPem": mtls.certPem,
+                "keyPem":  mtls.keyPem,
+                "caPem":   mtls.caPem,
+            ]
+            let endpoint = CloudTracePolicy.defaultEndpoint
+            if let scheme = endpoint.scheme, let host = endpoint.host {
+                mtlsCfg["autoSelectURL"] = "\(scheme)://\(host)"
+            }
+            cfg["mtls"] = mtlsCfg
+
+            // Corporate-site gating. `corporateWebsites` is a list of
+            // hostnames (with or without www., scheme, port, path — the
+            // guest-side extension normalizes them). `openExternalInPrivate`
+            // toggles between the redirect-to-private and banner behaviors.
+            // Managed sessions only; unmanaged flows don't get the extension
+            // loaded at all (config-agent gates on cfg["corporateGuard"]).
+            if let profile = ManagedProfileStore.shared.profile(id: pid) {
+                var guardCfg: [String: Any] = [:]
+                if case .array(let arr) = profile.settings["corporateWebsites"] {
+                    let hosts = arr.compactMap { entry -> String? in
+                        if case .string(let s) = entry { return s }
+                        return nil
+                    }
+                    guardCfg["corporateWebsites"] = hosts
+                }
+                if case .bool(let b) = profile.settings["openExternalInPrivate"] {
+                    guardCfg["openExternalInPrivate"] = b
+                }
+                // Only plumb when the admin actually configured at least
+                // one of the keys. Absence of both → extension stays off.
+                if !guardCfg.isEmpty {
+                    cfg["corporateGuard"] = guardCfg
+                }
+            }
+        }
+
+        // Corporate-guard's `openExternalInPrivate` flow hands URLs back to
+        // the host via the same cross-profile-open plumbing LinkSender uses.
+        // Force link-sender on when the managed profile requires it — the
+        // two features share infrastructure (vsock relay + host-side bridge),
+        // and without it the handoff silently drops on the floor. Must run
+        // AFTER cfg["corporateGuard"] is populated above.
+        if let g = cfg["corporateGuard"] as? [String: Any],
+           (g["openExternalInPrivate"] as? Bool) == true {
+            cfg["linkSender"] = true
+        }
         cfg["locale"] = config.locale
 
         // Display scale: read from UserDefaults so changing 1x/2x doesn't require image rebuild
@@ -547,9 +609,14 @@ public final class VMPool {
 
         // Close vsock for disabled agents so they exit cleanly instead of retrying.
         // Agents started at boot will connect and get an immediate EOF → clean exit.
+        // For link-sender: also keep 5300 open if corporate-guard forced it on,
+        // otherwise the guest's link-agent would get EOF and corporate-guard's
+        // cross-profile handoff (which routes through the same channel) would
+        // silently break.
+        let linkSenderOn = config.enableLinkSender || (cfg["linkSender"] as? Bool == true)
         let rejectPorts: [UInt32] = [
             config.enableFileTransfer ? 0 : 5100,
-            config.enableLinkSender   ? 0 : 5300,
+            linkSenderOn              ? 0 : 5300,
             config.enableWebcam       ? 0 : 5400,
         ].filter { $0 != 0 }
 

@@ -543,3 +543,46 @@
 "Your choice" = "Votre choix";
 "You can turn this off at any time in Profile Settings \U2192 Privacy & Safety. It is disabled by default on every new profile." = "Vous pouvez d\U00E9sactiver cette option \U00E0 tout moment dans Param\U00E8tres du profil \U2192 Confidentialit\U00E9 et s\U00E9curit\U00E9. Elle est d\U00E9sactiv\U00E9e par d\U00E9faut sur chaque nouveau profil.";
 "By clicking Accept, you agree to have the pages you browse in this profile analyzed by the Bromure phishing-detection service." = "En cliquant sur Accepter, vous acceptez que les pages que vous consultez dans ce profil soient analys\U00E9es par le service de d\U00E9tection d\U2019hame\U00E7onnage de Bromure.";
+
+/* Enterprise Management — shared */
+"Enroll in Enterprise Management" = "S\U2019inscrire \U00E0 la gestion d\U2019entreprise";
+"Unenroll from this organization?" = "Se d\U00E9sinscrire de cette organisation\U00A0?";
+"Unenroll" = "Se d\U00E9sinscrire";
+"Unenroll\U2026" = "Se d\U00E9sinscrire\U2026";
+
+/* EnrollmentView */
+"Your administrator will give you a 6-word enrollment code. Paste it below to receive managed profiles for this organization." = "Votre administrateur vous fournira un code d\U2019inscription de 6 mots. Collez-le ci-dessous pour recevoir les profils g\U00E9r\U00E9s de cette organisation.";
+"Enrollment Code" = "Code d\U2019inscription";
+"Device Name" = "Nom de l\U2019appareil";
+"Shown to your administrator so they can recognize this device." = "Affich\U00E9 \U00E0 votre administrateur afin qu\U2019il puisse identifier cet appareil.";
+"Server URL (optional)" = "URL du serveur (facultatif)";
+"Enroll" = "S\U2019inscrire";
+
+/* SettingsView — Managed Profile (multi-install) */
+"Managed Profile" = "Profil g\U00E9r\U00E9";
+"Enterprise-provisioned profile delivered from a Bromure control plane" = "Profil fourni par l\U2019entreprise, d\U00E9livr\U00E9 depuis un plan de contr\U00F4le Bromure";
+"Not enrolled." = "Non inscrit.";
+"Your administrator will give you a 6-word enrollment code (e.g. `acid-aloe-arson-bench-cat-drum`). Paste it below to receive your managed profile." = "Votre administrateur vous fournira un code d\U2019inscription de 6 mots (ex. `acid-aloe-arson-bench-cat-drum`). Collez-le ci-dessous pour recevoir votre profil g\U00E9r\U00E9.";
+"Assigned profiles" = "Profils attribu\U00E9s";
+"No managed profiles are currently assigned." = "Aucun profil g\U00E9r\U00E9 n\U2019est actuellement attribu\U00E9.";
+"Sync Now" = "Synchroniser maintenant";
+"Enroll Another\U2026" = "Inscrire une autre organisation\U2026";
+"Managed profiles and any issued mTLS certificates from this organization will be removed. Profiles you created yourself are untouched." = "Les profils g\U00E9r\U00E9s et tous les certificats mTLS d\U00E9livr\U00E9s par cette organisation seront supprim\U00E9s. Les profils que vous avez cr\U00E9\U00E9s ne sont pas affect\U00E9s.";
+"User" = "Utilisateur";
+"Device" = "Appareil";
+"Server" = "Serveur";
+"Last sync" = "Derni\U00E8re synchro";
+
+/* Managed profile sync status */
+"Syncing\U2026" = "Synchronisation\U2026";
+"Enrolled — no profiles assigned." = "Inscrit \U2014 aucun profil attribu\U00E9.";
+"Synced %lld profile(s)." = "%lld profil(s) synchronis\U00E9(s).";
+"Sync failed: %@" = "\U00C9chec de la synchronisation\U00A0: %@";
+
+/* Session window — trace controls + managed-recording banner */
+"Recording \U2014 click to pause" = "Enregistrement en cours \U2014 cliquez pour mettre en pause";
+"Paused \U2014 click to start recording" = "En pause \U2014 cliquez pour commencer l\U2019enregistrement";
+"View trace" = "Voir l\U2019enregistrement";
+"Recording is enforced by your organization (%@)." = "L\U2019enregistrement est impos\U00E9 par votre organisation (%@).";
+"Recording — shared with %@" = "Enregistrement \U2014 partag\U00E9 avec %@";
+"Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "Chaque requ\U00EAte effectu\U00E9e dans cette fen\U00EAtre est enregistr\U00E9e et transmise \U00E0 l\U2019\U00E9quipe s\U00E9curit\U00E9 de votre organisation. Cette mesure est impos\U00E9e par votre administrateur et ne peut pas \U00EAtre d\U00E9sactiv\U00E9e.";
