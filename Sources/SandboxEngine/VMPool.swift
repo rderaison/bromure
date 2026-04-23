@@ -436,7 +436,20 @@ public final class VMPool {
             if let u = config.proxyUsername { cfg["proxyUsername"] = u }
             if let p = config.proxyPassword { cfg["proxyPassword"] = p }
         }
-        if config.enableLinkSender { cfg["linkSender"] = true }
+        // Corporate-guard's `openExternalInPrivate` flow hands URLs
+        // back to the host via the same cross-profile-open plumbing
+        // LinkSender uses. If the managed profile requires it, force
+        // link-sender on even when the user's own profile flag is off
+        // — the two features share infrastructure (vsock relay +
+        // host-side bridge), and without it the handoff silently
+        // drops on the floor.
+        let forceLinkSenderForCorpGuard: Bool = {
+            guard let g = cfg["corporateGuard"] as? [String: Any] else { return false }
+            return (g["openExternalInPrivate"] as? Bool) == true
+        }()
+        if config.enableLinkSender || forceLinkSenderForCorpGuard {
+            cfg["linkSender"] = true
+        }
         if config.enableWebcam {
             cfg["webcam"] = true
             let probeT0 = CFAbsoluteTimeGetCurrent()
@@ -596,9 +609,14 @@ public final class VMPool {
 
         // Close vsock for disabled agents so they exit cleanly instead of retrying.
         // Agents started at boot will connect and get an immediate EOF → clean exit.
+        // For link-sender: also keep 5300 open if corporate-guard forced it on,
+        // otherwise the guest's link-agent would get EOF and corporate-guard's
+        // cross-profile handoff (which routes through the same channel) would
+        // silently break.
+        let linkSenderOn = config.enableLinkSender || (cfg["linkSender"] as? Bool == true)
         let rejectPorts: [UInt32] = [
             config.enableFileTransfer ? 0 : 5100,
-            config.enableLinkSender   ? 0 : 5300,
+            linkSenderOn              ? 0 : 5300,
             config.enableWebcam       ? 0 : 5400,
         ].filter { $0 != 0 }
 

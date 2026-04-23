@@ -1662,7 +1662,19 @@ final class BrowserSession {
             self.phishingAnalysisBridge = bridge
         }
 
-        if config.enableLinkSender, let dev = linkSocketDevice {
+        // Corporate-guard's `openExternalInPrivate` flow reuses LinkSender
+        // infrastructure (vsock port 5300 + host-side bridge) to hand URLs
+        // back to the profile picker. Force the bridge on when a managed
+        // profile requires it, even if the user's own profile flag is off —
+        // this mirrors the guest-side override in VMPool.swift.
+        let managedForcesLinkSender: Bool = {
+            guard let pid = profile?.id,
+                  let mp = ManagedProfileStore.shared.profile(id: pid),
+                  case .bool(let b) = mp.settings["openExternalInPrivate"]
+            else { return false }
+            return b
+        }()
+        if (config.enableLinkSender || managedForcesLinkSender), let dev = linkSocketDevice {
             let bridge = MainActor.assumeIsolated { LinkSenderBridge(socketDevice: dev) }
             MainActor.assumeIsolated {
                 bridge.onOpenInProfile = { [weak self] url in
