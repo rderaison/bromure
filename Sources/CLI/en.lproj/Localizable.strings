@@ -586,3 +586,19 @@
 "Recording is enforced by your organization (%@)." = "Recording is enforced by your organization (%@).";
 "Recording — shared with %@" = "Recording — shared with %@";
 "Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off.";
+
+/* Alerts — Remember dialog decisions */
+"Remember my decision" = "Remember my decision";
+
+/* Managed profile viewer */
+"This profile is managed by your organization. Settings are read-only." = "This profile is managed by your organization. Settings are read-only.";
+"Managed Profile \U2014 %@" = "Managed Profile \U2014 %@";
+"View profile settings (read-only)" = "View profile settings (read-only)";
+
+/* Link picker — cross-profile + system browsers */
+"Choose where to open this link" = "Choose where to open this link";
+"Which application should open %@?" = "Which application should open %@?";
+"Other browsers" = "Other browsers";
+
+/* Settings — Managed Profile section */
+"More details at bromure.io/enterprise" = "More details at bromure.io/enterprise";

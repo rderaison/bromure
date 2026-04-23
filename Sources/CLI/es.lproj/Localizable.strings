@@ -586,3 +586,19 @@
 "Recording is enforced by your organization (%@)." = "La grabaci\U00F3n es obligatoria por tu organizaci\U00F3n (%@).";
 "Recording — shared with %@" = "Grabando \U2014 compartido con %@";
 "Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "Cada solicitud de esta ventana se graba y se env\U00EDa al equipo de seguridad de tu organizaci\U00F3n. Lo exige tu administrador y no se puede desactivar.";
+
+/* Alerts — Remember dialog decisions */
+"Remember my decision" = "Recordar mi decisión";
+
+/* Managed profile viewer */
+"This profile is managed by your organization. Settings are read-only." = "Este perfil está gestionado por tu organización. Los ajustes son de solo lectura.";
+"Managed Profile \U2014 %@" = "Perfil gestionado \U2014 %@";
+"View profile settings (read-only)" = "Ver ajustes del perfil (solo lectura)";
+
+/* Link picker — cross-profile + system browsers */
+"Choose where to open this link" = "Elige dónde abrir este enlace";
+"Which application should open %@?" = "¿Qué aplicación debería abrir %@?";
+"Other browsers" = "Otros navegadores";
+
+/* Settings — Managed Profile section */
+"More details at bromure.io/enterprise" = "Más detalles en bromure.io/enterprise";

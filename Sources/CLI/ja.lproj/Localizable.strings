@@ -586,3 +586,19 @@
 "Recording is enforced by your organization (%@)." = "記録は所属組織（%@）によって必須化されています。";
 "Recording — shared with %@" = "記録中 \U2014 %@ と共有されています";
 "Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "このウィンドウ内のすべてのリクエストは記録され、所属組織のセキュリティチームに送信されます。これは管理者により必須化されており、無効化できません。";
+
+/* Alerts — Remember dialog decisions */
+"Remember my decision" = "選択を記憶する";
+
+/* Managed profile viewer */
+"This profile is managed by your organization. Settings are read-only." = "このプロファイルは組織によって管理されています。設定は読み取り専用です。";
+"Managed Profile \U2014 %@" = "管理対象プロファイル \U2014 %@";
+"View profile settings (read-only)" = "プロファイル設定を表示(読み取り専用)";
+
+/* Link picker — cross-profile + system browsers */
+"Choose where to open this link" = "このリンクを開く場所を選択";
+"Which application should open %@?" = "%@ をどのアプリケーションで開きますか?";
+"Other browsers" = "その他のブラウザ";
+
+/* Settings — Managed Profile section */
+"More details at bromure.io/enterprise" = "詳細は bromure.io/enterprise";

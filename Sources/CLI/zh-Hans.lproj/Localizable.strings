@@ -586,3 +586,19 @@
 "Recording is enforced by your organization (%@)." = "您的组织（%@）已强制启用录制。";
 "Recording — shared with %@" = "录制中 \U2014 与 %@ 共享";
 "Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "此窗口中的每个请求都会被记录并发送给您所在组织的信息安全团队。这是管理员要求的，无法关闭。";
+
+/* Alerts — Remember dialog decisions */
+"Remember my decision" = "\U8bb0\U4f4f\U6211\U7684\U9009\U62e9";
+
+/* Managed profile viewer */
+"This profile is managed by your organization. Settings are read-only." = "\U6b64\U914d\U7f6e\U6587\U4ef6\U7531\U60a8\U7684\U7ec4\U7ec7\U7ba1\U7406\U3002\U8bbe\U7f6e\U4e3a\U53ea\U8bfb\U3002";
+"Managed Profile \U2014 %@" = "\U53d7\U7ba1\U914d\U7f6e\U6587\U4ef6 \U2014 %@";
+"View profile settings (read-only)" = "\U67e5\U770b\U914d\U7f6e\U6587\U4ef6\U8bbe\U7f6e(\U53ea\U8bfb)";
+
+/* Link picker — cross-profile + system browsers */
+"Choose where to open this link" = "\U9009\U62e9\U6253\U5f00\U6b64\U94fe\U63a5\U7684\U4f4d\U7f6e";
+"Which application should open %@?" = "\U5e94\U4f7f\U7528\U54ea\U4e2a\U5e94\U7528\U7a0b\U5e8f\U6253\U5f00 %@?";
+"Other browsers" = "\U5176\U4ed6\U6d4f\U89c8\U5668";
+
+/* Settings — Managed Profile section */
+"More details at bromure.io/enterprise" = "\U66f4\U591a\U8be6\U60c5\U8bf7\U8bbf\U95ee bromure.io/enterprise";

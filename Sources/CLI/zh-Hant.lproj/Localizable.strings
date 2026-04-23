@@ -586,3 +586,19 @@
 "Recording is enforced by your organization (%@)." = "您的組織（%@）已強制啟用錄製。";
 "Recording — shared with %@" = "錄製中 \U2014 與 %@ 共享";
 "Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." = "此視窗中的每個請求都會被錄製並傳送至您所在組織的資安團隊。這是由您的管理員強制要求的，無法關閉。";
+
+/* Alerts — Remember dialog decisions */
+"Remember my decision" = "記住我的選擇";
+
+/* Managed profile viewer */
+"This profile is managed by your organization. Settings are read-only." = "此設定檔由您的組織管理。設定為唯讀。";
+"Managed Profile \U2014 %@" = "受管設定檔 \U2014 %@";
+"View profile settings (read-only)" = "檢視設定檔設定(唯讀)";
+
+/* Link picker — cross-profile + system browsers */
+"Choose where to open this link" = "選擇開啟此連結的位置";
+"Which application should open %@?" = "應使用哪個應用程式開啟 %@?";
+"Other browsers" = "其他瀏覽器";
+
+/* Settings — Managed Profile section */
+"More details at bromure.io/enterprise" = "更多詳情請造訪 bromure.io/enterprise";
