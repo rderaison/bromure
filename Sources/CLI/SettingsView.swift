@@ -216,7 +216,11 @@ struct SettingsView: View {
 
     private var managedView: some View {
         VStack(alignment: .leading, spacing: 20) {
-            sectionHeader("Managed Profile", subtitle: "Enterprise-provisioned profile delivered from a Bromure control plane")
+            VStack(alignment: .leading, spacing: 2) {
+                sectionHeader("Managed Profile", subtitle: "Enterprise-provisioned profile delivered from a Bromure control plane")
+                Link("More details at bromure.io/enterprise", destination: URL(string: "https://bromure.io/enterprise")!)
+                    .font(.caption)
+            }
 
             let enrollments = state?.managedEnrollments ?? []
             if enrollments.isEmpty {
