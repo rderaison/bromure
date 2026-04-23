@@ -329,7 +329,6 @@ chroot /mnt chown chrome:chrome /home/chrome/.profile
 install_config scripts/file-agent.py        /mnt/usr/local/bin/file-agent.py        755
 install_config scripts/file-picker-host.py  /mnt/usr/local/bin/file-picker-host.py  755
 install_config scripts/link-agent.py        /mnt/usr/local/bin/link-agent.py        755
-install_config scripts/corporate-guard-agent.py /mnt/usr/local/bin/corporate-guard-agent.py 755
 install_config scripts/mtls-reload-agent.py /mnt/usr/local/bin/mtls-reload-agent.py 755
 install_config scripts/webcam-agent.py      /mnt/usr/local/bin/webcam-agent.py      755
 install_config scripts/warp-agent.py        /mnt/usr/local/bin/warp-agent.py        755
@@ -422,7 +421,7 @@ done
 # redirect-to-incognito, configured per managed profile via
 # chrome.storage.managed).
 mkdir -p /mnt/opt/bromure/extensions/corporate-guard
-for f in manifest.json schema.json common.js background.js content.js; do
+for f in manifest.json schema.json common.js background.js content.js blocked.html; do
     [ -f "$SCRIPT_DIR/extensions/corporate-guard/$f" ] && \
         cp "$SCRIPT_DIR/extensions/corporate-guard/$f" /mnt/opt/bromure/extensions/corporate-guard/
 done
@@ -448,8 +447,6 @@ install_config configs/com.bromure.file_picker.json \
     /mnt/etc/chromium/native-messaging-hosts/com.bromure.file_picker.json
 install_config configs/com.bromure.trace.json \
     /mnt/etc/chromium/native-messaging-hosts/com.bromure.trace.json
-install_config configs/com.bromure.corporate_guard.json \
-    /mnt/etc/chromium/native-messaging-hosts/com.bromure.corporate_guard.json
 
 # Download Tranco top domains list (research-grade popularity ranking)
 echo "SANDBOX_STEP_START:Downloading popular domains list"

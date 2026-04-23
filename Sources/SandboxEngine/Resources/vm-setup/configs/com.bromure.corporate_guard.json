@@ -1,7 +1,0 @@
-{
-  "name": "com.bromure.corporate_guard",
-  "description": "Bromure corporate-guard agent — forwards external-site URLs to the host for opening in a private Bromure profile.",
-  "path": "/usr/local/bin/corporate-guard-agent.py",
-  "type": "stdio",
-  "allowed_origins": ["chrome-extension://nneafipcodbpeapjcagfcinodkidcjcp/"]
-}

@@ -1492,7 +1492,6 @@ final class BrowserSession {
     private var credentialBridge: CredentialBridge?
     private var fileDrawerModel: FileDrawerModel?
     private var linkSenderBridge: LinkSenderBridge?
-    private var corporateGuardBridge: CorporateGuardBridge?
     private var mtlsReloadBridge: MTLSReloadBridge?
     private var filePickerBridge: FilePickerBridge?
     private var webcamBridge: WebcamBridge?
@@ -1693,25 +1692,6 @@ final class BrowserSession {
                 }
             }
             self.linkSenderBridge = bridge
-        }
-
-        // Corporate-guard bridge (vsock port 5310). Always stand this up
-        // when we have a vsock device — the listener is idle until the
-        // guest-side extension dials in.
-        //
-        // Routes through the same `onOpenInProfile` channel that
-        // LinkSender uses, so corporate-guard's policy-driven handoff
-        // and LinkSender's user-initiated right-click both end up at
-        // the same profile-picker UX (single-profile setups open
-        // directly; multi-profile setups prompt).
-        if let dev = linkSocketDevice {
-            let bridge = MainActor.assumeIsolated { CorporateGuardBridge(socketDevice: dev) }
-            MainActor.assumeIsolated {
-                bridge.onOpenExternal = { [weak self] url in
-                    self?.onOpenInProfile?(url)
-                }
-            }
-            self.corporateGuardBridge = bridge
         }
 
         // mTLS-reload bridge (vsock port 5320). Also unconditional — only

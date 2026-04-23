@@ -89,9 +89,9 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 
-    # Mirror the link-agent / corporate-guard-agent pattern: keep
-    # retrying on connection loss so the agent survives brief host-side
-    # flaps (e.g. VM pool warmup churn).
+    # Mirror the link-agent pattern: keep retrying on connection loss
+    # so the agent survives brief host-side flaps (e.g. VM pool warmup
+    # churn).
     while True:
         sock = None
         try:
