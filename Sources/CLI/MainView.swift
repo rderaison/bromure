@@ -239,16 +239,14 @@ struct MainView: View {
 
                         Spacer()
 
-                        if !state.profileManager.isManaged(profile.id) {
-                            Button {
-                                editingProfile = profile
-                            } label: {
-                                Image(systemName: "gearshape")
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Edit profile settings")
+                        Button {
+                            editingProfile = profile
+                        } label: {
+                            Image(systemName: state.profileManager.isManaged(profile.id) ? "eye" : "gearshape")
+                                .font(.caption)
                         }
+                        .buttonStyle(.borderless)
+                        .help(state.profileManager.isManaged(profile.id) ? "View profile settings (read-only)" : "Edit profile settings")
                     }
                     .tag(profile.id)
                     .help(managedTooltip(for: profile) ?? (profile.comments.isEmpty ? "" : profile.comments))
@@ -494,6 +492,7 @@ struct MainView: View {
             guard let delegate = NSApp.delegate as? GUIAppDelegate else { return false }
             return delegate.sessions.contains { $0.profile?.id == profile.id }
         }()
+        let isManaged = state.profileManager.isManaged(profile.id)
         let settingsView = ProfileSettingsView(
             draft: profile,
             usedColors: usedColors(excluding: profile.id),
@@ -501,6 +500,7 @@ struct MainView: View {
                 at: state.profileManager.profileDiskURL(for: profile.id)
             ),
             hasActiveSession: hasActiveSession,
+            isReadOnly: isManaged,
             onDeleteProfileDisk: {
                 let diskURL = state.profileManager.profileDiskURL(for: profile.id)
                 try? FileManager.default.removeItem(at: diskURL)
@@ -540,7 +540,10 @@ struct MainView: View {
             defer: false
         )
         window.contentView = hostingView
-        window.title = String(format: NSLocalizedString("Profile Settings \u{2014} %@", comment: ""), profile.name)
+        let titleFormat = isManaged
+            ? NSLocalizedString("Managed Profile \u{2014} %@", comment: "")
+            : NSLocalizedString("Profile Settings \u{2014} %@", comment: "")
+        window.title = String(format: titleFormat, profile.name)
         window.isReleasedWhenClosed = false
         window.center()
 

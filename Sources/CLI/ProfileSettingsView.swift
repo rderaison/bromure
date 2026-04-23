@@ -59,6 +59,10 @@ struct ProfileSettingsView: View {
     let usedColors: Set<ProfileColor>
     let profileDiskExists: Bool
     let hasActiveSession: Bool
+    /// Managed profiles ship in a signed manifest and can't be modified
+    /// locally. The view renders normally but every input is disabled,
+    /// Save is hidden, and Cancel reads "Close".
+    let isReadOnly: Bool
     var onDeleteProfileDisk: (() -> Void)?
     var onSave: (Profile) -> Void
     var onCancel: () -> Void
@@ -71,6 +75,7 @@ struct ProfileSettingsView: View {
 
     init(draft: Profile, usedColors: Set<ProfileColor>, profileDiskExists: Bool,
          hasActiveSession: Bool = false,
+         isReadOnly: Bool = false,
          onDeleteProfileDisk: (() -> Void)? = nil, onSave: @escaping (Profile) -> Void,
          onCancel: @escaping () -> Void, onShowWarpEULA: ((@escaping () -> Void) -> Void)? = nil,
          onShowPhishingConsent: ((@escaping () -> Void) -> Void)? = nil,
@@ -79,6 +84,7 @@ struct ProfileSettingsView: View {
         self.usedColors = usedColors
         self.profileDiskExists = profileDiskExists
         self.hasActiveSession = hasActiveSession
+        self.isReadOnly = isReadOnly
         self.onDeleteProfileDisk = onDeleteProfileDisk
         self.onSave = onSave
         self.onCancel = onCancel
@@ -143,27 +149,44 @@ struct ProfileSettingsView: View {
 
                 // Detail
                 ScrollView {
-                    detailView
-                        .padding(24)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 16) {
+                        if isReadOnly {
+                            HStack(spacing: 8) {
+                                Image(systemName: "lock.fill")
+                                    .foregroundStyle(.secondary)
+                                Text("This profile is managed by your organization. Settings are read-only.")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                            .padding(10)
+                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                        }
+                        detailView
+                            .disabled(isReadOnly)
+                    }
+                    .padding(24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
 
             Divider()
             HStack {
-                Button("Cancel") { onCancel() }
+                Button(isReadOnly ? "Close" : "Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Save") {
-                    if draft.settings.virusTotalEnabled,
-                       (draft.settings.virusTotalAPIKey ?? "").isEmpty {
-                        showVirusTotalKeyError = true
-                    } else {
-                        onSave(draft)
+                if !isReadOnly {
+                    Button("Save") {
+                        if draft.settings.virusTotalEnabled,
+                           (draft.settings.virusTotalAPIKey ?? "").isEmpty {
+                            showVirusTotalKeyError = true
+                        } else {
+                            onSave(draft)
+                        }
                     }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
                 }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
             }
             .padding(12)
         }
