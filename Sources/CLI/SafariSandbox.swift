@@ -453,32 +453,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Handles a request from the corporate-guard extension to open an
-    /// out-of-policy URL in a private Bromure profile. Unlike
-    /// `handleOpenInProfile`, we never prompt — the whole point of the
-    /// feature is silent redirection. Picks the first non-persistent
-    /// profile (preferring one named "Private Browsing" if there are
-    /// multiple candidates), navigates an existing session for that
-    /// profile if one is open, or spawns a new one otherwise. If the
-    /// user has no ephemeral profile configured we silently drop the
-    /// request rather than falling back to a persistent profile —
-    /// leaking external traffic into a persistent profile would defeat
-    /// the purpose.
-    @MainActor private func handleOpenExternalInPrivate(url: URL) {
-        guard state.phase == .ready else { return }
-        let profiles = state.profileManager.allProfiles
-        let ephemeral = profiles.filter { !$0.settings.persistent }
-        guard !ephemeral.isEmpty else { return }
-        let chosen = ephemeral.first(where: { $0.name == "Private Browsing" }) ?? ephemeral[0]
-
-        let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
-        if let session = existingSession {
-            session.navigateTo(url: url)
-        } else {
-            openNewBrowser(with: chosen, initialURL: url)
-        }
-    }
-
     // MARK: - Phishing Consent
 
     func showPhishingConsent(onAccepted: @escaping () -> Void) {
@@ -903,9 +877,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             session.onOpenInProfile = { [weak self] url in
                 self?.handleOpenInProfile(url: url)
             }
-            session.onOpenExternalInPrivate = { [weak self] url in
-                self?.handleOpenExternalInPrivate(url: url)
-            }
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
             session.show()
@@ -1021,9 +992,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             session.onOpenInProfile = { [weak self] url in
                 self?.handleOpenInProfile(url: url)
-            }
-            session.onOpenExternalInPrivate = { [weak self] url in
-                self?.handleOpenExternalInPrivate(url: url)
             }
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
@@ -1327,9 +1295,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         session.onOpenInProfile = { [weak self] url in
             self?.handleOpenInProfile(url: url)
         }
-        session.onOpenExternalInPrivate = { [weak self] url in
-            self?.handleOpenExternalInPrivate(url: url)
-        }
         self.sessions.append(session)
         self.state.sessionCount = self.sessions.count
         session.show()
@@ -1508,7 +1473,6 @@ final class BrowserSession {
     private var vmView: VZVirtualMachineView?
     var onClosed: ((BrowserSession) -> Void)?
     var onOpenInProfile: ((URL) -> Void)?
-    var onOpenExternalInPrivate: ((URL) -> Void)?
     fileprivate var closing = false
     fileprivate var confirmed = false
     private static var windowCount = 0
@@ -1710,16 +1674,18 @@ final class BrowserSession {
 
         // Corporate-guard bridge (vsock port 5310). Always stand this up
         // when we have a vsock device — the listener is idle until the
-        // guest-side extension dials in, so the cost of having it
-        // unconditionally present is a couple of bytes of memory.
-        // That saves us from having to thread a "is this a managed
-        // session with corporateGuard configured" bit all the way down
-        // here from the control plane.
+        // guest-side extension dials in.
+        //
+        // Routes through the same `onOpenInProfile` channel that
+        // LinkSender uses, so corporate-guard's policy-driven handoff
+        // and LinkSender's user-initiated right-click both end up at
+        // the same profile-picker UX (single-profile setups open
+        // directly; multi-profile setups prompt).
         if let dev = linkSocketDevice {
             let bridge = MainActor.assumeIsolated { CorporateGuardBridge(socketDevice: dev) }
             MainActor.assumeIsolated {
                 bridge.onOpenExternal = { [weak self] url in
-                    self?.onOpenExternalInPrivate?(url)
+                    self?.onOpenInProfile?(url)
                 }
             }
             self.corporateGuardBridge = bridge
