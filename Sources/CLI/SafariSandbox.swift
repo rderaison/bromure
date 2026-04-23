@@ -167,6 +167,17 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // every 15 min while the app is running. No-op if not enrolled.
         state.startManagedSync()
 
+        // Live mTLS rotation: when the sync pipeline issues a fresh leaf
+        // for a managed profile, push the new cert+key+CA into every
+        // open session for that profile so long-running VMs don't have
+        // to restart to pick it up. Also invalidates the host-side
+        // SecIdentity cache used by CloudTraceUploader so its own mTLS
+        // connections to analytics.bromure.io start using the new leaf
+        // on the next handshake.
+        ManagedProfileSync.onProfileMTLSRenewed = { [weak self] profileId in
+            Task { @MainActor in self?.handleMTLSRenewed(profileId: profileId) }
+        }
+
         // Re-sync whenever the app becomes active (user comes back from a
         // different app or unlocks the machine).
         NotificationCenter.default.addObserver(
@@ -415,6 +426,51 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         guard let chosen = promptProfileForURL(url, profiles: profiles) else { return }
+        let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
+        if let session = existingSession {
+            session.navigateTo(url: url)
+        } else {
+            openNewBrowser(with: chosen, initialURL: url)
+        }
+    }
+
+    /// Called by ManagedProfileSync after a fresh leaf cert has landed
+    /// on disk + keychain for the given managed profile. Purges the
+    /// host-side SecIdentity cache so the next CloudTraceUploader
+    /// handshake uses the new leaf, then pushes the new material over
+    /// vsock to every live session for this profile.
+    @MainActor private func handleMTLSRenewed(profileId: UUID) {
+        AnalyticsMTLSIdentity.purge(profileId: profileId)
+        guard let material = ManagedProfileStore.shared.mtlsMaterial(profileId: profileId) else {
+            return
+        }
+        for session in sessions where !session.closing && session.profile?.id == profileId {
+            session.pushMTLSUpdate(
+                certPem: material.certPem,
+                keyPem: material.keyPem,
+                caPem: material.caPem,
+            )
+        }
+    }
+
+    /// Handles a request from the corporate-guard extension to open an
+    /// out-of-policy URL in a private Bromure profile. Unlike
+    /// `handleOpenInProfile`, we never prompt — the whole point of the
+    /// feature is silent redirection. Picks the first non-persistent
+    /// profile (preferring one named "Private Browsing" if there are
+    /// multiple candidates), navigates an existing session for that
+    /// profile if one is open, or spawns a new one otherwise. If the
+    /// user has no ephemeral profile configured we silently drop the
+    /// request rather than falling back to a persistent profile —
+    /// leaking external traffic into a persistent profile would defeat
+    /// the purpose.
+    @MainActor private func handleOpenExternalInPrivate(url: URL) {
+        guard state.phase == .ready else { return }
+        let profiles = state.profileManager.allProfiles
+        let ephemeral = profiles.filter { !$0.settings.persistent }
+        guard !ephemeral.isEmpty else { return }
+        let chosen = ephemeral.first(where: { $0.name == "Private Browsing" }) ?? ephemeral[0]
+
         let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
         if let session = existingSession {
             session.navigateTo(url: url)
@@ -847,6 +903,9 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             session.onOpenInProfile = { [weak self] url in
                 self?.handleOpenInProfile(url: url)
             }
+            session.onOpenExternalInPrivate = { [weak self] url in
+                self?.handleOpenExternalInPrivate(url: url)
+            }
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
             session.show()
@@ -962,6 +1021,9 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             session.onOpenInProfile = { [weak self] url in
                 self?.handleOpenInProfile(url: url)
+            }
+            session.onOpenExternalInPrivate = { [weak self] url in
+                self?.handleOpenExternalInPrivate(url: url)
             }
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
@@ -1265,6 +1327,9 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         session.onOpenInProfile = { [weak self] url in
             self?.handleOpenInProfile(url: url)
         }
+        session.onOpenExternalInPrivate = { [weak self] url in
+            self?.handleOpenExternalInPrivate(url: url)
+        }
         self.sessions.append(session)
         self.state.sessionCount = self.sessions.count
         session.show()
@@ -1443,6 +1508,7 @@ final class BrowserSession {
     private var vmView: VZVirtualMachineView?
     var onClosed: ((BrowserSession) -> Void)?
     var onOpenInProfile: ((URL) -> Void)?
+    var onOpenExternalInPrivate: ((URL) -> Void)?
     fileprivate var closing = false
     fileprivate var confirmed = false
     private static var windowCount = 0
@@ -1451,6 +1517,8 @@ final class BrowserSession {
     private var credentialBridge: CredentialBridge?
     private var fileDrawerModel: FileDrawerModel?
     private var linkSenderBridge: LinkSenderBridge?
+    private var corporateGuardBridge: CorporateGuardBridge?
+    private var mtlsReloadBridge: MTLSReloadBridge?
     private var filePickerBridge: FilePickerBridge?
     private var webcamBridge: WebcamBridge?
     private var phishingAnalysisBridge: PhishingAnalysisBridge?
@@ -1638,6 +1706,32 @@ final class BrowserSession {
                 }
             }
             self.linkSenderBridge = bridge
+        }
+
+        // Corporate-guard bridge (vsock port 5310). Always stand this up
+        // when we have a vsock device — the listener is idle until the
+        // guest-side extension dials in, so the cost of having it
+        // unconditionally present is a couple of bytes of memory.
+        // That saves us from having to thread a "is this a managed
+        // session with corporateGuard configured" bit all the way down
+        // here from the control plane.
+        if let dev = linkSocketDevice {
+            let bridge = MainActor.assumeIsolated { CorporateGuardBridge(socketDevice: dev) }
+            MainActor.assumeIsolated {
+                bridge.onOpenExternal = { [weak self] url in
+                    self?.onOpenExternalInPrivate?(url)
+                }
+            }
+            self.corporateGuardBridge = bridge
+        }
+
+        // mTLS-reload bridge (vsock port 5320). Also unconditional — only
+        // the guest-side agent knows whether to dial in, and it only
+        // starts when config-agent ran install_managed_mtls. The
+        // listener sits idle for non-managed sessions.
+        if let dev = linkSocketDevice {
+            let bridge = MainActor.assumeIsolated { MTLSReloadBridge(socketDevice: dev) }
+            self.mtlsReloadBridge = bridge
         }
 
         // Set up file picker bridge (vsock port 5600) for host-side file upload dialogs.
@@ -2294,6 +2388,14 @@ final class BrowserSession {
     /// For persistent profiles the --user-data-dir must match the running
     /// instance, otherwise Chromium looks in the default dir, finds no lock,
     /// and starts a separate process.
+    /// Push a freshly-issued managed-profile mTLS bundle into the guest
+    /// over the MTLSReloadBridge. No-op if the session has no bridge
+    /// (pre-managed-profile code paths) or the guest agent hasn't
+    /// dialed in yet.
+    @MainActor func pushMTLSUpdate(certPem: String, keyPem: String, caPem: String) {
+        mtlsReloadBridge?.push(certPem: certPem, keyPem: keyPem, caPem: caPem)
+    }
+
     func navigateTo(url: URL) {
         guard let warmVM else {
             print("[URL] navigateTo: no warmVM")

@@ -279,7 +279,7 @@ private final class MTLSDelegate: NSObject, URLSessionDelegate {
 /// in `$TMPDIR` (which still prompted the user for the keychain
 /// password), and briefly went through `/usr/bin/openssl`. All gone —
 /// no `SecKeychain` is created, and no subprocess is spawned.
-enum AnalyticsMTLSIdentity {
+public enum AnalyticsMTLSIdentity {
     enum Error: Swift.Error {
         case missingMaterial
         case invalidCertificate
@@ -300,9 +300,9 @@ enum AnalyticsMTLSIdentity {
     }
 
     /// Drop the cached identity for a profile — call on unenroll /
-    /// destroy-local-state so a rotated cert isn't served by a stale
-    /// identity ref.
-    static func purge(profileId: UUID) {
+    /// destroy-local-state / leaf rotation so a stale SecIdentity isn't
+    /// served on the next mTLS handshake.
+    public static func purge(profileId: UUID) {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         cache.removeValue(forKey: profileId)

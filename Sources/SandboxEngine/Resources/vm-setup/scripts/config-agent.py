@@ -118,6 +118,20 @@ def install_managed_mtls(mtls):
     if rc != 0:
         print(f"config-agent: install-mtls.sh failed (rc={rc}): {out}", file=sys.stderr)
 
+    # Long-lived reload agent: dials the host on vsock 5320 and waits
+    # for live cert rotations. Only spawned for managed sessions (we're
+    # already inside `if not mtls: return`-guarded install flow). Runs
+    # detached so config-agent can still exit cleanly.
+    try:
+        subprocess.Popen(
+            ["/usr/local/bin/mtls-reload-agent.py"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        print(f"config-agent: mtls-reload-agent spawn failed: {e}", file=sys.stderr)
+
     # Tell Chromium to auto-select this leaf for the analytics URL so the
     # browser doesn't pop its cert-picker dialog whenever the managed
     # profile hits the endpoint. Only the managed-profile NSS db has a

@@ -30,6 +30,13 @@ chown -R chrome:chrome /home/chrome/.pki
 # can open it non-interactively. Re-running on an existing db is a no-op.
 su -s /bin/sh chrome -c "certutil -d sql:$NSS_DIR -N --empty-password" 2>/dev/null || true
 
+# On re-runs (live cert rotation), delete any existing entries under
+# our nicknames so pk12util / certutil -A don't complain about dupes
+# or add a second copy alongside the old one. Errors ignored: on the
+# very first run these don't exist yet.
+su -s /bin/sh chrome -c "certutil -d sql:$NSS_DIR -D -n 'bromure-mtls'" 2>/dev/null || true
+su -s /bin/sh chrome -c "certutil -d sql:$NSS_DIR -D -n 'bromure-ca'" 2>/dev/null || true
+
 # pk12util only accepts PKCS#12 bundles, so combine cert + key into one.
 P12="$MTLS_DIR/leaf.p12"
 openssl pkcs12 -export \

@@ -329,6 +329,8 @@ chroot /mnt chown chrome:chrome /home/chrome/.profile
 install_config scripts/file-agent.py        /mnt/usr/local/bin/file-agent.py        755
 install_config scripts/file-picker-host.py  /mnt/usr/local/bin/file-picker-host.py  755
 install_config scripts/link-agent.py        /mnt/usr/local/bin/link-agent.py        755
+install_config scripts/corporate-guard-agent.py /mnt/usr/local/bin/corporate-guard-agent.py 755
+install_config scripts/mtls-reload-agent.py /mnt/usr/local/bin/mtls-reload-agent.py 755
 install_config scripts/webcam-agent.py      /mnt/usr/local/bin/webcam-agent.py      755
 install_config scripts/warp-agent.py        /mnt/usr/local/bin/warp-agent.py        755
 install_config scripts/wireguard-agent.py  /mnt/usr/local/bin/wireguard-agent.py  755
@@ -438,7 +440,7 @@ mkdir -p /mnt/opt/bromure/splash
 install_config splash/splash.html /mnt/opt/bromure/splash/splash.html
 install_config splash/night.jpg   /mnt/opt/bromure/splash/night.jpg
 
-# Native messaging hosts (link sender + file picker + trace)
+# Native messaging hosts (link sender + file picker + trace + corporate guard)
 mkdir -p /mnt/etc/chromium/native-messaging-hosts
 install_config configs/com.bromure.link_sender.json \
     /mnt/etc/chromium/native-messaging-hosts/com.bromure.link_sender.json
@@ -446,6 +448,8 @@ install_config configs/com.bromure.file_picker.json \
     /mnt/etc/chromium/native-messaging-hosts/com.bromure.file_picker.json
 install_config configs/com.bromure.trace.json \
     /mnt/etc/chromium/native-messaging-hosts/com.bromure.trace.json
+install_config configs/com.bromure.corporate_guard.json \
+    /mnt/etc/chromium/native-messaging-hosts/com.bromure.corporate_guard.json
 
 # Download Tranco top domains list (research-grade popularity ranking)
 echo "SANDBOX_STEP_START:Downloading popular domains list"

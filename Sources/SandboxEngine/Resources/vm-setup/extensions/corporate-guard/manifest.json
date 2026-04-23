@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Gates non-corporate sites per managed-profile settings: either warns with a banner (tracing mode) or redirects to a private window (private-external mode).",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyM1fN0OGNe+ExuXpUYRb3x3TFufzsaHhoSCUgyduztlMLY5znugpFPfLCpoqdxlVb+C+wiYBlKgzjKvvbZsJrfa437XHcd1kqMI5AQEl0Auz4WZCJWTs9sAx5tcil44vWpgz9uMX6rpVJXfpdQ8iycJgUOF16F3rG/ZINGw/u+OlSbqkfz64l4Y1CiIH9d0CcP3zQ7XCN39tvQN9vS6jxpDFa4YCHIEaLvOqeFRUAY6AYqbRgjQPMTAQBwDubiOlt7FwXQeoY6AIeeEBWu9x0KO8PTYoqSmC/RIF1VXwBO+16iTd5MJrdnipqh6zvNWclTSWPQ6eU0KazkByYU4wEQIDAQAB",
-  "permissions": ["storage", "tabs", "webNavigation"],
+  "permissions": ["storage", "tabs", "webNavigation", "nativeMessaging"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

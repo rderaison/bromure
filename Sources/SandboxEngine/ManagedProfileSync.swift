@@ -32,6 +32,13 @@ public final class ManagedProfileSync {
     /// AppState) can react to changes in the managed profile set.
     public static var onSyncComplete: (@Sendable () -> Void)?
 
+    /// Fired whenever a fresh leaf cert has just been written to disk
+    /// and the new private key to the keychain. Consumers typically
+    /// invalidate any cached SecIdentity and push the new material to
+    /// live sessions for that profile so they don't need to restart
+    /// the VM to pick up the renewal.
+    public static var onProfileMTLSRenewed: (@Sendable (UUID) -> Void)?
+
     @discardableResult
     public func enroll(
         code: String,
@@ -267,6 +274,12 @@ public final class ManagedProfileSync {
         // RSA private keys have no compact "raw" representation; store the
         // DER-encoded PKCS#8 blob instead.
         try storeMTLSPrivateKey(priv.derRepresentation, for: profile.id, serial: resp.serialHex)
+
+        // Tell the rest of the app that the cert+key on disk for this
+        // profile have just been rotated. Callers will invalidate any
+        // cached SecIdentity and push the new material to any live VM
+        // sessions so TLS traffic doesn't have to wait for a VM restart.
+        Self.onProfileMTLSRenewed?(profile.id)
     }
 
     public func loadMTLSPrivateKey(for profileId: UUID) throws -> _RSA.Signing.PrivateKey {
@@ -321,15 +334,28 @@ public final class ManagedProfileSync {
         return f.date(from: s) ?? ISO8601DateFormatter().date(from: s) ?? Date()
     }
 
+    /// Returns true when we have a leaf cert + matching private key
+    /// whose `notValidAfter` is at least `minSeconds` in the future.
+    /// Any failure — missing file, missing key, parse error, expired
+    /// or expiring-soon cert — returns false so the caller issues a
+    /// fresh CSR. This check is what gates cert renewal on every
+    /// `syncProfiles()` tick (boot, 15-min timer, app-foreground,
+    /// manual refresh).
     private func hasValidLeafCert(for profileId: UUID, expiringSoonerThan minSeconds: TimeInterval) -> Bool {
         let url = ManagedProfileStore.shared.mtlsCertURL(for: profileId)
         guard let pem = try? String(contentsOf: url, encoding: .utf8),
               let _ = try? readMTLSPrivateKey(for: profileId)
         else { return false }
-        // Quick sniff: we don't parse the cert here — presence of key + cert
-        // is enough for V1; full expiry check comes with cert parsing.
-        _ = pem
-        return true
+
+        // Parse the cert and compare notValidAfter to "now + minSeconds".
+        // If the cert expires inside that window (or the parse fails),
+        // treat it as no-cert — the caller will reissue.
+        guard let pemDoc = try? PEMDocument(pemString: pem),
+              let cert = try? Certificate(derEncoded: pemDoc.derBytes)
+        else { return false }
+
+        let threshold = Date().addingTimeInterval(minSeconds)
+        return cert.notValidAfter > threshold
     }
 
     // MARK: - Keychain for leaf keys (one per profile)
