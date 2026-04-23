@@ -2,24 +2,39 @@ import Foundation
 import Virtualization
 
 private let lsDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil
+@inline(__always) private func lsLog(_ msg: @autoclosure () -> String) {
+    if lsDebug { print(msg()) }
+}
 
-/// Receives "open URL in another profile" requests from the guest Chrome extension
-/// over vsock and notifies the host app delegate to show a profile picker.
+/// Receives "open URL in another profile" requests from guest Chrome
+/// extensions over vsock and notifies the host app delegate to show a
+/// profile picker.
 ///
 /// Protocol: newline-delimited JSON on vsock port 5300.
-///
 /// Expected message: `{"type":"open_in_profile","url":"https://..."}`
+///
+/// Connections are managed as a SET — multiple concurrent clients can
+/// share the port (e.g. link-sender's persistent connectNative port +
+/// corporate-guard's persistent connectNative port). An earlier version
+/// tracked only the latest connection, which silently dropped traffic
+/// from whichever peer lost the replacement race.
 @MainActor
 public final class LinkSenderBridge: NSObject, @unchecked Sendable {
     private static let linkPort: UInt32 = 5300
 
     private weak var socketDevice: VZVirtioSocketDevice?
     private var listenerDelegate: LinkListenerDelegate?
-    private var connection: VZVirtioSocketConnection?
-    private var readSource: DispatchSourceRead?
 
-    /// Whether the guest link sender agent is connected.
-    public var isConnected: Bool { connection != nil }
+    private var nextClientID: UInt64 = 0
+    private struct Client {
+        let fd: Int32
+        let source: DispatchSourceRead
+        let conn: VZVirtioSocketConnection
+    }
+    private var clients: [UInt64: Client] = [:]
+
+    /// Whether at least one guest client is currently connected.
+    public var isConnected: Bool { !clients.isEmpty }
 
     /// Called when the guest requests opening a URL in another profile.
     public var onOpenInProfile: ((URL) -> Void)?
@@ -28,7 +43,7 @@ public final class LinkSenderBridge: NSObject, @unchecked Sendable {
         self.socketDevice = socketDevice
         super.init()
 
-        if lsDebug { print("[LinkSender] init: setting up vsock listener on port \(Self.linkPort)") }
+        lsLog("[LinkSender] init: setting up vsock listener on port \(Self.linkPort)")
 
         let delegate = LinkListenerDelegate { [weak self] conn in
             self?.handleConnection(conn)
@@ -40,22 +55,20 @@ public final class LinkSenderBridge: NSObject, @unchecked Sendable {
     }
 
     public func stop() {
-        if lsDebug { print("[LinkSender] stop") }
-        readSource?.cancel()
-        readSource = nil
+        lsLog("[LinkSender] stop (\(clients.count) clients)")
+        for (_, c) in clients { c.source.cancel() }
+        clients.removeAll()
         socketDevice?.removeSocketListener(forPort: Self.linkPort)
-        connection = nil
     }
 
     // MARK: - Connection handling
 
     private func handleConnection(_ conn: VZVirtioSocketConnection) {
-        if lsDebug { print("[LinkSender] guest connected (fd=\(conn.fileDescriptor))") }
-
-        readSource?.cancel()
-        connection = conn
-
+        nextClientID &+= 1
+        let clientID = nextClientID
         let fd = conn.fileDescriptor
+        lsLog("[LinkSender] guest connected (id=\(clientID), fd=\(fd), total=\(clients.count + 1))")
+
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
         var pendingData = Data()
 
@@ -63,15 +76,14 @@ public final class LinkSenderBridge: NSObject, @unchecked Sendable {
             var buf = [UInt8](repeating: 0, count: 65536)
             let n = Darwin.read(fd, &buf, buf.count)
             guard n > 0 else {
-                if lsDebug { print("[LinkSender] connection closed") }
+                lsLog("[LinkSender] client \(clientID) EOF/closed")
                 source.cancel()
                 return
             }
             pendingData.append(contentsOf: buf[0..<n])
 
-            // Cap buffer to prevent abuse
             if pendingData.count > 1_048_576 {
-                if lsDebug { print("[LinkSender] buffer overflow, disconnecting") }
+                lsLog("[LinkSender] client \(clientID) buffer overflow, disconnecting")
                 source.cancel()
                 return
             }
@@ -79,24 +91,22 @@ public final class LinkSenderBridge: NSObject, @unchecked Sendable {
             while let newlineIndex = pendingData.firstIndex(of: UInt8(ascii: "\n")) {
                 let lineData = pendingData[pendingData.startIndex..<newlineIndex]
                 pendingData = Data(pendingData[(newlineIndex + 1)...])
-
                 if !lineData.isEmpty {
-                    self?.handleMessage(Data(lineData))
+                    self?.handleMessage(Data(lineData), replyFD: fd)
                 }
             }
         }
 
         source.setCancelHandler { [weak self] in
-            if lsDebug { print("[LinkSender] dispatch source cancelled") }
-            self?.readSource = nil
-            self?.connection = nil
+            lsLog("[LinkSender] client \(clientID) cancelled")
+            self?.clients.removeValue(forKey: clientID)
         }
 
-        readSource = source
+        clients[clientID] = Client(fd: fd, source: source, conn: conn)
         source.activate()
     }
 
-    private func handleMessage(_ data: Data) {
+    private func handleMessage(_ data: Data, replyFD: Int32) {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String,
               type == "open_in_profile",
@@ -104,20 +114,22 @@ public final class LinkSenderBridge: NSObject, @unchecked Sendable {
               let url = URL(string: urlString),
               url.scheme == "http" || url.scheme == "https"
         else {
-            if lsDebug { print("[LinkSender] ignoring invalid message") }
+            lsLog("[LinkSender] ignoring invalid message")
             return
         }
 
-        if lsDebug { print("[LinkSender] open_in_profile: \(urlString)") }
+        lsLog("[LinkSender] open_in_profile: \(urlString)")
 
-        // Send acknowledgement back to the guest
+        // Ack on the same connection the request came in on. Using a
+        // generic "current connection" reference was the shape of the
+        // earlier bug: with multiple clients, a reply could get routed
+        // back to the wrong peer.
         let ack: [String: Any] = ["type": "open_in_profile_ack", "url": urlString]
-        if let conn = connection,
-           let ackData = try? JSONSerialization.data(withJSONObject: ack),
+        if let ackData = try? JSONSerialization.data(withJSONObject: ack),
            var line = String(data: ackData, encoding: .utf8) {
             line += "\n"
             _ = line.withCString { ptr in
-                Darwin.write(conn.fileDescriptor, ptr, Int(strlen(ptr)))
+                Darwin.write(replyFD, ptr, Int(strlen(ptr)))
             }
         }
 
@@ -139,7 +151,7 @@ private final class LinkListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         shouldAcceptNewConnection connection: VZVirtioSocketConnection,
         from socketDevice: VZVirtioSocketDevice
     ) -> Bool {
-        if lsDebug { print("[LinkSender] listener: accepting connection") }
+        lsLog("[LinkSender] listener: accepting connection (fd=\(connection.fileDescriptor))")
         onConnection(connection)
         return true
     }

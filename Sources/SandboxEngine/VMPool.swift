@@ -436,18 +436,7 @@ public final class VMPool {
             if let u = config.proxyUsername { cfg["proxyUsername"] = u }
             if let p = config.proxyPassword { cfg["proxyPassword"] = p }
         }
-        // Corporate-guard's `openExternalInPrivate` flow hands URLs
-        // back to the host via the same cross-profile-open plumbing
-        // LinkSender uses. If the managed profile requires it, force
-        // link-sender on even when the user's own profile flag is off
-        // — the two features share infrastructure (vsock relay +
-        // host-side bridge), and without it the handoff silently
-        // drops on the floor.
-        let forceLinkSenderForCorpGuard: Bool = {
-            guard let g = cfg["corporateGuard"] as? [String: Any] else { return false }
-            return (g["openExternalInPrivate"] as? Bool) == true
-        }()
-        if config.enableLinkSender || forceLinkSenderForCorpGuard {
+        if config.enableLinkSender {
             cfg["linkSender"] = true
         }
         if config.enableWebcam {
@@ -518,6 +507,17 @@ public final class VMPool {
                     cfg["corporateGuard"] = guardCfg
                 }
             }
+        }
+
+        // Corporate-guard's `openExternalInPrivate` flow hands URLs back to
+        // the host via the same cross-profile-open plumbing LinkSender uses.
+        // Force link-sender on when the managed profile requires it — the
+        // two features share infrastructure (vsock relay + host-side bridge),
+        // and without it the handoff silently drops on the floor. Must run
+        // AFTER cfg["corporateGuard"] is populated above.
+        if let g = cfg["corporateGuard"] as? [String: Any],
+           (g["openExternalInPrivate"] as? Bool) == true {
+            cfg["linkSender"] = true
         }
         cfg["locale"] = config.locale
 
