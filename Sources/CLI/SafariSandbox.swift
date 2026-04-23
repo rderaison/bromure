@@ -263,22 +263,28 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
-        // If there's more than one profile, ask the user which one to use.
-        // If there's a running session for the chosen profile, route the URL
-        // to it; otherwise spin up a new VM.
-        if profiles.count > 1, state.phase == .ready {
-            guard let chosen = promptProfileForURL(url, profiles: profiles) else {
-                print("[URL] user cancelled profile picker")
+        // Show the picker when there's more than one destination to choose
+        // from (multiple profiles, or a single profile + at least one
+        // external browser installed on the host).
+        let externals = Self.externalBrowsers()
+        if state.phase == .ready, profiles.count + externals.count > 1 {
+            guard let choice = promptTargetForURL(url, profiles: profiles, externals: externals) else {
+                print("[URL] user cancelled picker")
                 return
             }
-            // Prefer an active session that already uses this profile
-            let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
-            if let session = existingSession {
-                print("[URL] sending to existing session for profile '\(chosen.name)'")
-                session.navigateTo(url: url)
-            } else {
-                print("[URL] opening new browser for profile '\(chosen.name)' with URL")
-                openNewBrowser(with: chosen, initialURL: url)
+            switch choice {
+            case .profile(let chosen):
+                let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
+                if let session = existingSession {
+                    print("[URL] sending to existing session for profile '\(chosen.name)'")
+                    session.navigateTo(url: url)
+                } else {
+                    print("[URL] opening new browser for profile '\(chosen.name)' with URL")
+                    openNewBrowser(with: chosen, initialURL: url)
+                }
+            case .externalApp(let appURL, let name):
+                print("[URL] opening in external app '\(name)'")
+                openInExternalApp(url: url, appURL: appURL)
             }
             return
         }
@@ -305,28 +311,90 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Profile Picker for URL
 
-    /// Shows a modal dialog asking which profile to use when opening a URL.
-    /// Returns the chosen profile, or nil if the user cancels.
-    private func promptProfileForURL(_ url: URL, profiles: [Profile]) -> Profile? {
+    /// What the user chose in the picker: a Bromure profile or another
+    /// browser on the host.
+    enum LinkTarget {
+        case profile(Profile)
+        case externalApp(url: URL, name: String)
+    }
+
+    /// Other browsers installed on the host that can open http(s) URLs.
+    /// Bromure itself is filtered out. Ordered as macOS returns them
+    /// (typically default browser first).
+    static func externalBrowsers() -> [(name: String, url: URL)] {
+        guard let probe = URL(string: "https://example.com") else { return [] }
+        let apps = NSWorkspace.shared.urlsForApplications(toOpen: probe)
+        let ourBundleID = Bundle.main.bundleIdentifier ?? "io.bromure.app"
+        var out: [(name: String, url: URL)] = []
+        for appURL in apps {
+            guard let bundle = Bundle(url: appURL) else { continue }
+            if bundle.bundleIdentifier == ourBundleID { continue }
+            let rawName = FileManager.default.displayName(atPath: appURL.path)
+            let name = rawName.hasSuffix(".app") ? String(rawName.dropLast(4)) : rawName
+            // Skip other Bromure copies on disk (dev builds, etc.)
+            if name.lowercased().contains("bromure") { continue }
+            out.append((name: name, url: appURL))
+        }
+        return out
+    }
+
+    /// Shows a modal dialog asking which profile (or external browser) to
+    /// use when opening a URL. Returns the chosen target, or nil if the
+    /// user cancels.
+    private func promptTargetForURL(
+        _ url: URL,
+        profiles: [Profile],
+        externals: [(name: String, url: URL)],
+    ) -> LinkTarget? {
         let urlString = url.absoluteString
         let truncatedURL = urlString.count > 60
             ? String(urlString.prefix(57)) + "..."
             : urlString
 
         let alert = NSAlert()
-        alert.messageText = NSLocalizedString("Choose a profile", comment: "")
-        alert.informativeText = String(format: NSLocalizedString("Which profile should open %@?", comment: ""), truncatedURL)
+        alert.messageText = NSLocalizedString("Choose where to open this link", comment: "")
+        alert.informativeText = String(format: NSLocalizedString("Which application should open %@?", comment: ""), truncatedURL)
         alert.addButton(withTitle: NSLocalizedString("Open", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         alert.alertStyle = .informational
 
         let containerWidth: CGFloat = 400
 
-        // Profile picker popup
+        // Target picker — profiles first, then a separator, then other
+        // installed browsers. Each menu item's representedObject is a
+        // LinkTarget so we can map the selection back without relying
+        // on indices across the separator.
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: containerWidth, height: 25), pullsDown: false)
+        let menu = popup.menu ?? NSMenu()
         for profile in profiles {
             let colorDot = profile.color.map { Self.colorDot(for: $0) } ?? ""
-            popup.addItem(withTitle: "\(colorDot)\(profile.name)")
+            let item = NSMenuItem(title: "\(colorDot)\(profile.name)", action: nil, keyEquivalent: "")
+            item.representedObject = LinkTarget.profile(profile)
+            menu.addItem(item)
+        }
+        if !externals.isEmpty {
+            if !profiles.isEmpty {
+                menu.addItem(NSMenuItem.separator())
+                let header = NSMenuItem(title: NSLocalizedString("Other browsers", comment: ""), action: nil, keyEquivalent: "")
+                header.isEnabled = false
+                menu.addItem(header)
+            }
+            for app in externals {
+                let item = NSMenuItem(title: app.name, action: nil, keyEquivalent: "")
+                item.image = {
+                    let icon = NSWorkspace.shared.icon(forFile: app.url.path)
+                    icon.size = NSSize(width: 16, height: 16)
+                    return icon
+                }()
+                item.representedObject = LinkTarget.externalApp(url: app.url, name: app.name)
+                menu.addItem(item)
+            }
+        }
+        popup.menu = menu
+        // Default-select the first real (profile or external) item, skipping any
+        // disabled header row we inserted.
+        if let first = menu.items.firstIndex(where: { $0.representedObject != nil }) {
+            popup.selectItem(at: first)
         }
 
         // Full URL label (small, grey, multiline).
@@ -387,9 +455,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return nil }
-        let index = popup.indexOfSelectedItem
-        guard index >= 0, index < profiles.count else { return nil }
-        return profiles[index]
+        return popup.selectedItem?.representedObject as? LinkTarget
+    }
+
+    /// Opens a URL in a non-Bromure browser installed on the host.
+    private func openInExternalApp(url: URL, appURL: URL) {
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: config) { _, err in
+            if let err { print("[URL] external app open failed: \(err)") }
+        }
     }
 
     /// Returns a colored circle character for a profile color.
@@ -408,29 +483,39 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Cross-Profile URL Opening
 
-    /// Handles a request from a guest VM to open a URL in a different profile.
+    /// Handles a request from a guest VM to open a URL in a different
+    /// profile (or another browser on the host).
     @MainActor private func handleOpenInProfile(url: URL) {
         let profiles = state.profileManager.allProfiles
-        guard !profiles.isEmpty, state.phase == .ready else { return }
+        guard state.phase == .ready else { return }
+        let externals = Self.externalBrowsers()
 
-        if profiles.count == 1 {
-            // Only one profile — open directly if there's no session for it yet
-            let profile = profiles[0]
-            let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == profile.id })
-            if let session = existingSession {
-                session.navigateTo(url: url)
-            } else {
-                openNewBrowser(with: profile, initialURL: url)
+        // With exactly one destination available, skip the picker.
+        if profiles.count + externals.count <= 1 {
+            if let profile = profiles.first {
+                let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == profile.id })
+                if let session = existingSession {
+                    session.navigateTo(url: url)
+                } else {
+                    openNewBrowser(with: profile, initialURL: url)
+                }
+            } else if let app = externals.first {
+                openInExternalApp(url: url, appURL: app.url)
             }
             return
         }
 
-        guard let chosen = promptProfileForURL(url, profiles: profiles) else { return }
-        let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
-        if let session = existingSession {
-            session.navigateTo(url: url)
-        } else {
-            openNewBrowser(with: chosen, initialURL: url)
+        guard let choice = promptTargetForURL(url, profiles: profiles, externals: externals) else { return }
+        switch choice {
+        case .profile(let chosen):
+            let existingSession = sessions.first(where: { !$0.closing && $0.profile?.id == chosen.id })
+            if let session = existingSession {
+                session.navigateTo(url: url)
+            } else {
+                openNewBrowser(with: chosen, initialURL: url)
+            }
+        case .externalApp(let appURL, _):
+            openInExternalApp(url: url, appURL: appURL)
         }
     }
 
