@@ -943,16 +943,27 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
-        // Ask whether to restore previous tabs for persistent profiles with existing data
+        // Ask whether to restore previous tabs for persistent profiles with existing data.
+        // Prior remembered decision (via "Remember my decision" checkbox) skips the prompt.
         var restoreSession = false
         if profile.isPersistent, !isFirstBoot, profileImageDir != nil {
-            let alert = NSAlert()
-            alert.messageText = NSLocalizedString("Restore previous tabs?", comment: "")
-            alert.informativeText = NSLocalizedString("This profile has data from a previous session. Would you like to restore your open tabs?", comment: "")
-            alert.addButton(withTitle: NSLocalizedString("Restore", comment: ""))
-            alert.addButton(withTitle: NSLocalizedString("Start Fresh", comment: ""))
-            alert.alertStyle = .informational
-            restoreSession = alert.runModal() == .alertFirstButtonReturn
+            if let remembered = ProfilePrefs.restoreTabsDecision(for: profile.id) {
+                restoreSession = (remembered == .restore)
+            } else {
+                let alert = NSAlert()
+                alert.messageText = NSLocalizedString("Restore previous tabs?", comment: "")
+                alert.informativeText = NSLocalizedString("This profile has data from a previous session. Would you like to restore your open tabs?", comment: "")
+                alert.addButton(withTitle: NSLocalizedString("Restore", comment: ""))
+                alert.addButton(withTitle: NSLocalizedString("Start Fresh", comment: ""))
+                alert.alertStyle = .informational
+                alert.showsSuppressionButton = true
+                alert.suppressionButton?.title = NSLocalizedString("Remember my decision", comment: "")
+                let response = alert.runModal()
+                restoreSession = (response == .alertFirstButtonReturn)
+                if alert.suppressionButton?.state == .on {
+                    ProfilePrefs.setRestoreTabsDecision(restoreSession ? .restore : .fresh, for: profile.id)
+                }
+            }
         }
 
         // Switch system default audio devices before claiming VM
@@ -2728,14 +2739,29 @@ private final class SessionDelegateHelper: NSObject, VZVirtualMachineDelegate, N
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard let session else { return true }
         if session.closing || session.confirmed { return true }
+        // Skip the prompt when the user previously checked "Remember my decision"
+        // on the Close button. Cancel intentionally can't be remembered — that
+        // would make the window unclosable.
+        if let pid = session.profile?.id, ProfilePrefs.skipCloseConfirm(for: pid) {
+            if session.promptSaveTraceIfNeeded() {
+                session.confirmed = true
+                return true
+            }
+            return false
+        }
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Close this browser?", comment: "")
         alert.informativeText = NSLocalizedString("All browsing data in this window will be permanently lost. This cannot be undone.", comment: "")
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Close", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        alert.beginSheetModal(for: sender) { [weak session] response in
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = NSLocalizedString("Remember my decision", comment: "")
+        alert.beginSheetModal(for: sender) { [weak session, weak alert] response in
             guard response == .alertFirstButtonReturn, let session else { return }
+            if alert?.suppressionButton?.state == .on, let pid = session.profile?.id {
+                ProfilePrefs.setSkipCloseConfirm(true, for: pid)
+            }
             // If trace has data, offer to save before closing
             if session.promptSaveTraceIfNeeded() {
                 session.confirmed = true

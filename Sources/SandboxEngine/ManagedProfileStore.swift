@@ -158,12 +158,15 @@ public final class ManagedProfileStore {
     public func remove(id: UUID) {
         try? FileManager.default.removeItem(at: dir(for: id))
         cache.removeValue(forKey: id)
+        ProfilePrefs.clear(for: id)
     }
 
     public func removeAll() {
+        let ids = Array(cache.keys)
         try? FileManager.default.removeItem(at: root)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         cache.removeAll()
+        for id in ids { ProfilePrefs.clear(for: id) }
     }
 
     // MARK: - Verification

@@ -152,6 +152,7 @@ public final class ProfileManager {
         // Remove local disk image
         let diskDir = localProfileDir(for: id)
         try? FileManager.default.removeItem(at: diskDir)
+        ProfilePrefs.clear(for: id)
     }
 
     /// Mark a profile as recently used.
