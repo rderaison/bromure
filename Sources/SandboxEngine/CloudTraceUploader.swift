@@ -224,7 +224,107 @@ public final class CloudTraceUploader: @unchecked Sendable {
         case .full:
             break
         }
+        redactSecrets(&e)
         return e
+    }
+
+    // MARK: - Secret redaction
+
+    /// Placeholder that replaces redacted values. Analysts still see that
+    /// a field was present, just not its content.
+    static let redactionMask = "***"
+
+    /// Names we treat as secret regardless of where they appear (form
+    /// field, url-encoded body key, JSON key). Matched case-insensitively
+    /// against the trimmed name; substrings count so `new_password` and
+    /// `password_confirmation` both hit.
+    static let secretNamePatterns: [String] = [
+        "password", "passwd", "pwd",
+        "secret", "token", "api_key", "apikey",
+        "authorization", "auth_token",
+    ]
+
+    private static func isSecretName(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        for p in secretNamePatterns where lower.contains(p) { return true }
+        return false
+    }
+
+    /// Scrub password-shaped values out of an event in place. Run on
+    /// every event before it's uploaded, regardless of level — the call
+    /// sites above nil-out the fields at lower levels anyway, but it's
+    /// cheaper to belt-and-suspenders than risk leaking a password
+    /// because someone added a new level above `.headers`.
+    private static func redactSecrets(_ e: inout TraceEvent) {
+        // 1. form fields — any input typed password, plus any named like one.
+        if let fields = e.formFields {
+            e.formFields = fields.map { f in
+                if f.type.lowercased() == "password" || isSecretName(f.name) {
+                    return TraceEvent.FormFieldSnapshot(name: f.name, type: f.type, value: redactionMask)
+                }
+                return f
+            }
+        }
+
+        // 2. request body — parse by content-type and redact secret keys.
+        if let body = e.postData {
+            let ct = contentType(from: e.requestHeaders) ?? ""
+            if ct.contains("application/x-www-form-urlencoded") {
+                e.postData = redactURLEncoded(body)
+            } else if ct.contains("application/json") || ct.contains("+json") {
+                e.postData = redactJSON(body)
+            }
+            // Multipart + other content types are left alone — they'd
+            // need a per-format parser and the risk of corrupting the
+            // body outweighs the leak surface for a research trace.
+        }
+    }
+
+    private static func contentType(from headers: [String: String]?) -> String? {
+        guard let headers else { return nil }
+        for (k, v) in headers where k.lowercased() == "content-type" { return v.lowercased() }
+        return nil
+    }
+
+    private static func redactURLEncoded(_ body: String) -> String {
+        // URLComponents handles percent-encoding + empty values correctly.
+        var comps = URLComponents()
+        comps.percentEncodedQuery = body
+        guard let items = comps.queryItems else { return body }
+        let redacted = items.map { item -> URLQueryItem in
+            if isSecretName(item.name) {
+                return URLQueryItem(name: item.name, value: redactionMask)
+            }
+            return item
+        }
+        comps.queryItems = redacted
+        return comps.percentEncodedQuery ?? body
+    }
+
+    private static func redactJSON(_ body: String) -> String {
+        guard let data = body.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        else { return body }
+        let scrubbed = redactJSONValue(obj)
+        guard let out = try? JSONSerialization.data(withJSONObject: scrubbed, options: [.fragmentsAllowed]),
+              let s = String(data: out, encoding: .utf8)
+        else { return body }
+        return s
+    }
+
+    private static func redactJSONValue(_ value: Any) -> Any {
+        if let dict = value as? [String: Any] {
+            var out: [String: Any] = [:]
+            out.reserveCapacity(dict.count)
+            for (k, v) in dict {
+                out[k] = isSecretName(k) ? redactionMask : redactJSONValue(v)
+            }
+            return out
+        }
+        if let arr = value as? [Any] {
+            return arr.map(redactJSONValue)
+        }
+        return value
     }
 }
 
