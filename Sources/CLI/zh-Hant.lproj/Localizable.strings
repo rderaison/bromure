@@ -650,3 +650,10 @@
 "Couldn\U2019t fetch the certificate chain." = "無法取得憑證鏈。";
 "Couldn\U2019t parse the certificate." = "無法解析憑證。";
 "Certificate inspection isn\U2019t available." = "無法檢視憑證。";
+
+/* Host Isolation — printing */
+"Allow Printing" = "允許列印";
+"When this is on, pressing \U2318P captures the current page as a PDF and hands it to your Mac\U2019s print system \U2014 so you can pick a real printer or save to a file from the standard macOS print dialog. The PDF stays in memory; nothing is written to your Mac\U2019s disk." = "啟用後,按 \U2318P 會將目前頁面擷取為 PDF 並交給 macOS 的列印系統 \U2014 你可以從標準 macOS 列印對話框中選擇實體印表機或儲存為檔案。PDF 僅存在於記憶體中,不會寫入磁碟。";
+
+/* Host Isolation — printing requires Native Tabs */
+"Printing relies on the tab agent that ships with Native Tabs. Turn Native Tabs on first to enable printing." = "列印依賴於隨原生分頁一起提供的分頁代理。請先啟用原生分頁以啟用列印。";

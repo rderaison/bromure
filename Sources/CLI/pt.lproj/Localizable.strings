@@ -650,3 +650,10 @@
 "Couldn\U2019t fetch the certificate chain." = "Não foi possível obter a cadeia de certificados.";
 "Couldn\U2019t parse the certificate." = "Não foi possível ler o certificado.";
 "Certificate inspection isn\U2019t available." = "A inspeção de certificados não está disponível.";
+
+/* Host Isolation — printing */
+"Allow Printing" = "Permitir impressão";
+"When this is on, pressing \U2318P captures the current page as a PDF and hands it to your Mac\U2019s print system \U2014 so you can pick a real printer or save to a file from the standard macOS print dialog. The PDF stays in memory; nothing is written to your Mac\U2019s disk." = "Quando isto está ligado, \U2318P captura a página atual como PDF e a entrega ao sistema de impressão do macOS \U2014 você pode escolher uma impressora real ou salvar como arquivo a partir do diálogo padrão. O PDF fica em memória; nada é gravado no disco.";
+
+/* Host Isolation — printing requires Native Tabs */
+"Printing relies on the tab agent that ships with Native Tabs. Turn Native Tabs on first to enable printing." = "A impressão depende do tab agent que acompanha as Abas nativas. Ative primeiro as Abas nativas para habilitar a impressão.";

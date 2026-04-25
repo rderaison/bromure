@@ -1,6 +1,7 @@
 import ArgumentParser
 import Cocoa
 import Foundation
+import PDFKit
 import SandboxEngine
 import Sparkle
 import SwiftUI
@@ -1589,6 +1590,7 @@ final class BrowserSession {
     private(set) var tabBridge: TabBridge?
     private var nativeTabBar: NativeTabBarChrome?
     private var nativeChromeKeyMonitor: Any?
+    private var nativeChromeFlagsMonitor: Any?
     private(set) var shellBridge: ShellBridge?
     private(set) var traceBridge: TraceBridge?
     private var cloudTraceUploader: CloudTraceUploader?
@@ -2028,6 +2030,12 @@ final class BrowserSession {
                 // side effects on a @MainActor Task. This avoids ever
                 // capturing the non-Sendable NSEvent across an actor boundary.
                 let windowID = ObjectIdentifier(window)
+                // Printing rides on the tab-agent's CDP connection, which
+                // only exists in native-tabs mode. If somehow the runtime
+                // ends up here without native tabs we'd still want the
+                // toggle to no-op cleanly.
+                let allowPrinting = (profile?.settings.allowPrinting ?? false)
+                    && config.nativeChrome
                 self.nativeChromeKeyMonitor = NSEvent.addLocalMonitorForEvents(
                     matching: .keyDown
                 ) { [weak bridge, weak tabModel, weak window] event in
@@ -2063,6 +2071,22 @@ final class BrowserSession {
                             if let id = tabModel.activeTab?.id { bridge.back(id: id) }
                         case "]":
                             if let id = tabModel.activeTab?.id { bridge.forward(id: id) }
+                        case "p":
+                            // Always intercept ⌘P to suppress Chromium's
+                            // print dialog (which would render in the
+                            // hidden chrome UI and be invisible to the
+                            // user). When the profile allows printing,
+                            // dispatch the active tab's PDF to macOS's
+                            // standard print pipeline.
+                            guard allowPrinting,
+                                  let id = tabModel.activeTab?.id else { break }
+                            Task { @MainActor [weak bridge] in
+                                guard let bridge,
+                                      let pdf = await bridge.printTab(id: id),
+                                      !pdf.isEmpty
+                                else { return }
+                                Self.runPrintOperation(pdf: pdf)
+                            }
                         case "1", "2", "3", "4", "5", "6", "7", "8", "9":
                             // Safari/Chrome convention: ⌘N switches to the
                             // Nth tab; ⌘9 jumps to the LAST tab regardless
@@ -2079,6 +2103,26 @@ final class BrowserSession {
                         }
                     }
                     return nil
+                }
+
+                // Always forward modifier-state changes (Cmd / Ctrl / Shift /
+                // Option presses & releases) to vmView even when something
+                // else (typically the address field after a ⌘T) holds the
+                // first responder. Otherwise modifier release events get
+                // delivered to NSTextField, which doesn't forward them — so
+                // the guest's keyboard state gets stuck "Cmd held". A
+                // subsequent scroll then carries the stale Cmd state on the
+                // guest side and Chromium zooms instead of scrolling.
+                self.nativeChromeFlagsMonitor = NSEvent.addLocalMonitorForEvents(
+                    matching: .flagsChanged
+                ) { [weak vmView, weak window] event in
+                    guard let vmView, let window,
+                          let eventWindow = event.window,
+                          ObjectIdentifier(eventWindow) == windowID,
+                          window.firstResponder !== vmView
+                    else { return event }
+                    vmView.flagsChanged(with: event)
+                    return event
                 }
             }
         }
@@ -2272,6 +2316,26 @@ final class BrowserSession {
         window.delegate = helper
     }
 
+    /// Hand the given PDF bytes to macOS's print system. Loads them into
+    /// `PDFDocument` and runs the standard print operation (which presents
+    /// the system print panel). PDF data stays in RAM — never written to
+    /// disk on the host.
+    @MainActor
+    static func runPrintOperation(pdf: Data) {
+        guard let doc = PDFDocument(data: pdf) else { return }
+        let info = NSPrintInfo.shared
+        info.horizontalPagination = .automatic
+        info.verticalPagination = .automatic
+        guard let op = doc.printOperation(
+            for: info,
+            scalingMode: .pageScaleNone,
+            autoRotate: true
+        ) else { return }
+        op.showsPrintPanel = true
+        op.showsProgressPanel = true
+        op.run()
+    }
+
     /// Aggressively force the URL field to remain first responder for the
     /// next `deadline` seconds. The AddressField-side retry in
     /// `makeNSView` handles the common case, but VZVirtualMachineView is
@@ -2312,8 +2376,11 @@ final class BrowserSession {
     /// the page. System shortcuts (⌘Tab/⌘Q/⌘W/⌘Space/⌘M/⌘H) are handled
     /// by macOS itself once `capturesSystemKeys` is off — ⌘Q quits Bromure
     /// and ⌘W closes the window via AppKit's standard responder chain.
+    /// ⌘P is here unconditionally; the handler no-ops when the profile
+    /// doesn't allow printing, which suppresses Chromium's hidden print
+    /// dialog as a side benefit.
     static let nativeChromeShortcutKeys: Set<String> = [
-        "t", "l", "r", "[", "]",
+        "t", "l", "r", "p", "[", "]",
         "1", "2", "3", "4", "5", "6", "7", "8", "9",
     ]
 
@@ -2886,6 +2953,10 @@ final class BrowserSession {
             if let monitor = nativeChromeKeyMonitor {
                 NSEvent.removeMonitor(monitor)
                 nativeChromeKeyMonitor = nil
+            }
+            if let monitor = nativeChromeFlagsMonitor {
+                NSEvent.removeMonitor(monitor)
+                nativeChromeFlagsMonitor = nil
             }
             shellBridge?.stop()
             shellBridge = nil

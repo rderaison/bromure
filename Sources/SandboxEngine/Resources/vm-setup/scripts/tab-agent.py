@@ -628,6 +628,22 @@ def handle_cmd(msg, targets_by_id, link):
         # pick up the correct survivor.
         if _get_active() == tid:
             _set_active(None)
+    elif cmd == "print":
+        tid = msg.get("id")
+        request_id = msg.get("request_id", "")
+        b64 = ""
+        if tid:
+            t = _target_for(tid, targets_by_id)
+            if t and t.get("webSocketDebuggerUrl"):
+                # `Page.printToPDF` returns the PDF as a base64 string in the
+                # `data` field. We pass it straight through to the host —
+                # nothing touches the guest disk.
+                res = cdp_ws_call(t["webSocketDebuggerUrl"], "Page.printToPDF", {
+                    "preferCSSPageSize": True,
+                })
+                if res and isinstance(res.get("data"), str):
+                    b64 = res["data"]
+        link.send({"event": "pdf", "request_id": request_id, "data": b64})
     elif cmd == "get_certificate":
         origin = msg.get("origin", "")
         request_id = msg.get("request_id", "")

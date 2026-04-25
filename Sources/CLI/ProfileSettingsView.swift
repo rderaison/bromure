@@ -631,6 +631,29 @@ struct ProfileSettingsView: View {
                 description: "Autofill usernames and passwords from your Mac\u{2019}s saved passwords and iCloud Keychain. Disables Chromium\u{2019}s built-in password manager.",
                 isOn: $draft.settings.keychainPasswords
             )
+
+            settingsDivider
+
+            VStack(alignment: .leading, spacing: 6) {
+                settingToggle(
+                    "Allow Printing",
+                    description: "When this is on, pressing \u{2318}P captures the current page as a PDF and hands it to your Mac\u{2019}s print system \u{2014} so you can pick a real printer or save to a file from the standard macOS print dialog. The PDF stays in memory; nothing is written to your Mac\u{2019}s disk.",
+                    isOn: $draft.settings.allowPrinting
+                )
+                .disabled(!draft.settings.nativeChrome)
+
+                if !draft.settings.nativeChrome {
+                    Label {
+                        Text("Printing relies on the tab agent that ships with Native Tabs. Turn Native Tabs on first to enable printing.")
+                            .font(.callout)
+                    } icon: {
+                        Image(systemName: "info.circle.fill")
+                            .foregroundStyle(.blue)
+                    }
+                    .padding(10)
+                    .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
         }
     }
 

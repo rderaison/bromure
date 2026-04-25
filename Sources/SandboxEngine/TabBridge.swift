@@ -117,6 +117,26 @@ public final class TabBridge: NSObject, @unchecked Sendable {
     /// clipped-off inset) and triggers spurious hover dropdowns.
     public func parkMouse() { send(["cmd": "mouse_park"]) }
 
+    // MARK: - Print request/response
+
+    private var pendingPrintRequests: [String: (Data?) -> Void] = [:]
+
+    /// Render the given target as a PDF via Chromium's `Page.printToPDF`.
+    /// Returns `nil` on timeout or guest error. The PDF bytes never touch
+    /// disk on the guest; they fly straight back over vsock to the host.
+    public func printTab(id: String) async -> Data? {
+        let requestId = UUID().uuidString
+        return await withCheckedContinuation { cont in
+            pendingPrintRequests[requestId] = { data in cont.resume(returning: data) }
+            send(["cmd": "print", "id": id, "request_id": requestId])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30.0) { [weak self] in
+                if let cb = self?.pendingPrintRequests.removeValue(forKey: requestId) {
+                    cb(nil)
+                }
+            }
+        }
+    }
+
     // MARK: - Certificate request/response
 
     public typealias CertChain = [Data]
@@ -225,6 +245,13 @@ public final class TabBridge: NSObject, @unchecked Sendable {
             let certs = certB64s.compactMap { Data(base64Encoded: $0) }
             if let cb = pendingCertRequests.removeValue(forKey: id) {
                 cb(certs)
+            }
+        case "pdf":
+            guard let id = obj["request_id"] as? String else { return }
+            let b64 = obj["data"] as? String ?? ""
+            let pdf = b64.isEmpty ? nil : Data(base64Encoded: b64)
+            if let cb = pendingPrintRequests.removeValue(forKey: id) {
+                cb(pdf)
             }
         default:
             tbLog("[TabBridge] unknown event: \(event ?? "nil")")

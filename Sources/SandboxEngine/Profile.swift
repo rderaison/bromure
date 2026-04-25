@@ -290,6 +290,13 @@ public struct ProfileSettings: Codable, Equatable {
     // legacy profile saved before this field existed both opt in.
     public var nativeChrome: Bool = true
 
+    // Printing: when on, ⌘P in the browser captures the active tab as a
+    // PDF (via CDP Page.printToPDF) and hands it to macOS's print system.
+    // Off by default — host clipboard, print dialogs, etc. all reach
+    // outside the VM, so it stays opt-in even though the file flow stays
+    // RAM-only.
+    public var allowPrinting: Bool = false
+
     // Trace
     public var traceLevel: TraceLevel = .disabled
     public var traceAutoStart: Bool = true  // start tracing when session opens
@@ -318,7 +325,7 @@ public struct ProfileSettings: Codable, Equatable {
         case webcamDeviceID, microphoneDeviceID, speakerDeviceID, webcamEffects
         case rootCAs, matchKeyboardLayout, locale, allowAutomation
         case traceLevel, traceAutoStart, persistent, encryptOnDisk
-        case nativeChrome
+        case nativeChrome, allowPrinting
     }
 
     // Custom decoder so that adding new fields doesn't break existing profiles.
@@ -395,6 +402,7 @@ public struct ProfileSettings: Codable, Equatable {
         persistent = try c.decodeIfPresent(Bool.self, forKey: .persistent) ?? defaults.persistent
         encryptOnDisk = try c.decodeIfPresent(Bool.self, forKey: .encryptOnDisk) ?? defaults.encryptOnDisk
         nativeChrome = try c.decodeIfPresent(Bool.self, forKey: .nativeChrome) ?? defaults.nativeChrome
+        allowPrinting = try c.decodeIfPresent(Bool.self, forKey: .allowPrinting) ?? defaults.allowPrinting
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -461,6 +469,7 @@ public struct ProfileSettings: Codable, Equatable {
         try c.encode(persistent, forKey: .persistent)
         try c.encode(encryptOnDisk, forKey: .encryptOnDisk)
         try c.encode(nativeChrome, forKey: .nativeChrome)
+        try c.encode(allowPrinting, forKey: .allowPrinting)
     }
 
     /// Convert to a VMConfig for VM creation.

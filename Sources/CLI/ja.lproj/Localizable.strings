@@ -650,3 +650,10 @@
 "Couldn\U2019t fetch the certificate chain." = "証明書チェーンを取得できませんでした。";
 "Couldn\U2019t parse the certificate." = "証明書を解析できませんでした。";
 "Certificate inspection isn\U2019t available." = "証明書の確認は利用できません。";
+
+/* Host Isolation — printing */
+"Allow Printing" = "印刷を許可";
+"When this is on, pressing \U2318P captures the current page as a PDF and hands it to your Mac\U2019s print system \U2014 so you can pick a real printer or save to a file from the standard macOS print dialog. The PDF stays in memory; nothing is written to your Mac\U2019s disk." = "オンのとき、\U2318P で現在のページを PDF として取得し、Mac の印刷システムに渡します \U2014 標準の macOS 印刷ダイアログから実際のプリンタを選んだり、ファイルとして保存したりできます。PDF はメモリ上にのみ保持され、ディスクには書き込まれません。";
+
+/* Host Isolation — printing requires Native Tabs */
+"Printing relies on the tab agent that ships with Native Tabs. Turn Native Tabs on first to enable printing." = "印刷はネイティブタブに付属するタブエージェントを利用します。印刷を有効にするには、まずネイティブタブをオンにしてください。";
