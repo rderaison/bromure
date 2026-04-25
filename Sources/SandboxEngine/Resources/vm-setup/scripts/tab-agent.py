@@ -51,6 +51,7 @@ Guest → host:
 Host → guest:
   {"cmd":"activate","id":"T"}
   {"cmd":"close","id":"T"}
+  {"cmd":"close_active"}  # ⌘W — guest resolves active id locally
   {"cmd":"new","url":"https://..."}
   {"cmd":"navigate","id":"T","url":"..."}
   {"cmd":"reload","id":"T"}
@@ -687,6 +688,22 @@ def handle_cmd(msg, targets_by_id, link):
         # pick up the correct survivor.
         if _get_active() == tid:
             _set_active(None)
+    elif cmd == "close_active":
+        # ⌘W path: resolve the active tab here, where xdotool sees X11
+        # focus in real time. The host's view of "active" is fed by the
+        # 400ms /json poll and lags behind spontaneous Chromium-side tab
+        # switches (e.g. target=_blank), so closing what the host thinks
+        # is active sometimes hits the wrong tab.
+        try:
+            fresh = cdp_list_targets()
+        except Exception as e:
+            log(f"close_active: list targets failed: {e}")
+            return
+        active_id = active_target_id(fresh)
+        if active_id and _is_safe_id(active_id):
+            cdp_simple_post(f"/json/close/{active_id}")
+            if _get_active() == active_id:
+                _set_active(None)
     elif cmd == "print":
         request_id = msg.get("request_id", "")
         b64 = ""

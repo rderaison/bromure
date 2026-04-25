@@ -102,6 +102,11 @@ public final class TabBridge: NSObject, @unchecked Sendable {
 
     public func activate(id: String) { send(["cmd": "activate", "id": id]) }
     public func close(id: String)    { send(["cmd": "close",    "id": id]) }
+    /// Close whichever tab the guest currently sees as active. Used by
+    /// ⌘W: the host's `active` flag is fed by a 400 ms /json poll and lags
+    /// behind spontaneous Chromium tab switches (target=_blank, popups),
+    /// so deferring the choice to the guest avoids closing the wrong tab.
+    public func closeActive()        { send(["cmd": "close_active"]) }
     public func newTab(url: String)  { send(["cmd": "new",      "url": url]) }
     public func navigate(id: String, url: String) {
         send(["cmd": "navigate", "id": id, "url": url])

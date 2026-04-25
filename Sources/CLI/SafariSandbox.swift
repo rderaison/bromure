@@ -710,6 +710,20 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         action: #selector(showSettings(_:)),
                         keyEquivalent: ",")
         appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: NSLocalizedString("Hide Bromure", comment: ""),
+                        action: #selector(NSApplication.hide(_:)),
+                        keyEquivalent: "h")
+        let hideOthers = NSMenuItem(
+            title: NSLocalizedString("Hide Others", comment: ""),
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h"
+        )
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(withTitle: NSLocalizedString("Show All", comment: ""),
+                        action: #selector(NSApplication.unhideAllApplications(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: NSLocalizedString("Quit Bromure", comment: ""),
                         action: #selector(NSApplication.terminate(_:)),
                         keyEquivalent: "q")
@@ -2093,10 +2107,13 @@ final class BrowserSession {
                             // a regular window close (which tears down the
                             // session). Mirrors Safari/Chrome behaviour and
                             // keeps the macOS-app feel native-chrome aims
-                            // for.
-                            if tabModel.tabs.count > 1,
-                               let id = tabModel.activeTab?.id {
-                                bridge.close(id: id)
+                            // for. The active id is resolved guest-side
+                            // because the host's `active` flag is fed by a
+                            // 400 ms poll and lags behind spontaneous
+                            // tab switches in Chromium, which would
+                            // otherwise close the wrong tab.
+                            if tabModel.tabs.count > 1 {
+                                bridge.closeActive()
                             } else {
                                 window.performClose(nil)
                             }
