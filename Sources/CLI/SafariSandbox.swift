@@ -2087,6 +2087,19 @@ final class BrowserSession {
                                 else { return }
                                 Self.runPrintOperation(pdf: pdf)
                             }
+                        case "w":
+                            // ⌘W closes the active tab when more than one
+                            // is open; on the last tab it falls through to
+                            // a regular window close (which tears down the
+                            // session). Mirrors Safari/Chrome behaviour and
+                            // keeps the macOS-app feel native-chrome aims
+                            // for.
+                            if tabModel.tabs.count > 1,
+                               let id = tabModel.activeTab?.id {
+                                bridge.close(id: id)
+                            } else {
+                                window.performClose(nil)
+                            }
                         case "1", "2", "3", "4", "5", "6", "7", "8", "9":
                             // Safari/Chrome convention: ⌘N switches to the
                             // Nth tab; ⌘9 jumps to the LAST tab regardless
@@ -2373,14 +2386,16 @@ final class BrowserSession {
     /// stay in sync with the switch statement in the monitor handler.
     /// In-page editing shortcuts (⌘C/⌘V/⌘X/⌘A/⌘Z) intentionally aren't here:
     /// they need to keep flowing to Chromium so selection/copy works on
-    /// the page. System shortcuts (⌘Tab/⌘Q/⌘W/⌘Space/⌘M/⌘H) are handled
-    /// by macOS itself once `capturesSystemKeys` is off — ⌘Q quits Bromure
-    /// and ⌘W closes the window via AppKit's standard responder chain.
+    /// the page. System shortcuts (⌘Tab/⌘Q/⌘Space/⌘M/⌘H) are handled by
+    /// macOS itself once `capturesSystemKeys` is off — ⌘Q quits Bromure
+    /// via AppKit's standard responder chain.
     /// ⌘P is here unconditionally; the handler no-ops when the profile
     /// doesn't allow printing, which suppresses Chromium's hidden print
     /// dialog as a side benefit.
+    /// ⌘W is here so we can close the active tab first and only close the
+    /// window when there's a single tab left.
     static let nativeChromeShortcutKeys: Set<String> = [
-        "t", "l", "r", "p", "[", "]",
+        "t", "w", "l", "r", "p", "[", "]",
         "1", "2", "3", "4", "5", "6", "7", "8", "9",
     ]
 
