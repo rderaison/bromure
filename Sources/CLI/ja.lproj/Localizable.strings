@@ -657,3 +657,19 @@
 
 /* Host Isolation — printing requires Native Tabs */
 "Printing relies on the tab agent that ships with Native Tabs. Turn Native Tabs on first to enable printing." = "印刷はネイティブタブに付属するタブエージェントを利用します。印刷を有効にするには、まずネイティブタブをオンにしてください。";
+
+/* Native tabs — fallback title for tab with no title or URL */
+"New Tab" = "新規タブ";
+
+/* Network Healer — alerts */
+"Network Issue" = "ネットワークの問題";
+"The VM didn't get a network address. macOS's shared networking stack (vmnet) may be wedged." = "VM がネットワークアドレスを取得できませんでした。macOS の共有ネットワークスタック (vmnet) が停止している可能性があります。";
+"The VM has an address but can't reach the network. macOS's NAT/vmnet stack may be wedged." = "VM はアドレスを取得しましたが、ネットワークに到達できません。macOS の NAT/vmnet スタックが停止している可能性があります。";
+"Bromure can restart the macOS networking daemons. You'll be asked for your password." = "Bromure は macOS のネットワークデーモンを再起動できます。パスワードの入力を求められます。";
+"Repair Network" = "ネットワークを修復";
+"Continue Anyway" = "そのまま続行";
+"Network Repair Cancelled" = "ネットワーク修復をキャンセルしました";
+"The repair was cancelled or failed. Try again from the menu." = "修復はキャンセルされたか失敗しました。メニューからもう一度お試しください。";
+
+/* Network Healer — DHCP fallback warning (bridged-mode incompatible cases) */
+"The VM could not obtain an IP address via DHCP. Browsing will not work in this session.\n\nTry switching to Bridge mode in Settings \U2192 Network for more reliable connectivity." = "VM は DHCP で IP アドレスを取得できませんでした。このセッションではブラウジングできません。\n\nより安定した接続のため、設定 \U2192 ネットワークでブリッジモードに切り替えてみてください。";

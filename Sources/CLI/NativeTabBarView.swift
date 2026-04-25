@@ -390,7 +390,7 @@ private struct InactiveTabPill: View {
     private var displayTitle: String {
         if !tab.title.isEmpty { return tab.title }
         if let url = URL(string: tab.url), let host = url.host { return host }
-        return tab.url.isEmpty ? "New Tab" : tab.url
+        return tab.url.isEmpty ? String(localized: "New Tab") : tab.url
     }
 }
 

@@ -657,3 +657,19 @@
 
 /* Host Isolation — printing requires Native Tabs */
 "Printing relies on the tab agent that ships with Native Tabs. Turn Native Tabs on first to enable printing." = "打印依赖于随原生标签页一起提供的标签代理。请先启用原生标签页以启用打印。";
+
+/* Native tabs — fallback title for tab with no title or URL */
+"New Tab" = "新建标签页";
+
+/* Network Healer — alerts */
+"Network Issue" = "网络问题";
+"The VM didn't get a network address. macOS's shared networking stack (vmnet) may be wedged." = "虚拟机未获取到网络地址。macOS 的共享网络栈 (vmnet) 可能已卡住。";
+"The VM has an address but can't reach the network. macOS's NAT/vmnet stack may be wedged." = "虚拟机已获取地址,但无法访问网络。macOS 的 NAT/vmnet 网络栈可能已卡住。";
+"Bromure can restart the macOS networking daemons. You'll be asked for your password." = "Bromure 可以重启 macOS 的网络守护进程,届时会要求输入你的密码。";
+"Repair Network" = "修复网络";
+"Continue Anyway" = "仍然继续";
+"Network Repair Cancelled" = "网络修复已取消";
+"The repair was cancelled or failed. Try again from the menu." = "修复已取消或失败,请从菜单重试。";
+
+/* Network Healer — DHCP fallback warning (bridged-mode incompatible cases) */
+"The VM could not obtain an IP address via DHCP. Browsing will not work in this session.\n\nTry switching to Bridge mode in Settings \U2192 Network for more reliable connectivity." = "虚拟机无法通过 DHCP 获取 IP 地址,本次会话将无法浏览。\n\n请尝试在 设置 \U2192 网络 中切换到桥接模式以获得更可靠的连接。";

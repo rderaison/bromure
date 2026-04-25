@@ -657,3 +657,19 @@
 
 /* Host Isolation — printing requires Native Tabs */
 "Printing relies on the tab agent that ships with Native Tabs. Turn Native Tabs on first to enable printing." = "Drucken benötigt den Tab-Agent, der mit Native Tabs ausgeliefert wird. Aktiviere zuerst Native Tabs, um Drucken zu nutzen.";
+
+/* Native tabs — fallback title for tab with no title or URL */
+"New Tab" = "Neuer Tab";
+
+/* Network Healer — alerts */
+"Network Issue" = "Netzwerkproblem";
+"The VM didn't get a network address. macOS's shared networking stack (vmnet) may be wedged." = "Die VM hat keine Netzwerkadresse erhalten. Der gemeinsame Netzwerk-Stack von macOS (vmnet) hängt möglicherweise.";
+"The VM has an address but can't reach the network. macOS's NAT/vmnet stack may be wedged." = "Die VM hat eine Adresse, kann das Netzwerk aber nicht erreichen. Der NAT/vmnet-Stack von macOS hängt möglicherweise.";
+"Bromure can restart the macOS networking daemons. You'll be asked for your password." = "Bromure kann die macOS-Netzwerkdienste neu starten. Du wirst nach deinem Passwort gefragt.";
+"Repair Network" = "Netzwerk reparieren";
+"Continue Anyway" = "Trotzdem fortfahren";
+"Network Repair Cancelled" = "Netzwerkreparatur abgebrochen";
+"The repair was cancelled or failed. Try again from the menu." = "Die Reparatur wurde abgebrochen oder ist fehlgeschlagen. Versuche es erneut über das Menü.";
+
+/* Network Healer — DHCP fallback warning (bridged-mode incompatible cases) */
+"The VM could not obtain an IP address via DHCP. Browsing will not work in this session.\n\nTry switching to Bridge mode in Settings \U2192 Network for more reliable connectivity." = "Die VM konnte keine IP-Adresse über DHCP beziehen. Surfen ist in dieser Sitzung nicht möglich.\n\nWechsle in Einstellungen \U2192 Netzwerk in den Bridge-Modus für eine zuverlässigere Verbindung.";
