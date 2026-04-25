@@ -5,14 +5,34 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; connect-src 'self' file:; img-src 'self' data: file:;">
 <title>Bromure — Connecting VPN</title>
 <style>
+  /* Tokens — match bromure.io. Dark by default; the
+     `prefers-color-scheme: light` block overrides for light mode and
+     swaps the bg image to day.jpg. No gradients. */
   :root {
-    --bg: hsl(216, 50%, 6%);
-    --fg: hsl(0, 0%, 98%);
-    --primary: hsl(214, 50%, 70%);
-    --accent: hsl(30, 80%, 55%);
-    --muted-fg: hsl(216, 20%, 65%);
-    --border: rgba(255, 255, 255, 0.1);
+    --bg:         hsl(220, 40%, 5%);
+    --fg:         hsl(0, 0%, 98%);
+    --muted-fg:   hsl(220, 12%, 65%);
+    --accent:     hsl(30, 80%, 55%);
+    --border:     hsla(0, 0%, 100%, 0.08);
+    --card-bg:    hsla(255, 255%, 255%, 0.04);
+    --msg-bg:     hsla(0, 0%, 0%, 0.30);
+    --bg-image:   url('night.jpg');
+    --tint-rgb:   5, 8, 18;
   }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:       hsl(210, 40%, 97%);
+      --fg:       hsl(220, 40%, 12%);
+      --muted-fg: hsl(220, 12%, 38%);
+      --accent:   hsl(30, 85%, 42%);
+      --border:   hsla(220, 18%, 16%, 0.10);
+      --card-bg:  hsla(0, 0%, 100%, 0.65);
+      --msg-bg:   hsla(220, 18%, 92%, 0.85);
+      --bg-image: url('day.jpg');
+      --tint-rgb: 245, 247, 250;
+    }
+  }
+
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; width: 100%; }
   body {
@@ -25,19 +45,17 @@
   }
   .bg {
     position: absolute; inset: 0;
-    background-image: url('night.jpg');
+    background-image: var(--bg-image);
     background-size: cover;
     background-position: center;
     background-repeat: no-repeat;
   }
+  /* Flat translucent tint instead of the old vertical gradient — keeps
+     the photo readable while letting `--bg` tone through enough that
+     the card sits comfortably over either day.jpg or night.jpg. */
   .bg-overlay {
     position: absolute; inset: 0;
-    background: linear-gradient(
-      to bottom,
-      hsla(216, 50%, 6%, 0.40) 0%,
-      hsla(216, 50%, 6%, 0.60) 50%,
-      hsla(216, 50%, 6%, 1.00) 100%
-    );
+    background-color: rgba(var(--tint-rgb), 0.55);
   }
   .stage {
     position: relative; z-index: 1;
@@ -47,36 +65,34 @@
   }
   .card {
     width: 100%; max-width: 560px;
-    background: rgba(255, 255, 255, 0.05);
-    -webkit-backdrop-filter: blur(14px);
-    backdrop-filter: blur(14px);
+    background: var(--card-bg);
+    -webkit-backdrop-filter: blur(14px) saturate(1.2);
+    backdrop-filter: blur(14px) saturate(1.2);
     border: 1px solid var(--border);
     border-radius: 24px;
     padding: 56px 48px;
     text-align: center;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
   }
   .brand {
     font-size: 14px;
     font-weight: 600;
     letter-spacing: 0.2em;
     text-transform: uppercase;
-    opacity: 0.55;
+    opacity: 0.65;
     margin-bottom: 32px;
+    color: var(--accent);
   }
-  .gradient-text {
-    background: linear-gradient(135deg, hsl(214, 50%, 70%) 0%, hsl(30, 80%, 55%) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    color: transparent;
-  }
+  /* Solid accent — the bromure_web `.gradient-text` class is no longer
+     a gradient. Keep this hook so the title can pick up the accent. */
+  .accent { color: var(--accent); letter-spacing: -0.02em; }
   h1 {
     font-size: 32px;
     font-weight: 700;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.022em;
     line-height: 1.15;
     margin-bottom: 14px;
+    color: var(--fg);
   }
   p {
     font-size: 16px;
@@ -86,35 +102,34 @@
     margin: 0 auto;
   }
 
-  /* Spinner */
+  /* Spinner — single-tone arc on a faint track. */
   .spinner {
     width: 64px; height: 64px;
     margin: 0 auto 28px;
-    border: 3px solid rgba(255, 255, 255, 0.12);
-    border-top-color: hsl(214, 50%, 70%);
-    border-right-color: hsl(30, 80%, 55%);
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 1.1s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Error */
+  /* Error — solid disk, no gradient. */
   .error-icon {
     width: 64px; height: 64px;
     margin: 0 auto 28px;
     border-radius: 50%;
-    background: linear-gradient(135deg, #ff3b30 0%, #d70015 100%);
+    background: hsl(0, 75%, 50%);
     color: white;
     display: flex; align-items: center; justify-content: center;
     font-size: 36px;
     font-weight: 600;
-    box-shadow: 0 10px 30px rgba(215, 0, 21, 0.35);
+    box-shadow: 0 10px 30px hsla(0, 75%, 40%, 0.30);
   }
   .msg {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 13px;
     text-align: left;
-    background: rgba(0, 0, 0, 0.3);
+    background: var(--msg-bg);
     border: 1px solid var(--border);
     padding: 14px 18px;
     border-radius: 12px;
@@ -133,14 +148,14 @@
     display: inline-flex; align-items: center; gap: 8px;
     padding: 12px 28px;
     border-radius: 999px;
-    background: hsl(30, 80%, 55%);
+    background: var(--accent);
     color: white;
     border: none;
     font-size: 15px;
     font-weight: 600;
     font-family: inherit;
     cursor: pointer;
-    box-shadow: 0 8px 24px hsla(30, 80%, 55%, 0.35);
+    box-shadow: 0 8px 24px hsla(30, 80%, 55%, 0.30);
     transition: transform 0.12s ease, opacity 0.12s ease;
   }
   .btn:hover { opacity: 0.92; transform: scale(1.03); }
@@ -154,11 +169,11 @@
 <div class="bg-overlay"></div>
 <div class="stage">
   <div class="card">
-    <div class="brand gradient-text">Bromure</div>
+    <div class="brand">Bromure</div>
 
     <div id="loading">
       <div class="spinner" aria-hidden="true"></div>
-      <h1><span id="t-title" class="gradient-text">Connecting to VPN</span></h1>
+      <h1><span id="t-title" class="accent">Connecting to VPN</span></h1>
       <p id="t-subtitle">Your browser session will start automatically once the VPN is ready.</p>
     </div>
 

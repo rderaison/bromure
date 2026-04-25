@@ -556,6 +556,7 @@ public struct ProfileSettings: Codable, Equatable {
             enableAutomation: defaults.bool(forKey: "automation.enabled") || nativeChrome,
             nativeChrome: nativeChrome,
             nativeChromeInset: nativeChrome ? VMConfig.defaultNativeChromeInset : 0,
+            allowPrinting: allowPrinting && nativeChrome,
             testSuite: isTestSuite,
             traceLevel: traceLevel,
             matchKeyboardLayout: matchKeyboardLayout,

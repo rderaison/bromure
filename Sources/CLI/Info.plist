@@ -7,9 +7,9 @@
     <key>CFBundleIdentifier</key>
     <string>io.bromure.app</string>
     <key>CFBundleVersion</key>
-    <string>3.0.0</string>
+    <string>3.2.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>3.0.0</string>
+    <string>3.2.0</string>
     <key>CFBundleExecutable</key>
     <string>bromure</string>
     <key>CFBundleIconFile</key>

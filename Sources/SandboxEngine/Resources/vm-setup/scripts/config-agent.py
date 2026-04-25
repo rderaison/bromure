@@ -415,6 +415,8 @@ def write_chrome_env(cfg):
         lines.append("AUTOMATION=1")
     if cfg.get("nativeChrome"):
         lines.append("NATIVE_CHROME=1")
+    if cfg.get("allowPrinting"):
+        lines.append("ALLOW_PRINTING=1")
     if cfg.get("debugShell"):
         lines.append("DEBUG_SHELL=1")
     if cfg.get("traceLevel", 0) > 0:

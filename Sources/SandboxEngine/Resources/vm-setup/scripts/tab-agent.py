@@ -8,6 +8,41 @@ native macOS titlebar accessories. This agent is the guest-side plumbing.
 Talks to Chromium over CDP (localhost:9222) and to the host over vsock
 port 5810 (newline-delimited JSON).
 
+Trust model
+-----------
+This agent runs as the chrome user inside the guest. The threat actor is
+a malicious page running inside Chromium. That actor can:
+
+  - Set arbitrary text in `document.title` and `document.URL`. Both flow
+    through /json -> upsert -> host. Host code displays as SwiftUI Text;
+    no shell or path interpretation.
+  - Override the favicon URL via <link rel=icon>. We fetch in-guest with
+    a 128 KB cap and an http(s) scheme allow-list; bytes go to host as
+    base64 and render via NSImage.
+  - Override `navigator.mediaDevices.getUserMedia` and our
+    `__bromureMediaPatched` flag, spoofing or hiding the per-tab red dot.
+    Cosmetic only.
+
+That actor CANNOT:
+
+  - Send vsock commands. AF_VSOCK requires kernel access; sandboxed
+    Chromium processes have no syscall path to it.
+  - Trigger any host->guest command (`activate`, `close`, `new`,
+    `navigate`, `print`, `get_certificate`, `mouse_park`). Those only
+    arrive on the existing host connection.
+
+In addition, this agent enforces:
+
+  - `ALLOW_PRINTING` env var must be `"1"` for `cmd: "print"` to do
+    anything. Set in chrome-env by config-agent only when the active
+    profile has Allow Printing on. Host already gates the same call;
+    this is defense in depth.
+  - Target ids interpolated into HTTP paths or used as DevTools session
+    keys must match `_SAFE_ID_RE` (alphanumeric + dashes). CDP target
+    ids fit this format; refusing anything else prevents path traversal
+    or HTTP header injection from a future bug that lets unvalidated
+    strings reach those code paths.
+
 Guest → host:
   {"event":"upsert","id":"T","title":"...","url":"...","active":true}
   {"event":"favicon","id":"T","mime":"image/png","data":"BASE64"}
@@ -31,6 +66,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import socket
 import ssl
 import struct
@@ -39,6 +75,22 @@ import sys
 import threading
 import time
 from urllib.parse import urlparse, urljoin
+
+# Hard gate on whether printing is honoured. Set from chrome-env at agent
+# launch (xinitrc sources chrome-env into its env, which propagates through
+# resilient-launch into our process). Read once; a session's profile is
+# immutable for the session's lifetime.
+_ALLOW_PRINTING = os.environ.get("ALLOW_PRINTING") == "1"
+
+# Target ids that we'll accept in HTTP paths and as DevTools session keys.
+# CDP target ids are alphanumeric + occasional dashes; rejecting anything
+# else stops a malformed id from sliding into header injection or path
+# traversal if a future bug ever lets one through unvalidated.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9-]+$")
+
+
+def _is_safe_id(s):
+    return bool(s) and isinstance(s, str) and _SAFE_ID_RE.match(s) is not None
 
 VSOCK_PORT = 5810
 HOST_CID = 2
@@ -226,8 +278,15 @@ def media_state(ws_url):
     return val if isinstance(val, str) else ""
 
 
+_CDP_PATH_RE = re.compile(r"^/json/(activate|close)/[A-Za-z0-9-]+$")
+
+
 def cdp_simple_post(path):
-    """Fire-and-forget POST to /json/<action>/<id>."""
+    """Fire-and-forget POST to /json/<action>/<id>. Path is validated to
+    block any header / traversal injection from a malformed target id."""
+    if not _CDP_PATH_RE.match(path):
+        log(f"cdp: refusing unsafe path {path!r}")
+        return
     conn = http.client.HTTPConnection(CDP_HOST, CDP_PORT, timeout=3)
     try:
         conn.request("PUT", path)  # DevTools accepts PUT; some builds require POST
@@ -619,25 +678,32 @@ def active_target_id(targets):
 def handle_cmd(msg, targets_by_id, link):
     cmd = msg.get("cmd")
     tid = msg.get("id")
-    if cmd == "activate" and tid:
+    if cmd == "activate" and _is_safe_id(tid):
         cdp_simple_post(f"/json/activate/{tid}")
         _set_active(tid)
-    elif cmd == "close" and tid:
+    elif cmd == "close" and _is_safe_id(tid):
         cdp_simple_post(f"/json/close/{tid}")
         # If we just closed the active tab, forget it — the next poll will
         # pick up the correct survivor.
         if _get_active() == tid:
             _set_active(None)
     elif cmd == "print":
-        tid = msg.get("id")
         request_id = msg.get("request_id", "")
         b64 = ""
-        if tid:
+        # Hard gate: even if the host issues `cmd: print`, refuse unless
+        # the active profile has Allow Printing on (chrome-env propagates
+        # ALLOW_PRINTING=1). Reply with empty data so the host's
+        # continuation completes; without the reply the host's request
+        # would just time out, leaking the user's intent into the wait.
+        if not _ALLOW_PRINTING:
+            log("print: blocked (ALLOW_PRINTING=0)")
+        elif _is_safe_id(msg.get("id")):
+            tid = msg["id"]
             t = _target_for(tid, targets_by_id)
             if t and t.get("webSocketDebuggerUrl"):
-                # `Page.printToPDF` returns the PDF as a base64 string in the
-                # `data` field. We pass it straight through to the host —
-                # nothing touches the guest disk.
+                # `Page.printToPDF` returns the PDF as a base64 string in
+                # the `data` field. We pass it straight through to the
+                # host — nothing touches the guest disk.
                 res = cdp_ws_call(t["webSocketDebuggerUrl"], "Page.printToPDF", {
                     "preferCSSPageSize": True,
                 })
@@ -692,7 +758,7 @@ def handle_cmd(msg, targets_by_id, link):
             "url": url,
             "active": True,
         })
-    elif cmd == "navigate" and tid:
+    elif cmd == "navigate" and _is_safe_id(tid):
         url = msg.get("url")
         if not url:
             return
@@ -706,11 +772,11 @@ def handle_cmd(msg, targets_by_id, link):
         res = cdp_ws_call(t["webSocketDebuggerUrl"], "Page.navigate", {"url": url})
         if res is None:
             log(f"navigate: CDP Page.navigate returned nothing for {tid}")
-    elif cmd == "reload" and tid:
+    elif cmd == "reload" and _is_safe_id(tid):
         t = _target_for(tid, targets_by_id)
         if t:
             cdp_ws_call(t["webSocketDebuggerUrl"], "Page.reload", {})
-    elif cmd in ("back", "forward") and tid:
+    elif cmd in ("back", "forward") and _is_safe_id(tid):
         t = _target_for(tid, targets_by_id)
         if not t:
             return

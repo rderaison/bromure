@@ -455,6 +455,7 @@ public final class VMPool {
         if config.blockDownloads { cfg["blockDownloads"] = true }
         if config.enableAutomation { cfg["automation"] = true }
         if config.nativeChrome { cfg["nativeChrome"] = true }
+        if config.allowPrinting { cfg["allowPrinting"] = true }
         if ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil {
             cfg["debugShell"] = true
         }

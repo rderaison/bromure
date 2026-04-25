@@ -240,6 +240,13 @@ public struct VMConfig {
     /// to `displayHeight` regardless of the toggle.
     public var nativeChromeInset: Int
 
+    /// When true, tab-agent honors `cmd: "print"` from the host (which is
+    /// itself only sent when the active profile has Allow Printing on).
+    /// Plumbed through chrome-env as `ALLOW_PRINTING=1` so a tab-agent
+    /// running in a profile that doesn't allow printing rejects the
+    /// command even if a host bug were to issue it — defense in depth.
+    public var allowPrinting: Bool
+
     /// When true, the guest runs test-runner.sh instead of Chromium.
     /// Set via the BROMURE_TEST_SUITE environment variable on the host.
     public var testSuite: Bool
@@ -315,6 +322,7 @@ public struct VMConfig {
         enableAutomation: Bool = false,
         nativeChrome: Bool = false,
         nativeChromeInset: Int = 0,
+        allowPrinting: Bool = false,
         testSuite: Bool = false,
         traceLevel: TraceLevel = .disabled,
         matchKeyboardLayout: Bool = true,
@@ -383,6 +391,7 @@ public struct VMConfig {
         self.enableAutomation = enableAutomation
         self.nativeChrome = nativeChrome
         self.nativeChromeInset = nativeChromeInset
+        self.allowPrinting = allowPrinting
         self.testSuite = testSuite
         self.traceLevel = traceLevel
         self.matchKeyboardLayout = matchKeyboardLayout

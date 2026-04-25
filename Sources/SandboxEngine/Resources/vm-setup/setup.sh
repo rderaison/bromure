@@ -439,6 +439,7 @@ done
 mkdir -p /mnt/opt/bromure/splash
 install_config splash/splash.html /mnt/opt/bromure/splash/splash.html
 install_config splash/night.jpg   /mnt/opt/bromure/splash/night.jpg
+install_config splash/day.jpg     /mnt/opt/bromure/splash/day.jpg
 
 # Native messaging hosts (link sender + file picker + trace + corporate guard)
 mkdir -p /mnt/etc/chromium/native-messaging-hosts
