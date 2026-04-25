@@ -219,12 +219,16 @@ def cdp_list_targets():
     return list(reversed(pages))
 
 
-# JS wrapper for getUserMedia tracking. Injected lazily on each poll via
-# Runtime.evaluate; the `__bromureMediaPatched` guard makes it idempotent
-# across navigations within the same JS context. Reports current camera
-# and microphone usage by counting active getUserMedia tracks and writing
-# the state to `document.documentElement.dataset.bromureMedia`.
-_MEDIA_TRACKER_JS = r"""
+# JS wrapper for getUserMedia tracking + visibility readout. Injected
+# lazily on each poll via Runtime.evaluate; the `__bromureMediaPatched`
+# guard makes the wrapper idempotent across navigations. Returns
+# `"<visibility>|<media>"` so a single CDP roundtrip per tab carries
+# both signals. `document.visibilityState` is the primary "which tab is
+# active" signal — the active tab reports `'visible'`, all others
+# `'hidden'` — which catches Chromium-side activations (target=_blank
+# clicks, window.open, etc.) that the X11-title fallback can miss in
+# the brief window between the new tab opening and its title settling.
+_TAB_TRACKER_JS = r"""
 (() => {
   if (!window.__bromureMediaPatched && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
     window.__bromureMediaPatched = true;
@@ -257,26 +261,34 @@ _MEDIA_TRACKER_JS = r"""
       return stream;
     };
   }
-  try { return document.documentElement.dataset.bromureMedia || ''; }
-  catch (_) { return ''; }
+  let media = '';
+  try { media = document.documentElement.dataset.bromureMedia || ''; }
+  catch (_) { /* no documentElement yet */ }
+  const vis = (typeof document !== 'undefined' && document.visibilityState) || '';
+  return vis + '|' + media;
 })()
 """.strip()
 
 
-def media_state(ws_url):
-    """Inject the getUserMedia wrapper (idempotent) and return a string of
-    `'video'`, `'audio'`, `'video,audio'`, or `''`. One CDP roundtrip per
-    target per poll; cheap enough."""
+def tab_state(ws_url):
+    """Inject the tracker (idempotent) and return ``(visibility, media)``.
+
+    visibility: ``'visible'`` / ``'hidden'`` / ``'prerender'`` / ``''``
+    media: ``''`` / ``'video'`` / ``'audio'`` / ``'video,audio'``
+    """
     if not ws_url:
-        return ""
+        return ("", "")
     res = cdp_ws_call(ws_url, "Runtime.evaluate", {
-        "expression": _MEDIA_TRACKER_JS,
+        "expression": _TAB_TRACKER_JS,
         "returnByValue": True,
     })
     if not res:
-        return ""
+        return ("", "")
     val = res.get("result", {}).get("value")
-    return val if isinstance(val, str) else ""
+    if not isinstance(val, str):
+        return ("", "")
+    parts = val.split("|", 1)
+    return (parts[0] if parts else "", parts[1] if len(parts) > 1 else "")
 
 
 _CDP_PATH_RE = re.compile(r"^/json/(activate|close)/[A-Za-z0-9-]+$")
@@ -638,25 +650,52 @@ def _match_target_by_title(targets, raw_title):
     return None
 
 
-def active_target_id(targets):
+def active_target_id(targets, visibility=None):
     """Report the currently-active target id, in this priority order:
 
     1. **Trusted explicit set** (within ``_ACTIVE_TRUST_TTL`` of the last
        `cmd: activate` / `cmd: new`): use ``_active_id`` as-is. Without
-       this, the xdotool branch below frequently misreads the X11 title
-       in the brief window before Chromium re-renders it after our /json/
-       activate, and reverts the host UI back to the previous tab.
-    2. The X11 active window's title matched against /json titles —
-       picks up Chromium-side activations (target=_blank link clicks,
-       window.open popups, etc.) that the host didn't initiate.
-    3. The id we last set ourselves, as long as it's still a live target.
-    4. The first target in /json as a final fallback for the empty /
+       this, the visibility / xdotool branches can flap in the brief
+       window before Chromium fully settles the new active tab after
+       our `/json/activate`, reverting the host UI to the previous tab.
+    2. **document.visibilityState**: the active tab reports ``'visible'``;
+       all others ``'hidden'``. This is the source of truth — Chromium
+       sets it the moment a tab becomes the active web contents, even
+       for Chromium-initiated activations like target=_blank link
+       clicks or window.open popups. It works regardless of X11 window-
+       title timing, which the previous fallback (xdotool) raced.
+    3. **xdotool window title**: secondary fallback when visibility is
+       unknown for every target (e.g. tabs whose JS context isn't
+       evaluable yet — non-http(s) urls, very-fresh pages).
+    4. The id we last set ourselves, as long as it's still a live target.
+    5. The first target in /json as a final fallback for the empty /
        very-short window where no signal is available yet.
     """
     if _is_active_trusted():
         tracked = _get_active()
         if tracked and any(t["id"] == tracked for t in targets):
             return tracked
+
+    if visibility:
+        visible_ids = [
+            t["id"] for t in targets
+            if visibility.get(t["id"]) == "visible"
+        ]
+        if len(visible_ids) == 1:
+            tid = visible_ids[0]
+            if tid != _get_active():
+                _set_active(tid)
+            return tid
+        if len(visible_ids) > 1:
+            # Transient (mid-switch). Prefer the one we already track
+            # if it's still in the visible set; otherwise pick the
+            # first.
+            tracked = _get_active()
+            if tracked in visible_ids:
+                return tracked
+            tid = visible_ids[0]
+            _set_active(tid)
+            return tid
 
     xdo = _xdotool_active_window_title()
     if xdo:
@@ -890,7 +929,20 @@ def main():
         for t in targets:
             targets_by_id[t["id"]] = t
 
-        active_id = active_target_id(targets)
+        # Inject + read the per-tab tracker once per target; the result
+        # carries both visibility (used to pick the active tab) and
+        # media tracker output. Skipped for non-evaluable urls.
+        states = {}
+        for t in targets:
+            url = t.get("url") or ""
+            ws = t.get("webSocketDebuggerUrl") or ""
+            if ws and url.startswith(("http://", "https://")):
+                states[t["id"]] = tab_state(ws)
+            else:
+                states[t["id"]] = ("", "")
+
+        visibility = {tid: vis for tid, (vis, _) in states.items()}
+        active_id = active_target_id(targets, visibility)
 
         current_ids = set()
         for t in targets:
@@ -898,13 +950,7 @@ def main():
             current_ids.add(tid)
             title = t.get("title") or ""
             url = t.get("url") or ""
-            # Inject + read the media tracker. Skipped for non-http(s)
-            # pages (about:, devtools:, …) where the wrapper isn't useful
-            # and the Runtime.evaluate just adds latency.
-            if url.startswith(("http://", "https://")):
-                media = media_state(t.get("webSocketDebuggerUrl") or "")
-            else:
-                media = ""
+            _, media = states.get(tid, ("", ""))
             using_camera = "video" in media
             using_microphone = "audio" in media
             prev = known.get(tid)

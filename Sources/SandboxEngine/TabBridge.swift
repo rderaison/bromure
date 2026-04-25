@@ -74,6 +74,14 @@ public final class TabBridge: NSObject, @unchecked Sendable {
     /// Fires when the guest first connects (i.e. Chromium is up).
     public var onConnected: (() -> Void)?
 
+    /// Fires synchronously inside `send(...)` before bytes hit the wire.
+    /// BrowserSession wires this up to ``VMAutoSuspend.resumeForAPIRequest``
+    /// so any host-initiated tab action (URL submit, ⌘T, ⌘W, click, …) on a
+    /// paused VM kicks it awake — otherwise the command sits in the vsock
+    /// buffer until the next focus event resumes the VM, and the user's
+    /// click feels like it did nothing.
+    public var onWillSend: (() -> Void)?
+
     public init(socketDevice: VZVirtioSocketDevice) {
         self.socketDevice = socketDevice
         super.init()
@@ -313,6 +321,9 @@ public final class TabBridge: NSObject, @unchecked Sendable {
             tbLog("[TabBridge] drop send (no guest): \(obj)")
             return
         }
+        // Wake the VM if it was auto-suspended — the guest can't read our
+        // bytes off the vsock until it's running again.
+        onWillSend?()
         guard var data = try? JSONSerialization.data(withJSONObject: obj) else { return }
         data.append(0x0A)
         let fd = currentFD

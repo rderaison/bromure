@@ -1977,6 +1977,12 @@ final class BrowserSession {
                 bridge.onTabsChanged = { [weak tabModel] tabs in
                     tabModel?.setTabs(tabs)
                 }
+                // Any host-initiated tab action (URL submit, ⌘T, click, …)
+                // should resume a paused VM so the command isn't stranded
+                // in the vsock buffer.
+                bridge.onWillSend = { [weak self] in
+                    self?.autoSuspend?.resumeForAPIRequest()
+                }
                 tabModel.onActivate = { [weak bridge, weak tabModel] id in
                     // Mark active locally first so the URL bar's "active tab"
                     // lookup is immediately correct, even if the guest takes
