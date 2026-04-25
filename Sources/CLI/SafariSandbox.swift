@@ -2151,10 +2151,18 @@ final class BrowserSession {
                             // hide ourselves; the menu items still cover
                             // launcher/settings windows where no monitor
                             // is installed.
-                            if modifiers == [.command, .option] {
-                                NSApp.hideOtherApplications(nil)
-                            } else {
-                                NSApp.hide(nil)
+                            //
+                            // Defer to the next runloop tick: calling
+                            // NSApp.hide directly from within keyDown
+                            // processing of a session window doesn't
+                            // actually hide — the in-flight event seems
+                            // to race the hide and win.
+                            DispatchQueue.main.async {
+                                if modifiers == [.command, .option] {
+                                    NSApp.hideOtherApplications(nil)
+                                } else {
+                                    NSApp.hide(nil)
+                                }
                             }
                         default:
                             break
