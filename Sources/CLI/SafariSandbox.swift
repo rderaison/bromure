@@ -2061,6 +2061,21 @@ final class BrowserSession {
                           Self.nativeChromeShortcutKeys.contains(key)
                     else { return event }
 
+                    // Snapshot modifiers off `event` (non-Sendable) so the
+                    // @MainActor Task can route ⌘H vs ⌥⌘H without capturing
+                    // the event itself.
+                    let modifiers = event.modifierFlags
+                        .intersection(.deviceIndependentFlagsMask)
+
+                    // ⇧⌘H / ⌃⌘H aren't standard hide shortcuts; let them
+                    // fall through to the guest instead of being silently
+                    // swallowed by the monitor.
+                    if key == "h",
+                       modifiers != [.command],
+                       modifiers != [.command, .option] {
+                        return event
+                    }
+
                     Task { @MainActor in
                         guard let bridge, let tabModel, let window else { return }
                         switch key {
@@ -2128,6 +2143,19 @@ final class BrowserSession {
                             let target = (n == 9) ? tabs.last! : tabs[min(n - 1, tabs.count - 1)]
                             tabModel.markActiveLocally(target.id)
                             bridge.activate(id: target.id)
+                        case "h":
+                            // VZVirtualMachineView's performKeyEquivalent
+                            // claims ⌘+letter shortcuts before AppKit walks
+                            // the main menu, so the Hide menu items never
+                            // fire when a session window is key. Dispatch
+                            // hide ourselves; the menu items still cover
+                            // launcher/settings windows where no monitor
+                            // is installed.
+                            if modifiers == [.command, .option] {
+                                NSApp.hideOtherApplications(nil)
+                            } else {
+                                NSApp.hide(nil)
+                            }
                         default:
                             break
                         }
@@ -2403,16 +2431,19 @@ final class BrowserSession {
     /// stay in sync with the switch statement in the monitor handler.
     /// In-page editing shortcuts (⌘C/⌘V/⌘X/⌘A/⌘Z) intentionally aren't here:
     /// they need to keep flowing to Chromium so selection/copy works on
-    /// the page. System shortcuts (⌘Tab/⌘Q/⌘Space/⌘M/⌘H) are handled by
-    /// macOS itself once `capturesSystemKeys` is off — ⌘Q quits Bromure
-    /// via AppKit's standard responder chain.
+    /// the page. ⌘Q quits Bromure via AppKit's standard responder chain
+    /// once `capturesSystemKeys` is off.
     /// ⌘P is here unconditionally; the handler no-ops when the profile
     /// doesn't allow printing, which suppresses Chromium's hidden print
     /// dialog as a side benefit.
     /// ⌘W is here so we can close the active tab first and only close the
     /// window when there's a single tab left.
+    /// ⌘H / ⌥⌘H are here because VZVirtualMachineView's performKeyEquivalent
+    /// claims ⌘+letter chords before AppKit walks the main menu, so the
+    /// Hide menu items never fire when a session window is key — we
+    /// dispatch NSApp.hide / hideOtherApplications ourselves instead.
     static let nativeChromeShortcutKeys: Set<String> = [
-        "t", "w", "l", "r", "p", "[", "]",
+        "t", "w", "l", "r", "p", "h", "[", "]",
         "1", "2", "3", "4", "5", "6", "7", "8", "9",
     ]
 
