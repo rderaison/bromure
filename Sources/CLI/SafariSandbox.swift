@@ -1146,6 +1146,15 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         warm: SandboxEngine.VMPool.WarmVM,
         relaunch: @escaping @MainActor () -> Void
     ) async -> Bool {
+        // The in-guest probe runs in the background during warm-up — it usually
+        // finishes long before the user claims a VM, but on a cold start the user
+        // can race ahead. Give it a brief moment to land before we decide.
+        if !warm.networkDiagnosisBox.resolved {
+            for _ in 0..<10 {
+                try? await Task.sleep(for: .milliseconds(100))
+                if warm.networkDiagnosisBox.resolved { break }
+            }
+        }
         if warm.networkReady { return true }
 
         let networkMode = UserDefaults.standard.string(forKey: "vm.networkMode") ?? "nat"
