@@ -966,7 +966,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.showSessionError()
                 return
             }
-            let networkReady = warm.networkReady
+            let proceed = await self.presentNetworkRepairIfNeeded(warm: warm) { [weak self] in
+                self?.openNewBrowser(initialURL: initialURL)
+            }
+            guard proceed else { return }
             let session = BrowserSession(warmVM: warm, config: config)
             session.onClosed = { [weak self] session in
                 guard let self else { return }
@@ -980,9 +983,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
             session.show()
-            if !networkReady {
-                Self.showNetworkWarning()
-            }
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
                 self.state.pool?.scheduleWarmUp()
             }
@@ -1087,7 +1087,11 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.showSessionError()
                 return
             }
-            let networkReady = warm.networkReady
+            self.state.isLaunching = false
+            let proceed = await self.presentNetworkRepairIfNeeded(warm: warm) { [weak self] in
+                self?.openNewBrowser(with: profile, initialURL: initialURL)
+            }
+            guard proceed else { return }
             let session = BrowserSession(
                 warmVM: warm, config: config,
                 profile: profile,
@@ -1107,10 +1111,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
             session.show()
-            self.state.isLaunching = false
-            if !networkReady {
-                Self.showNetworkWarning()
-            }
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
                 self.state.pool?.scheduleWarmUp()
             }
@@ -1135,6 +1135,85 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
         alert.runModal()
+    }
+
+    /// Returns true if the caller should proceed with `warm` (network is
+    /// healthy, or user opted to continue anyway). Returns false if the
+    /// warm VM was retired — either the user cancelled, or a repair was
+    /// triggered and `relaunch` was invoked to start a fresh session.
+    @MainActor
+    private func presentNetworkRepairIfNeeded(
+        warm: SandboxEngine.VMPool.WarmVM,
+        relaunch: @escaping @MainActor () -> Void
+    ) async -> Bool {
+        if warm.networkReady { return true }
+
+        let networkMode = UserDefaults.standard.string(forKey: "vm.networkMode") ?? "nat"
+        // In bridged mode the host's network is upstream — kickstarting vmnet
+        // wouldn't help. Fall back to the existing passive warning.
+        if networkMode != "nat" {
+            Self.showNetworkWarning()
+            return true
+        }
+
+        let action: NetworkHealer.Action
+        let problem: String
+        switch warm.networkDiagnosis {
+        case .noIP, .unknown:
+            action = .both
+            problem = NSLocalizedString(
+                "The VM didn't get a network address. macOS's shared networking stack (vmnet) may be wedged.",
+                comment: ""
+            )
+        case .noTraffic:
+            action = .nat
+            problem = NSLocalizedString(
+                "The VM has an address but can't reach the network. macOS's NAT/vmnet stack may be wedged.",
+                comment: ""
+            )
+        case .ok:
+            return true
+        }
+
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Network Issue", comment: "")
+        alert.informativeText = problem + "\n\n" + NSLocalizedString(
+            "Bromure can restart the macOS networking daemons. You'll be asked for your password.",
+            comment: ""
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("Repair Network", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Continue Anyway", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            // Repair: retire the broken VM, kickstart, then relaunch.
+            if let pool = state.pool { await pool.retire(warm) }
+            let ok = await NetworkHealer.shared.repair(action)
+            if !ok {
+                let failed = NSAlert()
+                failed.messageText = NSLocalizedString("Network Repair Cancelled", comment: "")
+                failed.informativeText = NSLocalizedString(
+                    "The repair was cancelled or failed. Try again from the menu.",
+                    comment: ""
+                )
+                failed.alertStyle = .warning
+                failed.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+                failed.runModal()
+                return false
+            }
+            relaunch()
+            return false
+        case .alertSecondButtonReturn:
+            // Continue Anyway with the broken VM.
+            return true
+        default:
+            // Cancel.
+            if let pool = state.pool { await pool.retire(warm) }
+            return false
+        }
     }
 
     // MARK: - Automation
