@@ -480,6 +480,7 @@ struct MainView: View {
         case "performance": initialCat = .performance
         case "media": initialCat = .media
         case "fileTransfer": initialCat = .fileTransfer
+        case "hostIsolation": initialCat = .hostIsolation
         case "privacy": initialCat = .privacy
         case "network": initialCat = .network
         case "vpnAds": initialCat = .vpnAds

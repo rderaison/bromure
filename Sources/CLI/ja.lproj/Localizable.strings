@@ -602,3 +602,51 @@
 
 /* Settings — Managed Profile section */
 "More details at bromure.io/enterprise" = "詳細は bromure.io/enterprise";
+
+/* Native Tabs (Host Isolation) — settings */
+"Native Tabs" = "ネイティブタブ";
+"Hide Chromium\U2019s tab strip and address bar, and render them as native macOS toolbar items instead. Tabs, favicons, the URL bar, and a share button appear in the window\U2019s titlebar \U2014 so the page uses the full window and the browser feels like a native Mac app." = "Chromium のタブバーとアドレスバーを隠し、代わりに macOS のネイティブツールバー要素として表示します。タブ、ファビコン、URL バー、共有ボタンがウインドウのタイトルバーに表示され \U2014 ページがウインドウ全体を使用し、ブラウザがネイティブ Mac App のように感じられます。";
+"Host Isolation" = "ホスト分離";
+"Control how this browser interacts with your Mac" = "このブラウザが Mac とどのように連携するかを制御します";
+
+/* Vsock diagnostics — service name */
+"Native Tab Bar" = "ネイティブタブバー";
+
+/* Native tabs — toolbar / address bar */
+"Search or enter URL" = "検索または URL を入力";
+"New tab (⌘T)" = "新規タブ (⌘T)";
+"Close tab (⌘W)" = "タブを閉じる (⌘W)";
+"Close tab" = "タブを閉じる";
+"Back (⌘[)" = "戻る (⌘[)";
+"Forward (⌘])" = "進む (⌘])";
+"Reload (⌘R)" = "再読み込み (⌘R)";
+"Share" = "共有";
+
+/* Native tabs — webcam / microphone indicator */
+"This tab is using the camera and microphone" = "このタブはカメラとマイクを使用しています";
+"This tab is using the camera" = "このタブはカメラを使用しています";
+"This tab is using the microphone" = "このタブはマイクを使用しています";
+
+/* Site info popover */
+"Connection is secure" = "接続は保護されています";
+"Connection is not secure" = "接続は保護されていません";
+"Connection details unavailable" = "接続情報を取得できません";
+"Information you send to this site (passwords, credit card numbers) is encrypted." = "このサイトに送信する情報 (パスワード、クレジットカード番号など) は暗号化されます。";
+"Information you send to this site can be intercepted by others." = "このサイトに送信する情報は第三者に傍受される可能性があります。";
+"This page doesn\U2019t use a standard web URL." = "このページは標準的なウェブ URL を使用していません。";
+"Site" = "サイト";
+"Page Title" = "ページタイトル";
+"Full URL" = "完全な URL";
+"Copy URL" = "URL をコピー";
+
+/* Site info popover — certificate */
+"Certificate" = "証明書";
+"Loading\U2026" = "読み込み中\U2026";
+"Issued to" = "発行先";
+"Issued by" = "発行元";
+"Valid" = "有効期間";
+"View Full Certificate\U2026" = "完全な証明書を表示\U2026";
+"Unknown issuer" = "不明な発行元";
+"Couldn\U2019t fetch the certificate chain." = "証明書チェーンを取得できませんでした。";
+"Couldn\U2019t parse the certificate." = "証明書を解析できませんでした。";
+"Certificate inspection isn\U2019t available." = "証明書の確認は利用できません。";

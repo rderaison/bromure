@@ -602,3 +602,51 @@
 
 /* Settings — Managed Profile section */
 "More details at bromure.io/enterprise" = "Plus de détails sur bromure.io/enterprise";
+
+/* Native Tabs (Host Isolation) — settings */
+"Native Tabs" = "Onglets natifs";
+"Hide Chromium\U2019s tab strip and address bar, and render them as native macOS toolbar items instead. Tabs, favicons, the URL bar, and a share button appear in the window\U2019s titlebar \U2014 so the page uses the full window and the browser feels like a native Mac app." = "Masque la barre d\U2019onglets et la barre d\U2019adresse de Chromium et les affiche comme éléments natifs de la barre d\U2019outils de macOS. Les onglets, favicons, la barre d\U2019adresse et un bouton de partage apparaissent dans la barre de titre de la fenêtre \U2014 la page occupe toute la fenêtre et le navigateur ressemble à une app native du Mac.";
+"Host Isolation" = "Isolation de l\U2019hôte";
+"Control how this browser interacts with your Mac" = "Contrôle la façon dont ce navigateur interagit avec votre Mac";
+
+/* Vsock diagnostics — service name */
+"Native Tab Bar" = "Barre d\U2019onglets native";
+
+/* Native tabs — toolbar / address bar */
+"Search or enter URL" = "Rechercher ou saisir une URL";
+"New tab (⌘T)" = "Nouvel onglet (⌘T)";
+"Close tab (⌘W)" = "Fermer l\U2019onglet (⌘W)";
+"Close tab" = "Fermer l\U2019onglet";
+"Back (⌘[)" = "Précédent (⌘[)";
+"Forward (⌘])" = "Suivant (⌘])";
+"Reload (⌘R)" = "Recharger (⌘R)";
+"Share" = "Partager";
+
+/* Native tabs — webcam / microphone indicator */
+"This tab is using the camera and microphone" = "Cet onglet utilise la caméra et le microphone";
+"This tab is using the camera" = "Cet onglet utilise la caméra";
+"This tab is using the microphone" = "Cet onglet utilise le microphone";
+
+/* Site info popover */
+"Connection is secure" = "Connexion sécurisée";
+"Connection is not secure" = "Connexion non sécurisée";
+"Connection details unavailable" = "Détails de connexion indisponibles";
+"Information you send to this site (passwords, credit card numbers) is encrypted." = "Les informations envoyées à ce site (mots de passe, numéros de carte) sont chiffrées.";
+"Information you send to this site can be intercepted by others." = "Les informations envoyées à ce site peuvent être interceptées par des tiers.";
+"This page doesn\U2019t use a standard web URL." = "Cette page n\U2019utilise pas une URL web standard.";
+"Site" = "Site";
+"Page Title" = "Titre de la page";
+"Full URL" = "URL complète";
+"Copy URL" = "Copier l\U2019URL";
+
+/* Site info popover — certificate */
+"Certificate" = "Certificat";
+"Loading\U2026" = "Chargement\U2026";
+"Issued to" = "Délivré à";
+"Issued by" = "Délivré par";
+"Valid" = "Valide";
+"View Full Certificate\U2026" = "Afficher le certificat complet\U2026";
+"Unknown issuer" = "Émetteur inconnu";
+"Couldn\U2019t fetch the certificate chain." = "Impossible de récupérer la chaîne de certificats.";
+"Couldn\U2019t parse the certificate." = "Impossible de lire le certificat.";
+"Certificate inspection isn\U2019t available." = "L\U2019inspection du certificat n\U2019est pas disponible.";

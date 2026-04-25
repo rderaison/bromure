@@ -1586,6 +1586,9 @@ final class BrowserSession {
     private var ikev2Bridge: IKEv2Bridge?
     private var networkRefreshBridge: NetworkRefreshBridge?
     private(set) var cdpBridge: CDPBridge?
+    private(set) var tabBridge: TabBridge?
+    private var nativeTabBar: NativeTabBarChrome?
+    private var nativeChromeKeyMonitor: Any?
     private(set) var shellBridge: ShellBridge?
     private(set) var traceBridge: TraceBridge?
     private var cloudTraceUploader: CloudTraceUploader?
@@ -1618,7 +1621,12 @@ final class BrowserSession {
 
         let vmView = VZVirtualMachineView()
         vmView.virtualMachine = warmVM.vm
-        vmView.capturesSystemKeys = true
+        // Native-chrome mode wants the macOS-app feel: ⌘-Tab switches apps,
+        // ⌘-Q quits Bromure, ⌘-Space opens Spotlight, etc. Letting VZ
+        // capture system keys would funnel those to Chromium instead.
+        // Non-native mode keeps the legacy behaviour where the guest sees
+        // every key.
+        vmView.capturesSystemKeys = !config.nativeChrome
         vmView.automaticallyReconfiguresDisplay = true
         self.vmView = vmView
 
@@ -1626,10 +1634,51 @@ final class BrowserSession {
         let windowHeight = CGFloat(config.displayHeight)
 
         // Wrap vmView in a drop target that accepts file drags from macOS.
-        let dropTarget = VMDropTargetView(vmView: vmView, displayWidth: config.displayWidth, displayHeight: config.displayHeight)
+        // The drop target — and the VZ scanout — span the FULL framebuffer,
+        // including the native-chrome inset; in that mode the macOS host
+        // hides the top inset rows behind a clipping cropper, which keeps
+        // Chromium completely unmodified inside the VM.
+        let totalDisplayHeight = config.displayHeight + config.nativeChromeInset
+        let dropTarget = VMDropTargetView(vmView: vmView, displayWidth: config.displayWidth, displayHeight: totalDisplayHeight)
+
+        // Native-chrome cropper. The dropTarget is sized `visible_pts +
+        // inset_pts` tall and pinned to the cropper's bottom; the top
+        // `inset_pts` extends above the cropper and is clipped by
+        // masksToBounds. As the user resizes the window the cropper's height
+        // tracks the window content area while the dropTarget stays
+        // `cropper.height + inset_pts`, so VZ keeps reconfiguring the guest
+        // display to (W, visible + inset). Chromium's tab strip + omnibox
+        // always live in the hidden inset, regardless of resize.
+        let cropperOrDropTarget: NSView
+        let croppingCropper: NativeChromeCropper?
+        if config.nativeChromeInset > 0 {
+            let dpr = max(CGFloat(VMConfig.detectDisplayScale()), 1)
+            let insetPts = CGFloat(config.nativeChromeInset) / dpr
+
+            let cropper = NativeChromeCropper()
+            cropper.wantsLayer = true
+            cropper.layer?.masksToBounds = true
+            cropper.translatesAutoresizingMaskIntoConstraints = false
+            dropTarget.translatesAutoresizingMaskIntoConstraints = false
+            cropper.addSubview(dropTarget)
+            NSLayoutConstraint.activate([
+                dropTarget.leadingAnchor.constraint(equalTo: cropper.leadingAnchor),
+                dropTarget.trailingAnchor.constraint(equalTo: cropper.trailingAnchor),
+                dropTarget.bottomAnchor.constraint(equalTo: cropper.bottomAnchor),
+                dropTarget.heightAnchor.constraint(
+                    equalTo: cropper.heightAnchor,
+                    constant: insetPts
+                ),
+            ])
+            cropperOrDropTarget = cropper
+            croppingCropper = cropper
+        } else {
+            cropperOrDropTarget = dropTarget
+            croppingCropper = nil
+        }
 
         // If file transfer is enabled, set up the bridge and show drawer alongside VM
-        var contentView: NSView = dropTarget
+        var contentView: NSView = cropperOrDropTarget
         if config.enableFileTransfer {
             if let socketDevices = warmVM.vm.socketDevices as? [VZVirtioSocketDevice],
                let socketDevice = socketDevices.first {
@@ -1646,7 +1695,7 @@ final class BrowserSession {
                 let split = NSSplitView()
                 split.isVertical = true
                 split.dividerStyle = .thin
-                split.addSubview(dropTarget)
+                split.addSubview(cropperOrDropTarget)
                 split.addSubview(hostView)
                 split.setHoldingPriority(.defaultLow, forSubviewAt: 0)
                 split.setHoldingPriority(.defaultHigh, forSubviewAt: 1)
@@ -1900,6 +1949,140 @@ final class BrowserSession {
             self.cdpBridge = bridge
         }
 
+        // Native-chrome mode: hide Chromium's tab strip + omnibox (guest runs
+        // `chromium --app=URL`) and render tabs + address bar as SwiftUI
+        // titlebar accessories driven by tab-agent.py over vsock 5810.
+        if config.nativeChrome, let dev = linkSocketDevice {
+            MainActor.assumeIsolated {
+                let tabModel = NativeTabBarModel()
+                let bridge = TabBridge(socketDevice: dev)
+                self.tabBridge = bridge
+
+                bridge.onTabsChanged = { [weak tabModel] tabs in
+                    tabModel?.setTabs(tabs)
+                }
+                tabModel.onActivate = { [weak bridge, weak tabModel] id in
+                    // Mark active locally first so the URL bar's "active tab"
+                    // lookup is immediately correct, even if the guest takes
+                    // a tick to echo the focus change back.
+                    tabModel?.markActiveLocally(id)
+                    bridge?.activate(id: id)
+                }
+                tabModel.onClose    = { [weak bridge] id in bridge?.close(id: id) }
+                tabModel.onReload   = { [weak bridge] id in bridge?.reload(id: id) }
+                tabModel.onBack     = { [weak bridge] id in bridge?.back(id: id) }
+                tabModel.onForward  = { [weak bridge] id in bridge?.forward(id: id) }
+                tabModel.fetchCertificate = { [weak bridge] origin in
+                    guard let bridge else { return [] }
+                    return await bridge.fetchCertificate(origin: origin)
+                }
+                tabModel.onNewTab = { [weak bridge, weak tabModel, weak window] in
+                    // Pre-emptively resign current first responder so
+                    // vmView isn't holding focus while the new pill is
+                    // being constructed. ActiveTabPill picks up the flag
+                    // below via shouldFocusOnAppear and self-focuses its
+                    // address field; in addition `forceFocusURLField`
+                    // hammers the field as first responder for ~1 s
+                    // because vmView is sometimes sticky and reclaims
+                    // focus after resigning.
+                    window?.makeFirstResponder(nil)
+                    bridge?.newTab(url: "about:blank")
+                    tabModel?.pendingFocusOnActiveChange = true
+                    Self.forceFocusURLField(window: window)
+                }
+                tabModel.onNavigate = { [weak bridge, weak tabModel] raw in
+                    guard let bridge, let tabModel else { return }
+                    let url = Self.normalizeNavigation(raw)
+                    // Prefer the active tab, then the first tab. Only spawn a
+                    // new --app window if there genuinely is no tab to
+                    // navigate — e.g. user hit Enter before Chromium had
+                    // reported anything.
+                    if let id = tabModel.activeTab?.id ?? tabModel.tabs.first?.id {
+                        bridge.navigate(id: id, url: url)
+                    } else {
+                        bridge.newTab(url: url)
+                    }
+                }
+
+                let chrome = NativeTabBarChrome(model: tabModel)
+                self.nativeTabBar = chrome
+                chrome.install(on: window)
+
+                // The cropping NSView fires `onExit` whenever the cursor
+                // crosses out of the visible content area into the toolbar.
+                // VZ's mouse tracking still fires on dropTarget's hidden top
+                // (it extends above the cropper to render Chromium's tab/
+                // URL inset), so without this Chromium would keep "seeing"
+                // the cursor at the very top of the page and trigger any
+                // y=0 hover dropdown. Send a CDP mouseMoved to (-1,-1) so
+                // Chromium tears down the hover state.
+                croppingCropper?.onExit = { [weak bridge] in bridge?.parkMouse() }
+
+                // ⌘T / ⌘W / ⌘L / ⌘R — since app-mode Chromium no longer has a
+                // tab strip or omnibox, we own the keyboard shortcuts.
+                // Installed as a local monitor so we only swallow events for
+                // this window.
+                //
+                // Structure: inspect primitives (chars, modifier flags, window
+                // identity) synchronously in the monitor block, then fire
+                // side effects on a @MainActor Task. This avoids ever
+                // capturing the non-Sendable NSEvent across an actor boundary.
+                let windowID = ObjectIdentifier(window)
+                self.nativeChromeKeyMonitor = NSEvent.addLocalMonitorForEvents(
+                    matching: .keyDown
+                ) { [weak bridge, weak tabModel, weak window] event in
+                    guard event.modifierFlags.contains(.command) else { return event }
+                    guard let eventWindow = event.window,
+                          ObjectIdentifier(eventWindow) == windowID
+                    else { return event }
+                    guard let key = event.charactersIgnoringModifiers?.lowercased(),
+                          Self.nativeChromeShortcutKeys.contains(key)
+                    else { return event }
+
+                    Task { @MainActor in
+                        guard let bridge, let tabModel, let window else { return }
+                        switch key {
+                        case "t":
+                            // See onNewTab above — resigning vmView before
+                            // we kick off tab creation prevents the new
+                            // address field from racing the VM for focus
+                            // and losing. forceFocusURLField then keeps
+                            // hammering the field for a second in case
+                            // vmView reclaims focus after our resign.
+                            window.makeFirstResponder(nil)
+                            bridge.newTab(url: "about:blank")
+                            tabModel.pendingFocusOnActiveChange = true
+                            Self.forceFocusURLField(window: window)
+                        case "l":
+                            if let field = window.contentView.flatMap(findFirstField) {
+                                window.makeFirstResponder(field)
+                            }
+                        case "r":
+                            if let id = tabModel.activeTab?.id { bridge.reload(id: id) }
+                        case "[":
+                            if let id = tabModel.activeTab?.id { bridge.back(id: id) }
+                        case "]":
+                            if let id = tabModel.activeTab?.id { bridge.forward(id: id) }
+                        case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+                            // Safari/Chrome convention: ⌘N switches to the
+                            // Nth tab; ⌘9 jumps to the LAST tab regardless
+                            // of count. Translate to a host-side activate
+                            // (which also marks the tab active locally).
+                            let n = Int(key) ?? 0
+                            let tabs = tabModel.tabs
+                            guard !tabs.isEmpty else { break }
+                            let target = (n == 9) ? tabs.last! : tabs[min(n - 1, tabs.count - 1)]
+                            tabModel.markActiveLocally(target.id)
+                            bridge.activate(id: target.id)
+                        default:
+                            break
+                        }
+                    }
+                    return nil
+                }
+            }
+        }
+
         // Network refresh bridge (vsock port 5703) — always attached so the
         // guest agent has something to connect to. Registered with the host
         // NWPathMonitor watcher only in bridged mode, where DHCP renewal on
@@ -2087,6 +2270,71 @@ final class BrowserSession {
         self.delegateHelper = helper
         warmVM.vm.delegate = helper
         window.delegate = helper
+    }
+
+    /// Aggressively force the URL field to remain first responder for the
+    /// next `deadline` seconds. The AddressField-side retry in
+    /// `makeNSView` handles the common case, but VZVirtualMachineView is
+    /// sometimes "sticky" — it refuses to resign immediately, or AppKit's
+    /// default-responder logic re-installs it once we resign — and a
+    /// single retry path isn't enough. This polls every 50 ms and, if any
+    /// other view holds the responder, force-resigns it and re-claims the
+    /// field. Stops once focus is on the field, or after `deadline`.
+    @MainActor
+    static func forceFocusURLField(window: NSWindow?, deadline: TimeInterval = 1.0) {
+        guard let window else { return }
+        let endTime = CFAbsoluteTimeGetCurrent() + deadline
+        func tick() {
+            if CFAbsoluteTimeGetCurrent() > endTime { return }
+            guard let field = window.contentView.flatMap(findFirstField) else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick() }
+                return
+            }
+            if window.firstResponder !== field {
+                _ = window.makeFirstResponder(nil)
+                if !window.makeFirstResponder(field) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick() }
+                    return
+                }
+            }
+            // Re-check on the next tick — vmView's NSTrackingArea or some
+            // other AppKit auto-responder logic can yank focus back. Keep
+            // polling until we time out.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick() }
+        }
+        tick()
+    }
+
+    /// Keys (with ⌘) that the native-chrome local monitor consumes. Must
+    /// stay in sync with the switch statement in the monitor handler.
+    /// In-page editing shortcuts (⌘C/⌘V/⌘X/⌘A/⌘Z) intentionally aren't here:
+    /// they need to keep flowing to Chromium so selection/copy works on
+    /// the page. System shortcuts (⌘Tab/⌘Q/⌘W/⌘Space/⌘M/⌘H) are handled
+    /// by macOS itself once `capturesSystemKeys` is off — ⌘Q quits Bromure
+    /// and ⌘W closes the window via AppKit's standard responder chain.
+    static let nativeChromeShortcutKeys: Set<String> = [
+        "t", "l", "r", "[", "]",
+        "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    ]
+
+    /// Turn whatever the user typed in the native address bar into a URL
+    /// Chromium can load. Non-URL input becomes a Google search, matching
+    /// Chromium's default omnibox fallback.
+    static func normalizeNavigation(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "about:blank" }
+        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
+            || trimmed.hasPrefix("about:") || trimmed.hasPrefix("chrome:")
+            || trimmed.hasPrefix("file:") || trimmed.hasPrefix("data:") {
+            return trimmed
+        }
+        // `example.com/foo` — needs a scheme before Chromium will navigate.
+        // Heuristic: contains a dot, no spaces → treat as URL.
+        if !trimmed.contains(" ") && trimmed.contains(".") {
+            return "https://" + trimmed
+        }
+        let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmed
+        return "https://www.google.com/search?q=" + encoded
     }
 
     /// Update the VPN titlebar button to reflect the current WARP state.
@@ -2632,6 +2880,13 @@ final class BrowserSession {
             webcamBridge = nil
             cdpBridge?.stop()
             cdpBridge = nil
+            tabBridge?.stop()
+            tabBridge = nil
+            nativeTabBar = nil
+            if let monitor = nativeChromeKeyMonitor {
+                NSEvent.removeMonitor(monitor)
+                nativeChromeKeyMonitor = nil
+            }
             shellBridge?.stop()
             shellBridge = nil
             traceBridge?.stop()
@@ -2741,6 +2996,13 @@ final class BrowserSession {
             name: "Shell",
             port: 5800,
             state: shellBridge.map { $0.isReady ? .connected : .listening } ?? .disabled
+        ))
+
+        services.append(VsockServiceStatus(
+            id: "\(id)-tabbar",
+            name: "Native Tab Bar",
+            port: TabBridge.vsockPort,
+            state: tabBridge.map { $0.tabs.isEmpty ? .listening : .connected } ?? .disabled
         ))
 
         services.append(VsockServiceStatus(
@@ -3414,7 +3676,12 @@ private final class VMDropTargetView: NSView {
             let delta = Double(recognizer.magnification)
             // Reset so the next .changed reads as a pure delta, not cumulative.
             recognizer.magnification = 0
-            guard abs(delta) > 0.0001 else { return }
+            // Threshold above the recognizer's noise floor. NSMagnificationGesture
+            // can emit micro-changes alongside legitimate two-finger scroll on
+            // some trackpads, which then ship as Ctrl+wheel to Chromium and
+            // visibly zoom the page during a normal scroll. A real pinch
+            // moves at least a percent or two per .changed tick.
+            guard abs(delta) > 0.005 else { return }
             let (gx, gy) = guestCoordinates(for: recognizer.location(in: self))
             onMagnify?(delta, gx, gy)
         default:
@@ -3456,6 +3723,42 @@ private final class VMDropTargetView: NSView {
 }
 
 // MARK: - Helpers
+
+/// Subclass of `NSView` that hosts the masked dropTarget for native-chrome
+/// mode and reports when the cursor leaves the visible content area. The
+/// `inVisibleRect` tracking option means the area rebinds on every resize,
+/// so live-resizing the window doesn't leave a stale bounds.
+final class NativeChromeCropper: NSView {
+    var onExit: (() -> Void)?
+
+    override func updateTrackingAreas() {
+        for area in trackingAreas { removeTrackingArea(area) }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        super.updateTrackingAreas()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        onExit?()
+    }
+}
+
+/// Depth-first search for the first `NSTextField` under `view`. Used to find
+/// the native address bar from a ⌘L handler without the caller needing to
+/// know where the tab-bar accessory got embedded.
+fileprivate func findFirstField(_ view: NSView) -> NSTextField? {
+    if let field = view as? NSTextField { return field }
+    for sub in view.subviews {
+        if let f = findFirstField(sub) { return f }
+    }
+    return nil
+}
 
 func parseGuestOS(_ value: String) throws -> GuestOS {
     switch value.lowercased() {

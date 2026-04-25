@@ -413,6 +413,8 @@ def write_chrome_env(cfg):
         lines.append("MICROPHONE=1")
     if cfg.get("automation"):
         lines.append("AUTOMATION=1")
+    if cfg.get("nativeChrome"):
+        lines.append("NATIVE_CHROME=1")
     if cfg.get("debugShell"):
         lines.append("DEBUG_SHELL=1")
     if cfg.get("traceLevel", 0) > 0:

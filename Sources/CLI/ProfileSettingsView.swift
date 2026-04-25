@@ -15,8 +15,9 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     case performance = "Performance"
     case media = "Media"
     case fileTransfer = "File Transfer"
-    case privacy = "Privacy & Safety"
+    case hostIsolation = "Host Isolation"
     case network = "Network Isolation"
+    case privacy = "Privacy & Safety"
     case vpnAds = "VPN & Ads"
     case enterprise = "Enterprise"
     case advanced = "Advanced"
@@ -29,6 +30,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .performance: "bolt.fill"
         case .media: "speaker.wave.2.fill"
         case .fileTransfer: "arrow.up.arrow.down"
+        case .hostIsolation: "macwindow.on.rectangle"
         case .privacy: "lock.shield.fill"
         case .network: "network"
         case .vpnAds: "shield.fill"
@@ -43,6 +45,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .performance: .orange
         case .media: .pink
         case .fileTransfer: .cyan
+        case .hostIsolation: .teal
         case .privacy: .blue
         case .network: .indigo
         case .vpnAds: .green
@@ -276,6 +279,7 @@ struct ProfileSettingsView: View {
         case .performance: performanceView
         case .media: mediaView
         case .fileTransfer: fileTransferView
+        case .hostIsolation: hostIsolationView
         case .privacy: privacyView
         case .network: networkView
         case .vpnAds: vpnAdsView
@@ -344,14 +348,6 @@ struct ProfileSettingsView: View {
 
             settingsDivider
 
-            settingToggle(
-                "Shared Clipboard",
-                description: "Copy and paste text and images between your Mac and this browser. When turned off, the browser\u{2019}s clipboard is completely isolated.",
-                isOn: $draft.settings.enableClipboardSharing
-            )
-
-            settingsDivider
-
             // Color
             VStack(alignment: .leading, spacing: 6) {
                 Text("Window Color").font(.headline)
@@ -384,14 +380,6 @@ struct ProfileSettingsView: View {
                 TextField("https://", text: $draft.settings.homePage)
                     .textFieldStyle(.roundedBorder)
             }
-
-            settingsDivider
-
-            settingToggle(
-                "Match Keyboard Layout",
-                description: "Automatically switch the browser\u{2019}s keyboard layout when you change it on your Mac. Turn this off to always use the layout set in Bromure \u{2192} Settings \u{2192} Input.",
-                isOn: $draft.settings.matchKeyboardLayout
-            )
 
             settingsDivider
 
@@ -600,6 +588,52 @@ struct ProfileSettingsView: View {
         }
     }
 
+    // MARK: - Host Isolation
+
+    private var hostIsolationView: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            sectionHeader("Host Isolation", subtitle: "Control how this browser interacts with your Mac")
+
+            settingToggle(
+                "Native Tabs",
+                description: "Hide Chromium\u{2019}s tab strip and address bar, and render them as native macOS toolbar items instead. Tabs, favicons, the URL bar, and a share button appear in the window\u{2019}s titlebar \u{2014} so the page uses the full window and the browser feels like a native Mac app.",
+                isOn: $draft.settings.nativeChrome
+            )
+
+            settingsDivider
+
+            settingToggle(
+                "Shared Clipboard",
+                description: "Copy and paste text and images between your Mac and this browser. When turned off, the browser\u{2019}s clipboard is completely isolated.",
+                isOn: $draft.settings.enableClipboardSharing
+            )
+
+            settingsDivider
+
+            settingToggle(
+                "Match Keyboard Layout",
+                description: "Automatically switch the browser\u{2019}s keyboard layout when you change it on your Mac. Turn this off to always use the layout set in Bromure \u{2192} Settings \u{2192} Input.",
+                isOn: $draft.settings.matchKeyboardLayout
+            )
+
+            settingsDivider
+
+            settingToggle(
+                "Use macOS Passkeys",
+                description: "Sign in to websites using passkeys stored on your Mac. Each request requires Touch ID or password approval.",
+                isOn: $draft.settings.keychainPasskeys
+            )
+
+            settingsDivider
+
+            settingToggle(
+                "Use macOS Passwords",
+                description: "Autofill usernames and passwords from your Mac\u{2019}s saved passwords and iCloud Keychain. Disables Chromium\u{2019}s built-in password manager.",
+                isOn: $draft.settings.keychainPasswords
+            )
+        }
+    }
+
     // MARK: - File Transfer
 
     private var fileTransferView: some View {
@@ -736,22 +770,6 @@ struct ProfileSettingsView: View {
                     onShowPhishingConsent { draft.settings.phishingWarning = true }
                 }
             }
-
-            settingsDivider
-
-            settingToggle(
-                "Use macOS Passkeys",
-                description: "Sign in to websites using passkeys stored on your Mac. Each request requires Touch ID or password approval.",
-                isOn: $draft.settings.keychainPasskeys
-            )
-
-            settingsDivider
-
-            settingToggle(
-                "Use macOS Passwords",
-                description: "Autofill usernames and passwords from your Mac\u{2019}s saved passwords and iCloud Keychain. Disables Chromium\u{2019}s built-in password manager.",
-                isOn: $draft.settings.keychainPasswords
-            )
 
             settingsDivider
 

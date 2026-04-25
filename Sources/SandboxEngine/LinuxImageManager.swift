@@ -191,12 +191,16 @@ public final class LinuxImageManager {
         net.attachment = networkAttachment ?? VZNATNetworkDeviceAttachment()
         vzConfig.networkDevices = [net]
 
-        // Graphics — virtio GPU
+        // Graphics — virtio GPU. In native-chrome mode the scanout is taller
+        // than the user-visible area by `nativeChromeInset` device pixels;
+        // Chromium auto-maximises into that taller framebuffer (its tab strip
+        // and omnibox land in the extra rows) and the macOS host clips them
+        // off so the user sees only the page content.
         let graphics = VZVirtioGraphicsDeviceConfiguration()
         graphics.scanouts = [
             VZVirtioGraphicsScanoutConfiguration(
                 widthInPixels: config.displayWidth,
-                heightInPixels: config.displayHeight
+                heightInPixels: config.displayHeight + config.nativeChromeInset
             )
         ]
         vzConfig.graphicsDevices = [graphics]

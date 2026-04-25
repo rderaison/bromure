@@ -602,3 +602,51 @@
 
 /* Settings — Managed Profile section */
 "More details at bromure.io/enterprise" = "更多詳情請造訪 bromure.io/enterprise";
+
+/* Native Tabs (Host Isolation) — settings */
+"Native Tabs" = "原生分頁";
+"Hide Chromium\U2019s tab strip and address bar, and render them as native macOS toolbar items instead. Tabs, favicons, the URL bar, and a share button appear in the window\U2019s titlebar \U2014 so the page uses the full window and the browser feels like a native Mac app." = "隱藏 Chromium 的分頁列和網址列,改以原生 macOS 工具列元件呈現。分頁、網站圖示、網址列和分享按鈕都顯示在視窗標題列中 \U2014 頁面佔用整個視窗,瀏覽器更像原生 Mac App。";
+"Host Isolation" = "主機隔離";
+"Control how this browser interacts with your Mac" = "控制此瀏覽器與 Mac 的互動方式";
+
+/* Vsock diagnostics — service name */
+"Native Tab Bar" = "原生分頁列";
+
+/* Native tabs — toolbar / address bar */
+"Search or enter URL" = "搜尋或輸入網址";
+"New tab (⌘T)" = "新增分頁 (⌘T)";
+"Close tab (⌘W)" = "關閉分頁 (⌘W)";
+"Close tab" = "關閉分頁";
+"Back (⌘[)" = "返回 (⌘[)";
+"Forward (⌘])" = "前進 (⌘])";
+"Reload (⌘R)" = "重新整理 (⌘R)";
+"Share" = "分享";
+
+/* Native tabs — webcam / microphone indicator */
+"This tab is using the camera and microphone" = "此分頁正在使用相機和麥克風";
+"This tab is using the camera" = "此分頁正在使用相機";
+"This tab is using the microphone" = "此分頁正在使用麥克風";
+
+/* Site info popover */
+"Connection is secure" = "連線安全";
+"Connection is not secure" = "連線不安全";
+"Connection details unavailable" = "無法取得連線資訊";
+"Information you send to this site (passwords, credit card numbers) is encrypted." = "你傳送至此網站的資訊(密碼、信用卡號等)已加密。";
+"Information you send to this site can be intercepted by others." = "你傳送至此網站的資訊可能會被他人攔截。";
+"This page doesn\U2019t use a standard web URL." = "此頁面未使用標準的網頁網址。";
+"Site" = "網站";
+"Page Title" = "頁面標題";
+"Full URL" = "完整網址";
+"Copy URL" = "拷貝網址";
+
+/* Site info popover — certificate */
+"Certificate" = "憑證";
+"Loading\U2026" = "載入中\U2026";
+"Issued to" = "頒發給";
+"Issued by" = "頒發者";
+"Valid" = "有效期";
+"View Full Certificate\U2026" = "檢視完整憑證\U2026";
+"Unknown issuer" = "未知頒發者";
+"Couldn\U2019t fetch the certificate chain." = "無法取得憑證鏈。";
+"Couldn\U2019t parse the certificate." = "無法解析憑證。";
+"Certificate inspection isn\U2019t available." = "無法檢視憑證。";

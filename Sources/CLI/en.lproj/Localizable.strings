@@ -602,3 +602,51 @@
 
 /* Settings — Managed Profile section */
 "More details at bromure.io/enterprise" = "More details at bromure.io/enterprise";
+
+/* Native Tabs (Host Isolation) — settings */
+"Native Tabs" = "Native Tabs";
+"Hide Chromium\U2019s tab strip and address bar, and render them as native macOS toolbar items instead. Tabs, favicons, the URL bar, and a share button appear in the window\U2019s titlebar \U2014 so the page uses the full window and the browser feels like a native Mac app." = "Hide Chromium\U2019s tab strip and address bar, and render them as native macOS toolbar items instead. Tabs, favicons, the URL bar, and a share button appear in the window\U2019s titlebar \U2014 so the page uses the full window and the browser feels like a native Mac app.";
+"Host Isolation" = "Host Isolation";
+"Control how this browser interacts with your Mac" = "Control how this browser interacts with your Mac";
+
+/* Vsock diagnostics — service name */
+"Native Tab Bar" = "Native Tab Bar";
+
+/* Native tabs — toolbar / address bar */
+"Search or enter URL" = "Search or enter URL";
+"New tab (⌘T)" = "New tab (⌘T)";
+"Close tab (⌘W)" = "Close tab (⌘W)";
+"Close tab" = "Close tab";
+"Back (⌘[)" = "Back (⌘[)";
+"Forward (⌘])" = "Forward (⌘])";
+"Reload (⌘R)" = "Reload (⌘R)";
+"Share" = "Share";
+
+/* Native tabs — webcam / microphone indicator */
+"This tab is using the camera and microphone" = "This tab is using the camera and microphone";
+"This tab is using the camera" = "This tab is using the camera";
+"This tab is using the microphone" = "This tab is using the microphone";
+
+/* Site info popover */
+"Connection is secure" = "Connection is secure";
+"Connection is not secure" = "Connection is not secure";
+"Connection details unavailable" = "Connection details unavailable";
+"Information you send to this site (passwords, credit card numbers) is encrypted." = "Information you send to this site (passwords, credit card numbers) is encrypted.";
+"Information you send to this site can be intercepted by others." = "Information you send to this site can be intercepted by others.";
+"This page doesn\U2019t use a standard web URL." = "This page doesn\U2019t use a standard web URL.";
+"Site" = "Site";
+"Page Title" = "Page Title";
+"Full URL" = "Full URL";
+"Copy URL" = "Copy URL";
+
+/* Site info popover — certificate */
+"Certificate" = "Certificate";
+"Loading\U2026" = "Loading\U2026";
+"Issued to" = "Issued to";
+"Issued by" = "Issued by";
+"Valid" = "Valid";
+"View Full Certificate\U2026" = "View Full Certificate\U2026";
+"Unknown issuer" = "Unknown issuer";
+"Couldn\U2019t fetch the certificate chain." = "Couldn\U2019t fetch the certificate chain.";
+"Couldn\U2019t parse the certificate." = "Couldn\U2019t parse the certificate.";
+"Certificate inspection isn\U2019t available." = "Certificate inspection isn\U2019t available.";

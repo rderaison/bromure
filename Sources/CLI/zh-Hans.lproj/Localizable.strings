@@ -602,3 +602,51 @@
 
 /* Settings — Managed Profile section */
 "More details at bromure.io/enterprise" = "\U66f4\U591a\U8be6\U60c5\U8bf7\U8bbf\U95ee bromure.io/enterprise";
+
+/* Native Tabs (Host Isolation) — settings */
+"Native Tabs" = "原生标签页";
+"Hide Chromium\U2019s tab strip and address bar, and render them as native macOS toolbar items instead. Tabs, favicons, the URL bar, and a share button appear in the window\U2019s titlebar \U2014 so the page uses the full window and the browser feels like a native Mac app." = "隐藏 Chromium 的标签栏和地址栏,改为以原生 macOS 工具栏元素的形式呈现。标签、网站图标、地址栏和共享按钮均显示在窗口标题栏中 \U2014 页面占用整个窗口,浏览器更像原生 Mac 应用。";
+"Host Isolation" = "宿主隔离";
+"Control how this browser interacts with your Mac" = "控制此浏览器与 Mac 的交互方式";
+
+/* Vsock diagnostics — service name */
+"Native Tab Bar" = "原生标签栏";
+
+/* Native tabs — toolbar / address bar */
+"Search or enter URL" = "搜索或输入网址";
+"New tab (⌘T)" = "新建标签页 (⌘T)";
+"Close tab (⌘W)" = "关闭标签页 (⌘W)";
+"Close tab" = "关闭标签页";
+"Back (⌘[)" = "后退 (⌘[)";
+"Forward (⌘])" = "前进 (⌘])";
+"Reload (⌘R)" = "重新载入 (⌘R)";
+"Share" = "共享";
+
+/* Native tabs — webcam / microphone indicator */
+"This tab is using the camera and microphone" = "此标签页正在使用摄像头和麦克风";
+"This tab is using the camera" = "此标签页正在使用摄像头";
+"This tab is using the microphone" = "此标签页正在使用麦克风";
+
+/* Site info popover */
+"Connection is secure" = "连接安全";
+"Connection is not secure" = "连接不安全";
+"Connection details unavailable" = "连接详情不可用";
+"Information you send to this site (passwords, credit card numbers) is encrypted." = "你发送到此网站的信息(密码、信用卡号等)已加密。";
+"Information you send to this site can be intercepted by others." = "你发送到此网站的信息可能被他人拦截。";
+"This page doesn\U2019t use a standard web URL." = "此页面未使用标准的网页 URL。";
+"Site" = "网站";
+"Page Title" = "页面标题";
+"Full URL" = "完整网址";
+"Copy URL" = "拷贝网址";
+
+/* Site info popover — certificate */
+"Certificate" = "证书";
+"Loading\U2026" = "正在载入\U2026";
+"Issued to" = "颁发给";
+"Issued by" = "颁发者";
+"Valid" = "有效期";
+"View Full Certificate\U2026" = "查看完整证书\U2026";
+"Unknown issuer" = "未知颁发者";
+"Couldn\U2019t fetch the certificate chain." = "无法获取证书链。";
+"Couldn\U2019t parse the certificate." = "无法解析证书。";
+"Certificate inspection isn\U2019t available." = "证书检查不可用。";

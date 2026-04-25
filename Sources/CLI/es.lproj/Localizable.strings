@@ -602,3 +602,51 @@
 
 /* Settings — Managed Profile section */
 "More details at bromure.io/enterprise" = "Más detalles en bromure.io/enterprise";
+
+/* Native Tabs (Host Isolation) — settings */
+"Native Tabs" = "Pestañas nativas";
+"Hide Chromium\U2019s tab strip and address bar, and render them as native macOS toolbar items instead. Tabs, favicons, the URL bar, and a share button appear in the window\U2019s titlebar \U2014 so the page uses the full window and the browser feels like a native Mac app." = "Oculta la barra de pestañas y la barra de direcciones de Chromium y las muestra como elementos nativos de la barra de herramientas de macOS. Las pestañas, favicons, la barra de direcciones y un botón de compartir aparecen en la barra de título de la ventana \U2014 la página ocupa toda la ventana y el navegador se siente como una app nativa de Mac.";
+"Host Isolation" = "Aislamiento del host";
+"Control how this browser interacts with your Mac" = "Controla cómo este navegador interactúa con tu Mac";
+
+/* Vsock diagnostics — service name */
+"Native Tab Bar" = "Barra de pestañas nativa";
+
+/* Native tabs — toolbar / address bar */
+"Search or enter URL" = "Buscar o escribir URL";
+"New tab (⌘T)" = "Nueva pestaña (⌘T)";
+"Close tab (⌘W)" = "Cerrar pestaña (⌘W)";
+"Close tab" = "Cerrar pestaña";
+"Back (⌘[)" = "Atrás (⌘[)";
+"Forward (⌘])" = "Adelante (⌘])";
+"Reload (⌘R)" = "Recargar (⌘R)";
+"Share" = "Compartir";
+
+/* Native tabs — webcam / microphone indicator */
+"This tab is using the camera and microphone" = "Esta pestaña está usando la cámara y el micrófono";
+"This tab is using the camera" = "Esta pestaña está usando la cámara";
+"This tab is using the microphone" = "Esta pestaña está usando el micrófono";
+
+/* Site info popover */
+"Connection is secure" = "Conexión segura";
+"Connection is not secure" = "Conexión no segura";
+"Connection details unavailable" = "Detalles de conexión no disponibles";
+"Information you send to this site (passwords, credit card numbers) is encrypted." = "La información que envías a este sitio (contraseñas, números de tarjeta) está cifrada.";
+"Information you send to this site can be intercepted by others." = "La información que envías a este sitio puede ser interceptada por otros.";
+"This page doesn\U2019t use a standard web URL." = "Esta página no usa una URL web estándar.";
+"Site" = "Sitio";
+"Page Title" = "Título de la página";
+"Full URL" = "URL completa";
+"Copy URL" = "Copiar URL";
+
+/* Site info popover — certificate */
+"Certificate" = "Certificado";
+"Loading\U2026" = "Cargando\U2026";
+"Issued to" = "Emitido a";
+"Issued by" = "Emitido por";
+"Valid" = "Válido";
+"View Full Certificate\U2026" = "Ver certificado completo\U2026";
+"Unknown issuer" = "Emisor desconocido";
+"Couldn\U2019t fetch the certificate chain." = "No se pudo obtener la cadena de certificados.";
+"Couldn\U2019t parse the certificate." = "No se pudo leer el certificado.";
+"Certificate inspection isn\U2019t available." = "La inspección de certificados no está disponible.";

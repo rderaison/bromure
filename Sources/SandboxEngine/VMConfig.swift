@@ -225,6 +225,21 @@ public struct VMConfig {
     /// This lets external tools (Puppeteer, Playwright, Claude, Codex) drive the browser.
     public var enableAutomation: Bool
 
+    /// When true, Chromium runs in app mode (no tab strip, no omnibox) and the
+    /// host renders tabs + address bar in the window's titlebar accessories.
+    /// Requires ``enableAutomation`` internally (we hijack CDP on port 9222 for
+    /// tab state), but we enable that automatically when this flag is on.
+    public var nativeChrome: Bool
+
+    /// Extra device-pixel rows added to the VZ scanout above the visible
+    /// content area. Non-zero only in native-chrome mode: Chromium auto-
+    /// maximises to fill the full `(displayWidth, displayHeight + inset)`
+    /// framebuffer, and the macOS host clips the top `inset` rows so the
+    /// browser's tab strip and omnibox stay hidden while we render our own
+    /// versions in the titlebar. Keeps the user-visible content area equal
+    /// to `displayHeight` regardless of the toggle.
+    public var nativeChromeInset: Int
+
     /// When true, the guest runs test-runner.sh instead of Chromium.
     /// Set via the BROMURE_TEST_SUITE environment variable on the host.
     public var testSuite: Bool
@@ -298,6 +313,8 @@ public struct VMConfig {
         proxyPassword: String? = nil,
         blockDownloads: Bool = false,
         enableAutomation: Bool = false,
+        nativeChrome: Bool = false,
+        nativeChromeInset: Int = 0,
         testSuite: Bool = false,
         traceLevel: TraceLevel = .disabled,
         matchKeyboardLayout: Bool = true,
@@ -364,6 +381,8 @@ public struct VMConfig {
         self.proxyPassword = proxyPassword
         self.blockDownloads = blockDownloads
         self.enableAutomation = enableAutomation
+        self.nativeChrome = nativeChrome
+        self.nativeChromeInset = nativeChromeInset
         self.testSuite = testSuite
         self.traceLevel = traceLevel
         self.matchKeyboardLayout = matchKeyboardLayout
@@ -814,6 +833,14 @@ public struct VMConfig {
 
     /// Default extra kernel boot options.
     public static let defaultExtraKernelOptions = "arm64.nosme"
+
+    /// Default extra rows (device pixels) reserved above the visible content
+    /// when native-chrome mode is on. Approx Chromium tab strip + omnibox
+    /// height at `--force-device-scale-factor=2`. Slight over-estimate so a
+    /// thin sliver of guest chrome never peeks below the clip — empirically
+    /// 172 device px (≈86 CSS) matches Chromium 142's two-row chrome height
+    /// without leaving a visible gap.
+    public static let defaultNativeChromeInset = 172
 
     /// Default storage directory: ~/Library/Application Support/Bromure
     public static var defaultStorageDirectory: URL {

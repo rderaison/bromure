@@ -283,6 +283,13 @@ public struct ProfileSettings: Codable, Equatable {
     // Automation
     public var allowAutomation: Bool = false
 
+    // Native macOS browser chrome (a.k.a. "Native Tabs" in the UI): hide
+    // Chromium's tab strip + omnibox via host-side framebuffer cropping
+    // and render tabs/URL/share controls as native macOS toolbar items.
+    // Tab state flows over vsock. Default `true` so new profiles and any
+    // legacy profile saved before this field existed both opt in.
+    public var nativeChrome: Bool = true
+
     // Trace
     public var traceLevel: TraceLevel = .disabled
     public var traceAutoStart: Bool = true  // start tracing when session opens
@@ -311,6 +318,7 @@ public struct ProfileSettings: Codable, Equatable {
         case webcamDeviceID, microphoneDeviceID, speakerDeviceID, webcamEffects
         case rootCAs, matchKeyboardLayout, locale, allowAutomation
         case traceLevel, traceAutoStart, persistent, encryptOnDisk
+        case nativeChrome
     }
 
     // Custom decoder so that adding new fields doesn't break existing profiles.
@@ -386,6 +394,7 @@ public struct ProfileSettings: Codable, Equatable {
         traceAutoStart = try c.decodeIfPresent(Bool.self, forKey: .traceAutoStart) ?? defaults.traceAutoStart
         persistent = try c.decodeIfPresent(Bool.self, forKey: .persistent) ?? defaults.persistent
         encryptOnDisk = try c.decodeIfPresent(Bool.self, forKey: .encryptOnDisk) ?? defaults.encryptOnDisk
+        nativeChrome = try c.decodeIfPresent(Bool.self, forKey: .nativeChrome) ?? defaults.nativeChrome
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -451,6 +460,7 @@ public struct ProfileSettings: Codable, Equatable {
         try c.encode(traceAutoStart, forKey: .traceAutoStart)
         try c.encode(persistent, forKey: .persistent)
         try c.encode(encryptOnDisk, forKey: .encryptOnDisk)
+        try c.encode(nativeChrome, forKey: .nativeChrome)
     }
 
     /// Convert to a VMConfig for VM creation.
@@ -534,7 +544,9 @@ public struct ProfileSettings: Codable, Equatable {
             proxyUsername: hasProxy && !proxyUsername.isEmpty ? proxyUsername : nil,
             proxyPassword: hasProxy && !proxyPassword.isEmpty ? proxyPassword : nil,
             blockDownloads: !canDownload,
-            enableAutomation: defaults.bool(forKey: "automation.enabled"),
+            enableAutomation: defaults.bool(forKey: "automation.enabled") || nativeChrome,
+            nativeChrome: nativeChrome,
+            nativeChromeInset: nativeChrome ? VMConfig.defaultNativeChromeInset : 0,
             testSuite: isTestSuite,
             traceLevel: traceLevel,
             matchKeyboardLayout: matchKeyboardLayout,
