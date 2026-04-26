@@ -50,9 +50,12 @@ const { values } = parseArgs({
     version: { type: "string" },
     channel: { type: "string", default: "stable" },
     // Which sibling app is being released. Selects the DO Spaces
-    // prefix and the appcast endpoint. Defaults to the browser to
-    // preserve the previous (single-product) behaviour.
-    product: { type: "string", default: "bromure" },
+    // prefix and the appcast endpoint. REQUIRED — no default, on
+    // purpose: a silently-defaulted product would upload to the
+    // wrong bucket if a release pipeline ever drops the flag, and
+    // the consequence (a browser release going to the AC channel
+    // or vice versa) is severe enough that we'd rather fail loudly.
+    product: { type: "string" },
     "min-system-version": { type: "string", default: "14.0" },
     "notes-file": { type: "string" },
     "dry-run": { type: "boolean", default: false },
@@ -66,6 +69,7 @@ function die(msg) {
 
 if (!values.file) die("--file is required");
 if (!values.version) die("--version is required");
+if (!values.product) die("--product is required (one of: bromure, bromure-ac)");
 if (!/^\d+\.\d+(\.\d+)?(-[A-Za-z0-9._-]+)?$/.test(values.version)) {
   die(`invalid version string: ${values.version}`);
 }
@@ -216,6 +220,22 @@ async function registerRelease(payload) {
 (async () => {
   const fileBasename = basename(FILE);
   const spacesKey = `${SPACES_PREFIX}/${fileBasename}`;
+
+  // Banner — loud enough that the build operator can read the
+  // Jenkins console output and confirm the artifact is heading to
+  // the right product channel. Especially important since the
+  // browser and AC pipelines share the same bucket and only the
+  // prefix differs.
+  console.log("=========================================================");
+  console.log(`  product:        ${PRODUCT}`);
+  console.log(`  spaces bucket:  ${DO_SPACES_BUCKET}`);
+  console.log(`  spaces prefix:  ${SPACES_PREFIX}/`);
+  console.log(`  spaces key:     ${spacesKey}`);
+  console.log(`  public URL:     ${DO_SPACES_PUBLIC_BASE}/${spacesKey}`);
+  console.log(`  appcast API:    ${RELEASE_API_URL}`);
+  console.log(`  channel:        ${CHANNEL}`);
+  console.log(`  version:        ${VERSION}`);
+  console.log("=========================================================");
 
   console.log(`[1/3] signing ${FILE}…`);
   const { signature, length } = signArtifact(FILE);

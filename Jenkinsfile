@@ -84,6 +84,7 @@ pipeline {
                         (cd tools && if [ -f package-lock.json ]; then npm ci --silent; else npm install --silent; fi)
 
                         node tools/release-upload.mjs \
+                            --product bromure \
                             --file "${WORKSPACE}/Bromure-${BROMURE_VERSION}.dmg" \
                             --version "${BROMURE_VERSION}" \
                             --channel "${RELEASE_CHANNEL}" \
