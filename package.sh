@@ -277,8 +277,11 @@ hdiutil create -volname "$APP_NAME" \
 
 # Mount the read-write DMG. hdiutil emits tab-separated columns; default
 # awk would split on whitespace and lose everything after the first space
-# in volume names like "Bromure Agentic Coding".
-MOUNT_DIR=$(hdiutil attach -readwrite -noverify "$DMG_RW" | grep "/Volumes/$APP_NAME" | awk -F'\t' '{print $NF}')
+# in volume names like "Bromure Agentic Coding". We capture both the
+# /dev/diskN identifier (for a clean detach later) and the mount point.
+ATTACH_OUTPUT=$(hdiutil attach -readwrite -noverify "$DMG_RW")
+DISK_DEV=$(echo "$ATTACH_OUTPUT" | grep -E '^/dev/disk[0-9]+\s' | head -1 | awk '{print $1}')
+MOUNT_DIR=$(echo "$ATTACH_OUTPUT" | grep "/Volumes/$APP_NAME" | awk -F'\t' '{print $NF}')
 # Wait for Finder to register the volume
 sleep 2
 
@@ -309,8 +312,24 @@ APPLESCRIPT
 # Ensure .background and .DS_Store are hidden
 SetFile -a V "$MOUNT_DIR/.background" 2>/dev/null || true
 
+# Detach reliably. Two issues we've hit: (1) Finder may still hold the
+# window open, so plain `hdiutil detach` fails with "resource busy" and
+# the buffer cache is never flushed — the .DS_Store written by the
+# AppleScript step ends up missing from the final DMG; (2) detaching
+# the volume mount-point can leave the underlying /dev/diskN attached.
+# Solution: detach the whole disk device (not just the mount point)
+# with `-force` so open file handles don't block the unmount.
 sync
-hdiutil detach "$MOUNT_DIR"
+for i in 1 2 3 4 5; do
+    if hdiutil detach "$DISK_DEV" 2>/dev/null; then
+        break
+    fi
+    sleep 2
+    if [ "$i" = "5" ]; then
+        echo "Forcing detach of $DISK_DEV..."
+        hdiutil detach -force "$DISK_DEV"
+    fi
+done
 
 # Convert to compressed read-only DMG
 hdiutil convert "$DMG_RW" -format UDZO -o "$DMG_PATH"
