@@ -261,7 +261,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case agent       = "Agent"
     case folders     = "Folders"
     case credentials = "Credentials"
-    case advanced    = "Advanced"
+    case tracing     = "Tracing"
     case appearance  = "Appearance"
     case resources   = "Resources"
 
@@ -273,7 +273,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .agent:       "sparkles"
         case .folders:     "folder.fill"
         case .credentials: "key.fill"
-        case .advanced:    "shield.lefthalf.filled"
+        case .tracing:     "doc.text.magnifyingglass"
         case .appearance:  "paintpalette.fill"
         case .resources:   "memorychip.fill"
         }
@@ -285,7 +285,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .agent:       .purple
         case .folders:     .orange
         case .credentials: .green
-        case .advanced:    .red
+        case .tracing:     .red
         case .appearance:  .pink
         case .resources:   .gray
         }
@@ -346,6 +346,10 @@ struct ProfileEditorView: View {
     /// Sheet state for the SSH-key import flow.
     @State private var importSheet: ImportSheetState?
     @State private var importError: String?
+    /// Keys of the disclosure groups the user has expanded in the
+    /// Credentials pane. SSH starts open by default; everything else
+    /// is closed until the user opts in.
+    @State private var expandedCredsSections: Set<String> = ["ssh"]
 
     struct ImportSheetState: Identifiable {
         let id = UUID()
@@ -449,7 +453,7 @@ struct ProfileEditorView: View {
         case .agent:       agentSection
         case .folders:     foldersSection
         case .credentials: credentialsSection
-        case .advanced:    advancedSection
+        case .tracing:     tracingSection
         case .appearance:  appearanceSection
         case .resources:   resourcesSection
         }
@@ -636,8 +640,9 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private var credentialsSection: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            // Git identity
+        VStack(alignment: .leading, spacing: 8) {
+            // Git identity (always visible — short, used by ~all
+            // profiles, doesn't deserve to hide behind a chevron).
             VStack(alignment: .leading, spacing: 6) {
                 Text("Git Identity")
                     .font(.headline)
@@ -649,13 +654,152 @@ struct ProfileEditorView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .padding(.bottom, 4)
 
-            Divider()
+            credentialsDisclosure(
+                key: "ssh",
+                title: NSLocalizedString("SSH Keys", comment: ""),
+                symbol: "key.fill",
+                count: sshKeyCount
+            ) {
+                sshKeySubsection
+            }
 
-            // SSH
-            VStack(alignment: .leading, spacing: 6) {
-                Text("SSH key")
+            credentialsDisclosure(
+                key: "github",
+                title: NSLocalizedString("GitHub Tokens", comment: ""),
+                symbol: "cat.fill",
+                count: gitTokenCount(filter: { isGitHub($0.host) })
+            ) {
+                gitTokenSubsection(displayName: "GitHub",
+                                   defaultHost: "github.com",
+                                   filter: { isGitHub($0.host) })
+            }
+
+            credentialsDisclosure(
+                key: "gitlab",
+                title: NSLocalizedString("GitLab Tokens", comment: ""),
+                symbol: "fox.fill",
+                count: gitTokenCount(filter: { isGitLab($0.host) })
+            ) {
+                gitTokenSubsection(displayName: "GitLab",
+                                   defaultHost: "gitlab.com",
+                                   filter: { isGitLab($0.host) })
+            }
+
+            credentialsDisclosure(
+                key: "bitbucket",
+                title: NSLocalizedString("Bitbucket Tokens", comment: ""),
+                symbol: "hammer.fill",
+                count: gitTokenCount(filter: { isBitbucket($0.host) })
+            ) {
+                gitTokenSubsection(displayName: "Bitbucket",
+                                   defaultHost: "bitbucket.org",
+                                   filter: { isBitbucket($0.host) })
+            }
+
+            credentialsDisclosure(
+                key: "k8s",
+                title: NSLocalizedString("Kubernetes", comment: ""),
+                symbol: "shippingbox.fill",
+                count: draft.kubeconfigs.count
+            ) {
+                kubernetesSubsection
+            }
+
+            credentialsDisclosure(
+                key: "do",
+                title: NSLocalizedString("DigitalOcean", comment: ""),
+                symbol: "cloud.fill",
+                count: draft.digitalOceanToken.isEmpty ? 0 : 1
+            ) {
+                digitalOceanSubsection
+            }
+
+            credentialsDisclosure(
+                key: "other",
+                title: NSLocalizedString("Other API keys", comment: ""),
+                symbol: "key.horizontal.fill",
+                count: draft.manualTokens.count
+            ) {
+                otherTokensSubsection
+            }
+        }
+        .sheet(item: $importSheet) { _ in
+            importSheetView
+        }
+    }
+
+    // MARK: - Disclosure helper
+
+    @ViewBuilder
+    private func credentialsDisclosure<Content: View>(
+        key: String,
+        title: String,
+        symbol: String,
+        count: Int,
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        DisclosureGroup(isExpanded: Binding(
+            get: { expandedCredsSections.contains(key) },
+            set: { isOpen in
+                if isOpen { expandedCredsSections.insert(key) }
+                else      { expandedCredsSections.remove(key) }
+            })) {
+            content()
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: symbol)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18)
+                Text(title)
                     .font(.headline)
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                }
+                Spacer()
+            }
+        }
+    }
+
+    // MARK: - Per-provider host predicates
+
+    private func isGitHub(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return h == "github.com" || h.hasSuffix(".github.com")
+    }
+    private func isGitLab(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return h == "gitlab.com" || h.hasPrefix("gitlab.")
+    }
+    private func isBitbucket(_ host: String) -> Bool {
+        host.lowercased() == "bitbucket.org"
+    }
+    private var sshKeyCount: Int {
+        var n = draft.importedSSHKeys.count
+        if draft.sshPublicKey != nil || generateSSH { n += 1 }
+        return n
+    }
+    private func gitTokenCount(filter: (GitHTTPSCredential) -> Bool) -> Int {
+        draft.gitHTTPSCredentials.filter(filter).count
+    }
+
+    // MARK: - SSH
+
+    @ViewBuilder
+    private var sshKeySubsection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // ed25519 keypair (auto-generated, lives only on the host)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Bromure-generated keypair")
+                    .font(.subheadline.weight(.semibold))
                 if isNew {
                     Toggle("Generate an ed25519 keypair", isOn: $generateSSH)
                     Text("The public key will be displayed below after the profile is saved.")
@@ -700,16 +844,200 @@ struct ProfileEditorView: View {
 
             Divider()
 
-            // Pre-existing SSH keys the user wants this profile to use.
             importedSSHKeysSubsection
-
-            Divider()
-
-            // HTTPS personal access tokens
-            httpsTokensSubsection
         }
-        .sheet(item: $importSheet) { _ in
-            importSheetView
+    }
+
+    // MARK: - Git tokens (per provider, sharing one model)
+
+    @ViewBuilder
+    private func gitTokenSubsection(displayName: String,
+                                    defaultHost: String,
+                                    filter: @escaping (GitHTTPSCredential) -> Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Personal access tokens for git over HTTPS. Stored encrypted on the host; the proxy swaps them onto outbound requests so the VM only ever holds the fake. `gh` and `glab` pick up GH_TOKEN / GITLAB_TOKEN env automatically.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            let entries = draft.gitHTTPSCredentials.enumerated()
+                .filter { filter($0.element) }
+
+            if entries.isEmpty {
+                Text("No \(displayName) tokens configured.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(Array(entries), id: \.element.id) { (idx, _) in
+                    HTTPSCredentialRow(
+                        credential: $draft.gitHTTPSCredentials[idx],
+                        onRemove: { draft.gitHTTPSCredentials.remove(at: idx) },
+                        onOpenTokenPage: openTokenPage(for:)
+                    )
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button {
+                    draft.gitHTTPSCredentials.append(
+                        GitHTTPSCredential(host: defaultHost,
+                                           username: gitUserNameSuggestion(),
+                                           token: ""))
+                    expandedCredsSections.insert(disclosureKey(for: defaultHost))
+                } label: {
+                    Label("Add token", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+    }
+    private func disclosureKey(for host: String) -> String {
+        if isGitHub(host)    { return "github" }
+        if isGitLab(host)    { return "gitlab" }
+        if isBitbucket(host) { return "bitbucket" }
+        return ""
+    }
+    private func gitUserNameSuggestion() -> String {
+        let n = draft.gitUserName.trimmingCharacters(in: .whitespaces)
+        return (!n.isEmpty && !n.contains(" ")) ? n : ""
+    }
+
+    // MARK: - Kubernetes
+
+    @ViewBuilder
+    private var kubernetesSubsection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Each context produces a synthetic ~/.kube/config in the VM with throwaway client certs / placeholder bearer tokens. Real credentials live on the host; the proxy substitutes them on the wire when the VM talks to the API server. Exec-plugin contexts are polled on the host so kubectl always sees a fresh token.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if draft.kubeconfigs.isEmpty {
+                Text("No Kubernetes contexts configured.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(Array(draft.kubeconfigs.enumerated()), id: \.element.id) { (idx, _) in
+                    KubeconfigRow(
+                        entry: $draft.kubeconfigs[idx],
+                        onRemove: { draft.kubeconfigs.remove(at: idx) }
+                    )
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button {
+                    importKubeconfigFile()
+                } label: {
+                    Label("Import file…", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.borderless)
+                Button {
+                    draft.kubeconfigs.append(KubeconfigEntry(name: "context-\(draft.kubeconfigs.count + 1)"))
+                } label: {
+                    Label("Add context", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+    }
+
+    /// Open-panel + parse + append. Shows an error sheet if the file
+    /// isn't a kubeconfig or YAML parsing failed.
+    private func importKubeconfigFile() {
+        let panel = NSOpenPanel()
+        panel.title = NSLocalizedString("Import kubeconfig", comment: "")
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = []  // anything — kubeconfigs have no canonical UTI
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".kube", isDirectory: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            let parsed = try KubeconfigImport.parse(text)
+            if parsed.isEmpty {
+                presentImportError("No contexts were found in this file.")
+                return
+            }
+            draft.kubeconfigs.append(contentsOf: parsed)
+        } catch {
+            presentImportError(error.localizedDescription)
+        }
+    }
+
+    private func presentImportError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Couldn't import kubeconfig", comment: "")
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
+
+    // MARK: - DigitalOcean
+
+    @ViewBuilder
+    private var digitalOceanSubsection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Personal access token from cloud.digitalocean.com → API → Generate New Token. Injected into the VM as `DIGITALOCEAN_ACCESS_TOKEN` env + `~/.config/doctl/config.yaml` — `doctl auth init` is unnecessary, you're already logged in.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                SecureField("dop_v1_…", text: $draft.digitalOceanToken)
+                    .textFieldStyle(.roundedBorder)
+                Button {
+                    if let url = URL(string: "https://cloud.digitalocean.com/account/api/tokens") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.right.square")
+                }
+                .buttonStyle(.borderless)
+                .help("Open DigitalOcean token page in your browser")
+            }
+        }
+    }
+
+    // MARK: - Other API keys (formerly Manual token rules under Advanced)
+
+    @ViewBuilder
+    private var otherTokensSubsection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("For any API beyond the auto-handled ones (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean, Kubernetes). Each entry mints a fresh fake (`brm_…`) deterministic in your real value; the fake is exported as the named env var inside the VM, the proxy swaps it back to your real value on the wire.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if draft.manualTokens.isEmpty {
+                Text("No other API tokens configured.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(Array(draft.manualTokens.enumerated()), id: \.element.id) { (idx, _) in
+                    ManualTokenRow(
+                        token: $draft.manualTokens[idx],
+                        onRemove: { draft.manualTokens.remove(at: idx) }
+                    )
+                }
+            }
+            HStack {
+                Spacer()
+                Button {
+                    draft.manualTokens.append(ManualToken())
+                } label: {
+                    Label("Add token", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+            }
         }
     }
 
@@ -865,62 +1193,6 @@ struct ProfileEditorView: View {
         }
     }
 
-    @ViewBuilder
-    private var httpsTokensSubsection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("HTTPS tokens")
-                    .font(.headline)
-                Spacer()
-                Menu {
-                    Button("GitHub.com")  { addCredential(host: "github.com",  presetName: "GitHub") }
-                    Button("GitLab.com")  { addCredential(host: "gitlab.com",  presetName: "GitLab") }
-                    Button("Bitbucket.org") { addCredential(host: "bitbucket.org", presetName: "Bitbucket") }
-                    Divider()
-                    Button("Other host…") { addCredential(host: "", presetName: nil) }
-                } label: {
-                    Label("Add", systemImage: "plus")
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-            }
-
-            Text("Personal access tokens for git over HTTPS. Written to ~/.git-credentials in the VM (chmod 600). For github.com / gitlab.com hosts we also seed `gh` and `glab` so their CLIs work without an extra `auth login`.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            if draft.gitHTTPSCredentials.isEmpty {
-                Text("No HTTPS tokens configured.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 10)
-            } else {
-                ForEach(Array(draft.gitHTTPSCredentials.enumerated()), id: \.element.id) { (idx, _) in
-                    HTTPSCredentialRow(
-                        credential: $draft.gitHTTPSCredentials[idx],
-                        onRemove: { draft.gitHTTPSCredentials.remove(at: idx) },
-                        onOpenTokenPage: openTokenPage(for:)
-                    )
-                }
-            }
-        }
-    }
-
-    private func addCredential(host: String, presetName: String?) {
-        // Pre-fill `username` with the git user.name when it looks like a
-        // login (no spaces) — saves a step for the common single-account
-        // case. Token deliberately left blank.
-        let suggestedUser: String = {
-            let n = draft.gitUserName.trimmingCharacters(in: .whitespaces)
-            return (!n.isEmpty && !n.contains(" ")) ? n : ""
-        }()
-        draft.gitHTTPSCredentials.append(
-            GitHTTPSCredential(host: host, username: suggestedUser, token: "")
-        )
-        _ = presetName  // reserved for future labelling in the row UI
-    }
-
     private func openTokenPage(for host: String) {
         let h = host.lowercased()
         let urlString: String?
@@ -939,7 +1211,7 @@ struct ProfileEditorView: View {
     }
 
     @ViewBuilder
-    private var advancedSection: some View {
+    private var tracingSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Label("MITM token swap", systemImage: "shield.lefthalf.filled")
@@ -974,37 +1246,7 @@ struct ProfileEditorView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            HStack {
-                Text("Manual token rules")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Button {
-                    draft.manualTokens.append(ManualToken())
-                } label: {
-                    Label("Add", systemImage: "plus")
-                }
-                .buttonStyle(.borderless)
-            }
-
-            if draft.manualTokens.isEmpty {
-                Text("No manual tokens configured. Auto-handled APIs (Anthropic, OpenAI, GitHub, GitLab) need no entries here.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 12)
-            } else {
-                ForEach(Array(draft.manualTokens.enumerated()), id: \.element.id) { (idx, _) in
-                    ManualTokenRow(
-                        token: $draft.manualTokens[idx],
-                        onRemove: { draft.manualTokens.remove(at: idx) }
-                    )
-                }
-            }
-
-            Text("Each entry mints a fresh fake (`brm_…`) on every session launch. The fake is exported as the named env var inside the VM; the proxy on the host swaps it back to your real value when the VM makes the API call.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .padding(.top, 4)
+            // Manual tokens moved to Credentials → Other API keys.
         }
     }
 
@@ -1657,6 +1899,219 @@ private struct ToolConfigCard: View {
         switch tool {
         case .claude: return "Anthropic API key"
         case .codex:  return "OpenAI API key"
+        }
+    }
+}
+
+// MARK: - Kubernetes context row
+
+/// One editable row for a KubeconfigEntry. Shows name + server inline;
+/// expands to reveal CA, namespace, and the auth-method-specific
+/// fields (token / cert+key / exec command + args).
+private struct KubeconfigRow: View {
+    @Binding var entry: KubeconfigEntry
+    var onRemove: () -> Void
+
+    @State private var expanded: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            DisclosureGroup(isExpanded: $expanded) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Text("Server").frame(width: 80, alignment: .trailing)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                        TextField("https://k8s.example.com:6443",
+                                  text: $entry.serverURL)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    HStack(alignment: .top, spacing: 6) {
+                        Text("CA cert").frame(width: 80, alignment: .trailing)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            TextEditor(text: $entry.caCertPEM)
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(height: 60)
+                                .border(Color.secondary.opacity(0.25))
+                            Text("Optional. Leave blank to trust the Bromure CA only (the proxy still validates the upstream).")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        Text("Namespace").frame(width: 80, alignment: .trailing)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                        TextField("default", text: $entry.namespace)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    Divider()
+                    authPicker
+                    authFields
+                }
+                .padding(.top, 6)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "shippingbox.fill")
+                        .foregroundStyle(.secondary)
+                    TextField("context-name", text: $entry.name)
+                        .textFieldStyle(.plain)
+                        .font(.callout.weight(.semibold))
+                    if !entry.serverURL.isEmpty {
+                        Text(entry.serverURL)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer()
+                    authBadge
+                    Button(action: onRemove) {
+                        Image(systemName: "minus.circle")
+                    }.buttonStyle(.borderless)
+                }
+            }
+        }
+        .padding(8)
+        .background(Color(nsColor: .textBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var authBadge: some View {
+        Text(authLabel)
+            .font(.caption2)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Capsule().fill(authColor.gradient))
+    }
+    private var authLabel: String {
+        switch entry.auth {
+        case .bearerToken:  return NSLocalizedString("token", comment: "")
+        case .clientCert:   return NSLocalizedString("cert", comment: "")
+        case .execPlugin:   return NSLocalizedString("exec", comment: "")
+        }
+    }
+    private var authColor: Color {
+        switch entry.auth {
+        case .bearerToken:  return .blue
+        case .clientCert:   return .green
+        case .execPlugin:   return .purple
+        }
+    }
+
+    @ViewBuilder
+    private var authPicker: some View {
+        HStack(spacing: 6) {
+            Text("Auth").frame(width: 80, alignment: .trailing)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+            Picker("", selection: Binding(
+                get: { authKind },
+                set: { switchAuthKind(to: $0) }
+            )) {
+                Text("Bearer token").tag("token")
+                Text("Client certificate").tag("cert")
+                Text("Exec plugin").tag("exec")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+        }
+    }
+    private var authKind: String {
+        switch entry.auth {
+        case .bearerToken: return "token"
+        case .clientCert:  return "cert"
+        case .execPlugin:  return "exec"
+        }
+    }
+    private func switchAuthKind(to kind: String) {
+        switch kind {
+        case "token": entry.auth = .bearerToken("")
+        case "cert":  entry.auth = .clientCert(certPEM: "", keyPEM: "")
+        case "exec":  entry.auth = .execPlugin(command: "", args: [], refreshSeconds: 600)
+        default: break
+        }
+    }
+
+    @ViewBuilder
+    private var authFields: some View {
+        switch entry.auth {
+        case .bearerToken(let t):
+            HStack(spacing: 6) {
+                Text("Token").frame(width: 80, alignment: .trailing)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                SecureField("eyJ… or sa-…", text: Binding(
+                    get: { t }, set: { entry.auth = .bearerToken($0) }))
+                    .textFieldStyle(.roundedBorder)
+            }
+        case .clientCert(let cert, let key):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 6) {
+                    Text("Cert PEM").frame(width: 80, alignment: .trailing)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    TextEditor(text: Binding(
+                        get: { cert },
+                        set: { entry.auth = .clientCert(certPEM: $0, keyPEM: key) }))
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(height: 60)
+                        .border(Color.secondary.opacity(0.25))
+                }
+                HStack(alignment: .top, spacing: 6) {
+                    Text("Key PEM").frame(width: 80, alignment: .trailing)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    TextEditor(text: Binding(
+                        get: { key },
+                        set: { entry.auth = .clientCert(certPEM: cert, keyPEM: $0) }))
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(height: 60)
+                        .border(Color.secondary.opacity(0.25))
+                }
+            }
+        case .execPlugin(let cmd, let args, let secs):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text("Command").frame(width: 80, alignment: .trailing)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    TextField("/usr/local/bin/aws", text: Binding(
+                        get: { cmd },
+                        set: { entry.auth = .execPlugin(command: $0, args: args, refreshSeconds: secs) }))
+                        .textFieldStyle(.roundedBorder)
+                }
+                HStack(spacing: 6) {
+                    Text("Args").frame(width: 80, alignment: .trailing)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    TextField("eks get-token --cluster-name foo (space-separated)",
+                              text: Binding(
+                                get: { args.joined(separator: " ") },
+                                set: { newVal in
+                                    let parts = newVal.split(separator: " ").map(String.init)
+                                    entry.auth = .execPlugin(command: cmd, args: parts, refreshSeconds: secs)
+                                }))
+                        .textFieldStyle(.roundedBorder)
+                }
+                HStack(spacing: 6) {
+                    Text("Refresh").frame(width: 80, alignment: .trailing)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    Stepper(value: Binding(
+                        get: { secs },
+                        set: { entry.auth = .execPlugin(command: cmd, args: args, refreshSeconds: $0) }),
+                            in: 60...3600, step: 60) {
+                        Text("\(secs / 60) min")
+                            .font(.caption.monospaced())
+                    }
+                    Spacer()
+                }
+                Text("Bromure runs this command on the host every refresh interval, parses the kubectl ExecCredential JSON, and feeds the resulting token into the proxy's swap map. The VM's kubectl never executes the plugin.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

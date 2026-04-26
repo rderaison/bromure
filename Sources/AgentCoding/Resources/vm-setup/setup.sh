@@ -315,20 +315,29 @@ step "npm install -g @anthropic-ai/claude-code (via socket)" \
 step "install codex (GitHub release binary, not npm)" \
     sh -c '
         ARCH=$(uname -m)
+        # Prefer the glibc target — we are on Ubuntu, and the gnu build
+        # is what OpenAI publishes alongside the musl one.
         case "$ARCH" in
-            aarch64|arm64) TARGET=aarch64-unknown-linux-musl ;;
-            x86_64)        TARGET=x86_64-unknown-linux-musl  ;;
+            aarch64|arm64) TARGET=aarch64-unknown-linux-gnu ;;
+            x86_64)        TARGET=x86_64-unknown-linux-gnu  ;;
             *) echo "  unsupported arch $ARCH — skipping codex"; exit 0 ;;
         esac
-        TAG=$(curl -fsSL https://api.github.com/repos/openai/codex/releases/latest \
-              | grep -m1 "\"tag_name\"" | cut -d"\"" -f4)
+        # Buffer the API response to a temp file so the trailing
+        # `grep -m1` doesn'"'"'t close the pipe early and trip curl
+        # exit-23 ("failure writing output to destination").
+        TMP=$(mktemp -d)
+        if ! curl -fsSL https://api.github.com/repos/openai/codex/releases/latest \
+                  -o "$TMP/release.json"; then
+            echo "  could not fetch codex release metadata; continuing without"
+            rm -rf "$TMP"; exit 0
+        fi
+        TAG=$(grep -m1 "\"tag_name\"" "$TMP/release.json" | cut -d"\"" -f4)
         if [ -z "$TAG" ]; then
             echo "  could not resolve latest codex tag; continuing without"
-            exit 0
+            rm -rf "$TMP"; exit 0
         fi
         URL="https://github.com/openai/codex/releases/download/${TAG}/codex-${TARGET}.tar.gz"
         echo "  fetching $URL"
-        TMP=$(mktemp -d)
         curl -fsSL "$URL" -o "$TMP/codex.tar.gz"
         tar -xzf "$TMP/codex.tar.gz" -C "$TMP"
         BIN=$(find "$TMP" -type f -name "codex-*" ! -name "*.tar.gz" | head -1)
@@ -400,6 +409,100 @@ step "install glab from latest GitLab release deb (best effort)" \
         else
             echo "  glab download failed; skipping"
         fi
+    ' || true
+
+# ---------------------------------------------------------------------------
+# Cloud + Kubernetes CLIs.
+# kubectl: stable release from dl.k8s.io.
+# doctl: GitHub release tarball.
+# awscli v2: official aws bundle (works for arm64 + amd64).
+# gcloud: Google Cloud SDK tarball.
+# Each install is best-effort with `|| true` so a single failure
+# doesn't take down the rest.
+# ---------------------------------------------------------------------------
+
+step "install kubectl (latest stable)" \
+    sh -c '
+        set -e
+        ARCH=$(dpkg --print-architecture)
+        case "$ARCH" in arm64|aarch64) K=arm64 ;; amd64|x86_64) K=amd64 ;; *) echo "  unsupported arch $ARCH"; exit 0 ;; esac
+        STABLE=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+        URL="https://dl.k8s.io/release/${STABLE}/bin/linux/${K}/kubectl"
+        echo "  fetching $URL"
+        curl -fsSL -o /tmp/kubectl "$URL"
+        install -m 755 /tmp/kubectl /usr/local/bin/kubectl
+        rm -f /tmp/kubectl
+        echo "  installed kubectl ${STABLE}"
+    ' || true
+
+step "install doctl (DigitalOcean CLI, GitHub release)" \
+    sh -c '
+        set -e
+        ARCH=$(dpkg --print-architecture)
+        case "$ARCH" in arm64|aarch64) K=arm64 ;; amd64|x86_64) K=amd64 ;; *) echo "  unsupported arch $ARCH"; exit 0 ;; esac
+        TAG=$(curl -fsSL https://api.github.com/repos/digitalocean/doctl/releases/latest \
+              | grep -m1 "\"tag_name\"" | cut -d"\"" -f4)
+        VER=${TAG#v}
+        URL="https://github.com/digitalocean/doctl/releases/download/${TAG}/doctl-${VER}-linux-${K}.tar.gz"
+        echo "  fetching $URL"
+        TMP=$(mktemp -d)
+        curl -fsSL "$URL" -o "$TMP/doctl.tar.gz"
+        tar -xzf "$TMP/doctl.tar.gz" -C "$TMP"
+        install -m 755 "$TMP/doctl" /usr/local/bin/doctl
+        rm -rf "$TMP"
+        echo "  installed doctl ${TAG}"
+    ' || true
+
+step "install awscli v2 (Amazon)" \
+    sh -c '
+        set -e
+        ARCH=$(uname -m)
+        case "$ARCH" in aarch64|arm64) K=aarch64 ;; x86_64) K=x86_64 ;; *) echo "  unsupported arch $ARCH"; exit 0 ;; esac
+        URL="https://awscli.amazonaws.com/awscli-exe-linux-${K}.zip"
+        echo "  fetching $URL"
+        TMP=$(mktemp -d)
+        curl -fsSL "$URL" -o "$TMP/awscliv2.zip"
+        # awscli requires unzip — install it best-effort.
+        apt-get install -y -q --no-install-recommends unzip || true
+        unzip -q "$TMP/awscliv2.zip" -d "$TMP"
+        "$TMP/aws/install" --update
+        rm -rf "$TMP"
+        echo "  installed awscli $(/usr/local/bin/aws --version 2>&1 | head -1)"
+    ' || true
+
+step "install Google Cloud SDK (gcloud)" \
+    sh -c '
+        set -e
+        ARCH=$(uname -m)
+        case "$ARCH" in aarch64|arm64) K=arm ;; x86_64) K=x86_64 ;; *) echo "  unsupported arch $ARCH"; exit 0 ;; esac
+        URL="https://dl.google.com/dl/cloudsdk/channels/rapid/google-cloud-cli-linux-${K}.tar.gz"
+        echo "  fetching $URL"
+        TMP=$(mktemp -d)
+        curl -fsSL "$URL" -o "$TMP/gcloud.tar.gz"
+        tar -xzf "$TMP/gcloud.tar.gz" -C /opt
+        # Non-interactive install: skip components, no PATH munging
+        # (we add /opt/google-cloud-sdk/bin via .bashrc PATH below).
+        /opt/google-cloud-sdk/install.sh --quiet --usage-reporting=false \
+            --path-update=false --command-completion=false || true
+        ln -sf /opt/google-cloud-sdk/bin/gcloud  /usr/local/bin/gcloud
+        ln -sf /opt/google-cloud-sdk/bin/gsutil  /usr/local/bin/gsutil
+        ln -sf /opt/google-cloud-sdk/bin/bq      /usr/local/bin/bq
+        rm -rf "$TMP"
+        echo "  installed gcloud"
+    ' || true
+
+step "install azure-cli (Microsoft)" \
+    sh -c '
+        set -e
+        # Azure publishes their own apt repo. Best-effort: errors are
+        # logged but not fatal.
+        curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+            | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ noble main" \
+            > /etc/apt/sources.list.d/azure-cli.list
+        apt-get update -y -qq
+        apt-get install -y -q --no-install-recommends azure-cli
+        echo "  installed azure-cli $(/usr/bin/az version 2>/dev/null | head -3 | tail -1)"
     ' || true
 
 # ---------------------------------------------------------------------------

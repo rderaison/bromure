@@ -12,6 +12,18 @@ public final class MitmEngine {
     public let swapper: TokenSwapper
     public let sshAgent: SSHAgentServer
     public let traceStore: TraceStore
+    /// Per-profile, per-host SecIdentity table for upstream client-cert
+    /// auth (Kubernetes API servers, internal mTLS APIs, etc.). The
+    /// proxy's URLSession delegate looks up here when an upstream
+    /// challenge comes in.
+    public let clientIdentities = ClientIdentityRegistry()
+    /// Per-profile, per-host CA the proxy must trust when reaching
+    /// the upstream API server. Used by the HTTPProxy URLSession
+    /// delegate's serverTrust handler.
+    public let clusterCAs = ClusterCATrustRegistry()
+    /// Owner of the exec-credential poller tasks. One Task per
+    /// kubeconfig entry; cancelled in `unregister(profileID:)`.
+    public let execPoller = ExecCredentialPoller()
 
     /// Per-profile trace level + session id, set by ACAppDelegate at
     /// session launch. The HTTPProxy connection looks these up to
@@ -106,6 +118,8 @@ public final class MitmEngine {
             swapper: swapper,
             sshAgent: sshAgent,
             traceStore: traceStore,
+            clientIdentities: clientIdentities,
+            clusterCAs: clusterCAs,
             // The provider runs from a detached Task on the proxy's
             // hot path. `sessionTrace(for:)` is now nonisolated +
             // lock-protected so this is just a hash lookup behind a
@@ -125,6 +139,9 @@ public final class MitmEngine {
         listenerHolders.removeValue(forKey: profileID)
         swapper.clearMap(for: profileID)
         sshAgent.clearKeys(for: profileID)
+        clientIdentities.clearAll(for: profileID)
+        clusterCAs.clearAll(for: profileID)
+        execPoller.stopAll()
     }
 }
 
@@ -143,6 +160,8 @@ private final class ListenerHolder {
          swapper: TokenSwapper,
          sshAgent: SSHAgentServer,
          traceStore: TraceStore,
+         clientIdentities: ClientIdentityRegistry,
+         clusterCAs: ClusterCATrustRegistry,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?)
     {
         self.profileID = profileID
@@ -151,6 +170,8 @@ private final class ListenerHolder {
             certCache: certCache,
             swapper: swapper,
             traceStore: traceStore,
+            clientIdentities: clientIdentities,
+            clusterCAs: clusterCAs,
             sessionTraceProvider: sessionTraceProvider)
         self.sshDelegate = SSHListenerDelegate(
             profileID: profileID, sshAgent: sshAgent)
@@ -168,15 +189,21 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
     let certCache: CertCache
     let swapper: TokenSwapper
     let traceStore: TraceStore
+    let clientIdentities: ClientIdentityRegistry
+    let clusterCAs: ClusterCATrustRegistry
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
 
     init(profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          traceStore: TraceStore,
+         clientIdentities: ClientIdentityRegistry,
+         clusterCAs: ClusterCATrustRegistry,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?) {
         self.profileID = profileID
         self.certCache = certCache
         self.swapper = swapper
         self.traceStore = traceStore
+        self.clientIdentities = clientIdentities
+        self.clusterCAs = clusterCAs
         self.sessionTraceProvider = sessionTraceProvider
     }
 
@@ -191,6 +218,8 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             certCache: certCache,
             swapper: swapper,
             traceStore: traceStore,
+            clientIdentities: clientIdentities,
+            clusterCAs: clusterCAs,
             sessionTraceProvider: providerCopy
         )
         Task.detached(priority: .userInitiated) {

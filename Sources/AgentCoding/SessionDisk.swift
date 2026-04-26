@@ -201,6 +201,12 @@ public final class SessionDisk {
                         ghEnv.append("export GLAB_TOKEN=\(shellQuote(fake))")
                     }
                 }
+                // DigitalOcean: doctl + most terraform / SDK clients
+                // honour DIGITALOCEAN_ACCESS_TOKEN — env beats the
+                // ~/.config/doctl/config.yaml path.
+                if let doFake = plan.fakeForDigitalOcean() {
+                    ghEnv.append("export DIGITALOCEAN_ACCESS_TOKEN=\(shellQuote(doFake))")
+                }
             }
 
             var proxyLines: [String] = [

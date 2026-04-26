@@ -15,16 +15,22 @@ final class HTTPMitmConnection: @unchecked Sendable {
     let certCache: CertCache
     let swapper: TokenSwapper
     let traceStore: TraceStore
+    let clientIdentities: ClientIdentityRegistry
+    let clusterCAs: ClusterCATrustRegistry
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
 
     init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          traceStore: TraceStore,
+         clientIdentities: ClientIdentityRegistry,
+         clusterCAs: ClusterCATrustRegistry,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?) {
         self.fd = fd
         self.profileID = profileID
         self.certCache = certCache
         self.swapper = swapper
         self.traceStore = traceStore
+        self.clientIdentities = clientIdentities
+        self.clusterCAs = clusterCAs
         self.sessionTraceProvider = sessionTraceProvider
     }
 
@@ -88,9 +94,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 "[mitm] LEAK \(leak.header)=\(leak.valuePreview) on \(host) (\(leak.suspicion.rawValue))\n".utf8))
         }
 
-        // 6. Send to upstream via URLSession. Build a URLRequest from
-        //    the raw HTTP wire frame.
-        let upstreamResp = try await sendToUpstream(rawRequest: swap.modified, host: host, port: port)
+        // 6. Send to upstream. The session's delegate looks up the
+        //    profile's per-host SecIdentity (Kubernetes API server
+        //    et al.) when the upstream challenges for a client cert.
+        let session = upstreamSession(for: host)
+        let upstreamResp = try await sendToUpstream(rawRequest: swap.modified,
+                                                    host: host, port: port,
+                                                    session: session)
 
         // 7. Send the response back through TLS.
         try tls.write(upstreamResp)
@@ -161,6 +171,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
         await MainActor.run {
             store.record(record, requestBody: req, responseBody: res)
         }
+    }
+
+    /// Build a per-request URLSession whose delegate fields client-
+    /// cert challenges with the matching SecIdentity from the
+    /// profile's identity registry. The session is single-use because
+    /// URLSessionDelegate must be retained for the session's lifetime
+    /// and we want the connection's identity binding to be tight.
+    private func upstreamSession(for host: String) -> URLSession {
+        let delegate = ClientCertChallengeDelegate(
+            identityRegistry: clientIdentities,
+            caRegistry: clusterCAs,
+            profileID: profileID, host: host)
+        let cfg = URLSessionConfiguration.ephemeral
+        return URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
     }
 
     /// Pull "GET /foo HTTP/1.1" → ("GET", "/foo").
@@ -282,7 +306,8 @@ private func writeAll(fd: Int32, bytes: [UInt8]) throws {
 /// Reconstruct the raw HTTP request as a URLRequest, fire via
 /// URLSession (which handles TLS validation upstream), and return the
 /// raw HTTP/1.1 response we'll send back through the TLS server.
-private func sendToUpstream(rawRequest: Data, host: String, port: Int) async throws -> Data {
+private func sendToUpstream(rawRequest: Data, host: String, port: Int,
+                            session: URLSession = URLSession.shared) async throws -> Data {
     guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)) else {
         throw MitmError.malformedHTTPRequest
     }
@@ -302,9 +327,13 @@ private func sendToUpstream(rawRequest: Data, host: String, port: Int) async thr
     let method = String(lineParts[0])
     let path   = String(lineParts[1])
 
-    let scheme = (port == 443) ? "https" : "http"
-    let portStr = (port == 443 || port == 80) ? "" : ":\(port)"
-    guard let url = URL(string: "\(scheme)://\(host)\(portStr)\(path)") else {
+    // CONNECT tunnels are TLS by definition — the port is just where
+    // the upstream listens (e.g. 6443 for k8s API servers, 8443 for
+    // some internal stacks). Always replay as https so URLSession
+    // performs a real TLS handshake upstream; firing http:// at a
+    // TLS-only port lands a Bad Request.
+    let portStr = (port == 443) ? "" : ":\(port)"
+    guard let url = URL(string: "https://\(host)\(portStr)\(path)") else {
         throw MitmError.malformedHTTPRequest
     }
 
@@ -326,7 +355,7 @@ private func sendToUpstream(rawRequest: Data, host: String, port: Int) async thr
         }
     }
 
-    let (data, response) = try await URLSession.shared.data(for: req)
+    let (data, response) = try await session.data(for: req)
     guard let http = response as? HTTPURLResponse else {
         throw MitmError.upstreamFailed("non-HTTP response")
     }
@@ -362,4 +391,78 @@ private func sendToUpstream(rawRequest: Data, host: String, port: Int) async thr
     var raw = Data(out.utf8)
     raw.append(data)
     return raw
+}
+
+// MARK: - Client-cert challenge handler
+
+/// URLSessionDelegate that satisfies an upstream's mTLS challenge by
+/// looking up the matching SecIdentity from the per-profile registry,
+/// and (when a per-host CA is registered) anchors the server-trust
+/// evaluation against it instead of the system trust store. The CA
+/// override is what lets us reach private k8s API servers whose cert
+/// chains don't appear in macOS's roots.
+private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
+    let identityRegistry: ClientIdentityRegistry
+    let caRegistry: ClusterCATrustRegistry
+    let profileID: UUID
+    let host: String
+
+    init(identityRegistry: ClientIdentityRegistry,
+         caRegistry: ClusterCATrustRegistry,
+         profileID: UUID, host: String) {
+        self.identityRegistry = identityRegistry
+        self.caRegistry = caRegistry
+        self.profileID = profileID
+        self.host = host
+    }
+
+    func urlSession(_ session: URLSession,
+                    didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition,
+                                                  URLCredential?) -> Void) {
+        let method = challenge.protectionSpace.authenticationMethod
+        switch method {
+        case NSURLAuthenticationMethodClientCertificate:
+            if let identity = identityRegistry.identity(for: host, profileID: profileID) {
+                completionHandler(.useCredential,
+                                  URLCredential(identity: identity,
+                                                certificates: nil,
+                                                persistence: .forSession))
+            } else {
+                completionHandler(.performDefaultHandling, nil)
+            }
+
+        case NSURLAuthenticationMethodServerTrust:
+            guard let trust = challenge.protectionSpace.serverTrust,
+                  let ca = caRegistry.ca(for: host, profileID: profileID) else {
+                completionHandler(.performDefaultHandling, nil)
+                return
+            }
+            // Anchor exclusively against the user-supplied CA — the
+            // private k8s root almost never chains to macOS's bundled
+            // roots, and falling back would defeat the override.
+            SecTrustSetAnchorCertificates(trust, [ca] as CFArray)
+            SecTrustSetAnchorCertificatesOnly(trust, true)
+            // Replace the default SSL policy (which enforces Apple's
+            // 398-day max validity + strict hostname rules + CT) with
+            // a basic X.509 policy: chain + signatures + EKU only.
+            // Self-signed k8s CAs routinely mint 10-year leaf certs,
+            // and the user is the trust root here — they pinned the CA,
+            // so the chain check is the security boundary.
+            let basic = SecPolicyCreateBasicX509()
+            SecTrustSetPolicies(trust, [basic] as CFArray)
+            var err: CFError?
+            if SecTrustEvaluateWithError(trust, &err) {
+                completionHandler(.useCredential, URLCredential(trust: trust))
+            } else {
+                let reason = (err as Error?).map { "\($0)" } ?? "unknown"
+                FileHandle.standardError.write(Data(
+                    "[mitm] trust eval failed for \(host) using registered CA: \(reason)\n".utf8))
+                completionHandler(.cancelAuthenticationChallenge, nil)
+            }
+
+        default:
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
 }

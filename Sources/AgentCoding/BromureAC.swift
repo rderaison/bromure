@@ -179,6 +179,11 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                        action: #selector(NSWindow.performClose(_:)),
                        keyEquivalent: "w")
     windowMenu.addItem(NSMenuItem.separator())
+    let pickerItem = NSMenuItem(title: L("Profile Manager"),
+                                action: #selector(ACAppDelegate.openProfileManagerAction(_:)),
+                                keyEquivalent: "0")
+    pickerItem.target = delegate
+    windowMenu.addItem(pickerItem)
     let inspectorItem = NSMenuItem(title: L("Trace Inspector…"),
                                    action: #selector(ACAppDelegate.openTraceInspectorAction(_:)),
                                    keyEquivalent: "i")
@@ -300,6 +305,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if imageManager.hasBaseImage {
             renderPicker()
             if profiles.isEmpty { openEditorWindow(editing: nil) }
+            // Stale image — nag (non-blocking) but let the user keep
+            // working with the existing base.
+            if imageManager.baseImageNeedsUpdate {
+                Task { @MainActor in
+                    self.promptBaseImageUpdate()
+                }
+            }
         } else {
             renderSetup()
         }
@@ -375,6 +387,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // small (it's idle and tiny) but worth tidying up at least
         // for the clean-quit path.
         mitmEngine?.privateAgent.terminate()
+    }
+
+    /// Vetoable close. For VM session windows we always confirm, because
+    /// closing tears down the disposable VM and any unsaved guest state
+    /// goes with it. The picker / inspector windows close freely.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard let session = sender as? TabbedSessionWindow else { return true }
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Close session “%@”?", comment: ""),
+            session.profile.name)
+        alert.informativeText = NSLocalizedString(
+            "The VM will shut down and any running processes will be stopped.",
+            comment: "")
+        alert.alertStyle = .warning
+        let closeButton = alert.addButton(withTitle: NSLocalizedString("Close", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        // Default to Cancel on Return so an accidental ⌘W + Enter
+        // doesn't blow the session away.
+        closeButton.keyEquivalent = ""
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -536,6 +569,35 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         openTraceInspector(for: nil)
     }
 
+    /// Window menu → "Profile Manager". Brings the picker forward, or
+    /// recreates it if the user closed the window earlier in the
+    /// session (windowWillClose nils out `mainWindow`).
+    @objc func openProfileManagerAction(_ sender: Any?) {
+        if let win = mainWindow {
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 420),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false
+        )
+        win.title = "Bromure Agentic Coding"
+        win.delegate = self
+        win.titlebarAppearsTransparent = false
+        win.center()
+        win.isReleasedWhenClosed = false
+        self.mainWindow = win
+        if imageManager.hasBaseImage {
+            renderPicker()
+        } else {
+            renderSetup()
+        }
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     /// Open (or focus) the Trace Inspector window. Pass a profile to
     /// pre-fill the profile filter — used by the session window's
     /// toolbar button so clicking it on a profile's window scopes the
@@ -577,6 +639,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.informativeText = "Re-runs the full Ubuntu installer (~5–10 min) using the current setup.sh. Existing profiles' disks aren't touched — on next launch each one's drift prompt will offer to reset to the new base."
         alert.addButton(withTitle: "Rebuild")
         alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            startInit(force: true)
+        }
+    }
+
+    /// Non-blocking nag shown on each launch when the on-disk base
+    /// image stamp is older than the app's bundled `imageVersion`.
+    /// "Later" dismisses for this launch only — we'll ask again next
+    /// time the app starts so the user keeps the option without being
+    /// blocked from running stale images.
+    private func promptBaseImageUpdate() {
+        let alert = NSAlert()
+        let installed = imageManager.installedImageVersion ?? "?"
+        alert.messageText = NSLocalizedString("Base image update available", comment: "")
+        alert.informativeText = String(
+            format: NSLocalizedString(
+                "Your base image is at version %@ but the app ships version %@. The current image still works — rebuilding (~5–10 min) picks up the latest setup.sh changes (new tools, updated configs).",
+                comment: ""),
+            installed, UbuntuImageManager.imageVersion)
+        alert.addButton(withTitle: NSLocalizedString("Rebuild Now", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
         if alert.runModal() == .alertFirstButtonReturn {
             startInit(force: true)
         }
@@ -898,14 +981,56 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // doesn't see the fake rotate session-to-session.
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
         let plan = profile.makeTokenPlan(salt: salt)
-        try? store.prepareHomeDirectory(for: profile,
-                                        terminalDefaults: terminalDefaults,
-                                        tokenPlan: plan)
+        // (prepareHomeDirectory call moved below — needs the
+        // materialized kubeconfig YAML produced by the engine block.)
 
         // Push the plan + ssh keys to the engine before VM start, so
         // the listeners we register after boot have something to swap.
+        var kubeYAMLForVM: String?
         if let engine = mitmEngine {
-            engine.swapper.setMap(plan.tokenMap(), for: profile.id)
+            // Materialize the synthetic kubeconfig + extract bearer
+            // swaps + client identities + exec contexts.
+            let kubeMat = KubeconfigMaterializer().materialize(
+                profile: profile, bromureCAPEM: engine.ca.certificatePEM)
+            kubeYAMLForVM = kubeMat.yaml
+
+            // Token map = the profile-derived plan + the kubeconfig
+            // bearer/exec swap entries.
+            var tokenMap = plan.tokenMap()
+            for swap in kubeMat.bearerSwaps {
+                tokenMap.entries.append(TokenMap.Entry(
+                    fake: swap.fakeToken, real: swap.realToken, host: swap.host))
+            }
+            engine.swapper.setMap(tokenMap, for: profile.id)
+
+            // Per-host client identities for upstream mTLS (kubectl
+            // → API server).
+            for ident in kubeMat.clientIdentities {
+                engine.clientIdentities.setIdentity(
+                    ident.identity, host: ident.host, profileID: profile.id)
+            }
+            // Per-host CA overrides so the proxy can verify private
+            // API-server certs that don't chain to macOS roots.
+            for entry in kubeMat.clusterCAs {
+                engine.clusterCAs.setCA(
+                    pem: entry.caPEM, host: entry.host, profileID: profile.id)
+            }
+            // Exec-credential poller: refreshes the swap map on a
+            // schedule for each context. Cancelled in unregister.
+            if !kubeMat.execContexts.isEmpty {
+                engine.execPoller.start(kubeMat.execContexts,
+                                        profileID: profile.id,
+                                        swapper: engine.swapper)
+            }
+        }
+        // Drop the synthetic kubeconfig + every other managed
+        // dotfile into the VM's home dir. Done after the engine
+        // block so kubeYAMLForVM is materialized.
+        try? store.prepareHomeDirectory(for: profile,
+                                        terminalDefaults: terminalDefaults,
+                                        tokenPlan: plan,
+                                        kubeconfigYAML: kubeYAMLForVM)
+        if let engine = mitmEngine {
             // Tell the trace store what level + session id to record
             // under for traffic from this profile.
             engine.setSessionTrace(

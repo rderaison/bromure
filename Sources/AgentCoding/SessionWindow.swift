@@ -106,6 +106,7 @@ final class TabbedSessionWindow: NSWindow {
 
         let delegate = TabsToolbarDelegate(
             model: model,
+            sharedFolderPaths: profile.folderPaths,
             onSelect: { [weak self] in self?.switchTo(index: $0) },
             onClose:  { [weak self] in self?.closeTab(at: $0) },
             onNew:    { [weak self] in
@@ -209,17 +210,20 @@ private let tabsToolbarItemID = NSToolbarItem.Identifier("io.bromure.ac.tabsItem
 @MainActor
 final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
     let model: TabsModel
+    let sharedFolderPaths: [String]
     let onSelect: (Int) -> Void
     let onClose:  (Int) -> Void
     let onNew:    () -> Void
     let onInspectTrace: () -> Void
 
     init(model: TabsModel,
+         sharedFolderPaths: [String],
          onSelect: @escaping (Int) -> Void,
          onClose:  @escaping (Int) -> Void,
          onNew:    @escaping () -> Void,
          onInspectTrace: @escaping () -> Void) {
         self.model = model
+        self.sharedFolderPaths = sharedFolderPaths
         self.onSelect = onSelect
         self.onClose = onClose
         self.onNew = onNew
@@ -244,6 +248,7 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
         container.translatesAutoresizingMaskIntoConstraints = false
         let host = FlexibleHostingView(rootView: TabsBar(
             model: model,
+            sharedFolderPaths: sharedFolderPaths,
             onSelect: onSelect,
             onClose:  onClose,
             onNew:    onNew,
@@ -280,10 +285,13 @@ final class FlexibleHostingView<Content: View>: NSHostingView<Content> {
 
 private struct TabsBar: View {
     let model: TabsModel
+    let sharedFolderPaths: [String]
     let onSelect: (Int) -> Void
     let onClose:  (Int) -> Void
     let onNew:    () -> Void
     let onInspectTrace: () -> Void
+
+    @State private var foldersPopoverShown = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -322,6 +330,23 @@ private struct TabsBar: View {
                     .help("Waiting for VM to report its IP")
             }
 
+            // Shared folders — only present when the profile actually
+            // mounts something into the VM. Click reveals a popover
+            // listing each host folder; click a row to open in Finder.
+            if !sharedFolderPaths.isEmpty {
+                Button {
+                    foldersPopoverShown.toggle()
+                } label: {
+                    Image(systemName: "folder")
+                        .frame(width: 24, height: 22)
+                }
+                .buttonStyle(.borderless)
+                .help(NSLocalizedString("Shared folders mounted in the VM", comment: ""))
+                .popover(isPresented: $foldersPopoverShown, arrowEdge: .bottom) {
+                    SharedFoldersList(paths: sharedFolderPaths)
+                }
+            }
+
             // Trace inspector — opens the global window pre-filtered
             // to this profile. Mirrors the browser's per-window
             // inspector affordance.
@@ -332,6 +357,72 @@ private struct TabsBar: View {
             .buttonStyle(.borderless)
             .help(NSLocalizedString("Inspect this profile's session trace (⇧⌘I)", comment: ""))
         }
+    }
+}
+
+/// Popover content listing the host paths the VM has mounted via
+/// virtiofs. Each row opens the folder in Finder when clicked.
+private struct SharedFoldersList: View {
+    let paths: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(NSLocalizedString("Shared folders", comment: ""))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+            Divider()
+            VStack(spacing: 0) {
+                ForEach(paths, id: \.self) { path in
+                    SharedFolderRow(path: path)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .frame(width: 320)
+    }
+}
+
+private struct SharedFolderRow: View {
+    let path: String
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "folder.fill")
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text((path as NSString).lastPathComponent)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                    Text(abbreviated(path))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                Image(systemName: "arrow.up.right.square")
+                    .foregroundStyle(.tertiary)
+                    .opacity(hovering ? 1 : 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background(hovering ? Color.gray.opacity(0.12) : .clear)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(path)
+    }
+
+    private func abbreviated(_ p: String) -> String {
+        (p as NSString).abbreviatingWithTildeInPath
     }
 }
 

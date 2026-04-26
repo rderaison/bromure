@@ -11,25 +11,35 @@ import SwiftUI
 @Observable
 final class InitProgressModel {
     var status: String = "Preparing…"
-    /// Rolling buffer of the installer's serial output. Capped so a
-    /// long apt/debootstrap run (which can emit hundreds of KB) doesn't
-    /// pin SwiftUI on Text-reflow.
+    /// Rolling buffer of the installer's serial output. Only the last
+    /// `maxLines` complete lines (plus any in-progress trailing partial
+    /// line) are kept so SwiftUI's Text reflow stays cheap during a
+    /// long apt/debootstrap run that emits hundreds of KB.
     var consoleLog: String = ""
     var error: String?
     var isRunning: Bool = false
 
-    /// Soft cap on `consoleLog`: when the buffer exceeds `maxBytes`,
-    /// drop the front to bring it back to `keepBytes`. Tuned so the user
-    /// always sees the tail of the log (including the SANDBOX_SETUP_DONE
-    /// marker or whatever errored out).
-    private let maxBytes = 120_000
-    private let keepBytes = 80_000
+    private let maxLines = 100
+    private var lines: [String] = []
+    private var trailing: String = ""
 
     func appendLog(_ chunk: String) {
-        consoleLog += chunk
-        if consoleLog.utf8.count > maxBytes {
-            consoleLog = "[…earlier output trimmed…]\n"
-                + String(consoleLog.suffix(keepBytes))
+        var buf = trailing + chunk
+        trailing = ""
+        while let nl = buf.firstIndex(of: "\n") {
+            lines.append(String(buf[..<nl]))
+            buf = String(buf[buf.index(after: nl)...])
+        }
+        trailing = buf
+        if lines.count > maxLines {
+            lines.removeFirst(lines.count - maxLines)
+        }
+        if trailing.isEmpty {
+            consoleLog = lines.joined(separator: "\n")
+        } else if lines.isEmpty {
+            consoleLog = trailing
+        } else {
+            consoleLog = lines.joined(separator: "\n") + "\n" + trailing
         }
     }
 }

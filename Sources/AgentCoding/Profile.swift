@@ -6,6 +6,100 @@ public enum ProfileColor: String, Codable, CaseIterable, Equatable, Sendable {
     public var label: String { rawValue.capitalized }
 }
 
+/// One Kubernetes context (cluster + auth) the user pointed bromure
+/// at. The full kubeconfig is materialized in the VM at session prep
+/// using only the synthetic credentials we generate; the real cert /
+/// token / exec-output stays on the host and the proxy substitutes it
+/// on the wire.
+public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+    /// Display name (and YAML context name) — e.g. "prod-east".
+    public var name: String
+    /// Full server URL with scheme + port, e.g. https://k8s.example.com:6443.
+    public var serverURL: String
+    /// PEM-encoded API server CA. Optional but recommended — when
+    /// blank we fall back to the Bromure CA, which kubectl will
+    /// trust because we've already installed it system-wide in the VM.
+    public var caCertPEM: String
+    /// Optional default namespace.
+    public var namespace: String
+    /// Auth flavour for this context. Type-safe enum + Codable
+    /// support via a discriminator field.
+    public var auth: Auth
+
+    public enum Auth: Codable, Equatable, Sendable {
+        /// Static bearer token (rotated rarely).
+        case bearerToken(String)
+        /// mTLS client cert + key (PEM).
+        case clientCert(certPEM: String, keyPEM: String)
+        /// External command + args producing an ExecCredential JSON
+        /// (the kubectl client-go exec plugin contract). Output is
+        /// polled on the host every `refreshSeconds`; the resulting
+        /// token gets piped into the swap map.
+        case execPlugin(command: String, args: [String], refreshSeconds: Int)
+
+        // Custom Codable: JSON-tagged form so we can evolve cases
+        // without breaking older profile.json files.
+        private enum CodingKeys: String, CodingKey {
+            case kind, token, cert, key, command, args, refreshSeconds
+        }
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            switch try c.decode(String.self, forKey: .kind) {
+            case "bearerToken":
+                self = .bearerToken(try c.decode(String.self, forKey: .token))
+            case "clientCert":
+                self = .clientCert(
+                    certPEM: try c.decode(String.self, forKey: .cert),
+                    keyPEM:  try c.decode(String.self, forKey: .key))
+            case "execPlugin":
+                self = .execPlugin(
+                    command: try c.decode(String.self, forKey: .command),
+                    args:    try c.decodeIfPresent([String].self, forKey: .args) ?? [],
+                    refreshSeconds: try c.decodeIfPresent(Int.self, forKey: .refreshSeconds) ?? 600)
+            default:
+                self = .bearerToken("")
+            }
+        }
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .bearerToken(let t):
+                try c.encode("bearerToken", forKey: .kind)
+                try c.encode(t, forKey: .token)
+            case .clientCert(let cert, let key):
+                try c.encode("clientCert", forKey: .kind)
+                try c.encode(cert, forKey: .cert)
+                try c.encode(key, forKey: .key)
+            case .execPlugin(let cmd, let args, let secs):
+                try c.encode("execPlugin", forKey: .kind)
+                try c.encode(cmd, forKey: .command)
+                try c.encode(args, forKey: .args)
+                try c.encode(secs, forKey: .refreshSeconds)
+            }
+        }
+    }
+
+    public init(id: UUID = UUID(), name: String = "", serverURL: String = "",
+                caCertPEM: String = "", namespace: String = "",
+                auth: Auth = .bearerToken("")) {
+        self.id = id
+        self.name = name
+        self.serverURL = serverURL
+        self.caCertPEM = caCertPEM
+        self.namespace = namespace
+        self.auth = auth
+    }
+
+    /// Bare host[:port] used as the proxy's routing key when
+    /// registering client identities or scoped token swaps.
+    public var hostPattern: String {
+        guard let url = URL(string: serverURL), let host = url.host else { return "" }
+        if let port = url.port { return "\(host):\(port)" }
+        return host
+    }
+}
+
 /// One existing SSH private key the user pointed bromure at. We copy
 /// the encrypted bytes onto the host (under `agent/imported/`) and
 /// stash the decryption passphrase (if any) in the macOS Keychain.
@@ -206,6 +300,17 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// response bodies (encrypted) to disk.
     public var traceLevel: TraceLevel
 
+    /// Pre-configured Kubernetes contexts. At session prep we
+    /// generate a synthetic ~/.kube/config in the VM and register the
+    /// real credentials with the proxy for upstream substitution.
+    public var kubeconfigs: [KubeconfigEntry]
+
+    /// DigitalOcean Personal Access Token. Injected as
+    /// DIGITALOCEAN_ACCESS_TOKEN env + ~/.config/doctl/config.yaml in
+    /// the VM as a fake; proxy swaps to the real value on
+    /// api.digitalocean.com requests. Empty = not configured.
+    public var digitalOceanToken: String
+
     public var createdAt: Date
     public var lastUsedAt: Date?
 
@@ -308,6 +413,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         manualTokens: [ManualToken] = [],
         importedSSHKeys: [ImportedSSHKey] = [],
         traceLevel: TraceLevel = .off,
+        kubeconfigs: [KubeconfigEntry] = [],
+        digitalOceanToken: String = "",
         createdAt: Date = Date(),
         lastUsedAt: Date? = nil,
         baseImageVersionAtClone: String? = nil,
@@ -338,6 +445,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.manualTokens = manualTokens
         self.importedSSHKeys = importedSSHKeys
         self.traceLevel = traceLevel
+        self.kubeconfigs = kubeconfigs
+        self.digitalOceanToken = digitalOceanToken
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.baseImageVersionAtClone = baseImageVersionAtClone
@@ -373,6 +482,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case manualTokens
         case importedSSHKeys
         case traceLevel
+        case kubeconfigs
+        case digitalOceanToken
     }
 
     public init(from decoder: Decoder) throws {
@@ -427,6 +538,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         manualTokens = try c.decodeIfPresent([ManualToken].self, forKey: .manualTokens) ?? []
         importedSSHKeys = try c.decodeIfPresent([ImportedSSHKey].self, forKey: .importedSSHKeys) ?? []
         traceLevel = try c.decodeIfPresent(TraceLevel.self, forKey: .traceLevel) ?? .off
+        kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
+        digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
     }
 
     /// Explicit encoder — skips the legacy `folderPath` key (we only ever
@@ -471,6 +584,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if traceLevel != .off {
             try c.encode(traceLevel, forKey: .traceLevel)
+        }
+        if !kubeconfigs.isEmpty {
+            try c.encode(kubeconfigs, forKey: .kubeconfigs)
+        }
+        if !digitalOceanToken.isEmpty {
+            try c.encode(digitalOceanToken, forKey: .digitalOceanToken)
         }
     }
 
@@ -528,12 +647,19 @@ struct ProfileSecrets: Codable {
     var gitHTTPSTokens: [String: String]
     /// Keyed by `ManualToken.id.uuidString`.
     var manualTokenValues: [String: String]
+    /// Whole kubeconfig entries, in their entirety. Cert PEMs, exec
+    /// commands, tokens — too sensitive to ever sit in profile.json.
+    var kubeconfigs: [KubeconfigEntry]?
+    /// DigitalOcean PAT.
+    var digitalOceanToken: String?
 
     var isEmpty: Bool {
         (apiKey?.isEmpty ?? true)
             && additionalToolApiKeys.isEmpty
             && gitHTTPSTokens.isEmpty
             && manualTokenValues.isEmpty
+            && (kubeconfigs?.isEmpty ?? true)
+            && (digitalOceanToken?.isEmpty ?? true)
     }
 
     /// Pull every secret string out of the profile, replacing them
@@ -570,6 +696,15 @@ struct ProfileSecrets: Codable {
             }
         }
 
+        if !profile.kubeconfigs.isEmpty {
+            s.kubeconfigs = profile.kubeconfigs
+            profile.kubeconfigs = []
+        }
+        if !profile.digitalOceanToken.isEmpty {
+            s.digitalOceanToken = profile.digitalOceanToken
+            profile.digitalOceanToken = ""
+        }
+
         return s
     }
 
@@ -596,6 +731,9 @@ struct ProfileSecrets: Codable {
                 profile.manualTokens[i].realValue = v
             }
         }
+
+        if let kcs = kubeconfigs { profile.kubeconfigs = kcs }
+        if let do_ = digitalOceanToken { profile.digitalOceanToken = do_ }
     }
 }
 
@@ -861,7 +999,8 @@ public final class ProfileStore {
     /// profiles/<id>/home/.ssh on first run.
     public func prepareHomeDirectory(for profile: Profile,
                                      terminalDefaults: TerminalAppDefaults,
-                                     tokenPlan: SessionTokenPlan? = nil) throws {
+                                     tokenPlan: SessionTokenPlan? = nil,
+                                     kubeconfigYAML: String? = nil) throws {
         let home = homeDirectory(for: profile)
         if !fm.fileExists(atPath: home.path) {
             try fm.createDirectory(
@@ -990,6 +1129,36 @@ public final class ProfileStore {
         try TerminalAppDefaults
             .kittyConfig(for: profile, terminalDefaults: terminalDefaults)
             .write(to: kittyConfig, atomically: true, encoding: .utf8)
+
+        // ~/.kube/config — synthetic kubeconfig with throwaway client
+        // certs / fake bearer tokens. Real credentials live on the
+        // host; the proxy substitutes them on the wire.
+        if let kube = kubeconfigYAML, !kube.isEmpty {
+            let kubeDir = home.appendingPathComponent(".kube", isDirectory: true)
+            try fm.createDirectory(at: kubeDir, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: NSNumber(value: 0o700)])
+            let kubeFile = kubeDir.appendingPathComponent("config")
+            try kube.write(to: kubeFile, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                 ofItemAtPath: kubeFile.path)
+        }
+
+        // ~/.config/doctl/config.yaml — DigitalOcean CLI config
+        // with the FAKE PAT. doctl reads access-token from this file
+        // (or DIGITALOCEAN_ACCESS_TOKEN env, also set in proxy.env).
+        if let plan = tokenPlan, let doFake = plan.fakeForDigitalOcean() {
+            let doctlDir = home.appendingPathComponent(".config/doctl",
+                                                       isDirectory: true)
+            try fm.createDirectory(at: doctlDir, withIntermediateDirectories: true)
+            let yaml = """
+            # Managed by Bromure Agentic Coding.
+            access-token: \(doFake)
+            """
+            let url = doctlDir.appendingPathComponent("config.yaml")
+            try yaml.write(to: url, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                 ofItemAtPath: url.path)
+        }
 
         // Migrate legacy SSH keys: profiles/<id>/ssh → home/.ssh
         let legacySSH = sshDirectory(for: profile)

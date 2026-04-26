@@ -38,7 +38,10 @@ public final class UbuntuImageManager {
     /// dist-upgrade after the initial bootstrap — the base image now
     /// ships with every security/bug fix that landed since the noble
     /// release, so `apt upgrade` in the user's VM is a no-op on day 1.
-    public static let imageVersion = "30"
+    /// Bumped to 31 (with explicit approval) to bake in the cloud
+    /// CLIs needed for the Credentials → Cloud sections to work
+    /// out of the box: kubectl, doctl, awscli v2, gcloud, az.
+    public static let imageVersion = "31"
 
     /// Ubuntu LTS release we target. Update when a new LTS lands.
     public static let ubuntuRelease = "noble"
@@ -84,14 +87,31 @@ public final class UbuntuImageManager {
 
     // MARK: - Status
 
+    /// True when the on-disk artefacts exist, regardless of version
+    /// stamp. A stale image still boots — it just won't have the latest
+    /// setup.sh additions. Use `baseImageNeedsUpdate` to gate a nag.
     public var hasBaseImage: Bool {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: baseDiskURL.path),
-              fm.fileExists(atPath: efiVarsURL.path),
-              let stamp = try? String(contentsOf: versionStampURL, encoding: .utf8) else {
-            return false
-        }
-        return stamp.trimmingCharacters(in: .whitespacesAndNewlines) == Self.imageVersion
+        return fm.fileExists(atPath: baseDiskURL.path)
+            && fm.fileExists(atPath: efiVarsURL.path)
+            && fm.fileExists(atPath: versionStampURL.path)
+    }
+
+    /// True when an image is present but its stamp doesn't match the
+    /// app's bundled `imageVersion`. The app surfaces a non-blocking
+    /// "rebuild?" prompt when this is true.
+    public var baseImageNeedsUpdate: Bool {
+        guard hasBaseImage,
+              let stamp = try? String(contentsOf: versionStampURL, encoding: .utf8)
+        else { return false }
+        return stamp.trimmingCharacters(in: .whitespacesAndNewlines) != Self.imageVersion
+    }
+
+    /// On-disk version stamp ("31", "32", …) or nil when no image.
+    public var installedImageVersion: String? {
+        guard let stamp = try? String(contentsOf: versionStampURL, encoding: .utf8)
+        else { return nil }
+        return stamp.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Public: build
@@ -111,7 +131,7 @@ public final class UbuntuImageManager {
         let fm = FileManager.default
         try fm.createDirectory(at: storageDir, withIntermediateDirectories: true)
 
-        if hasBaseImage {
+        if hasBaseImage && !baseImageNeedsUpdate {
             progress("Base image already at version \(Self.imageVersion).")
             return
         }

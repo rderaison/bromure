@@ -61,6 +61,14 @@ public final class TokenSwapper: @unchecked Sendable {
         maps.removeValue(forKey: profileID)
     }
 
+    /// Snapshot of the current entries for a profile. Used by the
+    /// exec-credential poller to mutate a single entry without
+    /// rebuilding the whole map from scratch.
+    public func entries(for profileID: UUID) -> [TokenMap.Entry] {
+        lock.lock(); defer { lock.unlock() }
+        return maps[profileID]?.entries ?? []
+    }
+
     /// Returns the (modified bytes, swap report) for the given raw
     /// request. If no swap applied, the original buffer is returned
     /// untouched.

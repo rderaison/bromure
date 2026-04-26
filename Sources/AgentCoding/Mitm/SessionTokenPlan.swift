@@ -25,6 +25,9 @@ public struct SessionTokenPlan: Sendable {
         /// `envVarName` may be empty (then nothing is exported and the
         /// user copy-pastes the fake from the welcome banner).
         case manual(name: String, envVarName: String, hostFilter: String)
+        /// DigitalOcean PAT. Injected as DIGITALOCEAN_ACCESS_TOKEN env
+        /// + ~/.config/doctl/config.yaml in the VM.
+        case digitalOcean
     }
 
     public var entries: [Entry]
@@ -80,7 +83,17 @@ public struct SessionTokenPlan: Sendable {
         case .openaiAPIKey:           return "openai.com"
         case .gitHTTPS(let host, _):  return host
         case .manual(_, _, let host): return host.isEmpty ? nil : host
+        case .digitalOcean:           return "digitalocean.com"
         }
+    }
+
+    /// Fake to expose to the VM as DIGITALOCEAN_ACCESS_TOKEN and in
+    /// ~/.config/doctl/config.yaml. nil = no DO token configured.
+    public func fakeForDigitalOcean() -> String? {
+        for e in entries {
+            if case .digitalOcean = e.purpose { return e.fakeValue }
+        }
+        return nil
     }
 
     /// Manual entries that have an env var name set, formatted as
@@ -151,6 +164,20 @@ public extension Profile {
                 purpose: .manual(name: entry.name,
                                  envVarName: entry.envVarName,
                                  hostFilter: entry.hostFilter)))
+        }
+
+        // DigitalOcean PAT.
+        let doRaw = digitalOceanToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !doRaw.isEmpty {
+            entries.append(.init(
+                realValue: doRaw,
+                // Real DO PATs are 64 chars — `dop_v1_<hex>`.
+                // Match the prefix + length so client validators
+                // (doctl, terraform-provider-digitalocean) accept.
+                fakeValue: SessionTokenPlan.deriveFake(prefix: "dop_v1_",
+                                                       real: doRaw, salt: salt,
+                                                       targetLength: 64),
+                purpose: .digitalOcean))
         }
 
         for cred in gitHTTPSCredentials where cred.isUsable {
