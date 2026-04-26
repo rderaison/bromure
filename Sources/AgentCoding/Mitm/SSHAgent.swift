@@ -121,9 +121,12 @@ public final class SSHAgentServer: @unchecked Sendable {
         var cursor = 0
         let keyBlob = try takeString(body: body, cursor: &cursor)
         let data    = try takeString(body: body, cursor: &cursor)
-        // Flags exists per draft-miller-ssh-agent-04 §3.6.1; we ignore
-        // since ed25519 doesn't have signature-mode variants.
-        _ = try? takeUInt32(body: body, cursor: &cursor)
+        // RSA keys carry SHA-2 algorithm hints in this u32 (bit 1 ==
+        // rsa-sha2-256, bit 2 == rsa-sha2-512). Modern OpenSSH servers
+        // reject the legacy SHA-1 ssh-rsa signatures, so we must forward
+        // the flags verbatim — dropping them makes the host agent sign
+        // with SHA-1 and the client throws "incorrect signature type".
+        let flags = (try? takeUInt32(body: body, cursor: &cursor)) ?? 0
 
         // First match: in-process per-profile key. We hold the seed,
         // so we can sign locally with no socket round-trip.
@@ -146,7 +149,7 @@ public final class SSHAgentServer: @unchecked Sendable {
         fwd.append(AgentMsg.signRequest.rawValue)
         fwd.append(string(keyBlob))
         fwd.append(string(data))
-        fwd.append(uint32(0))
+        fwd.append(uint32(flags))
         for client in [HostAgentClient._bromurePrivate, HostAgentClient.macOSUser] {
             guard let c = client else { continue }
             if let resp = c.request(fwd), !resp.isEmpty,

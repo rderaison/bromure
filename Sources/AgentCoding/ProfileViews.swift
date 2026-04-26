@@ -462,6 +462,16 @@ struct ProfileEditorView: View {
             .padding(12)
         }
         .frame(width: 720, height: 520)
+        // Attach the import sheet at the root of the editor so it stays
+        // in the hierarchy regardless of which sidebar category is
+        // selected when the user kicks off `presentImportPicker`. When
+        // it lived on `credentialsSection`, the switch-based detail
+        // view occasionally rebuilt the sheet's host view between the
+        // NSOpenPanel modal returning and the state mutation
+        // propagating, producing an empty/white sheet.
+        .sheet(item: $importSheet) { sheet in
+            importSheetView(for: sheet)
+        }
         .onReceive(NotificationCenter.default.publisher(
             for: .bromureACSelectEditorCategory)) { note in
             if let raw = note.object as? String,
@@ -838,9 +848,6 @@ struct ProfileEditorView: View {
             ) {
                 otherTokensSubsection
             }
-        }
-        .sheet(item: $importSheet) { _ in
-            importSheetView
         }
     }
 
@@ -1277,50 +1284,48 @@ struct ProfileEditorView: View {
     }
 
     @ViewBuilder
-    private var importSheetView: some View {
-        if let sheet = importSheet {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Import SSH key")
-                    .font(.title3.bold())
-                Text(sheet.sourceURL.path)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+    private func importSheetView(for sheet: ImportSheetState) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Import SSH key")
+                .font(.title3.bold())
+            Text(sheet.sourceURL.path)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
 
-                TextField("Label", text: Binding(
-                    get: { importSheet?.label ?? "" },
-                    set: { importSheet?.label = $0 }
-                ), prompt: Text("personal, work, deploy, …"))
-                    .textFieldStyle(.roundedBorder)
+            TextField("Label", text: Binding(
+                get: { importSheet?.label ?? sheet.label },
+                set: { importSheet?.label = $0 }
+            ), prompt: Text("personal, work, deploy, …"))
+                .textFieldStyle(.roundedBorder)
 
-                SecureField("Passphrase (leave blank if none)", text: Binding(
-                    get: { importSheet?.passphrase ?? "" },
-                    set: { importSheet?.passphrase = $0 }
-                ))
-                    .textFieldStyle(.roundedBorder)
+            SecureField("Passphrase (leave blank if none)", text: Binding(
+                get: { importSheet?.passphrase ?? "" },
+                set: { importSheet?.passphrase = $0 }
+            ))
+                .textFieldStyle(.roundedBorder)
 
-                Text("Passphrases (if any) are stored in the macOS Keychain — bromure-ac fetches via SSH_ASKPASS at session launch and never logs the value.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+            Text("Passphrases (if any) are stored in the macOS Keychain — bromure-ac fetches via SSH_ASKPASS at session launch and never logs the value.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
 
-                HStack {
-                    Spacer()
-                    Button("Cancel") {
-                        importSheet = nil
-                    }
-                    .keyboardShortcut(.cancelAction)
-                    Button("Import") {
-                        completeImport(sheet: sheet)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(onImportSSHKey == nil)
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    importSheet = nil
                 }
+                .keyboardShortcut(.cancelAction)
+                Button("Import") {
+                    completeImport(sheet: importSheet ?? sheet)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(onImportSSHKey == nil)
             }
-            .padding(20)
-            .frame(width: 480)
         }
+        .padding(20)
+        .frame(width: 480)
     }
 
     private func presentImportPicker() {
@@ -1328,16 +1333,26 @@ struct ProfileEditorView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
         panel.prompt = "Import"
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".ssh", isDirectory: true)
         panel.message = "Pick the private key file (e.g. id_ed25519, id_rsa)."
         if panel.runModal() == .OK, let url = panel.url {
-            importSheet = ImportSheetState(
-                sourceURL: url,
-                label: url.lastPathComponent,
-                passphrase: ""
-            )
+            // Defer the state mutation past the NSOpenPanel modal
+            // teardown. Setting `importSheet` synchronously inside the
+            // same call frame as `runModal()` returning races with
+            // SwiftUI's sheet presentation machinery on macOS — the
+            // sheet appears, but its content view is sometimes built
+            // against a stale state snapshot, producing an empty/white
+            // dialog.
+            DispatchQueue.main.async {
+                importSheet = ImportSheetState(
+                    sourceURL: url,
+                    label: url.lastPathComponent,
+                    passphrase: ""
+                )
+            }
         }
     }
 
