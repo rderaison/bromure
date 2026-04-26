@@ -69,11 +69,21 @@ public final class TraceStore {
     public func record(_ record: TraceRecord,
                        requestBody: Data? = nil,
                        responseBody: Data? = nil) {
-        // In-memory ring update — synchronous because SwiftUI needs
-        // the change reflected this run loop.
-        recent.insert(record, at: 0)
-        if recent.count > ringCapacity {
-            recent.removeLast(recent.count - ringCapacity)
+        // In-memory ring update — defer to a fresh runloop tick.
+        // `Task { @MainActor in }` from MainActor context can drain
+        // within the same iteration, which still trips AppKit's
+        // "reentrant operation in NSTableView delegate" warning
+        // when the inspector List is open. `DispatchQueue.main.async`
+        // strictly waits for the current runloop pass to complete,
+        // so the table delegate has fully unwound before we mutate
+        // the @Observable property.
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                self.recent.insert(record, at: 0)
+                if self.recent.count > self.ringCapacity {
+                    self.recent.removeLast(self.recent.count - self.ringCapacity)
+                }
+            }
         }
 
         // Disk write — off the main thread.
@@ -130,7 +140,18 @@ public final class TraceStore {
             if loaded.count >= ringCapacity { break }
         }
         loaded.sort { $0.timestamp > $1.timestamp }
-        recent = Array(loaded.prefix(ringCapacity))
+        // Defer to a fresh runloop tick — see record(...) for the
+        // full rationale. Triggered by `.onAppear` of the inspector
+        // List which fires inside the still-in-flight NSTableView
+        // delegate chain; assigning `recent` synchronously (or via
+        // `Task { @MainActor in }` which can drain in the same
+        // iteration) trips AppKit's reentrancy warning.
+        let snapshot = Array(loaded.prefix(ringCapacity))
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                self.recent = snapshot
+            }
+        }
     }
 
     /// Decrypt and return the request body for a record, if it was

@@ -284,6 +284,17 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         try await vm.resume()
         state = .running
         startOutboxPolling()
+        // Touch the resume marker on the meta share — the guest's
+        // bromure-resume.path systemd unit watches it and fires
+        // `rdate -n -s pool.ntp.org` to fix the clock skew that
+        // built up while the VM was paused. Best-effort: if the
+        // meta dir isn't there, the guest just doesn't resync now
+        // and systemd-timesyncd will catch up on its own schedule.
+        if let metaDir = session.metadataDirectory {
+            let signal = metaDir.appendingPathComponent(".resume-signal")
+            let stamp = String(Int(Date().timeIntervalSince1970))
+            try? stamp.write(to: signal, atomically: true, encoding: .utf8)
+        }
     }
 
     /// Pause the VM and write its RAM contents to the per-profile

@@ -344,9 +344,14 @@ public final class UbuntuImageManager {
             if chunk.isEmpty { return }
             FileHandle.standardError.write(chunk)
             buffer.append(chunk)
-            if let s = String(data: chunk, encoding: .utf8) {
-                output(s)
-            }
+            // `String(data:encoding:.utf8)` returns nil whenever a
+            // chunk straddles a multi-byte UTF-8 codepoint at its
+            // boundary — vastly common at 4 KB pipe-read sizes —
+            // which silently dropped most of the install output
+            // from the GUI's line counter. `String(decoding:as:)`
+            // replaces invalid bytes with U+FFFD instead, so every
+            // chunk gets through and lines are counted correctly.
+            output(String(decoding: chunk, as: UTF8.self))
         }
         defer { stdoutPipe.fileHandleForReading.readabilityHandler = nil }
 

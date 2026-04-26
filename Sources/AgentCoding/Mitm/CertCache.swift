@@ -56,12 +56,18 @@ public final class CertCache: @unchecked Sendable {
         }
 
         let now = Date()
+        // notBefore back-dated 24h: the guest's clock can be hours
+        // behind the host (suspended VMs freeze CLOCK_REALTIME, fresh
+        // boots can lag NTP sync, and the user may travel time zones
+        // between sessions). A few hours' tolerance keeps TLS valid
+        // while still bounding the window during which a leaked cert
+        // could be presented as "issued in the past".
         let serial = Certificate.SerialNumber(bytes: Array(randomBytes(20)))
         let cert = try Certificate(
             version: .v3,
             serialNumber: serial,
             publicKey: leafPub,
-            notValidBefore: now.addingTimeInterval(-60),
+            notValidBefore: now.addingTimeInterval(-24 * 3600),
             notValidAfter:  now.addingTimeInterval(365 * 86_400),
             issuer: ca.certificate.subject,
             subject: subject,

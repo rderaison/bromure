@@ -354,12 +354,14 @@ struct TraceInspectorView: View {
                 if rec.bodyStored {
                     section(NSLocalizedString("Request body", comment: ""),
                             symbol: "arrow.up.doc",
-                            tint: .secondary) {
+                            tint: .secondary,
+                            copy: { Self.copyableString(from: bodyRequest) }) {
                         bodyView(bodyRequest)
                     }
                     section(NSLocalizedString("Response body", comment: ""),
                             symbol: "arrow.down.doc",
-                            tint: .secondary) {
+                            tint: .secondary,
+                            copy: { Self.copyableString(from: bodyResponse) }) {
                         bodyView(bodyResponse)
                     }
                 }
@@ -388,17 +390,48 @@ struct TraceInspectorView: View {
     private func section<Content: View>(_ title: String,
                                         symbol: String,
                                         tint: Color,
+                                        copy: (() -> String)? = nil,
                                         @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(title, systemImage: symbol)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(tint)
+            HStack {
+                Label(title, systemImage: symbol)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(tint)
+                Spacer()
+                if let copy {
+                    // Copies the *complete* body to the clipboard,
+                    // not just whatever lineLimit lets the bodyView
+                    // render — for grabbing the whole JSON exchange
+                    // when truncation hides the rest.
+                    Button {
+                        let s = copy()
+                        if !s.isEmpty {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(s, forType: .string)
+                        }
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy full content to clipboard")
+                }
+            }
             content()
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(nsColor: .textBackgroundColor),
                             in: RoundedRectangle(cornerRadius: 6))
         }
+    }
+
+    /// Best-effort UTF-8 with a hex fallback so the Copy button on a
+    /// binary body still puts *something* useful on the clipboard
+    /// instead of silently no-oping.
+    private static func copyableString(from data: Data?) -> String {
+        guard let data, !data.isEmpty else { return "" }
+        if let s = String(data: data, encoding: .utf8) { return s }
+        return data.map { String(format: "%02x", $0) }.joined()
     }
 
     @ViewBuilder

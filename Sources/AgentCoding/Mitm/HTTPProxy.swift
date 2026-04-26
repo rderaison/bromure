@@ -101,18 +101,28 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     OpenAI's Realtime API and any other agent transport
         //     that rides on WS instead of plain HTTP/SSE.
         if isWebSocketUpgrade(rawRequest: swap.modified) {
-            try await handleWebSocketUpgrade(serverTLS: tls,
-                                             rawRequest: swap.modified,
-                                             host: host, port: port)
-            // Trace records the handshake only — body sizes are
-            // unknown for the streaming half.
+            FileHandle.standardError.write(Data(
+                "[mitm] WebSocket upgrade → \(host):\(port)\n".utf8))
+            // Decide body capture *before* the pump so we don't pay
+            // frame-parsing cost when the user has tracing off.
+            let captureBody = sessionTraceProvider()?
+                .level.capturesBodyForHost(host) ?? false
+            let result = try await handleWebSocketUpgrade(
+                serverTLS: tls,
+                rawRequest: swap.modified,
+                host: host, port: port,
+                captureBody: captureBody)
             let elapsed = Date().timeIntervalSince(t0) * 1000
-            await emitTrace(host: host, port: port,
-                            preSwapRequest: request,
-                            upstreamResponse: Data(),
-                            swaps: swap.swaps,
-                            leaks: leaks,
-                            latencyMs: elapsed)
+            await emitWebSocketTrace(host: host, port: port,
+                                     preSwapRequest: request,
+                                     handshakeResponse: result.handshakeResponse,
+                                     transcript: result.transcript,
+                                     clientBytes: result.clientBytes,
+                                     upstreamBytes: result.upstreamBytes,
+                                     statusCode: result.statusCode,
+                                     swaps: swap.swaps,
+                                     leaks: leaks,
+                                     latencyMs: elapsed)
             return
         }
 
@@ -163,14 +173,36 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return sawUpgrade || sawConnectionUpgrade
     }
 
+    /// Result of the WebSocket-upgrade fast-path. Populated whether
+    /// or not the upstream actually switched protocols, so the
+    /// caller can emit a meaningful trace for failed upgrades too.
+    struct WebSocketResult {
+        /// Raw upstream response headers (the 101 line + headers, or
+        /// whatever upstream sent if the upgrade was rejected).
+        var handshakeResponse: Data
+        /// Rendered text transcript of frames seen, or nil when the
+        /// caller asked for no body capture.
+        var transcript: Data?
+        /// Total plaintext bytes the VM sent to upstream (handshake +
+        /// every WebSocket frame's full wire size). The frame-level
+        /// counter sums *application* payload bytes; here we report
+        /// the wire-level total since that's what users think of as
+        /// "data sent".
+        var clientBytes: Int
+        var upstreamBytes: Int
+        var statusCode: Int
+    }
+
     /// Open a TLS connection to upstream, replay the (already token-
     /// swapped) request bytes verbatim, then bidirectionally pump
-    /// every byte that follows. Returns when either side EOFs or
-    /// errors out — the caller's `defer { close(fd) }` tears down
-    /// the client side.
+    /// every byte that follows. When `captureBody` is true, also
+    /// parse RFC 6455 frames in both directions and accumulate a
+    /// chronological transcript that the caller renders into the
+    /// trace's response body.
     private func handleWebSocketUpgrade(serverTLS: TLSServerStream,
                                         rawRequest: Data,
-                                        host: String, port: Int) async throws {
+                                        host: String, port: Int,
+                                        captureBody: Bool) async throws -> WebSocketResult {
         let upstreamFD = try connectTCP(host: host, port: port)
         let upstreamTLS: TLSClientStream
         do {
@@ -186,6 +218,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // header strip would have eaten Upgrade/Connection — that's
         // exactly why we bypass it here.
         try upstreamTLS.write(rawRequest)
+        var clientBytes = rawRequest.count
 
         // Read the response headers (everything up to the first blank
         // line) and forward them to the client. We don't care about
@@ -194,28 +227,50 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let respHeaders = try readUntilDoubleCRLF(via: upstreamTLS,
                                                   maxBytes: 64 * 1024)
         try serverTLS.write(respHeaders)
+        var upstreamBytes = respHeaders.count
+        let statusCode = parseStatusCode(rawHeaders: respHeaders)
 
-        // If upstream didn't switch protocols, there's no streaming
-        // half — the response either had a body (which we'd need a
-        // proper HTTP response parser to length-frame) or was an
-        // empty rejection. Either way, drop down to opaque pump
-        // briefly so any trailing bytes from upstream reach the
-        // client, then exit.
-        let switched = parseStatusCode(rawHeaders: respHeaders) == 101
-        if !switched {
-            // Best-effort drain of any remaining response body so the
-            // client sees the full upstream message before we close.
+        // If upstream didn't switch protocols, drain any trailing
+        // response body so the client sees the full upstream
+        // message, then return — there's no frame stream to trace.
+        guard statusCode == 101 else {
             for _ in 0..<8 {
                 let chunk = (try? upstreamTLS.read(maxBytes: 16 * 1024)) ?? Data()
                 if chunk.isEmpty { break }
+                upstreamBytes += chunk.count
                 try? serverTLS.write(chunk)
             }
-            return
+            return WebSocketResult(handshakeResponse: respHeaders,
+                                   transcript: nil,
+                                   clientBytes: clientBytes,
+                                   upstreamBytes: upstreamBytes,
+                                   statusCode: statusCode)
         }
 
-        // Bidirectional opaque pump. Two child tasks, each blocking on
-        // one direction; the first to EOF/error tears down the other
-        // by closing the upstream FD via the outer defer.
+        // Per-direction byte counters + (optional) frame collectors.
+        // The collectors are class instances so each child task can
+        // mutate its own without locking; we only read them after
+        // the pump completes, and never share a single instance
+        // across both tasks.
+        let counters = WSByteCounters()
+        // permessage-deflate (RFC 7692) is what codex+OpenAI almost
+        // always negotiate. Without inflating, every text frame
+        // looks like binary garbage in the trace and the inspector
+        // falls back to "(binary N bytes)".
+        let deflate = WSDeflateParams.parse(handshakeResponse: respHeaders)
+        if deflate != nil {
+            FileHandle.standardError.write(Data(
+                "[mitm] WebSocket negotiated permessage-deflate on \(host)\n".utf8))
+        }
+        let c2uInflater = (captureBody && deflate != nil)
+            ? WSInflater(noContextTakeover: deflate!.clientNoContextTakeover) : nil
+        let u2cInflater = (captureBody && deflate != nil)
+            ? WSInflater(noContextTakeover: deflate!.serverNoContextTakeover) : nil
+        let c2uCollector = captureBody
+            ? WSTraceCollector(direction: .clientToUpstream, inflater: c2uInflater) : nil
+        let u2cCollector = captureBody
+            ? WSTraceCollector(direction: .upstreamToClient, inflater: u2cInflater) : nil
+
         await withTaskGroup(of: Void.self) { group in
             let server = serverTLS
             let upstream = upstreamTLS
@@ -225,6 +280,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     do { chunk = try server.read(maxBytes: 16 * 1024) }
                     catch { return }
                     if chunk.isEmpty { return }
+                    counters.addClient(chunk.count)
+                    c2uCollector?.feed(chunk)
                     do { try upstream.write(chunk) }
                     catch { return }
                 }
@@ -235,14 +292,96 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     do { chunk = try upstream.read(maxBytes: 16 * 1024) }
                     catch { return }
                     if chunk.isEmpty { return }
+                    counters.addUpstream(chunk.count)
+                    u2cCollector?.feed(chunk)
                     do { try server.write(chunk) }
                     catch { return }
                 }
             }
-            // Either direction EOFing is enough — the other will get
-            // a read error / EOF on its own when the peer closes.
             await group.next()
             group.cancelAll()
+        }
+
+        clientBytes  += counters.client
+        upstreamBytes += counters.upstream
+
+        let transcript: Data?
+        if let c2u = c2uCollector, let u2c = u2cCollector {
+            transcript = WSTranscriptRenderer.render(c2u: c2u, u2c: u2c)
+        } else {
+            transcript = nil
+        }
+        return WebSocketResult(handshakeResponse: respHeaders,
+                               transcript: transcript,
+                               clientBytes: clientBytes,
+                               upstreamBytes: upstreamBytes,
+                               statusCode: statusCode)
+    }
+
+    /// Emit a TraceRecord for a finished WebSocket session. Builds a
+    /// synthetic response body that is the upstream's handshake
+    /// response followed (after the standard CRLFCRLF separator) by
+    /// the rendered frame transcript, so the inspector's existing
+    /// body-display path serves it without any new code path.
+    private func emitWebSocketTrace(host: String, port: Int,
+                                    preSwapRequest: Data,
+                                    handshakeResponse: Data,
+                                    transcript: Data?,
+                                    clientBytes: Int,
+                                    upstreamBytes: Int,
+                                    statusCode: Int,
+                                    swaps: [SwapRecord],
+                                    leaks: [LeakEntry],
+                                    latencyMs: Double) async {
+        guard let session = sessionTraceProvider(),
+              session.level.recordsActivity else { return }
+
+        let (method, path) = Self.parseRequestLine(preSwapRequest)
+        let captureBody = session.level.capturesBodyForHost(host)
+        let bodyStored = captureBody && (transcript != nil || !preSwapRequest.isEmpty)
+
+        // Compose the response body: handshake + transcript so the
+        // inspector renders both as one continuous text blob.
+        var responseBlob = handshakeResponse
+        if captureBody, let t = transcript {
+            if responseBlob.range(of: Data("\r\n\r\n".utf8)) == nil {
+                responseBlob.append(Data("\r\n\r\n".utf8))
+            }
+            responseBlob.append(t)
+        }
+
+        // Try the conversation parser on the synthesized bodies so
+        // the inspector can render the chat view (set the
+        // `isConversation` flag at record-time, like the regular
+        // HTTP path does).
+        let isConversation: Bool = (captureBody && transcript != nil)
+            ? ConversationParser.parse(host: host,
+                                       requestBody: preSwapRequest,
+                                       responseBody: responseBlob) != nil
+            : false
+
+        let record = TraceRecord(
+            sessionID: session.sessionID,
+            profileID: profileID,
+            host: host, port: port,
+            method: method, path: path,
+            statusCode: statusCode,
+            requestBytes: clientBytes,
+            responseBytes: upstreamBytes,
+            latencyMs: latencyMs,
+            swaps: swaps.map { SwapEntry(header: "Authorization/x-api-key",
+                                         fakePreview: $0.fakePreview,
+                                         realPreview: $0.realPreview) },
+            leaks: leaks,
+            bodyStored: bodyStored,
+            isConversation: isConversation
+        )
+
+        let store = traceStore
+        let req = captureBody ? preSwapRequest : nil
+        let res = captureBody ? responseBlob : nil
+        await MainActor.run {
+            store.record(record, requestBody: req, responseBody: res)
         }
     }
 
@@ -475,6 +614,17 @@ private func readUntilCompleteHTTP(maxBytes: Int,
         }
     }
     return buffer
+}
+
+/// Lightweight byte-counter used by the WebSocket pump. Each child
+/// task touches exactly one of the two fields, so we don't bother
+/// with locking — the @unchecked Sendable marker is honest because
+/// the access pattern is disjoint by construction.
+private final class WSByteCounters: @unchecked Sendable {
+    var client = 0
+    var upstream = 0
+    func addClient(_ n: Int) { client += n }
+    func addUpstream(_ n: Int) { upstream += n }
 }
 
 /// Read from a TLS stream until we see `\r\n\r\n` (end of headers)

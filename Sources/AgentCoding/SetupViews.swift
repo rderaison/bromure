@@ -19,15 +19,96 @@ final class InitProgressModel {
     var error: String?
     var isRunning: Bool = false
 
+    /// 0…1, monotonic. Driven primarily by line count — every line
+    /// of installer output (apt, debootstrap, npm, GitHub fetches,
+    /// the host's own progress messages) bumps the bar by
+    /// `1 / expectedTotalLines`. The "Base image ready" host phase
+    /// then jumps to 1.0 so the tail is always reached.
+    var progress: Double = 0.0
+
+    /// Total log lines we expect during a full bake. Calibrated
+    /// against a real run on Apple Silicon (≈7056 lines on a fresh
+    /// debootstrap+apt+npm chain) with a small margin so future
+    /// step additions or network retries don't overshoot the
+    /// ceiling. With actual = 7056, the bar lands around 94% just
+    /// before the final "Base image ready" phase jumps to 1.0.
+    private static let expectedTotalLines = 7500
+
+    /// Cap line-driven progress here so the host's terminal phase
+    /// always has visible distance to cover. "Base image ready"
+    /// bumps to 1.0; everything else is line-driven below this.
+    private static let progressCeiling = 0.97
+
+    /// Public so the caller can log it on completion (drives the
+    /// process of tuning `expectedTotalLines`). Counts every \n
+    /// observed in `appendLog`.
+    private(set) var linesSeen = 0
+
     private let maxLines = 100
     private var lines: [String] = []
     private var trailing: String = ""
 
+    /// Reset for a new bake run. Called by the start path before
+    /// kicking off `createBaseImage`.
+    func reset() {
+        status = "Preparing…"
+        consoleLog = ""
+        error = nil
+        isRunning = true
+        progress = 0.0
+        linesSeen = 0
+        lines = []
+        trailing = ""
+    }
+
+    /// No-op holdover so callers that paired `reset()` with `stop()`
+    /// (back when an interpolation timer needed teardown) keep
+    /// working without a behavioural change.
+    func stop() {}
+
+    /// Move the bar to at least `value`, clamped to [0, 1]. Never
+    /// regresses — every setter routes through here.
+    func bumpProgress(to value: Double) {
+        let v = max(0.0, min(1.0, value))
+        if v > progress { progress = v }
+    }
+
+    /// Bookend host-phase recogniser: cached-image fast path, and
+    /// the final "ready" jump to 1.0. Everything in between is
+    /// driven by the line counter — we don't need fine-grained
+    /// host phases anymore because the host's progress messages
+    /// also flow through `appendLog` and count as lines.
+    func recordHostPhase(_ msg: String) {
+        let m = msg.lowercased()
+        if m.contains("base image already at") || m.contains("base image ready") {
+            bumpProgress(to: 1.0)
+        }
+    }
+
     func appendLog(_ chunk: String) {
-        var buf = trailing + chunk
+        // Normalise line endings before splitting. The Alpine
+        // installer's serial console emits `\r` (or `\r\n`) for
+        // newlines, not bare `\n`, so the original
+        // `firstIndex(of: "\n")` matched zero times and every chunk
+        // accumulated forever in `trailing`. Collapse CRLF to LF
+        // first so we don't double-count, then turn any remaining
+        // CR into LF.
+        let normalized = chunk
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        var buf = trailing + normalized
         trailing = ""
         while let nl = buf.firstIndex(of: "\n") {
-            lines.append(String(buf[..<nl]))
+            let line = String(buf[..<nl])
+            lines.append(line)
+            linesSeen += 1
+            // Each line nudges the bar by 1/expectedTotalLines,
+            // capped at progressCeiling so the final phase jump to
+            // 1.0 is always visible. If real installs exceed the
+            // estimate the bar simply pins at the ceiling for the
+            // tail.
+            let frac = Double(linesSeen) / Double(Self.expectedTotalLines)
+            bumpProgress(to: min(frac, Self.progressCeiling))
             buf = String(buf[buf.index(after: nl)...])
         }
         trailing = buf
@@ -90,10 +171,10 @@ struct InitializingView: View {
     let model: InitProgressModel
     let onCancel: () -> Void
 
-    /// Console pane is expanded by default (the user explicitly asked
-    /// to see installer output) but the user can collapse it via the
-    /// disclosure arrow if they want a smaller window.
-    @State private var consoleExpanded: Bool = true
+    /// Console pane is collapsed by default — the determinate progress
+    /// bar is enough for the common case. Power users can expand the
+    /// disclosure arrow to watch the firehose.
+    @State private var consoleExpanded: Bool = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -113,19 +194,27 @@ struct InitializingView: View {
                 Spacer()
             }
 
-            HStack(spacing: 10) {
-                if model.error == nil {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: "xmark.octagon.fill")
-                        .foregroundStyle(.red)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    if model.error != nil {
+                        Image(systemName: "xmark.octagon.fill")
+                            .foregroundStyle(.red)
+                    }
+                    Text(model.error ?? model.status)
+                        .font(.callout)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                    Spacer()
+                    if model.error == nil {
+                        Text(String(format: "%.1f%%", model.progress * 100))
+                            .font(.callout.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                Text(model.error ?? model.status)
-                    .font(.callout)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                Spacer()
+                if model.error == nil {
+                    ProgressView(value: model.progress, total: 1.0)
+                        .progressViewStyle(.linear)
+                }
             }
             .padding(10)
             .background(Color(nsColor: .controlBackgroundColor),

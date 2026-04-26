@@ -371,6 +371,51 @@ step "apt-get install kitty (+ xterm fallback)" \
 step "apt-get install terminal multiplexers (screen + tmux)" \
     retry apt-get install -y -q --no-install-recommends screen tmux
 
+# bubblewrap — unprivileged sandbox / chroot helper. Useful when the
+# user wants an extra layer between the agent and the rest of the VM
+# even though the VM itself is already an isolation boundary.
+step "apt-get install bubblewrap" \
+    retry apt-get install -y -q --no-install-recommends bubblewrap
+
+# rdate is the user's preferred clock-resync nudge after VM restore —
+# VZ freezes CLOCK_REALTIME during saveMachineState, so on resume the
+# guest's wall-clock is N minutes/hours behind real time until
+# systemd-timesyncd notices. The path-unit + service below is
+# triggered by the host writing /mnt/bromure-meta/.resume-signal.
+step "apt-get install rdate" \
+    retry apt-get install -y -q --no-install-recommends rdate
+
+cat > /etc/systemd/system/bromure-resume.path <<'EOP'
+[Unit]
+Description=Watch for Bromure VM resume signal from host
+
+[Path]
+PathChanged=/mnt/bromure-meta/.resume-signal
+
+[Install]
+WantedBy=multi-user.target
+EOP
+
+cat > /etc/systemd/system/bromure-resume.service <<'EOS'
+[Unit]
+Description=Re-sync clock after Bromure VM restore
+# Order after the meta-share mount so rdate doesn't race a half-
+# mounted virtiofs path; nofail in fstab means if the share isn't
+# present at all the unit just no-ops.
+After=mnt-bromure\x2dmeta.mount
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# -n: NTP mode (port 123/UDP). Without it rdate uses RFC 868 which
+# basically nothing serves anymore. -s: set the clock; -p would
+# only print.
+ExecStart=/usr/bin/rdate -n -s pool.ntp.org
+EOS
+
+systemctl enable bromure-resume.path >/dev/null 2>&1 || true
+
 # ---------------------------------------------------------------------------
 # GitHub CLI (gh) — official apt repo. Picks up ~/.config/gh/hosts.yml the
 # host writes from a profile's HTTPS-token credential.

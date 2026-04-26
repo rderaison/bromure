@@ -209,6 +209,13 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     inspectorItem.keyEquivalentModifierMask = [.command, .shift]
     inspectorItem.target = delegate
     windowMenu.addItem(inspectorItem)
+
+    // Hand the menu to NSApp so AppKit auto-appends entries for every
+    // titled, non-excluded window. Session windows already get
+    // meaningful titles (claude / codex / vim / bash / etc.) so they
+    // appear here as the user opens them — Picker / Trace Inspector /
+    // session windows all routable from one place.
+    NSApp.windowsMenu = windowMenu
     return main
 }
 
@@ -488,9 +495,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard alert.runModal() == .alertFirstButtonReturn else { return false }
             task.cancel()
             self.installTask = nil
+            initProgress.stop()
             initProgress.isRunning = false
             if imageManager.hasBaseImage {
                 renderPicker()
+                resizeMainWindowForPicker()
             } else {
                 renderSetup()
             }
@@ -655,10 +664,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func renderSetup() {
         guard let win = mainWindow else { return }
         win.title = "Bromure Agentic Coding"
-        win.setContentSize(NSSize(width: 540, height: 420))
+        // Same ordering trap as renderPicker: must swap content view
+        // first, otherwise the InitializingView's autolayout
+        // constraints + contentMinSize=560 (set in renderInitializing)
+        // pin the window above the 540 we want here. Cancel-during-
+        // bake therefore left the welcome screen oversized.
         win.contentView = NSHostingView(rootView: SetupView(onStart: { [weak self] in
             self?.startInit()
         }))
+        win.contentMinSize = .zero
+        win.setContentSize(NSSize(width: 540, height: 420))
+        win.center()
     }
 
     private func renderInitializing() {
@@ -685,10 +701,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // image the moment the user clicks "Rebuild Now". The build
         // path uses .partial files and only swaps + rewrites the
         // stamp when the new image is fully in place.
-        initProgress.status = "Preparing…"
-        initProgress.consoleLog = ""
-        initProgress.error = nil
-        initProgress.isRunning = true
+        initProgress.reset()
         renderInitializing()
 
         installTask = Task { @MainActor in
@@ -706,6 +719,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             // the observation chain over-releasing.
                             guard self.installTask != nil else { return }
                             self.initProgress.status = msg
+                            self.initProgress.recordHostPhase(msg)
                             self.initProgress.appendLog("\n▶ " + msg + "\n")
                         }
                     },
@@ -719,11 +733,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     },
                     force: force
                 )
+                self.initProgress.stop()
                 self.initProgress.isRunning = false
+                FileHandle.standardError.write(Data(
+                    "[init] line count: \(self.initProgress.linesSeen)\n".utf8))
                 self.profiles = self.store.loadAll()
                 self.renderPicker()
+                // Resize AFTER the picker hosting view is in place.
+                // Resizing while the InitializingView is still
+                // contentView is defeated by its autolayout
+                // constraints — the window snaps back to the
+                // installer's 640×480 the instant `renderPicker`
+                // triggers a layout pass.
+                self.resizeMainWindowForPicker()
                 if self.profiles.isEmpty { self.openEditorWindow(editing: nil) }
             } catch {
+                self.initProgress.stop()
                 self.initProgress.isRunning = false
                 self.initProgress.error = error.localizedDescription
             }
@@ -858,6 +883,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if alert.runModal() == .alertFirstButtonReturn {
             startInit(force: true)
         }
+    }
+
+    /// Restore the main window to the picker's natural size after a
+    /// screen that resized it (currently only `renderInitializing`,
+    /// which sets 640×480 + a tighter min size for the install
+    /// console). Cold start with an existing image creates the
+    /// window at 540×420 already, so picker rendering there doesn't
+    /// hit this path.
+    private func resizeMainWindowForPicker() {
+        guard let win = mainWindow else { return }
+        win.contentMinSize = .zero
+        win.setContentSize(NSSize(width: 540, height: 420))
+        win.center()
     }
 
     /// Re-render the picker (reflecting current profiles + which sessions

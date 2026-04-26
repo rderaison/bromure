@@ -17,6 +17,13 @@ struct Conversation {
     var inputTokens: Int?
     var outputTokens: Int?
     var raw: Bool   // true when we built this from a non-canonical body shape
+    /// Pretty-printed JSON of the original request envelope (the
+    /// response.create event for WS, the POST body for HTTP). Always
+    /// surfaced as a collapsible bubble at the top of the conversation
+    /// so the user can audit fields the parser didn't promote to
+    /// system / messages — e.g. OpenAI Responses' `tools`, `tool_choice`,
+    /// `metadata`, or whatever new top-level keys ship next.
+    var requestEnvelope: String?
 
     enum Provider: String { case anthropic, openai, gemini, cohere, unknown }
 
@@ -69,6 +76,17 @@ enum ConversationParser {
         let req = stripHTTPFraming(requestBody)
         let res = stripHTTPFraming(responseBody)
 
+        // WebSocket transcript? Walk it chronologically so user
+        // turns and assistant turns interleave correctly even when
+        // codex compacts history (later turns' `input` only carry
+        // the new items; the prior assistant only exists in the
+        // prior SSE deltas). The synthesize-then-route fallback
+        // can't recover that ordering because it merges all SSE
+        // events into one assistant message.
+        if let conv = parseWebSocketTranscript(host: host, responseBody: res) {
+            return conv
+        }
+
         let h = host.lowercased()
         if h.contains("anthropic.com") {
             return parseAnthropic(req: req, res: res)
@@ -90,6 +108,348 @@ enum ConversationParser {
             return parseCohere(req: req, res: res)
         }
         return nil
+    }
+
+    /// Result of pulling apart a WebSocket trace transcript so the
+    /// per-provider parsers can read it. `request` is the JSON of
+    /// the very first client→upstream TEXT frame (codex sends a
+    /// single `response.create` event there carrying instructions +
+    /// input — same shape as a /v1/responses POST body). `response`
+    /// is a synthetic SSE stream where each upstream→client TEXT
+    /// frame becomes one `event: <type>\ndata: <json>` block, so
+    /// `parseOpenAIResponsesSSE` and friends accept it unchanged.
+    private struct SynthesizedTranscriptBodies {
+        let request: Data?
+        let response: Data?
+    }
+
+    /// Stable string fingerprint of a Responses-API input item, used
+    /// to dedup repeated history items across compacted turns. Falls
+    /// back to a string description for non-dictionary items so
+    /// even malformed entries don't crash the merge.
+    private static func fingerprint(for item: Any) -> String {
+        if let data = try? JSONSerialization.data(
+                withJSONObject: item,
+                options: [.sortedKeys]),
+           let s = String(data: data, encoding: .utf8) {
+            return s
+        }
+        return String(describing: item)
+    }
+
+    /// Walk a WebSocket trace transcript in chronological order and
+    /// build the conversation directly, instead of synthesizing
+    /// HTTP-shaped bodies and routing through the per-provider
+    /// parsers. The latter approach merges all SSE events into one
+    /// assistant message, which destroys the user₁/assistant₁/user₂
+    /// interleave when the session has multiple turns. Walking event-
+    /// by-event lets us flush the in-progress assistant text on
+    /// every `response.completed` so each turn's reply lands between
+    /// its prompt and the next.
+    ///
+    /// Currently OpenAI-Responses-shaped only (the `response.*`
+    /// event family). Returns nil for any non-WS body or any WS
+    /// transcript whose events don't match — caller falls through
+    /// to the existing synthesize-and-route path.
+    private static func parseWebSocketTranscript(host: String,
+                                                  responseBody: Data?)
+                                                  -> Conversation? {
+        guard let res = responseBody,
+              let text = String(data: res, encoding: .utf8),
+              text.contains("--- WebSocket session transcript ---") else {
+            return nil
+        }
+        // Only honour the OpenAI-Responses path for now. Other
+        // providers fall through and use synthesize-and-route.
+        let h = host.lowercased()
+        guard h.contains("openai.com")
+            || h.contains("mistral.ai")
+            || h.contains("x.ai")
+            || h.contains("groq.com")
+            || h.contains("perplexity.ai") else {
+            return nil
+        }
+
+        // Walk the transcript collecting (direction, body) tuples
+        // in arrival order.
+        enum Direction { case client, server }
+        var events: [(Direction, String)] = []
+        var direction: Direction?
+        var buffer = ""
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw)
+            if line.hasPrefix(">>>") {
+                if direction != nil {
+                    let body = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !body.isEmpty { events.append((direction!, body)) }
+                    buffer = ""
+                }
+                direction = .client; continue
+            }
+            if line.hasPrefix("<<<") {
+                if direction != nil {
+                    let body = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !body.isEmpty { events.append((direction!, body)) }
+                    buffer = ""
+                }
+                direction = .server; continue
+            }
+            guard direction != nil else { continue }
+            buffer += line + "\n"
+        }
+        if direction != nil {
+            let body = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !body.isEmpty { events.append((direction!, body)) }
+        }
+        guard !events.isEmpty else { return nil }
+
+        var convo = Conversation(provider: .openai, model: nil,
+                                 systemPrompt: nil, messages: [],
+                                 inputTokens: nil, outputTokens: nil,
+                                 raw: false, requestEnvelope: nil)
+
+        // Per-turn assistant accumulator. Flushed on response.completed
+        // (or end-of-transcript for a still-streaming final turn).
+        var pendingText = ""
+        var pendingTools: [String: (name: String, args: String)] = [:]
+        var pendingToolOrder: [String] = []
+        var emitted = Set<String>()  // input-item fingerprints already rendered
+        var firstClientObj: [String: Any]?
+
+        func flushAssistant() {
+            var blocks: [Conversation.Block] = []
+            if !pendingText.isEmpty { blocks.append(.text(pendingText)) }
+            for id in pendingToolOrder {
+                if let t = pendingTools[id] {
+                    blocks.append(.toolUse(name: t.name, input: t.args))
+                }
+            }
+            if !blocks.isEmpty {
+                convo.messages.append(Conversation.Message(
+                    role: .assistant, content: blocks))
+            }
+            pendingText = ""
+            pendingTools.removeAll()
+            pendingToolOrder.removeAll()
+        }
+
+        for (dir, json) in events {
+            guard let data = json.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data)
+                            as? [String: Any] else { continue }
+            switch dir {
+            case .client:
+                // First client event captures session metadata.
+                if firstClientObj == nil { firstClientObj = obj }
+                if convo.model == nil {
+                    convo.model = (obj["model"] as? String)
+                        ?? (obj["response"] as? [String: Any])?["model"] as? String
+                }
+                if convo.systemPrompt == nil {
+                    convo.systemPrompt = (obj["instructions"] as? String)
+                        ?? (obj["response"] as? [String: Any])?["instructions"] as? String
+                }
+                // A new turn started — flush any in-flight
+                // assistant from the prior turn first so the new
+                // user message lands AFTER the prior reply.
+                if !pendingText.isEmpty || !pendingTools.isEmpty {
+                    flushAssistant()
+                }
+                let candidates: [Any?] = [
+                    obj["input"], obj["messages"],
+                    (obj["response"] as? [String: Any])?["input"],
+                    (obj["response"] as? [String: Any])?["messages"],
+                ]
+                for c in candidates {
+                    if let items = c as? [[String: Any]] {
+                        for item in items {
+                            let fp = fingerprint(for: item)
+                            guard emitted.insert(fp).inserted else { continue }
+                            let role = mapResponsesRole(item["role"] as? String)
+                            let blocks = responsesItemBlocks(from: item)
+                            if !blocks.isEmpty {
+                                convo.messages.append(Conversation.Message(
+                                    role: role, content: blocks))
+                            }
+                        }
+                        break
+                    }
+                    if let s = c as? String, !s.isEmpty {
+                        let fp = "user:\(s)"
+                        if emitted.insert(fp).inserted {
+                            convo.messages.append(Conversation.Message(
+                                role: .user, content: [.text(s)]))
+                        }
+                        break
+                    }
+                }
+            case .server:
+                let type = obj["type"] as? String ?? ""
+                switch type {
+                case "response.output_text.delta":
+                    if let d = obj["delta"] as? String { pendingText += d }
+                case "response.function_call_arguments.delta":
+                    let id = (obj["item_id"] as? String) ?? "tool"
+                    let delta = (obj["delta"] as? String) ?? ""
+                    if pendingTools[id] == nil {
+                        pendingTools[id] = (name: "tool", args: "")
+                        pendingToolOrder.append(id)
+                    }
+                    pendingTools[id]?.args.append(delta)
+                case "response.output_item.added":
+                    if let item = obj["item"] as? [String: Any],
+                       let name = item["name"] as? String {
+                        let id = (item["id"] as? String)
+                            ?? (item["call_id"] as? String) ?? name
+                        if pendingTools[id] == nil {
+                            pendingTools[id] = (name: name, args: "")
+                            pendingToolOrder.append(id)
+                        } else {
+                            pendingTools[id]?.name = name
+                        }
+                    }
+                case "response.completed":
+                    if let usage = (obj["response"] as? [String: Any])?["usage"]
+                                    as? [String: Any] {
+                        if convo.inputTokens == nil {
+                            convo.inputTokens = usage["input_tokens"] as? Int
+                        }
+                        if convo.outputTokens == nil {
+                            convo.outputTokens = usage["output_tokens"] as? Int
+                        }
+                    }
+                    flushAssistant()
+                default:
+                    break
+                }
+            }
+        }
+        // End-of-transcript: emit anything still pending (covers
+        // sessions interrupted mid-stream).
+        flushAssistant()
+
+        if let firstClientObj,
+           let envData = try? JSONSerialization.data(
+                withJSONObject: firstClientObj,
+                options: [.prettyPrinted, .sortedKeys]),
+           let pretty = String(data: envData, encoding: .utf8) {
+            convo.requestEnvelope = pretty
+        }
+
+        if convo.messages.isEmpty
+           && convo.systemPrompt == nil
+           && convo.requestEnvelope == nil {
+            return nil
+        }
+        return convo
+    }
+
+    /// Recognise our WebSocket transcript marker and reconstitute
+    /// HTTP-shaped bodies. Returns nil for any input that isn't a
+    /// transcript so the regular parse path stays untouched.
+    private static func synthesizeFromTranscript(res: Data?) -> SynthesizedTranscriptBodies? {
+        guard let res,
+              let text = String(data: res, encoding: .utf8),
+              text.contains("--- WebSocket session transcript ---") else {
+            return nil
+        }
+
+        var clientBlocks: [String] = []
+        var serverBlocks: [String] = []
+        var currentDirection: Character?  // ">" for client, "<" for server
+        var currentBuffer = ""
+
+        func commit() {
+            guard let d = currentDirection else { return }
+            let body = currentBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !body.isEmpty {
+                if d == ">" { clientBlocks.append(body) }
+                else        { serverBlocks.append(body) }
+            }
+            currentBuffer = ""
+        }
+
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw)
+            if line.hasPrefix(">>>") {
+                commit()
+                currentDirection = ">"
+                continue
+            }
+            if line.hasPrefix("<<<") {
+                commit()
+                currentDirection = "<"
+                continue
+            }
+            // Skip header / banner lines until we've seen the first
+            // direction marker. Once inside a block, every line —
+            // including blanks — is part of the JSON payload.
+            guard currentDirection != nil else { continue }
+            currentBuffer += line + "\n"
+        }
+        commit()
+
+        guard !clientBlocks.isEmpty else { return nil }
+
+        // Codex sends one response.create event per turn. Each event's
+        // `input` USUALLY contains the full prior history, but server-
+        // side compaction or `previous_response_id` references can
+        // mean a later turn's input only carries a few new items —
+        // taking just the last block then misses earlier prompts.
+        // Walk every block in order and merge with content-based
+        // dedup: any item whose canonical JSON we've already added
+        // is a re-send of prior history and gets skipped. This
+        // preserves chronological order without dupes whether
+        // codex repeats history each turn or compacts it.
+        var mergedInput: [Any] = []
+        var seenFingerprints = Set<String>()
+        var model: String?
+        var instructions: String?
+        var tools: Any?
+
+        for block in clientBlocks {
+            guard let data = block.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data)
+                            as? [String: Any] else { continue }
+            if model == nil { model = obj["model"] as? String }
+            if instructions == nil { instructions = obj["instructions"] as? String }
+            if tools == nil { tools = obj["tools"] }
+            guard let inp = obj["input"] as? [Any] else { continue }
+            for item in inp {
+                let fp = fingerprint(for: item)
+                guard seenFingerprints.insert(fp).inserted else { continue }
+                mergedInput.append(item)
+            }
+        }
+
+        var synthReq: [String: Any] = ["type": "response.create"]
+        if let model { synthReq["model"] = model }
+        if let instructions { synthReq["instructions"] = instructions }
+        if !mergedInput.isEmpty { synthReq["input"] = mergedInput }
+        if let tools { synthReq["tools"] = tools }
+        let reqData = try? JSONSerialization.data(withJSONObject: synthReq,
+                                                  options: [])
+
+        // Build SSE response: `event: <typeFromJSON>\ndata: <json>\n\n`.
+        // OpenAI's responses_websockets uses the same `type` strings
+        // SSE does (`response.created`, `response.output_text.delta`,
+        // `response.completed`, …) so the existing
+        // `parseOpenAIResponsesSSE` pulls deltas out without any
+        // protocol-specific changes.
+        var sse = ""
+        for block in serverBlocks {
+            var eventName = "message"
+            if let data = block.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let t = obj["type"] as? String {
+                eventName = t
+            }
+            sse += "event: \(eventName)\ndata: \(block)\n\n"
+        }
+
+        return SynthesizedTranscriptBodies(
+            request: reqData ?? clientBlocks.first?.data(using: .utf8),
+            response: sse.data(using: .utf8))
     }
 
     /// Drop the HTTP request/status line + headers, return everything
@@ -114,7 +474,8 @@ enum ConversationParser {
     private static func parseAnthropic(req: Data?, res: Data?) -> Conversation? {
         var convo = Conversation(provider: .anthropic, model: nil,
                                  systemPrompt: nil, messages: [],
-                                 inputTokens: nil, outputTokens: nil, raw: false)
+                                 inputTokens: nil, outputTokens: nil, raw: false,
+                                 requestEnvelope: nil)
 
         if let req, let json = try? JSONSerialization.jsonObject(with: req) as? [String: Any] {
             convo.model = json["model"] as? String
@@ -304,7 +665,8 @@ enum ConversationParser {
     private static func parseOpenAIChat(reqJSON: [String: Any]?, res: Data?) -> Conversation? {
         var convo = Conversation(provider: .openai, model: nil,
                                  systemPrompt: nil, messages: [],
-                                 inputTokens: nil, outputTokens: nil, raw: false)
+                                 inputTokens: nil, outputTokens: nil, raw: false,
+                                 requestEnvelope: nil)
         if let json = reqJSON {
             convo.model = json["model"] as? String
             if let msgs = json["messages"] as? [[String: Any]] {
@@ -358,27 +720,58 @@ enum ConversationParser {
     private static func parseOpenAIResponses(reqJSON: [String: Any]?, res: Data?) -> Conversation? {
         var convo = Conversation(provider: .openai, model: nil,
                                  systemPrompt: nil, messages: [],
-                                 inputTokens: nil, outputTokens: nil, raw: false)
+                                 inputTokens: nil, outputTokens: nil, raw: false,
+                                 requestEnvelope: nil)
         if let json = reqJSON {
-            convo.model = json["model"] as? String
-            // `instructions` is the system prompt equivalent.
-            if let inst = json["instructions"] as? String {
-                convo.systemPrompt = inst
-            }
-            // `input` is either a string (one user message) or an
-            // array of input items with role + content.
-            if let s = json["input"] as? String, !s.isEmpty {
-                convo.messages.append(Conversation.Message(
-                    role: .user, content: [.text(s)]))
-            } else if let items = json["input"] as? [[String: Any]] {
-                for item in items {
-                    let blocks = responsesItemBlocks(from: item)
-                    let role = mapResponsesRole(item["role"] as? String)
-                    if !blocks.isEmpty {
-                        convo.messages.append(Conversation.Message(
-                            role: role, content: blocks))
-                    }
+            convo.model = (json["model"] as? String)
+                ?? (json["response"] as? [String: Any])?["model"] as? String
+            // `instructions` is the system prompt equivalent. WS
+            // events sometimes nest the response.create config under
+            // a top-level `response` key — check both.
+            convo.systemPrompt =
+                (json["instructions"] as? String)
+                ?? (json["response"] as? [String: Any])?["instructions"] as? String
+
+            // Try every shape we've seen ship as the conversation
+            // history: top-level `input` / `messages`, or the same
+            // keys nested under `response.*`. Whatever yields the
+            // first non-empty list of messages wins.
+            let candidates: [Any?] = [
+                json["input"],
+                json["messages"],
+                (json["response"] as? [String: Any])?["input"],
+                (json["response"] as? [String: Any])?["messages"],
+            ]
+            for c in candidates {
+                if let s = c as? String, !s.isEmpty {
+                    convo.messages.append(Conversation.Message(
+                        role: .user, content: [.text(s)]))
+                    break
                 }
+                if let items = c as? [[String: Any]] {
+                    var added = false
+                    for item in items {
+                        let blocks = responsesItemBlocks(from: item)
+                        let role = mapResponsesRole(item["role"] as? String)
+                        if !blocks.isEmpty {
+                            convo.messages.append(Conversation.Message(
+                                role: role, content: blocks))
+                            added = true
+                        }
+                    }
+                    if added { break }
+                }
+            }
+
+            // Always capture the raw envelope so the user can audit
+            // fields the parser didn't promote (tools, tool_choice,
+            // metadata, vendor-specific extensions). Pretty-printed
+            // for readability.
+            if let data = try? JSONSerialization.data(
+                    withJSONObject: json,
+                    options: [.prettyPrinted, .sortedKeys]),
+               let pretty = String(data: data, encoding: .utf8) {
+                convo.requestEnvelope = pretty
             }
         }
         if let res {
@@ -404,7 +797,15 @@ enum ConversationParser {
                 }
             }
         }
-        return convo.messages.isEmpty ? nil : convo
+        // Records with no parsed messages but a system prompt or a
+        // captured envelope are still worth showing — the inspector
+        // gates conversation rendering on this returning non-nil.
+        if convo.messages.isEmpty
+           && convo.systemPrompt == nil
+           && convo.requestEnvelope == nil {
+            return nil
+        }
+        return convo
     }
 
     private static func mapResponsesRole(_ raw: String?) -> Conversation.Message.Role {
@@ -583,7 +984,8 @@ enum ConversationParser {
     private static func parseCohere(req: Data?, res: Data?) -> Conversation? {
         var convo = Conversation(provider: .cohere, model: nil,
                                  systemPrompt: nil, messages: [],
-                                 inputTokens: nil, outputTokens: nil, raw: false)
+                                 inputTokens: nil, outputTokens: nil, raw: false,
+                                 requestEnvelope: nil)
         if let req, let json = try? JSONSerialization.jsonObject(with: req) as? [String: Any] {
             convo.model = json["model"] as? String
             if let preamble = json["preamble"] as? String { convo.systemPrompt = preamble }
@@ -618,7 +1020,8 @@ enum ConversationParser {
     private static func parseGemini(req: Data?, res: Data?) -> Conversation? {
         var convo = Conversation(provider: .gemini, model: nil,
                                  systemPrompt: nil, messages: [],
-                                 inputTokens: nil, outputTokens: nil, raw: false)
+                                 inputTokens: nil, outputTokens: nil, raw: false,
+                                 requestEnvelope: nil)
         if let req, let json = try? JSONSerialization.jsonObject(with: req) as? [String: Any] {
             if let sys = (json["systemInstruction"] as? [String: Any])?["parts"] as? [[String: Any]] {
                 convo.systemPrompt = sys.compactMap { $0["text"] as? String }.joined(separator: "\n\n")
@@ -669,6 +1072,9 @@ struct ConversationView: View {
                 .padding(.bottom, 8)
             ScrollView {
                 VStack(spacing: 10) {
+                    if let env = conversation.requestEnvelope, !env.isEmpty {
+                        RequestEnvelopeBubble(json: env)
+                    }
                     if let sys = conversation.systemPrompt, !sys.isEmpty {
                         SystemBubble(text: sys)
                     }
@@ -721,6 +1127,43 @@ struct ConversationView: View {
     }
     private var providerIcon: String {
         "sparkles"
+    }
+}
+
+/// The original request envelope (the response.create event, the
+/// /v1/responses POST body, etc.) shown as a collapsible JSON
+/// preview at the top of the conversation. Surfaces fields the
+/// per-provider parsers don't promote to system / messages so the
+/// user can audit `tools`, `tool_choice`, `metadata`, vendor
+/// extensions, and the WS event envelope itself.
+private struct RequestEnvelopeBubble: View {
+    let json: String
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Request", systemImage: "tray.and.arrow.down")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            DisclosureGroup(isExpanded: $expanded) {
+                Text(json)
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+            } label: {
+                Text(expanded ? "Hide JSON" : "Show JSON")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(10)
+            .background(Color.secondary.opacity(0.06),
+                        in: RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+            )
+        }
     }
 }
 
