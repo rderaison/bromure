@@ -102,6 +102,96 @@ final class TLSServerStream: @unchecked Sendable {
     }
 }
 
+/// Client-side TLS over an already-connected upstream socket FD.
+/// Mirror of `TLSServerStream` but with `clientSide` role and a
+/// peer-domain-name set so SecureTransport sends SNI and validates
+/// the upstream cert against the system trust store.
+///
+/// Used by the WebSocket-upgrade fast-path in `HTTPProxy.swift`,
+/// where URLSession can't represent the raw 101-Switching-Protocols
+/// + bidirectional byte stream that follows.
+@available(macOS, deprecated: 10.15, message: "wraps SSLContext deliberately — Network.framework can't take a raw socket FD")
+final class TLSClientStream: @unchecked Sendable {
+    private let fd: Int32
+    private let ctx: SSLContext
+
+    init(fd: Int32, peerName: String) throws {
+        self.fd = fd
+        guard let ctx = SSLCreateContext(nil, .clientSide, .streamType) else {
+            throw MitmError.tlsHandshakeFailed(errSSLInternal)
+        }
+        self.ctx = ctx
+
+        var status = SSLSetIOFuncs(ctx, sslReadCallback, sslWriteCallback)
+        if status != errSecSuccess { throw MitmError.tlsHandshakeFailed(status) }
+
+        let connectionRef = UnsafeMutableRawPointer(bitPattern: Int(fd))
+        status = SSLSetConnection(ctx, connectionRef)
+        if status != errSecSuccess { throw MitmError.tlsHandshakeFailed(status) }
+
+        // SNI + cert-name validation target. Without this, OpenAI (and
+        // most managed CDNs) will hand back a generic cert that fails
+        // matching, or refuse the connection entirely.
+        status = peerName.withCString { cstr in
+            SSLSetPeerDomainName(ctx, cstr, strlen(cstr))
+        }
+        if status != errSecSuccess { throw MitmError.tlsHandshakeFailed(status) }
+    }
+
+    deinit {
+        SSLClose(ctx)
+    }
+
+    func handshake() throws {
+        while true {
+            let status = SSLHandshake(ctx)
+            switch status {
+            case errSecSuccess:
+                return
+            case errSSLWouldBlock:
+                continue
+            default:
+                throw MitmError.tlsHandshakeFailed(status)
+            }
+        }
+    }
+
+    func read(maxBytes: Int) throws -> Data {
+        var buf = [UInt8](repeating: 0, count: maxBytes)
+        var got: Int = 0
+        let status = buf.withUnsafeMutableBufferPointer { ptr in
+            SSLRead(ctx, ptr.baseAddress!, maxBytes, &got)
+        }
+        switch status {
+        case errSecSuccess, errSSLWouldBlock:
+            return Data(buf.prefix(got))
+        case errSSLClosedGraceful, errSSLClosedNoNotify:
+            return Data()
+        default:
+            throw MitmError.tlsReadFailed(status)
+        }
+    }
+
+    func write(_ data: Data) throws {
+        try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var sent = 0
+            let total = data.count
+            while sent < total {
+                var written: Int = 0
+                let status = SSLWrite(ctx,
+                                      raw.baseAddress!.advanced(by: sent),
+                                      total - sent,
+                                      &written)
+                if status == errSecSuccess || status == errSSLWouldBlock {
+                    sent += written
+                    continue
+                }
+                throw MitmError.tlsWriteFailed(status)
+            }
+        }
+    }
+}
+
 // MARK: - SSL I/O callbacks
 
 /// SecureTransport read callback. Invoked with: connection ref (our

@@ -95,9 +95,30 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 "[mitm] LEAK \(leak.header)=\(leak.valuePreview) on \(host) (\(leak.suspicion.rawValue))\n".utf8))
         }
 
-        // 6. Send to upstream. The session's delegate looks up the
-        //    profile's per-host SecIdentity (Kubernetes API server
-        //    et al.) when the upstream challenges for a client cert.
+        // 6a. WebSocket upgrade — bypass URLSession (which can't
+        //     surface the 101 + raw bidirectional byte stream) and
+        //     do a manual TLS-client connect + opaque pump. Used by
+        //     OpenAI's Realtime API and any other agent transport
+        //     that rides on WS instead of plain HTTP/SSE.
+        if isWebSocketUpgrade(rawRequest: swap.modified) {
+            try await handleWebSocketUpgrade(serverTLS: tls,
+                                             rawRequest: swap.modified,
+                                             host: host, port: port)
+            // Trace records the handshake only — body sizes are
+            // unknown for the streaming half.
+            let elapsed = Date().timeIntervalSince(t0) * 1000
+            await emitTrace(host: host, port: port,
+                            preSwapRequest: request,
+                            upstreamResponse: Data(),
+                            swaps: swap.swaps,
+                            leaks: leaks,
+                            latencyMs: elapsed)
+            return
+        }
+
+        // 6b. Send to upstream. The session's delegate looks up the
+        //     profile's per-host SecIdentity (Kubernetes API server
+        //     et al.) when the upstream challenges for a client cert.
         let session = upstreamSession(for: host)
         let upstreamResp = try await sendToUpstream(rawRequest: swap.modified,
                                                     host: host, port: port,
@@ -116,6 +137,123 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         swaps: swap.swaps,
                         leaks: leaks,
                         latencyMs: elapsed)
+    }
+
+    /// True iff the request contains the HTTP/1.1 upgrade tokens for
+    /// WebSocket. Both `Upgrade: websocket` and a `Connection` header
+    /// listing `Upgrade` are required by RFC 6455 — but in practice
+    /// either is enough to know we should *not* hand this to URLSession.
+    private func isWebSocketUpgrade(rawRequest: Data) -> Bool {
+        guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)),
+              let headerStr = String(data: rawRequest.subdata(in: 0..<endRange.lowerBound),
+                                     encoding: .ascii) else {
+            return false
+        }
+        var sawUpgrade = false
+        var sawConnectionUpgrade = false
+        for line in headerStr.split(separator: "\r\n") {
+            let lower = line.lowercased()
+            if lower.hasPrefix("upgrade:") && lower.contains("websocket") {
+                sawUpgrade = true
+            }
+            if lower.hasPrefix("connection:") && lower.contains("upgrade") {
+                sawConnectionUpgrade = true
+            }
+        }
+        return sawUpgrade || sawConnectionUpgrade
+    }
+
+    /// Open a TLS connection to upstream, replay the (already token-
+    /// swapped) request bytes verbatim, then bidirectionally pump
+    /// every byte that follows. Returns when either side EOFs or
+    /// errors out — the caller's `defer { close(fd) }` tears down
+    /// the client side.
+    private func handleWebSocketUpgrade(serverTLS: TLSServerStream,
+                                        rawRequest: Data,
+                                        host: String, port: Int) async throws {
+        let upstreamFD = try connectTCP(host: host, port: port)
+        let upstreamTLS: TLSClientStream
+        do {
+            upstreamTLS = try TLSClientStream(fd: upstreamFD, peerName: host)
+            try upstreamTLS.handshake()
+        } catch {
+            close(upstreamFD)
+            throw error
+        }
+        defer { close(upstreamFD) }
+
+        // Forward the upgrade request as-is. URLSession's hop-by-hop
+        // header strip would have eaten Upgrade/Connection — that's
+        // exactly why we bypass it here.
+        try upstreamTLS.write(rawRequest)
+
+        // Read the response headers (everything up to the first blank
+        // line) and forward them to the client. We don't care about
+        // status: even a 4xx/5xx upgrade refusal should be relayed
+        // verbatim so the client sees the real failure.
+        let respHeaders = try readUntilDoubleCRLF(via: upstreamTLS,
+                                                  maxBytes: 64 * 1024)
+        try serverTLS.write(respHeaders)
+
+        // If upstream didn't switch protocols, there's no streaming
+        // half — the response either had a body (which we'd need a
+        // proper HTTP response parser to length-frame) or was an
+        // empty rejection. Either way, drop down to opaque pump
+        // briefly so any trailing bytes from upstream reach the
+        // client, then exit.
+        let switched = parseStatusCode(rawHeaders: respHeaders) == 101
+        if !switched {
+            // Best-effort drain of any remaining response body so the
+            // client sees the full upstream message before we close.
+            for _ in 0..<8 {
+                let chunk = (try? upstreamTLS.read(maxBytes: 16 * 1024)) ?? Data()
+                if chunk.isEmpty { break }
+                try? serverTLS.write(chunk)
+            }
+            return
+        }
+
+        // Bidirectional opaque pump. Two child tasks, each blocking on
+        // one direction; the first to EOF/error tears down the other
+        // by closing the upstream FD via the outer defer.
+        await withTaskGroup(of: Void.self) { group in
+            let server = serverTLS
+            let upstream = upstreamTLS
+            group.addTask {
+                while true {
+                    let chunk: Data
+                    do { chunk = try server.read(maxBytes: 16 * 1024) }
+                    catch { return }
+                    if chunk.isEmpty { return }
+                    do { try upstream.write(chunk) }
+                    catch { return }
+                }
+            }
+            group.addTask {
+                while true {
+                    let chunk: Data
+                    do { chunk = try upstream.read(maxBytes: 16 * 1024) }
+                    catch { return }
+                    if chunk.isEmpty { return }
+                    do { try server.write(chunk) }
+                    catch { return }
+                }
+            }
+            // Either direction EOFing is enough — the other will get
+            // a read error / EOF on its own when the peer closes.
+            await group.next()
+            group.cancelAll()
+        }
+    }
+
+    /// Pull the numeric status code out of a raw response header
+    /// blob ("HTTP/1.1 101 Switching Protocols\r\n…" → 101).
+    private func parseStatusCode(rawHeaders: Data) -> Int {
+        guard let str = String(data: rawHeaders.prefix(64), encoding: .ascii),
+              let lineEnd = str.range(of: "\r\n") else { return 0 }
+        let parts = str[..<lineEnd.lowerBound].split(separator: " ")
+        guard parts.count >= 2, let n = Int(parts[1]) else { return 0 }
+        return n
     }
 
     /// Build + record the TraceRecord. Body capture decision is made
@@ -337,6 +475,73 @@ private func readUntilCompleteHTTP(maxBytes: Int,
         }
     }
     return buffer
+}
+
+/// Read from a TLS stream until we see `\r\n\r\n` (end of headers)
+/// or hit `maxBytes`. Returns whatever was buffered (which may
+/// include bytes past the blank line — unlikely on a 101 because
+/// the upstream waits for our ACK, but tolerated). Used only by
+/// the WebSocket upgrade fast-path; the main request path has its
+/// own length-aware reader because it needs to honour Content-Length.
+@available(macOS, deprecated: 10.15)
+private func readUntilDoubleCRLF(via tls: TLSClientStream, maxBytes: Int) throws -> Data {
+    var buffer = Data()
+    while buffer.count < maxBytes {
+        let got = try tls.read(maxBytes: 16 * 1024)
+        if got.isEmpty {
+            if buffer.isEmpty { throw MitmError.unexpectedTermination }
+            return buffer
+        }
+        buffer.append(got)
+        if buffer.range(of: Data("\r\n\r\n".utf8)) != nil { return buffer }
+    }
+    return buffer
+}
+
+/// Open a synchronous TCP socket to `host:port` using `getaddrinfo`
+/// on a background queue so we don't block the cooperative pool.
+/// Returns the connected FD (caller owns the close). Tries each
+/// resolved address until one connects; throws `upstreamFailed` if
+/// none succeed.
+private func connectTCP(host: String, port: Int) throws -> Int32 {
+    var hints = addrinfo(
+        ai_flags: 0,
+        ai_family: AF_UNSPEC,
+        ai_socktype: SOCK_STREAM,
+        ai_protocol: IPPROTO_TCP,
+        ai_addrlen: 0,
+        ai_canonname: nil,
+        ai_addr: nil,
+        ai_next: nil
+    )
+    var res: UnsafeMutablePointer<addrinfo>? = nil
+    let rc = getaddrinfo(host, String(port), &hints, &res)
+    if rc != 0 || res == nil {
+        let msg = String(cString: gai_strerror(rc))
+        throw MitmError.upstreamFailed("getaddrinfo(\(host)): \(msg)")
+    }
+    defer { freeaddrinfo(res) }
+
+    var lastErrno: Int32 = 0
+    var cursor = res
+    while let info = cursor {
+        let fd = socket(info.pointee.ai_family,
+                        info.pointee.ai_socktype,
+                        info.pointee.ai_protocol)
+        if fd < 0 {
+            lastErrno = errno
+            cursor = info.pointee.ai_next
+            continue
+        }
+        if connect(fd, info.pointee.ai_addr, info.pointee.ai_addrlen) == 0 {
+            return fd
+        }
+        lastErrno = errno
+        close(fd)
+        cursor = info.pointee.ai_next
+    }
+    let msg = String(cString: strerror(lastErrno))
+    throw MitmError.upstreamFailed("connect(\(host):\(port)): \(msg)")
 }
 
 private func writeAll(fd: Int32, bytes: [UInt8]) throws {
