@@ -382,6 +382,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         false
     }
 
+    /// ⌘Q (and Quit menu) confirmation. Skip the prompt if no VMs are
+    /// running — quitting an idle app should be friction-free.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let runningSessions = profileWindows.values.filter {
+            $0.sandbox?.vm?.state == .running
+        }
+        if runningSessions.isEmpty { return .terminateNow }
+
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Quit Bromure Agentic Coding?", comment: "")
+        let names = runningSessions.map { $0.profile.name }.joined(separator: ", ")
+        alert.informativeText = String(
+            format: NSLocalizedString(
+                "%d VM(s) currently running (%@) will shut down and any running processes will be stopped.",
+                comment: ""),
+            runningSessions.count, names)
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("Quit", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // Nuke our private ssh-agent. The orphaned-process risk is
         // small (it's idle and tiny) but worth tidying up at least
