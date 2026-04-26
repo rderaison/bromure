@@ -18,15 +18,21 @@
  *   RELEASE_AUTH_TOKEN     Bearer token matching the backend's RELEASE_AUTH_TOKEN.
  *
  * Optional:
- *   RELEASE_API_URL        Defaults to https://bromure.io/api/v1/release
+ *   RELEASE_API_URL        Overrides the per-product appcast endpoint
+ *                          (handy for pointing at a staging backend).
  *
  * Usage:
  *   node tools/release-upload.mjs \
  *        --file .build/release/Bromure-2.6.0.zip \
  *        --version 2.6.0 \
+ *        [--product bromure|bromure-ac] \
  *        [--channel stable] \
  *        [--min-system-version 14.0] \
  *        [--notes-file release-notes-2.6.0.html]
+ *
+ * --product selects the DO Spaces prefix and appcast endpoint:
+ *   bromure     → releases/                + /api/v1/release
+ *   bromure-ac  → releases-agentic-coding/ + /api/v1/release-agentic-coding
  */
 
 import { createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
@@ -43,6 +49,10 @@ const { values } = parseArgs({
     file: { type: "string" },
     version: { type: "string" },
     channel: { type: "string", default: "stable" },
+    // Which sibling app is being released. Selects the DO Spaces
+    // prefix and the appcast endpoint. Defaults to the browser to
+    // preserve the previous (single-product) behaviour.
+    product: { type: "string", default: "bromure" },
     "min-system-version": { type: "string", default: "14.0" },
     "notes-file": { type: "string" },
     "dry-run": { type: "boolean", default: false },
@@ -63,9 +73,28 @@ if (!/^\d+\.\d+(\.\d+)?(-[A-Za-z0-9._-]+)?$/.test(values.version)) {
 const FILE = values.file;
 const VERSION = values.version;
 const CHANNEL = values.channel;
+const PRODUCT = values.product;
 const MIN_SYSTEM_VERSION = values["min-system-version"];
 const NOTES = values["notes-file"] ? readFileSync(values["notes-file"], "utf8") : "";
 const DRY_RUN = values["dry-run"];
+
+// Per-product mapping: where the artifact lands in DO Spaces and which
+// appcast endpoint is notified. Add a new entry when a new sibling
+// product gets a release pipeline.
+const PRODUCT_CONFIG = {
+  "bromure": {
+    spacesPrefix: "releases",
+    apiURL: process.env.RELEASE_API_URL || "https://bromure.io/api/v1/release",
+  },
+  "bromure-ac": {
+    spacesPrefix: "releases-agentic-coding",
+    apiURL: process.env.RELEASE_API_URL || "https://bromure.io/api/v1/release-agentic-coding",
+  },
+};
+if (!PRODUCT_CONFIG[PRODUCT]) {
+  die(`unknown --product '${PRODUCT}'. Known: ${Object.keys(PRODUCT_CONFIG).join(", ")}`);
+}
+const SPACES_PREFIX = PRODUCT_CONFIG[PRODUCT].spacesPrefix;
 
 // ---------------------------------------------------------------------------
 // Env
@@ -85,7 +114,10 @@ const DO_SPACES_REGION = env("DO_SPACES_REGION");
 const DO_SPACES_BUCKET = env("DO_SPACES_BUCKET");
 const DO_SPACES_PUBLIC_BASE = env("DO_SPACES_PUBLIC_BASE").replace(/\/+$/, "");
 const RELEASE_AUTH_TOKEN = env("RELEASE_AUTH_TOKEN");
-const RELEASE_API_URL = process.env.RELEASE_API_URL || "https://bromure.io/api/v1/release";
+// Per-product API URL (selected above based on --product). The
+// RELEASE_API_URL env var, if set, overrides the default for that
+// product — useful when pointing at a staging backend.
+const RELEASE_API_URL = PRODUCT_CONFIG[PRODUCT].apiURL;
 
 // ---------------------------------------------------------------------------
 // 1. Sign the artifact with ed25519 (Sparkle format)
@@ -183,7 +215,7 @@ async function registerRelease(payload) {
 
 (async () => {
   const fileBasename = basename(FILE);
-  const spacesKey = `releases/${fileBasename}`;
+  const spacesKey = `${SPACES_PREFIX}/${fileBasename}`;
 
   console.log(`[1/3] signing ${FILE}…`);
   const { signature, length } = signArtifact(FILE);

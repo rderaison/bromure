@@ -20,6 +20,24 @@
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
-    <!-- Sparkle auto-update — wire up SUFeedURL + SUPublicEDKey before shipping. -->
+    <!-- Sparkle auto-update.
+         Same SUPublicEDKey as the browser since the Jenkins build host
+         signs both products with the same SPARKLE_PRIVATE_KEY credential.
+         The release-agentic-coding endpoint serves a separate appcast
+         pointing at downloads under DO Spaces' releases-agentic-coding/
+         prefix so the two product channels stay isolated.
+         Note the singular "release" in the API path (mirrors the
+         browser's /api/v1/release) and plural "releases" in the bucket
+         prefix (mirrors the browser's releases/ prefix). -->
+    <key>SUFeedURL</key>
+    <string>https://bromure.io/api/v1/release-agentic-coding</string>
+    <key>SUPublicEDKey</key>
+    <string>G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <key>SUEnableInstallerLauncherService</key>
+    <true/>
 </dict>
 </plist>

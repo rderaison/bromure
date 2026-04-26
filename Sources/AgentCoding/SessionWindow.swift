@@ -77,31 +77,32 @@ final class TabbedSessionWindow: NSWindow {
         )
         title = profile.name
         titleVisibility = .hidden
-        // titlebarAppearsTransparent = false: the title bar / toolbar
-        // get their own opaque chrome. Without this, the contentView
-        // extends under the toolbar and any opacity / blur we apply
-        // to it bleeds into the chrome — exactly what we don't want.
         titlebarAppearsTransparent = false
         toolbarStyle = .unified
         model.accentHex = profile.color.hexInUI
+        contentView = view
 
-        // Per-frame opacity is applied to the framebuffer's CALayer,
-        // not NSWindow.alphaValue, so the toolbar stays fully opaque.
-        view.wantsLayer = true
-        let opacity = Float(min(1.0, max(0.3, profile.windowOpacity)))
-        view.layer?.opacity = opacity
-
-        // For the framebuffer's translucency to actually reveal the
-        // desktop (not the window's own background), the window has
-        // to be non-opaque with a clear background. The toolbar
-        // chrome is unaffected because `titlebarAppearsTransparent`
-        // is false above — the title bar paints its own opaque bg.
+        // Window opacity via NSWindow.alphaValue. Earlier we tried
+        // per-layer opacity on the VZ framebuffer view to keep the
+        // toolbar fully opaque — but VZVirtualMachineView manages its
+        // own layer-hosted framebuffer, and forcing wantsLayer +
+        // layer.opacity on it tripped AppKit's _NSWindowTransformAnimation
+        // path during hide/minimise (over-release in the autorelease
+        // pool drain → SIGSEGV).
+        //
+        // alphaValue does fade the toolbar too. At the default 97%
+        // it's imperceptible; at lower values the user trades a bit
+        // of toolbar fade for the see-through effect they asked for
+        // by lowering opacity. The right long-term fix is a wrapper
+        // view between contentView and vmView so we can sandwich the
+        // VZ layer without touching it directly, but that's out of
+        // scope for this hot-fix.
+        let opacity = CGFloat(min(1.0, max(0.3, profile.windowOpacity)))
+        alphaValue = opacity
         if opacity < 1.0 {
             isOpaque = false
             backgroundColor = .clear
         }
-
-        contentView = view
 
         let delegate = TabsToolbarDelegate(
             model: model,

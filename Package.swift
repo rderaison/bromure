@@ -30,6 +30,7 @@ let package = Package(
             dependencies: [
                 "SandboxEngine",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "X509", package: "swift-certificates"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "_CryptoExtras", package: "swift-crypto"),

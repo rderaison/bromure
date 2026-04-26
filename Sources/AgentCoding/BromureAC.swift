@@ -2,6 +2,7 @@ import ArgumentParser
 import Cocoa
 import Crypto
 import Foundation
+import Sparkle
 import SwiftUI
 @preconcurrency import Virtualization
 
@@ -230,6 +231,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                           withExtension: "py")
     }()
 
+    /// Sparkle auto-updater. Retained strongly — if this deallocates,
+    /// scheduled update checks stop firing. Initialised in
+    /// applicationDidFinishLaunching. Silently no-ops on dev builds where
+    /// SUPublicEDKey isn't populated.
+    private var updaterController: SPUStandardUpdaterController?
+
 
     init(imageManager: UbuntuImageManager) {
         self.imageManager = imageManager
@@ -240,6 +247,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         profiles = store.loadAll()
+
+        // Sparkle: kick off scheduled update checks against the
+        // release-agentic-coding appcast (separate channel from the
+        // browser product). Started before the menu so the "Check for
+        // Updates…" item has a live target.
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+        // Re-install the main menu now that updaterController is alive
+        // so the menu item built in `makeMainMenu` (called via the Run
+        // command, before this delegate ran) gets a fresh copy with the
+        // updater wired in.
+        if let menu = NSApp.mainMenu, let appMenu = menu.item(at: 0)?.submenu {
+            installCheckForUpdatesMenuItem(into: appMenu)
+        }
 
         // Force-init the MITM engine so the CA is ready before any
         // session opens (the lazy var would defer this to first launch,
@@ -438,6 +462,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.initProgress.error = error.localizedDescription
             }
         }
+    }
+
+    /// Insert (or refresh) the "Check for Updates…" item directly
+    /// after "About …". Idempotent — drops any prior copy first so
+    /// repeat calls don't stack duplicates. No-op if the updater
+    /// hasn't been initialised (dev builds without SUPublicEDKey).
+    fileprivate func installCheckForUpdatesMenuItem(into appMenu: NSMenu) {
+        guard let updater = updaterController else { return }
+        appMenu.items
+            .filter { ($0.representedObject as? String) == "bromure.checkForUpdates" }
+            .forEach { appMenu.removeItem($0) }
+        let item = NSMenuItem(
+            title: NSLocalizedString("Check for Updates…", comment: ""),
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: "")
+        item.target = updater
+        item.representedObject = "bromure.checkForUpdates"
+        // Slot the item right after "About …". The two slots before it
+        // are: 0 = About, 1 = separator (added in makeMainMenu).
+        let insertIdx = min(2, appMenu.items.count)
+        appMenu.insertItem(item, at: insertIdx)
+        appMenu.insertItem(.separator(), at: insertIdx + 1)
     }
 
     /// Wired to the "Rebuild Base Image…" menu item. Confirms, then

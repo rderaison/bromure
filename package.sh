@@ -2,12 +2,38 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PRODUCT_NAME="bromure"
-APP_NAME="Bromure"
-ENTITLEMENTS="$SCRIPT_DIR/Sources/CLI/SafariSandbox.entitlements"
-INFO_PLIST="$SCRIPT_DIR/Sources/CLI/Info.plist"
-ICON_FILE="$SCRIPT_DIR/Resources/AppIcon.icns"
-DMG_NAME="Bromure.dmg"
+
+# Per-target config — same dispatch idea as build.sh. Add a new case
+# here when a third sibling app gets a release pipeline.
+TARGET="${1:-bromure}"
+case "$TARGET" in
+    bromure)
+        PRODUCT_NAME="bromure"
+        APP_NAME="Bromure"
+        SOURCE_DIR="$SCRIPT_DIR/Sources/Browser"
+        ENTITLEMENTS="$SOURCE_DIR/SafariSandbox.entitlements"
+        INFO_PLIST="$SOURCE_DIR/Info.plist"
+        SDEF_FILE="$SOURCE_DIR/Bromure.sdef"
+        ICON_FILE="$SCRIPT_DIR/Resources/AppIcon.icns"
+        DMG_NAME="Bromure.dmg"
+        RESOURCE_BUNDLE_NAME="bromure_bromure.bundle"
+        ;;
+    bromure-ac)
+        PRODUCT_NAME="bromure-ac"
+        APP_NAME="Bromure Agentic Coding"
+        SOURCE_DIR="$SCRIPT_DIR/Sources/AgentCoding"
+        ENTITLEMENTS="$SOURCE_DIR/BromureAC.entitlements"
+        INFO_PLIST="$SOURCE_DIR/Info.plist"
+        SDEF_FILE=""
+        ICON_FILE="$SCRIPT_DIR/Resources/BromureACIcon.icns"
+        DMG_NAME="BromureAgenticCoding.dmg"
+        RESOURCE_BUNDLE_NAME="bromure_bromure-ac.bundle"
+        ;;
+    *)
+        echo "Usage: $0 [bromure|bromure-ac]" >&2
+        exit 2
+        ;;
+esac
 
 # --- Configuration ---
 # Set these via environment variables or edit here:
@@ -22,7 +48,7 @@ DMG_NAME="Bromure.dmg"
 #   APPLE_ID="jane@example.com" \
 #   TEAM_ID="ABC123XYZ" \
 #   APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
-#   ./package.sh
+#   ./package.sh [bromure|bromure-ac]
 
 DEVELOPER_ID="${DEVELOPER_ID:-}"
 APPLE_ID="${APPLE_ID:-}"
@@ -38,7 +64,7 @@ if [ -z "$DEVELOPER_ID" ]; then
     echo "  APPLE_ID=\"you@example.com\" \\"
     echo "  TEAM_ID=\"ABC123XYZ\" \\"
     echo "  APP_PASSWORD=\"xxxx-xxxx-xxxx-xxxx\" \\"
-    echo "  ./package.sh"
+    echo "  ./package.sh [bromure|bromure-ac]"
     echo ""
     echo "List available identities with:"
     echo "  security find-identity -v -p codesigning"
@@ -54,8 +80,8 @@ else
 fi
 
 # --- Build ---
-echo "=== Building $APP_NAME ==="
-swift build -c release --arch arm64 2>&1
+echo "=== Building $APP_NAME ($PRODUCT_NAME) ==="
+swift build -c release --arch arm64 --product "$PRODUCT_NAME" 2>&1
 
 BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
 BINARY="$BUILD_DIR/$PRODUCT_NAME"
@@ -68,7 +94,7 @@ fi
 echo "Binary: $BINARY"
 
 # --- Create app bundle ---
-APP_BUNDLE="$BUILD_DIR/$PRODUCT_NAME.app"
+APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 CONTENTS="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
 RESOURCES_DIR="$CONTENTS/Resources"
@@ -84,8 +110,11 @@ cp "$INFO_PLIST" "$CONTENTS/Info.plist"
 # @rpath/Sparkle.framework/... to Contents/Frameworks/.
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$PRODUCT_NAME" 2>/dev/null || true
 
-# Embed provisioning profile (required for iCloud and other entitlements)
-PROVISION_PROFILE="$SCRIPT_DIR/bromure.provisionprofile"
+# Embed provisioning profile (required for iCloud and other entitlements).
+# Per-product profile if present (e.g. bromure-ac.provisionprofile),
+# else fall back to the shared bromure.provisionprofile.
+PROVISION_PROFILE="$SCRIPT_DIR/$PRODUCT_NAME.provisionprofile"
+[ -f "$PROVISION_PROFILE" ] || PROVISION_PROFILE="$SCRIPT_DIR/bromure.provisionprofile"
 if [ ! -f "$PROVISION_PROFILE" ]; then
     echo "ERROR: Provisioning profile not found at $PROVISION_PROFILE"
     exit 1
@@ -96,10 +125,9 @@ if [ -f "$ICON_FILE" ]; then
     cp "$ICON_FILE" "$RESOURCES_DIR/AppIcon.icns"
 fi
 
-# Copy AppleScript scripting definition
-SDEF_FILE="$SCRIPT_DIR/Sources/CLI/Bromure.sdef"
-if [ -f "$SDEF_FILE" ]; then
-    cp "$SDEF_FILE" "$RESOURCES_DIR/Bromure.sdef"
+# Browser-only: AppleScript scripting definition.
+if [ -n "$SDEF_FILE" ] && [ -f "$SDEF_FILE" ]; then
+    cp "$SDEF_FILE" "$RESOURCES_DIR/$(basename "$SDEF_FILE")"
 fi
 
 # Copy SPM resource bundles into Contents/Resources/.
@@ -109,14 +137,21 @@ done
 
 # Copy localization .lproj directories into the app bundle so Bundle.main can find them.
 # SwiftUI looks up localized strings in Bundle.main, not Bundle.module.
-for lproj in "$BUILD_DIR"/bromure_bromure.bundle/*.lproj; do
-    [ -d "$lproj" ] && cp -R "$lproj" "$RESOURCES_DIR/"
-done
+if [ -d "$BUILD_DIR/$RESOURCE_BUNDLE_NAME" ]; then
+    for lproj in "$BUILD_DIR/$RESOURCE_BUNDLE_NAME"/*.lproj; do
+        [ -d "$lproj" ] && cp -R "$lproj" "$RESOURCES_DIR/"
+    done
+fi
 
 # Copy SPM-provided frameworks (Sparkle, etc.) into Contents/Frameworks.
+# Filter to frameworks the binary actually links — the shared $BUILD_DIR
+# may contain leftover frameworks from the sibling target's build.
 FRAMEWORKS_DIR="$CONTENTS/Frameworks"
+LINKED_RPATHS=$(otool -L "$BINARY" | awk '/@rpath\// {print $1}')
 for fw in "$BUILD_DIR"/*.framework; do
-    if [ -d "$fw" ]; then
+    [ -d "$fw" ] || continue
+    fw_base=$(basename "$fw")
+    if echo "$LINKED_RPATHS" | grep -q "@rpath/$fw_base/"; then
         mkdir -p "$FRAMEWORKS_DIR"
         cp -R "$fw" "$FRAMEWORKS_DIR/"
     fi
@@ -194,7 +229,7 @@ echo "=== Creating DMG ==="
 
 DMG_DIR="$BUILD_DIR/dmg-staging"
 DMG_PATH="$BUILD_DIR/$DMG_NAME"
-DMG_RW="$BUILD_DIR/${APP_NAME}_rw.dmg"
+DMG_RW="$BUILD_DIR/${PRODUCT_NAME}_rw.dmg"
 
 rm -rf "$DMG_DIR" "$DMG_PATH" "$DMG_RW"
 mkdir -p "$DMG_DIR/.background"
@@ -300,4 +335,4 @@ echo "=== Done ==="
 echo ""
 echo "DMG: $DMG_PATH"
 echo ""
-echo "Distribute this file. Users open the DMG and drag Bromure to Applications."
+echo "Distribute this file. Users open the DMG and drag $APP_NAME to Applications."
