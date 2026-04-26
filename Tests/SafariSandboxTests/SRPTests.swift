@@ -3,6 +3,7 @@ import CommonCrypto
 import CryptoKit
 import Foundation
 import Testing
+@testable import BrowserBridges
 @testable import SandboxEngine
 
 // MARK: - Data Hex Encoding/Decoding

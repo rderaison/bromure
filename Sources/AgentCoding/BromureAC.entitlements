@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Required to use Virtualization.framework APIs -->
+    <key>com.apple.security.virtualization</key>
+    <true/>
+    <key>com.apple.application-identifier</key>
+    <string>W3RD8G85BC.io.bromure.agentic-coding</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>W3RD8G85BC</string>
+    <!-- vmnet framework for host-side network filtering -->
+    <key>com.apple.developer.networking.vmnet</key>
+    <true/>
+</dict>
+</plist>

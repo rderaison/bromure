@@ -1,0 +1,129 @@
+/* Bromure Agentic Coding — Simplified Chinese */
+
+"Bromure Agentic Coding" = "Bromure Agentic Coding";
+
+/* Picker */
+"Pick a profile to open" = "选择要打开的配置";
+"Open Session" = "打开会话";
+"Select a profile, or click + to create one." = "选择一个配置,或点击 + 创建新配置。";
+"Add a new profile" = "添加新配置";
+"Delete selected profile" = "删除所选配置";
+"Edit profile settings" = "编辑配置设置";
+"Session is running" = "会话正在运行";
+"Launch" = "启动";
+"Edit…" = "编辑…";
+"SSH public key…" = "SSH 公钥…";
+"Reset disk" = "重置磁盘";
+"Delete profile" = "删除配置";
+"SSH key" = "SSH 密钥";
+
+/* Setup */
+"Welcome to Bromure Agentic Coding" = "欢迎使用 Bromure Agentic Coding";
+"First-time setup downloads Ubuntu Server and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Takes about 10 minutes; only happens once per base-image version." = "首次设置将下载 Ubuntu Server 并在隔离的虚拟机中安装 Node.js、Claude Code、Codex、kitty 和桌面环境。大约需要 10 分钟;每个基础镜像版本仅执行一次。";
+"Get Started" = "开始使用";
+"Building base image" = "正在构建基础镜像";
+"This is the one-time install. Don't close the window." = "这是一次性安装。请勿关闭窗口。";
+"Console output" = "控制台输出";
+"Copy" = "拷贝";
+"Close" = "关闭";
+"(waiting for installer output…)" = "(等待安装程序输出…)";
+
+/* Editor categories */
+"General" = "通用";
+"Agent" = "代理";
+"Folders" = "文件夹";
+"Credentials" = "凭据";
+"Advanced" = "高级";
+"Appearance" = "外观";
+"Resources" = "资源";
+
+/* Editor — General */
+"New profile" = "新建配置";
+"Edit profile" = "编辑配置";
+"Name" = "名称";
+"Color" = "颜色";
+"Notes (optional)" = "备注 (可选)";
+
+/* Editor — Agent */
+"Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "启用您希望在此配置中可用的每个代理。标记为 **主要** 的代理将在第一个 kitty 标签页中自动启动;其他启用的代理已安装并完成认证,但您需要在新标签页中按需运行它们。";
+"Primary" = "主要";
+"Make primary" = "设为主要";
+"Auth" = "认证";
+"API token" = "API 令牌";
+"Subscription (interactive login)" = "订阅 (交互式登录)";
+"Anthropic API key" = "Anthropic API 密钥";
+"OpenAI API key" = "OpenAI API 密钥";
+
+/* Editor — Folders */
+"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per profile." = "每个文件夹按其真实名称挂载到虚拟机中 (例如 ~/Documents → ~ubuntu/Documents)。每个配置最多 8 个文件夹。";
+"No folders shared." = "未共享任何文件夹。";
+"Add folder…" = "添加文件夹…";
+
+/* Editor — Credentials */
+"Git Identity" = "Git 身份";
+"Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults." = "写入虚拟机中的 ~/.gitconfig。保持两者为空以使用 git 的默认值。";
+"Generate an ed25519 keypair" = "生成 ed25519 密钥对";
+"The public key will be displayed below after the profile is saved." = "保存配置后,公钥将显示在下方。";
+"ed25519 keypair on file." = "已记录 ed25519 密钥对。";
+"Regenerate" = "重新生成";
+"Public key (paste into github.com/settings/keys):" = "公钥 (粘贴到 github.com/settings/keys):";
+"Open GitHub keys page" = "打开 GitHub 密钥页面";
+"Imported SSH keys" = "已导入的 SSH 密钥";
+"Import…" = "导入…";
+"Import" = "导入";
+"No imported keys." = "无导入的密钥。";
+"HTTPS tokens" = "HTTPS 令牌";
+"Add" = "添加";
+"Other host…" = "其他主机…";
+"No HTTPS tokens configured." = "未配置 HTTPS 令牌。";
+
+/* Editor — Resources */
+"Storage" = "存储";
+"Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "三层叠加构成此配置的环境。底层为共享且不可更改;上面两层属于您,可以独立清除。";
+"Your home folder" = "您的主目录";
+"Profile system disk" = "配置系统磁盘";
+"Base OS image" = "基础 OS 镜像";
+"Erase home…" = "清除主目录…";
+"Reset to base…" = "重置为基础…";
+"Memory" = "内存";
+"Network" = "网络";
+
+/* Editor — Appearance */
+"Font" = "字体";
+"Cursor" = "光标";
+"Colors" = "颜色";
+"Background" = "背景";
+"Text" = "文本";
+"Opacity" = "不透明度";
+"Reset to Terminal.app" = "重置为 Terminal.app";
+
+/* Editor — Advanced */
+"MITM token swap" = "MITM 令牌替换";
+"Manual token rules" = "手动令牌规则";
+"No manual tokens configured. Auto-handled APIs (Anthropic, OpenAI, GitHub, GitLab) need no entries here." = "未配置手动令牌。自动处理的 API (Anthropic、OpenAI、GitHub、GitLab) 在此处无需任何条目。";
+
+/* Buttons */
+"Cancel" = "取消";
+"Save" = "存储";
+"Create" = "创建";
+"Done" = "完成";
+"Reset" = "重置";
+"Delete" = "删除";
+
+/* Menus */
+"Rebuild Base Image…" = "重新构建基础镜像…";
+"Edit" = "编辑";
+"Window" = "窗口";
+"Minimize" = "最小化";
+"Cut" = "剪切";
+"Paste" = "粘贴";
+"Select All" = "全选";
+"Undo" = "撤销";
+"Redo" = "重做";
+
+/* App menu */
+"About %@" = "关于 %@";
+"Hide %@" = "隐藏 %@";
+"Hide Others" = "隐藏其他";
+"Show All" = "全部显示";
+"Quit %@" = "退出 %@";

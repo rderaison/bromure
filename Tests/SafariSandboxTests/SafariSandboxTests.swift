@@ -1,6 +1,7 @@
 import CommonCrypto
 import Foundation
 import Testing
+@testable import BrowserBridges
 @testable import SandboxEngine
 
 // MARK: - ProfileColor Tests

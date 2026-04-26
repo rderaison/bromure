@@ -1,0 +1,129 @@
+/* Bromure Agentic Coding — French */
+
+"Bromure Agentic Coding" = "Bromure Agentic Coding";
+
+/* Picker */
+"Pick a profile to open" = "Choisissez un profil à ouvrir";
+"Open Session" = "Ouvrir la session";
+"Select a profile, or click + to create one." = "Sélectionnez un profil, ou cliquez sur + pour en créer un.";
+"Add a new profile" = "Ajouter un nouveau profil";
+"Delete selected profile" = "Supprimer le profil sélectionné";
+"Edit profile settings" = "Modifier les paramètres du profil";
+"Session is running" = "La session est active";
+"Launch" = "Lancer";
+"Edit…" = "Modifier…";
+"SSH public key…" = "Clé publique SSH…";
+"Reset disk" = "Réinitialiser le disque";
+"Delete profile" = "Supprimer le profil";
+"SSH key" = "Clé SSH";
+
+/* Setup */
+"Welcome to Bromure Agentic Coding" = "Bienvenue dans Bromure Agentic Coding";
+"First-time setup downloads Ubuntu Server and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Takes about 10 minutes; only happens once per base-image version." = "L'installation initiale télécharge Ubuntu Server et installe Node.js, Claude Code, Codex, kitty et l'environnement de bureau dans une VM isolée. Cela prend environ 10 minutes ; ne se produit qu'une fois par version d'image de base.";
+"Get Started" = "Commencer";
+"Building base image" = "Création de l'image de base";
+"This is the one-time install. Don't close the window." = "Il s'agit de l'installation unique. Ne fermez pas la fenêtre.";
+"Console output" = "Sortie console";
+"Copy" = "Copier";
+"Close" = "Fermer";
+"(waiting for installer output…)" = "(en attente de la sortie de l'installateur…)";
+
+/* Editor categories */
+"General" = "Général";
+"Agent" = "Agent";
+"Folders" = "Dossiers";
+"Credentials" = "Identifiants";
+"Advanced" = "Avancé";
+"Appearance" = "Apparence";
+"Resources" = "Ressources";
+
+/* Editor — General */
+"New profile" = "Nouveau profil";
+"Edit profile" = "Modifier le profil";
+"Name" = "Nom";
+"Color" = "Couleur";
+"Notes (optional)" = "Notes (facultatif)";
+
+/* Editor — Agent */
+"Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Activez chaque agent que vous souhaitez avoir dans ce profil. Celui marqué **Principal** se lance automatiquement dans le premier onglet kitty ; les autres agents activés sont installés et authentifiés mais vous les exécutez à la demande depuis un nouvel onglet.";
+"Primary" = "Principal";
+"Make primary" = "Définir comme principal";
+"Auth" = "Authentification";
+"API token" = "Jeton API";
+"Subscription (interactive login)" = "Abonnement (connexion interactive)";
+"Anthropic API key" = "Clé API Anthropic";
+"OpenAI API key" = "Clé API OpenAI";
+
+/* Editor — Folders */
+"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per profile." = "Chaque dossier est monté dans la VM sous son nom réel (par ex. ~/Documents → ~ubuntu/Documents). Limité à 8 dossiers par profil.";
+"No folders shared." = "Aucun dossier partagé.";
+"Add folder…" = "Ajouter un dossier…";
+
+/* Editor — Credentials */
+"Git Identity" = "Identité Git";
+"Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults." = "Écrit dans ~/.gitconfig de la VM. Laissez les deux champs vides pour conserver les valeurs par défaut de git.";
+"Generate an ed25519 keypair" = "Générer une paire de clés ed25519";
+"The public key will be displayed below after the profile is saved." = "La clé publique sera affichée ci-dessous après l'enregistrement du profil.";
+"ed25519 keypair on file." = "Paire de clés ed25519 enregistrée.";
+"Regenerate" = "Régénérer";
+"Public key (paste into github.com/settings/keys):" = "Clé publique (à coller dans github.com/settings/keys) :";
+"Open GitHub keys page" = "Ouvrir la page des clés GitHub";
+"Imported SSH keys" = "Clés SSH importées";
+"Import…" = "Importer…";
+"Import" = "Importer";
+"No imported keys." = "Aucune clé importée.";
+"HTTPS tokens" = "Jetons HTTPS";
+"Add" = "Ajouter";
+"Other host…" = "Autre hôte…";
+"No HTTPS tokens configured." = "Aucun jeton HTTPS configuré.";
+
+/* Editor — Resources */
+"Storage" = "Stockage";
+"Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "Trois couches forment l'environnement de ce profil. Celle du bas est partagée et immuable ; les deux du dessus vous appartiennent et peuvent être effacées indépendamment.";
+"Your home folder" = "Votre dossier personnel";
+"Profile system disk" = "Disque système du profil";
+"Base OS image" = "Image OS de base";
+"Erase home…" = "Effacer le dossier personnel…";
+"Reset to base…" = "Réinitialiser à la base…";
+"Memory" = "Mémoire";
+"Network" = "Réseau";
+
+/* Editor — Appearance */
+"Font" = "Police";
+"Cursor" = "Curseur";
+"Colors" = "Couleurs";
+"Background" = "Arrière-plan";
+"Text" = "Texte";
+"Opacity" = "Opacité";
+"Reset to Terminal.app" = "Rétablir Terminal.app";
+
+/* Editor — Advanced */
+"MITM token swap" = "Échange de jetons MITM";
+"Manual token rules" = "Règles de jetons manuelles";
+"No manual tokens configured. Auto-handled APIs (Anthropic, OpenAI, GitHub, GitLab) need no entries here." = "Aucun jeton manuel configuré. Les API gérées automatiquement (Anthropic, OpenAI, GitHub, GitLab) ne nécessitent aucune entrée ici.";
+
+/* Buttons */
+"Cancel" = "Annuler";
+"Save" = "Enregistrer";
+"Create" = "Créer";
+"Done" = "Terminé";
+"Reset" = "Réinitialiser";
+"Delete" = "Supprimer";
+
+/* Menus */
+"Rebuild Base Image…" = "Reconstruire l'image de base…";
+"Edit" = "Édition";
+"Window" = "Fenêtre";
+"Minimize" = "Réduire";
+"Cut" = "Couper";
+"Paste" = "Coller";
+"Select All" = "Tout sélectionner";
+"Undo" = "Annuler";
+"Redo" = "Rétablir";
+
+/* App menu */
+"About %@" = "À propos de %@";
+"Hide %@" = "Masquer %@";
+"Hide Others" = "Masquer les autres";
+"Show All" = "Tout afficher";
+"Quit %@" = "Quitter %@";

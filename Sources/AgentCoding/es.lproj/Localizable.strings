@@ -1,0 +1,129 @@
+/* Bromure Agentic Coding — Spanish */
+
+"Bromure Agentic Coding" = "Bromure Agentic Coding";
+
+/* Picker */
+"Pick a profile to open" = "Elija un perfil para abrir";
+"Open Session" = "Abrir sesión";
+"Select a profile, or click + to create one." = "Seleccione un perfil, o haga clic en + para crear uno.";
+"Add a new profile" = "Añadir un perfil nuevo";
+"Delete selected profile" = "Eliminar el perfil seleccionado";
+"Edit profile settings" = "Editar la configuración del perfil";
+"Session is running" = "La sesión está activa";
+"Launch" = "Iniciar";
+"Edit…" = "Editar…";
+"SSH public key…" = "Clave pública SSH…";
+"Reset disk" = "Restablecer el disco";
+"Delete profile" = "Eliminar perfil";
+"SSH key" = "Clave SSH";
+
+/* Setup */
+"Welcome to Bromure Agentic Coding" = "Bienvenido a Bromure Agentic Coding";
+"First-time setup downloads Ubuntu Server and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Takes about 10 minutes; only happens once per base-image version." = "La instalación inicial descarga Ubuntu Server e instala Node.js, Claude Code, Codex, kitty y el entorno de escritorio dentro de una VM aislada. Tarda unos 10 minutos; solo ocurre una vez por versión de imagen base.";
+"Get Started" = "Comenzar";
+"Building base image" = "Creando la imagen base";
+"This is the one-time install. Don't close the window." = "Es la instalación única. No cierre la ventana.";
+"Console output" = "Salida de consola";
+"Copy" = "Copiar";
+"Close" = "Cerrar";
+"(waiting for installer output…)" = "(esperando la salida del instalador…)";
+
+/* Editor categories */
+"General" = "General";
+"Agent" = "Agente";
+"Folders" = "Carpetas";
+"Credentials" = "Credenciales";
+"Advanced" = "Avanzado";
+"Appearance" = "Apariencia";
+"Resources" = "Recursos";
+
+/* Editor — General */
+"New profile" = "Perfil nuevo";
+"Edit profile" = "Editar perfil";
+"Name" = "Nombre";
+"Color" = "Color";
+"Notes (optional)" = "Notas (opcional)";
+
+/* Editor — Agent */
+"Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Active cada agente que quiera tener disponible en este perfil. El marcado como **Principal** se inicia automáticamente en la primera pestaña de kitty; los demás agentes activados se instalan y autentican pero los ejecuta bajo demanda desde una pestaña nueva.";
+"Primary" = "Principal";
+"Make primary" = "Establecer como principal";
+"Auth" = "Autenticación";
+"API token" = "Token de API";
+"Subscription (interactive login)" = "Suscripción (inicio de sesión interactivo)";
+"Anthropic API key" = "Clave API de Anthropic";
+"OpenAI API key" = "Clave API de OpenAI";
+
+/* Editor — Folders */
+"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per profile." = "Cada carpeta se monta en la VM con su nombre real (p. ej. ~/Documents → ~ubuntu/Documents). Hasta 8 carpetas por perfil.";
+"No folders shared." = "Ninguna carpeta compartida.";
+"Add folder…" = "Añadir carpeta…";
+
+/* Editor — Credentials */
+"Git Identity" = "Identidad de Git";
+"Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults." = "Se escribe en ~/.gitconfig de la VM. Déjelo en blanco para mantener los valores por defecto de git.";
+"Generate an ed25519 keypair" = "Generar un par de claves ed25519";
+"The public key will be displayed below after the profile is saved." = "La clave pública se mostrará abajo después de guardar el perfil.";
+"ed25519 keypair on file." = "Par de claves ed25519 registrado.";
+"Regenerate" = "Regenerar";
+"Public key (paste into github.com/settings/keys):" = "Clave pública (pegar en github.com/settings/keys):";
+"Open GitHub keys page" = "Abrir la página de claves de GitHub";
+"Imported SSH keys" = "Claves SSH importadas";
+"Import…" = "Importar…";
+"Import" = "Importar";
+"No imported keys." = "Sin claves importadas.";
+"HTTPS tokens" = "Tokens HTTPS";
+"Add" = "Añadir";
+"Other host…" = "Otro host…";
+"No HTTPS tokens configured." = "Sin tokens HTTPS configurados.";
+
+/* Editor — Resources */
+"Storage" = "Almacenamiento";
+"Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "Tres capas componen el entorno de este perfil. La inferior es compartida e inmutable; las dos superiores son suyas y pueden borrarse de forma independiente.";
+"Your home folder" = "Su carpeta personal";
+"Profile system disk" = "Disco del sistema del perfil";
+"Base OS image" = "Imagen del SO base";
+"Erase home…" = "Borrar carpeta personal…";
+"Reset to base…" = "Restablecer a la base…";
+"Memory" = "Memoria";
+"Network" = "Red";
+
+/* Editor — Appearance */
+"Font" = "Fuente";
+"Cursor" = "Cursor";
+"Colors" = "Colores";
+"Background" = "Fondo";
+"Text" = "Texto";
+"Opacity" = "Opacidad";
+"Reset to Terminal.app" = "Restablecer a Terminal.app";
+
+/* Editor — Advanced */
+"MITM token swap" = "Intercambio de tokens MITM";
+"Manual token rules" = "Reglas de token manuales";
+"No manual tokens configured. Auto-handled APIs (Anthropic, OpenAI, GitHub, GitLab) need no entries here." = "Sin tokens manuales configurados. Las API gestionadas automáticamente (Anthropic, OpenAI, GitHub, GitLab) no necesitan entradas aquí.";
+
+/* Buttons */
+"Cancel" = "Cancelar";
+"Save" = "Guardar";
+"Create" = "Crear";
+"Done" = "Listo";
+"Reset" = "Restablecer";
+"Delete" = "Eliminar";
+
+/* Menus */
+"Rebuild Base Image…" = "Reconstruir la imagen base…";
+"Edit" = "Edición";
+"Window" = "Ventana";
+"Minimize" = "Minimizar";
+"Cut" = "Cortar";
+"Paste" = "Pegar";
+"Select All" = "Seleccionar todo";
+"Undo" = "Deshacer";
+"Redo" = "Rehacer";
+
+/* App menu */
+"About %@" = "Acerca de %@";
+"Hide %@" = "Ocultar %@";
+"Hide Others" = "Ocultar otras";
+"Show All" = "Mostrar todo";
+"Quit %@" = "Salir de %@";

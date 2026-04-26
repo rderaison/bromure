@@ -1,0 +1,129 @@
+/* Bromure Agentic Coding — German */
+
+"Bromure Agentic Coding" = "Bromure Agentic Coding";
+
+/* Picker */
+"Pick a profile to open" = "Profil zum Öffnen auswählen";
+"Open Session" = "Sitzung öffnen";
+"Select a profile, or click + to create one." = "Profil auswählen oder auf + klicken, um eines zu erstellen.";
+"Add a new profile" = "Neues Profil hinzufügen";
+"Delete selected profile" = "Ausgewähltes Profil löschen";
+"Edit profile settings" = "Profileinstellungen bearbeiten";
+"Session is running" = "Sitzung läuft";
+"Launch" = "Starten";
+"Edit…" = "Bearbeiten…";
+"SSH public key…" = "Öffentlicher SSH-Schlüssel…";
+"Reset disk" = "Datenträger zurücksetzen";
+"Delete profile" = "Profil löschen";
+"SSH key" = "SSH-Schlüssel";
+
+/* Setup */
+"Welcome to Bromure Agentic Coding" = "Willkommen bei Bromure Agentic Coding";
+"First-time setup downloads Ubuntu Server and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Takes about 10 minutes; only happens once per base-image version." = "Bei der Ersteinrichtung werden Ubuntu Server geladen und Node.js, Claude Code, Codex, kitty und die Desktop-Oberfläche in einer isolierten VM installiert. Das dauert etwa 10 Minuten und passiert nur einmal pro Basis-Image-Version.";
+"Get Started" = "Loslegen";
+"Building base image" = "Basis-Image wird erstellt";
+"This is the one-time install. Don't close the window." = "Dies ist die einmalige Installation. Bitte schließen Sie das Fenster nicht.";
+"Console output" = "Konsolenausgabe";
+"Copy" = "Kopieren";
+"Close" = "Schließen";
+"(waiting for installer output…)" = "(warte auf Ausgabe des Installers…)";
+
+/* Editor categories */
+"General" = "Allgemein";
+"Agent" = "Agent";
+"Folders" = "Ordner";
+"Credentials" = "Anmeldedaten";
+"Advanced" = "Erweitert";
+"Appearance" = "Darstellung";
+"Resources" = "Ressourcen";
+
+/* Editor — General */
+"New profile" = "Neues Profil";
+"Edit profile" = "Profil bearbeiten";
+"Name" = "Name";
+"Color" = "Farbe";
+"Notes (optional)" = "Notizen (optional)";
+
+/* Editor — Agent */
+"Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Aktivieren Sie jeden Agenten, den Sie in diesem Profil benötigen. Der als **Primär** markierte startet automatisch im ersten kitty-Tab; andere aktivierte Agenten werden installiert und authentifiziert, aber Sie starten sie bei Bedarf in einem neuen Tab.";
+"Primary" = "Primär";
+"Make primary" = "Als primär festlegen";
+"Auth" = "Authentifizierung";
+"API token" = "API-Token";
+"Subscription (interactive login)" = "Abonnement (interaktive Anmeldung)";
+"Anthropic API key" = "Anthropic-API-Schlüssel";
+"OpenAI API key" = "OpenAI-API-Schlüssel";
+
+/* Editor — Folders */
+"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per profile." = "Jeder Ordner wird unter seinem tatsächlichen Namen in der VM eingebunden (z. B. ~/Documents → ~ubuntu/Documents). Maximal 8 Ordner pro Profil.";
+"No folders shared." = "Keine freigegebenen Ordner.";
+"Add folder…" = "Ordner hinzufügen…";
+
+/* Editor — Credentials */
+"Git Identity" = "Git-Identität";
+"Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults." = "Wird in ~/.gitconfig der VM geschrieben. Beide Felder leer lassen, um die git-Standardwerte zu behalten.";
+"Generate an ed25519 keypair" = "ed25519-Schlüsselpaar erzeugen";
+"The public key will be displayed below after the profile is saved." = "Der öffentliche Schlüssel wird unten angezeigt, nachdem das Profil gespeichert wurde.";
+"ed25519 keypair on file." = "ed25519-Schlüsselpaar vorhanden.";
+"Regenerate" = "Neu erzeugen";
+"Public key (paste into github.com/settings/keys):" = "Öffentlicher Schlüssel (in github.com/settings/keys einfügen):";
+"Open GitHub keys page" = "GitHub-Schlüsselseite öffnen";
+"Imported SSH keys" = "Importierte SSH-Schlüssel";
+"Import…" = "Importieren…";
+"Import" = "Importieren";
+"No imported keys." = "Keine importierten Schlüssel.";
+"HTTPS tokens" = "HTTPS-Token";
+"Add" = "Hinzufügen";
+"Other host…" = "Anderer Host…";
+"No HTTPS tokens configured." = "Keine HTTPS-Token konfiguriert.";
+
+/* Editor — Resources */
+"Storage" = "Speicher";
+"Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "Drei Ebenen bilden die Umgebung dieses Profils. Die untere wird gemeinsam genutzt und ist unveränderlich; die beiden oberen gehören Ihnen und können unabhängig gelöscht werden.";
+"Your home folder" = "Ihr Persönlicher Ordner";
+"Profile system disk" = "Systemdatenträger des Profils";
+"Base OS image" = "Basis-OS-Image";
+"Erase home…" = "Persönlichen Ordner löschen…";
+"Reset to base…" = "Auf Basis zurücksetzen…";
+"Memory" = "Arbeitsspeicher";
+"Network" = "Netzwerk";
+
+/* Editor — Appearance */
+"Font" = "Schrift";
+"Cursor" = "Cursor";
+"Colors" = "Farben";
+"Background" = "Hintergrund";
+"Text" = "Text";
+"Opacity" = "Deckkraft";
+"Reset to Terminal.app" = "Auf Terminal.app zurücksetzen";
+
+/* Editor — Advanced */
+"MITM token swap" = "MITM-Token-Austausch";
+"Manual token rules" = "Manuelle Token-Regeln";
+"No manual tokens configured. Auto-handled APIs (Anthropic, OpenAI, GitHub, GitLab) need no entries here." = "Keine manuellen Token konfiguriert. Automatisch verwaltete APIs (Anthropic, OpenAI, GitHub, GitLab) benötigen hier keine Einträge.";
+
+/* Buttons */
+"Cancel" = "Abbrechen";
+"Save" = "Sichern";
+"Create" = "Erstellen";
+"Done" = "Fertig";
+"Reset" = "Zurücksetzen";
+"Delete" = "Löschen";
+
+/* Menus */
+"Rebuild Base Image…" = "Basis-Image neu erstellen…";
+"Edit" = "Bearbeiten";
+"Window" = "Fenster";
+"Minimize" = "Im Dock ablegen";
+"Cut" = "Ausschneiden";
+"Paste" = "Einsetzen";
+"Select All" = "Alles auswählen";
+"Undo" = "Widerrufen";
+"Redo" = "Wiederherstellen";
+
+/* App menu */
+"About %@" = "Über %@";
+"Hide %@" = "%@ ausblenden";
+"Hide Others" = "Andere ausblenden";
+"Show All" = "Alle einblenden";
+"Quit %@" = "%@ beenden";

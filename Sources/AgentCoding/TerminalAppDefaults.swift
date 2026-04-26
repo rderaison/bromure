@@ -1,0 +1,210 @@
+import AppKit
+import Foundation
+
+/// Snapshot of the user's Terminal.app default-profile settings —
+/// background/foreground colors, font family, font size. Used to seed
+/// kitty's appearance so moving from Terminal.app into Bromure AC's
+/// kitty feels visually continuous.
+public struct TerminalAppDefaults: Sendable {
+    public let fontFamily: String
+    public let fontSize: Int
+    public let backgroundHex: String   // "#RRGGBB"
+    public let foregroundHex: String
+
+    /// Sensible fallback if Terminal.app isn't installed, has never been
+    /// opened, or its prefs are unreadable.
+    public static let fallback = TerminalAppDefaults(
+        fontFamily: "JetBrains Mono",
+        fontSize: 14,
+        backgroundHex: "#0d1117",
+        foregroundHex: "#c9d1d9"
+    )
+
+    /// Read ~/Library/Preferences/com.apple.Terminal.plist via UserDefaults.
+    /// Falls back silently if anything's missing — never throws.
+    public static func load() -> TerminalAppDefaults {
+        guard let prefs = UserDefaults(suiteName: "com.apple.Terminal"),
+              let windowSettings = prefs.dictionary(forKey: "Window Settings"),
+              let defaultName = (prefs.string(forKey: "Default Window Settings")
+                                 ?? prefs.string(forKey: "Startup Window Settings")),
+              let profile = windowSettings[defaultName] as? [String: Any]
+        else {
+            return .fallback
+        }
+
+        // Font: stored as NSKeyedArchiver(NSFont).
+        var family = fallback.fontFamily
+        var size = fallback.fontSize
+        if let fontData = profile["Font"] as? Data,
+           let font = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSFont.self, from: fontData) {
+            family = font.familyName ?? font.fontName
+            // Round to nearest int — kitty's font_size accepts floats but
+            // most users picked round values in Terminal.
+            size = max(8, Int(font.pointSize.rounded()))
+        }
+
+        let bg = hex(from: profile["BackgroundColor"] as? Data) ?? fallback.backgroundHex
+        let fg = hex(from: profile["TextColor"] as? Data) ?? fallback.foregroundHex
+
+        return TerminalAppDefaults(
+            fontFamily: family,
+            fontSize: size,
+            backgroundHex: bg,
+            foregroundHex: fg
+        )
+    }
+
+    private static func hex(from data: Data?) -> String? {
+        guard let data,
+              let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) else {
+            return nil
+        }
+        let rgb = color.usingColorSpace(.sRGB) ?? color
+        let r = Int((rgb.redComponent * 255).rounded())
+        let g = Int((rgb.greenComponent * 255).rounded())
+        let b = Int((rgb.blueComponent * 255).rounded())
+        return String(format: "#%02X%02X%02X", r, g, b)
+    }
+}
+
+import SwiftUI
+
+extension Color {
+    /// Parse "#RRGGBB" / "RRGGBB" into a SwiftUI Color. Falls back to
+    /// black on malformed input.
+    init(hex: String) {
+        let cleaned = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        var rgb: UInt64 = 0
+        Scanner(string: cleaned).scanHexInt64(&rgb)
+        self = Color(
+            red:   Double((rgb >> 16) & 0xFF) / 255.0,
+            green: Double((rgb >> 8)  & 0xFF) / 255.0,
+            blue:  Double(rgb         & 0xFF) / 255.0
+        )
+    }
+
+    /// Encode this Color as "#RRGGBB" via sRGB.
+    var hexString: String {
+        let ns = NSColor(self).usingColorSpace(.sRGB) ?? NSColor.black
+        let r = Int((ns.redComponent   * 255).rounded())
+        let g = Int((ns.greenComponent * 255).rounded())
+        let b = Int((ns.blueComponent  * 255).rounded())
+        return String(format: "#%02X%02X%02X", r, g, b)
+    }
+}
+
+extension TerminalAppDefaults {
+    /// Render a complete kitty.conf for `profile` using its overrides
+    /// (with `terminalDefaults` filling per-field gaps) plus the cursor
+    /// shape, opacity, standard bindings, and URL-open hook. Result is
+    /// dropped at ~/.config/kitty/kitty.conf in the guest's home.
+    public static func kittyConfig(for profile: Profile,
+                                   terminalDefaults: TerminalAppDefaults) -> String {
+        let style = profile.resolveStyle(against: terminalDefaults)
+        // Empirical conversion: Terminal.app's 12pt visually matches
+        // kitty's 18pt under our default X DPI (96) on Retina. So the
+        // user enters whatever they're used to in Terminal.app and we
+        // scale by 1.5× before kitty sees it. Live ⌘+ / ⌘- still works
+        // for fine-tuning.
+        let size = max(8, Int((Double(style.fontSize) * 1.5).rounded()))
+        let opacity = String(format: "%.2f", min(1.0, max(0.3, profile.windowOpacity)))
+        _ = opacity  // intentionally unused: handled by NSWindow.alphaValue
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        return """
+        # Generated by Bromure Agentic Coding from this profile's appearance.
+        # Profile: \(profile.name)  •  written: \(stamp)
+        # font_family=\(style.fontFamily)  font_size=\(size)  cursor=\(profile.cursorShape.rawValue)
+        # If kitty isn't using these values, run `kitty --debug-config`
+        # inside the VM to see which kitty.conf it actually loaded.
+        # Edit ~/.bashrc.local for shell customizations; this file is
+        # rewritten on every launch.
+
+        font_family \(style.fontFamily)
+        font_size \(size)
+        background \(style.backgroundHex)
+        foreground \(style.foregroundHex)
+        cursor_shape \(profile.cursorShape.rawValue)
+        cursor_blink_interval 0
+        # Disable shell integration's cursor management — by default it
+        # injects bash hooks that toggle the cursor (beam during input,
+        # block while a command runs), overriding cursor_shape from this
+        # config. `no-cursor` keeps everything else (sane prompt, exit
+        # status reporting) but leaves the cursor under our control.
+        shell_integration no-cursor
+        hide_window_decorations yes
+        window_padding_width 16
+        enable_audio_bell no
+        remember_window_size no
+        sync_to_monitor no
+        # Transparency is handled host-side via NSWindow.alphaValue;
+        # `background_opacity` here would error inside the VM (no X
+        # compositor) and might cause kitty to ignore the whole config.
+
+        # Hide kitty's own tab bar — Bromure AC uses macOS native window
+        # tabs instead. Kitty stays single-tab forever.
+        tab_bar_style hidden
+
+        # Discard kitty's tab shortcuts entirely. `no_op` only kills the
+        # kitty action, but kitty's extended keyboard protocol still
+        # forwards the keystroke to the running shell (it shows up as
+        # CSI sequences like `6;9u`). `discard_event` is the action that
+        # truly consumes the keystroke at every level.
+        map super+t              discard_event
+        map super+w              discard_event
+        map super+n              discard_event
+        map super+h              discard_event
+        map super+m              discard_event
+        map super+q              discard_event
+        map super+tab            discard_event
+        map super+shift+tab      discard_event
+        map super+space          discard_event
+        map super+backtick       discard_event
+        map super+shift+left     discard_event
+        map super+shift+right    discard_event
+        map super+1              discard_event
+        map super+2              discard_event
+        map super+3              discard_event
+        map super+4              discard_event
+        map super+5              discard_event
+        map super+6              discard_event
+        map super+7              discard_event
+        map super+8              discard_event
+        map super+9              discard_event
+
+        # macOS muscle memory: copy/paste/select-all + font size.
+        map super+c    copy_to_clipboard
+        map super+v    paste_from_clipboard
+        map super+a    select_all
+        map super+plus change_font_size all +2.0
+        map super+minus change_font_size all -2.0
+        map super+0    change_font_size all 0
+
+        # Send URL clicks to the macOS host's default browser.
+        open_url_with /usr/local/bin/bromure-open
+        """
+    }
+}
+
+extension Profile {
+    /// Source the Terminal.app defaults into a brand-new profile's custom
+    /// fields so the editor opens with sensible, editable starting values.
+    ///
+    /// Default font intentionally falls back to **JetBrains Mono** rather
+    /// than Terminal.app's font — we install JetBrains Mono via apt at
+    /// base-image build time, so it's *guaranteed* to render. macOS
+    /// fonts copied into /usr/share/fonts/macos may or may not match
+    /// kitty's fontconfig query (e.g. "SF Mono" → fontconfig may not
+    /// register it under that exact name). Users can override via the
+    /// Appearance picker.
+    public mutating func seedAppearance(from terminalDefaults: TerminalAppDefaults) {
+        // Hard-coded defaults the team standardized on (matches the
+        // 'codex' canonical profile): JetBrains Mono 12 / dark slate
+        // background. Foreground falls through to whatever the user's
+        // Terminal.app currently uses since most users theme their
+        // text colour and we want to respect that.
+        if customFontFamily == nil { customFontFamily = "JetBrains Mono" }
+        if customFontSize == nil { customFontSize = 12 }
+        if customBackgroundHex == nil { customBackgroundHex = "#212734" }
+        if customForegroundHex == nil { customForegroundHex = terminalDefaults.foregroundHex }
+    }
+}

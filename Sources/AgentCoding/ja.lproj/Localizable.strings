@@ -1,0 +1,129 @@
+/* Bromure Agentic Coding — Japanese */
+
+"Bromure Agentic Coding" = "Bromure Agentic Coding";
+
+/* Picker */
+"Pick a profile to open" = "開くプロファイルを選択";
+"Open Session" = "セッションを開く";
+"Select a profile, or click + to create one." = "プロファイルを選択するか、+ をクリックして新規作成します。";
+"Add a new profile" = "新しいプロファイルを追加";
+"Delete selected profile" = "選択したプロファイルを削除";
+"Edit profile settings" = "プロファイル設定を編集";
+"Session is running" = "セッションは実行中です";
+"Launch" = "起動";
+"Edit…" = "編集…";
+"SSH public key…" = "SSH 公開鍵…";
+"Reset disk" = "ディスクをリセット";
+"Delete profile" = "プロファイルを削除";
+"SSH key" = "SSH 鍵";
+
+/* Setup */
+"Welcome to Bromure Agentic Coding" = "Bromure Agentic Coding へようこそ";
+"First-time setup downloads Ubuntu Server and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Takes about 10 minutes; only happens once per base-image version." = "初回セットアップでは Ubuntu Server をダウンロードし、隔離された VM 内に Node.js、Claude Code、Codex、kitty およびデスクトップ環境をインストールします。約 10 分かかり、ベースイメージのバージョンごとに 1 回のみ実行されます。";
+"Get Started" = "はじめる";
+"Building base image" = "ベースイメージを作成中";
+"This is the one-time install. Don't close the window." = "1 回限りのインストールです。ウインドウを閉じないでください。";
+"Console output" = "コンソール出力";
+"Copy" = "コピー";
+"Close" = "閉じる";
+"(waiting for installer output…)" = "(インストーラーの出力を待機中…)";
+
+/* Editor categories */
+"General" = "一般";
+"Agent" = "エージェント";
+"Folders" = "フォルダ";
+"Credentials" = "資格情報";
+"Advanced" = "詳細";
+"Appearance" = "外観";
+"Resources" = "リソース";
+
+/* Editor — General */
+"New profile" = "新規プロファイル";
+"Edit profile" = "プロファイルを編集";
+"Name" = "名前";
+"Color" = "カラー";
+"Notes (optional)" = "メモ (任意)";
+
+/* Editor — Agent */
+"Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "このプロファイルで使用したい各エージェントを有効にします。**プライマリ** に指定されたものは最初の kitty タブで自動起動し、他の有効化されたエージェントはインストールおよび認証されますが、新しいタブから必要に応じて実行します。";
+"Primary" = "プライマリ";
+"Make primary" = "プライマリに設定";
+"Auth" = "認証";
+"API token" = "API トークン";
+"Subscription (interactive login)" = "サブスクリプション (対話式ログイン)";
+"Anthropic API key" = "Anthropic API キー";
+"OpenAI API key" = "OpenAI API キー";
+
+/* Editor — Folders */
+"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per profile." = "各フォルダは実際の名前のまま VM にマウントされます (例: ~/Documents → ~ubuntu/Documents)。プロファイルあたり最大 8 フォルダまで。";
+"No folders shared." = "共有フォルダはありません。";
+"Add folder…" = "フォルダを追加…";
+
+/* Editor — Credentials */
+"Git Identity" = "Git のアイデンティティ";
+"Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults." = "VM の ~/.gitconfig に書き込まれます。両方空のままにすると git のデフォルトを保持します。";
+"Generate an ed25519 keypair" = "ed25519 鍵ペアを生成";
+"The public key will be displayed below after the profile is saved." = "プロファイルを保存すると、公開鍵が下に表示されます。";
+"ed25519 keypair on file." = "ed25519 鍵ペアが登録されています。";
+"Regenerate" = "再生成";
+"Public key (paste into github.com/settings/keys):" = "公開鍵 (github.com/settings/keys に貼り付け):";
+"Open GitHub keys page" = "GitHub の鍵ページを開く";
+"Imported SSH keys" = "インポート済み SSH 鍵";
+"Import…" = "インポート…";
+"Import" = "インポート";
+"No imported keys." = "インポートされた鍵はありません。";
+"HTTPS tokens" = "HTTPS トークン";
+"Add" = "追加";
+"Other host…" = "その他のホスト…";
+"No HTTPS tokens configured." = "HTTPS トークンは設定されていません。";
+
+/* Editor — Resources */
+"Storage" = "ストレージ";
+"Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "3 つのレイヤーがこのプロファイルの環境を構成します。下層は共有され変更不可で、上の 2 層はあなたのものであり、独立して消去できます。";
+"Your home folder" = "ホームフォルダ";
+"Profile system disk" = "プロファイルのシステムディスク";
+"Base OS image" = "ベース OS イメージ";
+"Erase home…" = "ホームを消去…";
+"Reset to base…" = "ベースにリセット…";
+"Memory" = "メモリ";
+"Network" = "ネットワーク";
+
+/* Editor — Appearance */
+"Font" = "フォント";
+"Cursor" = "カーソル";
+"Colors" = "カラー";
+"Background" = "背景";
+"Text" = "テキスト";
+"Opacity" = "不透明度";
+"Reset to Terminal.app" = "Terminal.app にリセット";
+
+/* Editor — Advanced */
+"MITM token swap" = "MITM トークン入れ替え";
+"Manual token rules" = "手動トークンルール";
+"No manual tokens configured. Auto-handled APIs (Anthropic, OpenAI, GitHub, GitLab) need no entries here." = "手動トークンは設定されていません。自動処理される API (Anthropic、OpenAI、GitHub、GitLab) はここに入力する必要はありません。";
+
+/* Buttons */
+"Cancel" = "キャンセル";
+"Save" = "保存";
+"Create" = "作成";
+"Done" = "完了";
+"Reset" = "リセット";
+"Delete" = "削除";
+
+/* Menus */
+"Rebuild Base Image…" = "ベースイメージを再構築…";
+"Edit" = "編集";
+"Window" = "ウインドウ";
+"Minimize" = "しまう";
+"Cut" = "カット";
+"Paste" = "ペースト";
+"Select All" = "すべてを選択";
+"Undo" = "取り消す";
+"Redo" = "やり直す";
+
+/* App menu */
+"About %@" = "%@ について";
+"Hide %@" = "%@ を隠す";
+"Hide Others" = "ほかを隠す";
+"Show All" = "すべてを表示";
+"Quit %@" = "%@ を終了";

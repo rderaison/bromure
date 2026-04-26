@@ -1,0 +1,130 @@
+/* Bromure Agentic Coding — English (base) */
+
+/* App */
+"Bromure Agentic Coding" = "Bromure Agentic Coding";
+
+/* Picker */
+"Pick a profile to open" = "Pick a profile to open";
+"Open Session" = "Open Session";
+"Select a profile, or click + to create one." = "Select a profile, or click + to create one.";
+"Add a new profile" = "Add a new profile";
+"Delete selected profile" = "Delete selected profile";
+"Edit profile settings" = "Edit profile settings";
+"Session is running" = "Session is running";
+"Launch" = "Launch";
+"Edit…" = "Edit…";
+"SSH public key…" = "SSH public key…";
+"Reset disk" = "Reset disk";
+"Delete profile" = "Delete profile";
+"SSH key" = "SSH key";
+
+/* Setup */
+"Welcome to Bromure Agentic Coding" = "Welcome to Bromure Agentic Coding";
+"First-time setup downloads Ubuntu Server and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Takes about 10 minutes; only happens once per base-image version." = "First-time setup downloads Ubuntu Server and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Takes about 10 minutes; only happens once per base-image version.";
+"Get Started" = "Get Started";
+"Building base image" = "Building base image";
+"This is the one-time install. Don't close the window." = "This is the one-time install. Don't close the window.";
+"Console output" = "Console output";
+"Copy" = "Copy";
+"Close" = "Close";
+"(waiting for installer output…)" = "(waiting for installer output…)";
+
+/* Editor categories */
+"General" = "General";
+"Agent" = "Agent";
+"Folders" = "Folders";
+"Credentials" = "Credentials";
+"Advanced" = "Advanced";
+"Appearance" = "Appearance";
+"Resources" = "Resources";
+
+/* Editor — General */
+"New profile" = "New profile";
+"Edit profile" = "Edit profile";
+"Name" = "Name";
+"Color" = "Color";
+"Notes (optional)" = "Notes (optional)";
+
+/* Editor — Agent */
+"Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab.";
+"Primary" = "Primary";
+"Make primary" = "Make primary";
+"Auth" = "Auth";
+"API token" = "API token";
+"Subscription (interactive login)" = "Subscription (interactive login)";
+"Anthropic API key" = "Anthropic API key";
+"OpenAI API key" = "OpenAI API key";
+
+/* Editor — Folders */
+"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per profile." = "Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per profile.";
+"No folders shared." = "No folders shared.";
+"Add folder…" = "Add folder…";
+
+/* Editor — Credentials */
+"Git Identity" = "Git Identity";
+"Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults." = "Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults.";
+"Generate an ed25519 keypair" = "Generate an ed25519 keypair";
+"The public key will be displayed below after the profile is saved." = "The public key will be displayed below after the profile is saved.";
+"ed25519 keypair on file." = "ed25519 keypair on file.";
+"Regenerate" = "Regenerate";
+"Public key (paste into github.com/settings/keys):" = "Public key (paste into github.com/settings/keys):";
+"Open GitHub keys page" = "Open GitHub keys page";
+"Imported SSH keys" = "Imported SSH keys";
+"Import…" = "Import…";
+"Import" = "Import";
+"No imported keys." = "No imported keys.";
+"HTTPS tokens" = "HTTPS tokens";
+"Add" = "Add";
+"Other host…" = "Other host…";
+"No HTTPS tokens configured." = "No HTTPS tokens configured.";
+
+/* Editor — Resources */
+"Storage" = "Storage";
+"Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently.";
+"Your home folder" = "Your home folder";
+"Profile system disk" = "Profile system disk";
+"Base OS image" = "Base OS image";
+"Erase home…" = "Erase home…";
+"Reset to base…" = "Reset to base…";
+"Memory" = "Memory";
+"Network" = "Network";
+
+/* Editor — Appearance */
+"Font" = "Font";
+"Cursor" = "Cursor";
+"Colors" = "Colors";
+"Background" = "Background";
+"Text" = "Text";
+"Opacity" = "Opacity";
+"Reset to Terminal.app" = "Reset to Terminal.app";
+
+/* Editor — Advanced */
+"MITM token swap" = "MITM token swap";
+"Manual token rules" = "Manual token rules";
+"No manual tokens configured. Auto-handled APIs (Anthropic, OpenAI, GitHub, GitLab) need no entries here." = "No manual tokens configured. Auto-handled APIs (Anthropic, OpenAI, GitHub, GitLab) need no entries here.";
+
+/* Buttons */
+"Cancel" = "Cancel";
+"Save" = "Save";
+"Create" = "Create";
+"Done" = "Done";
+"Reset" = "Reset";
+"Delete" = "Delete";
+
+/* Menus */
+"Rebuild Base Image…" = "Rebuild Base Image…";
+"Edit" = "Edit";
+"Window" = "Window";
+"Minimize" = "Minimize";
+"Cut" = "Cut";
+"Paste" = "Paste";
+"Select All" = "Select All";
+"Undo" = "Undo";
+"Redo" = "Redo";
+
+/* App menu */
+"About %@" = "About %@";
+"Hide %@" = "Hide %@";
+"Hide Others" = "Hide Others";
+"Show All" = "Show All";
+"Quit %@" = "Quit %@";

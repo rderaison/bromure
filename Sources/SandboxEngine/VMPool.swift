@@ -10,6 +10,11 @@ private let bromureDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG"] 
 
 @MainActor
 public final class VMPool {
+    /// Optional probe installed by the host app to query the host webcam's
+    /// native resolution before launch. Returns (width, height) in pixels.
+    /// When nil, ``applyConfig`` falls back to a 1280×720 default.
+    public static var webcamResolutionProbe: ((_ cameraID: String?, _ quality: WebcamQuality) -> (width: Int, height: Int))?
+
     /// A pre-warmed VM ready to be shown to the user.
     public struct WarmVM {
         public let vm: VZVirtualMachine
@@ -442,7 +447,8 @@ public final class VMPool {
         if config.enableWebcam {
             cfg["webcam"] = true
             let probeT0 = CFAbsoluteTimeGetCurrent()
-            let res = WebcamBridge.queryCameraResolution(cameraID: config.webcamDeviceID, quality: config.webcamQuality)
+            let res = Self.webcamResolutionProbe?(config.webcamDeviceID, config.webcamQuality)
+                ?? (width: 1280, height: 720)
             print("[VMPool] webcam probe: \(res.width)x\(res.height) in \(Int((CFAbsoluteTimeGetCurrent() - probeT0) * 1000))ms")
             cfg["webcamWidth"] = res.width
             cfg["webcamHeight"] = res.height
