@@ -1,4 +1,5 @@
 import AppKit
+import SandboxEngine
 import SwiftUI
 @preconcurrency import Virtualization
 
@@ -55,6 +56,12 @@ final class TabbedSessionWindow: NSWindow {
     /// after the VM finishes starting; nil while booting.
     var sandbox: UbuntuSandboxVM?
 
+    /// Keyboard-layout bridge that ferries macOS layout changes into
+    /// the guest's setxkbmap. Owned by the window so its observer
+    /// lifetime matches the VM session. nil when no socket device is
+    /// available yet.
+    var keyboardBridge: KeyboardBridge?
+
     init(profile: Profile, acDelegate: ACAppDelegate) {
         self.profile = profile
         self.acDelegate = acDelegate
@@ -81,6 +88,16 @@ final class TabbedSessionWindow: NSWindow {
         toolbarStyle = .unified
         model.accentHex = profile.color.hexInUI
         contentView = view
+
+        // Disable AppKit's default window animations. AppKit's
+        // _NSWindowTransformAnimation has been observed to over-release
+        // its block ivar inside the autorelease pool drain when the
+        // contentView is a layer-hosted VZVirtualMachineView (crash:
+        // `objc_release` from `-[NSConcretePointerArray dealloc]` on
+        // the main thread during `CA::Context::commit_transaction`).
+        // Disabling the implicit animation skips that animator path
+        // entirely. The browser sets the same flag for the same reason.
+        animationBehavior = .none
 
         // Window opacity via NSWindow.alphaValue. Earlier we tried
         // per-layer opacity on the VZ framebuffer view to keep the
@@ -128,9 +145,6 @@ final class TabbedSessionWindow: NSWindow {
         self.toolbar = bar
     }
 
-    /// Add a tab placeholder to the model. Caller follows up by sending a
-    /// spawn-kitty command to the in-VM agent for this tab's UUID.
-    @discardableResult
     /// Called by ACAppDelegate when the in-VM agent reports the
     /// foreground process for a kitty tab. Updates the matching
     /// pill's label live (Terminal.app behaviour).
@@ -139,6 +153,9 @@ final class TabbedSessionWindow: NSWindow {
         model.tabs[i].label = title
     }
 
+    /// Add a tab placeholder to the model. Caller follows up by sending a
+    /// spawn-kitty command to the in-VM agent for this tab's UUID.
+    @discardableResult
     func appendTab() -> TabsModel.Tab {
         let tab = TabsModel.Tab(label: "Session \(model.tabs.count + 1)")
         model.tabs.append(tab)

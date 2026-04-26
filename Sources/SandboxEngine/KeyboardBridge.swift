@@ -1,12 +1,18 @@
 import Foundation
-import SandboxEngine
-import Virtualization
+@preconcurrency import Virtualization
 
 /// Sends keyboard layout changes from the macOS host to a running VM.
 ///
-/// When the host keyboard layout changes, connects to vsock port 5006 in the
-/// guest and sends the new X11 layout name. The guest's keyboard-agent.py
-/// applies it with `setxkbmap`.
+/// On construction (and whenever the host layout changes) connects to
+/// vsock port 5006 in the guest and writes the X11 layout name. The
+/// guest's keyboard-agent.py applies it with `setxkbmap`.
+///
+/// Two modes:
+///  - **Auto** (`forcedLayout == nil`) — detect macOS's current layout
+///    and observe `TISNotifySelectedKeyboardInputSourceChanged` for
+///    live updates.
+///  - **Forced** (`forcedLayout != nil`) — push the supplied layout
+///    once and skip the observer entirely.
 public final class KeyboardBridge {
     private static let vsockPort: UInt32 = 5006
 
@@ -15,8 +21,14 @@ public final class KeyboardBridge {
     private var debounceTimer: Timer?
     private var lastSentLayout: String?
 
-    public init(socketDevice: VZVirtioSocketDevice) {
+    public init(socketDevice: VZVirtioSocketDevice, forcedLayout: String? = nil) {
         self.socketDevice = socketDevice
+
+        if let forced = forcedLayout, !forced.isEmpty {
+            lastSentLayout = forced
+            sendLayout(forced)
+            return
+        }
 
         // Send the current layout immediately so the VM matches on first use
         let initial = VMConfig.detectKeyboardLayout()

@@ -268,18 +268,61 @@ update-grub
 # X server + minimal terminal session
 # ---------------------------------------------------------------------------
 
+step "pre-seed keyboard-configuration to a minimal US default" \
+    sh -c '
+        echo "keyboard-configuration keyboard-configuration/layoutcode select us"     | debconf-set-selections
+        echo "keyboard-configuration keyboard-configuration/modelcode select pc105"   | debconf-set-selections
+        echo "keyboard-configuration keyboard-configuration/variantcode select"       | debconf-set-selections
+        echo "keyboard-configuration keyboard-configuration/optionscode select"       | debconf-set-selections
+        echo "keyboard-configuration keyboard-configuration/xkb-keymap select us"     | debconf-set-selections
+        echo "console-setup console-setup/codeset47 select Guess optimal character set" | debconf-set-selections
+    '
+
+# Install the X stack + the keyboard-configuration debconf chain that
+# gives Xorg a coherent /etc/default/keyboard. Without it, Xorg falls
+# back to compiling a default keymap that can fail when xkb-data ships
+# newer keysyms (XF86Sos, XF86CameraAccessEnable, …) than libxkbfile
+# knows about. With it, everything resolves to the pre-seeded `us`
+# layout and we still get setxkbmap so the host-side KeyboardBridge can
+# switch layouts at runtime.
 step "apt-get install X + WM + fonts" \
-    retry apt-get install -y -q --no-install-recommends \
+    retry env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
         xserver-xorg-core xserver-xorg-legacy \
         xserver-xorg-input-libinput \
         xserver-xorg-video-modesetting \
         xinit xauth \
-        x11-xserver-utils \
+        x11-xserver-utils x11-xkb-utils \
+        keyboard-configuration console-setup \
+        xkb-data \
         openbox xdotool \
         spice-vdagent \
         libgl1-mesa-dri \
         fonts-jetbrains-mono fonts-noto-color-emoji \
         libfontconfig1 libxcb1 libxkbcommon0
+
+# Force the keyboard config Xorg picks up at start-up — empty fields
+# below let setxkbmap override at runtime without conflicting with
+# whatever keyboard-configuration's postinst wrote.
+cat > /etc/default/keyboard <<'EOK'
+XKBMODEL="pc105"
+XKBLAYOUT="us"
+XKBVARIANT=""
+XKBOPTIONS=""
+BACKSPACE="guess"
+EOK
+
+# Drop a matching Xorg input config so the server doesn't probe for
+# layouts itself (which is what triggered the XF86Sos cascade) — it
+# just trusts what we wrote in /etc/default/keyboard.
+install -d /etc/X11/xorg.conf.d
+cat > /etc/X11/xorg.conf.d/00-keyboard.conf <<'EOX'
+Section "InputClass"
+    Identifier "system-keyboard"
+    MatchIsKeyboard "on"
+    Option "XkbLayout" "us"
+    Option "XkbModel" "pc105"
+EndSection
+EOX
 
 # ---------------------------------------------------------------------------
 # Node.js (NodeSource current LTS)
@@ -360,6 +403,9 @@ step "install codex (GitHub release binary, not npm)" \
 # xterm stays as a tiny fallback if kitty fails for any reason.
 step "apt-get install kitty (+ xterm fallback)" \
     retry apt-get install -y -q --no-install-recommends kitty xterm
+
+step "apt-get install terminal multiplexers (screen + tmux)" \
+    retry apt-get install -y -q --no-install-recommends screen tmux
 
 # ---------------------------------------------------------------------------
 # GitHub CLI (gh) — official apt repo. Picks up ~/.config/gh/hosts.yml the

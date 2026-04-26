@@ -379,6 +379,21 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Cursor shape passed to kitty. Default beam matches Terminal.app.
     public var cursorShape: CursorShape
 
+    /// XKB keyboard layout to force inside the VM. nil = auto-match
+    /// macOS's currently-selected layout (default), with live updates
+    /// when the user switches layouts on the host. Set to e.g. `"fr"`
+    /// or `"ch:fr"` to pin a specific layout regardless of macOS state.
+    public var keyboardLayoutOverride: String?
+
+    /// X11 `xset r rate` overrides for this profile. nil = match the
+    /// host's macOS settings (read live from NSEvent / IOHIDSystem).
+    /// Useful when the X-server pipeline makes the host's cadence
+    /// feel laggier than typing in a Cocoa app — the typical fix is
+    /// to bump the rate ~2× the macOS value. Both clamped at session
+    /// launch (`detectKeyRepeat`) so out-of-range values still work.
+    public var keyRepeatDelayMs: Int?
+    public var keyRepeatRateHz: Int?
+
     /// Combined window/terminal opacity (0.3–1.0). Applied as both kitty's
     /// `background_opacity` (needs a compositor in the VM to fully take
     /// effect) and the macOS `NSWindow.alphaValue` (works always — gives
@@ -431,7 +446,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         customBackgroundHex: String? = nil,
         customForegroundHex: String? = nil,
         cursorShape: CursorShape = .block,
-        windowOpacity: Double = 0.97
+        windowOpacity: Double = 0.97,
+        keyboardLayoutOverride: String? = nil,
+        keyRepeatDelayMs: Int? = nil,
+        keyRepeatRateHz: Int? = nil
     ) {
         self.id = id
         self.name = name
@@ -457,6 +475,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.bridgedInterfaceID = bridgedInterfaceID
         self.cursorShape = cursorShape
         self.windowOpacity = windowOpacity
+        self.keyboardLayoutOverride = keyboardLayoutOverride
+        self.keyRepeatDelayMs = keyRepeatDelayMs
+        self.keyRepeatRateHz = keyRepeatRateHz
         self.gitUserName = gitUserName
         self.gitUserEmail = gitUserEmail
         self.useTerminalAppDefaults = useTerminalAppDefaults
@@ -476,7 +497,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case useTerminalAppDefaults, customFontFamily, customFontSize
         case customBackgroundHex, customForegroundHex
         case networkMode, bridgedInterfaceID
-        case cursorShape, windowOpacity
+        case cursorShape, windowOpacity, keyboardLayoutOverride
+        case keyRepeatDelayMs, keyRepeatRateHz
         case gitHTTPSCredentials
         case additionalTools
         case manualTokens
@@ -522,6 +544,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         bridgedInterfaceID     = try c.decodeIfPresent(String.self, forKey: .bridgedInterfaceID)
         cursorShape            = try c.decodeIfPresent(CursorShape.self, forKey: .cursorShape) ?? .beam
         windowOpacity          = try c.decodeIfPresent(Double.self, forKey: .windowOpacity) ?? 1.0
+        keyboardLayoutOverride = try c.decodeIfPresent(String.self, forKey: .keyboardLayoutOverride)
+        keyRepeatDelayMs       = try c.decodeIfPresent(Int.self, forKey: .keyRepeatDelayMs)
+        keyRepeatRateHz        = try c.decodeIfPresent(Int.self, forKey: .keyRepeatRateHz)
         gitHTTPSCredentials    = try c.decodeIfPresent([GitHTTPSCredential].self, forKey: .gitHTTPSCredentials) ?? []
         // Strip out any entry that duplicates the primary tool — same
         // tool can't appear twice. Decoder is the right place to enforce
@@ -570,6 +595,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encodeIfPresent(bridgedInterfaceID, forKey: .bridgedInterfaceID)
         try c.encode(cursorShape, forKey: .cursorShape)
         try c.encode(windowOpacity, forKey: .windowOpacity)
+        try c.encodeIfPresent(keyboardLayoutOverride, forKey: .keyboardLayoutOverride)
+        try c.encodeIfPresent(keyRepeatDelayMs, forKey: .keyRepeatDelayMs)
+        try c.encodeIfPresent(keyRepeatRateHz, forKey: .keyRepeatRateHz)
         if !gitHTTPSCredentials.isEmpty {
             try c.encode(gitHTTPSCredentials, forKey: .gitHTTPSCredentials)
         }
@@ -1441,6 +1469,17 @@ public final class ProfileStore {
     xsetroot -solid '#0d1117'
     xset s off -dpms
 
+    # Key-repeat feel — match macOS's InitialKeyRepeat + KeyRepeat so
+    # typing in kitty is identical to typing in Terminal.app on the
+    # host. The host writes "<delay_ms> <rate_hz>" into the meta share
+    # at session prep.
+    if [ -r /mnt/bromure-meta/key_repeat ]; then
+        KR=$(cat /mnt/bromure-meta/key_repeat)
+        # shellcheck disable=SC2086 # intentional word split: "<delay> <rate>"
+        xset r rate $KR 2>/dev/null && \
+            echo "[xinit] key repeat $KR" >> /tmp/xinitrc.log
+    fi
+
     # Force mesa software rendering — virtio-gpu's GL stack under VZ isn't
     # reliable enough for kitty's 3.3 core profile requirement.
     export LIBGL_ALWAYS_SOFTWARE=1
@@ -1453,12 +1492,16 @@ public final class ProfileStore {
     # Lower MTU on the primary NIC. VZ NAT reports MTU 1500 but the
     # actual host path can be smaller (Wi-Fi, VPN, corp firewall) and
     # PMTUD doesn't always recover — large packets (TLS handshakes,
-    # SSH KEX_ECDH_REPLY, npm tarball chunks) blackhole. 1400 is the
-    # commonly-recommended safe value behind virtual interfaces.
+    # SSH KEX_ECDH_REPLY, npm tarball chunks) blackhole. The host
+    # writes its preferred value to /mnt/bromure-meta/mtu (default 1400,
+    # overridable via `defaults write io.bromure.agentic-coding vm.mtu`).
+    MTU=1400
+    [ -r /mnt/bromure-meta/mtu ] && MTU=$(tr -dc '0-9' < /mnt/bromure-meta/mtu)
+    [ -z "$MTU" ] && MTU=1400
     NIC=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
     if [ -n "$NIC" ]; then
-        sudo ip link set dev "$NIC" mtu 1400 2>/dev/null || true
-        echo "[xinit] set $NIC mtu 1400" >> /tmp/xinitrc.log
+        sudo ip link set dev "$NIC" mtu "$MTU" 2>/dev/null || true
+        echo "[xinit] set $NIC mtu $MTU" >> /tmp/xinitrc.log
     fi
 
     # Install the host's MITM CA into the system trust store so the
@@ -1484,6 +1527,30 @@ public final class ProfileStore {
     if [ -r /mnt/bromure-meta/bromure-vm-bridge.py ]; then
         python3 /mnt/bromure-meta/bromure-vm-bridge.py &
         echo "[xinit] bromure-vm-bridge pid $!" >> /tmp/xinitrc.log
+    fi
+
+    # Keyboard layout agent — listens on vsock 5006 for layout pushes
+    # from the macOS host (KeyboardBridge). Initial layout arrives
+    # before the user can type; subsequent macOS layout switches
+    # propagate live (debounced 200ms host-side).
+    if [ -r /mnt/bromure-meta/keyboard-agent.py ]; then
+        python3 /mnt/bromure-meta/keyboard-agent.py &
+        echo "[xinit] keyboard-agent pid $!" >> /tmp/xinitrc.log
+    fi
+
+    # Timezone — match macOS at session start so date / journal /
+    # commit timestamps line up with what the user sees on the host.
+    # Re-applied per session (the meta share is rebuilt each launch),
+    # so DST transitions and travel are picked up without an image
+    # rebuild.
+    if [ -r /mnt/bromure-meta/tz ]; then
+        TZID=""
+        read -r TZID < /mnt/bromure-meta/tz || true
+        if [ -n "$TZID" ] && [ -e "/usr/share/zoneinfo/$TZID" ]; then
+            sudo timedatectl set-timezone "$TZID" 2>/dev/null || sudo ln -sf "/usr/share/zoneinfo/$TZID" /etc/localtime
+            export TZ="$TZID"
+            echo "[xinit] timezone set to $TZID" >> /tmp/xinitrc.log
+        fi
     fi
 
     openbox &

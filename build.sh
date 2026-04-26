@@ -22,7 +22,7 @@ case "$TARGET" in
         SOURCE_DIR="$SCRIPT_DIR/Sources/AgentCoding"
         ENTITLEMENTS="$SOURCE_DIR/BromureAC.entitlements"
         INFO_PLIST="$SOURCE_DIR/Info.plist"
-        SDEF_FILE=""
+        SDEF_FILE="$SOURCE_DIR/BromureAC.sdef"
         RESOURCE_BUNDLE_NAME="bromure_bromure-ac.bundle"
         ICON_FILE="$SCRIPT_DIR/Resources/BromureACIcon.icns"
         ;;

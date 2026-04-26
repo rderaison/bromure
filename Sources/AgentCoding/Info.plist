@@ -20,6 +20,10 @@
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSAppleScriptEnabled</key>
+    <true/>
+    <key>OSAScriptingDefinition</key>
+    <string>BromureAC.sdef</string>
     <!-- Sparkle auto-update.
          Same SUPublicEDKey as the browser since the Jenkins build host
          signs both products with the same SPARKLE_PRIVATE_KEY credential.

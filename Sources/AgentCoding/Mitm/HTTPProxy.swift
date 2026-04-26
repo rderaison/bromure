@@ -9,6 +9,7 @@ import Foundation
 /// with HTTP/1.1 pipelining or keep-alive within a CONNECT — the cost
 /// of a fresh CONNECT per request is negligible at agent traffic
 /// volumes, and it keeps the state machine sane.
+@available(macOS, deprecated: 10.15, message: "owns a TLSServerStream which wraps SecureTransport")
 final class HTTPMitmConnection: @unchecked Sendable {
     let fd: Int32
     let profileID: UUID
@@ -166,11 +167,61 @@ final class HTTPMitmConnection: @unchecked Sendable {
         )
 
         let store = traceStore
-        let req = captureBody ? preSwapRequest : nil
-        let res = captureBody ? upstreamResponse : nil
+        // At every level above .activity, skip bodies that look like
+        // binary downloads (images, video, audio, archives, octet-
+        // stream, etc.) — they consume the per-session body cap fast
+        // and their decoded form isn't useful in the inspector. Text
+        // bodies (json, html, xml, plain, js, css, form, sse) are kept.
+        let req = captureBody ? Self.bodyForTrace(preSwapRequest) : nil
+        let res = captureBody ? Self.bodyForTrace(upstreamResponse) : nil
         await MainActor.run {
             store.record(record, requestBody: req, responseBody: res)
         }
+    }
+
+    /// Returns the original buffer iff the parsed Content-Type looks
+    /// like text (or there's no Content-Type at all — rare, treated
+    /// as benign), and iff total size is under a per-record cap.
+    /// Otherwise returns nil so the caller skips the body write.
+    private static func bodyForTrace(_ raw: Data) -> Data? {
+        // Per-record cap. Anything bigger is a download / upload that
+        // would fill the session-cap on its own.
+        let perRecordCap = 5 * 1024 * 1024
+        guard raw.count <= perRecordCap else { return nil }
+        guard !raw.isEmpty else { return nil }
+        guard let endRange = raw.range(of: Data("\r\n\r\n".utf8)) else {
+            // No header/body split — not a normal HTTP frame, but still
+            // small enough to keep.
+            return raw
+        }
+        let header = raw.subdata(in: 0..<endRange.lowerBound)
+        guard let headerStr = String(data: header, encoding: .ascii) else {
+            return raw
+        }
+        let lines = headerStr.split(separator: "\r\n")
+        let ctLine = lines.first(where: { $0.lowercased().hasPrefix("content-type:") })
+        let ct: String = ctLine.flatMap {
+            $0.split(separator: ":", maxSplits: 1).last
+                .map { String($0).trimmingCharacters(in: .whitespaces).lowercased() }
+        } ?? ""
+        if ct.isEmpty { return raw }
+        // Whitelist: anything we'd want to read in the inspector.
+        let textPrefixes = [
+            "text/", "application/json", "application/xml",
+            "application/javascript", "application/x-www-form-urlencoded",
+            "application/x-ndjson", "application/ld+json",
+            "application/graphql", "application/yaml", "application/x-yaml",
+            "application/problem+json",
+            "multipart/form-data",  // small forms; large uploads gated by perRecordCap
+        ]
+        if textPrefixes.contains(where: { ct.hasPrefix($0) }) { return raw }
+        // application/* with a +json or +xml suffix (RFC 6839)
+        if ct.hasPrefix("application/") && (ct.contains("+json") || ct.contains("+xml")) {
+            return raw
+        }
+        // Server-Sent Events
+        if ct.hasPrefix("text/event-stream") { return raw }
+        return nil
     }
 
     /// Build a per-request URLSession whose delegate fields client-
@@ -235,6 +286,7 @@ private func readRawHTTPRequest(plainFD fd: Int32, maxBytes: Int) throws -> Data
     }
 }
 
+@available(macOS, deprecated: 10.15)
 private func readRawHTTPRequest(via tls: TLSServerStream, maxBytes: Int) throws -> Data {
     return try readUntilCompleteHTTP(maxBytes: maxBytes) { buf in
         try tls.read(maxBytes: buf)

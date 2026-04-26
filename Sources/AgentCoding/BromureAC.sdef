@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<dictionary title="Bromure Agentic Coding Scripting Dictionary">
+
+    <suite name="Standard Suite" code="????" description="Common classes and commands for all applications.">
+        <command name="quit" code="aevtquit" description="Quit the application.">
+            <cocoa class="NSQuitCommand"/>
+        </command>
+    </suite>
+
+    <suite name="Bromure AC Suite" code="BrAC" description="Commands for orchestrating Bromure Agentic Coding — profile management, locale switching, and editor navigation for screenshot tooling.">
+
+        <!-- ============================================================ -->
+        <!-- Inspection                                                   -->
+        <!-- ============================================================ -->
+
+        <command name="get app state" code="BrAcGtSt" description="Returns a JSON object: { locale, mainWindowOpen, editorOpen, editorCategory, profiles: [...] }.">
+            <cocoa class="BromureACGetAppStateCommand"/>
+            <result type="text" description="JSON object"/>
+        </command>
+
+        <command name="list profiles" code="BrAcLsPr" description="JSON array of { id, name, color }.">
+            <cocoa class="BromureACListProfilesCommand"/>
+            <result type="text" description="JSON array"/>
+        </command>
+
+        <!-- ============================================================ -->
+        <!-- Profile management                                           -->
+        <!-- ============================================================ -->
+
+        <command name="create ac profile" code="BrAcCrPr" description="Create a new profile with the given name. Returns the new profile's UUID.">
+            <cocoa class="BromureACCreateProfileCommand"/>
+            <direct-parameter type="text" description="Profile name"/>
+            <parameter name="color" code="pCol" type="text" optional="yes" description="Window border color: blue, red, green, orange, purple, pink, teal, gray"/>
+            <result type="text" description="Profile UUID"/>
+        </command>
+
+        <command name="delete ac profile" code="BrAcDlPr" description="Delete a profile by name or UUID.">
+            <cocoa class="BromureACDeleteProfileCommand"/>
+            <direct-parameter type="text" description="Profile name or UUID"/>
+        </command>
+
+        <!-- ============================================================ -->
+        <!-- Window navigation (driven by the screenshot script)          -->
+        <!-- ============================================================ -->
+
+        <command name="open profile manager" code="BrAcOpPm" description="Bring the profile picker (main window) to the front.">
+            <cocoa class="BromureACOpenProfileManagerCommand"/>
+        </command>
+
+        <command name="open ac profile editor" code="BrAcOpEd" description="Open the editor for a profile by name or UUID.">
+            <cocoa class="BromureACOpenProfileEditorCommand"/>
+            <direct-parameter type="text" description="Profile name or UUID"/>
+        </command>
+
+        <command name="close ac profile editor" code="BrAcClEd" description="Close the editor window if open.">
+            <cocoa class="BromureACCloseProfileEditorCommand"/>
+        </command>
+
+        <command name="select editor category" code="BrAcSlCt" description="Switch the editor sidebar to the given category. Names: general, agent, folders, credentials, tracing, appearance, resources.">
+            <cocoa class="BromureACSelectEditorCategoryCommand"/>
+            <direct-parameter type="text" description="Category key"/>
+        </command>
+
+        <command name="get editor window id" code="BrAcGtId" description="Returns the CGWindowID of the editor window, or 0 if not open. Use with `screencapture -l ID` from the shell.">
+            <cocoa class="BromureACGetEditorWindowIDCommand"/>
+            <result type="integer" description="CGWindowID"/>
+        </command>
+
+        <command name="get main window id" code="BrAcGtMI" description="Returns the CGWindowID of the picker (main) window, or 0 if not open.">
+            <cocoa class="BromureACGetMainWindowIDCommand"/>
+            <result type="integer" description="CGWindowID"/>
+        </command>
+
+    </suite>
+</dictionary>

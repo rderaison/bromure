@@ -436,6 +436,22 @@ def write_chrome_env(cfg):
     display_scale = cfg.get("displayScale", 2)
     lines.append(f"DISPLAY_SCALE={display_scale}")
 
+    # MTU clamp for the primary NIC. Sourced from the host's
+    # `vm.mtu` UserDefaults entry (default 1400). Applied in xinitrc
+    # before Chrome starts.
+    mtu_value = cfg.get("mtu")
+    if isinstance(mtu_value, int) and 576 <= mtu_value <= 9000:
+        lines.append(f"MTU={mtu_value}")
+
+    # Key-repeat feel — translated macOS InitialKeyRepeat + KeyRepeat.
+    # Applied in xinitrc as `xset r rate <delay> <rate>` so typing in
+    # Chromium matches Safari on the host.
+    delay_ms = cfg.get("keyRepeatDelayMs")
+    rate_hz  = cfg.get("keyRepeatRateHz")
+    if isinstance(delay_ms, int) and isinstance(rate_hz, int):
+        lines.append(f"KEY_REPEAT_DELAY_MS={delay_ms}")
+        lines.append(f"KEY_REPEAT_RATE_HZ={rate_hz}")
+
     # Locale: forward host OS locale to Chromium
     locale = cfg.get("locale", "en_US")
     # Map macOS locale (e.g. "en_US") to Chromium --lang format (e.g. "en-US")

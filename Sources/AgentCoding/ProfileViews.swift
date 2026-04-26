@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SandboxEngine
 import SwiftUI
 @preconcurrency import Virtualization
 
@@ -256,6 +257,16 @@ private struct ProfileRow: View {
 
 // MARK: - Editor categories
 
+/// AppleScript bridge: posted by `BromureACSelectEditorCategoryCommand`
+/// to switch the open editor's sidebar selection. The view subscribes
+/// to this in `body` and updates its @State accordingly. Object is the
+/// raw value of `EditorCategory` (so the command doesn't need to know
+/// about the Swift type).
+public extension Notification.Name {
+    static let bromureACSelectEditorCategory =
+        Notification.Name("io.bromure.ac.selectEditorCategory")
+}
+
 enum EditorCategory: String, CaseIterable, Identifiable {
     case general     = "General"
     case agent       = "Agent"
@@ -351,6 +362,13 @@ struct ProfileEditorView: View {
     /// is closed until the user opts in.
     @State private var expandedCredsSections: Set<String> = ["ssh"]
 
+    /// Snapshot of the host's macOS key-repeat values, captured when
+    /// the editor opens. Used as the visible default in the Key
+    /// repeat fields and as the "treat as auto" sentinel — if the
+    /// user leaves the field at the macOS value, we save nil (track
+    /// macOS live); if they change it, we save their explicit value.
+    @State private var hostKeyRepeat: VMConfig.KeyRepeatSettings = VMConfig.detectKeyRepeat()
+
     struct ImportSheetState: Identifiable {
         let id = UUID()
         var sourceURL: URL
@@ -444,6 +462,13 @@ struct ProfileEditorView: View {
             .padding(12)
         }
         .frame(width: 720, height: 520)
+        .onReceive(NotificationCenter.default.publisher(
+            for: .bromureACSelectEditorCategory)) { note in
+            if let raw = note.object as? String,
+               let cat = EditorCategory(rawValue: raw) {
+                selectedCategory = cat
+            }
+        }
     }
 
     @ViewBuilder
@@ -461,28 +486,92 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private var generalSection: some View {
+        // Every row goes through Form's two-column labeled pattern
+        // (Picker(label, ...), LabeledContent, TextField(label, ...)).
+        // That's what gives us one right-aligned label column +
+        // one left-aligned control column — the System Settings look.
         Form {
             TextField("Name", text: $draft.name)
-                .textFieldStyle(.roundedBorder)
-            HStack {
-                Text("Color")
-                Picker("", selection: $draft.color) {
-                    ForEach(ProfileColor.allCases, id: \.self) { c in
-                        HStack {
-                            Circle().fill(c.swiftUIColor.gradient).frame(width: 12, height: 12)
-                            Text(c.label)
-                        }
-                        .tag(c)
+
+            Picker("Color", selection: $draft.color) {
+                ForEach(ProfileColor.allCases, id: \.self) { c in
+                    HStack {
+                        Circle().fill(c.swiftUIColor.gradient).frame(width: 12, height: 12)
+                        Text(c.label)
                     }
+                    .tag(c)
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                Spacer()
             }
+            .pickerStyle(.menu)
+
+            keyboardLayoutPicker
+
+            keyRepeatDelayRow
+            keyRepeatRateRow
+
             TextField("Notes (optional)", text: $draft.comments, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
                 .lineLimit(2...6)
         }
+        .formStyle(.grouped)
+    }
+
+    /// Pre-filled with the host's current macOS value. If the user
+    /// types a different number we save it as an explicit override; if
+    /// they restore the macOS value we save nil so the profile keeps
+    /// tracking macOS live.
+    @ViewBuilder
+    private var keyRepeatDelayRow: some View {
+        LabeledContent(NSLocalizedString("Key repeat delay", comment: "")) {
+            HStack(spacing: 6) {
+                TextField("",
+                          value: Binding(
+                            get: { draft.keyRepeatDelayMs ?? hostKeyRepeat.delayMs },
+                            set: { draft.keyRepeatDelayMs = ($0 == hostKeyRepeat.delayMs) ? nil : $0 }),
+                          format: .number)
+                    .frame(width: 64)
+                    .multilineTextAlignment(.trailing)
+                    .textFieldStyle(.roundedBorder)
+                Text("ms").foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var keyRepeatRateRow: some View {
+        LabeledContent(NSLocalizedString("Key repeat rate", comment: "")) {
+            HStack(spacing: 6) {
+                TextField("",
+                          value: Binding(
+                            get: { draft.keyRepeatRateHz ?? hostKeyRepeat.rateHz },
+                            set: { draft.keyRepeatRateHz = ($0 == hostKeyRepeat.rateHz) ? nil : $0 }),
+                          format: .number)
+                    .frame(width: 64)
+                    .multilineTextAlignment(.trailing)
+                    .textFieldStyle(.roundedBorder)
+                Text("Hz").foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// "Auto" follows the macOS keyboard input source live (the same
+    /// dynamic-match behaviour Bromure Web uses); selecting any other
+    /// entry pins the VM to that XKB layout regardless of host state.
+    @ViewBuilder
+    private var keyboardLayoutPicker: some View {
+        let autoTag = "__auto__"
+        let binding = Binding<String>(
+            get: { draft.keyboardLayoutOverride ?? autoTag },
+            set: { draft.keyboardLayoutOverride = ($0 == autoTag) ? nil : $0 }
+        )
+        Picker(NSLocalizedString("Keyboard layout", comment: ""), selection: binding) {
+            Text(NSLocalizedString("Auto (match macOS)", comment: ""))
+                .tag(autoTag)
+            Divider()
+            ForEach(VMConfig.commonKeyboardLayouts, id: \.value) { layout in
+                Text(layout.label).tag(layout.value)
+            }
+        }
+        .pickerStyle(.menu)
     }
 
     @ViewBuilder
@@ -1213,16 +1302,6 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var tracingSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Label("MITM token swap", systemImage: "shield.lefthalf.filled")
-                    .font(.headline)
-                    .foregroundStyle(.red)
-                Text("Bromure runs an HTTPS proxy on the host that swaps fake tokens for real ones on the wire. Real keys never leave macOS — the VM only ever sees the fakes. Add custom mappings here for any API beyond Claude / Codex / GitHub PAT auth (which are auto-handled).")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
             // Trace level for the proxy. Off by default — opt-in
             // because higher levels write encrypted body files to
             // ~/Library/Application Support/BromureAC/traces/.

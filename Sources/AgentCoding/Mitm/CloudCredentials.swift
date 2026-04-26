@@ -1,4 +1,5 @@
 import Foundation
+@preconcurrency import Security
 import Crypto
 import _CryptoExtras
 import X509
@@ -284,7 +285,7 @@ public final class KubeconfigMaterializer {
             // rejects on load.
             let cryptoKey = P256.Signing.PrivateKey()
             let key = Certificate.PrivateKey(cryptoKey)
-            let pubKey = try Certificate.PublicKey(cryptoKey.publicKey)
+            let pubKey = Certificate.PublicKey(cryptoKey.publicKey)
             let subject = try DistinguishedName { CommonName(commonName) }
             let now = Date()
             let serial = Certificate.SerialNumber(bytes: Array(randomBytes(20)))

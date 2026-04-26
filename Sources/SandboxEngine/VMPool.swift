@@ -452,6 +452,18 @@ public final class VMPool {
         if config.blockMalwareSites { cfg["blockMalware"] = true }
         if config.enableAdBlocking { cfg["adBlocking"] = true }
         cfg["currentTime"] = Int(Date().timeIntervalSince1970)
+        // Per-VM MTU clamp. VPNs (WireGuard ~1420, IKEv2 ~1400) push
+        // path MTU below 1500 and PMTUD doesn't always recover. Default
+        // 1400 is safe; override via:
+        //   defaults write io.bromure.app vm.mtu -int <value>
+        cfg["mtu"] = VMConfig.resolvedNICMTU()
+
+        // Key repeat feel — translate macOS InitialKeyRepeat + KeyRepeat
+        // into X11's xset r rate format so typing in Chromium matches
+        // typing in Safari on the host.
+        let kr = VMConfig.detectKeyRepeat()
+        cfg["keyRepeatDelayMs"] = kr.delayMs
+        cfg["keyRepeatRateHz"]  = kr.rateHz
         if config.vpnMode == .cloudflareWarp { cfg["enableWarp"] = true }
         if config.warpAutoConnect { cfg["warpAutoConnect"] = true }
         if config.vpnMode == .wireGuard, let wgConf = config.wireGuardConfig, !wgConf.isEmpty {

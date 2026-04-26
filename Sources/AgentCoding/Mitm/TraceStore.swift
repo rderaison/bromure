@@ -36,12 +36,18 @@ public final class TraceStore {
     private let rootDir: URL
     private let queue = DispatchQueue(label: "io.bromure.ac.trace-store",
                                       qos: .utility)
-    nonisolated(unsafe) private var appendsSinceLastCleanup = 0
-    /// Per-session running body byte total, used for the per-session cap.
-    private nonisolated(unsafe) var bodyBytesPerSession: [UUID: Int] = [:]
-    private static let perSessionBodyCap: Int = 100 * 1024 * 1024
-    private static let totalDirCap: Int       = 5 * 1024 * 1024 * 1024
-    private static let cleanupInterval = 200
+    /// Mutable bookkeeping state lifted out of the @Observable class
+    /// so it can be marked Sendable and accessed from the serial
+    /// `queue` without tripping the macro's isolation rules.
+    /// All access goes through the queue, so unchecked is safe.
+    fileprivate final class State: @unchecked Sendable {
+        var appendsSinceLastCleanup = 0
+        var bodyBytesPerSession: [UUID: Int] = [:]
+    }
+    fileprivate let state = State()
+    nonisolated private static let perSessionBodyCap: Int = 100 * 1024 * 1024
+    nonisolated private static let totalDirCap: Int       = 5 * 1024 * 1024 * 1024
+    nonisolated private static let cleanupInterval = 200
 
     public init(rootDir: URL? = nil) {
         if let rootDir {
@@ -171,7 +177,7 @@ public final class TraceStore {
         data.append(0x0a)  // newline
         if let handle = try? FileHandle(forWritingTo: url) {
             defer { try? handle.close() }
-            try? handle.seekToEnd()
+            _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: data)
         } else {
             try? data.write(to: url, options: .atomic)
@@ -198,8 +204,8 @@ public final class TraceStore {
 
     private nonisolated func queue_updateBodyAccount(sessionID: UUID, added: Int) {
         guard added > 0 else { return }
-        let total = (bodyBytesPerSession[sessionID] ?? 0) + added
-        bodyBytesPerSession[sessionID] = total
+        let total = (state.bodyBytesPerSession[sessionID] ?? 0) + added
+        state.bodyBytesPerSession[sessionID] = total
         if total > Self.perSessionBodyCap {
             queue_evictOldestBodiesInSession(sessionID, currentTotal: total)
         }
@@ -231,7 +237,7 @@ public final class TraceStore {
             try? fm.removeItem(at: url)
             total -= size
         }
-        bodyBytesPerSession[sessionID] = total
+        state.bodyBytesPerSession[sessionID] = total
     }
 
     private nonisolated func queue_periodicCleanup() {
@@ -291,11 +297,11 @@ public final class TraceStore {
 
     // unsafe back-channel for the queue-only counter
     nonisolated fileprivate static func unsafeIncrementAppendCounter(_ store: TraceStore) -> Int {
-        store.appendsSinceLastCleanup += 1
-        return store.appendsSinceLastCleanup
+        store.state.appendsSinceLastCleanup += 1
+        return store.state.appendsSinceLastCleanup
     }
     nonisolated fileprivate static func unsafeResetAppendCounter(_ store: TraceStore) {
-        store.appendsSinceLastCleanup = 0
+        store.state.appendsSinceLastCleanup = 0
     }
 }
 

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SandboxEngine
 
 /// Manages a profile's persistent disk and the per-launch metadata share.
 ///
@@ -30,9 +31,23 @@ public final class SessionDisk {
     public struct MitmSessionAssets: Sendable {
         public let caCertificatePEM: String
         public let bridgeScriptURL: URL
-        public init(caCertificatePEM: String, bridgeScriptURL: URL) {
+        /// Optional keyboard agent script URL — copied into the meta
+        /// share so the guest's xinitrc can launch it. nil = no
+        /// keyboard layout matching for this session.
+        public let keyboardAgentURL: URL?
+        /// Optional scroll agent script URL. Same delivery pattern as
+        /// the keyboard agent — copied to the meta share, launched
+        /// from xinitrc, listens on vsock 5008 for batched scroll
+        /// directions from the host's `ScrollBridge`.
+        public let scrollAgentURL: URL?
+        public init(caCertificatePEM: String,
+                    bridgeScriptURL: URL,
+                    keyboardAgentURL: URL? = nil,
+                    scrollAgentURL: URL? = nil) {
             self.caCertificatePEM = caCertificatePEM
             self.bridgeScriptURL = bridgeScriptURL
+            self.keyboardAgentURL = keyboardAgentURL
+            self.scrollAgentURL = scrollAgentURL
         }
     }
 
@@ -175,6 +190,22 @@ public final class SessionDisk {
                 [.posixPermissions: NSNumber(value: 0o755)],
                 ofItemAtPath: scriptDest.path)
 
+            if let kbURL = assets.keyboardAgentURL {
+                let kbDest = tmp.appendingPathComponent("keyboard-agent.py")
+                try fm.copyItem(at: kbURL, to: kbDest)
+                try fm.setAttributes(
+                    [.posixPermissions: NSNumber(value: 0o755)],
+                    ofItemAtPath: kbDest.path)
+            }
+
+            if let scURL = assets.scrollAgentURL {
+                let scDest = tmp.appendingPathComponent("scroll-agent.py")
+                try fm.copyItem(at: scURL, to: scDest)
+                try fm.setAttributes(
+                    [.posixPermissions: NSNumber(value: 0o755)],
+                    ofItemAtPath: scDest.path)
+            }
+
             // proxy.env — sourced by .bashrc to set HTTPS_PROXY etc.
             // for every shell. Also set the per-language CA bundle
             // hints so node, python, go, rust, curl all trust our CA.
@@ -274,6 +305,40 @@ public final class SessionDisk {
         let scale = Self.detectDisplayScale()
         try "\(scale)\n".write(
             to: tmp.appendingPathComponent("display_scale.txt"),
+            atomically: true, encoding: .utf8
+        )
+
+        // tz — host's current TimeZone identifier (e.g. "Europe/Paris").
+        // xinitrc passes it to timedatectl so date/log timestamps inside
+        // the VM match what the user sees on macOS. Re-read each session
+        // so DST transitions and travel are reflected without rebuilds.
+        let tzID = TimeZone.current.identifier
+        try "\(tzID)\n".write(
+            to: tmp.appendingPathComponent("tz"),
+            atomically: true, encoding: .utf8
+        )
+
+        // mtu — clamp for the VM's primary NIC. Default 1400 covers most
+        // VPNs (WireGuard ~1420, IKEv2 ~1400). Override via:
+        //   defaults write io.bromure.agentic-coding vm.mtu -int <value>
+        let mtu = VMConfig.resolvedNICMTU()
+        try "\(mtu)\n".write(
+            to: tmp.appendingPathComponent("mtu"),
+            atomically: true, encoding: .utf8
+        )
+
+        // key_repeat — macOS InitialKeyRepeat + KeyRepeat translated to
+        // X11's `xset r rate <delay-ms> <rate-Hz>` format. Profile-
+        // level overrides win over global defaults / NSEvent values.
+        // Why per-profile: the X-server pipeline often makes the host's
+        // own cadence feel laggier than typing in a Cocoa app, so users
+        // bump the rate. ~2× the macOS value matches the perceived
+        // speed for most setups.
+        let kr = VMConfig.detectKeyRepeat(
+            delayMsOverride: profile.keyRepeatDelayMs,
+            rateHzOverride: profile.keyRepeatRateHz)
+        try "\(kr.delayMs) \(kr.rateHz)\n".write(
+            to: tmp.appendingPathComponent("key_repeat"),
             atomically: true, encoding: .utf8
         )
 

@@ -756,6 +756,106 @@ public struct VMConfig {
         "ingush":                   "ru",          // Ingush (Cyrillic base)
     ]
 
+    /// Curated picker list — the same set Bromure Web exposes in its
+    /// global keyboard-layout picker. `value` is the XKB string the
+    /// guest's setxkbmap consumes (paren format = `layout(variant)`,
+    /// matching the browser's existing presets verbatim).
+    public static let commonKeyboardLayouts: [(label: String, value: String)] = [
+        ("US (QWERTY)",      "us"),
+        ("US (Dvorak)",      "us(dvorak)"),
+        ("US (Colemak)",     "us(colemak)"),
+        ("British",          "gb"),
+        ("French (AZERTY)",  "fr"),
+        ("German (QWERTZ)",  "de"),
+        ("Spanish",          "es"),
+        ("Italian",          "it"),
+        ("Portuguese",       "pt"),
+        ("Brazilian",        "br"),
+        ("Belgian",          "be"),
+        ("Dutch",            "nl"),
+        ("Swedish",          "se"),
+        ("Norwegian",        "no"),
+        ("Danish",           "dk"),
+        ("Finnish",          "fi"),
+        ("Swiss French",     "ch(fr)"),
+        ("Swiss German",     "ch(de)"),
+        ("Canadian French",  "ca(fr)"),
+        ("Czech",            "cz"),
+        ("Polish",           "pl"),
+        ("Russian",          "ru"),
+        ("Turkish",          "tr"),
+        ("Japanese",         "jp"),
+        ("Korean",           "kr"),
+        ("Arabic",           "ara"),
+        ("Hebrew",           "il"),
+        ("Irish",            "ie"),
+    ]
+
+    /// macOS key-repeat settings translated into X11's
+    /// `xset r rate <delay-ms> <rate-Hz>` units.
+    public struct KeyRepeatSettings: Sendable, Equatable {
+        public let delayMs: Int
+        public let rateHz: Int
+    }
+
+    /// Read the currently-applied repeat settings.
+    ///
+    /// Order of precedence (highest first):
+    /// 1. The optional `delayMsOverride` / `rateHzOverride` arguments
+    ///    (per-profile fields surfaced in the editor's General tab).
+    /// 2. `vm.keyRepeatDelayMs` / `vm.keyRepeatRateHz` UserDefaults
+    ///    (per-app: io.bromure.app or io.bromure.agentic-coding) —
+    ///    a global override for users who want one cadence everywhere.
+    /// 3. `NSEvent.keyRepeatDelay` / `NSEvent.keyRepeatInterval` —
+    ///    the system's HID-level values (the same ones IOHIDSystem
+    ///    advertises in HIDInitialKeyRepeat / HIDKeyRepeat).
+    ///
+    /// Final values are clamped to xset's accepted range so a typo
+    /// at any layer still produces a working call.
+    public static func detectKeyRepeat(delayMsOverride: Int? = nil,
+                                       rateHzOverride: Int? = nil) -> KeyRepeatSettings {
+        let d = UserDefaults.standard
+        let globalDelay = d.object(forKey: "vm.keyRepeatDelayMs") as? Int
+        let globalRate  = d.object(forKey: "vm.keyRepeatRateHz") as? Int
+
+        let baseDelaySeconds = NSEvent.keyRepeatDelay
+        let baseIntervalSeconds = NSEvent.keyRepeatInterval
+
+        // Off sentinel: NSEvent reports a huge delay when the slider
+        // is at "Off". Honour profile/global overrides first; only
+        // collapse to "off" when no one's asked for an explicit value.
+        if delayMsOverride == nil, globalDelay == nil, baseDelaySeconds >= 60 {
+            return KeyRepeatSettings(delayMs: 5000, rateHz: 2)
+        }
+
+        let delayMs: Int = {
+            if let v = delayMsOverride { return max(1, min(10_000, v)) }
+            if let v = globalDelay     { return max(1, min(10_000, v)) }
+            return max(15, min(2000, Int((baseDelaySeconds * 1000.0).rounded())))
+        }()
+
+        let rateHz: Int = {
+            if let v = rateHzOverride { return max(1, min(250, v)) }
+            if let v = globalRate     { return max(1, min(250, v)) }
+            let intervalMs = max(4, Int((baseIntervalSeconds * 1000.0).rounded()))
+            return max(1, min(250, 1000 / intervalMs))
+        }()
+
+        return KeyRepeatSettings(delayMs: delayMs, rateHz: rateHz)
+    }
+
+    /// Read the user-configurable VM NIC MTU from UserDefaults
+    /// (`vm.mtu`, default 1400) and clamp to a sane range.
+    /// Floor: 576 = RFC 791 IPv4 minimum reassembly buffer (any
+    /// smaller value would break common IPv4 traffic). Ceiling: 9000
+    /// = jumbo-frame upper bound; VZ NAT doesn't actually do jumbos
+    /// but we don't reject the option in case bridged mode finds an
+    /// interface that does.
+    public static func resolvedNICMTU() -> Int {
+        let raw = UserDefaults.standard.object(forKey: "vm.mtu") as? Int ?? 1400
+        return min(9000, max(576, raw))
+    }
+
     /// Detect the macOS keyboard layout and map to X11 layout name.
     ///
     /// Reads `AppleCurrentKeyboardLayoutInputSourceID` from the HIToolbox

@@ -591,6 +591,15 @@ public final class LinuxImageManager {
         writer.write(Data("root\n".utf8))
         try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
 
+        // Clamp installer NIC MTU before any apk/wget call. VPN paths
+        // (WireGuard ~1420, IKEv2 ~1400) often silently truncate large
+        // TLS frames at MTU 1500. Default 1400 is safe; override via:
+        //   defaults write io.bromure.app vm.mtu -int <value>
+        let installerMTU = VMConfig.resolvedNICMTU()
+        progress(.message("Clamping installer MTU to \(installerMTU)..."))
+        writer.write(Data("NIC=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'); [ -n \"$NIC\" ] && ip link set dev \"$NIC\" mtu \(installerMTU) 2>/dev/null || true\n".utf8))
+        try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 10, progress: progress)
+
         progress(.message("Mounting setup files via VirtioFS..."))
 
         // Mount the vm-setup resources shared from the host via VirtioFS.

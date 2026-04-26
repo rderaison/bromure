@@ -1696,6 +1696,12 @@ final class BrowserSession {
     private var nativeTabBar: NativeTabBarChrome?
     private var nativeChromeKeyMonitor: Any?
     private var nativeChromeFlagsMonitor: Any?
+    /// Swallows macOS-generated `isARepeat == true` keyDowns aimed at
+    /// the session window so VZ doesn't forward them as discrete USB
+    /// HID presses (which would bypass the X server's autorepeat at
+    /// the rate we set in xinitrc and cap typing speed at macOS's
+    /// KeyRepeat).
+    private var keyRepeatFilterMonitor: Any?
     private(set) var shellBridge: ShellBridge?
     private(set) var traceBridge: TraceBridge?
     private var cloudTraceUploader: CloudTraceUploader?
@@ -1860,6 +1866,20 @@ final class BrowserSession {
             window.sharingType = .none
         }
         self.window = window
+
+        // Filter macOS-generated key-repeat events targeting this VM
+        // window. VZ's USB HID path forwards every keyDown — including
+        // `isARepeat` ones — which makes the X server inside the guest
+        // see discrete keystrokes instead of a held key, bypassing the
+        // server's own `xset r rate`.
+        let windowID = ObjectIdentifier(window)
+        keyRepeatFilterMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.isARepeat,
+                  let evWin = event.window,
+                  ObjectIdentifier(evWin) == windowID
+            else { return event }
+            return nil
+        }
 
         // Add a sidebar toggle button in the titlebar for file transfer
         if hasFileTransfer {
@@ -3125,6 +3145,10 @@ final class BrowserSession {
             if let monitor = nativeChromeFlagsMonitor {
                 NSEvent.removeMonitor(monitor)
                 nativeChromeFlagsMonitor = nil
+            }
+            if let monitor = keyRepeatFilterMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyRepeatFilterMonitor = nil
             }
             shellBridge?.stop()
             shellBridge = nil

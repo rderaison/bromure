@@ -199,16 +199,17 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
 @MainActor
 final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let imageManager: UbuntuImageManager
-    private let store = ProfileStore()
-    private var profiles: [Profile] = []
+    let store = ProfileStore()
+    var profiles: [Profile] = []
 
     /// Snapshot of Terminal.app's default profile captured at app launch.
     /// Cached so changes the user makes to Terminal.app while AC is
     /// running don't surprise them mid-session.
     private let terminalDefaults: TerminalAppDefaults = TerminalAppDefaults.load()
 
-    private var mainWindow: NSWindow?
-    private var editorWindow: NSWindow?
+    /// Internal so the AppleScript bridge can read window IDs.
+    var mainWindow: NSWindow?
+    var editorWindow: NSWindow?
     private var sshWindow: NSWindow?
     private var editorEditingProfile: Profile?  // nil = creating
 
@@ -241,6 +242,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// once and copied into each session's meta share.
     private lazy var bridgeScriptURL: URL? = {
         Bundle.module.url(forResource: "vm-setup/bromure-vm-bridge",
+                          withExtension: "py")
+    }()
+
+    /// SPM-resource-bundle path to the in-VM keyboard agent. Pushed
+    /// into the meta share so xinitrc can launch it; the host-side
+    /// `KeyboardBridge` then ferries macOS layout changes to it.
+    private lazy var keyboardAgentURL: URL? = {
+        Bundle.module.url(forResource: "vm-setup/keyboard-agent",
+                          withExtension: "py")
+    }()
+
+    /// SPM-resource-bundle path to the in-VM scroll agent. Same
+    /// pattern: dropped in the meta share, launched from xinitrc,
+    /// fed by the host-side `ScrollBridge`.
+    private lazy var scrollAgentURL: URL? = {
+        Bundle.module.url(forResource: "vm-setup/scroll-agent",
                           withExtension: "py")
     }()
 
@@ -706,7 +723,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// editing == nil → create. editing != nil → modify in place.
-    private func openEditorWindow(editing: Profile?) {
+    func openEditorWindow(editing: Profile?) {
         if let existing = editorWindow {
             existing.makeKeyAndOrderFront(nil)
             return
@@ -785,7 +802,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
-    private func closeEditorWindow() {
+    func closeEditorWindow() {
         editorWindow?.close()
         editorWindow = nil
         editorEditingProfile = nil
@@ -1103,7 +1120,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if let engine = mitmEngine, let scriptURL = bridgeScriptURL {
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
-                    bridgeScriptURL: scriptURL)
+                    bridgeScriptURL: scriptURL,
+                    keyboardAgentURL: keyboardAgentURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
             do {
@@ -1119,6 +1137,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // VM. Done after start so the socket device is live.
             if let engine = self.mitmEngine, let dev = sandbox.socketDevice {
                 engine.register(socketDevice: dev, profileID: profile.id)
+            }
+            // Keyboard layout bridge — pushes the macOS layout into the
+            // guest at boot and follows live changes (or pins an
+            // override layout when the profile sets one).
+            if let dev = sandbox.socketDevice {
+                win.keyboardBridge = KeyboardBridge(
+                    socketDevice: dev,
+                    forcedLayout: profile.keyboardLayoutOverride)
             }
             if sessionDisk.didCloneOnLastEnsure, let current = currentBaseVersion {
                 var p = profile

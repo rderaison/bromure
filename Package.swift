@@ -38,7 +38,7 @@ let package = Package(
                 .product(name: "Yams", package: "Yams"),
             ],
             path: "Sources/AgentCoding",
-            exclude: ["Info.plist", "BromureAC.entitlements"],
+            exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef"],
             resources: [.copy("Resources/vm-setup")],
             linkerSettings: [
                 .linkedFramework("Virtualization"),

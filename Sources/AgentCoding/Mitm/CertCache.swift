@@ -38,7 +38,7 @@ public final class CertCache: @unchecked Sendable {
         // a leaked leaf re-impersonate every host; per-host keys keep
         // blast radius scoped to the leaked host.
         let leafKey = P256.Signing.PrivateKey()
-        let leafPub = try Certificate.PublicKey(leafKey.publicKey)
+        let leafPub = Certificate.PublicKey(leafKey.publicKey)
 
         let subject = try DistinguishedName {
             CommonName(host)

@@ -207,6 +207,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         self.sessionTraceProvider = sessionTraceProvider
     }
 
+    @available(macOS, deprecated: 10.15)
     func listener(_ listener: VZVirtioSocketListener,
                   shouldAcceptNewConnection connection: VZVirtioSocketConnection,
                   from socketDevice: VZVirtioSocketDevice) -> Bool {

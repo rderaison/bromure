@@ -8,6 +8,11 @@ import Foundation
 ///
 /// Synchronous read/write API. Each MITM connection runs on its own
 /// detached Task, so blocking syscalls inside read/write are fine.
+///
+/// The `@available(macOS, deprecated: 10.15)` annotation matches the
+/// underlying SSLContext APIs so the compiler doesn't double-warn —
+/// callers (only `HTTPMitmConnection`) are similarly annotated.
+@available(macOS, deprecated: 10.15, message: "wraps SSLContext deliberately — Network.framework can't take a raw socket FD")
 final class TLSServerStream: @unchecked Sendable {
     private let fd: Int32
     private let ctx: SSLContext

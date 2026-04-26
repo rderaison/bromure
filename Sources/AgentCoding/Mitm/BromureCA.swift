@@ -77,7 +77,7 @@ public final class BromureCA: @unchecked Sendable {
 
     private static func mint(certURL: URL, keyURL: URL) throws -> BromureCA {
         let key = P256.Signing.PrivateKey()
-        let publicKey = try Certificate.PublicKey(key.publicKey)
+        let publicKey = Certificate.PublicKey(key.publicKey)
 
         // Distinguished name for the CA. Showing up as "Bromure
         // Agentic Coding Root CA" in the trust store is friendlier than

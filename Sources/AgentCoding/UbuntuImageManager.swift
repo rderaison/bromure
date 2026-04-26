@@ -1,6 +1,7 @@
 import AppKit
 import CommonCrypto
 import Foundation
+import SandboxEngine
 @preconcurrency import Virtualization
 
 /// Builds and locates the Ubuntu base image for Bromure Agentic Coding.
@@ -41,7 +42,7 @@ public final class UbuntuImageManager {
     /// Bumped to 31 (with explicit approval) to bake in the cloud
     /// CLIs needed for the Credentials → Cloud sections to work
     /// out of the box: kubectl, doctl, awscli v2, gcloud, az.
-    public static let imageVersion = "31"
+    public static let imageVersion = "100"
 
     /// Ubuntu LTS release we target. Update when a new LTS lands.
     public static let ubuntuRelease = "noble"
@@ -355,6 +356,18 @@ public final class UbuntuImageManager {
                 progress("Logging in as root…")
                 send("root\n")
                 try await buffer.wait(for: "localhost:~#", timeout: 30, failures: [])
+
+                // Clamp the installer's interface MTU before any
+                // download starts. VPNs (esp. WireGuard at 1420 and
+                // many corporate IKEv2 tunnels) push the effective
+                // path MTU below 1500 and PMTUD doesn't always
+                // recover, blackholing apt/debootstrap mid-download.
+                // Override via:
+                //   defaults write io.bromure.agentic-coding vm.mtu -int <value>
+                let mtu = VMConfig.resolvedNICMTU()
+                progress("Clamping installer MTU to \(mtu)…")
+                send("NIC=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'); [ -n \"$NIC\" ] && ip link set dev \"$NIC\" mtu \(mtu) 2>/dev/null || true\n")
+                try await buffer.wait(for: "localhost:~#", timeout: 10, failures: [])
 
                 progress("Mounting host setup share…")
                 send("modprobe virtiofs\n")

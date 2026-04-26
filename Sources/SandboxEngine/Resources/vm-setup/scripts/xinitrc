@@ -40,7 +40,24 @@ AUDIO_VOLUME=
 PROFILE_DIR=
 CHROME_LANG=
 DISPLAY_SCALE=
+MTU=
+KEY_REPEAT_DELAY_MS=
+KEY_REPEAT_RATE_HZ=
 [ -f /tmp/bromure/chrome-env ] && . /tmp/bromure/chrome-env
+
+# MTU clamp on the default-route interface. Default 1400 covers most
+# VPNs (WireGuard ~1420, IKEv2 ~1400). Override on the host via:
+#   defaults write io.bromure.app vm.mtu -int <value>
+[ -z "$MTU" ] && MTU=1400
+NIC=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+[ -n "$NIC" ] && doas ip link set dev "$NIC" mtu "$MTU" 2>/dev/null
+echo "xinitrc: ${NIC:-<no-default-route>} mtu=$MTU" > /dev/hvc0
+
+# Key-repeat: match macOS's InitialKeyRepeat + KeyRepeat so typing in
+# Chromium feels the same as typing in Safari on the host.
+if [ -n "$KEY_REPEAT_DELAY_MS" ] && [ -n "$KEY_REPEAT_RATE_HZ" ]; then
+    xset r rate "$KEY_REPEAT_DELAY_MS" "$KEY_REPEAT_RATE_HZ" 2>/dev/null
+fi
 
 # Set cursor size and display scale from runtime config (not build-time template)
 DISPLAY_SCALE="${DISPLAY_SCALE:-2}"

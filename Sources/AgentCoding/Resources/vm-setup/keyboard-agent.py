@@ -19,30 +19,26 @@ VSOCK_PORT = 5006
 VALID_LAYOUT = re.compile(r'^[a-zA-Z0-9_:()-]{1,32}$')
 
 
-CHROME_ENV_PATH = "/tmp/bromure/chrome-env"
+KEY_REPEAT_PATH = "/mnt/bromure-meta/key_repeat"
 
 
 def reapply_key_repeat(env):
     """Re-apply xset r rate after a setxkbmap call.
 
     setxkbmap rebuilds the X keymap, which resets autorepeat to the
-    X server's compile-time defaults. Without this re-apply, the rate
-    xinitrc sets at boot is silently undone the first time the host
-    pushes a layout via KeyboardBridge.
+    X server's compile-time defaults (660 ms / 25 Hz on Xorg). Without
+    this re-apply, the rate xinitrc sets at boot is silently undone
+    the first time the host pushes a layout via KeyboardBridge.
     """
-    delay = rate = None
     try:
-        with open(CHROME_ENV_PATH) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("KEY_REPEAT_DELAY_MS="):
-                    delay = line.split("=", 1)[1]
-                elif line.startswith("KEY_REPEAT_RATE_HZ="):
-                    rate = line.split("=", 1)[1]
+        with open(KEY_REPEAT_PATH) as f:
+            kr = f.read().strip()
     except OSError:
         return
-    if not delay or not rate or not delay.isdigit() or not rate.isdigit():
+    parts = kr.split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
         return
+    delay, rate = parts
     try:
         subprocess.run(["xset", "r", "rate", delay, rate],
                        env=env, capture_output=True, timeout=2)
