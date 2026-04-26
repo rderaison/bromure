@@ -36,6 +36,7 @@ struct TraceInspectorView: View {
     @State private var bodyRequest: Data?
     @State private var bodyResponse: Data?
     @State private var detailMode: DetailMode = .conversation
+    @FocusState private var listFocused: Bool
 
     enum DetailMode: String, CaseIterable, Identifiable {
         case conversation, raw
@@ -78,11 +79,54 @@ struct TraceInspectorView: View {
                 .padding(.vertical, 6)
                 .background(.bar)
 
-            List(filteredRecords, selection: $selectedID) { record in
-                row(record)
-                    .tag(record.id)
+            // ScrollView + LazyVStack instead of List: SwiftUI's
+            // macOS List bridges to NSTableView, and the
+            // selection: $binding path triggers AppKit's
+            // "reentrant operation in NSTableView delegate"
+            // warning the moment the inspector loads — the table
+            // delegate's initial-selection callback re-enters
+            // SwiftUI which writes back to the binding which
+            // re-enters the table delegate. ScrollView is pure
+            // SwiftUI rendering with no AppKit table under it,
+            // so the reentrancy class doesn't exist. LazyVStack
+            // only materialises visible rows so even 5000 records
+            // (our ring cap) stay responsive.
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(filteredRecords) { record in
+                            Button { selectedID = record.id } label: {
+                                row(record)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(record.id == selectedID
+                                                ? Color.accentColor.opacity(0.20)
+                                                : Color.clear)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .id(record.id)
+                            Divider()
+                        }
+                    }
+                }
+                // Keyboard navigation. Without `List(selection:)`
+                // we lose the built-in arrow handling, so wire it
+                // ourselves: focus the scroll region, intercept
+                // ↑/↓/⇞/⇟/⇱/⇲, advance selectedID, scroll the
+                // newly-selected row into view.
+                .focusable()
+                .focusEffectDisabled()
+                .focused($listFocused)
+                .onKeyPress(.upArrow)    { moveSelection(by: -1, proxy: proxy); return .handled }
+                .onKeyPress(.downArrow)  { moveSelection(by: +1, proxy: proxy); return .handled }
+                .onKeyPress(.pageUp)     { moveSelection(by: -10, proxy: proxy); return .handled }
+                .onKeyPress(.pageDown)   { moveSelection(by: +10, proxy: proxy); return .handled }
+                .onKeyPress(.home)       { moveSelection(toFirst: true, proxy: proxy); return .handled }
+                .onKeyPress(.end)        { moveSelection(toFirst: false, proxy: proxy); return .handled }
+                .onAppear { listFocused = true }
             }
-            .listStyle(.inset)
 
             HStack {
                 Text(String(format: NSLocalizedString(
@@ -143,6 +187,32 @@ struct TraceInspectorView: View {
                     .textFieldStyle(.plain)
             }
         }
+    }
+
+    /// Move the selection by `delta` rows in the filtered list and
+    /// scroll the new row into view. Wraps at the ends (no overscroll).
+    /// With no current selection, ↓ lands on the first row, ↑ on the
+    /// last — matches the macOS Finder / Mail convention.
+    private func moveSelection(by delta: Int, proxy: ScrollViewProxy) {
+        let records = filteredRecords
+        guard !records.isEmpty else { return }
+        let nextIdx: Int
+        if let cur = records.firstIndex(where: { $0.id == selectedID }) {
+            nextIdx = max(0, min(records.count - 1, cur + delta))
+        } else {
+            nextIdx = delta > 0 ? 0 : records.count - 1
+        }
+        let target = records[nextIdx].id
+        selectedID = target
+        proxy.scrollTo(target, anchor: .center)
+    }
+
+    private func moveSelection(toFirst: Bool, proxy: ScrollViewProxy) {
+        let records = filteredRecords
+        guard !records.isEmpty else { return }
+        let target = (toFirst ? records.first : records.last)!.id
+        selectedID = target
+        proxy.scrollTo(target, anchor: toFirst ? .top : .bottom)
     }
 
     private var filteredRecords: [TraceRecord] {
