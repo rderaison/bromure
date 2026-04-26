@@ -7,6 +7,21 @@ import Sparkle
 import SwiftUI
 @preconcurrency import Virtualization
 
+/// SPM resource bundle, with a fallback for the .app layout. SPM's
+/// auto-generated `Bundle.module` looks for the bundle next to
+/// `Bundle.main.bundleURL` (the .app root), but codesign requires
+/// resources under `Contents/Resources/`. Reading `Bundle.module`
+/// directly traps on a fresh-system .app launch — check the resource
+/// dir first and only fall back to `Bundle.module` for `swift run`.
+private let acResourceBundle: Bundle = {
+    let bundleName = "bromure_bromure-ac"
+    if let resourceURL = Bundle.main.resourceURL,
+       let bundle = Bundle(url: resourceURL.appendingPathComponent("\(bundleName).bundle")) {
+        return bundle
+    }
+    return Bundle.module
+}()
+
 @main
 struct BromureAC: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -251,24 +266,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// SPM-resource-bundle path to the in-VM bridge script. Resolved
     /// once and copied into each session's meta share.
     private lazy var bridgeScriptURL: URL? = {
-        Bundle.module.url(forResource: "vm-setup/bromure-vm-bridge",
-                          withExtension: "py")
+        acResourceBundle.url(forResource: "vm-setup/bromure-vm-bridge",
+                             withExtension: "py")
     }()
 
     /// SPM-resource-bundle path to the in-VM keyboard agent. Pushed
     /// into the meta share so xinitrc can launch it; the host-side
     /// `KeyboardBridge` then ferries macOS layout changes to it.
     private lazy var keyboardAgentURL: URL? = {
-        Bundle.module.url(forResource: "vm-setup/keyboard-agent",
-                          withExtension: "py")
+        acResourceBundle.url(forResource: "vm-setup/keyboard-agent",
+                             withExtension: "py")
     }()
 
     /// SPM-resource-bundle path to the in-VM scroll agent. Same
     /// pattern: dropped in the meta share, launched from xinitrc,
     /// fed by the host-side `ScrollBridge`.
     private lazy var scrollAgentURL: URL? = {
-        Bundle.module.url(forResource: "vm-setup/scroll-agent",
-                          withExtension: "py")
+        acResourceBundle.url(forResource: "vm-setup/scroll-agent",
+                             withExtension: "py")
     }()
 
     /// Sparkle auto-updater. Retained strongly — if this deallocates,
@@ -2015,17 +2030,11 @@ private func makeImageManager() throws -> UbuntuImageManager {
 }
 
 /// Locate the vm-setup directory (containing setup.sh) shipped in the SPM
-/// resource bundle. Resolves first via Bundle.module (the standard SPM
-/// path) and falls back to the bundled .app layout that build.sh produces.
+/// resource bundle. `acResourceBundle` handles both the .app layout
+/// (Contents/Resources/) and the `swift run` layout.
 private func locateSetupDir() throws -> URL {
-    if let url = Bundle.module.url(forResource: "vm-setup", withExtension: nil) {
+    if let url = acResourceBundle.url(forResource: "vm-setup", withExtension: nil) {
         return url
-    }
-    let exec = Bundle.main.bundleURL
-    let candidate = exec
-        .appendingPathComponent("Contents/Resources/bromure_bromure-ac.bundle/vm-setup")
-    if FileManager.default.fileExists(atPath: candidate.path) {
-        return candidate
     }
     throw ValidationError("vm-setup directory not found in resource bundle")
 }
