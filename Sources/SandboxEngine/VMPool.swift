@@ -8,6 +8,31 @@ import Virtualization
 /// When a VM is claimed (shown to user), the next one starts booting immediately.
 private let bromureDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil
 
+/// Outcome of the guest's boot-time network probe (see on-boot.sh).
+/// Drives whether we offer a vmnet repair to the user before a session opens.
+public enum NetworkDiagnosis: Sendable {
+    /// Guest got an IP, gateway reachable, external reachable.
+    case ok
+    /// No IP at all — DHCP failed. Both bootpd + NetworkSharing need a kick.
+    case noIP
+    /// Got an IP, but gateway/external unreachable. NetworkSharing kick.
+    case noTraffic
+    /// Probe didn't report in time — assume worst-case (no IP).
+    case unknown
+}
+
+/// Reference holder for an in-flight network probe result.
+/// Lets us start the probe in the background without blocking warm-up
+/// and read the latest value from any callsite that holds the WarmVM.
+public final class NetworkDiagnosisBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: NetworkDiagnosis = .ok
+    private var _resolved = false
+    public var value: NetworkDiagnosis { lock.withLock { _value } }
+    public var resolved: Bool { lock.withLock { _resolved } }
+    func set(_ v: NetworkDiagnosis) { lock.withLock { _value = v; _resolved = true } }
+}
+
 @MainActor
 public final class VMPool {
     /// Optional probe installed by the host app to query the host webcam's
@@ -29,8 +54,14 @@ public final class VMPool {
         public let serialWaiter: SerialWaiter
         /// MAC address claimed from the pool (release on teardown).
         public var macAddress: String?
+        /// Holder for the boot-time network probe result. Updated asynchronously
+        /// by a background Task so warm-up doesn't block on the in-guest probe.
+        /// Defaults to `.ok` (optimistic) until the probe reports otherwise.
+        public let networkDiagnosisBox: NetworkDiagnosisBox
+        /// Result of the boot-time network probe — drives repair UI.
+        public var networkDiagnosis: NetworkDiagnosis { networkDiagnosisBox.value }
         /// Whether the guest obtained an IP via DHCP during boot.
-        public var networkReady: Bool = true
+        public var networkReady: Bool { networkDiagnosisBox.value == .ok }
         /// Network mode the VM was booted/swapped to: "nat" or an interface name for bridged.
         public var bootedNetworkMode: String = "nat"
     }
@@ -194,6 +225,19 @@ public final class VMPool {
         let onBoot = "/usr/local/bin/on-boot.sh"
         let waiter = await waitForBoot(outputPipe: outputPipe, inputPipe: inputPipe, onBootDetected: onBoot)
 
+        // Run the in-guest network probe in the background — don't block warm-up.
+        // The probe (on-boot.sh) takes ~1–8s on a healthy network and up to ~12s
+        // on a broken one. Subscribe via SerialWaiter immediately so the markers
+        // aren't lost if the buffer trims, then update the box when one fires.
+        let diagnosisBox = NetworkDiagnosisBox()
+        Task.detached { [waiter] in
+            let diagnosis = await Self.probeNetwork(waiter: waiter, timeout: 15)
+            diagnosisBox.set(diagnosis)
+            if diagnosis != .ok {
+                print("[VMPool] Network diagnosis: \(diagnosis)")
+            }
+        }
+
         let poolDelegate = PoolVMDelegate()
         vm.delegate = poolDelegate
         self.poolVMDelegate = poolDelegate
@@ -206,7 +250,7 @@ public final class VMPool {
             networkFilter: networkFilter,
             serialWaiter: waiter,
             macAddress: mac,
-            networkReady: true,
+            networkDiagnosisBox: diagnosisBox,
             bootedNetworkMode: bootedNetworkMode
         )
     }
@@ -732,6 +776,45 @@ public final class VMPool {
         return ports
     }
 
+    /// Discard the currently-pooled warm VM (e.g. after a vmnet repair, since
+    /// its existing NetworkFilter is bound to the now-restarted shared-
+    /// networking stack). Releases MAC, destroys ephemeral disk, stops the
+    /// VM. Caller is responsible for triggering a fresh warm-up.
+    public func discardWarmVM() async {
+        guard let warm = warmVM else { return }
+        warmVM = nil
+        suspendTimer?.invalidate()
+        suspendTimer = nil
+        await Self.tearDown(warm)
+    }
+
+    /// Tear down a WarmVM that was already handed out via `claim()` (so it's
+    /// no longer in `self.warmVM`). Use this when a claimed-but-unused VM
+    /// must be discarded — e.g. user cancelled or the network was wedged
+    /// and we're about to repair + re-claim.
+    public func retire(_ warm: WarmVM) async {
+        await Self.tearDown(warm)
+    }
+
+    private static func tearDown(_ warm: WarmVM) async {
+        if let mac = warm.macAddress {
+            MACAddressPool.shared.release(mac)
+        }
+        if warm.vm.state == .running || warm.vm.state == .paused {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                DispatchQueue.main.async {
+                    warm.vm.stop { _ in cont.resume() }
+                }
+            }
+        }
+        warm.serialOutput.fileHandleForReading.readabilityHandler = nil
+        try? warm.serialOutput.fileHandleForReading.close()
+        try? warm.serialOutput.fileHandleForWriting.close()
+        try? warm.serialInput.fileHandleForReading.close()
+        try? warm.serialInput.fileHandleForWriting.close()
+        try? warm.ephemeralDisk.destroy()
+    }
+
     /// Shut down the pool and clean up.
     public func shutdown() async {
         suspendTimer?.invalidate()
@@ -869,6 +952,23 @@ public final class VMPool {
                     }
                 }
             }
+        }
+    }
+
+    /// Race the three network probe markers emitted by on-boot.sh and return
+    /// the first one that fires. Returns `.unknown` if none appear in time.
+    private static func probeNetwork(waiter: SerialWaiter, timeout: TimeInterval) async -> NetworkDiagnosis {
+        await withTaskGroup(of: NetworkDiagnosis?.self) { group in
+            group.addTask { await waiter.probe(for: "BROMURE_NET_OK", timeout: timeout) ? .ok : nil }
+            group.addTask { await waiter.probe(for: "BROMURE_NET_NO_IP", timeout: timeout) ? .noIP : nil }
+            group.addTask { await waiter.probe(for: "BROMURE_NET_NO_TRAFFIC", timeout: timeout) ? .noTraffic : nil }
+            for await result in group {
+                if let result {
+                    group.cancelAll()
+                    return result
+                }
+            }
+            return .unknown
         }
     }
 

@@ -27,12 +27,22 @@ final class NativeTabBarModel {
 
 
     /// What to show in the URL field while the active tab is NOT being
-    /// edited. Mirrors Safari Compact: just the host (e.g. `apple.com`),
-    /// not the full path. The full URL is swapped in on focus.
+    /// edited. Strips the scheme (so "macbidouille.com/news/…" instead
+    /// of "https://macbidouille.com/news/…") for a cleaner read, but
+    /// keeps the path/query/fragment so two tabs on the same host stay
+    /// distinguishable. The full URL with scheme is still swapped in on
+    /// focus for editing/copying.
     static func displayValue(for tab: TabInfo?) -> String {
         guard let tab, !tab.url.isEmpty else { return "" }
-        if let url = URL(string: tab.url), let host = url.host { return host }
-        return tab.url
+        guard let url = URL(string: tab.url), let host = url.host else {
+            return tab.url
+        }
+        var s = host
+        let path = url.path
+        if !path.isEmpty && path != "/" { s += path }
+        if let q = url.query, !q.isEmpty { s += "?" + q }
+        if let f = url.fragment, !f.isEmpty { s += "#" + f }
+        return s
     }
 
     /// Called when the user clicks a tab or picks one via keyboard.
@@ -381,7 +391,7 @@ private struct InactiveTabPill: View {
     private var displayTitle: String {
         if !tab.title.isEmpty { return tab.title }
         if let url = URL(string: tab.url), let host = url.host { return host }
-        return tab.url.isEmpty ? "New Tab" : tab.url
+        return tab.url.isEmpty ? String(localized: "New Tab") : tab.url
     }
 }
 

@@ -713,6 +713,20 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         action: #selector(showSettings(_:)),
                         keyEquivalent: ",")
         appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: NSLocalizedString("Hide Bromure", comment: ""),
+                        action: #selector(NSApplication.hide(_:)),
+                        keyEquivalent: "h")
+        let hideOthers = NSMenuItem(
+            title: NSLocalizedString("Hide Others", comment: ""),
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h"
+        )
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(withTitle: NSLocalizedString("Show All", comment: ""),
+                        action: #selector(NSApplication.unhideAllApplications(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: NSLocalizedString("Quit Bromure", comment: ""),
                         action: #selector(NSApplication.terminate(_:)),
                         keyEquivalent: "q")
@@ -955,7 +969,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.showSessionError()
                 return
             }
-            let networkReady = warm.networkReady
+            let proceed = await self.presentNetworkRepairIfNeeded(warm: warm) { [weak self] in
+                self?.openNewBrowser(initialURL: initialURL)
+            }
+            guard proceed else { return }
             let session = BrowserSession(warmVM: warm, config: config)
             session.onClosed = { [weak self] session in
                 guard let self else { return }
@@ -969,9 +986,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
             session.show()
-            if !networkReady {
-                Self.showNetworkWarning()
-            }
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
                 self.state.pool?.scheduleWarmUp()
             }
@@ -1076,7 +1090,11 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.showSessionError()
                 return
             }
-            let networkReady = warm.networkReady
+            self.state.isLaunching = false
+            let proceed = await self.presentNetworkRepairIfNeeded(warm: warm) { [weak self] in
+                self?.openNewBrowser(with: profile, initialURL: initialURL)
+            }
+            guard proceed else { return }
             let session = BrowserSession(
                 warmVM: warm, config: config,
                 profile: profile,
@@ -1096,10 +1114,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
             session.show()
-            self.state.isLaunching = false
-            if !networkReady {
-                Self.showNetworkWarning()
-            }
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
                 self.state.pool?.scheduleWarmUp()
             }
@@ -1124,6 +1138,94 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
         alert.runModal()
+    }
+
+    /// Returns true if the caller should proceed with `warm` (network is
+    /// healthy, or user opted to continue anyway). Returns false if the
+    /// warm VM was retired — either the user cancelled, or a repair was
+    /// triggered and `relaunch` was invoked to start a fresh session.
+    @MainActor
+    private func presentNetworkRepairIfNeeded(
+        warm: SandboxEngine.VMPool.WarmVM,
+        relaunch: @escaping @MainActor () -> Void
+    ) async -> Bool {
+        // The in-guest probe runs in the background during warm-up — it usually
+        // finishes long before the user claims a VM, but on a cold start the user
+        // can race ahead. Give it a brief moment to land before we decide.
+        if !warm.networkDiagnosisBox.resolved {
+            for _ in 0..<10 {
+                try? await Task.sleep(for: .milliseconds(100))
+                if warm.networkDiagnosisBox.resolved { break }
+            }
+        }
+        if warm.networkReady { return true }
+
+        let networkMode = UserDefaults.standard.string(forKey: "vm.networkMode") ?? "nat"
+        // In bridged mode the host's network is upstream — kickstarting vmnet
+        // wouldn't help. Fall back to the existing passive warning.
+        if networkMode != "nat" {
+            Self.showNetworkWarning()
+            return true
+        }
+
+        let action: NetworkHealer.Action
+        let problem: String
+        switch warm.networkDiagnosis {
+        case .noIP, .unknown:
+            action = .both
+            problem = NSLocalizedString(
+                "The VM didn't get a network address. macOS's shared networking stack (vmnet) may be wedged.",
+                comment: ""
+            )
+        case .noTraffic:
+            action = .nat
+            problem = NSLocalizedString(
+                "The VM has an address but can't reach the network. macOS's NAT/vmnet stack may be wedged.",
+                comment: ""
+            )
+        case .ok:
+            return true
+        }
+
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Network Issue", comment: "")
+        alert.informativeText = problem + "\n\n" + NSLocalizedString(
+            "Bromure can restart the macOS networking daemons. You'll be asked for your password.",
+            comment: ""
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("Repair Network", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Continue Anyway", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            // Repair: retire the broken VM, kickstart, then relaunch.
+            if let pool = state.pool { await pool.retire(warm) }
+            let ok = await NetworkHealer.shared.repair(action)
+            if !ok {
+                let failed = NSAlert()
+                failed.messageText = NSLocalizedString("Network Repair Cancelled", comment: "")
+                failed.informativeText = NSLocalizedString(
+                    "The repair was cancelled or failed. Try again from the menu.",
+                    comment: ""
+                )
+                failed.alertStyle = .warning
+                failed.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+                failed.runModal()
+                return false
+            }
+            relaunch()
+            return false
+        case .alertSecondButtonReturn:
+            // Continue Anyway with the broken VM.
+            return true
+        default:
+            // Cancel.
+            if let pool = state.pool { await pool.retire(warm) }
+            return false
+        }
     }
 
     // MARK: - Automation
@@ -1966,6 +2068,12 @@ final class BrowserSession {
                 bridge.onTabsChanged = { [weak tabModel] tabs in
                     tabModel?.setTabs(tabs)
                 }
+                // Any host-initiated tab action (URL submit, ⌘T, click, …)
+                // should resume a paused VM so the command isn't stranded
+                // in the vsock buffer.
+                bridge.onWillSend = { [weak self] in
+                    self?.autoSuspend?.resumeForAPIRequest()
+                }
                 tabModel.onActivate = { [weak bridge, weak tabModel] id in
                     // Mark active locally first so the URL bar's "active tab"
                     // lookup is immediately correct, even if the guest takes
@@ -2050,6 +2158,21 @@ final class BrowserSession {
                           Self.nativeChromeShortcutKeys.contains(key)
                     else { return event }
 
+                    // Snapshot modifiers off `event` (non-Sendable) so the
+                    // @MainActor Task can route ⌘H vs ⌥⌘H without capturing
+                    // the event itself.
+                    let modifiers = event.modifierFlags
+                        .intersection(.deviceIndependentFlagsMask)
+
+                    // ⇧⌘H / ⌃⌘H aren't standard hide shortcuts; let them
+                    // fall through to the guest instead of being silently
+                    // swallowed by the monitor.
+                    if key == "h",
+                       modifiers != [.command],
+                       modifiers != [.command, .option] {
+                        return event
+                    }
+
                     Task { @MainActor in
                         guard let bridge, let tabModel, let window else { return }
                         switch key {
@@ -2090,6 +2213,22 @@ final class BrowserSession {
                                 else { return }
                                 Self.runPrintOperation(pdf: pdf)
                             }
+                        case "w":
+                            // ⌘W closes the active tab when more than one
+                            // is open; on the last tab it falls through to
+                            // a regular window close (which tears down the
+                            // session). Mirrors Safari/Chrome behaviour and
+                            // keeps the macOS-app feel native-chrome aims
+                            // for. The active id is resolved guest-side
+                            // because the host's `active` flag is fed by a
+                            // 400 ms poll and lags behind spontaneous
+                            // tab switches in Chromium, which would
+                            // otherwise close the wrong tab.
+                            if tabModel.tabs.count > 1 {
+                                bridge.closeActive()
+                            } else {
+                                window.performClose(nil)
+                            }
                         case "1", "2", "3", "4", "5", "6", "7", "8", "9":
                             // Safari/Chrome convention: ⌘N switches to the
                             // Nth tab; ⌘9 jumps to the LAST tab regardless
@@ -2101,6 +2240,27 @@ final class BrowserSession {
                             let target = (n == 9) ? tabs.last! : tabs[min(n - 1, tabs.count - 1)]
                             tabModel.markActiveLocally(target.id)
                             bridge.activate(id: target.id)
+                        case "h":
+                            // VZVirtualMachineView's performKeyEquivalent
+                            // claims ⌘+letter shortcuts before AppKit walks
+                            // the main menu, so the Hide menu items never
+                            // fire when a session window is key. Dispatch
+                            // hide ourselves; the menu items still cover
+                            // launcher/settings windows where no monitor
+                            // is installed.
+                            //
+                            // Defer to the next runloop tick: calling
+                            // NSApp.hide directly from within keyDown
+                            // processing of a session window doesn't
+                            // actually hide — the in-flight event seems
+                            // to race the hide and win.
+                            DispatchQueue.main.async {
+                                if modifiers == [.command, .option] {
+                                    NSApp.hideOtherApplications(nil)
+                                } else {
+                                    NSApp.hide(nil)
+                                }
+                            }
                         default:
                             break
                         }
@@ -2376,14 +2536,19 @@ final class BrowserSession {
     /// stay in sync with the switch statement in the monitor handler.
     /// In-page editing shortcuts (⌘C/⌘V/⌘X/⌘A/⌘Z) intentionally aren't here:
     /// they need to keep flowing to Chromium so selection/copy works on
-    /// the page. System shortcuts (⌘Tab/⌘Q/⌘W/⌘Space/⌘M/⌘H) are handled
-    /// by macOS itself once `capturesSystemKeys` is off — ⌘Q quits Bromure
-    /// and ⌘W closes the window via AppKit's standard responder chain.
+    /// the page. ⌘Q quits Bromure via AppKit's standard responder chain
+    /// once `capturesSystemKeys` is off.
     /// ⌘P is here unconditionally; the handler no-ops when the profile
     /// doesn't allow printing, which suppresses Chromium's hidden print
     /// dialog as a side benefit.
+    /// ⌘W is here so we can close the active tab first and only close the
+    /// window when there's a single tab left.
+    /// ⌘H / ⌥⌘H are here because VZVirtualMachineView's performKeyEquivalent
+    /// claims ⌘+letter chords before AppKit walks the main menu, so the
+    /// Hide menu items never fire when a session window is key — we
+    /// dispatch NSApp.hide / hideOtherApplications ourselves instead.
     static let nativeChromeShortcutKeys: Set<String> = [
-        "t", "l", "r", "p", "[", "]",
+        "t", "w", "l", "r", "p", "h", "[", "]",
         "1", "2", "3", "4", "5", "6", "7", "8", "9",
     ]
 
