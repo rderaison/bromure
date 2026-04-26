@@ -1,0 +1,130 @@
+pipeline {
+    agent { label 'macosx-builder' }
+
+    parameters {
+        booleanParam(
+            name: 'PUSH_RELEASE',
+            defaultValue: false,
+            description: 'Upload the signed DMG to DigitalOcean Spaces and register it with the appcast backend.'
+        )
+        choice(
+            name: 'RELEASE_CHANNEL',
+            choices: ['stable', 'beta'],
+            description: 'Appcast channel the release is published on. Only used when PUSH_RELEASE is checked.'
+        )
+    }
+
+    environment {
+        KEYCHAIN_PASSWORD = credentials('KEYCHAIN_PASSWORD')
+        BUILD_KEYCHAIN    = "${HOME}/build.keychain"
+
+        // Non-secret Spaces config. The secrets (access key, private key,
+        // auth token) live in Jenkins credentials. Same bucket as the
+        // browser pipeline; release-upload.mjs segregates the two
+        // products into separate prefixes (releases-agentic-coding/
+        // for this pipeline).
+        DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+        DO_SPACES_REGION      = 'nyc3'
+        DO_SPACES_BUCKET      = 'bromure-dl'
+        DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
+        RELEASE_API_URL       = 'https://bromure.io/api/v1/release-agentic-coding'
+    }
+
+    stages {
+        stage('Unlock Keychain') {
+            steps {
+                sh '''
+                    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$BUILD_KEYCHAIN"
+                    security list-keychains -s "$BUILD_KEYCHAIN" login.keychain-db
+                    security default-keychain -s "$BUILD_KEYCHAIN"
+                '''
+            }
+        }
+
+        stage('Resolve version') {
+            steps {
+                // Read CFBundleShortVersionString out of the AC Info.plist
+                // and stash it for later stages. Avoids a brittle external
+                // dependency on a globally-set BROMURE_VERSION env var.
+                script {
+                    env.BROMURE_VERSION = sh(
+                        script: '''/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+                                       Sources/AgentCoding/Info.plist''',
+                        returnStdout: true
+                    ).trim()
+                    echo "Building Bromure Agentic Coding ${env.BROMURE_VERSION}"
+                }
+            }
+        }
+
+        stage('Package') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DEVELOPER_ID',    variable: 'DEVELOPER_ID'),
+                    string(credentialsId: 'APPLE_ID',        variable: 'APPLE_ID'),
+                    string(credentialsId: 'TEAM_ID',         variable: 'TEAM_ID'),
+                    string(credentialsId: 'APP_PASSWORD',    variable: 'APP_PASSWORD'),
+                    file(credentialsId:   'PROVISION_PROFILE_AC', variable: 'PROVISION_PROFILE')
+                ]) {
+                    sh '''
+                        rm -f bromure-ac.provisionprofile
+                        cp "$PROVISION_PROFILE" bromure-ac.provisionprofile
+                        ./package.sh bromure-ac
+                    '''
+                }
+            }
+        }
+
+        stage('Archive') {
+            steps {
+                sh '''
+                    BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
+                    DMG_FILENAME="BromureAgenticCoding-${BROMURE_VERSION}.dmg"
+                    cp "$BUILD_DIR/BromureAgenticCoding.dmg" "${WORKSPACE}/${DMG_FILENAME}"
+                '''
+                archiveArtifacts artifacts: "BromureAgenticCoding-${BROMURE_VERSION}.dmg", fingerprint: true
+            }
+        }
+
+        stage('Release') {
+            when { expression { return params.PUSH_RELEASE } }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'SPARKLE_PRIVATE_KEY', variable: 'SPARKLE_PRIVATE_KEY'),
+                    string(credentialsId: 'DO_SPACES_KEY',       variable: 'DO_SPACES_KEY'),
+                    string(credentialsId: 'DO_SPACES_SECRET',    variable: 'DO_SPACES_SECRET'),
+                    string(credentialsId: 'RELEASES_TOKEN',  variable: 'RELEASE_AUTH_TOKEN')
+                ]) {
+                    sh '''
+                        set -euo pipefail
+
+                        # Install the release-tool deps once per build. npm ci
+                        # only when a lock file is committed; fall back to install.
+                        # Wrapped through socket.dev per project policy.
+                        (cd tools && if [ -f package-lock.json ]; then \
+                                        npx --yes @socketsecurity/cli npm ci --silent; \
+                                     else \
+                                        npx --yes @socketsecurity/cli npm install --silent; \
+                                     fi)
+
+                        # --product bromure-ac selects the right Spaces
+                        # prefix (releases-agentic-coding/) and appcast
+                        # endpoint inside release-upload.mjs.
+                        node tools/release-upload.mjs \
+                            --product bromure-ac \
+                            --file "${WORKSPACE}/BromureAgenticCoding-${BROMURE_VERSION}.dmg" \
+                            --version "${BROMURE_VERSION}" \
+                            --channel "${RELEASE_CHANNEL}" \
+                            --min-system-version "14.0"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'security default-keychain -s login.keychain-db || true'
+        }
+    }
+}
