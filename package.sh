@@ -275,8 +275,10 @@ hdiutil create -volname "$APP_NAME" \
     -ov -format UDRW \
     "$DMG_RW"
 
-# Mount the read-write DMG
-MOUNT_DIR=$(hdiutil attach -readwrite -noverify "$DMG_RW" | grep "/Volumes/$APP_NAME" | awk '{print $NF}')
+# Mount the read-write DMG. hdiutil emits tab-separated columns; default
+# awk would split on whitespace and lose everything after the first space
+# in volume names like "Bromure Agentic Coding".
+MOUNT_DIR=$(hdiutil attach -readwrite -noverify "$DMG_RW" | grep "/Volumes/$APP_NAME" | awk -F'\t' '{print $NF}')
 # Wait for Finder to register the volume
 sleep 2
 
