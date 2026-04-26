@@ -14,12 +14,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
     let profileID: UUID
     let certCache: CertCache
     let swapper: TokenSwapper
+    let traceStore: TraceStore
+    let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
 
-    init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper) {
+    init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
+         traceStore: TraceStore,
+         sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?) {
         self.fd = fd
         self.profileID = profileID
         self.certCache = certCache
         self.swapper = swapper
+        self.traceStore = traceStore
+        self.sessionTraceProvider = sessionTraceProvider
     }
 
     /// Drives the full MITM exchange. Must be called from a Task —
@@ -35,6 +41,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
     }
 
     private func drive() async throws {
+        let t0 = Date()
+
         // 1. CONNECT request from client (proxy command). Treat as
         //    ASCII — proxy headers don't legally carry non-ASCII.
         let connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
@@ -61,6 +69,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // 4. Read the wrapped HTTP request through TLS.
         let request = try readRawHTTPRequest(via: tls, maxBytes: 8 * 1024 * 1024)
 
+        // Pre-swap: scan for unswapped Bearer / x-api-key tokens. The
+        // trace store records these as `LeakEntry` values so the user
+        // sees exactly which secrets escaped the swap pipeline.
+        let leaks = swapper.detectLeaks(in: request, profileID: profileID)
+
         // 5. Swap tokens. host param is the SNI name; entries that
         //    don't match are no-ops.
         let swap = swapper.swap(rawRequest: request, host: host, profileID: profileID)
@@ -70,6 +83,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     "[mitm] swapped \(s.fakePreview) → \(s.realPreview) on \(s.host)\n".utf8))
             }
         }
+        for leak in leaks {
+            FileHandle.standardError.write(Data(
+                "[mitm] LEAK \(leak.header)=\(leak.valuePreview) on \(host) (\(leak.suspicion.rawValue))\n".utf8))
+        }
 
         // 6. Send to upstream via URLSession. Build a URLRequest from
         //    the raw HTTP wire frame.
@@ -78,7 +95,94 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // 7. Send the response back through TLS.
         try tls.write(upstreamResp)
 
-        // 8. Half-close on our side; let the client decide when it's done.
+        // 8. Trace. Build a TraceRecord from what we observed and
+        //    hand it to the engine's TraceStore. Body capture is
+        //    gated by the per-session level + host allowlist.
+        let elapsed = Date().timeIntervalSince(t0) * 1000
+        await emitTrace(host: host, port: port,
+                        preSwapRequest: request,
+                        upstreamResponse: upstreamResp,
+                        swaps: swap.swaps,
+                        leaks: leaks,
+                        latencyMs: elapsed)
+    }
+
+    /// Build + record the TraceRecord. Body capture decision is made
+    /// here so the proxy hot path doesn't pay the cost when traces
+    /// are off. Runs on the connection's Task — no main-actor hop
+    /// for the body files (TraceStore.queue handles them off-thread).
+    private func emitTrace(host: String, port: Int,
+                           preSwapRequest: Data,
+                           upstreamResponse: Data,
+                           swaps: [SwapRecord],
+                           leaks: [LeakEntry],
+                           latencyMs: Double) async {
+        guard let session = sessionTraceProvider(),
+              session.level.recordsActivity else { return }
+
+        // Parse the request line for the trace.
+        let (method, path) = Self.parseRequestLine(preSwapRequest)
+        let statusCode = Self.parseStatusCode(upstreamResponse)
+
+        let captureBody = session.level.capturesBodyForHost(host)
+        let bodyStored = captureBody && (!preSwapRequest.isEmpty || !upstreamResponse.isEmpty)
+
+        // Cheap eager parse — we still have the bodies in memory at
+        // this point (no decrypt round-trip) and the parser short-
+        // circuits fast on non-AI hosts. Lets the inspector's
+        // "Conversations only" filter be a true boolean check
+        // instead of "host is AI" approximation.
+        let isConversation: Bool = bodyStored
+            ? ConversationParser.parse(host: host,
+                                       requestBody: preSwapRequest,
+                                       responseBody: upstreamResponse) != nil
+            : false
+
+        let record = TraceRecord(
+            sessionID: session.sessionID,
+            profileID: profileID,
+            host: host, port: port,
+            method: method, path: path,
+            statusCode: statusCode,
+            requestBytes: preSwapRequest.count,
+            responseBytes: upstreamResponse.count,
+            latencyMs: latencyMs,
+            swaps: swaps.map { SwapEntry(header: "Authorization/x-api-key",
+                                         fakePreview: $0.fakePreview,
+                                         realPreview: $0.realPreview) },
+            leaks: leaks,
+            bodyStored: bodyStored,
+            isConversation: isConversation
+        )
+
+        let store = traceStore
+        let req = captureBody ? preSwapRequest : nil
+        let res = captureBody ? upstreamResponse : nil
+        await MainActor.run {
+            store.record(record, requestBody: req, responseBody: res)
+        }
+    }
+
+    /// Pull "GET /foo HTTP/1.1" → ("GET", "/foo").
+    private static func parseRequestLine(_ raw: Data) -> (method: String, path: String) {
+        guard let str = String(data: raw.prefix(8 * 1024), encoding: .ascii),
+              let lineEnd = str.range(of: "\r\n") else {
+            return ("?", "/")
+        }
+        let line = str[..<lineEnd.lowerBound]
+        let parts = line.split(separator: " ")
+        guard parts.count >= 2 else { return ("?", "/") }
+        return (String(parts[0]), String(parts[1]))
+    }
+
+    /// Pull "HTTP/1.1 200 OK" → 200.
+    private static func parseStatusCode(_ raw: Data) -> Int {
+        guard let str = String(data: raw.prefix(64), encoding: .ascii),
+              let lineEnd = str.range(of: "\r\n") else { return 0 }
+        let line = str[..<lineEnd.lowerBound]
+        let parts = line.split(separator: " ")
+        guard parts.count >= 2, let n = Int(parts[1]) else { return 0 }
+        return n
     }
 }
 

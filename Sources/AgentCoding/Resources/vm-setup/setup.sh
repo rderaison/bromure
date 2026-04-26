@@ -219,6 +219,12 @@ update-locale LANG=en_US.UTF-8
 
 step "apt-get update" \
     retry apt-get update -y -qq
+# Pull every security + bug-fix update that landed since the base
+# noble release. Without this, `apt upgrade` on first launch in the
+# user's VM would surface a wall of pending updates immediately —
+# we'd rather ship a base image that's already current.
+step "apt-get dist-upgrade (catch security + bug fixes)" \
+    retry apt-get dist-upgrade -y -q -o Dpkg::Options::="--force-confnew"
 step "apt-get install kernel+grub+systemd+base" \
     retry apt-get install -y -q --no-install-recommends \
         linux-image-virtual initramfs-tools \

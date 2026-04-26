@@ -111,7 +111,78 @@ public final class TokenSwapper: @unchecked Sendable {
         return SwapResult(modified: out, swaps: swaps)
     }
 
-    private static func preview(_ s: String) -> String {
+    /// Scan a pre-swap request for `Authorization: Bearer …` and
+    /// `*-api-key: …` values that **aren't** in the profile's fake
+    /// map. Each returned `LeakEntry` is a credential-shaped value
+    /// the proxy did NOT swap — i.e. either a real secret the user
+    /// pasted directly into the VM (bypassing bromure's vault) or
+    /// some other opaque token bromure doesn't manage. The Trace
+    /// Inspector flags these prominently.
+    public func detectLeaks(in rawRequest: Data, profileID: UUID) -> [LeakEntry] {
+        lock.lock()
+        let knownFakes: Set<String> = Set(maps[profileID]?.entries.map { $0.fake } ?? [])
+        lock.unlock()
+
+        guard let headerEndIdx = rawRequest.range(of: Data("\r\n\r\n".utf8))?.lowerBound,
+              let headerStr = String(data: rawRequest.subdata(in: 0..<headerEndIdx), encoding: .ascii)
+        else { return [] }
+
+        var leaks: [LeakEntry] = []
+        for line in headerStr.split(separator: "\r\n") {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            let lname = name.lowercased()
+
+            // Only inspect headers that conventionally carry credentials.
+            let token: String?
+            if lname == "authorization" {
+                let parts = value.split(separator: " ", maxSplits: 1)
+                if parts.count == 2,
+                   parts[0].lowercased() == "bearer" || parts[0].lowercased() == "token" {
+                    token = String(parts[1])
+                } else {
+                    token = nil
+                }
+            } else if lname == "x-api-key"
+                   || lname.hasSuffix("-api-key")
+                   || lname == "api-key" {
+                token = value
+            } else {
+                token = nil
+            }
+            guard let tok = token, !tok.isEmpty else { continue }
+
+            // If the token is one of our minted fakes, the swap will
+            // fire — not a leak.
+            if knownFakes.contains(tok) { continue }
+
+            // Heuristic: known secret prefixes are almost certainly
+            // real credentials.
+            let knownPrefixes = ["sk-ant-", "sk-", "ghp_", "ghu_", "ghs_", "gho_",
+                                 "github_pat_", "glpat-", "xoxp-", "xoxb-",
+                                 "AIza", "AKIA"]
+            let lowerTok = tok.lowercased()
+            if knownPrefixes.contains(where: { lowerTok.hasPrefix($0.lowercased()) }) {
+                leaks.append(LeakEntry(
+                    header: name,
+                    valuePreview: Self.preview(tok),
+                    suspicion: .knownPrefix))
+                continue
+            }
+            // Otherwise: opaque token in an auth header, ≥20 chars
+            // is suspicious enough to flag.
+            if tok.count >= 20 {
+                leaks.append(LeakEntry(
+                    header: name,
+                    valuePreview: Self.preview(tok),
+                    suspicion: .opaqueToken))
+            }
+        }
+        return leaks
+    }
+
+    static func preview(_ s: String) -> String {
         guard s.count > 8 else { return "***" }
         return String(s.prefix(4)) + "…" + String(s.suffix(4))
     }

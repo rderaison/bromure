@@ -201,6 +201,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// launch alongside the auto-generated key.
     public var importedSSHKeys: [ImportedSSHKey]
 
+    /// How aggressively the proxy records traffic for this profile.
+    /// Default `.off` — opt-in because higher levels write request/
+    /// response bodies (encrypted) to disk.
+    public var traceLevel: TraceLevel
+
     public var createdAt: Date
     public var lastUsedAt: Date?
 
@@ -302,6 +307,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         gitHTTPSCredentials: [GitHTTPSCredential] = [],
         manualTokens: [ManualToken] = [],
         importedSSHKeys: [ImportedSSHKey] = [],
+        traceLevel: TraceLevel = .off,
         createdAt: Date = Date(),
         lastUsedAt: Date? = nil,
         baseImageVersionAtClone: String? = nil,
@@ -331,6 +337,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.gitHTTPSCredentials = gitHTTPSCredentials
         self.manualTokens = manualTokens
         self.importedSSHKeys = importedSSHKeys
+        self.traceLevel = traceLevel
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.baseImageVersionAtClone = baseImageVersionAtClone
@@ -365,6 +372,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case additionalTools
         case manualTokens
         case importedSSHKeys
+        case traceLevel
     }
 
     public init(from decoder: Decoder) throws {
@@ -418,6 +426,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         additionalTools = dedup
         manualTokens = try c.decodeIfPresent([ManualToken].self, forKey: .manualTokens) ?? []
         importedSSHKeys = try c.decodeIfPresent([ImportedSSHKey].self, forKey: .importedSSHKeys) ?? []
+        traceLevel = try c.decodeIfPresent(TraceLevel.self, forKey: .traceLevel) ?? .off
     }
 
     /// Explicit encoder — skips the legacy `folderPath` key (we only ever
@@ -459,6 +468,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if !importedSSHKeys.isEmpty {
             try c.encode(importedSSHKeys, forKey: .importedSSHKeys)
+        }
+        if traceLevel != .off {
+            try c.encode(traceLevel, forKey: .traceLevel)
         }
     }
 

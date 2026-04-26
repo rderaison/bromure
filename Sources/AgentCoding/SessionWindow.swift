@@ -111,6 +111,10 @@ final class TabbedSessionWindow: NSWindow {
             onNew:    { [weak self] in
                 guard let self else { return }
                 self.acDelegate?.spawnNewTab(in: self)
+            },
+            onInspectTrace: { [weak self] in
+                guard let self else { return }
+                self.acDelegate?.openTraceInspector(for: self.profile)
             })
         toolbarChromeDelegate = delegate
 
@@ -208,15 +212,18 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
     let onSelect: (Int) -> Void
     let onClose:  (Int) -> Void
     let onNew:    () -> Void
+    let onInspectTrace: () -> Void
 
     init(model: TabsModel,
          onSelect: @escaping (Int) -> Void,
          onClose:  @escaping (Int) -> Void,
-         onNew:    @escaping () -> Void) {
+         onNew:    @escaping () -> Void,
+         onInspectTrace: @escaping () -> Void) {
         self.model = model
         self.onSelect = onSelect
         self.onClose = onClose
         self.onNew = onNew
+        self.onInspectTrace = onInspectTrace
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -239,7 +246,8 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
             model: model,
             onSelect: onSelect,
             onClose:  onClose,
-            onNew:    onNew
+            onNew:    onNew,
+            onInspectTrace: onInspectTrace
         ))
         host.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(host)
@@ -275,6 +283,7 @@ private struct TabsBar: View {
     let onSelect: (Int) -> Void
     let onClose:  (Int) -> Void
     let onNew:    () -> Void
+    let onInspectTrace: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
@@ -312,6 +321,16 @@ private struct TabsBar: View {
                     .foregroundStyle(.tertiary)
                     .help("Waiting for VM to report its IP")
             }
+
+            // Trace inspector — opens the global window pre-filtered
+            // to this profile. Mirrors the browser's per-window
+            // inspector affordance.
+            Button(action: onInspectTrace) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .frame(width: 24, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .help(NSLocalizedString("Inspect this profile's session trace (⇧⌘I)", comment: ""))
         }
     }
 }

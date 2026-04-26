@@ -951,6 +951,29 @@ struct ProfileEditorView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // Trace level for the proxy. Off by default — opt-in
+            // because higher levels write encrypted body files to
+            // ~/Library/Application Support/BromureAC/traces/.
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Label("Session trace", systemImage: "doc.text.magnifyingglass")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Picker("", selection: $draft.traceLevel) {
+                        ForEach(TraceLevel.allCases, id: \.self) { level in
+                            Text(level.displayName).tag(level)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 200)
+                }
+                Text("Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as profile secrets. View at App → Trace Inspector (⇧⌘I).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack {
                 Text("Manual token rules")
                     .font(.subheadline.weight(.semibold))

@@ -34,7 +34,11 @@ public final class UbuntuImageManager {
     /// Bumped to 29 (with explicit approval) to install codex via the
     /// official Rust binary release from github.com/openai/codex
     /// instead of the flaky npm postinstall path.
-    public static let imageVersion = "29"
+    /// Bumped to 30 (with explicit approval) to run apt-get
+    /// dist-upgrade after the initial bootstrap — the base image now
+    /// ships with every security/bug fix that landed since the noble
+    /// release, so `apt upgrade` in the user's VM is a no-op on day 1.
+    public static let imageVersion = "30"
 
     /// Ubuntu LTS release we target. Update when a new LTS lands.
     public static let ubuntuRelease = "noble"
@@ -338,7 +342,7 @@ public final class UbuntuImageManager {
                 send("mkdir -p /tmp/setup && mount -t virtiofs setup /tmp/setup\n")
                 try await buffer.wait(for: "localhost:~#", timeout: 60, failures: [])
 
-                progress("Running setup.sh (apt + npm — expect ~5 min)…")
+                progress("Running setup.sh (apt + npm)…")
                 let scale = Self.detectDisplayScale()
                 send("sh /tmp/setup/setup.sh \(scale)\n")
                 try await buffer.wait(

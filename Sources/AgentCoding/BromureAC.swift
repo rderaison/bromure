@@ -2,6 +2,7 @@ import ArgumentParser
 import Cocoa
 import Crypto
 import Foundation
+import SandboxEngine
 import Sparkle
 import SwiftUI
 @preconcurrency import Virtualization
@@ -177,6 +178,13 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     windowMenu.addItem(withTitle: L("Close"),
                        action: #selector(NSWindow.performClose(_:)),
                        keyEquivalent: "w")
+    windowMenu.addItem(NSMenuItem.separator())
+    let inspectorItem = NSMenuItem(title: L("Trace Inspector…"),
+                                   action: #selector(ACAppDelegate.openTraceInspectorAction(_:)),
+                                   keyEquivalent: "i")
+    inspectorItem.keyEquivalentModifierMask = [.command, .shift]
+    inspectorItem.target = delegate
+    windowMenu.addItem(inspectorItem)
     return main
 }
 
@@ -375,10 +383,40 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             mainWindow = nil
             return
         }
+        if win === traceInspectorWindow {
+            traceInspectorWindow = nil
+            return
+        }
         if let session = win as? TabbedSessionWindow {
             // Stop the single shared VM. All in-VM kittys die with it.
+            // Prefer a clean ACPI poweroff so systemd has a chance to
+            // unmount /home (the host-side virtiofs share), flush
+            // shell history, etc. If the guest doesn't ack the
+            // shutdown within 30s (no acpid, hung process), fall
+            // back to a hard stop so we don't leak a VM forever.
             if let vm = session.sandbox?.vm, vm.state == .running {
-                vm.stop(completionHandler: { _ in })
+                let profileName = session.profile.name
+                do {
+                    try vm.requestStop()
+                    FileHandle.standardError.write(Data(
+                        "[ac] requested clean poweroff for '\(profileName)'\n".utf8))
+                } catch {
+                    FileHandle.standardError.write(Data(
+                        "[ac] requestStop failed (\(error)) — forcing\n".utf8))
+                    vm.stop(completionHandler: { _ in })
+                }
+                // Watchdog. Captures `vm` strongly inside the Task
+                // so it stays alive for the deadline; once the Task
+                // completes the ref drops naturally.
+                let watchdogVM = vm
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(30))
+                    if watchdogVM.state == .running {
+                        FileHandle.standardError.write(Data(
+                            "[ac] '\(profileName)' didn't poweroff in 30s — forcing stop\n".utf8))
+                        watchdogVM.stop(completionHandler: { _ in })
+                    }
+                }
             }
             // Drop the engine's per-profile state — token map, ssh
             // keys, listener delegates. Otherwise we leak per-session
@@ -386,6 +424,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             for key in loadAgentKeys(for: session.profile) {
                 removeKeyFromHostAgent(publicKey: key.publicKey)
             }
+            mitmEngine?.clearSessionTrace(for: session.profile.id)
             mitmEngine?.unregister(profileID: session.profile.id)
             profileWindows.removeValue(forKey: session.profile.id)
             renderPicker()
@@ -489,6 +528,49 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Wired to the "Rebuild Base Image…" menu item. Confirms, then
     /// runs `init --force` from inside the GUI — same flow as the
     /// first-time setup, but proactive.
+    private var traceInspectorWindow: NSWindow?
+
+    /// Wired to the "Trace Inspector…" menu item (⇧⌘I).
+    /// Opens the inspector with no profile pre-filter.
+    @objc func openTraceInspectorAction(_ sender: Any?) {
+        openTraceInspector(for: nil)
+    }
+
+    /// Open (or focus) the Trace Inspector window. Pass a profile to
+    /// pre-fill the profile filter — used by the session window's
+    /// toolbar button so clicking it on a profile's window scopes the
+    /// inspector to that profile. Pass nil for the "all profiles" view.
+    func openTraceInspector(for profile: Profile?) {
+        if let win = traceInspectorWindow {
+            // Existing window — re-host with the new filter so the
+            // user always lands on the profile they clicked from.
+            if let store = mitmEngine?.traceStore {
+                win.contentView = NSHostingView(rootView: TraceInspectorView(
+                    store: store, profiles: profiles,
+                    initialProfileFilter: profile?.id))
+            }
+            win.makeKeyAndOrderFront(nil)
+            return
+        }
+        guard let store = mitmEngine?.traceStore else { return }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 600),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false
+        )
+        win.title = NSLocalizedString("Trace Inspector", comment: "")
+        win.center()
+        win.contentView = NSHostingView(rootView: TraceInspectorView(
+            store: store,
+            profiles: profiles,
+            initialProfileFilter: profile?.id
+        ))
+        win.delegate = self
+        win.isReleasedWhenClosed = false
+        win.makeKeyAndOrderFront(nil)
+        traceInspectorWindow = win
+    }
+
     @objc func rebuildBaseImageAction(_ sender: Any?) {
         let alert = NSAlert()
         alert.messageText = "Rebuild the base image?"
@@ -824,6 +906,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // the listeners we register after boot have something to swap.
         if let engine = mitmEngine {
             engine.swapper.setMap(plan.tokenMap(), for: profile.id)
+            // Tell the trace store what level + session id to record
+            // under for traffic from this profile.
+            engine.setSessionTrace(
+                MitmEngine.SessionTrace(sessionID: UUID(), level: profile.traceLevel),
+                for: profile.id)
             let agentKeys = loadAgentKeys(for: profile)
             engine.sshAgent.setKeys(agentKeys, for: profile.id)
             FileHandle.standardError.write(Data(
@@ -910,6 +997,87 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             // Spawn the first kitty in the freshly-booted VM.
             self.requestSpawnKitty(id: firstTab.id, in: win)
+
+            // NAT-only: watch for the in-guest IP reporter to land an
+            // address. If nothing arrives within the timeout, vmnet's
+            // shared NAT path is likely wedged — offer to repair via
+            // the same NetworkHealer the browser uses.
+            if profile.networkMode == .nat {
+                self.startNetworkHealerWatch(profile: profile, window: win)
+            }
+        }
+    }
+
+    /// Per-session network-health watch. Polls the window's reported
+    /// IP for ~25s. If the guest hasn't gotten an address by then,
+    /// presents a Repair / Continue / Cancel dialog; on Repair runs
+    /// `NetworkHealer.shared.repair(.both)` and relaunches the
+    /// session against a fresh VM.
+    @MainActor
+    private func startNetworkHealerWatch(profile: Profile,
+                                         window: TabbedSessionWindow) {
+        Task { @MainActor [weak self, weak window] in
+            // 25 polls × 1s = 25s window. xinitrc reports the address
+            // on a 5s loop, so we expect it well within this budget on
+            // a healthy install (typically 4-8s after boot).
+            for _ in 0..<25 {
+                try? await Task.sleep(for: .seconds(1))
+                if window == nil { return }
+                if window?.model.ipAddress?.isEmpty == false { return }
+            }
+            guard let self, let window, window.isVisible else { return }
+            // Re-check inside the @MainActor isolation in case the IP
+            // landed during the last sleep tick.
+            if window.model.ipAddress?.isEmpty == false { return }
+            await self.presentNetworkHealerPrompt(profile: profile, window: window)
+        }
+    }
+
+    @MainActor
+    private func presentNetworkHealerPrompt(profile: Profile,
+                                            window: TabbedSessionWindow) async {
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Network Issue", comment: "")
+        alert.informativeText = NSLocalizedString(
+            "The VM didn't get a network address. macOS's shared networking stack (vmnet) may be wedged.",
+            comment: ""
+        ) + "\n\n" + NSLocalizedString(
+            "Bromure can restart the macOS networking daemons. You'll be asked for your password.",
+            comment: ""
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("Repair Network", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Continue Anyway", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            // Tear down the wedged session before kickstarting — the
+            // VM's NIC needs a fresh DHCP exchange after the daemon
+            // restart, easier from a clean boot than mid-session.
+            window.close()
+            let ok = await NetworkHealer.shared.repair(.both)
+            if !ok {
+                let failed = NSAlert()
+                failed.messageText = NSLocalizedString("Network Repair Cancelled", comment: "")
+                failed.informativeText = NSLocalizedString(
+                    "The repair was cancelled or failed. Try again from the menu.",
+                    comment: ""
+                )
+                failed.alertStyle = .warning
+                failed.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+                failed.runModal()
+                return
+            }
+            // Fresh launch with kickstarted vmnet.
+            launch(profile)
+        case .alertSecondButtonReturn:
+            // Continue with the broken VM — user opted out of repair.
+            return
+        default:
+            // Cancel: just close the wedged session.
+            window.close()
         }
     }
 

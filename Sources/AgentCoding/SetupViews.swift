@@ -51,7 +51,7 @@ struct SetupView: View {
             }
             Text("Welcome to Bromure Agentic Coding")
                 .font(.title2.bold())
-            Text("First-time setup downloads Ubuntu Server and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Takes about 10 minutes; only happens once per base-image version.")
+            Text("First-time setup downloads Ubuntu Server and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Only happens once per base-image version.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -168,15 +168,11 @@ struct InitializingView: View {
             }
             .font(.caption)
 
-            HStack {
-                Spacer()
-                if model.error != nil {
+            if model.error != nil {
+                HStack {
+                    Spacer()
                     Button("Close", action: onCancel)
                         .keyboardShortcut(.defaultAction)
-                } else {
-                    Text("Tip: keep an eye on the console for `apt`, `npm`, and `cargo` activity.")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
                 }
             }
         }

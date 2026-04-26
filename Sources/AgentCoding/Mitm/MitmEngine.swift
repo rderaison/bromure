@@ -11,6 +11,36 @@ public final class MitmEngine {
     public let certCache: CertCache
     public let swapper: TokenSwapper
     public let sshAgent: SSHAgentServer
+    public let traceStore: TraceStore
+
+    /// Per-profile trace level + session id, set by ACAppDelegate at
+    /// session launch. The HTTPProxy connection looks these up to
+    /// decide whether to record + capture bodies. Lock-protected
+    /// (rather than @MainActor) because the proxy hot path runs on
+    /// a detached Task — `MainActor.assumeIsolated` would trap there.
+    public struct SessionTrace: Sendable {
+        public let sessionID: UUID
+        public let level: TraceLevel
+        public init(sessionID: UUID, level: TraceLevel) {
+            self.sessionID = sessionID
+            self.level = level
+        }
+    }
+    private let sessionTraceLock = NSLock()
+    nonisolated(unsafe) private var sessionTraces: [UUID: SessionTrace] = [:]
+
+    public nonisolated func setSessionTrace(_ trace: SessionTrace, for profileID: UUID) {
+        sessionTraceLock.lock(); defer { sessionTraceLock.unlock() }
+        sessionTraces[profileID] = trace
+    }
+    public nonisolated func sessionTrace(for profileID: UUID) -> SessionTrace? {
+        sessionTraceLock.lock(); defer { sessionTraceLock.unlock() }
+        return sessionTraces[profileID]
+    }
+    public nonisolated func clearSessionTrace(for profileID: UUID) {
+        sessionTraceLock.lock(); defer { sessionTraceLock.unlock() }
+        sessionTraces.removeValue(forKey: profileID)
+    }
 
     /// Per-install 32-byte salt for deriving fake tokens from real
     /// ones via HKDF. Generated once, persisted under app support so
@@ -42,6 +72,7 @@ public final class MitmEngine {
         self.certCache = CertCache(ca: ca)
         self.swapper = TokenSwapper()
         self.sshAgent = SSHAgentServer()
+        self.traceStore = TraceStore()
         // Spawn our dedicated ssh-agent BEFORE anyone reads the
         // HostAgentClient lazy vars — that way `_bromurePrivate` is
         // set by the time any session-launch code asks for it.
@@ -73,7 +104,15 @@ public final class MitmEngine {
             profileID: profileID,
             certCache: certCache,
             swapper: swapper,
-            sshAgent: sshAgent
+            sshAgent: sshAgent,
+            traceStore: traceStore,
+            // The provider runs from a detached Task on the proxy's
+            // hot path. `sessionTrace(for:)` is now nonisolated +
+            // lock-protected so this is just a hash lookup behind a
+            // mutex — no actor hop required.
+            sessionTraceProvider: { [weak self] in
+                self?.sessionTrace(for: profileID)
+            }
         )
         socketDevice.setSocketListener(holder.httpListener,
                                        forPort: Self.httpsVsockPort)
@@ -102,11 +141,17 @@ private final class ListenerHolder {
     init(profileID: UUID,
          certCache: CertCache,
          swapper: TokenSwapper,
-         sshAgent: SSHAgentServer)
+         sshAgent: SSHAgentServer,
+         traceStore: TraceStore,
+         sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?)
     {
         self.profileID = profileID
         self.httpDelegate = HTTPListenerDelegate(
-            profileID: profileID, certCache: certCache, swapper: swapper)
+            profileID: profileID,
+            certCache: certCache,
+            swapper: swapper,
+            traceStore: traceStore,
+            sessionTraceProvider: sessionTraceProvider)
         self.sshDelegate = SSHListenerDelegate(
             profileID: profileID, sshAgent: sshAgent)
 
@@ -122,22 +167,31 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
     let profileID: UUID
     let certCache: CertCache
     let swapper: TokenSwapper
+    let traceStore: TraceStore
+    let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
 
-    init(profileID: UUID, certCache: CertCache, swapper: TokenSwapper) {
+    init(profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
+         traceStore: TraceStore,
+         sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?) {
         self.profileID = profileID
         self.certCache = certCache
         self.swapper = swapper
+        self.traceStore = traceStore
+        self.sessionTraceProvider = sessionTraceProvider
     }
 
     func listener(_ listener: VZVirtioSocketListener,
                   shouldAcceptNewConnection connection: VZVirtioSocketConnection,
                   from socketDevice: VZVirtioSocketDevice) -> Bool {
         let fd = dup(connection.fileDescriptor)
+        let providerCopy = sessionTraceProvider
         let conn = HTTPMitmConnection(
             fd: fd,
             profileID: profileID,
             certCache: certCache,
-            swapper: swapper
+            swapper: swapper,
+            traceStore: traceStore,
+            sessionTraceProvider: providerCopy
         )
         Task.detached(priority: .userInitiated) {
             await conn.run()
