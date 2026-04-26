@@ -32,20 +32,24 @@ struct Init: ParsableCommand {
 
     func run() throws {
         let imageManager = try makeImageManager()
-        if force {
-            try? FileManager.default.removeItem(at: imageManager.versionStampURL)
-        }
+        // The build path keeps the existing image usable until the
+        // new one is ready (writes go to .partial files, then atomic
+        // swap), so we don't pre-delete the version stamp.
         // Pump the main RunLoop while an async Task does the actual build.
         // We can't `semaphore.wait()` here because `runInstaller` is
         // @MainActor — a sync block of the main thread starves the main
         // actor's executor and the install hangs at the first MainActor hop.
         // Driving the RunLoop instead lets MainActor continuations run.
         var result: Result<Void, Error>?
+        let forceFlag = force
         Task {
             do {
-                try await imageManager.createBaseImage { msg in
-                    FileHandle.standardError.write(Data("[init] \(msg)\n".utf8))
-                }
+                try await imageManager.createBaseImage(
+                    progress: { msg in
+                        FileHandle.standardError.write(Data("[init] \(msg)\n".utf8))
+                    },
+                    force: forceFlag
+                )
                 result = .success(())
             } catch {
                 result = .failure(error)
@@ -226,6 +230,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// version-bump rebuild).
     private let initProgress = InitProgressModel()
 
+    /// Retained handle to the in-flight base-image build Task. Used to
+    /// cancel cleanly when the user confirms a close mid-install —
+    /// otherwise the Task keeps pushing model updates after the window
+    /// is gone and the autorelease pool over-releases on the next tick.
+    private var installTask: Task<Void, Never>?
+
     /// Process-lifetime MITM engine. One instance per app run, holds
     /// the CA + per-profile token swap maps + ssh-agent keystore. Lazy
     /// because CA generation hits disk on first access.
@@ -313,6 +323,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.title = "Bromure Agentic Coding"
         window.delegate = self
         window.titlebarAppearsTransparent = false
+        // See TabbedSessionWindow for the same fix: AppKit's window
+        // close animator can over-release captured block ivars when
+        // SwiftUI tears the contentView down concurrently (most
+        // visible when the user closes this window mid-rebuild while
+        // the InitProgressModel is still updating).
+        window.animationBehavior = .none
+        // We hold a strong reference (`self.mainWindow = window`).
+        // NSWindow defaults to `isReleasedWhenClosed = true` for
+        // non-controller windows, which would autorelease the window
+        // on close and double-free it against our strong ref —
+        // crashing in the next autorelease pool drain. Disable.
+        window.isReleasedWhenClosed = false
         window.center()
         window.makeKeyAndOrderFront(nil)
         self.mainWindow = window
@@ -432,21 +454,100 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// closing tears down the disposable VM and any unsaved guest state
     /// goes with it. The picker / inspector windows close freely.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // The setup/picker window during an in-flight rebuild: the
+        // install Task keeps pushing model updates to a SwiftUI view
+        // that's about to be torn down — that's been observed to
+        // over-release in the autorelease pool. Confirm + cancel the
+        // Task; instead of closing the window, swap its contentView
+        // back to the picker (or setup, if no image yet) so the user
+        // lands somewhere usable rather than on a closed window.
+        if sender === mainWindow, let task = installTask {
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString("Cancel base-image rebuild?", comment: "")
+            alert.informativeText = NSLocalizedString(
+                "The image will be left in an incomplete state. You'll need to re-run the rebuild before launching new sessions.",
+                comment: "")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: NSLocalizedString("Cancel rebuild", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Keep building", comment: ""))
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+            task.cancel()
+            self.installTask = nil
+            initProgress.isRunning = false
+            if imageManager.hasBaseImage {
+                renderPicker()
+            } else {
+                renderSetup()
+            }
+            return false
+        }
+
         guard let session = sender as? TabbedSessionWindow else { return true }
+        return decideSessionClose(for: session)
+    }
+
+    /// Branch on the profile's `closeAction` setting. Sets
+    /// `session.pendingCloseAction` so `windowWillClose` can dispatch
+    /// without prompting the user a second time.
+    private func decideSessionClose(for session: TabbedSessionWindow) -> Bool {
+        switch session.profile.closeAction {
+        case .suspend:
+            session.pendingCloseAction = .suspend
+            return true
+        case .shutdown:
+            return confirmShutdown(for: session)
+        case .ask:
+            return askCloseAction(for: session)
+        }
+    }
+
+    /// Two-button "Are you sure?" used when the profile is set to shut
+    /// down on close. Default button is Cancel so an accidental ⌘W +
+    /// Enter doesn't blow the VM away.
+    private func confirmShutdown(for session: TabbedSessionWindow) -> Bool {
         let alert = NSAlert()
         alert.messageText = String(
-            format: NSLocalizedString("Close session “%@”?", comment: ""),
+            format: NSLocalizedString("Shut down session “%@”?", comment: ""),
             session.profile.name)
         alert.informativeText = NSLocalizedString(
             "The VM will shut down and any running processes will be stopped.",
             comment: "")
         alert.alertStyle = .warning
-        let closeButton = alert.addButton(withTitle: NSLocalizedString("Close", comment: ""))
+        let closeButton = alert.addButton(withTitle: NSLocalizedString("Shut down", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        // Default to Cancel on Return so an accidental ⌘W + Enter
-        // doesn't blow the session away.
         closeButton.keyEquivalent = ""
-        return alert.runModal() == .alertFirstButtonReturn
+        if alert.runModal() == .alertFirstButtonReturn {
+            session.pendingCloseAction = .shutdown
+            return true
+        }
+        return false
+    }
+
+    /// Three-button picker used when the profile is set to ask. Suspend
+    /// is the primary action (matches the suspend-by-default vibe of
+    /// the rest of the app).
+    private func askCloseAction(for session: TabbedSessionWindow) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Close session “%@”?", comment: ""),
+            session.profile.name)
+        alert.informativeText = NSLocalizedString(
+            "Suspend keeps the VM's state on disk so it resumes instantly next time. Shut down powers it off cleanly.",
+            comment: "")
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: NSLocalizedString("Suspend", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Shut down", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            session.pendingCloseAction = .suspend
+            return true
+        case .alertSecondButtonReturn:
+            session.pendingCloseAction = .shutdown
+            return true
+        default:
+            return false
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -461,32 +562,60 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if let session = win as? TabbedSessionWindow {
             // Stop the single shared VM. All in-VM kittys die with it.
-            // Prefer a clean ACPI poweroff so systemd has a chance to
-            // unmount /home (the host-side virtiofs share), flush
-            // shell history, etc. If the guest doesn't ack the
-            // shutdown within 30s (no acpid, hung process), fall
-            // back to a hard stop so we don't leak a VM forever.
-            if let vm = session.sandbox?.vm, vm.state == .running {
-                let profileName = session.profile.name
-                do {
-                    try vm.requestStop()
-                    FileHandle.standardError.write(Data(
-                        "[ac] requested clean poweroff for '\(profileName)'\n".utf8))
-                } catch {
-                    FileHandle.standardError.write(Data(
-                        "[ac] requestStop failed (\(error)) — forcing\n".utf8))
-                    vm.stop(completionHandler: { _ in })
-                }
-                // Watchdog. Captures `vm` strongly inside the Task
-                // so it stays alive for the deadline; once the Task
-                // completes the ref drops naturally.
-                let watchdogVM = vm
-                Task { @MainActor in
-                    try? await Task.sleep(for: .seconds(30))
-                    if watchdogVM.state == .running {
+            // The profile's `closeAction` (resolved in windowShouldClose
+            // → session.pendingCloseAction) decides whether to suspend
+            // (pause + save RAM to disk for instant resume) or to do a
+            // clean ACPI poweroff.
+            let profileName = session.profile.name
+            if let sandbox = session.sandbox, let vm = sandbox.vm,
+               vm.state == .running {
+                switch session.pendingCloseAction {
+                case .suspend:
+                    // Persist the host's tab UUIDs + active index
+                    // alongside the RAM snapshot, so restore can
+                    // rebuild the bar against the kittys that are
+                    // still running inside the resumed VM. Done
+                    // BEFORE pause so the model can't drift mid-save.
+                    sandbox.sessionDisk?.saveTabs(session.snapshotTabs())
+                    Task { @MainActor in
+                        do {
+                            try await sandbox.suspend()
+                            FileHandle.standardError.write(Data(
+                                "[ac] suspended '\(profileName)' to disk\n".utf8))
+                        } catch {
+                            FileHandle.standardError.write(Data(
+                                "[ac] suspend failed (\(error)) — forcing stop\n".utf8))
+                            // Suspended state may be partial / corrupt;
+                            // wipe so next launch boots fresh.
+                            sandbox.sessionDisk?.clearSavedState()
+                            vm.stop(completionHandler: { _ in })
+                        }
+                    }
+                case .shutdown:
+                    // A previously-suspended profile being shut down
+                    // explicitly: drop the saved snapshot so the next
+                    // launch is fresh.
+                    sandbox.sessionDisk?.clearSavedState()
+                    do {
+                        try vm.requestStop()
                         FileHandle.standardError.write(Data(
-                            "[ac] '\(profileName)' didn't poweroff in 30s — forcing stop\n".utf8))
-                        watchdogVM.stop(completionHandler: { _ in })
+                            "[ac] requested clean poweroff for '\(profileName)'\n".utf8))
+                    } catch {
+                        FileHandle.standardError.write(Data(
+                            "[ac] requestStop failed (\(error)) — forcing\n".utf8))
+                        vm.stop(completionHandler: { _ in })
+                    }
+                    // Watchdog. Captures `vm` strongly inside the Task
+                    // so it stays alive for the deadline; once the Task
+                    // completes the ref drops naturally.
+                    let watchdogVM = vm
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(30))
+                        if watchdogVM.state == .running {
+                            FileHandle.standardError.write(Data(
+                                "[ac] '\(profileName)' didn't poweroff in 30s — forcing stop\n".utf8))
+                            watchdogVM.stop(completionHandler: { _ in })
+                        }
                     }
                 }
             }
@@ -535,16 +664,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func startInit(force: Bool = false) {
-        if force {
-            try? FileManager.default.removeItem(at: imageManager.versionStampURL)
-        }
+        // Note: we do NOT delete the version stamp here even when
+        // force == true. The stamp gates whether existing sessions
+        // can launch from the old image — wiping it would brick the
+        // image the moment the user clicks "Rebuild Now". The build
+        // path uses .partial files and only swaps + rewrites the
+        // stamp when the new image is fully in place.
         initProgress.status = "Preparing…"
         initProgress.consoleLog = ""
         initProgress.error = nil
         initProgress.isRunning = true
         renderInitializing()
 
-        Task { @MainActor in
+        installTask = Task { @MainActor in
+            defer { self.installTask = nil }
             do {
                 try await imageManager.createBaseImage(
                     progress: { msg in
@@ -552,6 +685,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         // bookmark the console log with a leading marker
                         // so they're easy to find in the firehose.
                         Task { @MainActor in
+                            // Suppress updates after cancellation — the
+                            // hosted SwiftUI view is being torn down on
+                            // the same run loop tick and we don't want
+                            // the observation chain over-releasing.
+                            guard self.installTask != nil else { return }
                             self.initProgress.status = msg
                             self.initProgress.appendLog("\n▶ " + msg + "\n")
                         }
@@ -560,9 +698,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         // Raw guest serial bytes — append as-is so timing
                         // and apt's progress lines look the same as on stderr.
                         Task { @MainActor in
+                            guard self.installTask != nil else { return }
                             self.initProgress.appendLog(chunk)
                         }
-                    }
+                    },
+                    force: force
                 )
                 self.initProgress.isRunning = false
                 self.profiles = self.store.loadAll()
@@ -625,6 +765,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         win.title = "Bromure Agentic Coding"
         win.delegate = self
         win.titlebarAppearsTransparent = false
+        win.animationBehavior = .none
         win.center()
         win.isReleasedWhenClosed = false
         self.mainWindow = win
@@ -1106,9 +1247,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         profileWindows[profile.id] = win
         renderPicker()
 
-        // Show the first tab placeholder immediately. The VM will pick up
-        // the spawn-kitty command from the outbox once boot finishes.
-        let firstTab = win.appendTab()
+        // Pre-load saved tabs alongside the saved RAM snapshot. If
+        // both exist, the resumed VM already has matching kittys
+        // running (each one was started with `--class bromure-<UUID>`)
+        // — we rebuild the host's tab bar against those instead of
+        // spawning a brand-new kitty on top.
+        let probeDisk = SessionDisk(
+            profile: profile,
+            store: store,
+            baseDiskURL: imageManager.baseDiskURL
+        )
+        let savedTabs: SessionDisk.TabsState? =
+            probeDisk.hasSavedState ? probeDisk.loadTabs() : nil
+
+        if let saved = savedTabs, !saved.tabs.isEmpty {
+            win.rehydrateTabs(from: saved)
+        } else {
+            // Fresh boot or no saved tabs: queue the placeholder up
+            // immediately so the user sees something while VZ boots.
+            win.appendTab()
+        }
 
         Task { @MainActor in
             let sessionDisk = SessionDisk(
@@ -1124,10 +1282,40 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     keyboardAgentURL: keyboardAgentURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
+            // True only when the resumed snapshot's kittys are still
+            // valid — drives spawn-vs-raise at the end of this block.
+            var restoredSnapshot = false
             do {
                 try sandbox.prepare()
                 win.vmView.virtualMachine = sandbox.vm
-                try await sandbox.start()
+                if sandbox.hasSavedState {
+                    do {
+                        try await sandbox.restore()
+                        restoredSnapshot = true
+                        FileHandle.standardError.write(Data(
+                            "[ac] restored '\(profile.name)' from saved state\n".utf8))
+                    } catch {
+                        // Restore failed — bad snapshot, configuration
+                        // drift, or VZ refused. Drop the state file and
+                        // do a fresh boot.
+                        FileHandle.standardError.write(Data(
+                            "[ac] restore failed (\(error)) — booting fresh\n".utf8))
+                        sessionDisk.clearSavedState()
+                        // VZ leaves the VM in an indeterminate state
+                        // after a failed restore; rebuild it.
+                        try sandbox.prepare()
+                        win.vmView.virtualMachine = sandbox.vm
+                        try await sandbox.start()
+                        // Rehydrated tabs reference kittys that don't
+                        // exist on a fresh boot — wipe the model and
+                        // queue a fresh placeholder for the spawn path.
+                        win.model.tabs.removeAll()
+                        win.model.activeIndex = 0
+                        win.appendTab()
+                    }
+                } else {
+                    try await sandbox.start()
+                }
             } catch {
                 self.showError(error, message: "Couldn't start the VM for “\(profile.name)”.")
                 win.close()
@@ -1153,23 +1341,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.profiles = self.store.loadAll()
                 self.renderPicker()
             }
-            sandbox.onStopped = { [weak win] _ in
-                Task { @MainActor in win?.close() }
-            }
-            sandbox.onURLOpen = { url in NSWorkspace.shared.open(url) }
-            sandbox.onTabClosed = { [weak win] id in
-                Task { @MainActor in win?.handleTabClosedFromGuest(id: id) }
-            }
-            sandbox.onTabTitleUpdate = { [weak win] id, title in
-                Task { @MainActor in win?.handleTabTitleUpdate(id: id, title: title) }
-            }
-            sandbox.onIPUpdate = { [weak win] ip in
-                Task { @MainActor in win?.model.ipAddress = ip }
-            }
+            self.wireSandboxCallbacks(sandbox, win: win)
             win.sandbox = sandbox
 
-            // Spawn the first kitty in the freshly-booted VM.
-            self.requestSpawnKitty(id: firstTab.id, in: win)
+            // Restored snapshots already have kittys running with
+            // matching `--class bromure-<UUID>` markers — just raise
+            // the previously-active one. Fresh boots (and restore
+            // failures that fell back to fresh boot, where the model
+            // was reset) need an actual spawn.
+            if let target = win.model.activeTab ?? win.model.tabs.first {
+                if restoredSnapshot {
+                    self.requestRaiseTab(id: target.id, in: win)
+                } else {
+                    self.requestSpawnKitty(id: target.id, in: win)
+                }
+            }
 
             // NAT-only: watch for the in-guest IP reporter to land an
             // address. If nothing arrives within the timeout, vmnet's
@@ -1283,6 +1469,162 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let outbox = window.sandbox?.sessionDisk?.outboxDirectory else { return }
         let file = outbox.appendingPathComponent("cmd-\(UUID().uuidString).txt")
         try? (command + "\n").write(to: file, atomically: true, encoding: .utf8)
+    }
+
+    /// Reboot dialog: soft (`sudo reboot` inside the guest) or hard
+    /// (host-side `vm.stop()`). Both clear the saved RAM snapshot
+    /// first so the post-stop relaunch path is a clean fresh boot,
+    /// not a restore that would put us right back where we were.
+    @MainActor
+    func requestReboot(for window: TabbedSessionWindow) {
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Reboot “%@”?", comment: ""),
+            window.profile.name)
+        alert.informativeText = NSLocalizedString(
+            "Soft reboot runs `sudo reboot` inside the VM (graceful — filesystems flush, services stop). Hard reboot tears down the VM immediately and starts a fresh one.",
+            comment: "")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("Soft reboot", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Hard reboot", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            window.sandbox?.sessionDisk?.clearSavedState()
+            window.rebootRequested = true
+            sendCommand("soft-reboot", in: window)
+        case .alertSecondButtonReturn:
+            window.sandbox?.sessionDisk?.clearSavedState()
+            window.rebootRequested = true
+            // Host-initiated stop. VZ doesn't fire `guestDidStop` for
+            // this path (that callback is reserved for guest-driven
+            // halts like `sudo reboot`), so the `onStopped` →
+            // `relaunchVM` chain that soft reboot rides on never
+            // triggers. Drive the relaunch from the completion
+            // handler instead. The `rebootRequested` flag still
+            // gates: if VZ does fire `didStopWithError` for some
+            // edge case, the delegate path will consume the flag
+            // first and we'll no-op here (or vice versa).
+            window.sandbox?.vm?.stop(completionHandler: { [weak self, weak window] error in
+                if let error {
+                    FileHandle.standardError.write(Data(
+                        "[ac] hard reboot: stop failed: \(error)\n".utf8))
+                }
+                Task { @MainActor in
+                    guard let self, let window, window.rebootRequested else {
+                        return
+                    }
+                    window.rebootRequested = false
+                    self.relaunchVM(in: window)
+                }
+            })
+        default:
+            return
+        }
+    }
+
+    /// Wire the standard set of sandbox callbacks for `win`. Used by
+    /// both the initial launch and the post-reboot relaunch — the
+    /// reboot path needs identical wiring on the freshly-built
+    /// sandbox, and `onStopped` keying off `rebootRequested` is the
+    /// hinge that turns "VM stopped" into "rebuild VM in place"
+    /// instead of "close window".
+    @MainActor
+    private func wireSandboxCallbacks(_ sandbox: UbuntuSandboxVM,
+                                      win: TabbedSessionWindow) {
+        sandbox.onStopped = { [weak win, weak self] _ in
+            Task { @MainActor in
+                guard let win, let self else { return }
+                if win.rebootRequested {
+                    win.rebootRequested = false
+                    self.relaunchVM(in: win)
+                } else {
+                    win.close()
+                }
+            }
+        }
+        sandbox.onURLOpen = { url in NSWorkspace.shared.open(url) }
+        sandbox.onTabClosed = { [weak win] id in
+            Task { @MainActor in win?.handleTabClosedFromGuest(id: id) }
+        }
+        sandbox.onTabTitleUpdate = { [weak win] id, title in
+            Task { @MainActor in win?.handleTabTitleUpdate(id: id, title: title) }
+        }
+        sandbox.onIPUpdate = { [weak win] ip in
+            Task { @MainActor in win?.model.ipAddress = ip }
+        }
+    }
+
+    /// Build a fresh sandbox in `win` after the previous one stopped.
+    /// Used post-reboot to replace the dead VM in place without
+    /// closing/reopening the host window. Skips drift checks and the
+    /// network-healer watch — both are first-launch concerns; the
+    /// disk + base image version are unchanged across a reboot.
+    @MainActor
+    private func relaunchVM(in win: TabbedSessionWindow) {
+        let profile = win.profile
+        // Cancel the outgoing sandbox's outbox poller explicitly. A
+        // dropped Task keeps running in Swift — without this the old
+        // poller would keep racing the new one on the same shared
+        // directory and removing closed-* files out from under it.
+        win.sandbox?.stopPolling()
+        win.vmView.virtualMachine = nil
+        win.sandbox = nil
+        win.keyboardBridge = nil
+        win.model.tabs.removeAll()
+        win.model.activeIndex = 0
+        win.model.ipAddress = nil
+        let firstTab = win.appendTab()
+
+        Task { @MainActor in
+            // Brief settle before reusing the per-profile shared dirs
+            // (meta-share, outbox). The old VZ virtiofs daemon needs
+            // a moment to release its handles after the previous VM
+            // stopped; without this delay, the wipe-and-recreate in
+            // prepareMetadataShare/prepareOutboxDirectory has been
+            // observed to leave the new VM's first kitty wedged on
+            // a black screen — the cmd-spawn-kitty file lands in a
+            // directory the new agent doesn't see yet.
+            try? await Task.sleep(for: .milliseconds(500))
+
+            let sessionDisk = SessionDisk(
+                profile: profile,
+                store: store,
+                baseDiskURL: imageManager.baseDiskURL
+            )
+            let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
+            let plan = profile.makeTokenPlan(salt: salt)
+            sessionDisk.tokenPlan = plan
+            if let engine = mitmEngine, let scriptURL = bridgeScriptURL {
+                sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
+                    caCertificatePEM: engine.ca.certificatePEM,
+                    bridgeScriptURL: scriptURL,
+                    keyboardAgentURL: keyboardAgentURL)
+            }
+            let sandbox = UbuntuSandboxVM(imageManager: imageManager,
+                                          sessionDisk: sessionDisk)
+            do {
+                try sandbox.prepare()
+                win.vmView.virtualMachine = sandbox.vm
+                try await sandbox.start()
+            } catch {
+                self.showError(error, message:
+                    "Couldn't restart the VM for “\(profile.name)”.")
+                win.close()
+                return
+            }
+            if let engine = self.mitmEngine, let dev = sandbox.socketDevice {
+                engine.register(socketDevice: dev, profileID: profile.id)
+            }
+            if let dev = sandbox.socketDevice {
+                win.keyboardBridge = KeyboardBridge(
+                    socketDevice: dev,
+                    forcedLayout: profile.keyboardLayoutOverride)
+            }
+            self.wireSandboxCallbacks(sandbox, win: win)
+            win.sandbox = sandbox
+            self.requestSpawnKitty(id: firstTab.id, in: win)
+        }
     }
 
     private func readCurrentBaseVersion() -> String? {

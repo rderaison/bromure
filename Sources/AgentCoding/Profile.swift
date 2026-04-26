@@ -197,6 +197,49 @@ public struct GitHTTPSCredential: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// AWS API credentials for `aws` CLI / SDKs inside the VM.
+///
+/// Unlike the simple Bearer-token APIs (DigitalOcean, OpenAI, etc.)
+/// AWS signs each request with SigV4 — the secret key is consumed
+/// locally to compute an HMAC over the canonical request, then the
+/// signature (not the secret) crosses the wire. That means the
+/// host-side MITM can't fake → real swap on the wire the way it does
+/// for Bearer tokens; the secret has to be available where signing
+/// happens, i.e. inside the VM. Phase 2 could add a host-side
+/// re-signer (parse the request, recompute signature with the real
+/// secret, rewrite Authorization), but this Phase-1 path just
+/// injects the real credentials into ~/.aws/credentials + env so
+/// `aws`, terraform, boto3, the JS SDK, etc. all work out of the box.
+public struct AWSCredentials: Codable, Equatable, Sendable {
+    /// e.g. `AKIAIOSFODNN7EXAMPLE`. Identity-only on the wire.
+    public var accessKeyID: String
+    /// Secret signing key. Stored encrypted in the secrets vault.
+    public var secretAccessKey: String
+    /// Optional STS session token for temporary credentials. Adds
+    /// `aws_session_token` to the credentials file + `AWS_SESSION_TOKEN`
+    /// env. Stored encrypted alongside the secret.
+    public var sessionToken: String
+    /// Default region for the SDK (`AWS_DEFAULT_REGION` + ~/.aws/config).
+    public var region: String
+
+    public init(accessKeyID: String = "",
+                secretAccessKey: String = "",
+                sessionToken: String = "",
+                region: String = "") {
+        self.accessKeyID = accessKeyID
+        self.secretAccessKey = secretAccessKey
+        self.sessionToken = sessionToken
+        self.region = region
+    }
+
+    /// True when at least the access-key + secret pair is set — the
+    /// minimum for a signing-capable profile.
+    public var isUsable: Bool {
+        !accessKeyID.trimmingCharacters(in: .whitespaces).isEmpty
+            && !secretAccessKey.isEmpty
+    }
+}
+
 /// One agentic-coding profile: which tool, how it auths, what folder it
 /// works against, and where its persistent disk lives.
 public struct Profile: Codable, Identifiable, Equatable, Sendable {
@@ -311,6 +354,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// api.digitalocean.com requests. Empty = not configured.
     public var digitalOceanToken: String
 
+    /// AWS credentials injected into ~/.aws/credentials + environment
+    /// for the AWS CLI / SDKs. See `AWSCredentials` for the SigV4
+    /// reasoning. Empty struct (`isUsable == false`) = not configured.
+    public var awsCredentials: AWSCredentials
+
     public var createdAt: Date
     public var lastUsedAt: Date?
 
@@ -344,6 +392,27 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if hostGB < 36 { return 6 }
         return 8
     }
+
+    /// What to do with the VM when the user closes the session window.
+    /// `.suspend` saves RAM to disk and resumes instantly next launch.
+    /// `.shutdown` does a clean ACPI poweroff. `.ask` prompts each time.
+    public enum CloseAction: String, Codable, CaseIterable, Sendable {
+        case suspend
+        case shutdown
+        case ask
+
+        public var displayName: String {
+            switch self {
+            case .suspend:  return NSLocalizedString("Suspend", comment: "")
+            case .shutdown: return NSLocalizedString("Shut down", comment: "")
+            case .ask:      return NSLocalizedString("Ask", comment: "")
+            }
+        }
+    }
+
+    /// What happens when the user closes a session window. Defaults to
+    /// `.suspend` so closing a window feels instant on next launch.
+    public var closeAction: CloseAction
 
     public enum NetworkMode: String, Codable, CaseIterable, Sendable {
         case nat
@@ -430,6 +499,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         traceLevel: TraceLevel = .off,
         kubeconfigs: [KubeconfigEntry] = [],
         digitalOceanToken: String = "",
+        awsCredentials: AWSCredentials = AWSCredentials(),
         createdAt: Date = Date(),
         lastUsedAt: Date? = nil,
         baseImageVersionAtClone: String? = nil,
@@ -449,7 +519,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         windowOpacity: Double = 0.97,
         keyboardLayoutOverride: String? = nil,
         keyRepeatDelayMs: Int? = nil,
-        keyRepeatRateHz: Int? = nil
+        keyRepeatRateHz: Int? = nil,
+        closeAction: CloseAction = .suspend
     ) {
         self.id = id
         self.name = name
@@ -465,6 +536,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.traceLevel = traceLevel
         self.kubeconfigs = kubeconfigs
         self.digitalOceanToken = digitalOceanToken
+        self.awsCredentials = awsCredentials
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.baseImageVersionAtClone = baseImageVersionAtClone
@@ -485,6 +557,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.customFontSize = customFontSize
         self.customBackgroundHex = customBackgroundHex
         self.customForegroundHex = customForegroundHex
+        self.closeAction = closeAction
     }
 
     /// Default-tolerant decoder so old JSON files (missing newer fields) load.
@@ -506,6 +579,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case traceLevel
         case kubeconfigs
         case digitalOceanToken
+        case awsCredentials
+        case closeAction
     }
 
     public init(from decoder: Decoder) throws {
@@ -565,6 +640,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         traceLevel = try c.decodeIfPresent(TraceLevel.self, forKey: .traceLevel) ?? .off
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
+        awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
+        closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .suspend
     }
 
     /// Explicit encoder — skips the legacy `folderPath` key (we only ever
@@ -619,6 +696,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if !digitalOceanToken.isEmpty {
             try c.encode(digitalOceanToken, forKey: .digitalOceanToken)
         }
+        if awsCredentials.isUsable
+            || !awsCredentials.region.isEmpty
+            || !awsCredentials.accessKeyID.isEmpty {
+            try c.encode(awsCredentials, forKey: .awsCredentials)
+        }
+        try c.encode(closeAction, forKey: .closeAction)
     }
 
     /// Every tool configured on this profile, primary first. Each entry
@@ -680,6 +763,10 @@ struct ProfileSecrets: Codable {
     var kubeconfigs: [KubeconfigEntry]?
     /// DigitalOcean PAT.
     var digitalOceanToken: String?
+    /// AWS secret access key + session token (the two real secrets in
+    /// an AWS credential set — accessKeyID is identity-only).
+    var awsSecretAccessKey: String?
+    var awsSessionToken: String?
 
     var isEmpty: Bool {
         (apiKey?.isEmpty ?? true)
@@ -688,6 +775,8 @@ struct ProfileSecrets: Codable {
             && manualTokenValues.isEmpty
             && (kubeconfigs?.isEmpty ?? true)
             && (digitalOceanToken?.isEmpty ?? true)
+            && (awsSecretAccessKey?.isEmpty ?? true)
+            && (awsSessionToken?.isEmpty ?? true)
     }
 
     /// Pull every secret string out of the profile, replacing them
@@ -732,6 +821,14 @@ struct ProfileSecrets: Codable {
             s.digitalOceanToken = profile.digitalOceanToken
             profile.digitalOceanToken = ""
         }
+        if !profile.awsCredentials.secretAccessKey.isEmpty {
+            s.awsSecretAccessKey = profile.awsCredentials.secretAccessKey
+            profile.awsCredentials.secretAccessKey = ""
+        }
+        if !profile.awsCredentials.sessionToken.isEmpty {
+            s.awsSessionToken = profile.awsCredentials.sessionToken
+            profile.awsCredentials.sessionToken = ""
+        }
 
         return s
     }
@@ -762,6 +859,98 @@ struct ProfileSecrets: Codable {
 
         if let kcs = kubeconfigs { profile.kubeconfigs = kcs }
         if let do_ = digitalOceanToken { profile.digitalOceanToken = do_ }
+        if let sk = awsSecretAccessKey { profile.awsCredentials.secretAccessKey = sk }
+        if let st = awsSessionToken { profile.awsCredentials.sessionToken = st }
+    }
+}
+
+/// Centralized profile-UUID → MAC-address mapping, persisted as
+/// `profile-macs.json` under the AC application-support root. Each
+/// profile gets one stable MAC the first time it launches and keeps
+/// it forever — that's what makes `restoreMachineStateFrom` work
+/// across launches (VZ rejects mismatched MACs) and keeps vmnet's
+/// DHCP lease table stable per profile.
+///
+/// File layout:
+///   ```
+///   { "<uuid>": "02:ab:cd:ef:01:02", ... }
+///   ```
+///
+/// One file per host, NSLock-guarded for concurrent access from
+/// multiple AC sessions in the same app run. Profile deletion drops
+/// the entry via `release(profileID:)`.
+public final class MACBindings: @unchecked Sendable {
+    public static let shared = MACBindings()
+
+    private let fileURL: URL
+    private let lock = NSLock()
+    private var bindings: [String: String] = [:]
+    private var loaded = false
+
+    private init() {
+        let dir = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("BromureAC", isDirectory: true)
+        self.fileURL = dir.appendingPathComponent("profile-macs.json")
+    }
+
+    /// Look up the MAC for `profileID`, minting a fresh one (and
+    /// persisting it) on first call. Locally-administered unicast
+    /// (`02:` prefix) so it never collides with a real OUI.
+    public func macAddress(for profileID: UUID) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        loadLocked()
+        let key = profileID.uuidString
+        if let existing = bindings[key] { return existing }
+        let mac = Self.generate()
+        bindings[key] = mac
+        saveLocked()
+        return mac
+    }
+
+    /// Drop the mapping for a profile that's being deleted. No-op if
+    /// no entry exists.
+    public func release(profileID: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        loadLocked()
+        if bindings.removeValue(forKey: profileID.uuidString) != nil {
+            saveLocked()
+        }
+    }
+
+    private func loadLocked() {
+        if loaded { return }
+        loaded = true
+        guard let data = try? Data(contentsOf: fileURL),
+              let dict = try? JSONDecoder().decode([String: String].self, from: data)
+        else { return }
+        bindings = dict
+    }
+
+    private func saveLocked() {
+        let dir = fileURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(bindings) else { return }
+        try? data.write(to: fileURL, options: .atomic)
+        // Local-only — exclude from iCloud / Time Machine.
+        var url = fileURL
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
+    }
+
+    private static func generate() -> String {
+        let b1 = UInt8.random(in: 0...255)
+        let b2 = UInt8.random(in: 0...255)
+        let b3 = UInt8.random(in: 0...255)
+        let b4 = UInt8.random(in: 0...255)
+        let b5 = UInt8.random(in: 0...255)
+        return String(format: "02:%02x:%02x:%02x:%02x:%02x", b1, b2, b3, b4, b5)
     }
 }
 
@@ -862,6 +1051,10 @@ public final class ProfileStore {
         if profile.manualTokens.contains(where: { !$0.realValue.isEmpty }) {
             return true
         }
+        if !profile.awsCredentials.secretAccessKey.isEmpty
+            || !profile.awsCredentials.sessionToken.isEmpty {
+            return true
+        }
         return false
     }
 
@@ -919,16 +1112,24 @@ public final class ProfileStore {
 
     public func delete(_ profile: Profile) throws {
         try fm.removeItem(at: profileDirectory(for: profile))
+        MACBindings.shared.release(profileID: profile.id)
     }
 
     /// Wipe the per-profile disk so the next launch re-clones from base.
     /// The home dir (mounted as /home/ubuntu) is intentionally untouched
     /// so settings, history, and installed tools survive a reset.
+    ///
+    /// Also drops any saved VM state — a RAM snapshot paired with a
+    /// fresh disk would diverge instantly (the kernel's view of the
+    /// block device wouldn't match what's on disk).
     public func resetDisk(for profile: Profile) throws {
         let disk = diskURL(for: profile)
         if fm.fileExists(atPath: disk.path) {
             try fm.removeItem(at: disk)
         }
+        let dir = profileDirectory(for: profile)
+        try? fm.removeItem(at: dir.appendingPathComponent("vm.state"))
+        try? fm.removeItem(at: dir.appendingPathComponent("tabs.json"))
     }
 
     /// Wipe the per-profile **home** directory. Inverse of resetDisk:
@@ -1188,6 +1389,54 @@ public final class ProfileStore {
                                  ofItemAtPath: url.path)
         }
 
+        // ~/.aws/credentials + ~/.aws/config — REAL AWS creds, since
+        // SigV4 signing happens inside the VM and the secret can't be
+        // swapped on the wire (signature would be wrong). Both files
+        // chmod 600 to match what `aws configure` produces.
+        let awsCreds = profile.awsCredentials
+        let awsDir = home.appendingPathComponent(".aws", isDirectory: true)
+        let awsCredsURL = awsDir.appendingPathComponent("credentials")
+        let awsConfigURL = awsDir.appendingPathComponent("config")
+        if awsCreds.isUsable {
+            try fm.createDirectory(at: awsDir, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: NSNumber(value: 0o700)])
+            var creds = """
+            # Managed by Bromure Agentic Coding.
+            [default]
+            aws_access_key_id = \(awsCreds.accessKeyID)
+            aws_secret_access_key = \(awsCreds.secretAccessKey)
+            """
+            if !awsCreds.sessionToken.isEmpty {
+                creds += "\naws_session_token = \(awsCreds.sessionToken)"
+            }
+            creds += "\n"
+            try creds.write(to: awsCredsURL, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                 ofItemAtPath: awsCredsURL.path)
+
+            if !awsCreds.region.trimmingCharacters(in: .whitespaces).isEmpty {
+                let cfg = """
+                # Managed by Bromure Agentic Coding.
+                [default]
+                region = \(awsCreds.region)
+                """
+                try (cfg + "\n").write(to: awsConfigURL, atomically: true, encoding: .utf8)
+                try fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                     ofItemAtPath: awsConfigURL.path)
+            } else if let contents = try? String(contentsOf: awsConfigURL, encoding: .utf8),
+                      contents.hasPrefix("# Managed by Bromure Agentic Coding.") {
+                try? fm.removeItem(at: awsConfigURL)
+            }
+        } else {
+            // Profile cleared — drop ours, leave any user-created file.
+            for url in [awsCredsURL, awsConfigURL] {
+                if let contents = try? String(contentsOf: url, encoding: .utf8),
+                   contents.hasPrefix("# Managed by Bromure Agentic Coding.") {
+                    try? fm.removeItem(at: url)
+                }
+            }
+        }
+
         // Migrate legacy SSH keys: profiles/<id>/ssh → home/.ssh
         let legacySSH = sshDirectory(for: profile)
         let newSSH = home.appendingPathComponent(".ssh", isDirectory: true)
@@ -1390,6 +1639,11 @@ public final class ProfileStore {
         fi
         if command -v "$BROMURE_AC_TOOL" >/dev/null 2>&1; then
             : > "$_bromure_marker"
+            # Visible breadcrumb so a slow-starting agent doesn't
+            # look like a hung black terminal — particularly after
+            # a reboot, when /tmp is fresh and this auto-launch
+            # path runs again from scratch.
+            printf '\\033[2m[bromure-ac] starting %s…\\033[0m\\n' "$BROMURE_AC_TOOL"
             "$BROMURE_AC_TOOL"
         fi
     fi
@@ -1537,6 +1791,12 @@ public final class ProfileStore {
         python3 /mnt/bromure-meta/keyboard-agent.py &
         echo "[xinit] keyboard-agent pid $!" >> /tmp/xinitrc.log
     fi
+
+    # Natural scrolling is handled at the kitty level via
+    # wheel_scroll_multiplier / touch_scroll_multiplier in the
+    # generated kitty.conf — see TerminalAppDefaults.scrollDirectionStanza.
+    # That's the only layer we control reliably given the base image
+    # doesn't ship xinput and we don't want to rebuild it.
 
     # Timezone — match macOS at session start so date / journal /
     # commit timestamps line up with what the user sees on the host.
@@ -1741,6 +2001,7 @@ public final class ProfileStore {
                     spawn-kitty)  spawn_kitty "$arg" ;;
                     raise-kitty)  raise_kitty "$arg" ;;
                     close-kitty)  close_kitty "$arg" ;;
+                    soft-reboot)  log "soft-reboot triggered"; sudo reboot ;;
                     *)            log "unknown action '$action'" ;;
                 esac
             done

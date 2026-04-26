@@ -62,6 +62,79 @@ public final class SessionDisk {
     /// Persistent host-side /home/ubuntu mirror, shared into the guest.
     public var homeDirectory: URL { store.homeDirectory(for: profile) }
 
+    /// Saved-state file path for VM suspend/restore. Lives in the profile
+    /// directory so it survives across app launches. The matching
+    /// configuration is reconstructed deterministically from the
+    /// per-profile MAC + machine identifier files, so no sidecar JSON
+    /// is needed.
+    public var savedStateURL: URL {
+        store.profileDirectory(for: profile).appendingPathComponent("vm.state")
+    }
+    public var hasSavedState: Bool {
+        fm.fileExists(atPath: savedStateURL.path)
+    }
+
+    /// Per-tab snapshot persisted alongside `vm.state` so the host
+    /// can rebuild its tab bar with the same UUIDs the in-VM kittys
+    /// were started under (`--class bromure-<UUID>`). Without this,
+    /// every restore spawned a brand-new kitty even though the
+    /// resumed snapshot already had the originals running.
+    public struct TabSnapshot: Codable {
+        public let id: UUID
+        public var label: String
+    }
+
+    public struct TabsState: Codable {
+        public var tabs: [TabSnapshot]
+        public var activeIndex: Int
+    }
+
+    public var tabsURL: URL {
+        store.profileDirectory(for: profile).appendingPathComponent("tabs.json")
+    }
+
+    /// Snapshot the host's tab model alongside `vm.state` so restore
+    /// can rebuild it. No-ops on encode failures — losing the tab
+    /// snapshot just means restore falls back to spawning a fresh
+    /// first tab, which is the old behaviour.
+    public func saveTabs(_ state: TabsState) {
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        let dir = tabsURL.deletingLastPathComponent()
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? data.write(to: tabsURL, options: .atomic)
+    }
+
+    /// Read the saved tabs file, or nil if missing / unreadable.
+    /// Callers should only consume this when `hasSavedState` is true —
+    /// a tabs.json without a matching vm.state is stale (the kittys
+    /// it references don't exist on a fresh boot).
+    public func loadTabs() -> TabsState? {
+        guard fm.fileExists(atPath: tabsURL.path),
+              let data = try? Data(contentsOf: tabsURL),
+              let state = try? JSONDecoder().decode(TabsState.self, from: data)
+        else { return nil }
+        return state
+    }
+
+    /// Stable per-profile VZGenericMachineIdentifier persisted on disk.
+    /// `VZGenericMachineIdentifier()` returns a fresh random ID on each
+    /// call — using that meant every `prepare()` got a different machine
+    /// identity, which made `restoreMachineStateFrom` fail with VZ
+    /// Code 12 (invalid argument) because the saved RAM expects the
+    /// original ID. Generating once + persisting fixes that AND gives
+    /// the guest a stable machine-id across launches.
+    public var machineIdentifierURL: URL {
+        store.profileDirectory(for: profile)
+            .appendingPathComponent("machine-identifier.bin")
+    }
+
+    /// Load (or mint + persist) the deterministic MAC for this profile.
+    /// Backed by `MACBindings` — a single `profile-macs.json` keyed by
+    /// profile UUID, so the mapping is inspectable in one place.
+    public func persistentMACAddress() -> String {
+        MACBindings.shared.macAddress(for: profile.id)
+    }
+
     /// Per-launch directory shared into the guest as the "bromure-meta"
     /// virtiofs tag. Wiped + recreated on each call so old API keys / SSH
     /// keys don't leak across reset cycles.
@@ -131,14 +204,28 @@ public final class SessionDisk {
 
     // MARK: - Metadata share
 
-    /// Build a fresh metadata share for this launch. Returns the directory
+    /// Build the metadata share for this launch. Returns the directory
     /// to share via virtiofs (read-only is fine — the guest only reads).
+    ///
+    /// The path is **stable per-profile** (under the profile dir, not /tmp)
+    /// so VZ's saveMachineStateTo / restoreMachineStateFrom configuration
+    /// matches across launches when the profile is set to suspend on
+    /// close.
+    ///
+    /// `forRestore` toggles whether to wipe the directory before
+    /// rewriting. On fresh boot we wipe so stale files from older
+    /// versions can't leak in. On restore we preserve the directory
+    /// inode — recreating it has been observed to confuse the
+    /// resumed guest's virtiofs cache, so file writes from
+    /// already-running guest processes (the kitty wrapper subshell,
+    /// for instance) silently land somewhere the host can't see them.
     @MainActor
-    public func prepareMetadataShare() throws -> URL {
-        let tmp = fm.temporaryDirectory
-            .appendingPathComponent("bromure-ac-\(profile.id.uuidString)-\(UUID().uuidString)",
-                                    isDirectory: true)
-        try? fm.removeItem(at: tmp)
+    public func prepareMetadataShare(forRestore: Bool = false) throws -> URL {
+        let tmp = store.profileDirectory(for: profile)
+            .appendingPathComponent("meta-share", isDirectory: true)
+        if !forRestore {
+            try? fm.removeItem(at: tmp)
+        }
         try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
 
         // api_key.env — sourced by .bashrc inside the guest. Exports
@@ -183,8 +270,13 @@ public final class SessionDisk {
                 to: tmp.appendingPathComponent("bromure-ca.pem"),
                 atomically: true, encoding: .utf8)
             // Copy bridge.py from the SPM resource bundle into the meta
-            // share so the guest sees it under a stable path.
+            // share so the guest sees it under a stable path. We
+            // explicitly remove any prior copy first because on
+            // restore we no longer wipe the share dir, so a previous
+            // launch's file would still be sitting at the destination
+            // and `copyItem` errors on a pre-existing target.
             let scriptDest = tmp.appendingPathComponent("bromure-vm-bridge.py")
+            try? fm.removeItem(at: scriptDest)
             try fm.copyItem(at: assets.bridgeScriptURL, to: scriptDest)
             try fm.setAttributes(
                 [.posixPermissions: NSNumber(value: 0o755)],
@@ -192,6 +284,7 @@ public final class SessionDisk {
 
             if let kbURL = assets.keyboardAgentURL {
                 let kbDest = tmp.appendingPathComponent("keyboard-agent.py")
+                try? fm.removeItem(at: kbDest)
                 try fm.copyItem(at: kbURL, to: kbDest)
                 try fm.setAttributes(
                     [.posixPermissions: NSNumber(value: 0o755)],
@@ -200,6 +293,7 @@ public final class SessionDisk {
 
             if let scURL = assets.scrollAgentURL {
                 let scDest = tmp.appendingPathComponent("scroll-agent.py")
+                try? fm.removeItem(at: scDest)
                 try fm.copyItem(at: scURL, to: scDest)
                 try fm.setAttributes(
                     [.posixPermissions: NSNumber(value: 0o755)],
@@ -239,6 +333,23 @@ public final class SessionDisk {
                     ghEnv.append("export DIGITALOCEAN_ACCESS_TOKEN=\(shellQuote(doFake))")
                 }
             }
+            // AWS: real creds (SigV4 signs locally, no MITM swap is
+            // possible). Exported alongside ~/.aws/credentials so
+            // SDKs that prefer env over the file (boto3, AWS SDK v3)
+            // also see the keys.
+            let aws = profile.awsCredentials
+            if aws.isUsable {
+                ghEnv.append("export AWS_ACCESS_KEY_ID=\(shellQuote(aws.accessKeyID))")
+                ghEnv.append("export AWS_SECRET_ACCESS_KEY=\(shellQuote(aws.secretAccessKey))")
+                if !aws.sessionToken.isEmpty {
+                    ghEnv.append("export AWS_SESSION_TOKEN=\(shellQuote(aws.sessionToken))")
+                }
+                let region = aws.region.trimmingCharacters(in: .whitespaces)
+                if !region.isEmpty {
+                    ghEnv.append("export AWS_DEFAULT_REGION=\(shellQuote(region))")
+                    ghEnv.append("export AWS_REGION=\(shellQuote(region))")
+                }
+            }
 
             var proxyLines: [String] = [
                 "# Generated by Bromure AC; do not edit.",
@@ -266,6 +377,9 @@ public final class SessionDisk {
         let sshSrc = store.sshDirectory(for: profile)
         if fm.fileExists(atPath: sshSrc.path) {
             let sshDst = tmp.appendingPathComponent("ssh", isDirectory: true)
+            // Same no-pre-existing-target rule as the bridge script
+            // above — drop any leftover from a previous launch.
+            try? fm.removeItem(at: sshDst)
             try fm.copyItem(at: sshSrc, to: sshDst)
         }
 
@@ -324,6 +438,17 @@ public final class SessionDisk {
         let mtu = VMConfig.resolvedNICMTU()
         try "\(mtu)\n".write(
             to: tmp.appendingPathComponent("mtu"),
+            atomically: true, encoding: .utf8
+        )
+
+        // natural_scroll — host's macOS preference. xinitrc applies
+        // via `xinput set-prop "libinput Natural Scrolling Enabled"`
+        // so wheel events from VZ's USB HID end up in the right
+        // direction inside the terminal (libinput defaults to OFF
+        // regardless of the host).
+        let natural = VMConfig.detectNaturalScrolling() ? "1" : "0"
+        try "\(natural)\n".write(
+            to: tmp.appendingPathComponent("natural_scroll"),
             atomically: true, encoding: .utf8
         )
 
@@ -389,14 +514,34 @@ public final class SessionDisk {
         outboxDirectory = nil
     }
 
-    /// Build a fresh writable outbox dir for this launch. World-writable so
+    /// Drop the saved-state file (if any). Called on full shutdown so
+    /// the next launch boots fresh, and from `resetDisk` so a wiped
+    /// disk image isn't paired with a stale RAM snapshot.
+    public func clearSavedState() {
+        try? fm.removeItem(at: savedStateURL)
+        // tabs.json is only meaningful paired with a saved RAM
+        // snapshot — without one the recorded UUIDs reference
+        // kittys that no longer exist on a fresh boot.
+        try? fm.removeItem(at: tabsURL)
+    }
+
+    /// Build the writable outbox dir for this launch. World-writable so
     /// the guest's `ubuntu` user (UID 1000) can write to it regardless of
     /// how virtiofs maps host UID 501.
-    public func prepareOutboxDirectory() throws -> URL {
-        let tmp = fm.temporaryDirectory
-            .appendingPathComponent("bromure-ac-outbox-\(profile.id.uuidString)-\(UUID().uuidString)",
-                                    isDirectory: true)
-        try? fm.removeItem(at: tmp)
+    ///
+    /// Same stable-path rationale as `prepareMetadataShare()`. On
+    /// restore we keep the existing directory in place — the guest has
+    /// in-flight processes (e.g. the kitty wrapper subshell) that
+    /// captured the directory's inode when state was saved, and
+    /// removing+recreating it on the host has been observed to make
+    /// later writes from those processes invisible until the guest
+    /// re-stat()s the path.
+    public func prepareOutboxDirectory(forRestore: Bool = false) throws -> URL {
+        let tmp = store.profileDirectory(for: profile)
+            .appendingPathComponent("outbox", isDirectory: true)
+        if !forRestore {
+            try? fm.removeItem(at: tmp)
+        }
         try fm.createDirectory(at: tmp, withIntermediateDirectories: true,
                                attributes: [.posixPermissions: NSNumber(value: 0o777)])
         outboxDirectory = tmp

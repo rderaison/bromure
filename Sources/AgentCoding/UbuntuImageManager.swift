@@ -127,12 +127,17 @@ public final class UbuntuImageManager {
     /// a console log view.
     public func createBaseImage(
         progress: @escaping (String) -> Void,
-        output: @escaping (String) -> Void = { _ in }
+        output: @escaping (String) -> Void = { _ in },
+        force: Bool = false
     ) async throws {
         let fm = FileManager.default
         try fm.createDirectory(at: storageDir, withIntermediateDirectories: true)
 
-        if hasBaseImage && !baseImageNeedsUpdate {
+        // Skip the build only when caller hasn't asked for force AND
+        // the on-disk image is current. With `force = true`, the
+        // existing image stays in place + usable; we build into
+        // .partial paths and only swap the originals at the end.
+        if !force, hasBaseImage && !baseImageNeedsUpdate {
             progress("Base image already at version \(Self.imageVersion).")
             return
         }
@@ -146,8 +151,10 @@ public final class UbuntuImageManager {
             progress("Using cached Alpine netboot.")
         }
 
-        // 2. Fresh raw target disk. Sparse — actual size on disk grows as the
-        //    installer writes blocks.
+        // 2. Fresh raw target disk. Sparse — actual size on disk grows as
+        //    the installer writes blocks. Goes to a .partial path so the
+        //    existing base.img stays available for sessions that launch
+        //    while the rebuild is in flight.
         let scratchDisk = storageDir.appendingPathComponent("base.img.partial")
         try? fm.removeItem(at: scratchDisk)
         progress("Allocating \(Self.baseDiskBytes / (1024*1024*1024))GB sparse disk…")
@@ -161,17 +168,26 @@ public final class UbuntuImageManager {
             output: output
         )
 
-        // 4. Allocate a fresh EFI variable store. First boot of the installed
-        //    Ubuntu populates it with the boot entry GRUB registers.
-        try? fm.removeItem(at: efiVarsURL)
+        // 4. Build a fresh EFI variable store next to the existing one.
+        //    First boot of the installed Ubuntu populates it with the
+        //    boot entry GRUB registers. Like the disk: keep the old
+        //    file in place until step 5's atomic swap.
+        let scratchEFI = storageDir.appendingPathComponent("efivars.partial")
+        try? fm.removeItem(at: scratchEFI)
         _ = try VZEFIVariableStore(
-            creatingVariableStoreAt: efiVarsURL,
+            creatingVariableStoreAt: scratchEFI,
             options: []
         )
 
-        // 5. Promote.
+        // 5. Promote — only now do we touch the live files. Disk
+        //    swap is atomic (rename); EFI vars + version stamp are
+        //    individual writes that we sequence so a crash mid-step
+        //    leaves the rebuild restartable from the .partial files
+        //    rather than killing the running image.
         try? fm.removeItem(at: baseDiskURL)
         try fm.moveItem(at: scratchDisk, to: baseDiskURL)
+        try? fm.removeItem(at: efiVarsURL)
+        try fm.moveItem(at: scratchEFI, to: efiVarsURL)
         try Self.imageVersion.write(to: versionStampURL, atomically: true, encoding: .utf8)
 
         progress("Base image ready at \(baseDiskURL.path)")
@@ -255,6 +271,10 @@ public final class UbuntuImageManager {
             "alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main",
             "modloop=\(Self.releasesBase)/netboot-\(Self.alpineRelease)/modloop-virt",
             "modules=loop,squashfs,virtio-net,virtio-blk,virtiofs",
+            // Disable ARM Scalable Matrix Extension. Same option the
+            // installed image's GRUB cmdline uses — without it some
+            // M3+ hosts crash the guest kernel on init.
+            "arm64.nosme",
         ].joined(separator: " ")
         config.bootLoader = bootLoader
         config.platform = VZGenericPlatformConfiguration()

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SandboxEngine
 
 /// Snapshot of the user's Terminal.app default-profile settings —
 /// background/foreground colors, font family, font size. Used to seed
@@ -181,6 +182,32 @@ extension TerminalAppDefaults {
 
         # Send URL clicks to the macOS host's default browser.
         open_url_with /usr/local/bin/bromure-open
+
+        \(Self.scrollDirectionStanza())
+        """
+    }
+
+    /// Natural-scrolling stanza for kitty, derived from the host's
+    /// `com.apple.swipescrolldirection` pref captured at session prep.
+    ///
+    /// Why this is the right layer: the running base image doesn't
+    /// ship `xinput`, so per-device libinput natural-scrolling toggles
+    /// fail silently. VZ's USB HID does forward wheel reports, so the
+    /// guest's X stack sees scroll events — kitty's
+    /// `wheel_scroll_multiplier` (low-precision) /
+    /// `touch_scroll_multiplier` (high-precision) flip the direction
+    /// at the kitty level. Negative magnitudes preserve speed.
+    private static func scrollDirectionStanza() -> String {
+        let natural = VMConfig.detectNaturalScrolling()
+        // Defaults pulled from kitty's documented values so we don't
+        // accidentally change scroll speed when toggling direction.
+        let wheel: Double = natural ? -5.0 : 5.0
+        let touch: Double = natural ? -1.0 : 1.0
+        return """
+        # Scroll direction matches the macOS host (natural=\(natural)).
+        # See: https://sw.kovidgoyal.net/kitty/conf/#opt-kitty.wheel_scroll_multiplier
+        wheel_scroll_multiplier \(wheel)
+        touch_scroll_multiplier \(touch)
         """
     }
 }

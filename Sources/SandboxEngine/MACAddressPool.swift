@@ -59,6 +59,29 @@ public final class MACAddressPool: @unchecked Sendable {
         return mac
     }
 
+    /// Reclaim a previously-assigned MAC address (e.g. when restoring a
+    /// suspended VM). Returns the address if successfully reserved, or
+    /// nil if it's already in use by another active VM in this process.
+    /// Adds the address to the persistent pool if it wasn't there.
+    public func claimSpecific(_ mac: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        if claimed.contains(mac) {
+            print("[MACPool] claimSpecific failed — \(mac) already in use")
+            return nil
+        }
+        if !addresses.contains(mac) {
+            // Migration: a saved state from before this MAC was added
+            // to the persistent pool. Persist it so subsequent claim()s
+            // see it as a candidate to reuse.
+            addresses.append(mac)
+            save()
+        }
+        claimed.insert(mac)
+        print("[MACPool] claimSpecific: \(mac) (\(claimed.count)/\(addresses.count) in use)")
+        return mac
+    }
+
     /// Release a MAC address back to the pool for reuse.
     public func release(_ mac: String) {
         lock.lock()

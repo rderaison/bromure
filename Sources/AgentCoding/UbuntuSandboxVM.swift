@@ -96,7 +96,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         config.bootLoader = bootLoader
 
         let platform = VZGenericPlatformConfiguration()
-        platform.machineIdentifier = VZGenericMachineIdentifier()
+        platform.machineIdentifier = Self.persistentMachineIdentifier(for: sessionDisk)
         config.platform = platform
 
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(
@@ -126,11 +126,18 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 net.attachment = VZNATNetworkDeviceAttachment()
             }
         }
-        // Pull a MAC from the shared pool (same storage as Bromure-the-
-        // browser) so vmnet's DHCP lease table stays small. Falls back to
-        // VZ's random MAC if the pool is exhausted.
-        if let mac = MACAddressPool.shared.claim(),
-           let vzMAC = VZMACAddress(string: mac) {
+        // One deterministic MAC per profile, persisted in the profile
+        // dir. Cleaner than the shared pool (no leak-on-suspend, no
+        // cross-app-run collisions) and is required for save/restore
+        // anyway — VZ's `restoreMachineStateFrom` rejects a config with
+        // a different MAC than the one in the saved RAM snapshot.
+        if let session = sessionDisk,
+           let vzMAC = VZMACAddress(string: session.persistentMACAddress()) {
+            net.macAddress = vzMAC
+        } else if let mac = MACAddressPool.shared.claim(),
+                  let vzMAC = VZMACAddress(string: mac) {
+            // Legacy session-less path (CLI smoke tests) — keep the
+            // pool fallback so nothing regresses.
             net.macAddress = vzMAC
             self.claimedMAC = mac
         }
@@ -190,14 +197,17 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             )
             sharingDevices.append(homeFS)
 
-            let metaDir = try session.prepareMetadataShare()
+            // On restore, preserve directory inodes — see comments
+            // in SessionDisk for why.
+            let forRestore = session.hasSavedState
+            let metaDir = try session.prepareMetadataShare(forRestore: forRestore)
             let metaFS = VZVirtioFileSystemDeviceConfiguration(tag: "bromure-meta")
             metaFS.share = VZSingleDirectoryShare(
                 directory: VZSharedDirectory(url: metaDir, readOnly: true)
             )
             sharingDevices.append(metaFS)
 
-            let outboxDir = try session.prepareOutboxDirectory()
+            let outboxDir = try session.prepareOutboxDirectory(forRestore: forRestore)
             let outboxFS = VZVirtioFileSystemDeviceConfiguration(tag: "bromure-outbox")
             outboxFS.share = VZSingleDirectoryShare(
                 directory: VZSharedDirectory(url: outboxDir, readOnly: false)
@@ -238,6 +248,64 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         try await vm.start()
         state = .running
         startOutboxPolling()
+    }
+
+    /// True if a saved RAM snapshot is on disk for this profile and we
+    /// should attempt `restore()` instead of a fresh `start()` on the
+    /// next launch.
+    public var hasSavedState: Bool {
+        sessionDisk?.hasSavedState ?? false
+    }
+
+    /// Cancel the outbox poll task without going through guestDidStop
+    /// (which triggers full cleanup including metadata-share removal).
+    /// Used by the reboot path so the previous sandbox stops touching
+    /// the outbox before we hand the same directory to a fresh sandbox.
+    @MainActor
+    public func stopPolling() {
+        outboxPollTask?.cancel()
+        outboxPollTask = nil
+    }
+
+    /// Restore the VM from a previously-saved RAM snapshot. The VZ
+    /// configuration built in `prepare()` must match the one that was
+    /// in effect when state was saved (same RAM size, same MAC, same
+    /// machine identifier, same shared-directory paths) — that's why
+    /// metadata + outbox dirs use stable per-profile paths, and the
+    /// MAC + machine identifier are persisted in the profile dir.
+    @MainActor
+    public func restore() async throws {
+        guard let vm = vm, let session = sessionDisk else {
+            throw UbuntuImageError.installerStoppedEarly
+        }
+        let stateURL = session.savedStateURL
+        state = .starting
+        try await vm.restoreMachineStateFrom(url: stateURL)
+        try await vm.resume()
+        state = .running
+        startOutboxPolling()
+    }
+
+    /// Pause the VM and write its RAM contents to the per-profile
+    /// `vm.state` file. Caller is expected to drop its references to
+    /// this sandbox immediately after — the VM is left in the paused
+    /// state and is not resumed.
+    @MainActor
+    public func suspend() async throws {
+        guard let vm = vm, let session = sessionDisk else {
+            throw UbuntuImageError.installerStoppedEarly
+        }
+        guard vm.canPause else {
+            throw UbuntuImageError.installerStoppedEarly
+        }
+        outboxPollTask?.cancel()
+        try await vm.pause()
+        // VZ refuses to overwrite the destination (Code 11). After a
+        // restore the prior snapshot is still on disk; nuke it before
+        // writing the new one so suspend → restore → suspend works.
+        try? FileManager.default.removeItem(at: session.savedStateURL)
+        try await vm.saveMachineStateTo(url: session.savedStateURL)
+        state = .stopped
     }
 
     /// VZVirtioSocketDevice for this VM. Exposed so the MITM engine
@@ -351,4 +419,28 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             claimedMAC = nil
         }
     }
+
+    /// Load the profile's persistent VZ machine identifier from disk, or
+    /// mint and persist a fresh one on first call. Falls back to an
+    /// in-memory identifier (no persistence) when there's no
+    /// session disk — same as the legacy behaviour for tooling-mode
+    /// boots that aren't tied to a profile.
+    private static func persistentMachineIdentifier(for sessionDisk: SessionDisk?)
+        -> VZGenericMachineIdentifier
+    {
+        guard let sessionDisk else { return VZGenericMachineIdentifier() }
+        let url = sessionDisk.machineIdentifierURL
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path),
+           let data = try? Data(contentsOf: url),
+           let id = VZGenericMachineIdentifier(dataRepresentation: data) {
+            return id
+        }
+        let id = VZGenericMachineIdentifier()
+        try? fm.createDirectory(at: url.deletingLastPathComponent(),
+                                withIntermediateDirectories: true)
+        try? id.dataRepresentation.write(to: url, options: .atomic)
+        return id
+    }
 }
+

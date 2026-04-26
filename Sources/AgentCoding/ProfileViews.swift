@@ -358,9 +358,9 @@ struct ProfileEditorView: View {
     @State private var importSheet: ImportSheetState?
     @State private var importError: String?
     /// Keys of the disclosure groups the user has expanded in the
-    /// Credentials pane. SSH starts open by default; everything else
-    /// is closed until the user opts in.
-    @State private var expandedCredsSections: Set<String> = ["ssh"]
+    /// Credentials pane. All sections start collapsed — the user
+    /// opens whichever one they need.
+    @State private var expandedCredsSections: Set<String> = []
 
     /// Snapshot of the host's macOS key-repeat values, captured when
     /// the editor opens. Used as the visible default in the Key
@@ -509,10 +509,26 @@ struct ProfileEditorView: View {
             keyRepeatDelayRow
             keyRepeatRateRow
 
+            closeActionPicker
+
             TextField("Notes (optional)", text: $draft.comments, axis: .vertical)
                 .lineLimit(2...6)
         }
         .formStyle(.grouped)
+    }
+
+    /// Choose what happens when the user closes a session window:
+    /// suspend (save RAM to disk for instant resume — default), shut down
+    /// (clean ACPI poweroff), or ask each time.
+    @ViewBuilder
+    private var closeActionPicker: some View {
+        Picker(NSLocalizedString("When closing the window", comment: ""),
+               selection: $draft.closeAction) {
+            ForEach(Profile.CloseAction.allCases, id: \.self) { action in
+                Text(action.displayName).tag(action)
+            }
+        }
+        .pickerStyle(.radioGroup)
     }
 
     /// Pre-filled with the host's current macOS value. If the user
@@ -768,7 +784,7 @@ struct ProfileEditorView: View {
             credentialsDisclosure(
                 key: "gitlab",
                 title: NSLocalizedString("GitLab Tokens", comment: ""),
-                symbol: "fox.fill",
+                symbol: "testtube.2",
                 count: gitTokenCount(filter: { isGitLab($0.host) })
             ) {
                 gitTokenSubsection(displayName: "GitLab",
@@ -803,6 +819,15 @@ struct ProfileEditorView: View {
                 count: draft.digitalOceanToken.isEmpty ? 0 : 1
             ) {
                 digitalOceanSubsection
+            }
+
+            credentialsDisclosure(
+                key: "aws",
+                title: NSLocalizedString("AWS", comment: ""),
+                symbol: "server.rack",
+                count: draft.awsCredentials.isUsable ? 1 : 0
+            ) {
+                awsSubsection
             }
 
             credentialsDisclosure(
@@ -1091,6 +1116,56 @@ struct ProfileEditorView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Open DigitalOcean token page in your browser")
+            }
+        }
+    }
+
+    // MARK: - AWS
+
+    @ViewBuilder
+    private var awsSubsection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Access key + secret from IAM → Users → Security credentials. Written to `~/.aws/credentials` and exported as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` so `aws`, terraform, boto3 etc. work out of the box. Heads up: AWS signs requests locally with the secret (SigV4), so unlike Bearer-token APIs the real secret has to live inside the VM.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            LabeledContent(NSLocalizedString("Access key ID", comment: "")) {
+                TextField("AKIA…", text: $draft.awsCredentials.accessKeyID)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.username)
+                    .disableAutocorrection(true)
+            }
+
+            LabeledContent(NSLocalizedString("Secret access key", comment: "")) {
+                SecureField("•••• ••••", text: $draft.awsCredentials.secretAccessKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            LabeledContent(NSLocalizedString("Session token", comment: "")) {
+                SecureField(NSLocalizedString("Optional — STS only", comment: ""),
+                            text: $draft.awsCredentials.sessionToken)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            LabeledContent(NSLocalizedString("Default region", comment: "")) {
+                TextField("us-east-1", text: $draft.awsCredentials.region)
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+            }
+
+            HStack(spacing: 6) {
+                Spacer()
+                Button {
+                    if let url = URL(string: "https://console.aws.amazon.com/iam/home#/security_credentials") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Label(NSLocalizedString("Open IAM credentials page", comment: ""),
+                          systemImage: "arrow.up.right.square")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
             }
         }
     }
@@ -1951,9 +2026,6 @@ private struct ToolConfigCard: View {
                         )
                     )
                     .textFieldStyle(.roundedBorder)
-                    Text("Stored under \(profileDirHint). Phase B+ moves this to the keychain.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 } else {
                     Text("You'll run `\(tool.rawValue) login` once inside the VM.")
                         .font(.caption)

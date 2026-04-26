@@ -358,11 +358,14 @@ step "npm install -g @anthropic-ai/claude-code (via socket)" \
 step "install codex (GitHub release binary, not npm)" \
     sh -c '
         ARCH=$(uname -m)
-        # Prefer the glibc target — we are on Ubuntu, and the gnu build
-        # is what OpenAI publishes alongside the musl one.
+        # Use the musl target. The gnu (glibc) artifact has been
+        # observed to fail at runtime on this image; the static musl
+        # build is the path that historically Just Worked here, and
+        # it matches what the per-launch ~/.bashrc fallback installer
+        # in Profile.swift downloads.
         case "$ARCH" in
-            aarch64|arm64) TARGET=aarch64-unknown-linux-gnu ;;
-            x86_64)        TARGET=x86_64-unknown-linux-gnu  ;;
+            aarch64|arm64) TARGET=aarch64-unknown-linux-musl ;;
+            x86_64)        TARGET=x86_64-unknown-linux-musl  ;;
             *) echo "  unsupported arch $ARCH — skipping codex"; exit 0 ;;
         esac
         # Buffer the API response to a temp file so the trailing

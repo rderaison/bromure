@@ -14,12 +14,15 @@ final class TabsModel {
     @MainActor
     @Observable
     final class Tab: Identifiable {
-        let id = UUID()
+        let id: UUID
         // @Observable makes per-property changes drive SwiftUI redraws,
         // so updating `label` from the title-poll path live-refreshes
         // the pill without us having to replace the array slot.
         var label: String
-        init(label: String) { self.label = label }
+        init(label: String, id: UUID = UUID()) {
+            self.label = label
+            self.id = id
+        }
     }
 
     var tabs: [Tab] = []
@@ -62,6 +65,18 @@ final class TabbedSessionWindow: NSWindow {
     /// available yet.
     var keyboardBridge: KeyboardBridge?
 
+    /// What `windowShouldClose` decided to do with the VM. Read by
+    /// `windowWillClose` so it can pause+save vs. requestStop without
+    /// re-prompting the user.
+    enum PendingCloseAction { case suspend, shutdown }
+    var pendingCloseAction: PendingCloseAction = .shutdown
+
+    /// When true, the next `sandbox.onStopped` shouldn't close the
+    /// window — instead, relaunch a fresh VM in the same window. Set
+    /// by the toolbar's Reboot action; cleared inside the relaunch
+    /// path. Distinguishes user-requested reboot from a real shutdown.
+    var rebootRequested: Bool = false
+
     init(profile: Profile, acDelegate: ACAppDelegate) {
         self.profile = profile
         self.acDelegate = acDelegate
@@ -87,7 +102,28 @@ final class TabbedSessionWindow: NSWindow {
         titlebarAppearsTransparent = false
         toolbarStyle = .unified
         model.accentHex = profile.color.hexInUI
-        contentView = view
+
+        // Wrap the VZ view in a plain NSView container. We apply the
+        // user's opacity to the *container's* layer, not the VZ view
+        // itself — touching VZVirtualMachineView's own wantsLayer /
+        // layer.opacity has been observed to crash AppKit's window
+        // transform animator (see the animationBehavior comment
+        // below). The container takes the layer alpha cleanly; the
+        // VZ framebuffer renders into the container at full opacity
+        // and inherits the alpha when composited. The titlebar paints
+        // separately via the window chrome and is unaffected.
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.backgroundColor = .clear
+        view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        ])
+        contentView = container
 
         // Disable AppKit's default window animations. AppKit's
         // _NSWindowTransformAnimation has been observed to over-release
@@ -99,23 +135,15 @@ final class TabbedSessionWindow: NSWindow {
         // entirely. The browser sets the same flag for the same reason.
         animationBehavior = .none
 
-        // Window opacity via NSWindow.alphaValue. Earlier we tried
-        // per-layer opacity on the VZ framebuffer view to keep the
-        // toolbar fully opaque — but VZVirtualMachineView manages its
-        // own layer-hosted framebuffer, and forcing wantsLayer +
-        // layer.opacity on it tripped AppKit's _NSWindowTransformAnimation
-        // path during hide/minimise (over-release in the autorelease
-        // pool drain → SIGSEGV).
-        //
-        // alphaValue does fade the toolbar too. At the default 97%
-        // it's imperceptible; at lower values the user trades a bit
-        // of toolbar fade for the see-through effect they asked for
-        // by lowering opacity. The right long-term fix is a wrapper
-        // view between contentView and vmView so we can sandwich the
-        // VZ layer without touching it directly, but that's out of
-        // scope for this hot-fix.
-        let opacity = CGFloat(min(1.0, max(0.3, profile.windowOpacity)))
-        alphaValue = opacity
+        // Apply the requested opacity to the wrapper layer, not the
+        // window's alphaValue — that way only the framebuffer area
+        // (below the toolbar) blends with whatever's behind, and the
+        // titlebar / toolbar stays fully opaque. The window must
+        // still be non-opaque + clear-background for the alpha to
+        // actually composite against the desktop instead of an opaque
+        // window backing.
+        let opacity = min(1.0, max(0.3, profile.windowOpacity))
+        container.layer?.opacity = Float(opacity)
         if opacity < 1.0 {
             isOpaque = false
             backgroundColor = .clear
@@ -133,6 +161,10 @@ final class TabbedSessionWindow: NSWindow {
             onInspectTrace: { [weak self] in
                 guard let self else { return }
                 self.acDelegate?.openTraceInspector(for: self.profile)
+            },
+            onReboot: { [weak self] in
+                guard let self else { return }
+                self.acDelegate?.requestReboot(for: self)
             })
         toolbarChromeDelegate = delegate
 
@@ -163,6 +195,26 @@ final class TabbedSessionWindow: NSWindow {
         return tab
     }
 
+    /// Rebuild the tab bar from a saved-state snapshot. Used on
+    /// restore so the host's tab UUIDs match the kittys still
+    /// running inside the resumed VM (each kitty was started with
+    /// `--class bromure-<UUID>`). Called BEFORE the VM is up — the
+    /// raise-active-tab command goes out separately once it is.
+    func rehydrateTabs(from state: SessionDisk.TabsState) {
+        model.tabs = state.tabs.map { TabsModel.Tab(label: $0.label, id: $0.id) }
+        model.activeIndex = max(0, min(state.activeIndex, model.tabs.count - 1))
+    }
+
+    /// Capture the current tab model into a snapshot for persistence.
+    func snapshotTabs() -> SessionDisk.TabsState {
+        SessionDisk.TabsState(
+            tabs: model.tabs.map {
+                SessionDisk.TabSnapshot(id: $0.id, label: $0.label)
+            },
+            activeIndex: model.activeIndex
+        )
+    }
+
     func switchTo(index: Int) {
         guard model.tabs.indices.contains(index) else { return }
         model.activeIndex = index
@@ -176,6 +228,12 @@ final class TabbedSessionWindow: NSWindow {
         let tab = model.tabs.remove(at: index)
         acDelegate?.requestCloseTab(id: tab.id, in: self)
         if model.tabs.isEmpty {
+            // Last-tab ⌘W is "I'm done with this session" — same
+            // intent as Ctrl+D inside kitty. Force shutdown
+            // regardless of profile.closeAction; suspending an empty
+            // X session is wasteful and can leave a snapshot whose
+            // restore goes straight back to a black screen.
+            pendingCloseAction = .shutdown
             close()
             return
         }
@@ -193,6 +251,15 @@ final class TabbedSessionWindow: NSWindow {
             model.activeIndex = max(0, model.tabs.count - 1)
         }
         if model.tabs.isEmpty {
+            // Guest-side end-of-session: the user closed every kitty
+            // from inside the VM (Ctrl+D, `exit`, kitty crash). That
+            // signals "I'm done" — suspending RAM here would just
+            // freeze a do-nothing X session and on restore we'd end
+            // up with no usable terminal anyway. Force shutdown,
+            // bypass the profile's normal closeAction, and skip the
+            // confirmation prompt (the user already confirmed by
+            // killing their last shell).
+            pendingCloseAction = .shutdown
             close()
         }
     }
@@ -232,19 +299,22 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
     let onClose:  (Int) -> Void
     let onNew:    () -> Void
     let onInspectTrace: () -> Void
+    let onReboot: () -> Void
 
     init(model: TabsModel,
          sharedFolderPaths: [String],
          onSelect: @escaping (Int) -> Void,
          onClose:  @escaping (Int) -> Void,
          onNew:    @escaping () -> Void,
-         onInspectTrace: @escaping () -> Void) {
+         onInspectTrace: @escaping () -> Void,
+         onReboot: @escaping () -> Void) {
         self.model = model
         self.sharedFolderPaths = sharedFolderPaths
         self.onSelect = onSelect
         self.onClose = onClose
         self.onNew = onNew
         self.onInspectTrace = onInspectTrace
+        self.onReboot = onReboot
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -269,7 +339,8 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
             onSelect: onSelect,
             onClose:  onClose,
             onNew:    onNew,
-            onInspectTrace: onInspectTrace
+            onInspectTrace: onInspectTrace,
+            onReboot: onReboot
         ))
         host.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(host)
@@ -307,6 +378,7 @@ private struct TabsBar: View {
     let onClose:  (Int) -> Void
     let onNew:    () -> Void
     let onInspectTrace: () -> Void
+    let onReboot: () -> Void
 
     @State private var foldersPopoverShown = false
 
@@ -363,6 +435,15 @@ private struct TabsBar: View {
                     SharedFoldersList(paths: sharedFolderPaths)
                 }
             }
+
+            // Reboot — opens a confirm dialog (soft via `sudo reboot`
+            // inside the guest, hard via `vm.stop()` on the host).
+            Button(action: onReboot) {
+                Image(systemName: "arrow.clockwise.circle")
+                    .frame(width: 24, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .help(NSLocalizedString("Reboot the VM", comment: ""))
 
             // Trace inspector — opens the global window pre-filtered
             // to this profile. Mirrors the browser's per-window
