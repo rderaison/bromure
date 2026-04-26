@@ -355,47 +355,8 @@ socket_npm() {
 step "npm install -g @anthropic-ai/claude-code (via socket)" \
     retry socket_npm install -g --silent @anthropic-ai/claude-code
 
-step "install codex (GitHub release binary, not npm)" \
-    sh -c '
-        ARCH=$(uname -m)
-        # Use the musl target. The gnu (glibc) artifact has been
-        # observed to fail at runtime on this image; the static musl
-        # build is the path that historically Just Worked here, and
-        # it matches what the per-launch ~/.bashrc fallback installer
-        # in Profile.swift downloads.
-        case "$ARCH" in
-            aarch64|arm64) TARGET=aarch64-unknown-linux-musl ;;
-            x86_64)        TARGET=x86_64-unknown-linux-musl  ;;
-            *) echo "  unsupported arch $ARCH — skipping codex"; exit 0 ;;
-        esac
-        # Buffer the API response to a temp file so the trailing
-        # `grep -m1` doesn'"'"'t close the pipe early and trip curl
-        # exit-23 ("failure writing output to destination").
-        TMP=$(mktemp -d)
-        if ! curl -fsSL https://api.github.com/repos/openai/codex/releases/latest \
-                  -o "$TMP/release.json"; then
-            echo "  could not fetch codex release metadata; continuing without"
-            rm -rf "$TMP"; exit 0
-        fi
-        TAG=$(grep -m1 "\"tag_name\"" "$TMP/release.json" | cut -d"\"" -f4)
-        if [ -z "$TAG" ]; then
-            echo "  could not resolve latest codex tag; continuing without"
-            rm -rf "$TMP"; exit 0
-        fi
-        URL="https://github.com/openai/codex/releases/download/${TAG}/codex-${TARGET}.tar.gz"
-        echo "  fetching $URL"
-        curl -fsSL "$URL" -o "$TMP/codex.tar.gz"
-        tar -xzf "$TMP/codex.tar.gz" -C "$TMP"
-        BIN=$(find "$TMP" -type f -name "codex-*" ! -name "*.tar.gz" | head -1)
-        [ -z "$BIN" ] && BIN=$(find "$TMP" -type f -name "codex" | head -1)
-        if [ -z "$BIN" ]; then
-            echo "  codex binary not found in tarball; skipping"
-            rm -rf "$TMP"; exit 0
-        fi
-        install -m 755 "$BIN" /usr/local/bin/codex
-        rm -rf "$TMP"
-        echo "  installed codex $TAG"
-    '
+step "npm install -g @openai/codex (via socket)" \
+    retry socket_npm install -g --silent @openai/codex
 
 # ---------------------------------------------------------------------------
 # wezterm — latest GitHub release deb
@@ -664,6 +625,14 @@ export LIBGL_ALWAYS_SOFTWARE=1
 
 openbox &
 sleep 0.3
+
+# Wait briefly for spice-vdagentd's listening socket — the per-session
+# spice-vdagent client just exits if the daemon isn't up yet, which
+# silently breaks the kitty CLIPBOARD ↔ NSPasteboard bridge.
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -S /run/spice-vdagentd/spice-vdagent-sock ] && break
+    sleep 0.2
+done
 spice-vdagent &
 sleep 0.2
 
@@ -750,6 +719,15 @@ EON
 # is missing — guard with || true so we don't fail the whole chroot.
 systemctl enable systemd-networkd systemd-resolved >/dev/null 2>&1 || true
 ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+
+# spice-vdagentd is the *system* half of the SPICE clipboard bridge — it
+# owns /dev/virtio-ports/com.redhat.spice.0 and exposes a Unix socket that
+# the per-X-session `spice-vdagent` client (started from xinitrc) connects
+# to. Debian/Ubuntu's apt postinst usually flags it for enable, but inside
+# our debootstrap chroot that path doesn't always fire; without this the
+# kitty `super+c → CLIPBOARD selection` chain has no channel to the host
+# NSPasteboard and copy/paste appears broken on a fresh install.
+systemctl enable spice-vdagentd.socket spice-vdagentd.service >/dev/null 2>&1 || true
 
 # Slim the image down a bit.
 log "cleaning up apt caches"

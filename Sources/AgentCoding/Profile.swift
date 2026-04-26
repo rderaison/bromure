@@ -1536,7 +1536,7 @@ public final class ProfileStore {
     HISTFILESIZE=20000
 
     # User-level installs land in ~/.npm-global/bin, ~/.cargo/bin,
-    # or ~/.local/bin (where the codex binary install drops things).
+    # or ~/.local/bin.
     export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:$PATH"
 
     # MITM proxy env (HTTPS_PROXY + per-language CA bundles + ssh-agent
@@ -1576,47 +1576,16 @@ public final class ProfileStore {
                 return 1
                 ;;
             codex)
-                # Codex CLI is a static Rust binary published on
-                # github.com/openai/codex. Skip npm — that path goes
-                # through @openai/codex which has had postinstall
-                # flakiness behind the proxy. Direct binary download
-                # is the reliable path.
-                echo "[bromure-ac] codex not found — fetching the latest GitHub release…"
-                local arch target tag url tmpdir bin
-                arch=$(uname -m)
-                case "$arch" in
-                    aarch64|arm64) target=aarch64-unknown-linux-musl ;;
-                    x86_64)        target=x86_64-unknown-linux-musl  ;;
-                    *) echo "[bromure-ac] unsupported arch $arch"; return 1 ;;
-                esac
-                tag=$(curl -fsSL https://api.github.com/repos/openai/codex/releases/latest \\
-                      2>>/tmp/bromure-tool-install.log \\
-                      | grep -m1 '"tag_name"' | cut -d'"' -f4)
-                if [ -z "$tag" ]; then
-                    echo "[bromure-ac] couldn't resolve codex release tag"
-                    return 1
+                # Codex CLI ships via npm as @openai/codex. Wrapped
+                # through socket.dev per project policy.
+                echo "[bromure-ac] codex not found — installing @openai/codex…"
+                if npx --yes @socketsecurity/cli npm install -g --silent @openai/codex \\
+                        >>/tmp/bromure-tool-install.log 2>&1; then
+                    echo "[bromure-ac] installed @openai/codex"
+                    return 0
                 fi
-                url="https://github.com/openai/codex/releases/download/${tag}/codex-${target}.tar.gz"
-                tmpdir=$(mktemp -d)
-                if ! curl -fsSL "$url" -o "$tmpdir/codex.tar.gz" \\
-                        2>>/tmp/bromure-tool-install.log; then
-                    echo "[bromure-ac] failed to download $url"
-                    rm -rf "$tmpdir"
-                    return 1
-                fi
-                tar -xzf "$tmpdir/codex.tar.gz" -C "$tmpdir" 2>>/tmp/bromure-tool-install.log
-                bin=$(find "$tmpdir" -type f -name 'codex-*' ! -name '*.tar.gz' | head -1)
-                [ -z "$bin" ] && bin=$(find "$tmpdir" -type f -name 'codex' | head -1)
-                if [ -z "$bin" ]; then
-                    echo "[bromure-ac] codex binary not found in tarball"
-                    rm -rf "$tmpdir"
-                    return 1
-                fi
-                mkdir -p "$HOME/.local/bin"
-                install -m 755 "$bin" "$HOME/.local/bin/codex"
-                rm -rf "$tmpdir"
-                echo "[bromure-ac] installed codex $tag → ~/.local/bin/codex"
-                return 0
+                echo "[bromure-ac] install failed (see /tmp/bromure-tool-install.log)"
+                return 1
                 ;;
             *)
                 return 1
