@@ -47,10 +47,31 @@ public actor ConsentBroker {
         }
     }
 
+    public enum DecisionKind: Sendable {
+        case allow
+        case deny
+    }
+
+    /// Unified row for the Approvals window — covers both live allow
+    /// grants and live deny memories. Flat fields so the view doesn't
+    /// have to switch on a sum type per cell.
     public struct LiveEntry: Sendable {
         public let profileID: UUID
         public let credentialID: CredentialID
-        public let grant: Grant
+        public let kind: DecisionKind
+        public let expiration: Date
+        public let credentialDisplayName: String
+        /// Only meaningful when `kind == .allow`. Always false for
+        /// denies (deny memory is hard-capped at `denyTTL`).
+        public let isSessionScoped: Bool
+    }
+
+    /// Internal storage for a remembered deny. We keep the display
+    /// name alongside the expiration so the Approvals window can
+    /// render denies the same way it renders allows.
+    private struct DenyMemory: Sendable {
+        let expiration: Date
+        let credentialDisplayName: String
     }
 
     private static func storeKey(profileID: UUID, credentialID: CredentialID) -> String {
@@ -67,11 +88,13 @@ public actor ConsentBroker {
 
     private var grants: [String: Grant] = [:]
     /// Time-bounded "Don't allow" memory. When the user clicks
-    /// Don't allow, we record `now + 5min` here. Subsequent calls
-    /// for the same key auto-deny without re-prompting until the
-    /// entry expires. Same scope semantics as `grants` — cleared on
+    /// Don't allow, we record `now + 5min` here along with the
+    /// credential's display name (so the Approvals window can list
+    /// the deny the same way it lists allows). Subsequent calls for
+    /// the same key auto-deny without re-prompting until the entry
+    /// expires. Same scope semantics as `grants` — cleared on
     /// `revoke*` and on session teardown.
-    private var denies: [String: Date] = [:]
+    private var denies: [String: DenyMemory] = [:]
     /// How long a Don't-allow click is remembered. Short enough that
     /// a user who changed their mind isn't held hostage; long enough
     /// to silence a chatty agent that retries the same operation
@@ -122,7 +145,7 @@ public actor ConsentBroker {
         // honoring an older allow grant (in practice they shouldn't
         // both be live, but defensive ordering matters when the
         // ordering question ever comes up).
-        if let denyExpiry = denies[key], denyExpiry > now {
+        if let mem = denies[key], mem.expiration > now {
             FileHandle.standardError.write(Data(
                 "[consent] live deny for \(credentialID) — auto-deny\n".utf8))
             return false
@@ -155,7 +178,9 @@ public actor ConsentBroker {
         let allow: Bool
         switch decision {
         case .deny:
-            denies[key] = now.addingTimeInterval(Self.denyTTL)
+            denies[key] = DenyMemory(
+                expiration: now.addingTimeInterval(Self.denyTTL),
+                credentialDisplayName: credentialDisplayName)
             allow = false
         case .allow5min:
             grants[key] = Grant(expiration: now.addingTimeInterval(5 * 60),
@@ -180,15 +205,30 @@ public actor ConsentBroker {
         return allow
     }
 
-    /// Snapshot of all live (unexpired) grants for the management UI.
+    /// Snapshot of all live (unexpired) decisions — both allow grants
+    /// and remembered denies — for the management UI.
     public func snapshot() -> [LiveEntry] {
         let now = Date()
         var out: [LiveEntry] = []
         for (k, g) in grants where g.expiration > now {
             guard let (pid, cid) = Self.splitStoreKey(k) else { continue }
-            out.append(LiveEntry(profileID: pid, credentialID: cid, grant: g))
+            out.append(LiveEntry(
+                profileID: pid, credentialID: cid,
+                kind: .allow,
+                expiration: g.expiration,
+                credentialDisplayName: g.credentialDisplayName,
+                isSessionScoped: g.isSessionScoped))
         }
-        return out.sorted { $0.grant.credentialDisplayName < $1.grant.credentialDisplayName }
+        for (k, d) in denies where d.expiration > now {
+            guard let (pid, cid) = Self.splitStoreKey(k) else { continue }
+            out.append(LiveEntry(
+                profileID: pid, credentialID: cid,
+                kind: .deny,
+                expiration: d.expiration,
+                credentialDisplayName: d.credentialDisplayName,
+                isSessionScoped: false))
+        }
+        return out.sorted { $0.credentialDisplayName < $1.credentialDisplayName }
     }
 
     public func revoke(profileID: UUID, credentialID: CredentialID) {

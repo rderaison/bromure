@@ -176,7 +176,8 @@
 "Revoke all" = "Revoke all";
 "Revoke" = "Revoke";
 "Loading…" = "Loading…";
-"No active credential approvals. They appear here after you allow a gated credential." = "No active credential approvals. They appear here after you allow a gated credential.";
+"No active credential decisions. They appear here after you allow or deny a gated credential." = "No active credential decisions. They appear here after you allow or deny a gated credential.";
+"Denied" = "Denied";
 "rest of session" = "rest of session";
 "%d min remaining" = "%d min remaining";
 "%d sec remaining" = "%d sec remaining";

@@ -175,7 +175,8 @@
 "Revoke all" = "Tout révoquer";
 "Revoke" = "Révoquer";
 "Loading…" = "Chargement…";
-"No active credential approvals. They appear here after you allow a gated credential." = "Aucune autorisation d'identifiant active. Elles apparaissent ici après l'autorisation d'un identifiant protégé.";
+"No active credential decisions. They appear here after you allow or deny a gated credential." = "Aucune décision d'identifiant active. Elles apparaissent ici après que vous autorisez ou refusez un identifiant protégé.";
+"Denied" = "Refusé";
 "rest of session" = "reste de la session";
 "%d min remaining" = "%d min restantes";
 "%d sec remaining" = "%d s restantes";

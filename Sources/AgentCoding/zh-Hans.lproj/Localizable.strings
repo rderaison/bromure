@@ -175,7 +175,8 @@
 "Revoke all" = "全部撤销";
 "Revoke" = "撤销";
 "Loading…" = "加载中…";
-"No active credential approvals. They appear here after you allow a gated credential." = "没有有效的凭证授权。允许受保护的凭证后会显示在这里。";
+"No active credential decisions. They appear here after you allow or deny a gated credential." = "没有有效的凭证决定。允许或拒绝受保护的凭证后会显示在这里。";
+"Denied" = "已拒绝";
 "rest of session" = "本次会话中";
 "%d min remaining" = "剩余 %d 分钟";
 "%d sec remaining" = "剩余 %d 秒";

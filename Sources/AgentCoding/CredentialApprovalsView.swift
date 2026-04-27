@@ -2,12 +2,14 @@ import SwiftUI
 import AppKit
 
 /// Window contents for "Window → Credential Approvals…". Lists every
-/// live consent grant the user has issued in this app run, with a
-/// per-row Revoke button and a global "Revoke all" reset.
+/// live consent decision the user has made in this app run — both
+/// time-bounded allows (5 min / 1 hr / rest of session) and remembered
+/// "Don't allow" refusals (5 min). Each row has a Revoke button; a
+/// global "Revoke all" wipes the lot.
 ///
-/// Grants are ephemeral: 5-min / 1-hr / session-scope variants all live
-/// only in the broker's in-memory state, so this view's list shrinks
-/// naturally as the clock ticks. Auto-refreshes every 2 s.
+/// Decisions are ephemeral: they live only in the broker's in-memory
+/// state, so this view's list shrinks naturally as the clock ticks.
+/// Auto-refreshes every 2 s.
 struct CredentialApprovalsView: View {
     let broker: ConsentBroker
     /// profileID → display name. Snapshotted once on appear; the
@@ -44,7 +46,7 @@ struct CredentialApprovalsView: View {
                 placeholder(NSLocalizedString("Loading…", comment: ""))
             } else if entries.isEmpty {
                 placeholder(NSLocalizedString(
-                    "No active credential approvals. They appear here after you allow a gated credential.",
+                    "No active credential decisions. They appear here after you allow or deny a gated credential.",
                     comment: ""))
             } else {
                 List {
@@ -72,14 +74,12 @@ struct CredentialApprovalsView: View {
     @ViewBuilder
     private func row(for entry: ConsentBroker.LiveEntry) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: entry.grant.isSessionScoped
-                  ? "infinity.circle.fill"
-                  : "clock.fill")
-                .foregroundStyle(entry.grant.isSessionScoped ? .blue : .orange)
+            Image(systemName: iconName(for: entry))
+                .foregroundStyle(iconColor(for: entry))
                 .font(.title3)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(entry.grant.credentialDisplayName)
+                Text(entry.credentialDisplayName)
                     .font(.body)
                     .lineLimit(1)
                 HStack(spacing: 8) {
@@ -87,7 +87,16 @@ struct CredentialApprovalsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("·").foregroundStyle(.tertiary)
-                    Text(remainingLabel(for: entry.grant))
+                    if entry.kind == .deny {
+                        // Lead the row's caption with "Denied" so the
+                        // kind is unambiguous even without color cues
+                        // (color-blind users, screen readers).
+                        Text(NSLocalizedString("Denied", comment: ""))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.red)
+                        Text("·").foregroundStyle(.tertiary)
+                    }
+                    Text(remainingLabel(for: entry))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -105,6 +114,20 @@ struct CredentialApprovalsView: View {
         .padding(.vertical, 6)
     }
 
+    private func iconName(for entry: ConsentBroker.LiveEntry) -> String {
+        switch entry.kind {
+        case .deny:  return "nosign"
+        case .allow: return entry.isSessionScoped ? "infinity.circle.fill" : "clock.fill"
+        }
+    }
+
+    private func iconColor(for entry: ConsentBroker.LiveEntry) -> Color {
+        switch entry.kind {
+        case .deny:  return .red
+        case .allow: return entry.isSessionScoped ? .blue : .orange
+        }
+    }
+
     @ViewBuilder
     private func placeholder(_ text: String) -> some View {
         VStack {
@@ -119,11 +142,11 @@ struct CredentialApprovalsView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func remainingLabel(for grant: ConsentBroker.Grant) -> String {
-        if grant.isSessionScoped {
+    private func remainingLabel(for entry: ConsentBroker.LiveEntry) -> String {
+        if entry.kind == .allow && entry.isSessionScoped {
             return NSLocalizedString("rest of session", comment: "")
         }
-        let secs = max(0, Int(grant.expiration.timeIntervalSinceNow))
+        let secs = max(0, Int(entry.expiration.timeIntervalSinceNow))
         if secs >= 60 {
             let mins = (secs + 30) / 60
             return String(format: NSLocalizedString(

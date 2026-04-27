@@ -175,7 +175,8 @@
 "Revoke all" = "全部撤銷";
 "Revoke" = "撤銷";
 "Loading…" = "載入中…";
-"No active credential approvals. They appear here after you allow a gated credential." = "沒有有效的認證核准。允許受保護的認證後會顯示在此處。";
+"No active credential decisions. They appear here after you allow or deny a gated credential." = "沒有有效的認證決定。允許或拒絕受保護的認證後會顯示在此處。";
+"Denied" = "已拒絕";
 "rest of session" = "本次工作階段";
 "%d min remaining" = "剩餘 %d 分鐘";
 "%d sec remaining" = "剩餘 %d 秒";

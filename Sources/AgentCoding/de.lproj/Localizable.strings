@@ -175,7 +175,8 @@
 "Revoke all" = "Alle widerrufen";
 "Revoke" = "Widerrufen";
 "Loading…" = "Wird geladen…";
-"No active credential approvals. They appear here after you allow a gated credential." = "Keine aktiven Anmeldedaten-Freigaben. Sie erscheinen hier, nachdem Sie ein geschütztes Anmeldedatum freigegeben haben.";
+"No active credential decisions. They appear here after you allow or deny a gated credential." = "Keine aktiven Anmeldedaten-Entscheidungen. Sie erscheinen hier, nachdem Sie ein geschütztes Anmeldedatum erlaubt oder abgelehnt haben.";
+"Denied" = "Abgelehnt";
 "rest of session" = "Rest der Sitzung";
 "%d min remaining" = "%d Min. verbleibend";
 "%d sec remaining" = "%d Sek. verbleibend";
