@@ -66,6 +66,17 @@ public actor ConsentBroker {
     }
 
     private var grants: [String: Grant] = [:]
+    /// Time-bounded "Don't allow" memory. When the user clicks
+    /// Don't allow, we record `now + 5min` here. Subsequent calls
+    /// for the same key auto-deny without re-prompting until the
+    /// entry expires. Same scope semantics as `grants` — cleared on
+    /// `revoke*` and on session teardown.
+    private var denies: [String: Date] = [:]
+    /// How long a Don't-allow click is remembered. Short enough that
+    /// a user who changed their mind isn't held hostage; long enough
+    /// to silence a chatty agent that retries the same operation
+    /// dozens of times after a refusal.
+    private static let denyTTL: TimeInterval = 5 * 60
     /// Coalesced waiters: while a prompt is on-screen for a key, any
     /// other call for the same key parks here and resumes when the
     /// dialog resolves.
@@ -106,6 +117,19 @@ public actor ConsentBroker {
         FileHandle.standardError.write(Data(
             "[consent] check \(credentialID) for profile \(profileID.uuidString.prefix(8))\n".utf8))
 
+        // A live deny short-circuits before the allow check. If the
+        // user just said no, we don't quietly undo that decision by
+        // honoring an older allow grant (in practice they shouldn't
+        // both be live, but defensive ordering matters when the
+        // ordering question ever comes up).
+        if let denyExpiry = denies[key], denyExpiry > now {
+            FileHandle.standardError.write(Data(
+                "[consent] live deny for \(credentialID) — auto-deny\n".utf8))
+            return false
+        } else if denies[key] != nil {
+            denies.removeValue(forKey: key)
+        }
+
         if let g = grants[key], g.expiration > now {
             FileHandle.standardError.write(Data(
                 "[consent] live grant for \(credentialID) — auto-allow\n".utf8))
@@ -131,6 +155,7 @@ public actor ConsentBroker {
         let allow: Bool
         switch decision {
         case .deny:
+            denies[key] = now.addingTimeInterval(Self.denyTTL)
             allow = false
         case .allow5min:
             grants[key] = Grant(expiration: now.addingTimeInterval(5 * 60),
@@ -169,18 +194,25 @@ public actor ConsentBroker {
     public func revoke(profileID: UUID, credentialID: CredentialID) {
         let key = Self.storeKey(profileID: profileID, credentialID: credentialID)
         grants.removeValue(forKey: key)
+        denies.removeValue(forKey: key)
     }
 
-    /// Wipe every grant for this profile. Called at session teardown
-    /// so session-scope grants don't survive into the next launch.
+    /// Wipe every grant *and* deny for this profile. Called at
+    /// session teardown so session-scope decisions don't survive
+    /// into the next launch.
     public func revokeAll(profileID: UUID) {
-        for k in grants.keys where k.hasPrefix(profileID.uuidString + "|") {
+        let prefix = profileID.uuidString + "|"
+        for k in grants.keys where k.hasPrefix(prefix) {
             grants.removeValue(forKey: k)
+        }
+        for k in denies.keys where k.hasPrefix(prefix) {
+            denies.removeValue(forKey: k)
         }
     }
 
     public func revokeEverything() {
         grants.removeAll()
+        denies.removeAll()
     }
 
     // MARK: - Modal prompt
