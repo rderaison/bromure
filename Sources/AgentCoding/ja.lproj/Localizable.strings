@@ -135,3 +135,22 @@
 "Discard suspended VM for “%@”?" = "「%@」の中断中の VM を破棄しますか？";
 "The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "このプロファイルが中断されてから、共有フォルダが変更されました。スナップショットは以前の共有セットに対して保存されているため、新しい共有セットでは安全に再開できません。\n\n保存すると中断状態は破棄されます。次回の起動はコールドブートになります。プロファイルのホームディレクトリと共有フォルダ内のファイルは影響を受けません。";
 "Discard & save" = "破棄して保存";
+
+/* Editor — Credentials → Container Registries */
+"Container Registries" = "コンテナレジストリ";
+"Per-registry HTTP Basic auth for `docker pull` / `docker push`. The real password is never written into the VM — bromure puts a fake `base64(\"<user>:<derived>\")` in `~/.docker/config.json`, and the proxy substitutes the real value on the wire when the request hits the matching registry host." = "`docker pull` / `docker push` 用のレジストリごとの HTTP Basic 認証。実際のパスワードは VM に書き込まれません — bromure は偽の `base64(\"<user>:<derived>\")` を `~/.docker/config.json` に書き込み、リクエストが対応するレジストリホストに到達した時点でプロキシが通信上で実際の値に置き換えます。";
+"No registries configured." = "レジストリが設定されていません。";
+"Remove this registry" = "このレジストリを削除";
+"Hide password" = "パスワードを隠す";
+"Show password" = "パスワードを表示";
+"Import config.json…" = "config.json を読み込む…";
+"Pull entries from an existing ~/.docker/config.json. Entries that delegate to credsStore / credHelpers are skipped — those passwords live in the OS keychain, not in the file." = "既存の ~/.docker/config.json からエントリを取り込みます。credsStore / credHelpers に委譲しているエントリはスキップされます — それらのパスワードはファイルではなく OS のキーチェーンに保管されています。";
+"Import Docker config.json" = "Docker の config.json を読み込む";
+"Imported 1 registry" = "1 件のレジストリを読み込みました";
+"Imported %d registries" = "%d 件のレジストリを読み込みました";
+"Skipped 1 entry stored in credsStore / credHelpers (the password lives in the OS keychain, not in the file)." = "credsStore / credHelpers に保存されていた 1 件をスキップしました（パスワードはファイルではなく OS のキーチェーンに保管されています）。";
+"Skipped %d entries stored in credsStore / credHelpers (passwords live in the OS keychain, not in the file)." = "credsStore / credHelpers に保存されていた %d 件をスキップしました（パスワードはファイルではなく OS のキーチェーンに保管されています）。";
+"No usable auth entries found." = "利用可能な auth エントリが見つかりません。";
+"Couldn't import config.json" = "config.json を読み込めませんでした";
+"The file isn't valid JSON." = "ファイルが有効な JSON ではありません。";
+"No `auths` object found at the top level." = "トップレベルに `auths` オブジェクトが見つかりません。";

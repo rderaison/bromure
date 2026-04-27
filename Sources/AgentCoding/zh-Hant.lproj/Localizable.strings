@@ -135,3 +135,22 @@
 "Discard suspended VM for “%@”?" = "要丟棄「%@」的暫停虛擬機嗎？";
 "The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "自此設定檔暫停以來，共享資料夾已變更。快照是以舊的共享集儲存的，無法以新的共享集安全地繼續。\n\n儲存將丟棄暫停狀態。下次啟動將是冷開機。設定檔的個人主目錄與共享資料夾中的檔案不受影響。";
 "Discard & save" = "丟棄並儲存";
+
+/* Editor — Credentials → Container Registries */
+"Container Registries" = "容器映像登錄";
+"Per-registry HTTP Basic auth for `docker pull` / `docker push`. The real password is never written into the VM — bromure puts a fake `base64(\"<user>:<derived>\")` in `~/.docker/config.json`, and the proxy substitutes the real value on the wire when the request hits the matching registry host." = "為每個映像登錄設定 HTTP Basic 認證，供 `docker pull` / `docker push` 使用。真正的密碼絕不會寫入虛擬機 — bromure 在 `~/.docker/config.json` 中寫入偽造的 `base64(\"<user>:<derived>\")`，當請求抵達對應的登錄主機時，由代理在傳輸層替換為真實值。";
+"No registries configured." = "尚未設定任何映像登錄。";
+"Remove this registry" = "移除此映像登錄";
+"Hide password" = "隱藏密碼";
+"Show password" = "顯示密碼";
+"Import config.json…" = "匯入 config.json…";
+"Pull entries from an existing ~/.docker/config.json. Entries that delegate to credsStore / credHelpers are skipped — those passwords live in the OS keychain, not in the file." = "從現有的 ~/.docker/config.json 匯入項目。委派給 credsStore / credHelpers 的項目會被略過 — 這些密碼保存在系統鑰匙圈中，不在檔案裡。";
+"Import Docker config.json" = "匯入 Docker config.json";
+"Imported 1 registry" = "已匯入 1 個映像登錄";
+"Imported %d registries" = "已匯入 %d 個映像登錄";
+"Skipped 1 entry stored in credsStore / credHelpers (the password lives in the OS keychain, not in the file)." = "已略過 1 個保存在 credsStore / credHelpers 中的項目（密碼保存在系統鑰匙圈中，不在檔案裡）。";
+"Skipped %d entries stored in credsStore / credHelpers (passwords live in the OS keychain, not in the file)." = "已略過 %d 個保存在 credsStore / credHelpers 中的項目（密碼保存在系統鑰匙圈中，不在檔案裡）。";
+"No usable auth entries found." = "找不到可用的 auth 項目。";
+"Couldn't import config.json" = "無法匯入 config.json";
+"The file isn't valid JSON." = "檔案不是有效的 JSON。";
+"No `auths` object found at the top level." = "頂層找不到 `auths` 物件。";

@@ -135,3 +135,22 @@
 "Discard suspended VM for “%@”?" = "Descartar a VM suspensa de “%@”?";
 "The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "As pastas compartilhadas mudaram desde que este perfil foi suspenso. O snapshot foi salvo com o conjunto antigo de pastas e não pode ser retomado com segurança com o novo.\n\nSalvar descartará o estado suspenso. A próxima execução iniciará a frio. Os arquivos da pasta pessoal do perfil e das pastas compartilhadas não são afetados.";
 "Discard & save" = "Descartar e salvar";
+
+/* Editor — Credentials → Container Registries */
+"Container Registries" = "Registros de contêineres";
+"Per-registry HTTP Basic auth for `docker pull` / `docker push`. The real password is never written into the VM — bromure puts a fake `base64(\"<user>:<derived>\")` in `~/.docker/config.json`, and the proxy substitutes the real value on the wire when the request hits the matching registry host." = "Autenticação HTTP Basic por registro para `docker pull` / `docker push`. A senha real nunca é gravada na VM — o bromure coloca um `base64(\"<usuário>:<derivado>\")` falso em `~/.docker/config.json`, e o proxy substitui o valor real na rede quando a requisição chega no registro correspondente.";
+"No registries configured." = "Nenhum registro configurado.";
+"Remove this registry" = "Remover este registro";
+"Hide password" = "Ocultar senha";
+"Show password" = "Mostrar senha";
+"Import config.json…" = "Importar config.json…";
+"Pull entries from an existing ~/.docker/config.json. Entries that delegate to credsStore / credHelpers are skipped — those passwords live in the OS keychain, not in the file." = "Importa entradas de um ~/.docker/config.json existente. Entradas que delegam para credsStore / credHelpers são ignoradas — essas senhas ficam no chaveiro do sistema, não no arquivo.";
+"Import Docker config.json" = "Importar Docker config.json";
+"Imported 1 registry" = "1 registro importado";
+"Imported %d registries" = "%d registros importados";
+"Skipped 1 entry stored in credsStore / credHelpers (the password lives in the OS keychain, not in the file)." = "1 entrada ignorada (armazenada em credsStore / credHelpers — a senha fica no chaveiro do sistema, não no arquivo).";
+"Skipped %d entries stored in credsStore / credHelpers (passwords live in the OS keychain, not in the file)." = "%d entradas ignoradas (armazenadas em credsStore / credHelpers — as senhas ficam no chaveiro do sistema, não no arquivo).";
+"No usable auth entries found." = "Nenhuma entrada de auth utilizável encontrada.";
+"Couldn't import config.json" = "Não foi possível importar config.json";
+"The file isn't valid JSON." = "O arquivo não é um JSON válido.";
+"No `auths` object found at the top level." = "Nenhum objeto `auths` encontrado no nível raiz.";

@@ -28,6 +28,11 @@ public struct SessionTokenPlan: Sendable {
         /// DigitalOcean PAT. Injected as DIGITALOCEAN_ACCESS_TOKEN env
         /// + ~/.config/doctl/config.yaml in the VM.
         case digitalOcean
+        /// Container-registry Basic auth. The realValue / fakeValue are
+        /// the full `base64("<user>:<password>")` strings — that's what
+        /// docker writes in `~/.docker/config.json` and sends as
+        /// `Authorization: Basic <…>`. host is the registry hostname.
+        case dockerRegistry(host: String, username: String)
     }
 
     public var entries: [Entry]
@@ -84,6 +89,39 @@ public struct SessionTokenPlan: Sendable {
         case .gitHTTPS(let host, _):  return host
         case .manual(_, _, let host): return host.isEmpty ? nil : host
         case .digitalOcean:           return "digitalocean.com"
+        case .dockerRegistry(let host, _): return host
+        }
+    }
+
+    /// Look up the fake base64 auth blob for a given (host, username)
+    /// pair so Profile.prepareHomeDirectory can write it into the VM's
+    /// ~/.docker/config.json. Returns nil if no docker entry matches.
+    public func fakeForDockerRegistry(host: String, username: String) -> String? {
+        for e in entries {
+            if case .dockerRegistry(let h, let u) = e.purpose,
+               h == host, u == username {
+                return e.fakeValue
+            }
+        }
+        return nil
+    }
+
+    /// Hardcoded list of cloud registries whose distribution-spec auth
+    /// challenge points at a different hostname than the registry
+    /// itself. Each docker-registry credential gets a duplicate swap
+    /// entry per realm, so the Basic-auth check on the realm host
+    /// substitutes correctly.
+    static func dockerAuthRealms(for host: String) -> [String] {
+        let h = host.lowercased().trimmingCharacters(in: .whitespaces)
+        switch h {
+        case "registry.digitalocean.com":
+            return ["api.digitalocean.com"]
+        case "docker.io", "registry-1.docker.io", "index.docker.io":
+            return ["auth.docker.io"]
+        case "public.ecr.aws":
+            return ["public.ecr.aws"]
+        default:
+            return []
         }
     }
 
@@ -169,15 +207,71 @@ public extension Profile {
         // DigitalOcean PAT.
         let doRaw = digitalOceanToken.trimmingCharacters(in: .whitespacesAndNewlines)
         if !doRaw.isEmpty {
+            let doFake = SessionTokenPlan.deriveFake(prefix: "dop_v1_",
+                                                      real: doRaw, salt: salt,
+                                                      targetLength: 64)
             entries.append(.init(
                 realValue: doRaw,
                 // Real DO PATs are 64 chars — `dop_v1_<hex>`.
                 // Match the prefix + length so client validators
                 // (doctl, terraform-provider-digitalocean) accept.
-                fakeValue: SessionTokenPlan.deriveFake(prefix: "dop_v1_",
-                                                       real: doRaw, salt: salt,
-                                                       targetLength: 64),
+                fakeValue: doFake,
                 purpose: .digitalOcean))
+            // `doctl registry login` / `docker login -u $TOKEN -p $TOKEN
+            // registry.digitalocean.com` wraps the PAT in HTTP Basic
+            // auth — the wire form is `Authorization: Basic
+            // base64("<token>:<token>")`. The naked-token swap above
+            // can't see through the base64 transform, so add an
+            // explicit pair for the encoded blob. Scope tracks the
+            // .digitalOcean entry (digitalocean.com).
+            let realB64 = Data("\(doRaw):\(doRaw)".utf8).base64EncodedString()
+            let fakeB64 = Data("\(doFake):\(doFake)".utf8).base64EncodedString()
+            entries.append(.init(
+                realValue: realB64,
+                fakeValue: fakeB64,
+                purpose: .digitalOcean))
+        }
+
+        for reg in dockerRegistries where reg.isUsable {
+            let realPass = reg.password.trimmingCharacters(in: .whitespacesAndNewlines)
+            if realPass.isEmpty { continue }
+            // Mint a fake password derived from the real one (HKDF over
+            // the real value + salt) so the same input always produces
+            // the same fake — clients that cache `auth` blobs don't see
+            // the value rotate session-to-session.
+            //
+            // Both the real and fake `auth` strings are
+            // base64("<user>:<password>"). The proxy substitutes the
+            // fake base64 with the real base64 on the wire, scoped to
+            // the registry host (so a stray copy of the fake leaking to
+            // a third-party host is left alone, not rewritten).
+            let fakePass = SessionTokenPlan.deriveFake(
+                prefix: "brm-docker-",
+                real: realPass,
+                salt: salt,
+                targetLength: max(40, realPass.count))
+            let realB64 = Data("\(reg.username):\(realPass)".utf8).base64EncodedString()
+            let fakeB64 = Data("\(reg.username):\(fakePass)".utf8).base64EncodedString()
+            entries.append(.init(
+                realValue: realB64,
+                fakeValue: fakeB64,
+                purpose: .dockerRegistry(host: reg.host, username: reg.username)))
+            // Distribution-spec auth flow: GET /v2/ returns 401 with
+            // a `WWW-Authenticate: Bearer realm="https://<auth-host>/…"`.
+            // For multi-host providers (DO: api.digitalocean.com,
+            // Docker Hub: auth.docker.io) the realm lives on a
+            // different hostname than the registry, so an entry
+            // scoped to the registry host alone never fires on the
+            // auth call. Add one swap entry per known auth realm with
+            // the same fake/real base64 pair.
+            for realm in SessionTokenPlan.dockerAuthRealms(for: reg.host) {
+                entries.append(.init(
+                    realValue: realB64,
+                    fakeValue: fakeB64,
+                    // Reuse .dockerRegistry purpose; only the host
+                    // scope differs. Carry the realm in the host slot.
+                    purpose: .dockerRegistry(host: realm, username: reg.username)))
+            }
         }
 
         for cred in gitHTTPSCredentials where cred.isUsable {

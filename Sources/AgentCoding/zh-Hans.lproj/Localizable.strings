@@ -135,3 +135,22 @@
 "Discard suspended VM for “%@”?" = "丢弃“%@”的已挂起虚拟机？";
 "The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "自该配置文件挂起以来，共享文件夹已发生变化。快照是基于旧的共享集保存的，无法安全地以新的共享集恢复。\n\n保存将丢弃挂起状态。下次启动将冷启动。配置文件的个人主目录及共享文件夹中的文件不受影响。";
 "Discard & save" = "丢弃并保存";
+
+/* Editor — Credentials → Container Registries */
+"Container Registries" = "容器镜像仓库";
+"Per-registry HTTP Basic auth for `docker pull` / `docker push`. The real password is never written into the VM — bromure puts a fake `base64(\"<user>:<derived>\")` in `~/.docker/config.json`, and the proxy substitutes the real value on the wire when the request hits the matching registry host." = "为每个镜像仓库配置 HTTP Basic 认证，用于 `docker pull` / `docker push`。真实密码绝不会写入虚拟机 — bromure 在 `~/.docker/config.json` 中写入伪造的 `base64(\"<user>:<derived>\")`，在请求到达对应仓库主机时由代理在传输层替换为真实值。";
+"No registries configured." = "未配置任何镜像仓库。";
+"Remove this registry" = "移除此镜像仓库";
+"Hide password" = "隐藏密码";
+"Show password" = "显示密码";
+"Import config.json…" = "导入 config.json…";
+"Pull entries from an existing ~/.docker/config.json. Entries that delegate to credsStore / credHelpers are skipped — those passwords live in the OS keychain, not in the file." = "从现有的 ~/.docker/config.json 导入条目。委派给 credsStore / credHelpers 的条目会被跳过 — 这些密码保存在系统钥匙串中,不在文件里。";
+"Import Docker config.json" = "导入 Docker config.json";
+"Imported 1 registry" = "已导入 1 个镜像仓库";
+"Imported %d registries" = "已导入 %d 个镜像仓库";
+"Skipped 1 entry stored in credsStore / credHelpers (the password lives in the OS keychain, not in the file)." = "已跳过 1 个保存在 credsStore / credHelpers 中的条目（密码保存在系统钥匙串中,不在文件里）。";
+"Skipped %d entries stored in credsStore / credHelpers (passwords live in the OS keychain, not in the file)." = "已跳过 %d 个保存在 credsStore / credHelpers 中的条目（密码保存在系统钥匙串中,不在文件里）。";
+"No usable auth entries found." = "未找到可用的 auth 条目。";
+"Couldn't import config.json" = "无法导入 config.json";
+"The file isn't valid JSON." = "文件不是有效的 JSON。";
+"No `auths` object found at the top level." = "顶层未找到 `auths` 对象。";

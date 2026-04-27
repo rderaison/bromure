@@ -8,9 +8,14 @@ public struct TokenMap: Sendable {
     public struct Entry: Sendable {
         public let fake: String
         public let real: String
-        /// Optional host pattern (substring match). Empty/nil = swap on
-        /// any host. Used when the same fake token might appear in
-        /// requests where we want it left alone for some hosts.
+        /// Optional host scope. Empty/nil = swap on any host.
+        ///
+        /// **Matching is exact-or-subdomain**: `host == scope` OR
+        /// `host.hasSuffix("." + scope)`. NOT substring — substring
+        /// matching would be a security hole, since a malicious
+        /// VM-internal client could `CONNECT openai.com.evil.com:443`
+        /// and the proxy would happily swap the real OpenAI key into
+        /// the request. The check is also case-insensitive.
         public let host: String?
         /// Header to swap in. Default `Authorization` (Bearer prefix).
         public let header: Header
@@ -93,7 +98,8 @@ public final class TokenSwapper: @unchecked Sendable {
 
         var swaps: [SwapRecord] = []
         for entry in map.entries {
-            if let h = entry.host, !host.contains(h) { continue }
+            if let h = entry.host, !h.isEmpty,
+               !Self.hostMatchesScope(host: host, scope: h) { continue }
             // Sweep all token positions — the same fake might appear in
             // multiple headers (rare but possible).
             while let r = headerStr.range(of: entry.fake) {
@@ -193,6 +199,16 @@ public final class TokenSwapper: @unchecked Sendable {
     static func preview(_ s: String) -> String {
         guard s.count > 8 else { return "***" }
         return String(s.prefix(4)) + "…" + String(s.suffix(4))
+    }
+
+    /// Cookie-style domain match: `host` belongs to `scope` if it equals
+    /// `scope` or is a proper subdomain (`host.hasSuffix("." + scope)`).
+    /// Case-insensitive. Substring matching is intentionally NOT used —
+    /// see the security note on `TokenMap.Entry.host`.
+    static func hostMatchesScope(host: String, scope: String) -> Bool {
+        let h = host.lowercased()
+        let s = scope.lowercased()
+        return h == s || h.hasSuffix("." + s)
     }
 }
 

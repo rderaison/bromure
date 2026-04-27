@@ -150,9 +150,11 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
     /// Env var name to inject the fake under (e.g. "STRIPE_API_KEY").
     /// Empty = inject nothing, the user has to copy-paste manually.
     public var envVarName: String
-    /// Optional host substring filter. Empty = swap on any host where
-    /// the fake appears. Useful when the fake might leak to a third
-    /// party we don't want quietly rewriting (rare but possible).
+    /// Optional host scope. Empty = swap on any host where the fake
+    /// appears. Non-empty = exact-or-subdomain match: a scope of
+    /// `example.com` swaps on requests to `example.com` and any
+    /// `*.example.com`, but not on `example.com.evil.com`. Match is
+    /// case-insensitive. Substring matching is deliberately NOT used.
     public var hostFilter: String
 
     public init(id: UUID = UUID(), name: String = "", realValue: String = "",
@@ -194,6 +196,48 @@ public struct GitHTTPSCredential: Codable, Equatable, Sendable, Identifiable {
         !host.trimmingCharacters(in: .whitespaces).isEmpty
             && !username.trimmingCharacters(in: .whitespaces).isEmpty
             && !token.isEmpty
+    }
+}
+
+/// One container-registry credential — Docker Hub, GHCR, GitLab CR,
+/// a private registry, etc. Materializes as an entry in
+/// ~/.docker/config.json's `auths` dict so `docker pull` / `docker
+/// push` / `docker login` (skipped) just work.
+///
+/// Docker auth is HTTP Basic: the value stored in config.json is
+/// `base64("<user>:<password>")`, sent as `Authorization: Basic <b64>`
+/// to the registry's auth endpoint. We mint a fake password (HKDF) and
+/// write `base64("<user>:<fake>")` into the VM. The proxy substitutes
+/// the fake base64 string with the real one on the wire — scoped to
+/// the registry host so a stray copy of the base64 string sent to a
+/// third-party host is left alone.
+public struct DockerRegistryCredential: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+    /// Registry hostname — "ghcr.io", "docker.io", "registry.gitlab.com",
+    /// "myregistry.example.com". For Docker Hub, "docker.io" is the
+    /// expected input; we rewrite it to the canonical
+    /// `https://index.docker.io/v1/` key when writing config.json so
+    /// the Docker CLI picks it up.
+    public var host: String
+    public var username: String
+    /// Personal access token / password. Stored in the encrypted
+    /// secrets.enc next to the rest of the profile's secrets.
+    public var password: String
+
+    public init(id: UUID = UUID(),
+                host: String = "",
+                username: String = "",
+                password: String = "") {
+        self.id = id
+        self.host = host
+        self.username = username
+        self.password = password
+    }
+
+    public var isUsable: Bool {
+        !host.trimmingCharacters(in: .whitespaces).isEmpty
+            && !username.trimmingCharacters(in: .whitespaces).isEmpty
+            && !password.isEmpty
     }
 }
 
@@ -359,6 +403,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// reasoning. Empty struct (`isUsable == false`) = not configured.
     public var awsCredentials: AWSCredentials
 
+    /// Container-registry credentials. One entry per host. Materialized
+    /// as ~/.docker/config.json `auths` entries (with FAKE base64 auth
+    /// strings); the proxy swaps fake → real on the wire when the
+    /// request hits the matching registry host.
+    public var dockerRegistries: [DockerRegistryCredential]
+
     public var createdAt: Date
     public var lastUsedAt: Date?
 
@@ -500,6 +550,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         kubeconfigs: [KubeconfigEntry] = [],
         digitalOceanToken: String = "",
         awsCredentials: AWSCredentials = AWSCredentials(),
+        dockerRegistries: [DockerRegistryCredential] = [],
         createdAt: Date = Date(),
         lastUsedAt: Date? = nil,
         baseImageVersionAtClone: String? = nil,
@@ -537,6 +588,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.kubeconfigs = kubeconfigs
         self.digitalOceanToken = digitalOceanToken
         self.awsCredentials = awsCredentials
+        self.dockerRegistries = dockerRegistries
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.baseImageVersionAtClone = baseImageVersionAtClone
@@ -580,6 +632,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case kubeconfigs
         case digitalOceanToken
         case awsCredentials
+        case dockerRegistries
         case closeAction
     }
 
@@ -641,6 +694,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
+        dockerRegistries = try c.decodeIfPresent([DockerRegistryCredential].self, forKey: .dockerRegistries) ?? []
         closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .suspend
     }
 
@@ -700,6 +754,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             || !awsCredentials.region.isEmpty
             || !awsCredentials.accessKeyID.isEmpty {
             try c.encode(awsCredentials, forKey: .awsCredentials)
+        }
+        if !dockerRegistries.isEmpty {
+            try c.encode(dockerRegistries, forKey: .dockerRegistries)
         }
         try c.encode(closeAction, forKey: .closeAction)
     }
@@ -767,6 +824,12 @@ struct ProfileSecrets: Codable {
     /// an AWS credential set — accessKeyID is identity-only).
     var awsSecretAccessKey: String?
     var awsSessionToken: String?
+    /// Keyed by `DockerRegistryCredential.id.uuidString`. Holds the
+    /// raw registry password / access token; the host + username live
+    /// in profile.json since they're identity, not secret. Optional so
+    /// older `secrets.enc` blobs (written before this field existed)
+    /// keep decoding cleanly.
+    var dockerRegistryPasswords: [String: String]?
 
     var isEmpty: Bool {
         (apiKey?.isEmpty ?? true)
@@ -777,6 +840,7 @@ struct ProfileSecrets: Codable {
             && (digitalOceanToken?.isEmpty ?? true)
             && (awsSecretAccessKey?.isEmpty ?? true)
             && (awsSessionToken?.isEmpty ?? true)
+            && (dockerRegistryPasswords?.isEmpty ?? true)
     }
 
     /// Pull every secret string out of the profile, replacing them
@@ -830,6 +894,14 @@ struct ProfileSecrets: Codable {
             profile.awsCredentials.sessionToken = ""
         }
 
+        for (i, reg) in profile.dockerRegistries.enumerated() {
+            if !reg.password.isEmpty {
+                if s.dockerRegistryPasswords == nil { s.dockerRegistryPasswords = [:] }
+                s.dockerRegistryPasswords?[reg.id.uuidString] = reg.password
+                profile.dockerRegistries[i].password = ""
+            }
+        }
+
         return s
     }
 
@@ -861,6 +933,13 @@ struct ProfileSecrets: Codable {
         if let do_ = digitalOceanToken { profile.digitalOceanToken = do_ }
         if let sk = awsSecretAccessKey { profile.awsCredentials.secretAccessKey = sk }
         if let st = awsSessionToken { profile.awsCredentials.sessionToken = st }
+        if let map = dockerRegistryPasswords {
+            for (i, reg) in profile.dockerRegistries.enumerated() {
+                if let p = map[reg.id.uuidString] {
+                    profile.dockerRegistries[i].password = p
+                }
+            }
+        }
     }
 }
 
@@ -1428,6 +1507,58 @@ public final class ProfileStore {
             try? fm.removeItem(at: awsConfigURL)
         }
 
+        // ~/.docker/config.json — Docker stores per-registry HTTP Basic
+        // creds here as `auths.<key>.auth = base64("<user>:<password>")`.
+        // We write FAKE base64 strings; the proxy substitutes the real
+        // values on the wire when the request hits the matching
+        // registry host.
+        //
+        // To coexist with `docker login` run from inside the VM, our
+        // file carries a sentinel top-level key that Docker ignores.
+        // Cleanup only deletes a previously-managed file (sentinel
+        // present); a hand-managed config.json is left alone.
+        let dockerDir = home.appendingPathComponent(".docker", isDirectory: true)
+        let dockerConfigURL = dockerDir.appendingPathComponent("config.json")
+        let usableRegs = profile.dockerRegistries.filter { $0.isUsable }
+        let bromureSentinel = "_bromureManaged"
+        if !usableRegs.isEmpty {
+            try fm.createDirectory(at: dockerDir, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: NSNumber(value: 0o700)])
+            var auths: [String: [String: String]] = [:]
+            for reg in usableRegs {
+                let useB64: String
+                if let plan = tokenPlan,
+                   let fake = plan.fakeForDockerRegistry(host: reg.host,
+                                                        username: reg.username) {
+                    useB64 = fake
+                } else {
+                    // Plan-less path (no MitmEngine): fall back to the
+                    // real base64. Won't be reached in practice since
+                    // every session has a token plan, but keeps the
+                    // file useful if someone runs prepareHomeDirectory
+                    // directly.
+                    let raw = "\(reg.username):\(reg.password)"
+                    useB64 = Data(raw.utf8).base64EncodedString()
+                }
+                auths[Self.dockerConfigKey(for: reg.host)] = ["auth": useB64]
+            }
+            let payload: [String: Any] = [
+                bromureSentinel: "Managed by Bromure Agentic Coding.",
+                "auths": auths,
+            ]
+            let data = try JSONSerialization.data(
+                withJSONObject: payload,
+                options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: dockerConfigURL, options: .atomic)
+            try fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                 ofItemAtPath: dockerConfigURL.path)
+        } else if let data = try? Data(contentsOf: dockerConfigURL),
+                  let json = try? JSONSerialization.jsonObject(with: data),
+                  let dict = json as? [String: Any],
+                  dict[bromureSentinel] != nil {
+            try? fm.removeItem(at: dockerConfigURL)
+        }
+
         // Migrate legacy SSH keys: profiles/<id>/ssh → home/.ssh
         let legacySSH = sshDirectory(for: profile)
         let newSSH = home.appendingPathComponent(".ssh", isDirectory: true)
@@ -1450,6 +1581,18 @@ public final class ProfileStore {
         var allowed = CharacterSet.urlUserAllowed
         allowed.remove(charactersIn: ":@/")
         return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
+    }
+
+    /// Translate a registry hostname to the key Docker stores it under
+    /// in `~/.docker/config.json`. Docker Hub is the special case: its
+    /// canonical key is the URL `https://index.docker.io/v1/` rather
+    /// than the bare hostname. Everything else uses the host as-is.
+    static func dockerConfigKey(for host: String) -> String {
+        let h = host.lowercased().trimmingCharacters(in: .whitespaces)
+        if h == "docker.io" || h == "index.docker.io" || h == "registry-1.docker.io" {
+            return "https://index.docker.io/v1/"
+        }
+        return host
     }
 
     /// Write ~/.config/gh/hosts.yml entries for any github.com (or GHE-host)
@@ -1741,6 +1884,37 @@ public final class ProfileStore {
     if [ -r /mnt/bromure-meta/bromure-vm-bridge.py ]; then
         python3 /mnt/bromure-meta/bromure-vm-bridge.py &
         echo "[xinit] bromure-vm-bridge pid $!" >> /tmp/xinitrc.log
+    fi
+
+    # Wire dockerd through the bridge.
+    #
+    # dockerd is launched by systemd at boot, BEFORE this xinitrc runs.
+    # That means: (a) the CA pool it cached predates our update-ca-
+    # certificates install above (so registry certs forged by Bromure
+    # CA fail TLS verify), and (b) shell HTTPS_PROXY env doesn't reach
+    # dockerd (systemd doesn't import the user session env).
+    #
+    # Drop in a systemd unit fragment that sets the proxy + restart
+    # docker. Restart picks up both the freshly-installed CA pool and
+    # the proxy env in one shot. Best-effort — failures don't break
+    # the rest of the session.
+    if [ -r /mnt/bromure-meta/bromure-vm-bridge.py ] \
+       && command -v docker >/dev/null 2>&1; then
+        sudo mkdir -p /etc/systemd/system/docker.service.d
+        sudo tee /etc/systemd/system/docker.service.d/bromure-proxy.conf \
+            >/dev/null <<'CONF'
+    # Managed by Bromure Agentic Coding — rewritten on every launch.
+    [Service]
+    Environment="HTTP_PROXY=http://127.0.0.1:8080"
+    Environment="HTTPS_PROXY=http://127.0.0.1:8080"
+    Environment="NO_PROXY=localhost,127.0.0.1,::1"
+    CONF
+        sudo systemctl daemon-reload >/dev/null 2>&1
+        sudo systemctl restart docker >/dev/null 2>&1 \
+            && echo "[xinit] docker restarted with bromure proxy + CA" \
+                >> /tmp/xinitrc.log \
+            || echo "[xinit] docker restart failed (non-fatal)" \
+                >> /tmp/xinitrc.log
     fi
 
     # Keyboard layout agent — listens on vsock 5006 for layout pushes

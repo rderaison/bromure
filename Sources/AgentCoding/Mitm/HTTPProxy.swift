@@ -378,8 +378,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
         )
 
         let store = traceStore
-        let req = captureBody ? preSwapRequest : nil
-        let res = captureBody ? responseBlob : nil
+        // Same redaction as the regular HTTP path: scrub auth-bearing
+        // headers from both the request handshake and the response
+        // handshake before they hit the trace store.
+        let req = captureBody ? Self.redactSensitiveHeaders(preSwapRequest) : nil
+        let res = captureBody ? Self.redactSensitiveHeaders(responseBlob) : nil
         await MainActor.run {
             store.record(record, requestBody: req, responseBody: res)
         }
@@ -449,11 +452,66 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // stream, etc.) — they consume the per-session body cap fast
         // and their decoded form isn't useful in the inspector. Text
         // bodies (json, html, xml, plain, js, css, form, sse) are kept.
-        let req = captureBody ? Self.bodyForTrace(preSwapRequest) : nil
-        let res = captureBody ? Self.bodyForTrace(upstreamResponse) : nil
+        //
+        // Auth-bearing headers (Authorization, Proxy-Authorization,
+        // *-api-key, Cookie, Set-Cookie) are redacted before the body
+        // is handed to the trace store. The swap log already records
+        // a previewed token; storing the full secret in the body
+        // file would defeat the encrypted-at-rest guarantee.
+        let req = captureBody
+            ? Self.bodyForTrace(preSwapRequest).map { Self.redactSensitiveHeaders($0) }
+            : nil
+        let res = captureBody
+            ? Self.bodyForTrace(upstreamResponse).map { Self.redactSensitiveHeaders($0) }
+            : nil
         await MainActor.run {
             store.record(record, requestBody: req, responseBody: res)
         }
+    }
+
+    /// Rewrite the headers of an HTTP frame so any header on the
+    /// `sensitiveHeaders` list has its value replaced with
+    /// `<redacted>`. Body bytes are passed through unchanged. If the
+    /// frame doesn't have a CRLF-CRLF separator, returns the input
+    /// unchanged.
+    static func redactSensitiveHeaders(_ raw: Data) -> Data {
+        guard let endRange = raw.range(of: Data("\r\n\r\n".utf8)) else { return raw }
+        let headerData = raw.subdata(in: 0..<endRange.lowerBound)
+        let bodyData   = raw.subdata(in: endRange.lowerBound..<raw.count)
+        guard let headerStr = String(data: headerData, encoding: .ascii) else { return raw }
+
+        var lines = headerStr.components(separatedBy: "\r\n")
+        for i in lines.indices {
+            let line = lines[i]
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = String(line[..<colon]).trimmingCharacters(in: .whitespaces).lowercased()
+            if Self.isSensitiveHeader(name) {
+                lines[i] = String(line[..<colon]) + ": <redacted>"
+            }
+        }
+        let rebuilt = lines.joined(separator: "\r\n")
+        var out = Data()
+        out.reserveCapacity(rebuilt.utf8.count + bodyData.count)
+        out.append(Data(rebuilt.utf8))
+        out.append(bodyData)
+        return out
+    }
+
+    private static func isSensitiveHeader(_ lowered: String) -> Bool {
+        if lowered == "authorization"
+            || lowered == "proxy-authorization"
+            || lowered == "cookie"
+            || lowered == "set-cookie"
+            || lowered == "x-amz-security-token"
+            || lowered == "x-goog-iap-jwt-assertion" {
+            return true
+        }
+        // `x-api-key`, `anthropic-api-key`, `openai-api-key`, and the
+        // catch-all `*-api-key` / `api-key` pattern all carry secrets.
+        if lowered == "api-key" || lowered.hasSuffix("-api-key") {
+            return true
+        }
+        return false
     }
 
     /// Returns the original buffer iff the parsed Content-Type looks

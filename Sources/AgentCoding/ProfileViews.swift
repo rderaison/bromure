@@ -841,6 +841,15 @@ struct ProfileEditorView: View {
             }
 
             credentialsDisclosure(
+                key: "docker",
+                title: NSLocalizedString("Container Registries", comment: ""),
+                symbol: "shippingbox.and.arrow.backward.fill",
+                count: draft.dockerRegistries.filter { $0.isUsable }.count
+            ) {
+                dockerRegistriesSubsection
+            }
+
+            credentialsDisclosure(
                 key: "other",
                 title: NSLocalizedString("Other API keys", comment: ""),
                 symbol: "key.horizontal.fill",
@@ -1176,6 +1185,150 @@ struct ProfileEditorView: View {
             }
         }
     }
+
+    // MARK: - Container Registries (Docker / GHCR / GitLab CR / private)
+
+    @ViewBuilder
+    private var dockerRegistriesSubsection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Per-registry HTTP Basic auth for `docker pull` / `docker push`. The real password is never written into the VM — bromure puts a fake `base64(\"<user>:<derived>\")` in `~/.docker/config.json`, and the proxy substitutes the real value on the wire when the request hits the matching registry host.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if draft.dockerRegistries.isEmpty {
+                Text("No registries configured.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.vertical, 4)
+            } else {
+                ForEach(Array(draft.dockerRegistries.enumerated()), id: \.element.id) { (idx, _) in
+                    DockerRegistryRow(
+                        cred: $draft.dockerRegistries[idx],
+                        onRemove: { draft.dockerRegistries.remove(at: idx) }
+                    )
+                    Divider()
+                }
+            }
+
+            HStack {
+                Menu {
+                    Button("Docker Hub (docker.io)") {
+                        addDockerRegistry(host: "docker.io")
+                    }
+                    Button("GitHub Container Registry (ghcr.io)") {
+                        addDockerRegistry(host: "ghcr.io")
+                    }
+                    Button("GitLab Container Registry (registry.gitlab.com)") {
+                        addDockerRegistry(host: "registry.gitlab.com")
+                    }
+                    Button("Quay (quay.io)") {
+                        addDockerRegistry(host: "quay.io")
+                    }
+                    Divider()
+                    Button(NSLocalizedString("Other host…", comment: "")) {
+                        addDockerRegistry(host: "")
+                    }
+                } label: {
+                    Label(NSLocalizedString("Add", comment: ""), systemImage: "plus")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+
+                Button {
+                    importDockerConfigFile()
+                } label: {
+                    Label(NSLocalizedString("Import config.json…", comment: ""),
+                          systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.borderless)
+                .help(NSLocalizedString(
+                    "Pull entries from an existing ~/.docker/config.json. Entries that delegate to credsStore / credHelpers are skipped — those passwords live in the OS keychain, not in the file.",
+                    comment: ""))
+
+                Spacer()
+            }
+        }
+    }
+
+    private func addDockerRegistry(host: String) {
+        draft.dockerRegistries.append(
+            DockerRegistryCredential(host: host, username: "", password: ""))
+    }
+
+    /// Open-panel + parse a Docker config.json. For each entry under
+    /// `auths`, decode the `auth` field (`base64("user:password")`),
+    /// translate the JSON key back to a hostname, and append a new
+    /// `DockerRegistryCredential` to the draft. Entries that use
+    /// `credsStore` / `credHelpers` are skipped — those passwords live
+    /// in the host's OS keychain, not in the file. Always reports a
+    /// summary alert so the user knows what landed.
+    private func importDockerConfigFile() {
+        let panel = NSOpenPanel()
+        panel.title = NSLocalizedString("Import Docker config.json", comment: "")
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.json]
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".docker", isDirectory: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let parsed: DockerConfigImport.Result
+        do {
+            let data = try Data(contentsOf: url)
+            parsed = try DockerConfigImport.parse(data)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString("Couldn't import config.json",
+                                                   comment: "")
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            alert.runModal()
+            return
+        }
+
+        // Skip duplicates: same (host, username) pair already in the
+        // draft is left alone (the user can edit it manually).
+        var added = 0
+        for entry in parsed.entries {
+            let dup = draft.dockerRegistries.contains {
+                $0.host.lowercased() == entry.host.lowercased()
+                    && $0.username == entry.username
+            }
+            if dup { continue }
+            draft.dockerRegistries.append(DockerRegistryCredential(
+                host: entry.host,
+                username: entry.username,
+                password: entry.password))
+            added += 1
+        }
+
+        let alert = NSAlert()
+        alert.messageText = added == 1
+            ? NSLocalizedString("Imported 1 registry", comment: "")
+            : String(format: NSLocalizedString("Imported %d registries",
+                                                comment: ""), added)
+        var info = ""
+        if parsed.skippedHelper > 0 {
+            info = parsed.skippedHelper == 1
+                ? NSLocalizedString(
+                    "Skipped 1 entry stored in credsStore / credHelpers (the password lives in the OS keychain, not in the file).",
+                    comment: "")
+                : String(format: NSLocalizedString(
+                    "Skipped %d entries stored in credsStore / credHelpers (passwords live in the OS keychain, not in the file).",
+                    comment: ""), parsed.skippedHelper)
+        }
+        if added == 0 && info.isEmpty {
+            info = NSLocalizedString("No usable auth entries found.", comment: "")
+        }
+        alert.informativeText = info
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
+
 
     // MARK: - Other API keys (formerly Manual token rules under Advanced)
 
@@ -2355,6 +2508,69 @@ private struct HTTPSCredentialRow: View {
         return h == "github.com" || h.hasSuffix(".github.com")
             || h == "gitlab.com" || h.hasPrefix("gitlab.")
             || h == "bitbucket.org"
+    }
+}
+
+// MARK: - Docker registry row
+
+private struct DockerRegistryRow: View {
+    @Binding var cred: DockerRegistryCredential
+    var onRemove: () -> Void
+
+    @State private var revealPassword: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: hostSymbol)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+                TextField("Host", text: $cred.host, prompt: Text("ghcr.io"))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                Button(action: onRemove) {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .help(NSLocalizedString("Remove this registry", comment: ""))
+            }
+            HStack(spacing: 6) {
+                TextField("Username", text: $cred.username, prompt: Text("octocat"))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                ZStack {
+                    if revealPassword {
+                        TextField("Password / token", text: $cred.password,
+                                  prompt: Text("ghp_…"))
+                            .textFieldStyle(.roundedBorder)
+                    } else {
+                        SecureField("Password / token", text: $cred.password,
+                                    prompt: Text("•••• ••••"))
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+                Button {
+                    revealPassword.toggle()
+                } label: {
+                    Image(systemName: revealPassword ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.borderless)
+                .help(revealPassword
+                      ? NSLocalizedString("Hide password", comment: "")
+                      : NSLocalizedString("Show password", comment: ""))
+            }
+        }
+        .padding(8)
+        .background(Color(nsColor: .textBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var hostSymbol: String {
+        let h = cred.host.lowercased()
+        if h == "ghcr.io"                            { return "cat.fill" }
+        if h.contains("gitlab")                      { return "fox.fill" }
+        if h == "docker.io" || h == "index.docker.io" { return "cube.box.fill" }
+        return "shippingbox.fill"
     }
 }
 
