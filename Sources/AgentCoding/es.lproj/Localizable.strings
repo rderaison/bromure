@@ -154,3 +154,31 @@
 "Couldn't import config.json" = "No se pudo importar config.json";
 "The file isn't valid JSON." = "El archivo no es JSON válido.";
 "No `auths` object found at the top level." = "No se encontró un objeto `auths` en el nivel superior.";
+
+/* Credential consent gate */
+"Allow “%@” to use %@?" = "¿Permitir que “%@” use %@?";
+"Allow for 1 hour" = "Permitir durante 1 hora";
+"Allow for 5 minutes" = "Permitir durante 5 minutos";
+"Allow for the rest of the session" = "Permitir durante el resto de la sesión";
+"Don't allow" = "No permitir";
+"for any AWS API call (SigV4 signing in the VM)" = "para cualquier llamada a la API de AWS (firma SigV4 dentro de la VM)";
+"to produce one signature inside the VM" = "para producir una firma dentro de la VM";
+"for any *.%@ request" = "para cualquier petición a *.%@";
+"for outbound requests" = "para peticiones salientes";
+"Require approval to use" = "Requerir aprobación para usar";
+"Pop a confirmation dialog the first time this credential is used in a session. Off by default." = "Muestra un diálogo de confirmación la primera vez que esta credencial se usa en una sesión. Desactivado por defecto.";
+
+/* Credential Approvals window */
+"Credential Approvals" = "Aprobaciones de credenciales";
+"Credential Approvals…" = "Aprobaciones de credenciales…";
+"Revoke all" = "Revocar todo";
+"Revoke" = "Revocar";
+"Loading…" = "Cargando…";
+"No active credential approvals. They appear here after you allow a gated credential." = "No hay aprobaciones activas. Aparecerán aquí cuando autorice una credencial protegida.";
+"rest of session" = "resto de la sesión";
+"%d min remaining" = "%d min restantes";
+"%d sec remaining" = "%d s restantes";
+
+/* Duplicate profile */
+"Duplicate" = "Duplicar";
+"copy" = "copia";

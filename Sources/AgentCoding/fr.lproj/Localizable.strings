@@ -154,3 +154,31 @@
 "Couldn't import config.json" = "Impossible d'importer config.json";
 "The file isn't valid JSON." = "Le fichier n'est pas un JSON valide.";
 "No `auths` object found at the top level." = "Aucun objet `auths` trouvé au niveau racine.";
+
+/* Credential consent gate */
+"Allow “%@” to use %@?" = "Autoriser « %@ » à utiliser %@ ?";
+"Allow for 1 hour" = "Autoriser pendant 1 heure";
+"Allow for 5 minutes" = "Autoriser pendant 5 minutes";
+"Allow for the rest of the session" = "Autoriser pour le reste de la session";
+"Don't allow" = "Ne pas autoriser";
+"for any AWS API call (SigV4 signing in the VM)" = "pour tout appel à l'API AWS (signature SigV4 dans la VM)";
+"to produce one signature inside the VM" = "pour produire une signature à l'intérieur de la VM";
+"for any *.%@ request" = "pour toute requête vers *.%@";
+"for outbound requests" = "pour les requêtes sortantes";
+"Require approval to use" = "Demander l'autorisation à l'utilisation";
+"Pop a confirmation dialog the first time this credential is used in a session. Off by default." = "Affiche une boîte de dialogue de confirmation la première fois que cet identifiant est utilisé dans une session. Désactivé par défaut.";
+
+/* Credential Approvals window */
+"Credential Approvals" = "Autorisations d'identifiants";
+"Credential Approvals…" = "Autorisations d'identifiants…";
+"Revoke all" = "Tout révoquer";
+"Revoke" = "Révoquer";
+"Loading…" = "Chargement…";
+"No active credential approvals. They appear here after you allow a gated credential." = "Aucune autorisation d'identifiant active. Elles apparaissent ici après l'autorisation d'un identifiant protégé.";
+"rest of session" = "reste de la session";
+"%d min remaining" = "%d min restantes";
+"%d sec remaining" = "%d s restantes";
+
+/* Duplicate profile */
+"Duplicate" = "Dupliquer";
+"copy" = "copie";

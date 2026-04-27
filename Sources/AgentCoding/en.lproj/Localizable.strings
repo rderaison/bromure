@@ -155,3 +155,31 @@
 "Couldn't import config.json" = "Couldn't import config.json";
 "The file isn't valid JSON." = "The file isn't valid JSON.";
 "No `auths` object found at the top level." = "No `auths` object found at the top level.";
+
+/* Credential consent gate */
+"Allow “%@” to use %@?" = "Allow “%@” to use %@?";
+"Allow for 1 hour" = "Allow for 1 hour";
+"Allow for 5 minutes" = "Allow for 5 minutes";
+"Allow for the rest of the session" = "Allow for the rest of the session";
+"Don't allow" = "Don't allow";
+"for any AWS API call (SigV4 signing in the VM)" = "for any AWS API call (SigV4 signing in the VM)";
+"to produce one signature inside the VM" = "to produce one signature inside the VM";
+"for any *.%@ request" = "for any *.%@ request";
+"for outbound requests" = "for outbound requests";
+"Require approval to use" = "Require approval to use";
+"Pop a confirmation dialog the first time this credential is used in a session. Off by default." = "Pop a confirmation dialog the first time this credential is used in a session. Off by default.";
+
+/* Credential Approvals window */
+"Credential Approvals" = "Credential Approvals";
+"Credential Approvals…" = "Credential Approvals…";
+"Revoke all" = "Revoke all";
+"Revoke" = "Revoke";
+"Loading…" = "Loading…";
+"No active credential approvals. They appear here after you allow a gated credential." = "No active credential approvals. They appear here after you allow a gated credential.";
+"rest of session" = "rest of session";
+"%d min remaining" = "%d min remaining";
+"%d sec remaining" = "%d sec remaining";
+
+/* Duplicate profile */
+"Duplicate" = "Duplicate";
+"copy" = "copy";

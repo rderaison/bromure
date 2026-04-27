@@ -154,3 +154,31 @@
 "Couldn't import config.json" = "config.json konnte nicht importiert werden";
 "The file isn't valid JSON." = "Die Datei ist kein gültiges JSON.";
 "No `auths` object found at the top level." = "Kein `auths`-Objekt auf oberster Ebene gefunden.";
+
+/* Credential consent gate */
+"Allow “%@” to use %@?" = "„%@“ für die Verwendung von %@ zulassen?";
+"Allow for 1 hour" = "1 Stunde lang erlauben";
+"Allow for 5 minutes" = "5 Minuten lang erlauben";
+"Allow for the rest of the session" = "Für den Rest der Sitzung erlauben";
+"Don't allow" = "Nicht erlauben";
+"for any AWS API call (SigV4 signing in the VM)" = "für jeden AWS-API-Aufruf (SigV4-Signierung in der VM)";
+"to produce one signature inside the VM" = "um eine Signatur in der VM zu erzeugen";
+"for any *.%@ request" = "für jede Anfrage an *.%@";
+"for outbound requests" = "für ausgehende Anfragen";
+"Require approval to use" = "Verwendung bestätigen lassen";
+"Pop a confirmation dialog the first time this credential is used in a session. Off by default." = "Beim ersten Einsatz dieses Anmeldedatums in einer Sitzung einen Bestätigungsdialog anzeigen. Standardmäßig deaktiviert.";
+
+/* Credential Approvals window */
+"Credential Approvals" = "Anmeldedaten-Freigaben";
+"Credential Approvals…" = "Anmeldedaten-Freigaben…";
+"Revoke all" = "Alle widerrufen";
+"Revoke" = "Widerrufen";
+"Loading…" = "Wird geladen…";
+"No active credential approvals. They appear here after you allow a gated credential." = "Keine aktiven Anmeldedaten-Freigaben. Sie erscheinen hier, nachdem Sie ein geschütztes Anmeldedatum freigegeben haben.";
+"rest of session" = "Rest der Sitzung";
+"%d min remaining" = "%d Min. verbleibend";
+"%d sec remaining" = "%d Sek. verbleibend";
+
+/* Duplicate profile */
+"Duplicate" = "Duplizieren";
+"copy" = "Kopie";

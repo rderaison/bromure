@@ -12,23 +12,45 @@ import SwiftASN1
 /// internal mTLS APIs, etc.). Keyed by `host[:port]` lowercased.
 public final class ClientIdentityRegistry: @unchecked Sendable {
     private let lock = NSLock()
+
+    public struct Entry: Sendable {
+        public let identity: SecIdentity
+        /// Stable consent ID for the originating credential. nil = no
+        /// gate; the proxy hands the identity to URLSession without
+        /// prompting.
+        public let consentCredentialID: String?
+        public let consentDisplayName: String?
+        public init(identity: SecIdentity,
+                    consentCredentialID: String? = nil,
+                    consentDisplayName: String? = nil) {
+            self.identity = identity
+            self.consentCredentialID = consentCredentialID
+            self.consentDisplayName = consentDisplayName
+        }
+    }
+
     /// Per-profile, per-host map. We key by profile so two profiles
     /// pointing at the same cluster URL with different creds don't
     /// stomp on each other.
-    private var perProfile: [UUID: [String: SecIdentity]] = [:]
+    private var perProfile: [UUID: [String: Entry]] = [:]
 
     public init() {}
 
-    public func setIdentity(_ identity: SecIdentity, host: String, profileID: UUID) {
+    public func setIdentity(_ identity: SecIdentity, host: String, profileID: UUID,
+                            consentCredentialID: String? = nil,
+                            consentDisplayName: String? = nil) {
         let h = host.lowercased()
+        let entry = Entry(identity: identity,
+                          consentCredentialID: consentCredentialID,
+                          consentDisplayName: consentDisplayName)
         lock.lock(); defer { lock.unlock() }
         var byHost = perProfile[profileID] ?? [:]
-        byHost[h] = identity
+        byHost[h] = entry
         // Also index by bare hostname — URLSession challenges + the
         // proxy's CONNECT-parsed host typically drop the port, so a
         // single registration must hit both forms.
         if let bare = h.split(separator: ":").first.map(String.init), bare != h {
-            byHost[bare] = identity
+            byHost[bare] = entry
         }
         perProfile[profileID] = byHost
     }
@@ -38,14 +60,18 @@ public final class ClientIdentityRegistry: @unchecked Sendable {
         perProfile.removeValue(forKey: profileID)
     }
 
-    public func identity(for host: String, profileID: UUID) -> SecIdentity? {
+    public func entry(for host: String, profileID: UUID) -> Entry? {
         let h = host.lowercased()
         lock.lock(); defer { lock.unlock() }
-        if let id = perProfile[profileID]?[h] { return id }
-        // Allow port-stripped fallback (some upstream challenges drop the port).
+        if let e = perProfile[profileID]?[h] { return e }
         if let bareHost = h.split(separator: ":").first.map(String.init),
-           let id = perProfile[profileID]?[bareHost] { return id }
+           let e = perProfile[profileID]?[bareHost] { return e }
         return nil
+    }
+
+    /// Compatibility shortcut for code that only needs the SecIdentity.
+    public func identity(for host: String, profileID: UUID) -> SecIdentity? {
+        return entry(for: host, profileID: profileID)?.identity
     }
 }
 
@@ -123,14 +149,31 @@ public final class KubeconfigMaterializer {
     /// real credentials on the wire.
     public struct Materialized: Sendable {
         public var yaml: String
-        public var bearerSwaps: [(host: String, fakeToken: String, realToken: String)]
-        public var clientIdentities: [(host: String, identity: SecIdentity)]
+        public var bearerSwaps: [BearerSwap]
+        public var clientIdentities: [ClientIdentitySpec]
         public var execContexts: [ExecContext]
         /// Per-host CA PEMs the proxy must trust when talking to the
         /// upstream API server. Empty when the cluster's API server uses
         /// a publicly-trusted cert (rare for on-prem k8s, common for
         /// managed services).
         public var clusterCAs: [(host: String, caPEM: String)]
+    }
+
+    public struct ClientIdentitySpec: Sendable {
+        public let host: String
+        public let identity: SecIdentity
+        public let consentCredentialID: String?
+        public let consentDisplayName: String?
+    }
+
+    public struct BearerSwap: Sendable {
+        public let host: String
+        public let fakeToken: String
+        public let realToken: String
+        /// `ConsentBroker` ID when the source kubeconfig entry is
+        /// flagged for approval; nil = no gate.
+        public let consentCredentialID: String?
+        public let consentDisplayName: String?
     }
 
     public struct ExecContext: Sendable {
@@ -151,8 +194,8 @@ public final class KubeconfigMaterializer {
         var contexts: [String] = []
         var clusters: [String] = []
         var users: [String] = []
-        var bearerSwaps: [(String, String, String)] = []
-        var identities: [(String, SecIdentity)] = []
+        var bearerSwaps: [BearerSwap] = []
+        var identities: [ClientIdentitySpec] = []
         var execContexts: [ExecContext] = []
         var clusterCAs: [(String, String)] = []
 
@@ -190,11 +233,20 @@ public final class KubeconfigMaterializer {
             \(ctxBody)
             """)
 
+            let consentID: String? = entry.requireApproval
+                ? ConsentCredentialID.kubeconfig(entry.id) : nil
+            let consentDisplay = entry.name.isEmpty
+                ? "kubeconfig context" : "kubeconfig “\(entry.name)”"
+
             // User block — swap by auth flavour.
             switch entry.auth {
             case .bearerToken(let realToken):
                 let fake = makeFakeToken()
-                bearerSwaps.append((entry.hostPattern, fake, realToken))
+                bearerSwaps.append(BearerSwap(
+                    host: entry.hostPattern,
+                    fakeToken: fake, realToken: realToken,
+                    consentCredentialID: consentID,
+                    consentDisplayName: consentDisplay))
                 users.append("""
                 - name: \(user)
                   user:
@@ -206,7 +258,11 @@ public final class KubeconfigMaterializer {
                 // a SecIdentity for upstream mTLS. The VM gets a
                 // throwaway pair so kubectl can load valid PEM.
                 if let id = makeSecIdentity(certPEM: certPEM, keyPEM: keyPEM) {
-                    identities.append((entry.hostPattern, id))
+                    identities.append(ClientIdentitySpec(
+                        host: entry.hostPattern,
+                        identity: id,
+                        consentCredentialID: consentID,
+                        consentDisplayName: consentDisplay))
                 }
                 let throwaway = makeThrowawayClientCert(commonName: user)
                 let throwawayCert = Data(throwaway.cert.utf8).base64EncodedString()
@@ -225,7 +281,11 @@ public final class KubeconfigMaterializer {
                 // placeholder; the poller updates the real value
                 // before kubectl needs it.
                 let fake = makeFakeToken()
-                bearerSwaps.append((entry.hostPattern, fake, ""))   // real filled by poller
+                bearerSwaps.append(BearerSwap(
+                    host: entry.hostPattern,
+                    fakeToken: fake, realToken: "",
+                    consentCredentialID: consentID,
+                    consentDisplayName: consentDisplay))
                 execContexts.append(ExecContext(
                     entryID: entry.id,
                     host: entry.hostPattern,
@@ -477,9 +537,15 @@ public final class ExecCredentialPoller {
         // by appending; old entries with the same fake get
         // overwritten by the lookup-by-fake nature of the swap.
         var entries = swapper.entries(for: profileID)
-        // Remove any existing entry with this fake to avoid duplicates.
+        // Preserve any consent metadata the original entry carried —
+        // otherwise an exec-plugin refresh would silently strip the
+        // gate flag for that kubeconfig context.
+        let prior = entries.first(where: { $0.fake == fake })
         entries.removeAll { $0.fake == fake }
-        entries.append(TokenMap.Entry(fake: fake, real: real, host: host))
+        entries.append(TokenMap.Entry(
+            fake: fake, real: real, host: host,
+            consentCredentialID: prior?.consentCredentialID,
+            consentDisplayName: prior?.consentDisplayName))
         swapper.setMap(TokenMap(entries: entries), for: profileID)
     }
 }

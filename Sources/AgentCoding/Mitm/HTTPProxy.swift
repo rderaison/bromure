@@ -18,12 +18,14 @@ final class HTTPMitmConnection: @unchecked Sendable {
     let traceStore: TraceStore
     let clientIdentities: ClientIdentityRegistry
     let clusterCAs: ClusterCATrustRegistry
+    let consent: ConsentBroker
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
 
     init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          traceStore: TraceStore,
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
+         consent: ConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?) {
         self.fd = fd
         self.profileID = profileID
@@ -32,6 +34,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         self.traceStore = traceStore
         self.clientIdentities = clientIdentities
         self.clusterCAs = clusterCAs
+        self.consent = consent
         self.sessionTraceProvider = sessionTraceProvider
     }
 
@@ -83,7 +86,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
         // 5. Swap tokens. host param is the SNI name; entries that
         //    don't match are no-ops.
-        let swap = swapper.swap(rawRequest: request, host: host, profileID: profileID)
+        let swap = await swapper.swap(rawRequest: request, host: host, profileID: profileID)
         if !swap.swaps.isEmpty {
             for s in swap.swaps {
                 FileHandle.standardError.write(Data(
@@ -568,6 +571,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let delegate = ClientCertChallengeDelegate(
             identityRegistry: clientIdentities,
             caRegistry: clusterCAs,
+            consent: consent,
             profileID: profileID, host: host)
         let cfg = URLSessionConfiguration.ephemeral
         return URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
@@ -869,14 +873,17 @@ private func sendToUpstream(rawRequest: Data, host: String, port: Int,
 private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
     let identityRegistry: ClientIdentityRegistry
     let caRegistry: ClusterCATrustRegistry
+    let consent: ConsentBroker
     let profileID: UUID
     let host: String
 
     init(identityRegistry: ClientIdentityRegistry,
          caRegistry: ClusterCATrustRegistry,
+         consent: ConsentBroker,
          profileID: UUID, host: String) {
         self.identityRegistry = identityRegistry
         self.caRegistry = caRegistry
+        self.consent = consent
         self.profileID = profileID
         self.host = host
     }
@@ -888,13 +895,44 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
         let method = challenge.protectionSpace.authenticationMethod
         switch method {
         case NSURLAuthenticationMethodClientCertificate:
-            if let identity = identityRegistry.identity(for: host, profileID: profileID) {
+            guard let entry = identityRegistry.entry(for: host, profileID: profileID) else {
+                completionHandler(.performDefaultHandling, nil)
+                return
+            }
+            // Gate via the consent broker if the source kubeconfig
+            // entry is flagged. The challenge handler is sync, but
+            // its completionHandler can be invoked asynchronously —
+            // bridge to the actor and call back when the user (or a
+            // live grant) decides.
+            if let credID = entry.consentCredentialID {
+                FileHandle.standardError.write(Data(
+                    "[mitm] client-cert challenge on \(host) gated → consent \(credID)\n".utf8))
+                let display = entry.consentDisplayName ?? credID
+                let pid = profileID
+                let hostName = host
+                let broker = consent
+                Task {
+                    let allowed = await broker.consent(
+                        profileID: pid,
+                        credentialID: credID,
+                        credentialDisplayName: display,
+                        scopeHint: String(format: NSLocalizedString(
+                            "to authenticate with the API server at %@",
+                            comment: ""), hostName))
+                    if allowed {
+                        completionHandler(.useCredential,
+                                          URLCredential(identity: entry.identity,
+                                                        certificates: nil,
+                                                        persistence: .forSession))
+                    } else {
+                        completionHandler(.cancelAuthenticationChallenge, nil)
+                    }
+                }
+            } else {
                 completionHandler(.useCredential,
-                                  URLCredential(identity: identity,
+                                  URLCredential(identity: entry.identity,
                                                 certificates: nil,
                                                 persistence: .forSession))
-            } else {
-                completionHandler(.performDefaultHandling, nil)
             }
 
         case NSURLAuthenticationMethodServerTrust:

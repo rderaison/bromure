@@ -154,3 +154,31 @@
 "Couldn't import config.json" = "無法匯入 config.json";
 "The file isn't valid JSON." = "檔案不是有效的 JSON。";
 "No `auths` object found at the top level." = "頂層找不到 `auths` 物件。";
+
+/* Credential consent gate */
+"Allow “%@” to use %@?" = "允許「%@」使用 %@ 嗎？";
+"Allow for 1 hour" = "允許 1 小時";
+"Allow for 5 minutes" = "允許 5 分鐘";
+"Allow for the rest of the session" = "在本次工作階段中持續允許";
+"Don't allow" = "不允許";
+"for any AWS API call (SigV4 signing in the VM)" = "用於任何 AWS API 呼叫（於虛擬機內進行 SigV4 簽章）";
+"to produce one signature inside the VM" = "用於在虛擬機內產生一次簽章";
+"for any *.%@ request" = "用於對 *.%@ 的任何請求";
+"for outbound requests" = "用於對外請求";
+"Require approval to use" = "使用時需要核准";
+"Pop a confirmation dialog the first time this credential is used in a session. Off by default." = "本次工作階段中首次使用此認證時顯示確認對話框。預設為關閉。";
+
+/* Credential Approvals window */
+"Credential Approvals" = "認證核准";
+"Credential Approvals…" = "認證核准…";
+"Revoke all" = "全部撤銷";
+"Revoke" = "撤銷";
+"Loading…" = "載入中…";
+"No active credential approvals. They appear here after you allow a gated credential." = "沒有有效的認證核准。允許受保護的認證後會顯示在此處。";
+"rest of session" = "本次工作階段";
+"%d min remaining" = "剩餘 %d 分鐘";
+"%d sec remaining" = "剩餘 %d 秒";
+
+/* Duplicate profile */
+"Duplicate" = "複製";
+"copy" = "副本";

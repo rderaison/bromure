@@ -154,3 +154,31 @@
 "Couldn't import config.json" = "config.json を読み込めませんでした";
 "The file isn't valid JSON." = "ファイルが有効な JSON ではありません。";
 "No `auths` object found at the top level." = "トップレベルに `auths` オブジェクトが見つかりません。";
+
+/* Credential consent gate */
+"Allow “%@” to use %@?" = "「%@」が %@ を使用するのを許可しますか？";
+"Allow for 1 hour" = "1 時間許可";
+"Allow for 5 minutes" = "5 分許可";
+"Allow for the rest of the session" = "セッション中ずっと許可";
+"Don't allow" = "許可しない";
+"for any AWS API call (SigV4 signing in the VM)" = "すべての AWS API 呼び出しに対して（VM 内で SigV4 署名）";
+"to produce one signature inside the VM" = "VM 内で 1 件の署名を生成するため";
+"for any *.%@ request" = "*.%@ への任意のリクエストに対して";
+"for outbound requests" = "外向きリクエストに対して";
+"Require approval to use" = "使用時に承認を要求";
+"Pop a confirmation dialog the first time this credential is used in a session. Off by default." = "セッション内でこの認証情報が初めて使用される際に確認ダイアログを表示します。デフォルトはオフです。";
+
+/* Credential Approvals window */
+"Credential Approvals" = "認証情報の承認";
+"Credential Approvals…" = "認証情報の承認…";
+"Revoke all" = "すべて取り消す";
+"Revoke" = "取り消す";
+"Loading…" = "読み込み中…";
+"No active credential approvals. They appear here after you allow a gated credential." = "有効な認証情報の承認はありません。ゲート付き認証情報を許可するとここに表示されます。";
+"rest of session" = "セッション中ずっと";
+"%d min remaining" = "残り %d 分";
+"%d sec remaining" = "残り %d 秒";
+
+/* Duplicate profile */
+"Duplicate" = "複製";
+"copy" = "コピー";

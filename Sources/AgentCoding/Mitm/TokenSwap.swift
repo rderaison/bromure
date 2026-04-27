@@ -19,6 +19,11 @@ public struct TokenMap: Sendable {
         public let host: String?
         /// Header to swap in. Default `Authorization` (Bearer prefix).
         public let header: Header
+        /// Stable ID consulted by `ConsentBroker` when this entry
+        /// requires user approval. nil = approval not gated.
+        public let consentCredentialID: String?
+        /// Display name shown in the consent prompt.
+        public let consentDisplayName: String?
 
         public enum Header: String, Sendable {
             case authorization     // Authorization: Bearer <token>
@@ -27,11 +32,16 @@ public struct TokenMap: Sendable {
             case openaiApiKey      // Authorization: Bearer <token> (OpenAI)
         }
 
-        public init(fake: String, real: String, host: String? = nil, header: Header = .authorization) {
+        public init(fake: String, real: String, host: String? = nil,
+                    header: Header = .authorization,
+                    consentCredentialID: String? = nil,
+                    consentDisplayName: String? = nil) {
             self.fake = fake
             self.real = real
             self.host = host
             self.header = header
+            self.consentCredentialID = consentCredentialID
+            self.consentDisplayName = consentDisplayName
         }
     }
 
@@ -50,8 +60,11 @@ public struct TokenMap: Sendable {
 public final class TokenSwapper: @unchecked Sendable {
     private var maps: [UUID: TokenMap] = [:]
     private let lock = NSLock()
+    private let consent: ConsentBroker
 
-    public init() {}
+    public init(consent: ConsentBroker) {
+        self.consent = consent
+    }
 
     /// Replace the token map for a profile. Called by the host each
     /// time a session launches (and on profile edit while running, if
@@ -74,13 +87,24 @@ public final class TokenSwapper: @unchecked Sendable {
         return maps[profileID]?.entries ?? []
     }
 
+    /// Synchronous helper used by the async `swap` to grab the map
+    /// without holding NSLock across an await (Swift 6 forbids it).
+    private func snapshotMap(for profileID: UUID) -> TokenMap? {
+        lock.lock(); defer { lock.unlock() }
+        return maps[profileID]
+    }
+
     /// Returns the (modified bytes, swap report) for the given raw
     /// request. If no swap applied, the original buffer is returned
     /// untouched.
-    public func swap(rawRequest: Data, host: String, profileID: UUID) -> SwapResult {
-        lock.lock()
-        let map = maps[profileID]
-        lock.unlock()
+    ///
+    /// Async because entries flagged for user approval await the
+    /// consent broker before substitution; the proxy hot path holds
+    /// the connection until the user (or a live grant) decides.
+    public func swap(rawRequest: Data, host: String, profileID: UUID) async -> SwapResult {
+        // Read the map through a non-async helper so NSLock never sits
+        // across an `await` (Swift 6 forbids it).
+        let map = snapshotMap(for: profileID)
         guard let map, !map.isEmpty else { return SwapResult(modified: rawRequest, swaps: []) }
 
         // Find header section end. HTTP delimits headers from body
@@ -100,6 +124,24 @@ public final class TokenSwapper: @unchecked Sendable {
         for entry in map.entries {
             if let h = entry.host, !h.isEmpty,
                !Self.hostMatchesScope(host: host, scope: h) { continue }
+            // Quick check: is the fake even present? Avoid a consent
+            // hop just to prove there's nothing to substitute.
+            guard headerStr.range(of: entry.fake) != nil else { continue }
+
+            // Gate on consent if the entry is flagged.
+            if let credID = entry.consentCredentialID {
+                FileHandle.standardError.write(Data(
+                    "[mitm] swap candidate on \(host) gated → consent \(credID)\n".utf8))
+                let allowed = await consent.consent(
+                    profileID: profileID,
+                    credentialID: credID,
+                    credentialDisplayName: entry.consentDisplayName ?? credID,
+                    scopeHint: entry.host.map { String(format: NSLocalizedString(
+                        "for any *.%@ request", comment: ""), $0) }
+                        ?? NSLocalizedString("for outbound requests", comment: ""))
+                if !allowed { continue }
+            }
+
             // Sweep all token positions — the same fake might appear in
             // multiple headers (rare but possible).
             while let r = headerStr.range(of: entry.fake) {

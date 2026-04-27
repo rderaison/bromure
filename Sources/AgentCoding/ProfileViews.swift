@@ -61,6 +61,7 @@ struct ProfilePickerView: View {
     let onReset: (Profile) -> Void
     let onDelete: (Profile) -> Void
     let onShowPublicKey: (Profile) -> Void
+    let onDuplicate: (Profile) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -97,6 +98,7 @@ struct ProfilePickerView: View {
                     .contextMenu {
                         Button("Launch") { onLaunch(profile) }
                         Button("Edit…") { onEdit(profile) }
+                        Button("Duplicate") { onDuplicate(profile) }
                         if profile.sshPublicKey != nil {
                             Button("SSH public key…") { onShowPublicKey(profile) }
                         }
@@ -635,7 +637,11 @@ struct ProfileEditorView: View {
         Binding(
             get: {
                 if t == self.draft.tool {
-                    return Profile.ToolSpec(tool: t, authMode: self.draft.authMode, apiKey: self.draft.apiKey)
+                    return Profile.ToolSpec(
+                        tool: t,
+                        authMode: self.draft.authMode,
+                        apiKey: self.draft.apiKey,
+                        requireApproval: self.draft.apiKeyRequiresApproval)
                 }
                 if let s = self.draft.additionalTools.first(where: { $0.tool == t }) {
                     return s
@@ -646,6 +652,7 @@ struct ProfileEditorView: View {
                 if t == self.draft.tool {
                     self.draft.authMode = newValue.authMode
                     self.draft.apiKey   = newValue.apiKey
+                    self.draft.apiKeyRequiresApproval = newValue.requireApproval
                 } else if let i = self.draft.additionalTools.firstIndex(where: { $0.tool == t }) {
                     self.draft.additionalTools[i] = newValue
                 }
@@ -970,6 +977,9 @@ struct ProfileEditorView: View {
                 } else {
                     Toggle("Generate an ed25519 keypair", isOn: $generateSSH)
                 }
+                if draft.sshPublicKey != nil || generateSSH {
+                    requireApprovalToggle(isOn: $draft.sshKeyRequiresApproval)
+                }
             }
 
             Divider()
@@ -1133,7 +1143,27 @@ struct ProfileEditorView: View {
                 .buttonStyle(.borderless)
                 .help("Open DigitalOcean token page in your browser")
             }
+            requireApprovalToggle(isOn: $draft.digitalOceanTokenRequiresApproval)
         }
+    }
+
+    // MARK: - "Require approval to use" toggle
+
+    /// Compact checkbox that flips a credential's `requireApproval`
+    /// flag. When on, the host pops a consent dialog the first time
+    /// any session tries to use the credential; the user picks 5 min /
+    /// 1 hr / rest of session / deny. Off by default.
+    @ViewBuilder
+    private func requireApprovalToggle(isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            Text(NSLocalizedString("Require approval to use", comment: ""))
+                .font(.caption)
+        }
+        .toggleStyle(.checkbox)
+        .controlSize(.small)
+        .help(NSLocalizedString(
+            "Pop a confirmation dialog the first time this credential is used in a session. Off by default.",
+            comment: ""))
     }
 
     // MARK: - AWS
@@ -1169,6 +1199,8 @@ struct ProfileEditorView: View {
                     .textFieldStyle(.roundedBorder)
                     .disableAutocorrection(true)
             }
+
+            requireApprovalToggle(isOn: $draft.awsCredentials.requireApproval)
 
             HStack(spacing: 6) {
                 Spacer()
@@ -1391,37 +1423,59 @@ struct ProfileEditorView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 10)
             } else {
-                ForEach(draft.importedSSHKeys) { key in
-                    HStack(spacing: 8) {
-                        Image(systemName: "key.horizontal.fill")
-                            .foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 1) {
-                            HStack(spacing: 6) {
-                                Text(key.label).font(.callout)
-                                if key.hasPassphrase {
-                                    Image(systemName: "lock.fill")
-                                        .font(.caption2)
-                                        .foregroundStyle(.tertiary)
-                                        .help("Passphrase is in your macOS Keychain.")
+                ForEach(Array(draft.importedSSHKeys.enumerated()), id: \.element.id) { (idx, key) in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "key.horizontal.fill")
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack(spacing: 6) {
+                                    Text(key.label).font(.callout)
+                                    if key.hasPassphrase {
+                                        Image(systemName: "lock.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                            .help("Passphrase is in your macOS Keychain.")
+                                    }
                                 }
+                                Text(key.publicKeyText.isEmpty
+                                     ? key.filename
+                                     : key.publicKeyText.split(separator: " ").prefix(1).joined()
+                                       + " " + (key.publicKeyText.split(separator: " ").dropFirst().last.map(String.init) ?? ""))
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
                             }
-                            Text(key.publicKeyText.isEmpty
-                                 ? key.filename
-                                 : key.publicKeyText.split(separator: " ").prefix(1).joined()
-                                   + " " + (key.publicKeyText.split(separator: " ").dropFirst().last.map(String.init) ?? ""))
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                            Spacer()
+                            Button {
+                                onRemoveSSHKey?(key)
+                                draft.importedSSHKeys.removeAll { $0.id == key.id }
+                            } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
                         }
-                        Spacer()
-                        Button {
-                            onRemoveSSHKey?(key)
-                            draft.importedSSHKeys.removeAll { $0.id == key.id }
-                        } label: {
-                            Image(systemName: "minus.circle")
+                        Toggle(isOn: $draft.importedSSHKeys[idx].requireApproval) {
+                            Text(NSLocalizedString("Require approval to use", comment: ""))
+                                .font(.caption)
                         }
-                        .buttonStyle(.borderless)
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        // Disable if the imported key has no public-key
+                        // text — the gate looks the key up by wire-format
+                        // blob, which we extract from the .pub. Without
+                        // it we can't match incoming SIGN_REQUESTs to the
+                        // approval entry, and the toggle would silently
+                        // do nothing.
+                        .disabled(key.publicKeyText.isEmpty)
+                        .help(key.publicKeyText.isEmpty
+                              ? NSLocalizedString(
+                                "Public key text wasn't captured at import time — re-import with the matching .pub file alongside the private key to enable per-key gating.",
+                                comment: "")
+                              : NSLocalizedString(
+                                "Pop a confirmation dialog the first time this credential is used in a session. Off by default.",
+                                comment: ""))
                     }
                     .padding(8)
                     .background(Color(nsColor: .textBackgroundColor),
@@ -1849,6 +1903,12 @@ private struct ManualTokenRow: View {
                 .buttonStyle(.borderless)
                 .help(revealReal ? "Hide value" : "Show value")
             }
+            Toggle(isOn: $token.requireApproval) {
+                Text(NSLocalizedString("Require approval to use", comment: ""))
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
         }
         .padding(8)
         .background(Color(nsColor: .textBackgroundColor),
@@ -2194,6 +2254,12 @@ private struct ToolConfigCard: View {
                         )
                     )
                     .textFieldStyle(.roundedBorder)
+                    Toggle(isOn: $spec.requireApproval) {
+                        Text(NSLocalizedString("Require approval to use", comment: ""))
+                            .font(.caption)
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
                 } else {
                     Text("You'll run `\(tool.rawValue) login` once inside the VM.")
                         .font(.caption)
@@ -2268,6 +2334,12 @@ private struct KubeconfigRow: View {
                     Divider()
                     authPicker
                     authFields
+                    Toggle(isOn: $entry.requireApproval) {
+                        Text(NSLocalizedString("Require approval to use", comment: ""))
+                            .font(.caption)
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
                 }
                 .padding(.top, 6)
             } label: {
@@ -2490,6 +2562,12 @@ private struct HTTPSCredentialRow: View {
                 .buttonStyle(.borderless)
                 .help(revealToken ? "Hide token" : "Show token")
             }
+            Toggle(isOn: $credential.requireApproval) {
+                Text(NSLocalizedString("Require approval to use", comment: ""))
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
         }
         .padding(8)
         .background(Color(nsColor: .textBackgroundColor),
@@ -2559,6 +2637,12 @@ private struct DockerRegistryRow: View {
                       ? NSLocalizedString("Hide password", comment: "")
                       : NSLocalizedString("Show password", comment: ""))
             }
+            Toggle(isOn: $cred.requireApproval) {
+                Text(NSLocalizedString("Require approval to use", comment: ""))
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
         }
         .padding(8)
         .background(Color(nsColor: .textBackgroundColor),

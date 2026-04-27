@@ -80,15 +80,21 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
         }
     }
 
+    /// When true, every fake→real swap involving this context's
+    /// bearer / exec token prompts on the host. See `ConsentBroker`.
+    public var requireApproval: Bool
+
     public init(id: UUID = UUID(), name: String = "", serverURL: String = "",
                 caCertPEM: String = "", namespace: String = "",
-                auth: Auth = .bearerToken("")) {
+                auth: Auth = .bearerToken(""),
+                requireApproval: Bool = false) {
         self.id = id
         self.name = name
         self.serverURL = serverURL
         self.caCertPEM = caCertPEM
         self.namespace = namespace
         self.auth = auth
+        self.requireApproval = requireApproval
     }
 
     /// Bare host[:port] used as the proxy's routing key when
@@ -97,6 +103,30 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
         guard let url = URL(string: serverURL), let host = url.host else { return "" }
         if let port = url.port { return "\(host):\(port)" }
         return host
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, serverURL, caCertPEM, namespace, auth, requireApproval
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id              = try c.decode(UUID.self, forKey: .id)
+        name            = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        serverURL       = try c.decodeIfPresent(String.self, forKey: .serverURL) ?? ""
+        caCertPEM       = try c.decodeIfPresent(String.self, forKey: .caCertPEM) ?? ""
+        namespace       = try c.decodeIfPresent(String.self, forKey: .namespace) ?? ""
+        auth            = try c.decodeIfPresent(Auth.self, forKey: .auth) ?? .bearerToken("")
+        requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(serverURL, forKey: .serverURL)
+        try c.encode(caCertPEM, forKey: .caCertPEM)
+        try c.encode(namespace, forKey: .namespace)
+        try c.encode(auth, forKey: .auth)
+        if requireApproval { try c.encode(true, forKey: .requireApproval) }
     }
 }
 
@@ -120,17 +150,44 @@ public struct ImportedSSHKey: Codable, Equatable, Sendable, Identifiable {
     public var publicKeyText: String
     /// Hint for the UI; the actual passphrase lives in Keychain.
     public var hasPassphrase: Bool
+    /// When true, every SSH sign request using this key prompts for
+    /// user consent on the host. See `ConsentBroker`.
+    public var requireApproval: Bool
 
     public init(id: UUID = UUID(),
                 label: String,
                 filename: String,
                 publicKeyText: String = "",
-                hasPassphrase: Bool = false) {
+                hasPassphrase: Bool = false,
+                requireApproval: Bool = false) {
         self.id = id
         self.label = label
         self.filename = filename
         self.publicKeyText = publicKeyText
         self.hasPassphrase = hasPassphrase
+        self.requireApproval = requireApproval
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, label, filename, publicKeyText, hasPassphrase, requireApproval
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id              = try c.decode(UUID.self, forKey: .id)
+        label           = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
+        filename        = try c.decodeIfPresent(String.self, forKey: .filename) ?? ""
+        publicKeyText   = try c.decodeIfPresent(String.self, forKey: .publicKeyText) ?? ""
+        hasPassphrase   = try c.decodeIfPresent(Bool.self, forKey: .hasPassphrase) ?? false
+        requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(label, forKey: .label)
+        try c.encode(filename, forKey: .filename)
+        try c.encode(publicKeyText, forKey: .publicKeyText)
+        try c.encode(hasPassphrase, forKey: .hasPassphrase)
+        if requireApproval { try c.encode(true, forKey: .requireApproval) }
     }
 }
 
@@ -156,18 +213,45 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
     /// `*.example.com`, but not on `example.com.evil.com`. Match is
     /// case-insensitive. Substring matching is deliberately NOT used.
     public var hostFilter: String
+    /// When true, every fake→real substitution for this token prompts
+    /// the user on the host. See `ConsentBroker`.
+    public var requireApproval: Bool
 
     public init(id: UUID = UUID(), name: String = "", realValue: String = "",
-                envVarName: String = "", hostFilter: String = "") {
+                envVarName: String = "", hostFilter: String = "",
+                requireApproval: Bool = false) {
         self.id = id
         self.name = name
         self.realValue = realValue
         self.envVarName = envVarName
         self.hostFilter = hostFilter
+        self.requireApproval = requireApproval
     }
 
     public var isUsable: Bool {
         !realValue.isEmpty
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, realValue, envVarName, hostFilter, requireApproval
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id              = try c.decode(UUID.self, forKey: .id)
+        name            = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        realValue       = try c.decodeIfPresent(String.self, forKey: .realValue) ?? ""
+        envVarName      = try c.decodeIfPresent(String.self, forKey: .envVarName) ?? ""
+        hostFilter      = try c.decodeIfPresent(String.self, forKey: .hostFilter) ?? ""
+        requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(realValue, forKey: .realValue)
+        try c.encode(envVarName, forKey: .envVarName)
+        try c.encode(hostFilter, forKey: .hostFilter)
+        if requireApproval { try c.encode(true, forKey: .requireApproval) }
     }
 }
 
@@ -183,12 +267,18 @@ public struct GitHTTPSCredential: Codable, Equatable, Sendable, Identifiable {
     /// Personal access token (or fine-grained token, OAuth token, etc.).
     /// Stored in profile.json alongside the API key — same trust boundary.
     public var token: String
+    /// When true, every fake→real swap for this token prompts on the
+    /// host. See `ConsentBroker`.
+    public var requireApproval: Bool
 
-    public init(id: UUID = UUID(), host: String = "github.com", username: String = "", token: String = "") {
+    public init(id: UUID = UUID(), host: String = "github.com",
+                username: String = "", token: String = "",
+                requireApproval: Bool = false) {
         self.id = id
         self.host = host
         self.username = username
         self.token = token
+        self.requireApproval = requireApproval
     }
 
     /// True if this entry has enough to be written to ~/.git-credentials.
@@ -196,6 +286,26 @@ public struct GitHTTPSCredential: Codable, Equatable, Sendable, Identifiable {
         !host.trimmingCharacters(in: .whitespaces).isEmpty
             && !username.trimmingCharacters(in: .whitespaces).isEmpty
             && !token.isEmpty
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, host, username, token, requireApproval
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id              = try c.decode(UUID.self, forKey: .id)
+        host            = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
+        username        = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
+        token           = try c.decodeIfPresent(String.self, forKey: .token) ?? ""
+        requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(host, forKey: .host)
+        try c.encode(username, forKey: .username)
+        try c.encode(token, forKey: .token)
+        if requireApproval { try c.encode(true, forKey: .requireApproval) }
     }
 }
 
@@ -223,21 +333,46 @@ public struct DockerRegistryCredential: Codable, Equatable, Sendable, Identifiab
     /// Personal access token / password. Stored in the encrypted
     /// secrets.enc next to the rest of the profile's secrets.
     public var password: String
+    /// When true, every fake→real swap of the registry's Basic-auth
+    /// blob prompts on the host. See `ConsentBroker`.
+    public var requireApproval: Bool
 
     public init(id: UUID = UUID(),
                 host: String = "",
                 username: String = "",
-                password: String = "") {
+                password: String = "",
+                requireApproval: Bool = false) {
         self.id = id
         self.host = host
         self.username = username
         self.password = password
+        self.requireApproval = requireApproval
     }
 
     public var isUsable: Bool {
         !host.trimmingCharacters(in: .whitespaces).isEmpty
             && !username.trimmingCharacters(in: .whitespaces).isEmpty
             && !password.isEmpty
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, host, username, password, requireApproval
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id              = try c.decode(UUID.self, forKey: .id)
+        host            = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
+        username        = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
+        password        = try c.decodeIfPresent(String.self, forKey: .password) ?? ""
+        requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(host, forKey: .host)
+        try c.encode(username, forKey: .username)
+        try c.encode(password, forKey: .password)
+        if requireApproval { try c.encode(true, forKey: .requireApproval) }
     }
 }
 
@@ -265,15 +400,20 @@ public struct AWSCredentials: Codable, Equatable, Sendable {
     public var sessionToken: String
     /// Default region for the SDK (`AWS_DEFAULT_REGION` + ~/.aws/config).
     public var region: String
+    /// When true, every credential_process call from the VM prompts
+    /// for user consent on the host. See `ConsentBroker`.
+    public var requireApproval: Bool
 
     public init(accessKeyID: String = "",
                 secretAccessKey: String = "",
                 sessionToken: String = "",
-                region: String = "") {
+                region: String = "",
+                requireApproval: Bool = false) {
         self.accessKeyID = accessKeyID
         self.secretAccessKey = secretAccessKey
         self.sessionToken = sessionToken
         self.region = region
+        self.requireApproval = requireApproval
     }
 
     /// True when at least the access-key + secret pair is set — the
@@ -281,6 +421,26 @@ public struct AWSCredentials: Codable, Equatable, Sendable {
     public var isUsable: Bool {
         !accessKeyID.trimmingCharacters(in: .whitespaces).isEmpty
             && !secretAccessKey.isEmpty
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case accessKeyID, secretAccessKey, sessionToken, region, requireApproval
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        accessKeyID     = try c.decodeIfPresent(String.self, forKey: .accessKeyID) ?? ""
+        secretAccessKey = try c.decodeIfPresent(String.self, forKey: .secretAccessKey) ?? ""
+        sessionToken    = try c.decodeIfPresent(String.self, forKey: .sessionToken) ?? ""
+        region          = try c.decodeIfPresent(String.self, forKey: .region) ?? ""
+        requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(accessKeyID, forKey: .accessKeyID)
+        try c.encode(secretAccessKey, forKey: .secretAccessKey)
+        try c.encode(sessionToken, forKey: .sessionToken)
+        try c.encode(region, forKey: .region)
+        if requireApproval { try c.encode(true, forKey: .requireApproval) }
     }
 }
 
@@ -327,17 +487,40 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         public var authMode: AuthMode
         /// Cleartext API key. Only honored when `authMode == .token`.
         public var apiKey: String?
+        /// When true, every fake→real swap of this tool's API key
+        /// prompts on the host. See `ConsentBroker`.
+        public var requireApproval: Bool
 
         public var id: Tool { tool }
 
-        public init(tool: Tool, authMode: AuthMode = .token, apiKey: String? = nil) {
+        public init(tool: Tool, authMode: AuthMode = .token,
+                    apiKey: String? = nil, requireApproval: Bool = false) {
             self.tool = tool
             self.authMode = authMode
             self.apiKey = apiKey
+            self.requireApproval = requireApproval
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case tool, authMode, apiKey, requireApproval
+        }
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            tool            = try c.decode(Tool.self, forKey: .tool)
+            authMode        = try c.decodeIfPresent(AuthMode.self, forKey: .authMode) ?? .token
+            apiKey          = try c.decodeIfPresent(String.self, forKey: .apiKey)
+            requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+        }
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(tool, forKey: .tool)
+            try c.encode(authMode, forKey: .authMode)
+            try c.encodeIfPresent(apiKey, forKey: .apiKey)
+            if requireApproval { try c.encode(true, forKey: .requireApproval) }
         }
     }
 
-    public let id: UUID
+    public var id: UUID
     public var name: String
     /// **Primary** coding agent — the one auto-launched in the first
     /// kitty tab when the session opens. Additional pre-configured
@@ -408,6 +591,18 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// strings); the proxy swaps fake → real on the wire when the
     /// request hits the matching registry host.
     public var dockerRegistries: [DockerRegistryCredential]
+
+    /// Gate the primary tool's API key behind a consent prompt. See
+    /// `ConsentBroker`. Default false.
+    public var apiKeyRequiresApproval: Bool
+
+    /// Gate the DigitalOcean PAT behind a consent prompt. Default false.
+    public var digitalOceanTokenRequiresApproval: Bool
+
+    /// Gate the auto-generated bromure SSH key behind a consent prompt
+    /// (per-sign). Imported keys carry their own flag on the struct.
+    /// Default false.
+    public var sshKeyRequiresApproval: Bool
 
     public var createdAt: Date
     public var lastUsedAt: Date?
@@ -551,6 +746,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         digitalOceanToken: String = "",
         awsCredentials: AWSCredentials = AWSCredentials(),
         dockerRegistries: [DockerRegistryCredential] = [],
+        apiKeyRequiresApproval: Bool = false,
+        digitalOceanTokenRequiresApproval: Bool = false,
+        sshKeyRequiresApproval: Bool = false,
         createdAt: Date = Date(),
         lastUsedAt: Date? = nil,
         baseImageVersionAtClone: String? = nil,
@@ -589,6 +787,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.digitalOceanToken = digitalOceanToken
         self.awsCredentials = awsCredentials
         self.dockerRegistries = dockerRegistries
+        self.apiKeyRequiresApproval = apiKeyRequiresApproval
+        self.digitalOceanTokenRequiresApproval = digitalOceanTokenRequiresApproval
+        self.sshKeyRequiresApproval = sshKeyRequiresApproval
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.baseImageVersionAtClone = baseImageVersionAtClone
@@ -633,6 +834,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case digitalOceanToken
         case awsCredentials
         case dockerRegistries
+        case apiKeyRequiresApproval
+        case digitalOceanTokenRequiresApproval
+        case sshKeyRequiresApproval
         case closeAction
     }
 
@@ -695,6 +899,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
         dockerRegistries = try c.decodeIfPresent([DockerRegistryCredential].self, forKey: .dockerRegistries) ?? []
+        apiKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .apiKeyRequiresApproval) ?? false
+        digitalOceanTokenRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .digitalOceanTokenRequiresApproval) ?? false
+        sshKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .sshKeyRequiresApproval) ?? false
         closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .suspend
     }
 
@@ -758,6 +965,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if !dockerRegistries.isEmpty {
             try c.encode(dockerRegistries, forKey: .dockerRegistries)
         }
+        if apiKeyRequiresApproval { try c.encode(true, forKey: .apiKeyRequiresApproval) }
+        if digitalOceanTokenRequiresApproval {
+            try c.encode(true, forKey: .digitalOceanTokenRequiresApproval)
+        }
+        if sshKeyRequiresApproval { try c.encode(true, forKey: .sshKeyRequiresApproval) }
         try c.encode(closeAction, forKey: .closeAction)
     }
 
@@ -1192,6 +1404,117 @@ public final class ProfileStore {
     public func delete(_ profile: Profile) throws {
         try fm.removeItem(at: profileDirectory(for: profile))
         MACBindings.shared.release(profileID: profile.id)
+    }
+
+    /// Deep-copy a profile under a new identity. Everything that
+    /// matters carries over: profile fields (incl. credentials, since
+    /// they're already in `source` after `loadAll` merged the secrets
+    /// blob), the per-profile system disk, the persistent home dir,
+    /// and the host-only `agent/` + `ssh/` dirs.
+    ///
+    /// Skipped on purpose:
+    ///   - `vm.state` / `tabs.json` — a RAM snapshot saved against the
+    ///     source profile's MAC + UUID would diverge on the duplicate
+    ///     instantly. Cold boot.
+    ///   - MAC binding — `MACBindings` mints a fresh MAC on first
+    ///     launch keyed by the new UUID, so vmnet's lease table stays
+    ///     stable per-profile.
+    ///
+    /// Disk.img, home/, agent/ are copied via `clonefile(2)` — APFS
+    /// CoW makes the duplicate instant and zero additional disk space
+    /// until the two diverge, even when the home directory is large.
+    public func duplicate(_ source: Profile, named newName: String) throws -> Profile {
+        var fresh = source
+        fresh.id = UUID()
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        fresh.name = trimmed.isEmpty ? source.name + " copy" : trimmed
+        fresh.lastUsedAt = nil
+        // createdAt stamps the duplicate — sorting in the picker uses
+        // (lastUsedAt ?? createdAt), so leaving the source's createdAt
+        // would file the copy under wherever the original sits in the
+        // list, which is confusing.
+        fresh.createdAt = Date()
+
+        // First, write the new profile.json + encrypted secrets blob to
+        // the new dir. Doing this before the data clones means a clone
+        // failure mid-way leaves us with a directory that at least has
+        // a valid metadata layer (the user can still see + delete it).
+        try save(fresh)
+
+        let srcDir = profileDirectory(for: source)
+        let dstDir = profileDirectory(for: fresh)
+
+        // Per-profile disk image (system layer). May not exist yet if
+        // the source was created but never launched.
+        let srcDisk = srcDir.appendingPathComponent("disk.img")
+        if fm.fileExists(atPath: srcDisk.path) {
+            let dstDisk = dstDir.appendingPathComponent("disk.img")
+            try? fm.removeItem(at: dstDisk)
+            try Self.cloneItem(at: srcDisk, to: dstDisk)
+        }
+
+        // Persistent home dir. clonefile() recurses, so one call
+        // duplicates the whole tree as APFS CoW.
+        let srcHome = srcDir.appendingPathComponent("home", isDirectory: true)
+        if fm.fileExists(atPath: srcHome.path) {
+            let dstHome = dstDir.appendingPathComponent("home", isDirectory: true)
+            try? fm.removeItem(at: dstHome)
+            try Self.cloneItem(at: srcHome, to: dstHome)
+        }
+
+        // Host-only ssh material — auto-generated keypair seed under
+        // agent/, plus any imported keys under agent/imported/, plus
+        // the legacy ssh/ dir (still present for migration).
+        for sub in ["agent", "ssh"] {
+            let srcSub = srcDir.appendingPathComponent(sub, isDirectory: true)
+            guard fm.fileExists(atPath: srcSub.path) else { continue }
+            let dstSub = dstDir.appendingPathComponent(sub, isDirectory: true)
+            try? fm.removeItem(at: dstSub)
+            try Self.cloneItem(at: srcSub, to: dstSub)
+        }
+
+        return fresh
+    }
+
+    /// Try `clonefile(2)` first (APFS CoW, instant, zero space) and
+    /// fall back to a recursive plain copy if the kernel rejects it.
+    /// `clonefile()` is fussy about cross-volume paths, missing
+    /// destination parents, and a handful of edge cases — the
+    /// fallback keeps duplicate working even when the fast path
+    /// can't.
+    private static func cloneItem(at src: URL, to dst: URL) throws {
+        let fm = FileManager.default
+        // Belt-and-braces: ensure the destination's parent exists.
+        // `save(fresh)` creates the top-level profile dir, but if a
+        // future caller hands in a deeper destination this catches it
+        // before clonefile's terse ENOENT.
+        let parent = dst.deletingLastPathComponent()
+        if !fm.fileExists(atPath: parent.path) {
+            try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+        }
+
+        let srcPath = src.path(percentEncoded: false)
+        let dstPath = dst.path(percentEncoded: false)
+
+        let result = clonefile(srcPath, dstPath, 0)
+        if result == 0 { return }
+
+        let cloneErrno = errno
+        let cloneErr = String(cString: strerror(cloneErrno))
+        FileHandle.standardError.write(Data(
+            "[duplicate] clonefile \(srcPath) → \(dstPath) failed (\(cloneErr)) — falling back to plain copy\n".utf8))
+
+        // Plain recursive copy. Slower (no CoW) but works across
+        // volumes and on whatever edge case got us here. Wipe any
+        // partial result clonefile may have left.
+        try? fm.removeItem(at: dst)
+        do {
+            try fm.copyItem(at: src, to: dst)
+        } catch {
+            throw NSError(domain: "BromureAC.duplicate", code: Int(cloneErrno),
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "duplicate \(srcPath) → \(dstPath): clonefile (\(cloneErr)) and copy (\(error.localizedDescription)) both failed"])
+        }
     }
 
     /// Wipe the per-profile disk so the next launch re-clones from base.
@@ -1877,6 +2200,85 @@ public final class ProfileStore {
             /etc/ssl/certs/bromure-ca.pem
     fi
 
+    # Resume-time clock sync. VZ freezes CLOCK_REALTIME during
+    # saveMachineState, so on resume the wall clock is N minutes/hours
+    # behind real time until systemd-timesyncd notices. The host
+    # writes the current Unix timestamp into
+    # /mnt/bromure-meta/.resume-signal right after vm.resume(); a
+    # long-running watcher daemon polls that file and, on change,
+    # sets the clock to whatever the host wrote.
+    #
+    # We use polling instead of systemd PathChanged= because virtiofs
+    # doesn't reliably deliver inotify events for host-side file
+    # writes — the path-unit approach silently never fires. 2 s
+    # polling on a 64-byte file is cheap.
+    sudo tee /usr/local/bin/bromure-resume-watcher.sh \
+        >/dev/null <<'WATCHER'
+    #!/bin/bash
+    # Managed by Bromure Agentic Coding — rewritten on every launch.
+    set -u
+    LOG=/tmp/bromure-resume.log
+    SIGNAL=/mnt/bromure-meta/.resume-signal
+    echo "--- $(date -u +%FT%TZ) bromure-resume-watcher started ---" >> "$LOG"
+    # Skip whatever stale value is sitting in the signal file at
+    # daemon-start: only react to *changes*. Otherwise a cold boot
+    # would set the clock to the previous resume's timestamp.
+    LAST=""
+    if [ -r "$SIGNAL" ]; then
+        LAST=$(cat "$SIGNAL" 2>/dev/null | tr -d '[:space:]')
+        echo "$(date -u +%FT%TZ) ignoring stale boot value: '$LAST'" >> "$LOG"
+    fi
+    while true; do
+        if [ -r "$SIGNAL" ]; then
+            ts=$(cat "$SIGNAL" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "$ts" ] && [ "$ts" != "$LAST" ]; then
+                case "$ts" in
+                    *[!0-9]*)
+                        echo "$(date -u +%FT%TZ) signal not numeric: '$ts'" >> "$LOG"
+                        ;;
+                    *)
+                        before=$(date -u +%FT%TZ)
+                        if date -u -s "@$ts" >/dev/null; then
+                            after=$(date -u +%FT%TZ)
+                            echo "$(date -u +%FT%TZ) clock set: was $before → now $after (target ts=$ts)" >> "$LOG"
+                        else
+                            echo "$(date -u +%FT%TZ) date -s failed (rc=$?)" >> "$LOG"
+                        fi
+                        ;;
+                esac
+                LAST="$ts"
+            fi
+        fi
+        sleep 2
+    done
+    WATCHER
+    sudo chmod +x /usr/local/bin/bromure-resume-watcher.sh
+
+    # Drop the (broken) path-unit-based wiring from earlier builds.
+    sudo systemctl disable --now bromure-resume.path >/dev/null 2>&1 || true
+    sudo rm -f /etc/systemd/system/bromure-resume.path
+
+    sudo tee /etc/systemd/system/bromure-resume.service \
+        >/dev/null <<'SVCU'
+    [Unit]
+    Description=Watch for Bromure VM resume signal and re-sync the clock
+    After=mnt-bromure\x2dmeta.mount
+
+    [Service]
+    Type=simple
+    ExecStart=/usr/local/bin/bromure-resume-watcher.sh
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    SVCU
+    sudo systemctl daemon-reload >/dev/null 2>&1 || true
+    sudo systemctl enable --now bromure-resume.service >/dev/null 2>&1 \
+        && echo "[xinit] bromure-resume watcher running" >> /tmp/xinitrc.log \
+        || echo "[xinit] bromure-resume watcher enable failed (non-fatal)" \
+            >> /tmp/xinitrc.log
+
     # Start the in-VM bridge daemon: 127.0.0.1:8080 + /tmp/bromure-agent.sock
     # both relay over vsock to the host's MITM engine. Foregrounding to
     # /tmp/bromure-vm-bridge.log helps debugging when the env-var
@@ -1951,6 +2353,35 @@ public final class ProfileStore {
     sleep 0.3
     spice-vdagent &
     sleep 0.2
+
+    # spice-vdagent loses its virtio-console handle to spice-vdagentd
+    # whenever the VM is paused/resumed (VZSpiceAgentPortAttachment
+    # doesn't gracefully reconnect on the guest side), which kills
+    # macOS clipboard ↔ X CLIPBOARD bridging until the agent is
+    # respawned. This watcher runs as the X-session user, polls the
+    # host's resume-signal file the root watcher already uses, and
+    # kicks spice-vdagent on every change.
+    (
+        LAST=""
+        if [ -r /mnt/bromure-meta/.resume-signal ]; then
+            LAST=$(cat /mnt/bromure-meta/.resume-signal 2>/dev/null | tr -d '[:space:]')
+        fi
+        while true; do
+            if [ -r /mnt/bromure-meta/.resume-signal ]; then
+                ts=$(cat /mnt/bromure-meta/.resume-signal 2>/dev/null | tr -d '[:space:]')
+                if [ -n "$ts" ] && [ "$ts" != "$LAST" ]; then
+                    pkill -u "$USER" spice-vdagent 2>/dev/null
+                    sleep 0.3
+                    spice-vdagent &
+                    echo "[xinit] respawned spice-vdagent after resume (ts=$ts)" \
+                        >> /tmp/xinitrc.log
+                    LAST="$ts"
+                fi
+            fi
+            sleep 2
+        done
+    ) >/dev/null 2>&1 &
+    echo "[xinit] spice-vdagent resume-restarter pid $!" >> /tmp/xinitrc.log
 
     # (We used to set xrandr --dpi based on host scale here; ditched
     # because the kittyConfig generator now scales font_size by 1.5×

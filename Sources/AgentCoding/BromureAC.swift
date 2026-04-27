@@ -210,6 +210,12 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     inspectorItem.target = delegate
     windowMenu.addItem(inspectorItem)
 
+    let approvalsItem = NSMenuItem(title: L("Credential Approvals…"),
+                                   action: #selector(ACAppDelegate.openCredentialApprovalsAction(_:)),
+                                   keyEquivalent: "")
+    approvalsItem.target = delegate
+    windowMenu.addItem(approvalsItem)
+
     // Hand the menu to NSApp so AppKit auto-appends entries for every
     // titled, non-excluded window. Session windows already get
     // meaningful titles (claude / codex / vim / bash / etc.) so they
@@ -591,6 +597,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             mainWindow = nil
             return
         }
+        if win === credentialApprovalsWindow {
+            credentialApprovalsWindow = nil
+        }
         if win === traceInspectorWindow {
             traceInspectorWindow = nil
             return
@@ -792,11 +801,41 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// runs `init --force` from inside the GUI — same flow as the
     /// first-time setup, but proactive.
     private var traceInspectorWindow: NSWindow?
+    private var credentialApprovalsWindow: NSWindow?
 
     /// Wired to the "Trace Inspector…" menu item (⇧⌘I).
     /// Opens the inspector with no profile pre-filter.
     @objc func openTraceInspectorAction(_ sender: Any?) {
         openTraceInspector(for: nil)
+    }
+
+    /// Window menu → "Credential Approvals…". Lists every live consent
+    /// grant (5 min / 1 hr / rest of session) with per-row Revoke and a
+    /// "Revoke all" reset.
+    @objc func openCredentialApprovalsAction(_ sender: Any?) {
+        guard let broker = mitmEngine?.consent else { return }
+        let names = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0.name) })
+
+        if let win = credentialApprovalsWindow {
+            win.contentView = NSHostingView(rootView: CredentialApprovalsView(
+                broker: broker, profileNames: names,
+                onClose: { [weak self] in self?.credentialApprovalsWindow = nil }))
+            win.makeKeyAndOrderFront(nil)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 580, height: 360),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false)
+        win.title = NSLocalizedString("Credential Approvals", comment: "")
+        win.center()
+        win.delegate = self
+        win.isReleasedWhenClosed = false
+        win.contentView = NSHostingView(rootView: CredentialApprovalsView(
+            broker: broker, profileNames: names,
+            onClose: { [weak self] in self?.credentialApprovalsWindow = nil }))
+        win.makeKeyAndOrderFront(nil)
+        credentialApprovalsWindow = win
     }
 
     /// Window menu → "Profile Manager". Brings the picker forward, or
@@ -922,9 +961,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             onEdit:          { self.openEditorWindow(editing: $0) },
             onReset:         { self.resetProfile($0) },
             onDelete:        { self.deleteProfile($0) },
-            onShowPublicKey: { self.openSSHWindow(for: $0) }
+            onShowPublicKey: { self.openSSHWindow(for: $0) },
+            onDuplicate:     { self.duplicateProfile($0) }
         )
         win.contentView = NSHostingView(rootView: view)
+    }
+
+    /// Deep-copy a profile (new UUID, new MAC) using `ProfileStore.duplicate`.
+    /// Includes the system disk + home dir via APFS clonefile, the encrypted
+    /// secrets blob, host-only ssh material, and every credential — but
+    /// skips the suspended VM state (a snapshot tied to the source's MAC
+    /// can't safely resume on the duplicate).
+    private func duplicateProfile(_ source: Profile) {
+        let copyName = source.name + " " + NSLocalizedString("copy", comment: "")
+        do {
+            _ = try store.duplicate(source, named: copyName)
+        } catch {
+            showError(error, message: "Couldn't duplicate “\(source.name)”.")
+            return
+        }
+        profiles = store.loadAll()
+        renderPicker()
     }
 
     /// editing == nil → create. editing != nil → modify in place.
@@ -1276,7 +1333,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             var tokenMap = plan.tokenMap()
             for swap in kubeMat.bearerSwaps {
                 tokenMap.entries.append(TokenMap.Entry(
-                    fake: swap.fakeToken, real: swap.realToken, host: swap.host))
+                    fake: swap.fakeToken, real: swap.realToken, host: swap.host,
+                    consentCredentialID: swap.consentCredentialID,
+                    consentDisplayName: swap.consentDisplayName))
             }
             engine.swapper.setMap(tokenMap, for: profile.id)
 
@@ -1284,7 +1343,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // → API server).
             for ident in kubeMat.clientIdentities {
                 engine.clientIdentities.setIdentity(
-                    ident.identity, host: ident.host, profileID: profile.id)
+                    ident.identity, host: ident.host, profileID: profile.id,
+                    consentCredentialID: ident.consentCredentialID,
+                    consentDisplayName: ident.consentDisplayName)
             }
             // Per-host CA overrides so the proxy can verify private
             // API-server certs that don't chain to macOS roots.
@@ -1313,6 +1374,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             engine.setSessionTrace(
                 MitmEngine.SessionTrace(sessionID: UUID(), level: profile.traceLevel),
                 for: profile.id)
+            // Profile name lookup for the consent dialog ("Profile X
+            // wants to use credential Y").
+            let broker = engine.consent
+            let pidCopy = profile.id
+            let nameCopy = profile.name
+            Task.detached { await broker.setProfileName(nameCopy, for: pidCopy) }
             let agentKeys = loadAgentKeys(for: profile)
             engine.sshAgent.setKeys(agentKeys, for: profile.id)
             // AWS creds: pushed to the host-side server. The guest's
@@ -1335,6 +1402,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // editor — passphrase-protected ones use the macOS Keychain
             // for the password, fed through SSH_ASKPASS.
             loadImportedSSHKeys(for: profile)
+            // Register approval metadata for imported keys whose flag
+            // is on. The agent forwards SIGN_REQUESTs for these to the
+            // host's bromure ssh-agent (we don't hold the seed in
+            // process), so the broker is consulted just before that
+            // forward. Keys without `publicKeyText` (no .pub on import)
+            // can't be matched by blob and will sign without a prompt.
+            var approvals: [Data: SSHAgentServer.ImportedApproval] = [:]
+            for k in profile.importedSSHKeys where k.requireApproval {
+                guard let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText)
+                else { continue }
+                approvals[blob] = SSHAgentServer.ImportedApproval(
+                    label: k.label,
+                    consentCredentialID: ConsentCredentialID.sshKey(k.id.uuidString))
+            }
+            engine.sshAgent.setImportedKeyApprovals(approvals, for: profile.id)
         } else {
             FileHandle.standardError.write(Data(
                 "[mitm] session launch for '\(profile.name)': MITM ENGINE IS NIL — nothing will be wired\n".utf8))
@@ -1779,7 +1861,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "[mitm] loaded 1 agent key from \(raw.path)\n".utf8))
         return [AgentKey(comment: "bromure-ac",
                          publicKey: Data(publicKey),
-                         seed: Data(secret))]
+                         seed: Data(secret),
+                         requireApproval: profile.sshKeyRequiresApproval,
+                         consentCredentialID: ConsentCredentialID.bromureSSHKey())]
+    }
+
+    /// Extract the SSH wire-format public-key blob from an OpenSSH
+    /// public-key line (`<keytype> <base64> [comment]`). The base64
+    /// payload IS the wire-format blob the SSH client passes to
+    /// SIGN_REQUEST as the key identifier, so callers can match it
+    /// 1:1 against incoming sign requests.
+    ///
+    /// Returns nil for empty / malformed input — callers that can't
+    /// resolve a blob skip the consent gate (better than refusing to
+    /// sign for keys we can't identify).
+    private func sshPublicKeyBlob(fromOpenSSHText text: String) -> Data? {
+        let line = text.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .first?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+        let parts = line.split(separator: " ", maxSplits: 2,
+                               omittingEmptySubsequences: true)
+        guard parts.count >= 2 else { return nil }
+        return Data(base64Encoded: String(parts[1]))
     }
 
     /// Copy a user-supplied SSH private key into the profile's
@@ -1825,6 +1928,40 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         let trimmed = passphrase?.trimmingCharacters(in: CharacterSet()) ?? ""
+
+        // If we still don't have the public-key text (common for .pem
+        // imports), derive it from the private key via `ssh-keygen
+        // -y -f <key> -P <passphrase>`. Captures stdout, caches the
+        // result on disk so future launches don't re-run ssh-keygen,
+        // and unblocks the per-key consent gate (which keys requests
+        // by the wire-format public-key blob).
+        if pubText.isEmpty {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
+            // -y: print public-key text from a private file.
+            // -P: passphrase. Empty string for unencrypted keys —
+            //     ssh-keygen accepts empty -P silently.
+            p.arguments = ["-y", "-f", dst.path, "-P", trimmed]
+            let outPipe = Pipe()
+            p.standardOutput = outPipe
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            p.waitUntilExit()
+            if p.terminationStatus == 0,
+               let data = try? outPipe.fileHandleForReading.readToEnd(),
+               let s = String(data: data, encoding: .utf8) {
+                let derived = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !derived.isEmpty {
+                    pubText = derived
+                    // Cache the derived pub next to the private key so
+                    // future launches read it from disk (avoids the
+                    // ssh-keygen shell-out and avoids needing the
+                    // passphrase again post-import).
+                    let pubDst = importedDir.appendingPathComponent(basename + ".pub")
+                    try? derived.write(to: pubDst, atomically: true, encoding: .utf8)
+                }
+            }
+        }
         let hasPass = !trimmed.isEmpty
         if hasPass {
             try PassphraseKeychain.set(passphrase: trimmed,

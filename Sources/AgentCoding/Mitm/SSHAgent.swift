@@ -14,16 +14,59 @@ import Crypto
 /// no "give me the private key" message.
 public final class SSHAgentServer: @unchecked Sendable {
     private var keysByProfile: [UUID: [AgentKey]] = [:]
+    /// Approval metadata for imported keys whose signing flows through
+    /// the host's bromure ssh-agent (not in-process). Keyed by the
+    /// public-key blob that the in-VM client hands back in
+    /// SIGN_REQUESTs.
+    private var importedApprovals: [UUID: [Data: ImportedApproval]] = [:]
     private let lock = NSLock()
+    private let consent: ConsentBroker
 
-    public init() {}
+    public struct ImportedApproval: Sendable {
+        public let label: String
+        public let consentCredentialID: String
+        public init(label: String, consentCredentialID: String) {
+            self.label = label
+            self.consentCredentialID = consentCredentialID
+        }
+    }
+
+    public init(consent: ConsentBroker) {
+        self.consent = consent
+    }
+
+    /// Register approval metadata for the imported keys that have
+    /// `requireApproval == true`. Looked up by public-key blob during
+    /// SIGN_REQUEST forwarding to the host bromure ssh-agent.
+    public func setImportedKeyApprovals(_ entries: [Data: ImportedApproval],
+                                        for profileID: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        importedApprovals[profileID] = entries
+    }
+
+    public func clearImportedKeyApprovals(for profileID: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        importedApprovals.removeValue(forKey: profileID)
+    }
+
+    private func importedApproval(for profileID: UUID, blob: Data) -> ImportedApproval? {
+        lock.lock(); defer { lock.unlock() }
+        return importedApprovals[profileID]?[blob]
+    }
 
     /// Replace the key set for a profile. Called when the session
     /// launches with whatever ed25519 keys live under the profile's
     /// host-side ssh dir.
     public func setKeys(_ keys: [AgentKey], for profileID: UUID) {
-        lock.lock(); defer { lock.unlock() }
-        keysByProfile[profileID] = keys
+        lock.lock(); keysByProfile[profileID] = keys; lock.unlock()
+        // Log a one-shot summary so the user can confirm the flag
+        // actually landed on the in-process key (vs. silently
+        // defaulting to false because they edited the profile while
+        // a session was already running).
+        for k in keys {
+            FileHandle.standardError.write(Data(
+                "[ssh-agent] registered key \(k.comment) requireApproval=\(k.requireApproval)\n".utf8))
+        }
     }
 
     public func clearKeys(for profileID: UUID) {
@@ -38,17 +81,17 @@ public final class SSHAgentServer: @unchecked Sendable {
 
     /// Serve one client connection. Returns when the client closes,
     /// or on protocol error.
-    public func serve(fd: Int32, profileID: UUID) {
+    public func serve(fd: Int32, profileID: UUID) async {
         defer { close(fd) }
         do {
-            try loop(fd: fd, profileID: profileID)
+            try await loop(fd: fd, profileID: profileID)
         } catch {
             FileHandle.standardError.write(Data(
                 "[ssh-agent] connection ended: \(error)\n".utf8))
         }
     }
 
-    private func loop(fd: Int32, profileID: UUID) throws {
+    private func loop(fd: Int32, profileID: UUID) async throws {
         while true {
             // 4-byte big-endian length, then payload.
             guard let lenBuf = try readExact(fd: fd, count: 4) else { return }
@@ -67,7 +110,7 @@ public final class SSHAgentServer: @unchecked Sendable {
                 let resp = try handleRequestIdentities(profileID: profileID)
                 try writeFrame(fd: fd, payload: resp)
             case AgentMsg.signRequest.rawValue:
-                let resp = try handleSignRequest(body: body, profileID: profileID)
+                let resp = try await handleSignRequest(body: body, profileID: profileID)
                 try writeFrame(fd: fd, payload: resp)
             default:
                 // SSH_AGENT_FAILURE for anything we don't understand.
@@ -79,6 +122,8 @@ public final class SSHAgentServer: @unchecked Sendable {
     // MARK: - Message handlers
 
     private func handleRequestIdentities(profileID: UUID) throws -> Data {
+        FileHandle.standardError.write(Data(
+            "[ssh-agent] REQUEST_IDENTITIES from VM\n".utf8))
         let profileKeys = self.keys(for: profileID)
         // Multiplex two agents into one identities answer:
         //   • Bromure's private ssh-agent (always present; holds the
@@ -117,7 +162,7 @@ public final class SSHAgentServer: @unchecked Sendable {
         return out
     }
 
-    private func handleSignRequest(body: Data, profileID: UUID) throws -> Data {
+    private func handleSignRequest(body: Data, profileID: UUID) async throws -> Data {
         var cursor = 0
         let keyBlob = try takeString(body: body, cursor: &cursor)
         let data    = try takeString(body: body, cursor: &cursor)
@@ -132,6 +177,20 @@ public final class SSHAgentServer: @unchecked Sendable {
         // so we can sign locally with no socket round-trip.
         let keys = self.keys(for: profileID)
         if let match = keys.first(where: { $0.publicKeyBlob == keyBlob }) {
+            FileHandle.standardError.write(Data(
+                "[ssh-agent] sign \(match.comment) requireApproval=\(match.requireApproval)\n".utf8))
+            if match.requireApproval {
+                let credID = match.consentCredentialID
+                    ?? ConsentCredentialID.sshKey(match.publicKeyBlob.base64EncodedString())
+                let allowed = await consent.consent(
+                    profileID: profileID,
+                    credentialID: credID,
+                    credentialDisplayName: "SSH key “\(match.comment)”",
+                    scopeHint: NSLocalizedString(
+                        "to produce one signature inside the VM",
+                        comment: ""))
+                if !allowed { return Data([AgentMsg.failure.rawValue]) }
+            }
             let signature = try match.sign(data)
             var sshSig = Data()
             sshSig.append(string(Data("ssh-ed25519".utf8)))
@@ -140,6 +199,27 @@ public final class SSHAgentServer: @unchecked Sendable {
             out.append(AgentMsg.signResponse.rawValue)
             out.append(string(sshSig))
             return out
+        }
+
+        // Imported-key gating: signing flows through the host's
+        // bromure ssh-agent for keys the user pointed bromure at. The
+        // VM client only gives us the public-key blob — we look up the
+        // matching approval entry by blob and pop the consent dialog
+        // before forwarding the SIGN_REQUEST.
+        let blobHex = keyBlob.prefix(8).map { String(format: "%02x", $0) }.joined()
+        let approvalState = importedApproval(for: profileID, blob: keyBlob) == nil
+            ? "none" : "matched"
+        FileHandle.standardError.write(Data(
+            "[ssh-agent] sign forwarded — blob \(blobHex)… approvals=\(approvalState)\n".utf8))
+        if let approval = importedApproval(for: profileID, blob: keyBlob) {
+            let allowed = await consent.consent(
+                profileID: profileID,
+                credentialID: approval.consentCredentialID,
+                credentialDisplayName: "imported SSH key “\(approval.label)”",
+                scopeHint: NSLocalizedString(
+                    "to produce one signature inside the VM",
+                    comment: ""))
+            if !allowed { return Data([AgentMsg.failure.rawValue]) }
         }
 
         // Forward to whichever agent advertises the key. Try our
@@ -268,11 +348,21 @@ public struct AgentKey: Sendable {
     /// security model is "never crosses vsock", not "never visible to
     /// any Swift code".
     public let seed: Data
+    /// When true, every SIGN_REQUEST using this key prompts the user
+    /// before producing the signature. See `ConsentBroker`.
+    public let requireApproval: Bool
+    /// Stable consent ID — identifies the underlying credential across
+    /// session restarts. nil = use the public-key fingerprint.
+    public let consentCredentialID: String?
 
-    public init(comment: String, publicKey: Data, seed: Data) {
+    public init(comment: String, publicKey: Data, seed: Data,
+                requireApproval: Bool = false,
+                consentCredentialID: String? = nil) {
         self.comment = comment
         self.publicKey = publicKey
         self.seed = seed
+        self.requireApproval = requireApproval
+        self.consentCredentialID = consentCredentialID
     }
 
     /// SSH-protocol-formatted public key blob, the wire format the

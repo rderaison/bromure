@@ -12,6 +12,7 @@ public final class MitmEngine {
     public let swapper: TokenSwapper
     public let sshAgent: SSHAgentServer
     public let awsCreds: AWSCredentialServer
+    public let consent: ConsentBroker
     public let traceStore: TraceStore
     /// Per-profile, per-host SecIdentity table for upstream client-cert
     /// auth (Kubernetes API servers, internal mTLS APIs, etc.). The
@@ -86,9 +87,13 @@ public final class MitmEngine {
         let caDir = supportDir.appendingPathComponent("ca", isDirectory: true)
         self.ca = try BromureCA.loadOrCreate(at: caDir)
         self.certCache = CertCache(ca: ca)
-        self.swapper = TokenSwapper()
-        self.sshAgent = SSHAgentServer()
-        self.awsCreds = AWSCredentialServer()
+        // Construct the consent broker first — every cred-vending
+        // server takes a reference to it.
+        let broker = ConsentBroker()
+        self.consent = broker
+        self.swapper = TokenSwapper(consent: broker)
+        self.sshAgent = SSHAgentServer(consent: broker)
+        self.awsCreds = AWSCredentialServer(consent: broker)
         self.traceStore = TraceStore()
         // Spawn our dedicated ssh-agent BEFORE anyone reads the
         // HostAgentClient lazy vars — that way `_bromurePrivate` is
@@ -126,6 +131,7 @@ public final class MitmEngine {
             traceStore: traceStore,
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,
+            consent: consent,
             // The provider runs from a detached Task on the proxy's
             // hot path. `sessionTrace(for:)` is now nonisolated +
             // lock-protected so this is just a hash lookup behind a
@@ -147,10 +153,18 @@ public final class MitmEngine {
         listenerHolders.removeValue(forKey: profileID)
         swapper.clearMap(for: profileID)
         sshAgent.clearKeys(for: profileID)
+        sshAgent.clearImportedKeyApprovals(for: profileID)
         awsCreds.clearCredentials(for: profileID)
         clientIdentities.clearAll(for: profileID)
         clusterCAs.clearAll(for: profileID)
         execPoller.stopAll()
+        // Drop any consent grants the user issued during this session
+        // — "Allow for the rest of the session" must not survive a
+        // window close. Detached so we don't block the @MainActor
+        // teardown path on the actor hop.
+        let broker = consent
+        Task.detached { await broker.revokeAll(profileID: profileID) }
+        Task.detached { await broker.clearProfileName(for: profileID) }
     }
 }
 
@@ -174,6 +188,7 @@ private final class ListenerHolder {
          traceStore: TraceStore,
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
+         consent: ConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?)
     {
         self.profileID = profileID
@@ -184,6 +199,7 @@ private final class ListenerHolder {
             traceStore: traceStore,
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,
+            consent: consent,
             sessionTraceProvider: sessionTraceProvider)
         self.sshDelegate = SSHListenerDelegate(
             profileID: profileID, sshAgent: sshAgent)
@@ -208,12 +224,14 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
     let traceStore: TraceStore
     let clientIdentities: ClientIdentityRegistry
     let clusterCAs: ClusterCATrustRegistry
+    let consent: ConsentBroker
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
 
     init(profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          traceStore: TraceStore,
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
+         consent: ConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?) {
         self.profileID = profileID
         self.certCache = certCache
@@ -221,6 +239,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         self.traceStore = traceStore
         self.clientIdentities = clientIdentities
         self.clusterCAs = clusterCAs
+        self.consent = consent
         self.sessionTraceProvider = sessionTraceProvider
     }
 
@@ -238,6 +257,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             traceStore: traceStore,
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,
+            consent: consent,
             sessionTraceProvider: providerCopy
         )
         Task.detached(priority: .userInitiated) {
@@ -263,7 +283,7 @@ private final class SSHListenerDelegate: NSObject, VZVirtioSocketListenerDelegat
         let pid = profileID
         let agent = sshAgent
         Task.detached(priority: .userInitiated) {
-            agent.serve(fd: fd, profileID: pid)
+            await agent.serve(fd: fd, profileID: pid)
         }
         return true
     }
@@ -285,7 +305,7 @@ private final class AWSCredsListenerDelegate: NSObject, VZVirtioSocketListenerDe
         let pid = profileID
         let server = awsCreds
         Task.detached(priority: .userInitiated) {
-            server.serve(fd: fd, profileID: pid)
+            await server.serve(fd: fd, profileID: pid)
         }
         return true
     }

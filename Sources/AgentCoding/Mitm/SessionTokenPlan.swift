@@ -11,6 +11,22 @@ public struct SessionTokenPlan: Sendable {
         public let realValue: String
         public let fakeValue: String
         public let purpose: Purpose
+        /// Stable consent ID for the source credential. nil = the
+        /// credential isn't gated. Multiple entries may share the
+        /// same ID (e.g. a docker registry's primary + auth-realm
+        /// rows both come from the same registry credential).
+        public let consentCredentialID: String?
+        /// Display name shown in the consent prompt.
+        public let consentDisplayName: String
+        public init(realValue: String, fakeValue: String, purpose: Purpose,
+                    consentCredentialID: String? = nil,
+                    consentDisplayName: String = "") {
+            self.realValue = realValue
+            self.fakeValue = fakeValue
+            self.purpose = purpose
+            self.consentCredentialID = consentCredentialID
+            self.consentDisplayName = consentDisplayName
+        }
     }
 
     public enum Purpose: Sendable {
@@ -50,7 +66,10 @@ public struct SessionTokenPlan: Sendable {
             TokenMap.Entry(
                 fake: e.fakeValue,
                 real: e.realValue,
-                host: hostScope(for: e.purpose)
+                host: hostScope(for: e.purpose),
+                consentCredentialID: e.consentCredentialID,
+                consentDisplayName: e.consentCredentialID != nil
+                    ? e.consentDisplayName : nil
             )
         }
         return TokenMap(entries: mapped)
@@ -172,36 +191,54 @@ public extension Profile {
     func makeTokenPlan(salt: Data) -> SessionTokenPlan {
         var entries: [SessionTokenPlan.Entry] = []
 
+        // Primary tool API key gating: the primary tool's flag lives
+        // on Profile (apiKeyRequiresApproval); each entry in
+        // additionalTools carries its own `requireApproval`.
         for spec in allToolSpecs where spec.authMode == .token {
             guard let raw = spec.apiKey else { continue }
             let real = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             if real.isEmpty { continue }
+            let isPrimary = (spec.tool == self.tool)
+            let gated = isPrimary ? apiKeyRequiresApproval : spec.requireApproval
+            let consentID: String? = gated
+                ? ConsentCredentialID.primaryToolAPIKey(tool: spec.tool.rawValue)
+                : nil
+            let displayName = "\(spec.tool.displayName) API key"
             switch spec.tool {
             case .claude:
                 entries.append(.init(
                     realValue: real,
                     fakeValue: SessionTokenPlan.deriveFake(prefix: "sk-ant-api03-brm-",
                                                            real: real, salt: salt),
-                    purpose: .anthropicAPIKey))
+                    purpose: .anthropicAPIKey,
+                    consentCredentialID: consentID,
+                    consentDisplayName: displayName))
             case .codex:
                 entries.append(.init(
                     realValue: real,
                     fakeValue: SessionTokenPlan.deriveFake(prefix: "sk-brm-",
                                                            real: real, salt: salt),
-                    purpose: .openaiAPIKey))
+                    purpose: .openaiAPIKey,
+                    consentCredentialID: consentID,
+                    consentDisplayName: displayName))
             }
         }
 
         for entry in manualTokens where entry.isUsable {
             let real = entry.realValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if real.isEmpty { continue }
+            let consentID: String? = entry.requireApproval
+                ? ConsentCredentialID.manualToken(entry.id) : nil
             entries.append(.init(
                 realValue: real,
                 fakeValue: SessionTokenPlan.deriveFake(prefix: "brm_",
                                                        real: real, salt: salt),
                 purpose: .manual(name: entry.name,
                                  envVarName: entry.envVarName,
-                                 hostFilter: entry.hostFilter)))
+                                 hostFilter: entry.hostFilter),
+                consentCredentialID: consentID,
+                consentDisplayName: entry.name.isEmpty
+                    ? "manual token" : "“\(entry.name)” token"))
         }
 
         // DigitalOcean PAT.
@@ -210,13 +247,18 @@ public extension Profile {
             let doFake = SessionTokenPlan.deriveFake(prefix: "dop_v1_",
                                                       real: doRaw, salt: salt,
                                                       targetLength: 64)
+            let doConsentID: String? = digitalOceanTokenRequiresApproval
+                ? ConsentCredentialID.digitalOcean() : nil
+            let doDisplay = "DigitalOcean PAT"
             entries.append(.init(
                 realValue: doRaw,
                 // Real DO PATs are 64 chars — `dop_v1_<hex>`.
                 // Match the prefix + length so client validators
                 // (doctl, terraform-provider-digitalocean) accept.
                 fakeValue: doFake,
-                purpose: .digitalOcean))
+                purpose: .digitalOcean,
+                consentCredentialID: doConsentID,
+                consentDisplayName: doDisplay))
             // `doctl registry login` / `docker login -u $TOKEN -p $TOKEN
             // registry.digitalocean.com` wraps the PAT in HTTP Basic
             // auth — the wire form is `Authorization: Basic
@@ -229,7 +271,9 @@ public extension Profile {
             entries.append(.init(
                 realValue: realB64,
                 fakeValue: fakeB64,
-                purpose: .digitalOcean))
+                purpose: .digitalOcean,
+                consentCredentialID: doConsentID,
+                consentDisplayName: doDisplay))
         }
 
         for reg in dockerRegistries where reg.isUsable {
@@ -252,10 +296,15 @@ public extension Profile {
                 targetLength: max(40, realPass.count))
             let realB64 = Data("\(reg.username):\(realPass)".utf8).base64EncodedString()
             let fakeB64 = Data("\(reg.username):\(fakePass)".utf8).base64EncodedString()
+            let regConsentID: String? = reg.requireApproval
+                ? ConsentCredentialID.dockerRegistry(reg.id) : nil
+            let regDisplay = "registry “\(reg.host)” (\(reg.username))"
             entries.append(.init(
                 realValue: realB64,
                 fakeValue: fakeB64,
-                purpose: .dockerRegistry(host: reg.host, username: reg.username)))
+                purpose: .dockerRegistry(host: reg.host, username: reg.username),
+                consentCredentialID: regConsentID,
+                consentDisplayName: regDisplay))
             // Distribution-spec auth flow: GET /v2/ returns 401 with
             // a `WWW-Authenticate: Bearer realm="https://<auth-host>/…"`.
             // For multi-host providers (DO: api.digitalocean.com,
@@ -270,7 +319,9 @@ public extension Profile {
                     fakeValue: fakeB64,
                     // Reuse .dockerRegistry purpose; only the host
                     // scope differs. Carry the realm in the host slot.
-                    purpose: .dockerRegistry(host: realm, username: reg.username)))
+                    purpose: .dockerRegistry(host: realm, username: reg.username),
+                    consentCredentialID: regConsentID,
+                    consentDisplayName: regDisplay))
             }
         }
 
@@ -293,12 +344,16 @@ public extension Profile {
                 prefix = "brm_"
                 target = nil
             }
+            let credConsentID: String? = cred.requireApproval
+                ? ConsentCredentialID.gitHTTPS(cred.id) : nil
             entries.append(.init(
                 realValue: real,
                 fakeValue: SessionTokenPlan.deriveFake(prefix: prefix,
                                                        real: real, salt: salt,
                                                        targetLength: target),
-                purpose: .gitHTTPS(host: cred.host, username: cred.username)))
+                purpose: .gitHTTPS(host: cred.host, username: cred.username),
+                consentCredentialID: credConsentID,
+                consentDisplayName: "git token (\(cred.username)@\(cred.host))"))
         }
 
         return SessionTokenPlan(entries: entries)

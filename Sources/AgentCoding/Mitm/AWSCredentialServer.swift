@@ -15,11 +15,15 @@ public final class AWSCredentialServer: @unchecked Sendable {
         var accessKeyID: String
         var secretAccessKey: String
         var sessionToken: String
+        var requireApproval: Bool
     }
     private var byProfile: [UUID: Entry] = [:]
     private let lock = NSLock()
+    private let consent: ConsentBroker
 
-    public init() {}
+    public init(consent: ConsentBroker) {
+        self.consent = consent
+    }
 
     public func setCredentials(_ creds: AWSCredentials, for profileID: UUID) {
         lock.lock(); defer { lock.unlock() }
@@ -30,7 +34,8 @@ public final class AWSCredentialServer: @unchecked Sendable {
         byProfile[profileID] = Entry(
             accessKeyID: creds.accessKeyID,
             secretAccessKey: creds.secretAccessKey,
-            sessionToken: creds.sessionToken)
+            sessionToken: creds.sessionToken,
+            requireApproval: creds.requireApproval)
     }
 
     public func clearCredentials(for profileID: UUID) {
@@ -44,10 +49,34 @@ public final class AWSCredentialServer: @unchecked Sendable {
     }
 
     /// Serve one client connection. Pushes the JSON payload and closes.
-    public func serve(fd: Int32, profileID: UUID) {
+    public func serve(fd: Int32, profileID: UUID) async {
         defer { close(fd) }
+
+        // Gate on consent if the credential is flagged. Denial returns
+        // a structured error JSON so the SDK reports a useful message
+        // rather than hanging on a closed socket.
+        let entry = self.entry(for: profileID)
+        if let e = entry, e.requireApproval {
+            let masked = Self.maskAccessKey(e.accessKeyID)
+            let allowed = await consent.consent(
+                profileID: profileID,
+                credentialID: ConsentCredentialID.aws(),
+                credentialDisplayName: "AWS access key \(masked)",
+                scopeHint: NSLocalizedString(
+                    "for any AWS API call (SigV4 signing in the VM)",
+                    comment: ""))
+            if !allowed {
+                writePayload(fd: fd, data: errorPayload("denied by user consent"))
+                return
+            }
+        }
+
         let payload = jsonPayload(for: profileID)
-        payload.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
+        writePayload(fd: fd, data: payload)
+    }
+
+    private func writePayload(fd: Int32, data: Data) {
+        data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
             guard let base = buf.baseAddress else { return }
             var written = 0
             while written < buf.count {
@@ -56,6 +85,11 @@ public final class AWSCredentialServer: @unchecked Sendable {
                 written += n
             }
         }
+    }
+
+    private static func maskAccessKey(_ akid: String) -> String {
+        guard akid.count > 6 else { return "***" }
+        return String(akid.prefix(4)) + "…" + String(akid.suffix(4))
     }
 
     /// Serialize the credentials for `profileID` in the AWS SDK
