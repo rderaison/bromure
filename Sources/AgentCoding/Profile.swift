@@ -384,11 +384,14 @@ public struct DockerRegistryCredential: Codable, Equatable, Sendable, Identifiab
 /// signature (not the secret) crosses the wire. So we can't fake →
 /// real swap on the wire the way it does for Bearer tokens.
 ///
-/// Instead we keep the real access key + secret on the host (in the
-/// MitmEngine's AWSCredentialServer) and point ~/.aws/config at a
-/// `credential_process` helper that reads them on demand from a
-/// vsock-bridged Unix socket. The SDK runs SigV4 locally with
-/// material that lives only in process memory — disk stays clean.
+/// Instead the real access key + secret live on the host (in the
+/// MitmEngine's `AWSCredentialServer`). The guest's `credential_process`
+/// helper gets the real `AccessKeyId` paired with a *fake* secret, so
+/// the SDK signs a request whose signature is bound to fail. The host
+/// `AWSResigner` intercepts the proxied request, strips the doomed
+/// signature, and recomputes SigV4 with the real material that never
+/// enters the VM's address space. If the proxy is bypassed, AWS
+/// rejects with `InvalidSignatureException` — fail-closed.
 public struct AWSCredentials: Codable, Equatable, Sendable {
     /// e.g. `AKIAIOSFODNN7EXAMPLE`. Identity-only on the wire.
     public var accessKeyID: String
@@ -400,8 +403,9 @@ public struct AWSCredentials: Codable, Equatable, Sendable {
     public var sessionToken: String
     /// Default region for the SDK (`AWS_DEFAULT_REGION` + ~/.aws/config).
     public var region: String
-    /// When true, every credential_process call from the VM prompts
-    /// for user consent on the host. See `ConsentBroker`.
+    /// When true, every host-side SigV4 signing call (one per AWS
+    /// API request) prompts for user consent until a time-bounded
+    /// grant covers the request. See `ConsentBroker`.
     public var requireApproval: Bool
 
     public init(accessKeyID: String = "",
@@ -1794,9 +1798,12 @@ public final class ProfileStore {
         // ~/.aws/config — points the SDK at our credential_process
         // helper, which reads short-lived JSON from a vsock-bridged
         // Unix socket. The real access key + secret never land on the
-        // guest disk: they live in the host MitmEngine's
-        // AWSCredentialServer. SigV4 still runs locally, but with
-        // material that exists only in process memory.
+        // guest disk OR in the SDK's process memory: the helper hands
+        // out the real AccessKeyId paired with a *fake* SecretAccessKey,
+        // so the SDK signs a doomed request. The host MitmEngine's
+        // AWSResigner strips that signature and re-signs with the real
+        // material before the request leaves the box. If the proxy is
+        // bypassed somehow, AWS rejects the request — fail-closed.
         //
         // ~/.aws/credentials is always nuked if we previously wrote
         // one, even when no creds are configured for this profile —

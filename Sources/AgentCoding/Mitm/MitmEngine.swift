@@ -12,6 +12,10 @@ public final class MitmEngine {
     public let swapper: TokenSwapper
     public let sshAgent: SSHAgentServer
     public let awsCreds: AWSCredentialServer
+    /// Strips the (intentionally invalid) signature on AWS-bound
+    /// requests and re-signs with material that lives only on the host.
+    /// See `AWSResigner` for the threat model.
+    public let awsResigner: AWSResigner
     public let consent: ConsentBroker
     public let traceStore: TraceStore
     /// Per-profile, per-host SecIdentity table for upstream client-cert
@@ -94,6 +98,7 @@ public final class MitmEngine {
         self.swapper = TokenSwapper(consent: broker)
         self.sshAgent = SSHAgentServer(consent: broker)
         self.awsCreds = AWSCredentialServer(consent: broker)
+        self.awsResigner = AWSResigner(credServer: awsCreds)
         self.traceStore = TraceStore()
         // Spawn our dedicated ssh-agent BEFORE anyone reads the
         // HostAgentClient lazy vars — that way `_bromurePrivate` is
@@ -128,6 +133,7 @@ public final class MitmEngine {
             swapper: swapper,
             sshAgent: sshAgent,
             awsCreds: awsCreds,
+            awsResigner: awsResigner,
             traceStore: traceStore,
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,
@@ -185,6 +191,7 @@ private final class ListenerHolder {
          swapper: TokenSwapper,
          sshAgent: SSHAgentServer,
          awsCreds: AWSCredentialServer,
+         awsResigner: AWSResigner,
          traceStore: TraceStore,
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
@@ -196,6 +203,7 @@ private final class ListenerHolder {
             profileID: profileID,
             certCache: certCache,
             swapper: swapper,
+            awsResigner: awsResigner,
             traceStore: traceStore,
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,
@@ -221,6 +229,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
     let profileID: UUID
     let certCache: CertCache
     let swapper: TokenSwapper
+    let awsResigner: AWSResigner
     let traceStore: TraceStore
     let clientIdentities: ClientIdentityRegistry
     let clusterCAs: ClusterCATrustRegistry
@@ -228,6 +237,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
 
     init(profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
+         awsResigner: AWSResigner,
          traceStore: TraceStore,
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
@@ -236,6 +246,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         self.profileID = profileID
         self.certCache = certCache
         self.swapper = swapper
+        self.awsResigner = awsResigner
         self.traceStore = traceStore
         self.clientIdentities = clientIdentities
         self.clusterCAs = clusterCAs
@@ -254,6 +265,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             profileID: profileID,
             certCache: certCache,
             swapper: swapper,
+            awsResigner: awsResigner,
             traceStore: traceStore,
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,

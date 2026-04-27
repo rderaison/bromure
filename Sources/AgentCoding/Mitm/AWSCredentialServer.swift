@@ -1,21 +1,46 @@
 import Foundation
 
-/// Per-profile AWS credential vendor served over vsock. The guest's
-/// `credential_process` helper opens a connection, the host writes the
-/// SDK-format JSON, and the connection closes. The real access key /
-/// secret never touches the guest disk; SigV4 signing still happens in
-/// the VM but with material that lives only in this process's memory.
+/// Per-profile AWS credential vendor served over vsock — and the
+/// host-side custodian of the *real* signing material that the
+/// `AWSResigner` consumes when it re-signs guest requests.
 ///
-/// Wire format on the socket: one JSON document, server-pushed, then
-/// server EOF. Any errors are reported as `{"Version":1,"Error":"…"}`
-/// (non-standard but harmless — the SDK rejects payloads without
-/// AccessKeyId, surfacing the message verbatim).
+/// Two surfaces:
+///
+///   * `serve(fd:profileID:)` — what the guest's `credential_process`
+///     helper talks to. The vended payload now contains the **real**
+///     `AccessKeyId` (so the SDK's identity caching / debug output is
+///     useful) and a **fake** 40-char `SecretAccessKey`. The `SessionToken`
+///     is intentionally omitted — the resigner injects the real one
+///     before signing on the host.
+///
+///     Result: the guest's SDK signs requests with material that
+///     cannot authenticate against AWS. The signature only becomes
+///     valid after the host's `AWSResigner` strips it and re-signs
+///     with the real secret. If the proxy is bypassed, AWS rejects
+///     the request — fail-closed.
+///
+///   * `signingMaterial(for:scopeHint:)` — what the resigner calls,
+///     per request. Returns the real AKID/secret/sessionToken bundle
+///     (after a consent prompt if `requireApproval` is set on the
+///     credential). The real secret never reaches the VM's address
+///     space.
+///
+/// Wire format on the credential_process socket: one JSON document,
+/// server-pushed, then server EOF. Errors are reported as
+/// `{"Version":1,"Error":"…"}` (non-standard but harmless — the SDK
+/// rejects payloads without `AccessKeyId`, surfacing the message
+/// verbatim).
 public final class AWSCredentialServer: @unchecked Sendable {
     private struct Entry {
         var accessKeyID: String
         var secretAccessKey: String
         var sessionToken: String
         var requireApproval: Bool
+        /// 40-char fake-secret string handed to the SDK in place of
+        /// `secretAccessKey`. Generated once at `setCredentials` so
+        /// every credential_process call within a session sees the
+        /// same value; rotated whenever the profile's creds change.
+        var vendedSecret: String
     }
     private var byProfile: [UUID: Entry] = [:]
     private let lock = NSLock()
@@ -35,7 +60,8 @@ public final class AWSCredentialServer: @unchecked Sendable {
             accessKeyID: creds.accessKeyID,
             secretAccessKey: creds.secretAccessKey,
             sessionToken: creds.sessionToken,
-            requireApproval: creds.requireApproval)
+            requireApproval: creds.requireApproval,
+            vendedSecret: Self.makeFakeSecret())
     }
 
     public func clearCredentials(for profileID: UUID) {
@@ -48,29 +74,50 @@ public final class AWSCredentialServer: @unchecked Sendable {
         return byProfile[profileID]
     }
 
-    /// Serve one client connection. Pushes the JSON payload and closes.
-    public func serve(fd: Int32, profileID: UUID) async {
-        defer { close(fd) }
+    /// Result of `signingMaterial(for:scopeHint:)`.
+    public enum SigningMaterial: Sendable {
+        case material(SigV4Signer.Credentials)
+        /// User declined the consent prompt. Caller should respond with
+        /// a 403 to the guest rather than forwarding the unsigned
+        /// request.
+        case denied
+        /// No AWS credentials configured for this profile. Caller
+        /// should let the guest's (invalid) request through so the SDK
+        /// surfaces a helpful error.
+        case missing
+    }
 
-        // Gate on consent if the credential is flagged. Denial returns
-        // a structured error JSON so the SDK reports a useful message
-        // rather than hanging on a closed socket.
-        let entry = self.entry(for: profileID)
-        if let e = entry, e.requireApproval {
+    /// Real signing material for the resigner. Gates on consent when
+    /// the credential is flagged. Note the consent expiry windows in
+    /// `ConsentBroker` (5min / 1hr / session) cover repeat requests so
+    /// per-request prompting only fires the first time.
+    public func signingMaterial(
+        for profileID: UUID,
+        scopeHint: String
+    ) async -> SigningMaterial {
+        guard let e = self.entry(for: profileID) else { return .missing }
+        if e.requireApproval {
             let masked = Self.maskAccessKey(e.accessKeyID)
             let allowed = await consent.consent(
                 profileID: profileID,
                 credentialID: ConsentCredentialID.aws(),
                 credentialDisplayName: "AWS access key \(masked)",
-                scopeHint: NSLocalizedString(
-                    "for any AWS API call (SigV4 signing in the VM)",
-                    comment: ""))
-            if !allowed {
-                writePayload(fd: fd, data: errorPayload("denied by user consent"))
-                return
-            }
+                scopeHint: scopeHint)
+            if !allowed { return .denied }
         }
+        let creds = SigV4Signer.Credentials(
+            accessKeyID: e.accessKeyID,
+            secretAccessKey: e.secretAccessKey,
+            sessionToken: e.sessionToken.isEmpty ? nil : e.sessionToken)
+        return .material(creds)
+    }
 
+    /// Serve one client connection. Pushes the (fake-secret) JSON
+    /// payload and closes. No consent gate here — the secret being
+    /// vended is fake by construction, so there is no real-world
+    /// permission to ask about.
+    public func serve(fd: Int32, profileID: UUID) async {
+        defer { close(fd) }
         let payload = jsonPayload(for: profileID)
         writePayload(fd: fd, data: payload)
     }
@@ -96,18 +143,19 @@ public final class AWSCredentialServer: @unchecked Sendable {
     /// `credential_process` format. Omitting `Expiration` lets the SDK
     /// cache for the consumer process's lifetime — fine here since the
     /// process dies with the VM.
+    ///
+    /// Returns the **fake** secret. The real secret is delivered via
+    /// `signingMaterial(for:scopeHint:)` to the host's resigner, never
+    /// to the guest.
     private func jsonPayload(for profileID: UUID) -> Data {
         guard let e = entry(for: profileID) else {
             return errorPayload("no AWS credentials configured for this profile")
         }
-        var obj: [String: Any] = [
+        let obj: [String: Any] = [
             "Version": 1,
             "AccessKeyId": e.accessKeyID,
-            "SecretAccessKey": e.secretAccessKey,
+            "SecretAccessKey": e.vendedSecret,
         ]
-        if !e.sessionToken.isEmpty {
-            obj["SessionToken"] = e.sessionToken
-        }
         do {
             return try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
         } catch {
@@ -119,5 +167,23 @@ public final class AWSCredentialServer: @unchecked Sendable {
         let obj: [String: Any] = ["Version": 1, "Error": message]
         return (try? JSONSerialization.data(withJSONObject: obj))
             ?? Data("{\"Version\":1,\"Error\":\"unknown\"}".utf8)
+    }
+
+    /// 40-char alphabet-restricted random string, in the same shape an
+    /// AWS secret key takes on the wire (`[A-Za-z0-9+/]`). Doesn't
+    /// authenticate against AWS — its only job is to look plausible to
+    /// the SDK so signing doesn't crash, and unique per session so
+    /// debug output is unambiguous about which session produced what.
+    private static func makeFakeSecret() -> String {
+        let alphabet = Array(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/")
+        var rng = SystemRandomNumberGenerator()
+        var out = ""
+        out.reserveCapacity(40)
+        while out.count < 40 {
+            let idx = Int(rng.next() % UInt64(alphabet.count))
+            out.append(alphabet[idx])
+        }
+        return out
     }
 }

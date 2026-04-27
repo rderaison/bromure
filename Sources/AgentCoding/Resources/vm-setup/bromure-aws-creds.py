@@ -9,9 +9,16 @@ Configured in ~/.aws/config as:
 
 The SDK invokes this on demand, expects one JSON document on stdout, and
 caches the result for the consumer-process lifetime (since we do not
-emit Expiration). The real access key + secret never touch the guest's
-disk: we connect to the bromure-vm-bridge's Unix socket, which forwards
-over vsock to the host's MITM engine, which writes the SDK payload back.
+emit Expiration). The host returns the real `AccessKeyId` paired with
+a *fake* `SecretAccessKey`: that's enough for the SDK to compose a
+SigV4-shaped request, but the signature is doomed. The host's MITM
+proxy (AWSResigner) strips that signature and replaces it with one
+computed from the real material before the request leaves the Mac.
+
+Net effect: neither the real secret nor the STS session token ever
+reach this VM's disk OR the SDK's process memory. If anything bypasses
+the proxy (transparent CLI tools, stray HTTPS, …) AWS rejects with
+InvalidSignatureException — fail-closed.
 """
 import socket
 import sys

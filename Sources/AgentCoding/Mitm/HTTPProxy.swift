@@ -15,6 +15,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     let profileID: UUID
     let certCache: CertCache
     let swapper: TokenSwapper
+    let awsResigner: AWSResigner
     let traceStore: TraceStore
     let clientIdentities: ClientIdentityRegistry
     let clusterCAs: ClusterCATrustRegistry
@@ -22,6 +23,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
 
     init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
+         awsResigner: AWSResigner,
          traceStore: TraceStore,
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
@@ -31,6 +33,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         self.profileID = profileID
         self.certCache = certCache
         self.swapper = swapper
+        self.awsResigner = awsResigner
         self.traceStore = traceStore
         self.clientIdentities = clientIdentities
         self.clusterCAs = clusterCAs
@@ -129,11 +132,51 @@ final class HTTPMitmConnection: @unchecked Sendable {
             return
         }
 
-        // 6b. Send to upstream. The session's delegate looks up the
+        // 6b. AWS resign. No-op for non-AWS hosts. For AWS hosts, the
+        //     guest's SDK has signed with a fake secret vended by
+        //     `AWSCredentialServer`; we strip that signature and
+        //     replace it with one computed from the real material on
+        //     the host. Denial / unsupported features short-circuit
+        //     with a response written straight back to the guest, so
+        //     the SDK gets a meaningful HTTP error rather than an
+        //     opaque InvalidSignatureException after a round-trip.
+        let toForward: Data
+        let resignOutcome = await awsResigner.resign(
+            rawRequest: swap.modified, host: host, profileID: profileID)
+        switch resignOutcome {
+        case .unchanged:
+            toForward = swap.modified
+        case .resigned(let bytes):
+            toForward = bytes
+        case .denied(let response):
+            try tls.write(response)
+            let elapsed = Date().timeIntervalSince(t0) * 1000
+            await emitTrace(host: host, port: port,
+                            preSwapRequest: request,
+                            upstreamResponse: response,
+                            swaps: swap.swaps,
+                            leaks: leaks,
+                            latencyMs: elapsed)
+            return
+        case .failed(let reason, let response):
+            FileHandle.standardError.write(Data(
+                "[mitm] AWS resign failed for \(host): \(reason)\n".utf8))
+            try tls.write(response)
+            let elapsed = Date().timeIntervalSince(t0) * 1000
+            await emitTrace(host: host, port: port,
+                            preSwapRequest: request,
+                            upstreamResponse: response,
+                            swaps: swap.swaps,
+                            leaks: leaks,
+                            latencyMs: elapsed)
+            return
+        }
+
+        // 6c. Send to upstream. The session's delegate looks up the
         //     profile's per-host SecIdentity (Kubernetes API server
         //     et al.) when the upstream challenges for a client cert.
         let session = upstreamSession(for: host)
-        let upstreamResp = try await sendToUpstream(rawRequest: swap.modified,
+        let upstreamResp = try await sendToUpstream(rawRequest: toForward,
                                                     host: host, port: port,
                                                     session: session)
 

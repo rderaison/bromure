@@ -1384,9 +1384,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             engine.sshAgent.setKeys(agentKeys, for: profile.id)
             // AWS creds: pushed to the host-side server. The guest's
             // ~/.aws/config points at a credential_process helper that
-            // pulls JSON from here over vsock — so the secret never
-            // touches the VM disk. setCredentials clears the slot when
-            // the profile has no usable AWS creds.
+            // gets the real AKID + a fake secret; the host AWSResigner
+            // re-signs each AWS request with the real material so the
+            // secret never lives in the VM at all. setCredentials clears
+            // the slot when the profile has no usable AWS creds.
             engine.awsCreds.setCredentials(profile.awsCredentials, for: profile.id)
             FileHandle.standardError.write(Data(
                 "[mitm] session launch for '\(profile.name)': loaded \(agentKeys.count) agent key(s)\n".utf8))
