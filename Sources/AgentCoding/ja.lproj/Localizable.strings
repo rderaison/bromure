@@ -33,6 +33,7 @@
 "Agent" = "エージェント";
 "Folders" = "フォルダ";
 "Credentials" = "資格情報";
+"Environment" = "環境";
 "Advanced" = "詳細";
 "Appearance" = "外観";
 "Resources" = "リソース";
@@ -129,7 +130,7 @@
 "Quit %@" = "%@ を終了";
 
 /* Editor — Credentials → AWS */
-"Access key + secret from IAM → Users → Security credentials. The real secret never lands on the VM disk — bromure points `~/.aws/config` at a `credential_process` helper that pulls JSON from the host over vsock on demand, so `aws`, terraform, boto3 etc. work out of the box. SigV4 signing still runs inside the VM, but with material that exists only in process memory." = "IAM → ユーザー → セキュリティ認証情報からアクセスキーとシークレットを取得します。本物のシークレットは VM のディスクには一切書き込まれません — bromure は `~/.aws/config` で `credential_process` ヘルパーを指定し、必要に応じて vsock 経由でホストから JSON を取得するため、`aws`、terraform、boto3 などはそのまま動作します。SigV4 の署名は引き続き VM 内で行われますが、利用される鍵情報はプロセスのメモリ上にしか存在しません。";
+"Access key + secret from IAM → Users → Security credentials. The real secret never reaches the VM at all — `~/.aws/config` points at a `credential_process` helper that vends the real access key with a *fake* secret, so the SDK signs a doomed request. The host's MITM proxy strips that signature and re-signs with the real material before the request leaves your Mac. `aws`, terraform, boto3 etc. work out of the box; if anything bypasses the proxy, AWS rejects with InvalidSignatureException — fail-closed." = "IAM → ユーザー → セキュリティ認証情報からアクセスキーとシークレットを取得します。本物のシークレットは VM にまったく到達しません — `~/.aws/config` は `credential_process` ヘルパーを指していて、本物のアクセスキーと*ニセの*シークレットを返します。そのため SDK は失敗が確定したリクエストに署名します。ホスト側の MITM プロキシがその署名を取り除き、本物の鍵情報で再署名してから Mac の外に送出します。`aws`、terraform、boto3 などはそのまま動作します。プロキシを迂回した場合は AWS が InvalidSignatureException で拒否します — フェイルクローズです。";
 
 /* Alert: shared folders changed while a saved VM state exists */
 "Discard suspended VM for “%@”?" = "「%@」の中断中の VM を破棄しますか？";
@@ -161,7 +162,7 @@
 "Allow for 5 minutes" = "5 分許可";
 "Allow for the rest of the session" = "セッション中ずっと許可";
 "Don't allow" = "許可しない";
-"for any AWS API call (SigV4 signing in the VM)" = "すべての AWS API 呼び出しに対して（VM 内で SigV4 署名）";
+"for any AWS API call (SigV4 signing on the host)" = "すべての AWS API 呼び出しに対して（ホストで SigV4 署名）";
 "to produce one signature inside the VM" = "VM 内で 1 件の署名を生成するため";
 "for any *.%@ request" = "*.%@ への任意のリクエストに対して";
 "for outbound requests" = "外向きリクエストに対して";
@@ -182,3 +183,11 @@
 /* Duplicate profile */
 "Duplicate" = "複製";
 "copy" = "コピー";
+
+/* Editor — Environment */
+"Plain `KEY=VALUE` pairs exported into every shell in the VM via `proxy.env` (sourced from `.bashrc`). No proxy substitution — values land on the VM verbatim, so don't put secrets here. Good for log levels, feature flags, build toggles." = "`proxy.env`（`.bashrc` から読み込まれる）経由で VM 内の各シェルにエクスポートされるシンプルな `KEY=VALUE` のペアです。プロキシによる置換はなく、値はそのまま VM に届くため、ここには秘密情報を入れないでください。ログレベル、機能フラグ、ビルドの切り替えなどに適しています。";
+"No environment variables configured." = "環境変数は設定されていません。";
+"Add variable" = "変数を追加";
+"Value" = "値";
+"Remove this variable" = "この変数を削除";
+"Name must match `[A-Za-z_][A-Za-z0-9_]*` to be exported." = "エクスポートするには名前が `[A-Za-z_][A-Za-z0-9_]*` に一致する必要があります。";

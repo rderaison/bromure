@@ -1,72 +1,25 @@
 import Foundation
 
-/// Tiny synchronous client for the macOS ssh-agent unix socket. Lets
-/// us multiplex the user's host-side keys (loaded into their macOS
-/// agent / Keychain) into the in-VM agent: the VM's `ssh` calls our
-/// agent, our agent merges the per-profile bromure key + every key the
-/// host agent advertises, and signs with whichever one matches.
+/// Tiny synchronous client for an ssh-agent unix socket. Used by
+/// `SSHAgentServer` to forward SIGN_REQUESTs and REQUEST_IDENTITIES
+/// from the VM into bromure's private ssh-agent — the only host-side
+/// agent the VM ever sees.
 ///
-/// **Why not byte-forward the whole socket?** Because we want to ALSO
-/// expose the per-profile bromure key (which only our process holds).
-/// Multiplexing means both key sets work without the user having to
-/// `ssh-add` anything on the host.
+/// The user's launchd `SSH_AUTH_SOCK` is intentionally NOT plumbed
+/// through here. Earlier revisions multiplexed it in alongside the
+/// private agent; that exposed every key in the user's daily-driver
+/// agent (GitHub, work, prod) to the disposable VM with no consent
+/// gate. Keys the user wants reachable from the VM now go through
+/// the explicit-import flow in the profile UI, which lands the key
+/// in `_bromurePrivate` and registers an `ImportedApproval` for
+/// per-key consent.
 final class HostAgentClient: @unchecked Sendable {
     let socketPath: String
 
-    /// The user's macOS launchd ssh-agent. Optional — present only if
-    /// the user's macOS install actually has one running, which most
-    /// do. Used to multiplex the user's personal keys into the VM
-    /// alongside the per-profile bromure keys.
-    static let macOSUser: HostAgentClient? = {
-        if let p = resolveSocketPath() {
-            FileHandle.standardError.write(Data(
-                "[mitm] macOS user ssh-agent at \(p) will be multiplexed into VMs\n".utf8))
-            return HostAgentClient(socketPath: p)
-        }
-        FileHandle.standardError.write(Data(
-            "[mitm] no macOS user ssh-agent — only the bromure private agent will be exposed\n".utf8))
-        return nil
-    }()
-
-    /// Backwards-compatibility shim for older call sites. Prefers our
-    /// own bromure-managed agent (set by MitmEngine after spawn) and
-    /// falls back to the macOS user's agent.
-    static var shared: HostAgentClient? {
-        return _bromurePrivate ?? macOSUser
-    }
-
     /// Set by MitmEngine after it spawns the private ssh-agent. Used
-    /// as the destination for ssh-add of per-profile keys.
+    /// as the destination for ssh-add of per-profile keys and as the
+    /// only forwarding target for in-VM SIGN_REQUESTs.
     static var _bromurePrivate: HostAgentClient?
-
-    fileprivate static func resolveSocketPath() -> String? {
-        if let env = ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"],
-           !env.isEmpty,
-           FileManager.default.fileExists(atPath: env) {
-            return env
-        }
-        // Ask launchd directly. On macOS this is the source of truth
-        // for the GUI session's SSH_AUTH_SOCK.
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        p.arguments = ["getenv", "SSH_AUTH_SOCK"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do {
-            try p.run()
-            p.waitUntilExit()
-            let data = out.fileHandleForReading.readDataToEndOfFile()
-            let s = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !s.isEmpty, FileManager.default.fileExists(atPath: s) {
-                return s
-            }
-        } catch {
-            // launchctl missing? Skip silently.
-        }
-        return nil
-    }
 
     init(socketPath: String) {
         self.socketPath = socketPath

@@ -382,6 +382,16 @@ public final class SessionDisk {
                 "export SSH_AUTH_SOCK=/tmp/bromure-agent.sock",
             ]
             proxyLines.append(contentsOf: ghEnv)
+
+            // User-defined env vars from the profile. No substitution
+            // — values land in the VM verbatim. Names are filtered to
+            // POSIX shape at the boundary so an invalid character in
+            // the editor can't produce an unsourceable shell line.
+            for env in profile.environmentVariables where env.isUsable {
+                let name = env.name.trimmingCharacters(in: .whitespaces)
+                proxyLines.append("export \(name)=\(shellQuote(env.value))")
+            }
+
             try proxyLines.joined(separator: "\n").appending("\n").write(
                 to: tmp.appendingPathComponent("proxy.env"),
                 atomically: true, encoding: .utf8)

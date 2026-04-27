@@ -7,9 +7,9 @@
     <key>CFBundleIdentifier</key>
     <string>io.bromure.agentic-coding</string>
     <key>CFBundleVersion</key>
-    <string>1.0.4</string>
+    <string>1.0.5</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.4</string>
+    <string>1.0.5</string>
     <key>CFBundleExecutable</key>
     <string>bromure-ac</string>
     <key>CFBundleIconFile</key>

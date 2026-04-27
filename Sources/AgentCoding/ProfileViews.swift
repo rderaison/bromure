@@ -274,6 +274,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case agent       = "Agent"
     case folders     = "Folders"
     case credentials = "Credentials"
+    case environment = "Environment"
     case tracing     = "Tracing"
     case appearance  = "Appearance"
     case resources   = "Resources"
@@ -286,6 +287,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .agent:       "sparkles"
         case .folders:     "folder.fill"
         case .credentials: "key.fill"
+        case .environment: "terminal.fill"
         case .tracing:     "doc.text.magnifyingglass"
         case .appearance:  "paintpalette.fill"
         case .resources:   "memorychip.fill"
@@ -298,6 +300,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .agent:       .purple
         case .folders:     .orange
         case .credentials: .green
+        case .environment: .teal
         case .tracing:     .red
         case .appearance:  .pink
         case .resources:   .gray
@@ -490,6 +493,7 @@ struct ProfileEditorView: View {
         case .agent:       agentSection
         case .folders:     foldersSection
         case .credentials: credentialsSection
+        case .environment: environmentSection
         case .tracing:     tracingSection
         case .appearance:  appearanceSection
         case .resources:   resourcesSection
@@ -1701,6 +1705,39 @@ struct ProfileEditorView: View {
     }
 
     @ViewBuilder
+    private var environmentSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Plain `KEY=VALUE` pairs exported into every shell in the VM via `proxy.env` (sourced from `.bashrc`). No proxy substitution — values land on the VM verbatim, so don't put secrets here. Good for log levels, feature flags, build toggles.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if draft.environmentVariables.isEmpty {
+                Text("No environment variables configured.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            } else {
+                ForEach(Array(draft.environmentVariables.enumerated()), id: \.element.id) { (idx, _) in
+                    EnvironmentVariableRow(
+                        entry: $draft.environmentVariables[idx],
+                        onRemove: { draft.environmentVariables.remove(at: idx) }
+                    )
+                }
+            }
+            HStack {
+                Spacer()
+                Button {
+                    draft.environmentVariables.append(EnvironmentVariable())
+                } label: {
+                    Label("Add variable", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+    }
+
+    @ViewBuilder
     private var appearanceSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             // Font
@@ -1909,6 +1946,42 @@ private struct ManualTokenRow: View {
             }
             .toggleStyle(.checkbox)
             .controlSize(.small)
+        }
+        .padding(8)
+        .background(Color(nsColor: .textBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+// MARK: - Environment variable row
+
+private struct EnvironmentVariableRow: View {
+    @Binding var entry: EnvironmentVariable
+    var onRemove: () -> Void
+
+    var body: some View {
+        let nameTrim = entry.name.trimmingCharacters(in: .whitespaces)
+        let nameInvalid = !nameTrim.isEmpty && !EnvironmentVariable.isValidName(nameTrim)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                TextField("Name", text: $entry.name, prompt: Text("MY_ENV_VAR"))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 220)
+                Text("=")
+                    .foregroundStyle(.tertiary)
+                TextField("Value", text: $entry.value, prompt: Text("1"))
+                    .textFieldStyle(.roundedBorder)
+                Button(action: onRemove) {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("Remove this variable")
+            }
+            if nameInvalid {
+                Text("Name must match `[A-Za-z_][A-Za-z0-9_]*` to be exported.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
         }
         .padding(8)
         .background(Color(nsColor: .textBackgroundColor),

@@ -33,6 +33,7 @@
 "Agent" = "代理";
 "Folders" = "文件夹";
 "Credentials" = "凭据";
+"Environment" = "环境变量";
 "Advanced" = "高级";
 "Appearance" = "外观";
 "Resources" = "资源";
@@ -129,7 +130,7 @@
 "Quit %@" = "退出 %@";
 
 /* Editor — Credentials → AWS */
-"Access key + secret from IAM → Users → Security credentials. The real secret never lands on the VM disk — bromure points `~/.aws/config` at a `credential_process` helper that pulls JSON from the host over vsock on demand, so `aws`, terraform, boto3 etc. work out of the box. SigV4 signing still runs inside the VM, but with material that exists only in process memory." = "在 IAM → 用户 → 安全凭证 中获取访问密钥和密钥。真正的密钥从不会落到虚拟机磁盘上 — bromure 将 `~/.aws/config` 指向一个 `credential_process` 辅助程序，按需通过 vsock 从主机拉取 JSON，因此 `aws`、terraform、boto3 等可开箱即用。SigV4 签名仍在虚拟机内运行，但所用材料仅存在于进程内存中。";
+"Access key + secret from IAM → Users → Security credentials. The real secret never reaches the VM at all — `~/.aws/config` points at a `credential_process` helper that vends the real access key with a *fake* secret, so the SDK signs a doomed request. The host's MITM proxy strips that signature and re-signs with the real material before the request leaves your Mac. `aws`, terraform, boto3 etc. work out of the box; if anything bypasses the proxy, AWS rejects with InvalidSignatureException — fail-closed." = "在 IAM → 用户 → 安全凭证 中获取访问密钥和秘密密钥。真正的秘密密钥根本不会进入虚拟机 —— `~/.aws/config` 指向一个 `credential_process` 辅助程序，该程序提供真正的访问密钥和一个*假的*秘密密钥，因此 SDK 签名的请求注定会失败。主机端的 MITM 代理会去掉该签名，并在请求离开你的 Mac 之前用真实的密钥材料重新签名。`aws`、terraform、boto3 等可开箱即用；如果有任何东西绕过代理，AWS 会以 InvalidSignatureException 拒绝该请求 —— 失败时关闭（fail-closed）。";
 
 /* Alert: shared folders changed while a saved VM state exists */
 "Discard suspended VM for “%@”?" = "丢弃“%@”的已挂起虚拟机？";
@@ -161,7 +162,7 @@
 "Allow for 5 minutes" = "允许 5 分钟";
 "Allow for the rest of the session" = "在本次会话中始终允许";
 "Don't allow" = "不允许";
-"for any AWS API call (SigV4 signing in the VM)" = "用于任何 AWS API 调用（在虚拟机内进行 SigV4 签名）";
+"for any AWS API call (SigV4 signing on the host)" = "用于任何 AWS API 调用（SigV4 在主机端签名）";
 "to produce one signature inside the VM" = "用于在虚拟机内生成一次签名";
 "for any *.%@ request" = "用于到 *.%@ 的任何请求";
 "for outbound requests" = "用于出站请求";
@@ -182,3 +183,11 @@
 /* Duplicate profile */
 "Duplicate" = "复制";
 "copy" = "副本";
+
+/* Editor — Environment */
+"Plain `KEY=VALUE` pairs exported into every shell in the VM via `proxy.env` (sourced from `.bashrc`). No proxy substitution — values land on the VM verbatim, so don't put secrets here. Good for log levels, feature flags, build toggles." = "通过 `proxy.env`（由 `.bashrc` 加载）导出到虚拟机内每个 shell 的简单 `KEY=VALUE` 键值对。不会被代理替换 —— 值会原样到达虚拟机，因此请不要在此放入机密。适合日志级别、功能开关、构建开关等。";
+"No environment variables configured." = "尚未配置任何环境变量。";
+"Add variable" = "添加变量";
+"Value" = "值";
+"Remove this variable" = "删除此变量";
+"Name must match `[A-Za-z_][A-Za-z0-9_]*` to be exported." = "名称必须匹配 `[A-Za-z_][A-Za-z0-9_]*` 才会被导出。";

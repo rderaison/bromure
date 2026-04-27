@@ -80,8 +80,9 @@ public final class MitmEngine {
     private var listenerHolders: [UUID: ListenerHolder] = [:]
 
     /// Our spawned ssh-agent. Owns the per-profile bromure keys
-    /// (loaded via `ssh-add` at session launch) and is the back-end
-    /// for the in-VM agent multiplex.
+    /// (loaded via `ssh-add` at session launch) plus any keys the
+    /// user explicitly imported through the profile UI; sole back-
+    /// end for the in-VM agent socket.
     public let privateAgent: PrivateSSHAgent
 
     public init() throws {

@@ -3,8 +3,8 @@ import Foundation
 /// Encoder for the OpenSSH unencrypted ed25519 private-key format.
 ///
 /// We hand the bytes directly to `ssh-add -` (reads from stdin) at
-/// session launch so the per-profile bromure key lives in the user's
-/// macOS ssh-agent for the duration of the session — without ever
+/// session launch so the per-profile bromure key lives in bromure's
+/// private ssh-agent for the duration of the session — without ever
 /// touching disk in OpenSSH form.
 ///
 /// File layout (unencrypted, single-key):

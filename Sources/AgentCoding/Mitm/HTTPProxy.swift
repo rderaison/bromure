@@ -989,14 +989,17 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
             // roots, and falling back would defeat the override.
             SecTrustSetAnchorCertificates(trust, [ca] as CFArray)
             SecTrustSetAnchorCertificatesOnly(trust, true)
-            // Replace the default SSL policy (which enforces Apple's
-            // 398-day max validity + strict hostname rules + CT) with
-            // a basic X.509 policy: chain + signatures + EKU only.
-            // Self-signed k8s CAs routinely mint 10-year leaf certs,
-            // and the user is the trust root here — they pinned the CA,
-            // so the chain check is the security boundary.
-            let basic = SecPolicyCreateBasicX509()
-            SecTrustSetPolicies(trust, [basic] as CFArray)
+            // Use the SSL policy with hostname binding. BasicX509 alone
+            // would let any cert chained to the same pinned CA satisfy
+            // a request for any hostname under that CA — fine for
+            // single-cert clusters, fatal for any cluster with kubelet /
+            // etcd / sibling-API certs under the same root. Apple's
+            // max-validity / CT restrictions only apply when chaining
+            // to system roots; against a custom anchor with
+            // anchorCertificatesOnly=true the long self-signed cluster
+            // cert lifetimes are accepted.
+            let policy = SecPolicyCreateSSL(true, host as CFString)
+            SecTrustSetPolicies(trust, [policy] as CFArray)
             var err: CFError?
             if SecTrustEvaluateWithError(trust, &err) {
                 completionHandler(.useCredential, URLCredential(trust: trust))

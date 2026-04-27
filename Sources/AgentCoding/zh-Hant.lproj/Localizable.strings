@@ -33,6 +33,7 @@
 "Agent" = "代理程式";
 "Folders" = "檔案夾";
 "Credentials" = "憑證";
+"Environment" = "環境變數";
 "Advanced" = "進階";
 "Appearance" = "外觀";
 "Resources" = "資源";
@@ -129,7 +130,7 @@
 "Quit %@" = "結束 %@";
 
 /* Editor — Credentials → AWS */
-"Access key + secret from IAM → Users → Security credentials. The real secret never lands on the VM disk — bromure points `~/.aws/config` at a `credential_process` helper that pulls JSON from the host over vsock on demand, so `aws`, terraform, boto3 etc. work out of the box. SigV4 signing still runs inside the VM, but with material that exists only in process memory." = "於 IAM → 使用者 → 安全認證 取得存取金鑰與密鑰。真正的密鑰永遠不會寫入虛擬機磁碟 — bromure 將 `~/.aws/config` 指向 `credential_process` 輔助程式，依需求透過 vsock 從主機取得 JSON，因此 `aws`、terraform、boto3 等都能直接運作。SigV4 簽章仍在虛擬機內執行，但使用的材料僅存於行程記憶體中。";
+"Access key + secret from IAM → Users → Security credentials. The real secret never reaches the VM at all — `~/.aws/config` points at a `credential_process` helper that vends the real access key with a *fake* secret, so the SDK signs a doomed request. The host's MITM proxy strips that signature and re-signs with the real material before the request leaves your Mac. `aws`, terraform, boto3 etc. work out of the box; if anything bypasses the proxy, AWS rejects with InvalidSignatureException — fail-closed." = "在 IAM → 使用者 → 安全憑證 中取得存取金鑰和秘密金鑰。真正的秘密金鑰根本不會到達虛擬機 —— `~/.aws/config` 指向一個 `credential_process` 輔助程式，該程式會將真正的存取金鑰與一個*偽造的*秘密金鑰一起回傳，因此 SDK 簽署的請求註定會失敗。主機端的 MITM 代理會去除該簽章，並在請求離開你的 Mac 之前以真實的金鑰材料重新簽章。`aws`、terraform、boto3 等可直接運作；如果有任何東西繞過代理，AWS 會以 InvalidSignatureException 拒絕該請求 —— 失敗時關閉（fail-closed）。";
 
 /* Alert: shared folders changed while a saved VM state exists */
 "Discard suspended VM for “%@”?" = "要丟棄「%@」的暫停虛擬機嗎？";
@@ -161,7 +162,7 @@
 "Allow for 5 minutes" = "允許 5 分鐘";
 "Allow for the rest of the session" = "在本次工作階段中持續允許";
 "Don't allow" = "不允許";
-"for any AWS API call (SigV4 signing in the VM)" = "用於任何 AWS API 呼叫（於虛擬機內進行 SigV4 簽章）";
+"for any AWS API call (SigV4 signing on the host)" = "用於任何 AWS API 呼叫（SigV4 在主機端簽章）";
 "to produce one signature inside the VM" = "用於在虛擬機內產生一次簽章";
 "for any *.%@ request" = "用於對 *.%@ 的任何請求";
 "for outbound requests" = "用於對外請求";
@@ -182,3 +183,11 @@
 /* Duplicate profile */
 "Duplicate" = "複製";
 "copy" = "副本";
+
+/* Editor — Environment */
+"Plain `KEY=VALUE` pairs exported into every shell in the VM via `proxy.env` (sourced from `.bashrc`). No proxy substitution — values land on the VM verbatim, so don't put secrets here. Good for log levels, feature flags, build toggles." = "透過 `proxy.env`（由 `.bashrc` 載入）匯出到虛擬機每個 shell 的簡單 `KEY=VALUE` 鍵值對。不會被代理替換 —— 值會原樣抵達虛擬機，因此請勿在此放入機密。適合用於記錄層級、功能旗標、建置切換。";
+"No environment variables configured." = "尚未設定任何環境變數。";
+"Add variable" = "新增變數";
+"Value" = "值";
+"Remove this variable" = "移除此變數";
+"Name must match `[A-Za-z_][A-Za-z0-9_]*` to be exported." = "名稱必須符合 `[A-Za-z_][A-Za-z0-9_]*` 才會被匯出。";

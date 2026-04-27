@@ -6,12 +6,19 @@ import Crypto
 /// every profile via vsock — the per-profile selection happens via the
 /// VZVirtioSocketListener delegate that captures the profileID.
 ///
-/// **Threat model**: the private keys live only in `~/Library/Application
-/// Support/BromureAC/profiles/<id>/ssh/id_ed25519` on the host. The VM
-/// has `SSH_AUTH_SOCK` pointing at a unix socket that's bridged to vsock
-/// here. The VM can ask for `IDENTITIES_ANSWER` and `SIGN_RESPONSE` but
-/// cannot ever read or extract the key bytes — the agent protocol has
-/// no "give me the private key" message.
+/// **Threat model**: the private keys live only on the host — either
+/// in `~/Library/Application Support/BromureAC/profiles/<id>/ssh/...`
+/// (per-profile bromure-minted keys) or inside the spawned bromure
+/// ssh-agent process (keys the user explicitly imported through the
+/// profile UI, which carry an `ImportedApproval` for per-key consent).
+/// The VM has `SSH_AUTH_SOCK` pointing at a unix socket that's bridged
+/// to vsock here. The VM can ask for `IDENTITIES_ANSWER` and
+/// `SIGN_RESPONSE` but cannot ever read or extract the key bytes —
+/// the agent protocol has no "give me the private key" message.
+///
+/// The user's macOS launchd ssh-agent is intentionally NOT exposed
+/// to the VM. Keys the user wants reachable from the VM go through
+/// the explicit-import flow.
 public final class SSHAgentServer: @unchecked Sendable {
     private var keysByProfile: [UUID: [AgentKey]] = [:]
     /// Approval metadata for imported keys whose signing flows through
@@ -125,13 +132,22 @@ public final class SSHAgentServer: @unchecked Sendable {
         FileHandle.standardError.write(Data(
             "[ssh-agent] REQUEST_IDENTITIES from VM\n".utf8))
         let profileKeys = self.keys(for: profileID)
-        // Multiplex two agents into one identities answer:
-        //   • Bromure's private ssh-agent (always present; holds the
-        //     per-profile keys we ssh-add'd at session launch)
-        //   • The user's macOS launchd ssh-agent (optional; their
-        //     personal keys)
-        // De-dupe by public-key blob so a key the user added to both
-        // agents only shows up once in the VM.
+        // Two sources, both fully under bromure's control:
+        //   • In-process per-profile keys (we hold the seed; sign locally)
+        //   • Bromure's private ssh-agent (per-profile keys ssh-add'd
+        //     at session launch + keys the user explicitly imported
+        //     through bromure's UI)
+        // De-dupe by public-key blob so a key that exists in both
+        // sources only shows up once.
+        //
+        // The user's macOS launchd ssh-agent is intentionally NOT
+        // multiplexed in. The previous behavior exposed every key in
+        // the user's daily-driver agent (GitHub, prod, work infra) to
+        // the disposable VM with no consent gate — see git blame for
+        // the security incident write-up. Users who want their host
+        // keys reachable from the VM go through the explicit-import
+        // flow, which lands in the bromure private agent and carries
+        // a per-key consent prompt.
         var seen = Set<Data>()
         var entries: [(blob: Data, comment: String)] = []
 
@@ -140,12 +156,6 @@ public final class SSHAgentServer: @unchecked Sendable {
             entries.append((key.publicKeyBlob, key.comment))
         }
         for ident in fetchIdentities(from: HostAgentClient._bromurePrivate)
-            where !seen.contains(ident.blob)
-        {
-            seen.insert(ident.blob)
-            entries.append(ident)
-        }
-        for ident in fetchIdentities(from: HostAgentClient.macOSUser)
             where !seen.contains(ident.blob)
         {
             seen.insert(ident.blob)
@@ -222,20 +232,18 @@ public final class SSHAgentServer: @unchecked Sendable {
             if !allowed { return Data([AgentMsg.failure.rawValue]) }
         }
 
-        // Forward to whichever agent advertises the key. Try our
-        // private agent first (cheaper, always available); fall
-        // through to the macOS user agent.
+        // Forward to the bromure private agent. The user's macOS
+        // launchd agent is deliberately NOT a fallback here — see the
+        // note in handleRequestIdentities for the security rationale.
         var fwd = Data()
         fwd.append(AgentMsg.signRequest.rawValue)
         fwd.append(string(keyBlob))
         fwd.append(string(data))
         fwd.append(uint32(flags))
-        for client in [HostAgentClient._bromurePrivate, HostAgentClient.macOSUser] {
-            guard let c = client else { continue }
-            if let resp = c.request(fwd), !resp.isEmpty,
-               resp[0] == AgentMsg.signResponse.rawValue {
-                return resp
-            }
+        if let c = HostAgentClient._bromurePrivate,
+           let resp = c.request(fwd), !resp.isEmpty,
+           resp[0] == AgentMsg.signResponse.rawValue {
+            return resp
         }
         return Data([AgentMsg.failure.rawValue])
     }

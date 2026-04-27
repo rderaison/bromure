@@ -33,6 +33,7 @@
 "Agent" = "Agent";
 "Folders" = "Dossiers";
 "Credentials" = "Identifiants";
+"Environment" = "Environnement";
 "Advanced" = "Avancé";
 "Appearance" = "Apparence";
 "Resources" = "Ressources";
@@ -129,7 +130,7 @@
 "Quit %@" = "Quitter %@";
 
 /* Editor — Credentials → AWS */
-"Access key + secret from IAM → Users → Security credentials. The real secret never lands on the VM disk — bromure points `~/.aws/config` at a `credential_process` helper that pulls JSON from the host over vsock on demand, so `aws`, terraform, boto3 etc. work out of the box. SigV4 signing still runs inside the VM, but with material that exists only in process memory." = "Clé d'accès + secret depuis IAM → Utilisateurs → Identifiants de sécurité. Le vrai secret n'est jamais écrit sur le disque de la VM — bromure pointe `~/.aws/config` vers un assistant `credential_process` qui récupère du JSON depuis l'hôte via vsock à la demande, ce qui rend `aws`, terraform, boto3, etc. fonctionnels d'emblée. La signature SigV4 s'exécute toujours dans la VM, mais avec un matériau qui n'existe qu'en mémoire de processus.";
+"Access key + secret from IAM → Users → Security credentials. The real secret never reaches the VM at all — `~/.aws/config` points at a `credential_process` helper that vends the real access key with a *fake* secret, so the SDK signs a doomed request. The host's MITM proxy strips that signature and re-signs with the real material before the request leaves your Mac. `aws`, terraform, boto3 etc. work out of the box; if anything bypasses the proxy, AWS rejects with InvalidSignatureException — fail-closed." = "Clé d'accès + secret depuis IAM → Utilisateurs → Identifiants de sécurité. Le vrai secret n'atteint jamais la VM — `~/.aws/config` pointe vers un assistant `credential_process` qui livre la vraie clé d'accès avec un secret *factice*, ce qui fait que le SDK signe une requête vouée à l'échec. Le proxy MITM de l'hôte supprime cette signature et la refait avec le vrai matériau avant que la requête ne quitte votre Mac. `aws`, terraform, boto3, etc. fonctionnent d'emblée ; si quelque chose contourne le proxy, AWS rejette avec InvalidSignatureException — fail-closed.";
 
 /* Alert: shared folders changed while a saved VM state exists */
 "Discard suspended VM for “%@”?" = "Abandonner la VM suspendue pour « %@ » ?";
@@ -161,7 +162,7 @@
 "Allow for 5 minutes" = "Autoriser pendant 5 minutes";
 "Allow for the rest of the session" = "Autoriser pour le reste de la session";
 "Don't allow" = "Ne pas autoriser";
-"for any AWS API call (SigV4 signing in the VM)" = "pour tout appel à l'API AWS (signature SigV4 dans la VM)";
+"for any AWS API call (SigV4 signing on the host)" = "pour tout appel à l'API AWS (signature SigV4 sur l'hôte)";
 "to produce one signature inside the VM" = "pour produire une signature à l'intérieur de la VM";
 "for any *.%@ request" = "pour toute requête vers *.%@";
 "for outbound requests" = "pour les requêtes sortantes";
@@ -182,3 +183,11 @@
 /* Duplicate profile */
 "Duplicate" = "Dupliquer";
 "copy" = "copie";
+
+/* Editor — Environment */
+"Plain `KEY=VALUE` pairs exported into every shell in the VM via `proxy.env` (sourced from `.bashrc`). No proxy substitution — values land on the VM verbatim, so don't put secrets here. Good for log levels, feature flags, build toggles." = "Paires `KEY=VALUE` simples exportées dans chaque shell de la VM via `proxy.env` (chargé depuis `.bashrc`). Pas de substitution par le proxy — les valeurs arrivent telles quelles dans la VM, donc n'y mettez pas de secrets. Idéal pour niveaux de log, drapeaux de fonctionnalités, interrupteurs de build.";
+"No environment variables configured." = "Aucune variable d'environnement configurée.";
+"Add variable" = "Ajouter une variable";
+"Value" = "Valeur";
+"Remove this variable" = "Supprimer cette variable";
+"Name must match `[A-Za-z_][A-Za-z0-9_]*` to be exported." = "Le nom doit correspondre à `[A-Za-z_][A-Za-z0-9_]*` pour être exporté.";

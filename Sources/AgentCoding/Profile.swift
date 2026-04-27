@@ -134,7 +134,8 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
 /// the encrypted bytes onto the host (under `agent/imported/`) and
 /// stash the decryption passphrase (if any) in the macOS Keychain.
 /// At session launch we ssh-add each one into the private bromure
-/// agent so the in-VM ssh client sees it via the multiplex.
+/// agent so the in-VM ssh client can sign with it through the
+/// vsock-bridged agent socket.
 public struct ImportedSSHKey: Codable, Equatable, Sendable, Identifiable {
     public var id: UUID
     /// User-supplied display name shown in the editor row
@@ -448,6 +449,47 @@ public struct AWSCredentials: Codable, Equatable, Sendable {
     }
 }
 
+/// One user-defined environment variable exported into the VM at
+/// session prepare time. No proxy substitution — the value is written
+/// verbatim into `proxy.env` (which `.bashrc` sources), so anything
+/// the user doesn't want on the VM disk should NOT go here. Useful
+/// for non-secret toggles like `MY_FEATURE_FLAG=1`, `RUST_LOG=debug`,
+/// `DEBUG=app:*`, etc.
+public struct EnvironmentVariable: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+    /// POSIX env-var name. Anything outside `[A-Za-z_][A-Za-z0-9_]*`
+    /// is stripped at materialization time so a stray space or `-`
+    /// doesn't produce an unsourceable shell line.
+    public var name: String
+    /// Value. Shell-quoted on the way into `proxy.env`, so spaces,
+    /// quotes, dollar signs etc. are safe.
+    public var value: String
+
+    public init(id: UUID = UUID(), name: String = "", value: String = "") {
+        self.id = id
+        self.name = name
+        self.value = value
+    }
+
+    /// True when the entry has a non-empty, syntactically-valid name.
+    /// Empty values are allowed (`export FOO=` clears the variable).
+    public var isUsable: Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        return EnvironmentVariable.isValidName(trimmed)
+    }
+
+    /// POSIX env-var name regex: leading [A-Za-z_], rest [A-Za-z0-9_].
+    public static func isValidName(_ s: String) -> Bool {
+        guard let first = s.first else { return false }
+        if !(first.isLetter || first == "_") { return false }
+        for c in s.dropFirst() {
+            if !(c.isLetter || c.isNumber || c == "_") { return false }
+        }
+        return true
+    }
+}
+
 /// One agentic-coding profile: which tool, how it auths, what folder it
 /// works against, and where its persistent disk lives.
 public struct Profile: Codable, Identifiable, Equatable, Sendable {
@@ -568,6 +610,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// profile. Loaded into the bromure ssh-agent at every session
     /// launch alongside the auto-generated key.
     public var importedSSHKeys: [ImportedSSHKey]
+
+    /// Plain key=value environment variables exported into the VM via
+    /// `proxy.env`. No proxy substitution — meant for non-secret
+    /// toggles, log levels, feature flags, etc. Empty by default.
+    public var environmentVariables: [EnvironmentVariable]
 
     /// How aggressively the proxy records traffic for this profile.
     /// Default `.off` — opt-in because higher levels write request/
@@ -745,6 +792,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         gitHTTPSCredentials: [GitHTTPSCredential] = [],
         manualTokens: [ManualToken] = [],
         importedSSHKeys: [ImportedSSHKey] = [],
+        environmentVariables: [EnvironmentVariable] = [],
         traceLevel: TraceLevel = .off,
         kubeconfigs: [KubeconfigEntry] = [],
         digitalOceanToken: String = "",
@@ -786,6 +834,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.gitHTTPSCredentials = gitHTTPSCredentials
         self.manualTokens = manualTokens
         self.importedSSHKeys = importedSSHKeys
+        self.environmentVariables = environmentVariables
         self.traceLevel = traceLevel
         self.kubeconfigs = kubeconfigs
         self.digitalOceanToken = digitalOceanToken
@@ -833,6 +882,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case additionalTools
         case manualTokens
         case importedSSHKeys
+        case environmentVariables
         case traceLevel
         case kubeconfigs
         case digitalOceanToken
@@ -898,6 +948,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         additionalTools = dedup
         manualTokens = try c.decodeIfPresent([ManualToken].self, forKey: .manualTokens) ?? []
         importedSSHKeys = try c.decodeIfPresent([ImportedSSHKey].self, forKey: .importedSSHKeys) ?? []
+        environmentVariables = try c.decodeIfPresent([EnvironmentVariable].self,
+                                                     forKey: .environmentVariables) ?? []
         traceLevel = try c.decodeIfPresent(TraceLevel.self, forKey: .traceLevel) ?? .off
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
@@ -951,6 +1003,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if !importedSSHKeys.isEmpty {
             try c.encode(importedSSHKeys, forKey: .importedSSHKeys)
+        }
+        if !environmentVariables.isEmpty {
+            try c.encode(environmentVariables, forKey: .environmentVariables)
         }
         if traceLevel != .off {
             try c.encode(traceLevel, forKey: .traceLevel)

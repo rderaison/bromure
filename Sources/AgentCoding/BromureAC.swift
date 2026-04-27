@@ -1392,8 +1392,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             FileHandle.standardError.write(Data(
                 "[mitm] session launch for '\(profile.name)': loaded \(agentKeys.count) agent key(s)\n".utf8))
             // Mirror the per-profile key into our private bromure
-            // ssh-agent so the in-VM ssh client (via the multiplex)
-            // and macOS-side commands both see it.
+            // ssh-agent so the in-VM ssh client can sign with it
+            // through the vsock-bridged agent socket.
             for key in agentKeys {
                 addKeyToHostAgent(seed: key.seed,
                                   publicKey: key.publicKey,
@@ -2081,14 +2081,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Add the per-profile key to the user's macOS ssh-agent so the
-    /// VM (and macOS Terminal) both see it without the user having
-    /// to `ssh-add` anything by hand. Idempotent — re-adding an
-    /// already-loaded key is harmless. Removed in `windowWillClose`.
+    /// Add the per-profile key to bromure's private ssh-agent so the
+    /// in-VM ssh client can sign with it without the user having to
+    /// `ssh-add` anything by hand. Idempotent — re-adding an already-
+    /// loaded key is harmless. Removed in `windowWillClose`.
+    ///
+    /// The user's macOS launchd ssh-agent is intentionally NOT a
+    /// target — exposing it to the VM was the source of an earlier
+    /// security gap; see `SSHAgentServer` for the full rationale.
     private func addKeyToHostAgent(seed: Data, publicKey: Data, comment: String) {
-        // Target our private bromure ssh-agent specifically — the
-        // user's macOS launchd agent might not be running, and we
-        // want predictable lifecycle (key gone when bromure-ac quits).
+        // Target our private bromure ssh-agent specifically: it gives
+        // us predictable lifecycle (key gone when bromure-ac quits)
+        // and keeps the in-VM agent's reachable key set fully under
+        // bromure's control.
         guard let sock = mitmEngine?.privateAgent.socketPath else {
             FileHandle.standardError.write(Data(
                 "[mitm] skipping ssh-add — private agent not running\n".utf8))
