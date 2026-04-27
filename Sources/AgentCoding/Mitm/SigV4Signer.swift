@@ -120,7 +120,7 @@ public enum SigV4Signer {
 
         let canonicalRequest = [
             request.method.uppercased(),
-            request.path.isEmpty ? "/" : request.path,
+            canonicalPath(request.path, service: scope.service),
             canonicalQueryString(request.query),
             canonicalHeaders,
             signedHeaders,
@@ -174,6 +174,49 @@ public enum SigV4Signer {
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
         return f.string(from: date)
+    }
+
+    /// Canonical path per SigV4. For most services the wire path is
+    /// URI-encoded once for the canonical request (so a literal `:` on
+    /// the wire becomes `%3A` in canonical, and a wire `%20` from a
+    /// pre-encoded space becomes `%2520`). S3 is the documented
+    /// exception that passes the path through untouched.
+    ///
+    /// Bedrock model IDs (`global.anthropic.claude-sonnet-4-5-…-v1:0`)
+    /// always carry a `:`, which is exactly the kind of char this
+    /// rule exists for — without re-encoding, every Bedrock call
+    /// signs against a canonical that diverges from AWS's by one byte
+    /// per `:` and AWS rejects with InvalidSignatureException.
+    static func canonicalPath(_ path: String, service: String) -> String {
+        if path.isEmpty { return "/" }
+        if service.lowercased() == "s3" { return path }
+        // Split keeping empty segments so leading/trailing `/` survive.
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+            .map(String.init)
+        return segments.map { uriEncodeSegment($0) }.joined(separator: "/")
+    }
+
+    /// Percent-encode every byte that isn't in RFC 3986 unreserved
+    /// (`A-Z a-z 0-9 - . _ ~`). This intentionally encodes `%` itself,
+    /// which is what produces SigV4's expected double-encoding behavior
+    /// when the SDK has already pre-encoded a path char on the wire.
+    static func uriEncodeSegment(_ s: String) -> String {
+        var out = ""
+        out.reserveCapacity(s.utf8.count)
+        for c in s.utf8 {
+            let isUnreserved =
+                (c >= 0x41 && c <= 0x5A) ||  // A-Z
+                (c >= 0x61 && c <= 0x7A) ||  // a-z
+                (c >= 0x30 && c <= 0x39) ||  // 0-9
+                c == 0x2D || c == 0x2E ||    // - .
+                c == 0x5F || c == 0x7E       // _ ~
+            if isUnreserved {
+                out.append(Character(UnicodeScalar(c)))
+            } else {
+                out.append(String(format: "%%%02X", c))
+            }
+        }
+        return out
     }
 
     /// Canonical query string per SigV4: split on `&`, sort by key
