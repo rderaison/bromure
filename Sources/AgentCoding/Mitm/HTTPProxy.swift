@@ -172,18 +172,23 @@ final class HTTPMitmConnection: @unchecked Sendable {
             return
         }
 
-        // 6c. Send to upstream. The session's delegate looks up the
-        //     profile's per-host SecIdentity (Kubernetes API server
-        //     et al.) when the upstream challenges for a client cert.
+        // 6c. Stream the upstream response back to the guest via the
+        //     same TLS server stream. `relayUpstream` writes chunks
+        //     to `tls` as URLSession's delegate hands them over, so
+        //     SSE / Bedrock eventstream / long-poll endpoints reach
+        //     the guest in real time. The returned Data is the full
+        //     captured response — only used for the trace record;
+        //     the wire write already happened inside relayUpstream.
+        //     The session's delegate looks up the profile's per-host
+        //     SecIdentity (Kubernetes API server et al.) when the
+        //     upstream challenges for a client cert.
         let session = upstreamSession(for: host)
-        let upstreamResp = try await sendToUpstream(rawRequest: toForward,
-                                                    host: host, port: port,
-                                                    session: session)
+        let upstreamResp = try await relayUpstream(rawRequest: toForward,
+                                                   host: host, port: port,
+                                                   session: session,
+                                                   tls: tls)
 
-        // 7. Send the response back through TLS.
-        try tls.write(upstreamResp)
-
-        // 8. Trace. Build a TraceRecord from what we observed and
+        // 7. Trace. Build a TraceRecord from what we observed and
         //    hand it to the engine's TraceStore. Body capture is
         //    gated by the per-session level + host allowlist.
         let elapsed = Date().timeIntervalSince(t0) * 1000
@@ -815,11 +820,28 @@ private func writeAll(fd: Int32, bytes: [UInt8]) throws {
 
 // MARK: - Upstream
 
-/// Reconstruct the raw HTTP request as a URLRequest, fire via
-/// URLSession (which handles TLS validation upstream), and return the
-/// raw HTTP/1.1 response we'll send back through the TLS server.
-private func sendToUpstream(rawRequest: Data, host: String, port: Int,
-                            session: URLSession = URLSession.shared) async throws -> Data {
+/// Reconstruct the guest's HTTP request as a URLRequest, fire via
+/// URLSession, and **stream** the response back through the guest's
+/// TLS server stream as bytes arrive — no full-body buffering.
+///
+/// Why streaming matters: SSE (`text/event-stream`), Bedrock's
+/// eventstream framing, long-polling endpoints, and any other open-
+/// ended response would otherwise sit invisibly in URLSession's
+/// buffer until upstream finished sending. With the previous
+/// `URLSession.data(for:)` path, a Claude streaming reply through
+/// Bedrock would arrive at the VM as one giant blob after the model
+/// fully generated, defeating the whole point of streaming.
+///
+/// Returns the full constructed wire response (head + accumulated
+/// body) so `emitTrace` can record bytes / status / body for the
+/// inspector. The accumulation is the same memory cost as the prior
+/// implementation — we just send to the wire as we receive instead
+/// of waiting for completion. Caller must NOT also `tls.write()` the
+/// returned bytes (already streamed during the call).
+@available(macOS, deprecated: 10.15, message: "uses TLSServerStream which wraps SecureTransport")
+private func relayUpstream(rawRequest: Data, host: String, port: Int,
+                           session: URLSession,
+                           tls: TLSServerStream) async throws -> Data {
     guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)) else {
         throw MitmError.malformedHTTPRequest
     }
@@ -867,42 +889,113 @@ private func sendToUpstream(rawRequest: Data, host: String, port: Int,
         }
     }
 
-    let (data, response) = try await session.data(for: req)
-    guard let http = response as? HTTPURLResponse else {
-        throw MitmError.upstreamFailed("non-HTTP response")
+    // Bridge URLSession's delegate callbacks (head / data chunks /
+    // completion) into an AsyncThrowingStream the consumer iterates.
+    // Each chunk yielded by the delegate becomes a tls.write on the
+    // consumer's task — TLS access stays serialized to one task.
+    enum UpstreamEvent {
+        case head(HTTPURLResponse)
+        case chunk(Data)
     }
 
-    // Build raw HTTP/1.1 response wire frame.
-    //
-    // Critical: URLSession transparently decompresses gzip/br/deflate
-    // responses. The `data` we have here is the *decompressed* body —
-    // but `http.allHeaderFields` still carries the upstream's original
-    // Content-Encoding + Content-Length (compressed size). Replaying
-    // either of those would make the client try to decompress raw
-    // bytes (ZlibError) or read the wrong number of bytes (truncate /
-    // hang). Strip them and let our own Content-Length stand.
-    //
-    // Also strip Transfer-Encoding (we never chunk on the way back),
-    // Connection (we set our own), and the proxy-only hop-by-hop
-    // headers HTTP/1.1 lists in §13.5.1.
+    let events = AsyncThrowingStream<UpstreamEvent, Error> { continuation in
+        let delegate = StreamingRelayDelegate(
+            onHead:  { continuation.yield(.head($0)) },
+            onChunk: { continuation.yield(.chunk($0)) },
+            onComplete: { error in
+                if let e = error { continuation.finish(throwing: e) }
+                else { continuation.finish() }
+            }
+        )
+        let task = session.dataTask(with: req)
+        task.delegate = delegate
+        // Retain the delegate for the task's lifetime — URLSessionTask
+        // only weakly references its delegate. Storing on the task
+        // itself isn't a thing, so park it on the continuation's
+        // termination cleanup.
+        continuation.onTermination = { _ in
+            task.cancel()
+            _ = delegate  // keepalive
+        }
+        task.resume()
+    }
+
+    // Strip headers URLSession either lies about (post-decompression)
+    // or that we own framing of (Transfer-Encoding / Connection /
+    // hop-by-hop §13.5.1). We don't emit a Content-Length — the
+    // response length is unknown when we start streaming, and we
+    // signal end-of-body with `Connection: close`.
     let stripped: Set<String> = [
         "content-encoding", "content-length",
         "transfer-encoding", "connection",
         "proxy-connection", "keep-alive", "te", "trailer",
         "upgrade", "proxy-authenticate", "proxy-authorization",
     ]
-    var out = "HTTP/1.1 \(http.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: http.statusCode).capitalized)\r\n"
-    for (k, v) in http.allHeaderFields {
-        guard let key = k as? String, let val = v as? String else { continue }
-        if stripped.contains(key.lowercased()) { continue }
-        out += "\(key): \(val)\r\n"
+
+    var responseBuffer = Data()
+    for try await event in events {
+        switch event {
+        case .head(let http):
+            var head = "HTTP/1.1 \(http.statusCode) "
+            head += HTTPURLResponse.localizedString(forStatusCode: http.statusCode).capitalized
+            head += "\r\n"
+            for (k, v) in http.allHeaderFields {
+                guard let key = k as? String, let val = v as? String else { continue }
+                if stripped.contains(key.lowercased()) { continue }
+                head += "\(key): \(val)\r\n"
+            }
+            head += "Connection: close\r\n"
+            head += "\r\n"
+            let headData = Data(head.utf8)
+            try tls.write(headData)
+            responseBuffer.append(headData)
+        case .chunk(let chunk):
+            try tls.write(chunk)
+            responseBuffer.append(chunk)
+        }
     }
-    out += "Content-Length: \(data.count)\r\n"
-    out += "Connection: close\r\n"
-    out += "\r\n"
-    var raw = Data(out.utf8)
-    raw.append(data)
-    return raw
+    return responseBuffer
+}
+
+/// URLSessionDataDelegate that funnels the response head, each body
+/// chunk, and completion into an AsyncThrowingStream. Keeps strong
+/// refs to its closures so the relay function can stash it via the
+/// continuation termination handler — `URLSessionTask.delegate` is
+/// declared weak.
+private final class StreamingRelayDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    let onHead: @Sendable (HTTPURLResponse) -> Void
+    let onChunk: @Sendable (Data) -> Void
+    let onComplete: @Sendable (Error?) -> Void
+
+    init(onHead: @escaping @Sendable (HTTPURLResponse) -> Void,
+         onChunk: @escaping @Sendable (Data) -> Void,
+         onComplete: @escaping @Sendable (Error?) -> Void) {
+        self.onHead = onHead
+        self.onChunk = onChunk
+        self.onComplete = onComplete
+    }
+
+    func urlSession(_ session: URLSession,
+                    dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let http = response as? HTTPURLResponse {
+            onHead(http)
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession,
+                    dataTask: URLSessionDataTask,
+                    didReceive data: Data) {
+        onChunk(data)
+    }
+
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    didCompleteWithError error: Error?) {
+        onComplete(error)
+    }
 }
 
 // MARK: - Client-cert challenge handler
