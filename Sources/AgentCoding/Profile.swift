@@ -202,14 +202,14 @@ public struct GitHTTPSCredential: Codable, Equatable, Sendable, Identifiable {
 /// Unlike the simple Bearer-token APIs (DigitalOcean, OpenAI, etc.)
 /// AWS signs each request with SigV4 — the secret key is consumed
 /// locally to compute an HMAC over the canonical request, then the
-/// signature (not the secret) crosses the wire. That means the
-/// host-side MITM can't fake → real swap on the wire the way it does
-/// for Bearer tokens; the secret has to be available where signing
-/// happens, i.e. inside the VM. Phase 2 could add a host-side
-/// re-signer (parse the request, recompute signature with the real
-/// secret, rewrite Authorization), but this Phase-1 path just
-/// injects the real credentials into ~/.aws/credentials + env so
-/// `aws`, terraform, boto3, the JS SDK, etc. all work out of the box.
+/// signature (not the secret) crosses the wire. So we can't fake →
+/// real swap on the wire the way it does for Bearer tokens.
+///
+/// Instead we keep the real access key + secret on the host (in the
+/// MitmEngine's AWSCredentialServer) and point ~/.aws/config at a
+/// `credential_process` helper that reads them on demand from a
+/// vsock-bridged Unix socket. The SDK runs SigV4 locally with
+/// material that lives only in process memory — disk stays clean.
 public struct AWSCredentials: Codable, Equatable, Sendable {
     /// e.g. `AKIAIOSFODNN7EXAMPLE`. Identity-only on the wire.
     public var accessKeyID: String
@@ -1389,52 +1389,43 @@ public final class ProfileStore {
                                  ofItemAtPath: url.path)
         }
 
-        // ~/.aws/credentials + ~/.aws/config — REAL AWS creds, since
-        // SigV4 signing happens inside the VM and the secret can't be
-        // swapped on the wire (signature would be wrong). Both files
-        // chmod 600 to match what `aws configure` produces.
+        // ~/.aws/config — points the SDK at our credential_process
+        // helper, which reads short-lived JSON from a vsock-bridged
+        // Unix socket. The real access key + secret never land on the
+        // guest disk: they live in the host MitmEngine's
+        // AWSCredentialServer. SigV4 still runs locally, but with
+        // material that exists only in process memory.
+        //
+        // ~/.aws/credentials is always nuked if we previously wrote
+        // one, even when no creds are configured for this profile —
+        // we never want a stale secret left behind.
         let awsCreds = profile.awsCredentials
         let awsDir = home.appendingPathComponent(".aws", isDirectory: true)
         let awsCredsURL = awsDir.appendingPathComponent("credentials")
         let awsConfigURL = awsDir.appendingPathComponent("config")
+        if let contents = try? String(contentsOf: awsCredsURL, encoding: .utf8),
+           contents.hasPrefix("# Managed by Bromure Agentic Coding.") {
+            try? fm.removeItem(at: awsCredsURL)
+        }
         if awsCreds.isUsable {
             try fm.createDirectory(at: awsDir, withIntermediateDirectories: true,
                                    attributes: [.posixPermissions: NSNumber(value: 0o700)])
-            var creds = """
-            # Managed by Bromure Agentic Coding.
-            [default]
-            aws_access_key_id = \(awsCreds.accessKeyID)
-            aws_secret_access_key = \(awsCreds.secretAccessKey)
-            """
-            if !awsCreds.sessionToken.isEmpty {
-                creds += "\naws_session_token = \(awsCreds.sessionToken)"
+            var lines = [
+                "# Managed by Bromure Agentic Coding.",
+                "[default]",
+                "credential_process = /mnt/bromure-meta/bromure-aws-creds.py",
+            ]
+            let region = awsCreds.region.trimmingCharacters(in: .whitespaces)
+            if !region.isEmpty {
+                lines.append("region = \(region)")
             }
-            creds += "\n"
-            try creds.write(to: awsCredsURL, atomically: true, encoding: .utf8)
+            try (lines.joined(separator: "\n") + "\n")
+                .write(to: awsConfigURL, atomically: true, encoding: .utf8)
             try fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
-                                 ofItemAtPath: awsCredsURL.path)
-
-            if !awsCreds.region.trimmingCharacters(in: .whitespaces).isEmpty {
-                let cfg = """
-                # Managed by Bromure Agentic Coding.
-                [default]
-                region = \(awsCreds.region)
-                """
-                try (cfg + "\n").write(to: awsConfigURL, atomically: true, encoding: .utf8)
-                try fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
-                                     ofItemAtPath: awsConfigURL.path)
-            } else if let contents = try? String(contentsOf: awsConfigURL, encoding: .utf8),
-                      contents.hasPrefix("# Managed by Bromure Agentic Coding.") {
-                try? fm.removeItem(at: awsConfigURL)
-            }
-        } else {
-            // Profile cleared — drop ours, leave any user-created file.
-            for url in [awsCredsURL, awsConfigURL] {
-                if let contents = try? String(contentsOf: url, encoding: .utf8),
-                   contents.hasPrefix("# Managed by Bromure Agentic Coding.") {
-                    try? fm.removeItem(at: url)
-                }
-            }
+                                 ofItemAtPath: awsConfigURL.path)
+        } else if let contents = try? String(contentsOf: awsConfigURL, encoding: .utf8),
+                  contents.hasPrefix("# Managed by Bromure Agentic Coding.") {
+            try? fm.removeItem(at: awsConfigURL)
         }
 
         // Migrate legacy SSH keys: profiles/<id>/ssh → home/.ssh

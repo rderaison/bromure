@@ -1132,7 +1132,7 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var awsSubsection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Access key + secret from IAM → Users → Security credentials. Written to `~/.aws/credentials` and exported as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` so `aws`, terraform, boto3 etc. work out of the box. Heads up: AWS signs requests locally with the secret (SigV4), so unlike Bearer-token APIs the real secret has to live inside the VM.")
+            Text("Access key + secret from IAM → Users → Security credentials. The real secret never lands on the VM disk — bromure points `~/.aws/config` at a `credential_process` helper that pulls JSON from the host over vsock on demand, so `aws`, terraform, boto3 etc. work out of the box. SigV4 signing still runs inside the VM, but with material that exists only in process memory.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

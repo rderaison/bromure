@@ -11,6 +11,7 @@ public final class MitmEngine {
     public let certCache: CertCache
     public let swapper: TokenSwapper
     public let sshAgent: SSHAgentServer
+    public let awsCreds: AWSCredentialServer
     public let traceStore: TraceStore
     /// Per-profile, per-host SecIdentity table for upstream client-cert
     /// auth (Kubernetes API servers, internal mTLS APIs, etc.). The
@@ -65,6 +66,9 @@ public final class MitmEngine {
     public static let httpsVsockPort: UInt32 = 8443
     /// Vsock port the in-VM bridge connects to for the ssh-agent.
     public static let sshAgentVsockPort: UInt32 = 8444
+    /// Vsock port the in-VM AWS credential_process helper connects to.
+    /// Host pushes a SDK-format JSON payload per connection.
+    public static let awsCredsVsockPort: UInt32 = 8445
 
     /// Per-VM listener delegates kept alive so they aren't GC'd while
     /// the VM is running. Keyed by profile UUID.
@@ -84,6 +88,7 @@ public final class MitmEngine {
         self.certCache = CertCache(ca: ca)
         self.swapper = TokenSwapper()
         self.sshAgent = SSHAgentServer()
+        self.awsCreds = AWSCredentialServer()
         self.traceStore = TraceStore()
         // Spawn our dedicated ssh-agent BEFORE anyone reads the
         // HostAgentClient lazy vars — that way `_bromurePrivate` is
@@ -117,6 +122,7 @@ public final class MitmEngine {
             certCache: certCache,
             swapper: swapper,
             sshAgent: sshAgent,
+            awsCreds: awsCreds,
             traceStore: traceStore,
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,
@@ -132,6 +138,8 @@ public final class MitmEngine {
                                        forPort: Self.httpsVsockPort)
         socketDevice.setSocketListener(holder.sshListener,
                                        forPort: Self.sshAgentVsockPort)
+        socketDevice.setSocketListener(holder.awsListener,
+                                       forPort: Self.awsCredsVsockPort)
         listenerHolders[profileID] = holder
     }
 
@@ -139,6 +147,7 @@ public final class MitmEngine {
         listenerHolders.removeValue(forKey: profileID)
         swapper.clearMap(for: profileID)
         sshAgent.clearKeys(for: profileID)
+        awsCreds.clearCredentials(for: profileID)
         clientIdentities.clearAll(for: profileID)
         clusterCAs.clearAll(for: profileID)
         execPoller.stopAll()
@@ -152,13 +161,16 @@ private final class ListenerHolder {
     let profileID: UUID
     let httpDelegate: HTTPListenerDelegate
     let sshDelegate: SSHListenerDelegate
+    let awsDelegate: AWSCredsListenerDelegate
     let httpListener: VZVirtioSocketListener
     let sshListener: VZVirtioSocketListener
+    let awsListener: VZVirtioSocketListener
 
     init(profileID: UUID,
          certCache: CertCache,
          swapper: TokenSwapper,
          sshAgent: SSHAgentServer,
+         awsCreds: AWSCredentialServer,
          traceStore: TraceStore,
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
@@ -175,12 +187,17 @@ private final class ListenerHolder {
             sessionTraceProvider: sessionTraceProvider)
         self.sshDelegate = SSHListenerDelegate(
             profileID: profileID, sshAgent: sshAgent)
+        self.awsDelegate = AWSCredsListenerDelegate(
+            profileID: profileID, awsCreds: awsCreds)
 
         self.httpListener = VZVirtioSocketListener()
         self.httpListener.delegate = httpDelegate
 
         self.sshListener = VZVirtioSocketListener()
         self.sshListener.delegate = sshDelegate
+
+        self.awsListener = VZVirtioSocketListener()
+        self.awsListener.delegate = awsDelegate
     }
 }
 
@@ -247,6 +264,28 @@ private final class SSHListenerDelegate: NSObject, VZVirtioSocketListenerDelegat
         let agent = sshAgent
         Task.detached(priority: .userInitiated) {
             agent.serve(fd: fd, profileID: pid)
+        }
+        return true
+    }
+}
+
+private final class AWSCredsListenerDelegate: NSObject, VZVirtioSocketListenerDelegate {
+    let profileID: UUID
+    let awsCreds: AWSCredentialServer
+
+    init(profileID: UUID, awsCreds: AWSCredentialServer) {
+        self.profileID = profileID
+        self.awsCreds = awsCreds
+    }
+
+    func listener(_ listener: VZVirtioSocketListener,
+                  shouldAcceptNewConnection connection: VZVirtioSocketConnection,
+                  from socketDevice: VZVirtioSocketDevice) -> Bool {
+        let fd = dup(connection.fileDescriptor)
+        let pid = profileID
+        let server = awsCreds
+        Task.detached(priority: .userInitiated) {
+            server.serve(fd: fd, profileID: pid)
         }
         return true
     }

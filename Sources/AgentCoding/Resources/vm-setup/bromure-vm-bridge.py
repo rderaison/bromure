@@ -2,11 +2,12 @@
 """
 Bromure AC in-VM bridge daemon.
 
-Listens for two kinds of clients inside the VM and bridges each to the
-host's MITM engine over vsock:
+Listens for several kinds of clients inside the VM and bridges each to
+the host's MITM engine over vsock:
 
-  • HTTP proxy:  127.0.0.1:8080 (TCP)  →  vsock CID 2 port 8443
-  • ssh-agent:   /tmp/bromure-agent.sock (Unix)  →  vsock CID 2 port 8444
+  • HTTP proxy:  127.0.0.1:8080 (TCP)              →  vsock CID 2 port 8443
+  • ssh-agent:   /tmp/bromure-agent.sock (Unix)    →  vsock CID 2 port 8444
+  • AWS creds:   /tmp/bromure-aws-creds.sock (Unix) →  vsock CID 2 port 8445
 
 Bytes are pumped both directions per connection. No TLS, no inspection,
 no buffering — just a raw pipe.
@@ -32,6 +33,8 @@ HTTP_PROXY_TCP_PORT = 8080
 HTTP_PROXY_VSOCK_PORT = 8443
 SSH_AGENT_VSOCK_PORT = 8444
 SSH_AGENT_UNIX_PATH = "/tmp/bromure-agent.sock"
+AWS_CREDS_VSOCK_PORT = 8445
+AWS_CREDS_UNIX_PATH = "/tmp/bromure-aws-creds.sock"
 
 LOG_PATH = "/tmp/bromure-vm-bridge.log"
 
@@ -116,6 +119,25 @@ def serve_ssh_agent() -> None:
         ).start()
 
 
+def serve_aws_creds() -> None:
+    try:
+        os.unlink(AWS_CREDS_UNIX_PATH)
+    except FileNotFoundError:
+        pass
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(AWS_CREDS_UNIX_PATH)
+    os.chmod(AWS_CREDS_UNIX_PATH, 0o600)
+    s.listen(8)
+    log(f"[aws] listening on {AWS_CREDS_UNIX_PATH}")
+    while True:
+        conn, _addr = s.accept()
+        threading.Thread(
+            target=bridge,
+            args=(conn, AWS_CREDS_VSOCK_PORT, "aws"),
+            daemon=True,
+        ).start()
+
+
 def main() -> None:
     # Truncate log on each run.
     try:
@@ -128,6 +150,7 @@ def main() -> None:
 
     threading.Thread(target=serve_http_proxy, daemon=True).start()
     threading.Thread(target=serve_ssh_agent, daemon=True).start()
+    threading.Thread(target=serve_aws_creds, daemon=True).start()
 
     # Park the main thread.
     signal.pause()

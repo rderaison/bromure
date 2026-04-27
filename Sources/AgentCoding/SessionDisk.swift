@@ -40,14 +40,20 @@ public final class SessionDisk {
         /// from xinitrc, listens on vsock 5008 for batched scroll
         /// directions from the host's `ScrollBridge`.
         public let scrollAgentURL: URL?
+        /// AWS `credential_process` helper. Referenced from the
+        /// per-profile ~/.aws/config; pulls JSON creds on demand from
+        /// the bridge's Unix socket.
+        public let awsCredsHelperURL: URL?
         public init(caCertificatePEM: String,
                     bridgeScriptURL: URL,
                     keyboardAgentURL: URL? = nil,
-                    scrollAgentURL: URL? = nil) {
+                    scrollAgentURL: URL? = nil,
+                    awsCredsHelperURL: URL? = nil) {
             self.caCertificatePEM = caCertificatePEM
             self.bridgeScriptURL = bridgeScriptURL
             self.keyboardAgentURL = keyboardAgentURL
             self.scrollAgentURL = scrollAgentURL
+            self.awsCredsHelperURL = awsCredsHelperURL
         }
     }
 
@@ -300,6 +306,15 @@ public final class SessionDisk {
                     ofItemAtPath: scDest.path)
             }
 
+            if let awsURL = assets.awsCredsHelperURL {
+                let awsDest = tmp.appendingPathComponent("bromure-aws-creds.py")
+                try? fm.removeItem(at: awsDest)
+                try fm.copyItem(at: awsURL, to: awsDest)
+                try fm.setAttributes(
+                    [.posixPermissions: NSNumber(value: 0o755)],
+                    ofItemAtPath: awsDest.path)
+            }
+
             // proxy.env — sourced by .bashrc to set HTTPS_PROXY etc.
             // for every shell. Also set the per-language CA bundle
             // hints so node, python, go, rust, curl all trust our CA.
@@ -333,17 +348,16 @@ public final class SessionDisk {
                     ghEnv.append("export DIGITALOCEAN_ACCESS_TOKEN=\(shellQuote(doFake))")
                 }
             }
-            // AWS: real creds (SigV4 signs locally, no MITM swap is
-            // possible). Exported alongside ~/.aws/credentials so
-            // SDKs that prefer env over the file (boto3, AWS SDK v3)
-            // also see the keys.
+            // AWS: secret stays on host. The SDK pulls credentials on
+            // demand via the `credential_process` line in ~/.aws/config,
+            // which shells out to /mnt/bromure-meta/bromure-aws-creds.py.
+            // We must NOT export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+            // / AWS_SESSION_TOKEN here: env vars beat credential_process
+            // in the SDK's chain, and they'd also defeat the
+            // no-secret-on-disk guarantee (envs leak via /proc, ps -E,
+            // and shell history). Region is fine — it's not a secret.
             let aws = profile.awsCredentials
             if aws.isUsable {
-                ghEnv.append("export AWS_ACCESS_KEY_ID=\(shellQuote(aws.accessKeyID))")
-                ghEnv.append("export AWS_SECRET_ACCESS_KEY=\(shellQuote(aws.secretAccessKey))")
-                if !aws.sessionToken.isEmpty {
-                    ghEnv.append("export AWS_SESSION_TOKEN=\(shellQuote(aws.sessionToken))")
-                }
                 let region = aws.region.trimmingCharacters(in: .whitespaces)
                 if !region.isEmpty {
                     ghEnv.append("export AWS_DEFAULT_REGION=\(shellQuote(region))")

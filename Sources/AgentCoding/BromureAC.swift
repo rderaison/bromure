@@ -293,6 +293,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                              withExtension: "py")
     }()
 
+    /// SPM-resource-bundle path to the AWS `credential_process` helper.
+    /// Shipped to /mnt/bromure-meta and referenced from the per-profile
+    /// ~/.aws/config so the SDK pulls JSON creds from the host on demand.
+    private lazy var awsCredsHelperURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/bromure-aws-creds",
+                             withExtension: "py")
+    }()
+
     /// Sparkle auto-updater. Retained strongly — if this deallocates,
     /// scheduled update checks stop firing. Initialised in
     /// applicationDidFinishLaunching. Silently no-ops on dev builds where
@@ -1271,6 +1279,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 for: profile.id)
             let agentKeys = loadAgentKeys(for: profile)
             engine.sshAgent.setKeys(agentKeys, for: profile.id)
+            // AWS creds: pushed to the host-side server. The guest's
+            // ~/.aws/config points at a credential_process helper that
+            // pulls JSON from here over vsock — so the secret never
+            // touches the VM disk. setCredentials clears the slot when
+            // the profile has no usable AWS creds.
+            engine.awsCreds.setCredentials(profile.awsCredentials, for: profile.id)
             FileHandle.standardError.write(Data(
                 "[mitm] session launch for '\(profile.name)': loaded \(agentKeys.count) agent key(s)\n".utf8))
             // Mirror the per-profile key into our private bromure
@@ -1332,7 +1346,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
-                    keyboardAgentURL: keyboardAgentURL)
+                    keyboardAgentURL: keyboardAgentURL,
+                    awsCredsHelperURL: awsCredsHelperURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
             // True only when the resumed snapshot's kittys are still
@@ -1652,7 +1667,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
-                    keyboardAgentURL: keyboardAgentURL)
+                    keyboardAgentURL: keyboardAgentURL,
+                    awsCredsHelperURL: awsCredsHelperURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager,
                                           sessionDisk: sessionDisk)
