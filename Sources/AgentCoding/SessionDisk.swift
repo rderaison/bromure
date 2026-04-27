@@ -619,9 +619,10 @@ private func shellQuote(_ s: String) -> String {
     "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
-// macOS clonefile is in <sys/clonefile.h>. Swift doesn't have a direct
-// import, so declare it ourselves.
-@_silgen_name("clonefile")
-private func clonefile(_ src: UnsafePointer<CChar>,
-                       _ dst: UnsafePointer<CChar>,
-                       _ flags: UInt32) -> Int32
+// `clonefile(2)` is auto-imported from <sys/clonefile.h> by Foundation
+// in modern SDKs — no shim needed. Older SDKs needed an
+// @_silgen_name("clonefile") shim, but on macOS 14+ SDKs the C
+// import collides with the shim (different optionality on the
+// pointer args) and causes a function-type-mismatch build failure.
+// `Sources/SandboxEngine/EphemeralDisk.swift` already uses the
+// auto-import successfully; this file follows the same path.
