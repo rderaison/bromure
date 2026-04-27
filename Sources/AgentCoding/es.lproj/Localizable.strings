@@ -127,3 +127,11 @@
 "Hide Others" = "Ocultar otras";
 "Show All" = "Mostrar todo";
 "Quit %@" = "Salir de %@";
+
+/* Editor — Credentials → AWS */
+"Access key + secret from IAM → Users → Security credentials. The real secret never lands on the VM disk — bromure points `~/.aws/config` at a `credential_process` helper that pulls JSON from the host over vsock on demand, so `aws`, terraform, boto3 etc. work out of the box. SigV4 signing still runs inside the VM, but with material that exists only in process memory." = "Clave de acceso + secreto desde IAM → Usuarios → Credenciales de seguridad. El secreto real nunca llega al disco de la VM — bromure apunta `~/.aws/config` a un asistente `credential_process` que obtiene JSON del host a través de vsock bajo demanda, así `aws`, terraform, boto3, etc. funcionan sin más. La firma SigV4 se sigue ejecutando dentro de la VM, pero con material que sólo existe en la memoria del proceso.";
+
+/* Alert: shared folders changed while a saved VM state exists */
+"Discard suspended VM for “%@”?" = "¿Descartar la VM suspendida de “%@”?";
+"The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "Las carpetas compartidas han cambiado desde que se suspendió este perfil. La instantánea se guardó con el conjunto antiguo de carpetas y no se puede reanudar con seguridad con el nuevo.\n\nAl guardar se descartará el estado suspendido. El próximo inicio será en frío. Los archivos de la carpeta personal del perfil y de las carpetas compartidas no se ven afectados.";
+"Discard & save" = "Descartar y guardar";

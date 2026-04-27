@@ -127,3 +127,11 @@
 "Hide Others" = "ほかを隠す";
 "Show All" = "すべてを表示";
 "Quit %@" = "%@ を終了";
+
+/* Editor — Credentials → AWS */
+"Access key + secret from IAM → Users → Security credentials. The real secret never lands on the VM disk — bromure points `~/.aws/config` at a `credential_process` helper that pulls JSON from the host over vsock on demand, so `aws`, terraform, boto3 etc. work out of the box. SigV4 signing still runs inside the VM, but with material that exists only in process memory." = "IAM → ユーザー → セキュリティ認証情報からアクセスキーとシークレットを取得します。本物のシークレットは VM のディスクには一切書き込まれません — bromure は `~/.aws/config` で `credential_process` ヘルパーを指定し、必要に応じて vsock 経由でホストから JSON を取得するため、`aws`、terraform、boto3 などはそのまま動作します。SigV4 の署名は引き続き VM 内で行われますが、利用される鍵情報はプロセスのメモリ上にしか存在しません。";
+
+/* Alert: shared folders changed while a saved VM state exists */
+"Discard suspended VM for “%@”?" = "「%@」の中断中の VM を破棄しますか？";
+"The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "このプロファイルが中断されてから、共有フォルダが変更されました。スナップショットは以前の共有セットに対して保存されているため、新しい共有セットでは安全に再開できません。\n\n保存すると中断状態は破棄されます。次回の起動はコールドブートになります。プロファイルのホームディレクトリと共有フォルダ内のファイルは影響を受けません。";
+"Discard & save" = "破棄して保存";

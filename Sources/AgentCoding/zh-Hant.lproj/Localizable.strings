@@ -127,3 +127,11 @@
 "Hide Others" = "隱藏其他";
 "Show All" = "全部顯示";
 "Quit %@" = "結束 %@";
+
+/* Editor — Credentials → AWS */
+"Access key + secret from IAM → Users → Security credentials. The real secret never lands on the VM disk — bromure points `~/.aws/config` at a `credential_process` helper that pulls JSON from the host over vsock on demand, so `aws`, terraform, boto3 etc. work out of the box. SigV4 signing still runs inside the VM, but with material that exists only in process memory." = "於 IAM → 使用者 → 安全認證 取得存取金鑰與密鑰。真正的密鑰永遠不會寫入虛擬機磁碟 — bromure 將 `~/.aws/config` 指向 `credential_process` 輔助程式，依需求透過 vsock 從主機取得 JSON，因此 `aws`、terraform、boto3 等都能直接運作。SigV4 簽章仍在虛擬機內執行，但使用的材料僅存於行程記憶體中。";
+
+/* Alert: shared folders changed while a saved VM state exists */
+"Discard suspended VM for “%@”?" = "要丟棄「%@」的暫停虛擬機嗎？";
+"The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "自此設定檔暫停以來，共享資料夾已變更。快照是以舊的共享集儲存的，無法以新的共享集安全地繼續。\n\n儲存將丟棄暫停狀態。下次啟動將是冷開機。設定檔的個人主目錄與共享資料夾中的檔案不受影響。";
+"Discard & save" = "丟棄並儲存";

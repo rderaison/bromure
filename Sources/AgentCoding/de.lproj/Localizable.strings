@@ -127,3 +127,11 @@
 "Hide Others" = "Andere ausblenden";
 "Show All" = "Alle einblenden";
 "Quit %@" = "%@ beenden";
+
+/* Editor — Credentials → AWS */
+"Access key + secret from IAM → Users → Security credentials. The real secret never lands on the VM disk — bromure points `~/.aws/config` at a `credential_process` helper that pulls JSON from the host over vsock on demand, so `aws`, terraform, boto3 etc. work out of the box. SigV4 signing still runs inside the VM, but with material that exists only in process memory." = "Access Key + Secret aus IAM → Benutzer → Sicherheitsanmeldedaten. Das echte Secret landet nie auf der VM-Festplatte — bromure verweist `~/.aws/config` auf ein `credential_process`-Hilfsprogramm, das bei Bedarf JSON per vsock vom Host abruft, damit `aws`, terraform, boto3 usw. ohne Anpassungen funktionieren. Die SigV4-Signierung läuft weiterhin in der VM, jedoch mit Material, das nur im Prozessspeicher existiert.";
+
+/* Alert: shared folders changed while a saved VM state exists */
+"Discard suspended VM for “%@”?" = "Angehaltene VM für „%@“ verwerfen?";
+"The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "Die freigegebenen Ordner haben sich geändert, seit dieses Profil angehalten wurde. Der Schnappschuss wurde mit dem alten Ordner-Satz gesichert und lässt sich mit dem neuen nicht sicher fortsetzen.\n\nBeim Sichern wird der angehaltene Zustand verworfen. Der nächste Start ist ein Kaltstart. Dateien im persönlichen Profil-Ordner und in den freigegebenen Ordnern selbst bleiben unberührt.";
+"Discard & save" = "Verwerfen und sichern";

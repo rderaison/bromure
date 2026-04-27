@@ -1796,6 +1796,16 @@ public final class ProfileStore {
     # Materialize per-profile folder shares as symlinks under ~. Each
     # entry in /mnt/bromure-meta/shares.txt is "<slot-index> <basename>";
     # the matching virtiofs slot is mounted at /mnt/bromure-share-<N>.
+    #
+    # /home/ubuntu is the persistent virtiofs home, so symlinks created
+    # by a previous launch survive into this one. Sweep any top-level
+    # symlinks that point at our share slots before recreating, so a
+    # config change that drops or renames a share doesn't leave the old
+    # ~/<basename> behind. -lname is precise: only symlinks whose target
+    # matches /mnt/bromure-share-* get removed; user files and unrelated
+    # symlinks are untouched.
+    find "$HOME" -maxdepth 1 -type l -lname '/mnt/bromure-share-*' -delete \
+        2>>/tmp/xinitrc.log
     {
         echo "--- shares debug at $(date +%T) ---"
         echo "shares.txt exists: $([ -r /mnt/bromure-meta/shares.txt ] && echo yes || echo no)"

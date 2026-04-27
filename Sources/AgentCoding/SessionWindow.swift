@@ -265,7 +265,12 @@ final class TabbedSessionWindow: NSWindow {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Match the relaxed-modifier test in ACAppDelegate.interceptKey:
+        // capsLock / numericPad / help / function leak in unrelated
+        // bits that a strict `== [.command]` would reject, leaving ⌘T
+        // and ⌘W appearing to work intermittently.
+        let userMods: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
+        let mods = event.modifierFlags.intersection(userMods)
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
         if mods == [.command] {
             switch chars {

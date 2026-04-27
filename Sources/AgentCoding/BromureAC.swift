@@ -396,12 +396,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func interceptKey(_ event: NSEvent) -> NSEvent? {
-        // Tolerate the .function modifier (Apple sets it for some keys
-        // unexpectedly) — the meaningful test is "is Command held alone
-        // among the user-meaningful modifiers".
-        let mods = event.modifierFlags
-            .intersection(.deviceIndependentFlagsMask)
-            .subtracting(.function)
+        // The meaningful test is "is Command held without any other
+        // user-meaningful modifier (shift / option / control)". macOS
+        // sets stray bits — capsLock when the LED is on, numericPad on
+        // some letter keys with non-US layouts, help / function — that
+        // a strict `mods == [.command]` would reject. Filter to just
+        // the four modifiers a user expects to combine with Command,
+        // then check Command is the only one set.
+        let userMods: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
+        let mods = event.modifierFlags.intersection(userMods)
         guard mods == [.command] else { return event }
 
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
@@ -1056,6 +1059,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             copy.realValue = t.realValue.trimmingCharacters(in: .whitespacesAndNewlines)
             return copy
         }
+
+        // Shared-folder edits are incompatible with a suspended VM:
+        // virtiofs shares become slot-tagged VZDirectoryShares in the VM
+        // config (share-1, share-2, …), and xinitrc — which materializes
+        // the symlinks under ~ from /mnt/bromure-meta/shares.txt — only
+        // runs on cold boot, not on resume. So changing folderPaths while
+        // a saved state exists either crashes the restore or silently
+        // ignores the new config. Warn the user and invalidate.
+        if let original = editing, original.folderPaths != profile.folderPaths {
+            let stateURL = store.profileDirectory(for: profile)
+                .appendingPathComponent("vm.state")
+            if FileManager.default.fileExists(atPath: stateURL.path) {
+                let alert = NSAlert()
+                alert.messageText = String(
+                    format: NSLocalizedString("Discard suspended VM for “%@”?", comment: ""),
+                    profile.name)
+                alert.informativeText = NSLocalizedString(
+                    "The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected.",
+                    comment: "")
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: NSLocalizedString("Discard & save", comment: ""))
+                alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+                try? FileManager.default.removeItem(at: stateURL)
+                // tabs.json pairs with the snapshot — without the matching
+                // VM, the saved tab UUIDs point at kittys that won't exist
+                // on the next cold boot.
+                let tabsURL = store.profileDirectory(for: profile)
+                    .appendingPathComponent("tabs.json")
+                try? FileManager.default.removeItem(at: tabsURL)
+            }
+        }
+
         // Editing keeps the original id (already preserved by ProfileEditorView).
         do {
             try store.save(profile)
