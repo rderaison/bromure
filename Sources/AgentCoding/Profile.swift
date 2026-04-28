@@ -1949,6 +1949,38 @@ public final class ProfileStore {
             try? fm.removeItem(at: awsConfigURL)
         }
 
+        // ~/.claude/settings.json — Bedrock configuration for Claude Code.
+        let claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
+        let claudeSettingsURL = claudeDir.appendingPathComponent("settings.json")
+        if profile.bedrockEnabled {
+            try fm.createDirectory(at: claudeDir, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: NSNumber(value: 0o700)])
+            var env: [String: String] = [
+                "CLAUDE_CODE_USE_BEDROCK": "1",
+                "AWS_PROFILE": "default",
+            ]
+            let region = awsCreds.region.trimmingCharacters(in: .whitespaces)
+            if !region.isEmpty {
+                env["AWS_REGION"] = region
+            }
+            let modelID = profile.bedrockModelID.trimmingCharacters(in: .whitespaces)
+            if !modelID.isEmpty {
+                env["ANTHROPIC_MODEL"] = modelID
+            }
+            let settings: [String: Any] = ["env": env]
+            let data = try JSONSerialization.data(withJSONObject: settings,
+                                                  options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: claudeSettingsURL, options: .atomic)
+            try fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                 ofItemAtPath: claudeSettingsURL.path)
+        } else if fm.fileExists(atPath: claudeSettingsURL.path),
+                  let data = try? Data(contentsOf: claudeSettingsURL),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let env = json["env"] as? [String: Any],
+                  env["CLAUDE_CODE_USE_BEDROCK"] != nil {
+            try? fm.removeItem(at: claudeSettingsURL)
+        }
+
         // ~/.docker/config.json — Docker stores per-registry HTTP Basic
         // creds here as `auths.<key>.auth = base64("<user>:<password>")`.
         // We write FAKE base64 strings; the proxy substitutes the real
