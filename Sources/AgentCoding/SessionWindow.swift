@@ -77,6 +77,20 @@ final class TabbedSessionWindow: NSWindow {
     /// path. Distinguishes user-requested reboot from a real shutdown.
     var rebootRequested: Bool = false
 
+    /// Tabs whose pill has been added on the host but whose kitty
+    /// hasn't yet appeared in a guest-side `tabs-alive.txt` roster.
+    /// Each entry is dropped when the roster confirms the UUID OR
+    /// when the deadline expires (whichever comes first). Until then
+    /// the reconcile path won't reap the pill — that grace window
+    /// covers the time between us writing `cmd-spawn-kitty <UUID>` and
+    /// the agent actually launching kitty + the next title-loop tick.
+    private struct PendingSpawn {
+        let id: UUID
+        let deadline: Date
+    }
+    private var pendingSpawns: [PendingSpawn] = []
+    private static let spawnGraceInterval: TimeInterval = 5
+
     init(profile: Profile, acDelegate: ACAppDelegate) {
         self.profile = profile
         self.acDelegate = acDelegate
@@ -192,6 +206,9 @@ final class TabbedSessionWindow: NSWindow {
         let tab = TabsModel.Tab(label: "Session \(model.tabs.count + 1)")
         model.tabs.append(tab)
         model.activeIndex = model.tabs.count - 1
+        pendingSpawns.append(.init(
+            id: tab.id,
+            deadline: Date().addingTimeInterval(Self.spawnGraceInterval)))
         return tab
     }
 
@@ -203,6 +220,12 @@ final class TabbedSessionWindow: NSWindow {
     func rehydrateTabs(from state: SessionDisk.TabsState) {
         model.tabs = state.tabs.map { TabsModel.Tab(label: $0.label, id: $0.id) }
         model.activeIndex = max(0, min(state.activeIndex, model.tabs.count - 1))
+        // Restored kittys exist in the resumed VM but the host hasn't
+        // confirmed them via a roster yet — protect them from the
+        // reconcile reaper while the VM finishes restoring and the
+        // tab agent's title_loop ticks at least once.
+        let deadline = Date().addingTimeInterval(Self.spawnGraceInterval)
+        pendingSpawns = model.tabs.map { .init(id: $0.id, deadline: deadline) }
     }
 
     /// Capture the current tab model into a snapshot for persistence.
@@ -247,6 +270,7 @@ final class TabbedSessionWindow: NSWindow {
     func handleTabClosedFromGuest(id: UUID) {
         guard let idx = model.tabs.firstIndex(where: { $0.id == id }) else { return }
         model.tabs.remove(at: idx)
+        pendingSpawns.removeAll { $0.id == id }
         if model.activeIndex >= model.tabs.count {
             model.activeIndex = max(0, model.tabs.count - 1)
         }
@@ -261,6 +285,33 @@ final class TabbedSessionWindow: NSWindow {
             // killing their last shell).
             pendingCloseAction = .shutdown
             close()
+        }
+    }
+
+    /// Reconcile the host's tab pills against the guest agent's
+    /// `tabs-alive.txt` roster. Reaps any pill whose UUID isn't in
+    /// the roster AND whose grace window has expired — that catches
+    /// the ⌘T → Ctrl+D race (pill appended but kitty never came up
+    /// because the spawn-kitty cmd was processed in a transient X
+    /// state and the closed-* event was lost) and any other drift
+    /// where a kitty died without sending closed-*. Pills inside
+    /// their `spawnGraceInterval` are protected so we don't reap a
+    /// freshly-added tab before the agent has had a chance to launch
+    /// kitty and the title loop has ticked once.
+    func reconcileTabRoster(alive: Set<UUID>) {
+        let now = Date()
+        // A pending spawn graduates as soon as the roster confirms it
+        // OR when the deadline lapses — after that, the roster's
+        // "absent" answer is trusted.
+        pendingSpawns.removeAll {
+            alive.contains($0.id) || $0.deadline < now
+        }
+        let pending = Set(pendingSpawns.map(\.id))
+        let toReap = model.tabs
+            .map(\.id)
+            .filter { !alive.contains($0) && !pending.contains($0) }
+        for id in toReap {
+            handleTabClosedFromGuest(id: id)
         }
     }
 
