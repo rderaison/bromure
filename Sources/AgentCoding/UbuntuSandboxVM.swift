@@ -21,12 +21,6 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// the given tab UUID has exited. Wire this to remove the tab pill.
     public var onTabClosed: ((UUID) -> Void)?
 
-    /// Called every ~1.5s with the set of UUIDs of every kitty
-    /// currently running in the guest. The host reconciles its tab
-    /// model against this so a pill whose kitty died without sending
-    /// closed-* (or never spawned) gets reaped instead of orphaned.
-    public var onTabRoster: ((Set<UUID>) -> Void)?
-
     /// Called when the guest reports a fresh foreground-process name
     /// for a kitty (every ~1.5s). Use this to drive Terminal.app-style
     /// dynamic tab labels.
@@ -392,19 +386,6 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             if let uuid = UUID(uuidString: uuidPart) {
                                 self?.onTabClosed?(uuid)
                             }
-                            continue
-                        }
-                        // tabs-alive.txt — guest agent's per-tick roster
-                        // of every running kitty's UUID, one per line.
-                        // Constantly rewritten atomically; don't delete.
-                        // The empty-file case is meaningful (no kittys
-                        // running → reap any orphan pill).
-                        if name == "tabs-alive.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
-                            let alive = Set(raw
-                                .split(whereSeparator: \.isNewline)
-                                .compactMap { UUID(uuidString: String($0)) })
-                            self?.onTabRoster?(alive)
                             continue
                         }
                         // cmd-*.txt — host-written, consumed by the in-VM
