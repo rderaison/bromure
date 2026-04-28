@@ -41,7 +41,7 @@ public enum AWSSSOResolver {
 
         let ssoRegion = profile.ssoRegion.isEmpty ? profile.region : profile.ssoRegion
 
-        if let cached = readCachedToken(startURL: profile.ssoStartURL) {
+        if let cached = readCachedToken(startURL: profile.ssoStartURL, ssoRegion: ssoRegion, sessionName: profile.ssoSessionName) {
             let creds = try await getRoleCredentials(
                 accessToken: cached,
                 accountID: profile.ssoAccountID,
@@ -64,7 +64,7 @@ public enum AWSSSOResolver {
         progress?("SSO login required — opening browser…")
         try await runSSOLogin(profileName: profileName)
 
-        guard let token = readCachedToken(startURL: profile.ssoStartURL) else {
+        guard let token = readCachedToken(startURL: profile.ssoStartURL, ssoRegion: ssoRegion, sessionName: profile.ssoSessionName) else {
             throw Error.tokenExpired
         }
 
@@ -114,31 +114,78 @@ public enum AWSSSOResolver {
 
     // MARK: - SSO Token Cache
 
-    private static func readCachedToken(startURL: String) -> String? {
+    private static func readCachedToken(startURL: String, ssoRegion: String, sessionName: String?) -> String? {
         let cacheDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".aws/sso/cache", isDirectory: true)
 
-        let hash = sha1Hex(startURL)
-        let cacheFile = cacheDir.appendingPathComponent("\(hash).json")
+        // Try direct hash lookup: SHA1("startUrl|region")
+        let sessionKey = "\(startURL)|\(ssoRegion)"
+        let hashFile = cacheDir.appendingPathComponent("\(sha1Hex(sessionKey)).json")
+        if let token = extractValidToken(from: hashFile) {
+            return token
+        }
 
-        guard let data = try? Data(contentsOf: cacheFile),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let accessToken = json["accessToken"] as? String,
-              let expiresAtString = json["expiresAt"] as? String else {
+        // Also try SHA1(startURL) for older CLIs
+        let legacyFile = cacheDir.appendingPathComponent("\(sha1Hex(startURL)).json")
+        if let token = extractValidToken(from: legacyFile) {
+            return token
+        }
+
+        // Fallback: scan all cache files for a match by content
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: cacheDir, includingPropertiesForKeys: nil) else {
             return nil
         }
 
+        for file in files where file.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: file),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let accessToken = json["accessToken"] as? String else {
+                continue
+            }
+
+            // Match by session name (sso-session profiles)
+            if let sessionName, let fileSession = json["sessionName"] as? String,
+               fileSession == sessionName {
+                if let token = extractValidToken(accessToken: accessToken,
+                                                  expiresAtString: json["expiresAt"] as? String) {
+                    return token
+                }
+            }
+
+            // Match by startUrl + region fields
+            if let storedURL = json["startUrl"] as? String,
+               let storedRegion = json["region"] as? String,
+               storedURL == startURL && storedRegion == ssoRegion {
+                if let token = extractValidToken(accessToken: accessToken,
+                                                  expiresAtString: json["expiresAt"] as? String) {
+                    return token
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func extractValidToken(from file: URL) -> String? {
+        guard let data = try? Data(contentsOf: file),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accessToken = json["accessToken"] as? String else {
+            return nil
+        }
+        return extractValidToken(accessToken: accessToken,
+                                  expiresAtString: json["expiresAt"] as? String)
+    }
+
+    private static func extractValidToken(accessToken: String, expiresAtString: String?) -> String? {
+        guard let expiresAtString else { return nil }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         guard let expiresAt = formatter.date(from: expiresAtString)
                 ?? ISO8601DateFormatter().date(from: expiresAtString) else {
             return nil
         }
-
-        if expiresAt.timeIntervalSinceNow < 5 * 60 {
-            return nil
-        }
-
+        if expiresAt.timeIntervalSinceNow < 5 * 60 { return nil }
         return accessToken
     }
 

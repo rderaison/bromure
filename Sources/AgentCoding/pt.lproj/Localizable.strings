@@ -147,7 +147,7 @@
 "Role name" = "Nome da função";
 "Bedrock (AWS)" = "Bedrock (AWS)";
 "Claude Code will authenticate via AWS Bedrock using the credentials configured in the AWS section below." = "O Claude Code será autenticado via AWS Bedrock usando as credenciais configuradas na seção AWS abaixo.";
-"Model ID" = "ID do modelo";
+"Default Model ID" = "ID do modelo padrão";
 "Configure AWS credentials (SSO or static keys) in the Credentials → AWS section." = "Configure as credenciais da AWS (SSO ou chaves estáticas) na seção Credenciais → AWS.";
 
 /* Alert: shared folders changed while a saved VM state exists */
