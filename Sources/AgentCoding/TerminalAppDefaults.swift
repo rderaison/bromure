@@ -136,7 +136,17 @@ extension TerminalAppDefaults {
         window_padding_width 16
         enable_audio_bell no
         remember_window_size no
-        sync_to_monitor no
+
+        # Render-loop throttling. kitty runs against Mesa llvmpipe inside
+        # the VM (LIBGL_ALWAYS_SOFTWARE=1 in xinitrc), so every frame is
+        # pure CPU. Cap the rate to the X server's refresh and back off
+        # the per-frame floor + PTY-coalesce window so bursty output
+        # (streaming agent responses, build logs) doesn't pin a core.
+        sync_to_monitor yes
+        repaint_delay 16
+        input_delay 10
+        # Sealed VM — kitty's periodic update check is just a wakeup.
+        update_check_interval 0
         # Transparency is handled host-side via NSWindow.alphaValue;
         # `background_opacity` here would error inside the VM (no X
         # compositor) and might cause kitty to ignore the whole config.

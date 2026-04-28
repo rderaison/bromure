@@ -730,7 +730,17 @@ hide_window_decorations yes
 window_padding_width 16
 enable_audio_bell no
 remember_window_size no
-sync_to_monitor no
+
+# Render-loop throttling. kitty runs against Mesa llvmpipe in this
+# image (LIBGL_ALWAYS_SOFTWARE=1 in xinitrc), so every frame is pure
+# CPU. Cap to the X refresh and back off the per-frame floor + the
+# PTY-coalesce window so bursty output doesn't pin a core. The per-
+# profile config written by the host (TerminalAppDefaults) mirrors
+# these; this file is just the fallback when no profile is loaded.
+sync_to_monitor yes
+repaint_delay 16
+input_delay 10
+update_check_interval 0
 
 # macOS muscle memory: ⌘C / ⌘V come through as Super + C / V because the
 # host's VZVirtualMachineView is set to capturesSystemKeys = true. Also
