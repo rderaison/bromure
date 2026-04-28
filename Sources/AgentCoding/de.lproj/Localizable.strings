@@ -132,6 +132,24 @@
 /* Editor — Credentials → AWS */
 "Access key + secret from IAM → Users → Security credentials. The real secret never reaches the VM at all — `~/.aws/config` points at a `credential_process` helper that vends the real access key with a *fake* secret, so the SDK signs a doomed request. The host's MITM proxy strips that signature and re-signs with the real material before the request leaves your Mac. `aws`, terraform, boto3 etc. work out of the box; if anything bypasses the proxy, AWS rejects with InvalidSignatureException — fail-closed." = "Access Key + Secret aus IAM → Benutzer → Sicherheitsanmeldedaten. Das echte Secret erreicht die VM gar nicht — `~/.aws/config` verweist auf ein `credential_process`-Hilfsprogramm, das den echten Access Key zusammen mit einem *gefälschten* Secret ausliefert, sodass das SDK eine zum Scheitern verurteilte Anfrage signiert. Der MITM-Proxy auf dem Host entfernt diese Signatur und signiert mit dem echten Schlüsselmaterial neu, bevor die Anfrage Ihren Mac verlässt. `aws`, terraform, boto3 usw. funktionieren ohne Anpassungen; umgeht etwas den Proxy, lehnt AWS mit InvalidSignatureException ab — Fail-closed.";
 
+/* Editor — Credentials → AWS SSO & Bedrock */
+"Auth method" = "Authentifizierungsmethode";
+"Static keys" = "Statische Schlüssel";
+"SSO / Identity Center" = "SSO / Identity Center";
+"Authenticate via AWS IAM Identity Center (SSO). Grant access to your ~/.aws directory, then select an SSO profile. On session start, if your cached token is expired, your browser will open for login." = "Authentifizierung über AWS IAM Identity Center (SSO). Gewähren Sie Zugriff auf Ihr ~/.aws-Verzeichnis und wählen Sie dann ein SSO-Profil. Beim Sitzungsstart öffnet sich Ihr Browser zur Anmeldung, falls Ihr zwischengespeichertes Token abgelaufen ist.";
+"Grant Bromure read access to your AWS configuration directory." = "Bromure Lesezugriff auf Ihr AWS-Konfigurationsverzeichnis gewähren.";
+"Grant Access" = "Zugriff gewähren";
+"Grant access to ~/.aws" = "Zugriff auf ~/.aws gewähren";
+"SSO profile" = "SSO-Profil";
+"Select a profile…" = "Profil auswählen…";
+"Refresh profiles" = "Profile aktualisieren";
+"Account ID" = "Konto-ID";
+"Role name" = "Rollenname";
+"Bedrock (AWS)" = "Bedrock (AWS)";
+"Claude Code will authenticate via AWS Bedrock using the credentials configured in the AWS section below." = "Claude Code authentifiziert sich über AWS Bedrock mit den im AWS-Bereich unten konfigurierten Anmeldedaten.";
+"Model ID" = "Modell-ID";
+"Configure AWS credentials (SSO or static keys) in the Credentials → AWS section." = "Konfigurieren Sie AWS-Anmeldedaten (SSO oder statische Schlüssel) im Bereich Anmeldedaten → AWS.";
+
 /* Alert: shared folders changed while a saved VM state exists */
 "Discard suspended VM for “%@”?" = "Angehaltene VM für „%@“ verwerfen?";
 "The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "Die freigegebenen Ordner haben sich geändert, seit dieses Profil angehalten wurde. Der Schnappschuss wurde mit dem alten Ordner-Satz gesichert und lässt sich mit dem neuen nicht sicher fortsetzen.\n\nBeim Sichern wird der angehaltene Zustand verworfen. Der nächste Start ist ein Kaltstart. Dateien im persönlichen Profil-Ordner und in den freigegebenen Ordnern selbst bleiben unberührt.";

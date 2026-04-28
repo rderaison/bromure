@@ -90,5 +90,10 @@ let package = Package(
             dependencies: ["SandboxEngine", "BrowserBridges"],
             path: "Tests/SafariSandboxTests"
         ),
+        .testTarget(
+            name: "AgentCodingTests",
+            dependencies: ["bromure-ac"],
+            path: "Tests/AgentCodingTests"
+        ),
     ]
 )
