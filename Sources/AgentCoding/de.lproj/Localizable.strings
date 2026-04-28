@@ -147,7 +147,7 @@
 "Role name" = "Rollenname";
 "Bedrock (AWS)" = "Bedrock (AWS)";
 "Claude Code will authenticate via AWS Bedrock using the credentials configured in the AWS section below." = "Claude Code authentifiziert sich über AWS Bedrock mit den im AWS-Bereich unten konfigurierten Anmeldedaten.";
-"Model ID" = "Modell-ID";
+"Default Model ID" = "Standard-Modell-ID";
 "Configure AWS credentials (SSO or static keys) in the Credentials → AWS section." = "Konfigurieren Sie AWS-Anmeldedaten (SSO oder statische Schlüssel) im Bereich Anmeldedaten → AWS.";
 
 /* Alert: shared folders changed while a saved VM state exists */

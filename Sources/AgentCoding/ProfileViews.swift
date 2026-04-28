@@ -1255,7 +1255,7 @@ struct ProfileEditorView: View {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
 
-        if !awsFolderGranted && !draft.folderPaths.contains(where: { $0.hasSuffix("/.aws") }) {
+        if !awsFolderGranted {
             Button {
                 let panel = NSOpenPanel()
                 panel.canChooseDirectories = true
@@ -1268,9 +1268,6 @@ struct ProfileEditorView: View {
                     comment: "")
                 panel.prompt = NSLocalizedString("Grant Access", comment: "")
                 if panel.runModal() == .OK, let url = panel.url {
-                    if !draft.folderPaths.contains(url.path) {
-                        draft.folderPaths.append(url.path)
-                    }
                     awsFolderGranted = true
                     discoveredSSOProfiles = AWSConfigParser.discover(
                         configPath: url.appendingPathComponent("config").path)
@@ -1301,10 +1298,11 @@ struct ProfileEditorView: View {
             }
             .onAppear {
                 if discoveredSSOProfiles.isEmpty {
-                    discoveredSSOProfiles = AWSConfigParser.discover()
-                }
-                if draft.folderPaths.contains(where: { $0.hasSuffix("/.aws") }) {
-                    awsFolderGranted = true
+                    let found = AWSConfigParser.discover()
+                    if !found.isEmpty {
+                        discoveredSSOProfiles = found
+                        awsFolderGranted = true
+                    }
                 }
             }
             .onChange(of: draft.awsCredentials.ssoProfileName) { _, newValue in
@@ -1315,25 +1313,6 @@ struct ProfileEditorView: View {
                         draft.awsCredentials.region = match.region
                     }
                 }
-            }
-
-            if !draft.awsCredentials.ssoAccountId.isEmpty {
-                LabeledContent(NSLocalizedString("Account ID", comment: "")) {
-                    Text(draft.awsCredentials.ssoAccountId)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-                LabeledContent(NSLocalizedString("Role name", comment: "")) {
-                    Text(draft.awsCredentials.ssoRoleName)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-            }
-
-            LabeledContent(NSLocalizedString("Default region", comment: "")) {
-                TextField("us-east-1", text: $draft.awsCredentials.region)
-                    .textFieldStyle(.roundedBorder)
-                    .disableAutocorrection(true)
             }
         }
     }
@@ -2464,7 +2443,7 @@ private struct ToolConfigCard: View {
                     Text("Claude Code will authenticate via AWS Bedrock using the credentials configured in the AWS section below.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    LabeledContent(NSLocalizedString("Model ID", comment: "")) {
+                    LabeledContent(NSLocalizedString("Default Model ID", comment: "")) {
                         TextField("us.anthropic.claude-sonnet-4-6-v1:0",
                                   text: $bedrockModelID)
                             .textFieldStyle(.roundedBorder)

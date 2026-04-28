@@ -7,6 +7,7 @@ public struct DiscoveredSSOProfile: Identifiable, Hashable, Sendable {
     public let ssoRoleName: String
     public let ssoRegion: String
     public let region: String
+    public let ssoSessionName: String?
     public var id: String { name }
 }
 
@@ -128,7 +129,8 @@ public enum AWSConfigParser {
             ssoAccountID: accountID,
             ssoRoleName: roleName,
             ssoRegion: ssoRegion,
-            region: region
+            region: region,
+            ssoSessionName: fields["sso_session"]
         )
     }
 }
