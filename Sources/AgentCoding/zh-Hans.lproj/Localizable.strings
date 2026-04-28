@@ -132,6 +132,24 @@
 /* Editor — Credentials → AWS */
 "Access key + secret from IAM → Users → Security credentials. The real secret never reaches the VM at all — `~/.aws/config` points at a `credential_process` helper that vends the real access key with a *fake* secret, so the SDK signs a doomed request. The host's MITM proxy strips that signature and re-signs with the real material before the request leaves your Mac. `aws`, terraform, boto3 etc. work out of the box; if anything bypasses the proxy, AWS rejects with InvalidSignatureException — fail-closed." = "在 IAM → 用户 → 安全凭证 中获取访问密钥和秘密密钥。真正的秘密密钥根本不会进入虚拟机 —— `~/.aws/config` 指向一个 `credential_process` 辅助程序，该程序提供真正的访问密钥和一个*假的*秘密密钥，因此 SDK 签名的请求注定会失败。主机端的 MITM 代理会去掉该签名，并在请求离开你的 Mac 之前用真实的密钥材料重新签名。`aws`、terraform、boto3 等可开箱即用；如果有任何东西绕过代理，AWS 会以 InvalidSignatureException 拒绝该请求 —— 失败时关闭（fail-closed）。";
 
+/* Editor — Credentials → AWS SSO & Bedrock */
+"Auth method" = "认证方式";
+"Static keys" = "静态密钥";
+"SSO / Identity Center" = "SSO / Identity Center";
+"Authenticate via AWS IAM Identity Center (SSO). Grant access to your ~/.aws directory, then select an SSO profile. On session start, if your cached token is expired, your browser will open for login." = "通过 AWS IAM Identity Center (SSO) 进行认证。授予对 ~/.aws 目录的访问权限，然后选择 SSO 配置文件。会话启动时，如果缓存的令牌已过期，浏览器将打开进行登录。";
+"Grant Bromure read access to your AWS configuration directory." = "授予 Bromure 对 AWS 配置目录的读取权限。";
+"Grant Access" = "授予访问权限";
+"Grant access to ~/.aws" = "授予对 ~/.aws 的访问权限";
+"SSO profile" = "SSO 配置文件";
+"Select a profile…" = "选择配置文件…";
+"Refresh profiles" = "刷新配置文件";
+"Account ID" = "账户 ID";
+"Role name" = "角色名称";
+"Bedrock (AWS)" = "Bedrock (AWS)";
+"Claude Code will authenticate via AWS Bedrock using the credentials configured in the AWS section below." = "Claude Code 将使用下方 AWS 部分中配置的凭证通过 AWS Bedrock 进行认证。";
+"Model ID" = "模型 ID";
+"Configure AWS credentials (SSO or static keys) in the Credentials → AWS section." = "在凭证 → AWS 部分中配置 AWS 凭证（SSO 或静态密钥）。";
+
 /* Alert: shared folders changed while a saved VM state exists */
 "Discard suspended VM for “%@”?" = "丢弃“%@”的已挂起虚拟机？";
 "The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "自该配置文件挂起以来，共享文件夹已发生变化。快照是基于旧的共享集保存的，无法安全地以新的共享集恢复。\n\n保存将丢弃挂起状态。下次启动将冷启动。配置文件的个人主目录及共享文件夹中的文件不受影响。";
