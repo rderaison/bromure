@@ -2616,8 +2616,7 @@ public final class ProfileStore {
                 # Pull the UUID out of "--class bromure-<uuid>".
                 uuid=$(printf '%s' "$cmd" | sed -n 's/.*--class bromure-\([^ ]*\).*/\1/p')
                 [ -z "$uuid" ] && continue
-                roster="${roster}${uuid}
-"
+                roster="${roster}${uuid}"$'\n'
                 # Kitty's child = the shell. Then the shell's tty
                 # foreground PG = whatever the user is running.
                 shell=$(pgrep -P "$pid" 2>/dev/null | head -1)
