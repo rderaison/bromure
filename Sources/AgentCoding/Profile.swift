@@ -393,7 +393,15 @@ public struct DockerRegistryCredential: Codable, Equatable, Sendable, Identifiab
 /// signature, and recomputes SigV4 with the real material that never
 /// enters the VM's address space. If the proxy is bypassed, AWS
 /// rejects with `InvalidSignatureException` — fail-closed.
+
+public enum AWSAuthMode: String, Codable, CaseIterable, Sendable {
+    case staticKeys
+    case ssoProfile
+}
+
 public struct AWSCredentials: Codable, Equatable, Sendable {
+    /// How the credentials are sourced: static IAM keys or SSO profile.
+    public var authMode: AWSAuthMode
     /// e.g. `AKIAIOSFODNN7EXAMPLE`. Identity-only on the wire.
     public var accessKeyID: String
     /// Secret signing key. Stored encrypted in the secrets vault.
@@ -409,43 +417,71 @@ public struct AWSCredentials: Codable, Equatable, Sendable {
     /// grant covers the request. See `ConsentBroker`.
     public var requireApproval: Bool
 
+    /// The `[profile <name>]` from `~/.aws/config` when `authMode == .ssoProfile`.
+    public var ssoProfileName: String
+    /// Read-only, populated from config discovery.
+    public var ssoAccountId: String
+    /// Read-only, populated from config discovery.
+    public var ssoRoleName: String
+
     public init(accessKeyID: String = "",
                 secretAccessKey: String = "",
                 sessionToken: String = "",
                 region: String = "",
-                requireApproval: Bool = false) {
+                requireApproval: Bool = false,
+                authMode: AWSAuthMode = .staticKeys,
+                ssoProfileName: String = "",
+                ssoAccountId: String = "",
+                ssoRoleName: String = "") {
+        self.authMode = authMode
         self.accessKeyID = accessKeyID
         self.secretAccessKey = secretAccessKey
         self.sessionToken = sessionToken
         self.region = region
         self.requireApproval = requireApproval
+        self.ssoProfileName = ssoProfileName
+        self.ssoAccountId = ssoAccountId
+        self.ssoRoleName = ssoRoleName
     }
 
-    /// True when at least the access-key + secret pair is set — the
-    /// minimum for a signing-capable profile.
+    /// True when credentials are configured enough to attempt signing.
     public var isUsable: Bool {
-        !accessKeyID.trimmingCharacters(in: .whitespaces).isEmpty
-            && !secretAccessKey.isEmpty
+        switch authMode {
+        case .staticKeys:
+            return !accessKeyID.trimmingCharacters(in: .whitespaces).isEmpty
+                && !secretAccessKey.isEmpty
+        case .ssoProfile:
+            return !ssoProfileName.trimmingCharacters(in: .whitespaces).isEmpty
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
-        case accessKeyID, secretAccessKey, sessionToken, region, requireApproval
+        case authMode, accessKeyID, secretAccessKey, sessionToken, region
+        case requireApproval, ssoProfileName, ssoAccountId, ssoRoleName
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        authMode        = try c.decodeIfPresent(AWSAuthMode.self, forKey: .authMode) ?? .staticKeys
         accessKeyID     = try c.decodeIfPresent(String.self, forKey: .accessKeyID) ?? ""
         secretAccessKey = try c.decodeIfPresent(String.self, forKey: .secretAccessKey) ?? ""
         sessionToken    = try c.decodeIfPresent(String.self, forKey: .sessionToken) ?? ""
         region          = try c.decodeIfPresent(String.self, forKey: .region) ?? ""
         requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+        ssoProfileName  = try c.decodeIfPresent(String.self, forKey: .ssoProfileName) ?? ""
+        ssoAccountId    = try c.decodeIfPresent(String.self, forKey: .ssoAccountId) ?? ""
+        ssoRoleName     = try c.decodeIfPresent(String.self, forKey: .ssoRoleName) ?? ""
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        if authMode != .staticKeys { try c.encode(authMode, forKey: .authMode) }
         try c.encode(accessKeyID, forKey: .accessKeyID)
         try c.encode(secretAccessKey, forKey: .secretAccessKey)
         try c.encode(sessionToken, forKey: .sessionToken)
         try c.encode(region, forKey: .region)
         if requireApproval { try c.encode(true, forKey: .requireApproval) }
+        if !ssoProfileName.isEmpty { try c.encode(ssoProfileName, forKey: .ssoProfileName) }
+        if !ssoAccountId.isEmpty { try c.encode(ssoAccountId, forKey: .ssoAccountId) }
+        if !ssoRoleName.isEmpty { try c.encode(ssoRoleName, forKey: .ssoRoleName) }
     }
 }
 
@@ -515,11 +551,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public enum AuthMode: String, Codable, CaseIterable, Sendable {
         case token         // user-supplied API key, injected as env var
         case subscription  // user runs `claude login` / `codex login` in the VM
+        case bedrock       // AWS Bedrock via SSO or static IAM keys
 
         public var displayName: String {
             switch self {
             case .token:        return "API token"
             case .subscription: return "Subscription (interactive login)"
+            case .bedrock:      return "Bedrock (AWS)"
             }
         }
     }
@@ -636,6 +674,15 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// for the AWS CLI / SDKs. See `AWSCredentials` for the SigV4
     /// reasoning. Empty struct (`isUsable == false`) = not configured.
     public var awsCredentials: AWSCredentials
+
+    /// When true and the Claude tool is configured, write Bedrock env
+    /// vars into `~/.claude/settings.json` so Claude Code uses the AWS
+    /// credential chain instead of an Anthropic API key.
+    public var bedrockEnabled: Bool
+
+    /// Bedrock model ID, e.g. `us.anthropic.claude-sonnet-4-6-v1:0`.
+    /// Empty string uses Claude Code's default.
+    public var bedrockModelID: String
 
     /// Container-registry credentials. One entry per host. Materialized
     /// as ~/.docker/config.json `auths` entries (with FAKE base64 auth
@@ -797,6 +844,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         kubeconfigs: [KubeconfigEntry] = [],
         digitalOceanToken: String = "",
         awsCredentials: AWSCredentials = AWSCredentials(),
+        bedrockEnabled: Bool = false,
+        bedrockModelID: String = "",
         dockerRegistries: [DockerRegistryCredential] = [],
         apiKeyRequiresApproval: Bool = false,
         digitalOceanTokenRequiresApproval: Bool = false,
@@ -839,6 +888,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.kubeconfigs = kubeconfigs
         self.digitalOceanToken = digitalOceanToken
         self.awsCredentials = awsCredentials
+        self.bedrockEnabled = bedrockEnabled
+        self.bedrockModelID = bedrockModelID
         self.dockerRegistries = dockerRegistries
         self.apiKeyRequiresApproval = apiKeyRequiresApproval
         self.digitalOceanTokenRequiresApproval = digitalOceanTokenRequiresApproval
@@ -887,6 +938,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case kubeconfigs
         case digitalOceanToken
         case awsCredentials
+        case bedrockEnabled, bedrockModelID
         case dockerRegistries
         case apiKeyRequiresApproval
         case digitalOceanTokenRequiresApproval
@@ -954,6 +1006,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
+        bedrockEnabled = try c.decodeIfPresent(Bool.self, forKey: .bedrockEnabled) ?? false
+        bedrockModelID = try c.decodeIfPresent(String.self, forKey: .bedrockModelID) ?? ""
         dockerRegistries = try c.decodeIfPresent([DockerRegistryCredential].self, forKey: .dockerRegistries) ?? []
         apiKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .apiKeyRequiresApproval) ?? false
         digitalOceanTokenRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .digitalOceanTokenRequiresApproval) ?? false
@@ -1018,9 +1072,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if awsCredentials.isUsable
             || !awsCredentials.region.isEmpty
-            || !awsCredentials.accessKeyID.isEmpty {
+            || !awsCredentials.accessKeyID.isEmpty
+            || awsCredentials.authMode != .staticKeys {
             try c.encode(awsCredentials, forKey: .awsCredentials)
         }
+        if bedrockEnabled { try c.encode(true, forKey: .bedrockEnabled) }
+        if !bedrockModelID.isEmpty { try c.encode(bedrockModelID, forKey: .bedrockModelID) }
         if !dockerRegistries.isEmpty {
             try c.encode(dockerRegistries, forKey: .dockerRegistries)
         }

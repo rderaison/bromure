@@ -366,6 +366,8 @@ struct ProfileEditorView: View {
     /// Credentials pane. All sections start collapsed — the user
     /// opens whichever one they need.
     @State private var expandedCredsSections: Set<String> = []
+    @State private var discoveredSSOProfiles: [DiscoveredSSOProfile] = []
+    @State private var awsFolderGranted: Bool = false
 
     /// Snapshot of the host's macOS key-repeat values, captured when
     /// the editor opens. Used as the visible default in the Key
@@ -619,6 +621,7 @@ struct ProfileEditorView: View {
                     isPrimary: draft.tool == t,
                     isEnabled: isToolEnabled(t),
                     spec: bindingForTool(t),
+                    bedrockModelID: $draft.bedrockModelID,
                     onToggleEnabled: { setToolEnabled(t, enabled: $0) },
                     onMakePrimary: { setPrimary(t) },
                     profileDirHint: profileDirHint
@@ -659,6 +662,9 @@ struct ProfileEditorView: View {
                     self.draft.apiKeyRequiresApproval = newValue.requireApproval
                 } else if let i = self.draft.additionalTools.firstIndex(where: { $0.tool == t }) {
                     self.draft.additionalTools[i] = newValue
+                }
+                if newValue.tool == .claude {
+                    self.draft.bedrockEnabled = newValue.authMode == .bedrock
                 }
             }
         )
@@ -1175,27 +1181,153 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var awsSubsection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Access key + secret from IAM → Users → Security credentials. The real secret never reaches the VM at all — `~/.aws/config` points at a `credential_process` helper that vends the real access key with a *fake* secret, so the SDK signs a doomed request. The host's MITM proxy strips that signature and re-signs with the real material before the request leaves your Mac. `aws`, terraform, boto3 etc. work out of the box; if anything bypasses the proxy, AWS rejects with InvalidSignatureException — fail-closed.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Picker(NSLocalizedString("Auth method", comment: ""),
+                   selection: $draft.awsCredentials.authMode) {
+                Text(NSLocalizedString("Static keys", comment: ""))
+                    .tag(AWSAuthMode.staticKeys)
+                Text(NSLocalizedString("SSO / Identity Center", comment: ""))
+                    .tag(AWSAuthMode.ssoProfile)
+            }
+            .pickerStyle(.segmented)
+            .padding(.bottom, 4)
 
-            LabeledContent(NSLocalizedString("Access key ID", comment: "")) {
-                TextField("AKIA…", text: $draft.awsCredentials.accessKeyID)
-                    .textFieldStyle(.roundedBorder)
-                    .textContentType(.username)
-                    .disableAutocorrection(true)
+            switch draft.awsCredentials.authMode {
+            case .staticKeys:
+                awsStaticKeysFields
+            case .ssoProfile:
+                awsSSOFields
             }
 
-            LabeledContent(NSLocalizedString("Secret access key", comment: "")) {
-                SecureField("•••• ••••", text: $draft.awsCredentials.secretAccessKey)
-                    .textFieldStyle(.roundedBorder)
+            requireApprovalToggle(isOn: $draft.awsCredentials.requireApproval)
+        }
+    }
+
+    @ViewBuilder
+    private var awsStaticKeysFields: some View {
+        Text("Access key + secret from IAM → Users → Security credentials. The real secret never reaches the VM at all — `~/.aws/config` points at a `credential_process` helper that vends the real access key with a *fake* secret, so the SDK signs a doomed request. The host's MITM proxy strips that signature and re-signs with the real material before the request leaves your Mac. `aws`, terraform, boto3 etc. work out of the box; if anything bypasses the proxy, AWS rejects with InvalidSignatureException — fail-closed.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        LabeledContent(NSLocalizedString("Access key ID", comment: "")) {
+            TextField("AKIA…", text: $draft.awsCredentials.accessKeyID)
+                .textFieldStyle(.roundedBorder)
+                .textContentType(.username)
+                .disableAutocorrection(true)
+        }
+
+        LabeledContent(NSLocalizedString("Secret access key", comment: "")) {
+            SecureField("•••• ••••", text: $draft.awsCredentials.secretAccessKey)
+                .textFieldStyle(.roundedBorder)
+        }
+
+        LabeledContent(NSLocalizedString("Session token", comment: "")) {
+            SecureField(NSLocalizedString("Optional — STS only", comment: ""),
+                        text: $draft.awsCredentials.sessionToken)
+                .textFieldStyle(.roundedBorder)
+        }
+
+        LabeledContent(NSLocalizedString("Default region", comment: "")) {
+            TextField("us-east-1", text: $draft.awsCredentials.region)
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+        }
+
+        HStack(spacing: 6) {
+            Spacer()
+            Button {
+                if let url = URL(string: "https://console.aws.amazon.com/iam/home#/security_credentials") {
+                    NSWorkspace.shared.open(url)
+                }
+            } label: {
+                Label(NSLocalizedString("Open IAM credentials page", comment: ""),
+                      systemImage: "arrow.up.right.square")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+        }
+    }
+
+    @ViewBuilder
+    private var awsSSOFields: some View {
+        Text("Authenticate via AWS IAM Identity Center (SSO). Grant access to your ~/.aws directory, then select an SSO profile. On session start, if your cached token is expired, your browser will open for login.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        if !awsFolderGranted && !draft.folderPaths.contains(where: { $0.hasSuffix("/.aws") }) {
+            Button {
+                let panel = NSOpenPanel()
+                panel.canChooseDirectories = true
+                panel.canChooseFiles = false
+                panel.allowsMultipleSelection = false
+                panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".aws", isDirectory: true)
+                panel.message = NSLocalizedString(
+                    "Grant Bromure read access to your AWS configuration directory.",
+                    comment: "")
+                panel.prompt = NSLocalizedString("Grant Access", comment: "")
+                if panel.runModal() == .OK, let url = panel.url {
+                    if !draft.folderPaths.contains(url.path) {
+                        draft.folderPaths.append(url.path)
+                    }
+                    awsFolderGranted = true
+                    discoveredSSOProfiles = AWSConfigParser.discover(
+                        configPath: url.appendingPathComponent("config").path)
+                }
+            } label: {
+                Label(NSLocalizedString("Grant access to ~/.aws", comment: ""),
+                      systemImage: "folder.badge.plus")
+            }
+            .controlSize(.large)
+        } else {
+            HStack {
+                Picker(NSLocalizedString("SSO profile", comment: ""),
+                       selection: $draft.awsCredentials.ssoProfileName) {
+                    Text("Select a profile…").tag("")
+                    ForEach(discoveredSSOProfiles) { profile in
+                        Text(profile.name).tag(profile.name)
+                    }
+                }
+                .frame(maxWidth: 240)
+
+                Button {
+                    discoveredSSOProfiles = AWSConfigParser.discover()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help(NSLocalizedString("Refresh profiles", comment: ""))
+            }
+            .onAppear {
+                if discoveredSSOProfiles.isEmpty {
+                    discoveredSSOProfiles = AWSConfigParser.discover()
+                }
+                if draft.folderPaths.contains(where: { $0.hasSuffix("/.aws") }) {
+                    awsFolderGranted = true
+                }
+            }
+            .onChange(of: draft.awsCredentials.ssoProfileName) { _, newValue in
+                if let match = discoveredSSOProfiles.first(where: { $0.name == newValue }) {
+                    draft.awsCredentials.ssoAccountId = match.ssoAccountID
+                    draft.awsCredentials.ssoRoleName = match.ssoRoleName
+                    if draft.awsCredentials.region.isEmpty {
+                        draft.awsCredentials.region = match.region
+                    }
+                }
             }
 
-            LabeledContent(NSLocalizedString("Session token", comment: "")) {
-                SecureField(NSLocalizedString("Optional — STS only", comment: ""),
-                            text: $draft.awsCredentials.sessionToken)
-                    .textFieldStyle(.roundedBorder)
+            if !draft.awsCredentials.ssoAccountId.isEmpty {
+                LabeledContent(NSLocalizedString("Account ID", comment: "")) {
+                    Text(draft.awsCredentials.ssoAccountId)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                LabeledContent(NSLocalizedString("Role name", comment: "")) {
+                    Text(draft.awsCredentials.ssoRoleName)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
             }
 
             LabeledContent(NSLocalizedString("Default region", comment: "")) {
@@ -1203,24 +1335,9 @@ struct ProfileEditorView: View {
                     .textFieldStyle(.roundedBorder)
                     .disableAutocorrection(true)
             }
-
-            requireApprovalToggle(isOn: $draft.awsCredentials.requireApproval)
-
-            HStack(spacing: 6) {
-                Spacer()
-                Button {
-                    if let url = URL(string: "https://console.aws.amazon.com/iam/home#/security_credentials") {
-                        NSWorkspace.shared.open(url)
-                    }
-                } label: {
-                    Label(NSLocalizedString("Open IAM credentials page", comment: ""),
-                          systemImage: "arrow.up.right.square")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-            }
         }
     }
+
 
     // MARK: - Container Registries (Docker / GHCR / GitLab CR / private)
 
@@ -2278,6 +2395,7 @@ private struct ToolConfigCard: View {
     let isPrimary: Bool
     let isEnabled: Bool
     @Binding var spec: Profile.ToolSpec
+    @Binding var bedrockModelID: String
     let onToggleEnabled: (Bool) -> Void
     let onMakePrimary: () -> Void
     let profileDirHint: String
@@ -2313,12 +2431,17 @@ private struct ToolConfigCard: View {
             if isEnabled {
                 Picker("Auth", selection: $spec.authMode) {
                     ForEach(Profile.AuthMode.allCases, id: \.self) { m in
-                        Text(m.displayName).tag(m)
+                        if m == .bedrock && tool != .claude {
+                            EmptyView()
+                        } else {
+                            Text(m.displayName).tag(m)
+                        }
                     }
                 }
                 .pickerStyle(.radioGroup)
 
-                if spec.authMode == .token {
+                switch spec.authMode {
+                case .token:
                     SecureField(
                         envVarPlaceholder,
                         text: Binding(
@@ -2333,8 +2456,21 @@ private struct ToolConfigCard: View {
                     }
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
-                } else {
+                case .subscription:
                     Text("You'll run `\(tool.rawValue) login` once inside the VM.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .bedrock:
+                    Text("Claude Code will authenticate via AWS Bedrock using the credentials configured in the AWS section below.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    LabeledContent(NSLocalizedString("Model ID", comment: "")) {
+                        TextField("us.anthropic.claude-sonnet-4-6-v1:0",
+                                  text: $bedrockModelID)
+                            .textFieldStyle(.roundedBorder)
+                            .disableAutocorrection(true)
+                    }
+                    Text("Configure AWS credentials (SSO or static keys) in the Credentials → AWS section.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
