@@ -1638,6 +1638,25 @@ struct ProfileEditorView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // Private mode: opt-out of bromure.io streaming for this
+            // profile. Independent of the local trace level above —
+            // the trace inspector keeps recording per the picker;
+            // only the upstream metadata feed is suppressed. The
+            // section header is the "Bromure Web" / "Mac is enrolled"
+            // surface; show the toggle even on un-enrolled Macs so
+            // the preference travels with the profile.
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle(isOn: $draft.privateMode) {
+                    Label("Private mode", systemImage: "eye.slash")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .toggleStyle(.switch)
+                Text("When this Mac is enrolled with bromure.io, sessions running under this profile normally stream metadata (tools, files, commands, token usage) to your workspace. Turn this on to keep this profile's activity local — neither the title-bar indicator nor the admin's session list will see anything from this profile. The local trace inspector is unaffected.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             // Manual tokens moved to Credentials → Other API keys.
         }
     }

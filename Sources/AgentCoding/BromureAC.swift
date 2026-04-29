@@ -236,7 +236,16 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
 final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let imageManager: UbuntuImageManager
     let store = ProfileStore()
-    var profiles: [Profile] = []
+    var profiles: [Profile] = [] {
+        didSet {
+            // Single funnel: every assignment to `profiles` (load,
+            // save, delete, restore) flows through here, so the
+            // private-profile set on the cloud emitter and any open
+            // session window's streaming indicator stay in lockstep
+            // with the latest store state.
+            refreshStreamingState()
+        }
+    }
 
     /// Snapshot of Terminal.app's default profile captured at app launch.
     /// Cached so changes the user makes to Terminal.app while AC is
@@ -378,6 +387,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 BACEventEmitter.shared.reset()
             }
             self?.refreshEnrollmentMenuTitle()
+            // Streaming flag flips on enroll/unenroll; refresh
+            // every session window's toolbar indicator.
+            self?.refreshStreamingState()
         }
 
         // Force-init the MITM engine so the CA is ready before any
@@ -964,6 +976,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.contentView = self?.makeEnrollmentContentView(in: window)
             self?.refreshEnrollmentMenuTitle()
         })
+    }
+
+    /// Recompute (a) the private-profile set the cloud emitter
+    /// gates on, and (b) the streaming flag every open session
+    /// window's toolbar paints. Cheap — runs after profile load,
+    /// after a profile save / delete, and after enrollment state
+    /// changes. Single source of truth: `profiles` (the loaded
+    /// store) + `BACEnrollmentStore.load()`.
+    func refreshStreamingState() {
+        let privateIDs = Set(profiles.filter { $0.privateMode }.map { $0.id })
+        BACEventEmitter.shared.setPrivateProfiles(privateIDs)
+        let enrolled = BACEnrollmentStore.load() != nil
+        for (profileID, window) in profileWindows {
+            window.model.streamingActive = enrolled && !privateIDs.contains(profileID)
+        }
     }
 
     /// Update the menu item label so it reflects the current state
@@ -1594,6 +1621,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         win.makeKeyAndOrderFront(nil)
         win.isReleasedWhenClosed = false
         profileWindows[profile.id] = win
+        // Newly-registered window — sync its streaming indicator
+        // with the current enrollment + privateMode state.
+        refreshStreamingState()
         renderPicker()
 
         // Pre-load saved tabs alongside the saved RAM snapshot. If

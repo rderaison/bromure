@@ -31,6 +31,11 @@ final class TabsModel {
     /// Most recent VM IP reported by the guest's xinitrc loop. Surfaced
     /// in the toolbar; click to copy.
     var ipAddress: String?
+    /// Drives the red toolbar indicator. True when the Mac is enrolled
+    /// with bromure.io AND this session's profile is NOT in private
+    /// mode — i.e. session metadata is being shipped upstream.
+    /// ACAppDelegate.refreshStreamingState() pushes updates here.
+    var streamingActive: Bool = false
 
     var activeTab: Tab? {
         tabs.indices.contains(activeIndex) ? tabs[activeIndex] : nil
@@ -465,6 +470,16 @@ private struct TabsBar: View {
 
             Spacer(minLength: 8)
 
+            // Red recording-style dot when the proxy is shipping
+            // session metadata to bromure.io. Mirrors Bromure Web's
+            // managed-mode indicator. Hidden in private mode, hidden
+            // when the Mac isn't enrolled. The decision lives in
+            // ACAppDelegate.refreshStreamingState() so this view
+            // just renders the latest flag.
+            if model.streamingActive {
+                StreamingIndicator()
+            }
+
             if let ip = model.ipAddress {
                 IPChip(ip: ip)
             } else {
@@ -576,6 +591,29 @@ private struct SharedFolderRow: View {
 
     private func abbreviated(_ p: String) -> String {
         (p as NSString).abbreviatingWithTildeInPath
+    }
+}
+
+/// Red dot signalling the proxy is streaming session metadata to
+/// bromure.io for this profile. Pulses gently so it doesn't blend
+/// into the toolbar background. Tooltip explains the why.
+private struct StreamingIndicator: View {
+    @State private var pulse = false
+    var body: some View {
+        Circle()
+            .fill(Color.red)
+            .frame(width: 8, height: 8)
+            .opacity(pulse ? 1.0 : 0.55)
+            .shadow(color: .red.opacity(0.6), radius: pulse ? 3 : 0)
+            .help(NSLocalizedString(
+                "Session metadata is being sent to bromure.io. Toggle the profile's Private Mode to stop streaming.",
+                comment: "BAC streaming indicator tooltip"))
+            .padding(.horizontal, 4)
+            .accessibilityLabel(NSLocalizedString(
+                "Streaming to bromure.io", comment: "BAC streaming indicator a11y"))
+            .onAppear { withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
+                pulse.toggle()
+            } }
     }
 }
 

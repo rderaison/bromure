@@ -621,6 +621,15 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// response bodies (encrypted) to disk.
     public var traceLevel: TraceLevel
 
+    /// When true, sessions running under this profile do NOT stream
+    /// metadata to bromure.io even if the Mac is enrolled. The trace
+    /// inspector still records locally per `traceLevel`. Default
+    /// false — managed mode (= enrolled) implies streaming on; this
+    /// flag is the per-profile escape hatch ("I'm prototyping
+    /// against my personal Anthropic key, my admin doesn't need to
+    /// see this"). Mirrors a similar opt-out on Bromure Web.
+    public var privateMode: Bool
+
     /// Pre-configured Kubernetes contexts. At session prep we
     /// generate a synthetic ~/.kube/config in the VM and register the
     /// real credentials with the proxy for upstream substitution.
@@ -794,6 +803,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         importedSSHKeys: [ImportedSSHKey] = [],
         environmentVariables: [EnvironmentVariable] = [],
         traceLevel: TraceLevel = .off,
+        privateMode: Bool = false,
         kubeconfigs: [KubeconfigEntry] = [],
         digitalOceanToken: String = "",
         awsCredentials: AWSCredentials = AWSCredentials(),
@@ -836,6 +846,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.importedSSHKeys = importedSSHKeys
         self.environmentVariables = environmentVariables
         self.traceLevel = traceLevel
+        self.privateMode = privateMode
         self.kubeconfigs = kubeconfigs
         self.digitalOceanToken = digitalOceanToken
         self.awsCredentials = awsCredentials
@@ -884,6 +895,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case importedSSHKeys
         case environmentVariables
         case traceLevel
+        case privateMode
         case kubeconfigs
         case digitalOceanToken
         case awsCredentials
@@ -951,6 +963,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         environmentVariables = try c.decodeIfPresent([EnvironmentVariable].self,
                                                      forKey: .environmentVariables) ?? []
         traceLevel = try c.decodeIfPresent(TraceLevel.self, forKey: .traceLevel) ?? .off
+        privateMode = try c.decodeIfPresent(Bool.self, forKey: .privateMode) ?? false
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
@@ -1009,6 +1022,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if traceLevel != .off {
             try c.encode(traceLevel, forKey: .traceLevel)
+        }
+        // Only emit privateMode when true — keeps default-config JSON
+        // small for the common (managed-mode-streaming) case.
+        if privateMode {
+            try c.encode(privateMode, forKey: .privateMode)
         }
         if !kubeconfigs.isEmpty {
             try c.encode(kubeconfigs, forKey: .kubeconfigs)
