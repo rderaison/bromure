@@ -215,19 +215,10 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                    keyEquivalent: "")
     approvalsItem.target = delegate
     windowMenu.addItem(approvalsItem)
-
-    // Title flips between "Enroll…" and "bromure.io Enrollment…"
-    // depending on state — set the initial value here, and let
-    // `refreshEnrollmentMenuTitle()` keep it in sync after enroll/
-    // unenroll.
-    let enrollmentTitle = BACEnrollmentStore.load() == nil
-        ? L("Enroll in bromure.io…")
-        : L("bromure.io Enrollment…")
-    let enrollmentItem = NSMenuItem(title: enrollmentTitle,
-                                    action: #selector(ACAppDelegate.openEnrollmentAction(_:)),
-                                    keyEquivalent: "")
-    enrollmentItem.target = delegate
-    windowMenu.addItem(enrollmentItem)
+    // The bromure.io Enrollment item is added to the *app* menu (next
+    // to Check for Updates…) rather than here — see
+    // `ACAppDelegate.installEnrollmentMenuItem(into:)`, called from
+    // applicationDidFinishLaunching once the updater item exists.
 
     // Hand the menu to NSApp so AppKit auto-appends entries for every
     // titled, non-excluded window. Session windows already get
@@ -352,6 +343,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // updater wired in.
         if let menu = NSApp.mainMenu, let appMenu = menu.item(at: 0)?.submenu {
             installCheckForUpdatesMenuItem(into: appMenu)
+            // Slot the bromure.io enrollment item right under Check for
+            // Updates… so admins find both deployment-touching items in
+            // the same place. Idempotent and safe even when the updater
+            // isn't initialised (dev builds): it falls back to inserting
+            // just after About.
+            installEnrollmentMenuItem(into: appMenu)
         }
 
         // Start the bromure.io heartbeat right away if this Mac is
@@ -360,12 +357,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // schedule keeps `last_seen_at` fresh on the admin UI. No-op
         // when not enrolled.
         BACHeartbeat.shared.start()
+        // Same lifecycle for the cloud event uploader: stand it up
+        // once, the emitter itself short-circuits when there's no
+        // install identity. Credential hooks + the LLM extractor can
+        // call into it from the moment the proxy starts intercepting.
+        if BACEnrollmentStore.load() != nil {
+            BACEventEmitter.shared.ensureUploader()
+        }
         BACEnrollment.onStateChange = { [weak self] in
             // Restart so a fresh enrollment kicks off heartbeats
             // immediately, and an unenroll stops them.
             BACHeartbeat.shared.stop()
             if BACEnrollmentStore.load() != nil {
                 BACHeartbeat.shared.start()
+                BACEventEmitter.shared.ensureUploader()
+            } else {
+                // Drop any buffered events so the next enrollment
+                // starts with a clean slate (different install id,
+                // different bearer, possibly different workspace).
+                BACEventEmitter.shared.reset()
             }
             self?.refreshEnrollmentMenuTitle()
         }
@@ -837,6 +847,37 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let insertIdx = min(2, appMenu.items.count)
         appMenu.insertItem(item, at: insertIdx)
         appMenu.insertItem(.separator(), at: insertIdx + 1)
+    }
+
+    /// Insert (or refresh) the "Enroll in bromure.io…" / "bromure.io
+    /// Enrollment…" item directly under "Check for Updates…". When the
+    /// updater hasn't been initialised (dev build), fall back to
+    /// inserting just after About — the two layouts converge once
+    /// `installCheckForUpdatesMenuItem` runs and pushes everyone down.
+    /// Idempotent so re-running doesn't stack duplicates.
+    fileprivate func installEnrollmentMenuItem(into appMenu: NSMenu) {
+        appMenu.items
+            .filter { ($0.representedObject as? String) == "bromure.enrollment" }
+            .forEach { appMenu.removeItem($0) }
+        let title = BACEnrollmentStore.load() == nil
+            ? NSLocalizedString("Enroll in bromure.io…", comment: "")
+            : NSLocalizedString("bromure.io Enrollment…", comment: "")
+        let item = NSMenuItem(
+            title: title,
+            action: #selector(ACAppDelegate.openEnrollmentAction(_:)),
+            keyEquivalent: "")
+        item.target = self
+        item.representedObject = "bromure.enrollment"
+        let updaterIdx = appMenu.items.firstIndex {
+            ($0.representedObject as? String) == "bromure.checkForUpdates"
+        }
+        // Right after Check for Updates… when present; otherwise the
+        // slot just after "About + separator". `min` keeps us in
+        // bounds on the still-being-built menu.
+        let insertIdx: Int
+        if let updaterIdx { insertIdx = updaterIdx + 1 }
+        else { insertIdx = min(2, appMenu.items.count) }
+        appMenu.insertItem(item, at: insertIdx)
     }
 
     /// Wired to the "Rebuild Base Image…" menu item. Confirms, then

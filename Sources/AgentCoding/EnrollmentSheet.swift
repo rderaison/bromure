@@ -175,7 +175,7 @@ struct BACEnrollmentStatusView: View {
                     Button(role: .destructive) {
                         Task { @MainActor in
                             await BACEnrollment.shared.unenroll()
-                            install = nil
+                            self.install = nil
                             onUnenroll()
                         }
                     } label: {

@@ -202,6 +202,18 @@ public final class SSHAgentServer: @unchecked Sendable {
                 if !allowed { return Data([AgentMsg.failure.rawValue]) }
             }
             let signature = try match.sign(data)
+            // Audit trail: this profile's bromure-managed SSH key
+            // just produced a signature for code running inside the
+            // VM. Fingerprint = SHA-256 of the public key blob, which
+            // matches how OpenSSH formats `ssh-keygen -lf`.
+            BACEventEmitter.shared.emitDetached(
+                profileID: profileID,
+                eventType: "credential.ssh_sign",
+                eventData: [
+                    "key_label": .string(match.comment),
+                    "key_fingerprint_sha256": .string(Self.sha256Fingerprint(of: match.publicKeyBlob)),
+                    "key_kind": .string("managed"),
+                ])
             var sshSig = Data()
             sshSig.append(string(Data("ssh-ed25519".utf8)))
             sshSig.append(string(signature))
@@ -243,9 +255,32 @@ public final class SSHAgentServer: @unchecked Sendable {
         if let c = HostAgentClient._bromurePrivate,
            let resp = c.request(fwd), !resp.isEmpty,
            resp[0] == AgentMsg.signResponse.rawValue {
+            // Imported / forwarded SSH key just signed something for
+            // the VM. Same audit trail as the managed-key path, with
+            // a `key_kind` discriminator so admins can tell which
+            // pool the key came from.
+            let approval = importedApproval(for: profileID, blob: keyBlob)
+            BACEventEmitter.shared.emitDetached(
+                profileID: profileID,
+                eventType: "credential.ssh_sign",
+                eventData: [
+                    "key_label": .string(approval?.label ?? ""),
+                    "key_fingerprint_sha256": .string(Self.sha256Fingerprint(of: keyBlob)),
+                    "key_kind": .string("imported"),
+                ])
             return resp
         }
         return Data([AgentMsg.failure.rawValue])
+    }
+
+    /// SHA-256 fingerprint of the SSH public-key blob, base64
+    /// (no padding) — the format `ssh-keygen -lf` produces, modulo
+    /// the leading "SHA256:" prefix.
+    fileprivate static func sha256Fingerprint(of blob: Data) -> String {
+        let digest = SHA256.hash(data: blob)
+        let b64 = Data(digest).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "")
+        return "SHA256:\(b64)"
     }
 
     /// Query a single agent for its identities. Returns empty on

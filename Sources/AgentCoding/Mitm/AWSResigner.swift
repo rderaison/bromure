@@ -191,6 +191,23 @@ public final class AWSResigner: @unchecked Sendable {
             "akid=\(Self.maskAccessKey(creds.accessKeyID))\n"
         FileHandle.standardError.write(Data(logLine.utf8))
 
+        // Audit trail: bromure just re-signed an outbound AWS request
+        // with this profile's real credentials. We only log the
+        // already-non-secret bits (region, service, masked AKID, the
+        // request path) — the access key gets the same mask the local
+        // log uses.
+        BACEventEmitter.shared.emitDetached(
+            profileID: profileID,
+            eventType: "credential.aws_sign",
+            eventData: [
+                "method": .string(parsed.method),
+                "host": .string(host),
+                "path": .string(parsed.path),
+                "service": .string(scope.service),
+                "region": .string(scope.region),
+                "access_key_masked": .string(Self.maskAccessKey(creds.accessKeyID)),
+            ])
+
         return .resigned(bytes)
     }
 

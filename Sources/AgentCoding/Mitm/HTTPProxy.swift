@@ -448,12 +448,36 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // Try the conversation parser on the synthesized bodies so
         // the inspector can render the chat view (set the
         // `isConversation` flag at record-time, like the regular
-        // HTTP path does).
-        let isConversation: Bool = (captureBody && transcript != nil)
+        // HTTP path does). Re-use the Conversation for the cloud
+        // event extractor when the parse succeeds.
+        let conversation: Conversation? = (captureBody && transcript != nil)
             ? ConversationParser.parse(host: host,
                                        requestBody: preSwapRequest,
-                                       responseBody: responseBlob) != nil
-            : false
+                                       responseBody: responseBlob)
+            : nil
+        let isConversation = (conversation != nil)
+        if let conv = conversation {
+            LLMEventExtractor.emit(
+                profileID: profileID,
+                host: host, path: path,
+                statusCode: statusCode,
+                latencyMs: latencyMs,
+                responseBody: responseBlob,
+                conversation: conv)
+        }
+        // Audit trail for credential.token_swap on the WS path —
+        // mirror the HTTP-emit hook above.
+        for s in swaps {
+            BACEventEmitter.shared.emitDetached(
+                profileID: profileID,
+                eventType: "credential.token_swap",
+                eventData: [
+                    "host": .string(host),
+                    "path": .string(path),
+                    "fake_preview": .string(s.fakePreview),
+                    "real_preview": .string(s.realPreview),
+                ])
+        }
 
         let record = TraceRecord(
             sessionID: session.sessionID,
@@ -528,11 +552,44 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // instead of "host is AI" approximation. Skip when the
         // response was truncated; running the conversation parser on
         // a partial SSE stream would misclassify.
-        let isConversation: Bool = (bodyStored && !responseTruncated)
+        //
+        // Side benefit: when the parse succeeds we hand the
+        // Conversation to the cloud event extractor so admins see
+        // structured `llm.request` / `tool.use` / `file.*` /
+        // `command.run` events even though the recording was for the
+        // local trace inspector. The extractor only emits when the
+        // Mac is enrolled with bromure.io.
+        let conversation: Conversation? = (bodyStored && !responseTruncated)
             ? ConversationParser.parse(host: host,
                                        requestBody: preSwapRequest,
-                                       responseBody: upstreamResponse) != nil
-            : false
+                                       responseBody: upstreamResponse)
+            : nil
+        let isConversation = (conversation != nil)
+        if let conv = conversation {
+            LLMEventExtractor.emit(
+                profileID: profileID,
+                host: host, path: path,
+                statusCode: statusCode,
+                latencyMs: latencyMs,
+                responseBody: upstreamResponse,
+                conversation: conv)
+        }
+        // Audit trail for credential.token_swap: every fake → real
+        // substitution that just left the VM. One event per swap so
+        // the admin UI can list "AI authenticated as <token name>
+        // against <host>". Previews only — real values stay in
+        // memory; the server would never see the secret bytes.
+        for s in swaps {
+            BACEventEmitter.shared.emitDetached(
+                profileID: profileID,
+                eventType: "credential.token_swap",
+                eventData: [
+                    "host": .string(host),
+                    "path": .string(path),
+                    "fake_preview": .string(s.fakePreview),
+                    "real_preview": .string(s.realPreview),
+                ])
+        }
 
         let record = TraceRecord(
             sessionID: session.sessionID,
