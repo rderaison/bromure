@@ -27,7 +27,7 @@ struct BromureAC: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac",
         abstract: "Run Codex / Claude Code in an isolated, persistent VM.",
-        subcommands: [Init.self, Run.self, Reset.self],
+        subcommands: [Init.self, Run.self, Reset.self, Enroll.self, Unenroll.self, Status.self],
         // No-arg invocation (double-click in Finder, `open` w/o args,
         // bare `bromure-ac` in a terminal) opens the GUI. CLI users who
         // want headless setup still have `bromure-ac init`.
@@ -216,6 +216,19 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     approvalsItem.target = delegate
     windowMenu.addItem(approvalsItem)
 
+    // Title flips between "Enroll…" and "bromure.io Enrollment…"
+    // depending on state — set the initial value here, and let
+    // `refreshEnrollmentMenuTitle()` keep it in sync after enroll/
+    // unenroll.
+    let enrollmentTitle = BACEnrollmentStore.load() == nil
+        ? L("Enroll in bromure.io…")
+        : L("bromure.io Enrollment…")
+    let enrollmentItem = NSMenuItem(title: enrollmentTitle,
+                                    action: #selector(ACAppDelegate.openEnrollmentAction(_:)),
+                                    keyEquivalent: "")
+    enrollmentItem.target = delegate
+    windowMenu.addItem(enrollmentItem)
+
     // Hand the menu to NSApp so AppKit auto-appends entries for every
     // titled, non-excluded window. Session windows already get
     // meaningful titles (claude / codex / vim / bash / etc.) so they
@@ -339,6 +352,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // updater wired in.
         if let menu = NSApp.mainMenu, let appMenu = menu.item(at: 0)?.submenu {
             installCheckForUpdatesMenuItem(into: appMenu)
+        }
+
+        // Start the bromure.io heartbeat right away if this Mac is
+        // enrolled. The first ping fires inside the background task
+        // (no extra latency on the launch path), and the periodic
+        // schedule keeps `last_seen_at` fresh on the admin UI. No-op
+        // when not enrolled.
+        BACHeartbeat.shared.start()
+        BACEnrollment.onStateChange = { [weak self] in
+            // Restart so a fresh enrollment kicks off heartbeats
+            // immediately, and an unenroll stops them.
+            BACHeartbeat.shared.stop()
+            if BACEnrollmentStore.load() != nil {
+                BACHeartbeat.shared.start()
+            }
+            self?.refreshEnrollmentMenuTitle()
         }
 
         // Force-init the MITM engine so the CA is ready before any
@@ -613,6 +642,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             traceInspectorWindow = nil
             return
         }
+        if win === enrollmentWindow {
+            enrollmentWindow = nil
+            return
+        }
         if let session = win as? TabbedSessionWindow {
             // Stop the single shared VM. All in-VM kittys die with it.
             // The profile's `closeAction` (resolved in windowShouldClose
@@ -811,6 +844,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// first-time setup, but proactive.
     private var traceInspectorWindow: NSWindow?
     private var credentialApprovalsWindow: NSWindow?
+    private var enrollmentWindow: NSWindow?
 
     /// Wired to the "Trace Inspector…" menu item (⇧⌘I).
     /// Opens the inspector with no profile pre-filter.
@@ -845,6 +879,63 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             onClose: { [weak self] in self?.credentialApprovalsWindow = nil }))
         win.makeKeyAndOrderFront(nil)
         credentialApprovalsWindow = win
+    }
+
+    /// Window menu → "Enroll in bromure.io…" / "bromure.io Enrollment".
+    /// The same menu item swaps between two views depending on state:
+    /// the entry sheet when not enrolled, the status panel when
+    /// enrolled. Title is refreshed by `refreshEnrollmentMenuTitle()`
+    /// whenever state changes.
+    @objc func openEnrollmentAction(_ sender: Any?) {
+        if let win = enrollmentWindow {
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered, defer: false)
+        win.title = NSLocalizedString("bromure.io Enrollment", comment: "")
+        win.center()
+        win.delegate = self
+        win.isReleasedWhenClosed = false
+        win.contentView = makeEnrollmentContentView(in: win)
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        enrollmentWindow = win
+    }
+
+    private func makeEnrollmentContentView(in window: NSWindow) -> NSView {
+        if BACEnrollmentStore.load() == nil {
+            return NSHostingView(rootView: BACEnrollmentSheet { [weak self, weak window] _ in
+                window?.close()
+                self?.enrollmentWindow = nil
+                self?.refreshEnrollmentMenuTitle()
+            })
+        }
+        return NSHostingView(rootView: BACEnrollmentStatusView { [weak self, weak window] in
+            // After unenroll, swap the same window's content to the
+            // entry sheet rather than closing — the user almost
+            // certainly wanted to re-enroll against a different code
+            // or workspace.
+            guard let window else { return }
+            window.contentView = self?.makeEnrollmentContentView(in: window)
+            self?.refreshEnrollmentMenuTitle()
+        })
+    }
+
+    /// Update the menu item label so it reflects the current state
+    /// without the user having to open the window. Called from the
+    /// state-change callback set up in `applicationDidFinishLaunching`.
+    func refreshEnrollmentMenuTitle() {
+        guard let main = NSApp.mainMenu, let windowMenu = NSApp.windowsMenu else { return }
+        for item in windowMenu.items + (main.items.flatMap { $0.submenu?.items ?? [] }) {
+            guard item.action == #selector(openEnrollmentAction(_:)) else { continue }
+            item.title = BACEnrollmentStore.load() == nil
+                ? NSLocalizedString("Enroll in bromure.io…", comment: "")
+                : NSLocalizedString("bromure.io Enrollment…", comment: "")
+        }
     }
 
     /// Window menu → "Profile Manager". Brings the picker forward, or

@@ -16,17 +16,41 @@ public struct ManagedProfileClient {
         public let orgSlug: String
         public let userId: String
         public let userEmail: String
+        // The server stamps the install row with the app the enrollment
+        // code was issued for. Returned so the client can sanity-check
+        // it ended up where it expected ("agentic-coding" only).
+        public let app: String?
     }
 
     public func enroll(code: String, installPubkeyHex: String, deviceName: String) async throws -> EnrollResponse {
+        // Convenience overload preserves the original Bromure Web call
+        // shape (no `app`). Server defaults to 'web' when the field is
+        // absent on the wire.
+        return try await enroll(
+            code: code, installPubkeyHex: installPubkeyHex, deviceName: deviceName, app: nil,
+        )
+    }
+
+    public func enroll(
+        code: String,
+        installPubkeyHex: String,
+        deviceName: String,
+        app: String?,
+    ) async throws -> EnrollResponse {
         var req = URLRequest(url: serverURL.appendingPathComponent("v1/enroll"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "code": code,
             "installPubkey": installPubkeyHex,
             "deviceName": deviceName,
         ]
+        // Codes are app-scoped server-side; the redeeming client doesn't
+        // strictly need to send `app` because the token row already
+        // carries it. We pass it anyway so misuse (an admin minting a
+        // code for the wrong app) surfaces here as a server-side reject
+        // rather than silently producing the wrong install kind.
+        if let app { body["app"] = app }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, resp) = try await URLSession.shared.data(for: req)
         try Self.assertOK(resp, data)
@@ -162,11 +186,25 @@ public struct ManagedProfileClient {
     public func signCSR(
         installId: String, bearer: String, profileId: String, csrPem: String,
     ) async throws -> CertResponse {
+        try await signCSR(
+            installId: installId, bearer: bearer,
+            profileId: profileId as String?, csrPem: csrPem,
+        )
+    }
+
+    /// `profileId == nil` ⇒ sign with the workspace org CA (the path BAC
+    /// installs always use; AC has no managed-profile concept on the
+    /// server side). With a profileId, the server prefers that profile's
+    /// CA and falls back to the org CA only if the profile has none.
+    public func signCSR(
+        installId: String, bearer: String, profileId: String?, csrPem: String,
+    ) async throws -> CertResponse {
         var req = URLRequest(url: serverURL.appendingPathComponent("v1/installs/\(installId)/cert"))
         req.httpMethod = "POST"
         req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = ["profileId": profileId, "csrPem": csrPem]
+        var body: [String: Any] = ["csrPem": csrPem]
+        if let profileId { body["profileId"] = profileId }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, resp) = try await URLSession.shared.data(for: req)
         try Self.assertOK(resp, data)
