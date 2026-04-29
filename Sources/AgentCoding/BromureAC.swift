@@ -349,6 +349,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let engine = mitmEngine {
             FileHandle.standardError.write(Data(
                 "[mitm] engine ready; CA loaded from \(engine.ca.certificate.subject)\n".utf8))
+            // Compromise handler — fired by the swapper's AC-backed
+            // outbound scan whenever a fake token leaves the VM bound
+            // for a host outside the scope it was minted for. Hops to
+            // MainActor to pause the VM and present the alert.
+            engine.swapper.setCompromiseHandler { [weak self] event in
+                Task { @MainActor [weak self] in
+                    self?.handleCompromise(event)
+                }
+            }
         }
 
         let window = NSWindow(
@@ -953,9 +962,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func renderPicker() {
         guard let win = mainWindow else { return }
         let runningIDs = Set(profileWindows.keys)
+        // Cheap fs-stat per profile — the compromised badge is only
+        // present when the marker file is on disk; profile.json on
+        // its own can't tell us this.
+        let compromisedIDs = Set(profiles.lazy
+            .filter { SessionDisk.isCompromised(profile: $0, store: self.store) }
+            .map { $0.id })
         let view = ProfilePickerView(
             profiles: Binding(get: { self.profiles }, set: { self.profiles = $0 }),
             runningProfiles: runningIDs,
+            compromisedProfiles: compromisedIDs,
             onLaunch:        { self.launch($0) },
             onCreate:        { self.openEditorWindow(editing: nil) },
             onEdit:          { self.openEditorWindow(editing: $0) },
@@ -1282,6 +1298,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
+        // Compromised profiles refuse to boot until the user confirms
+        // a wipe of the disk + home (the parts the malware could have
+        // modified). Tokens, ssh material, and the rest of profile.json
+        // are kept — the user wants to keep the profile around. Shared
+        // folders are NOT touched (they live outside Bromure's storage
+        // and may legitimately hold the user's source); the alert
+        // surfaces this so the user knows where to look next.
+        if SessionDisk.isCompromised(profile: profile, store: store) {
+            if !confirmWipeAndProceed(profile: profile) {
+                return
+            }
+            // Fall through — disk + home are gone, flag is cleared,
+            // launch path now treats this like any first launch.
+        }
+
         // Drift check: if the base image has been rebuilt since this
         // profile's disk was cloned, prompt to reset.
         let currentBaseVersion = readCurrentBaseVersion()
@@ -1475,6 +1506,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             do {
                 try sandbox.prepare()
                 win.vmView.virtualMachine = sandbox.vm
+                // Investigation mode: the saved snapshot was taken with
+                // a NIC attached, but `prepare()` just built a config
+                // with no network device — VZ would reject `restore`
+                // for config drift. Boot fresh from the persisted disk
+                // (the home dir + filesystem state are intact) so the
+                // user can inspect on-disk artifacts offline.
                 if sandbox.hasSavedState {
                     do {
                         try await sandbox.restore()
@@ -1657,6 +1694,318 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let file = outbox.appendingPathComponent("cmd-\(UUID().uuidString).txt")
         try? (command + "\n").write(to: file, atomically: true, encoding: .utf8)
     }
+
+    /// Confirm + execute the wipe of a compromised profile. Returns
+    /// true if the user accepted and the wipe ran, false on cancel.
+    /// On true, the caller proceeds with the regular launch path —
+    /// the disk + home no longer exist, so it'll mint fresh ones.
+    @MainActor
+    private func confirmWipeAndProceed(profile: Profile) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        if let symbol = NSImage(
+            systemSymbolName: "exclamationmark.octagon.fill",
+            accessibilityDescription: "Compromised VM warning") {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 64, weight: .bold)
+                .applying(.init(paletteColors: [.systemRed]))
+            alert.icon = symbol.withSymbolConfiguration(cfg)
+        }
+        alert.messageText = String(
+            format: NSLocalizedString("⛔ “%@” is marked as compromised", comment: ""),
+            profile.name)
+        var info = NSLocalizedString(
+            "Bromure refused to boot this VM because the proxy detected an outbound credential leak in a previous session.",
+            comment: "")
+        info += "\n\n"
+        info += NSLocalizedString(
+            "To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and profile settings are preserved.",
+            comment: "")
+        // Surface the shared-folder warning. Listing the paths
+        // explicitly is cheap and makes "where do I look?" obvious.
+        let shares = profile.folderPaths
+        if !shares.isEmpty {
+            info += "\n\n"
+            info += NSLocalizedString(
+                "WARNING: shared folders are NOT wiped. Compromised packages or files may still be present in:",
+                comment: "")
+            info += "\n"
+            for path in shares {
+                info += "  • \(path)\n"
+            }
+            info += NSLocalizedString(
+                "Inspect those folders before launching anything that re-uses them.",
+                comment: "")
+        }
+        alert.informativeText = info
+        alert.addButton(withTitle: NSLocalizedString("Wipe and Launch", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        // Esc → Cancel. Don't let an enter-press auto-confirm a
+        // destructive wipe; remove the default keyEquivalent on the
+        // first button so the user has to click it explicitly.
+        alert.buttons.first?.keyEquivalent = ""
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+
+        let session = SessionDisk(
+            profile: profile, store: store,
+            baseDiskURL: imageManager.baseDiskURL)
+        session.wipeForCompromise()
+        // Re-render so the badge disappears immediately. (`launch`
+        // continues right after this, but the picker behind the
+        // session window will reflect the change once focus returns.)
+        renderPicker()
+        return true
+    }
+
+    /// True while a compromise alert is up on screen. The swap-time
+    /// detector can fire many times back-to-back (one per outbound
+    /// request the VM attempts); without this flag we'd stack alerts
+    /// behind each other instead of letting the user act once.
+    private var compromiseAlertActive: Bool = false
+
+    /// Handle a compromise event: pause the VM immediately so no further
+    /// outbound bytes flow, then present the alert. The user picks
+    /// Shutdown / Save for Investigation / Continue and we drive the
+    /// VM accordingly.
+    @MainActor
+    func handleCompromise(_ event: CompromiseEvent) {
+        if compromiseAlertActive { return }
+        guard let window = profileWindows[event.profileID],
+              let sandbox = window.sandbox,
+              let vm = sandbox.vm else { return }
+
+        compromiseAlertActive = true
+
+        // Pause now — synchronous from the user's perspective. If pause
+        // is unavailable (already paused or VM in error state) we just
+        // proceed: the proxy already wrote a 451 back to the guest, so
+        // the malicious request was blocked regardless.
+        Task { @MainActor in
+            defer { self.compromiseAlertActive = false }
+            if vm.canPause {
+                do { try await vm.pause() }
+                catch {
+                    FileHandle.standardError.write(Data(
+                        "[ac] compromise: pause failed (\(error))\n".utf8))
+                }
+            }
+            // Tint goes on AFTER pause so the user sees the
+            // last-rendered frame freeze and bloom red, not the
+            // tint flash before the framebuffer stops.
+            window.setSuspendedTint(true)
+
+            let action = self.presentCompromiseAlert(event: event,
+                                                      profileName: window.profile.name)
+            switch action {
+            case .shutdown:
+                // No export, but the disk + home are still presumed
+                // contaminated. Mark compromised; the next launch will
+                // refuse to boot until the user wipes.
+                sandbox.sessionDisk?.markCompromised()
+                sandbox.sessionDisk?.clearSavedState()
+                window.pendingCloseAction = .shutdown
+                vm.stop(completionHandler: { _ in })
+                window.close()
+
+            case .saveForInvestigation:
+                // Pick a destination folder, then bundle (1) the disk
+                // image, (2) a tar.gz of the per-profile home dir,
+                // (3) one tar.gz per shared folder. Whether the export
+                // succeeds or not, the profile gets the compromised
+                // mark — the user has already classified this VM as
+                // suspicious and shouldn't be allowed to launch it
+                // again without an explicit wipe.
+                if let dest = self.askForInvestigationDestination(profileName: window.profile.name),
+                   let session = sandbox.sessionDisk {
+                    do {
+                        try self.exportForInvestigation(
+                            session: session,
+                            destination: dest)
+                        FileHandle.standardError.write(Data(
+                            "[ac] investigation export complete → \(dest.path)\n".utf8))
+                    } catch {
+                        FileHandle.standardError.write(Data(
+                            "[ac] investigation export failed: \(error)\n".utf8))
+                        self.showError(error,
+                                       message: "Couldn't export the VM for investigation. The profile will still be marked compromised.")
+                    }
+                }
+                sandbox.sessionDisk?.markCompromised()
+                sandbox.sessionDisk?.clearSavedState()
+                window.pendingCloseAction = .shutdown
+                vm.stop(completionHandler: { _ in })
+                window.close()
+
+            case .continueAnyway:
+                // User accepted the risk. Resume the VM. The proxy
+                // already returned 451 for the leaking request — if
+                // the VM tries again, the detector fires again and
+                // the alert re-opens.
+                window.setSuspendedTint(false)
+                if vm.state == .paused {
+                    do { try await vm.resume() }
+                    catch {
+                        FileHandle.standardError.write(Data(
+                            "[ac] compromise: resume failed (\(error))\n".utf8))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Modal NSOpenPanel asking the user where to drop the
+    /// investigation bundle. Returns nil if the user cancels.
+    @MainActor
+    private func askForInvestigationDestination(profileName: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = NSLocalizedString("Save Investigation Here", comment: "")
+        panel.message = String(
+            format: NSLocalizedString(
+                "Choose a folder to receive the disk image, home archive, and shared-folder archives for “%@”.",
+                comment: ""),
+            profileName)
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let dir = panel.url else { return nil }
+        return dir
+    }
+
+    /// Copy the disk + tar-gzip the home dir + tar-gzip each shared
+    /// folder into `destination`. Throws on the first hard failure;
+    /// the caller surfaces the error and proceeds to mark compromised
+    /// regardless. Layout under the destination:
+    ///
+    ///   destination/
+    ///     disk.img
+    ///     home.tar.gz
+    ///     shares/
+    ///       <basename>.tar.gz   (one per profile.folderPaths entry)
+    ///
+    /// VM is paused on entry, so the disk + home are quiescent — a
+    /// straight file copy / tar is consistent with no extra locking.
+    private func exportForInvestigation(session: SessionDisk,
+                                          destination: URL) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        // 1. Disk image — straight copy. APFS clonefile would be ideal
+        //    when source + dest are on the same volume, but we don't
+        //    know the destination volume so the safe move is copyItem,
+        //    which uses clonefile under the hood when applicable.
+        let diskDst = destination.appendingPathComponent("disk.img")
+        if fm.fileExists(atPath: diskDst.path) {
+            try fm.removeItem(at: diskDst)
+        }
+        try fm.copyItem(at: session.diskURL, to: diskDst)
+
+        // 2. Home dir → home.tar.gz. Skip silently if the dir doesn't
+        //    exist (e.g. the user reset home recently and never relaunched).
+        let homeURL = session.homeDirectory
+        if fm.fileExists(atPath: homeURL.path) {
+            let homeDst = destination.appendingPathComponent("home.tar.gz")
+            try Self.tarGzip(source: homeURL, destination: homeDst)
+        }
+
+        // 3. Shared folders → shares/<basename>.tar.gz. Each one is the
+        //    user's project dir, so the tarball preserves that. We name
+        //    by the dedup'd basename `SessionDisk.SharedFolder.mountName`
+        //    — same names the user sees in the welcome banner.
+        let shares = session.sharedFolders
+        if !shares.isEmpty {
+            let sharesDir = destination.appendingPathComponent("shares")
+            try fm.createDirectory(at: sharesDir, withIntermediateDirectories: true)
+            for share in shares {
+                guard fm.fileExists(atPath: share.url.path) else { continue }
+                let archive = sharesDir.appendingPathComponent("\(share.mountName).tar.gz")
+                try Self.tarGzip(source: share.url, destination: archive)
+            }
+        }
+    }
+
+    /// Shell out to bsdtar (always present on macOS) to produce a
+    /// gzip-compressed tarball. We invoke `tar -C parent -czf out base`
+    /// so the archive contains a single root entry named after the
+    /// source — extracts cleanly into `<basename>/...` rather than
+    /// dumping its contents in the cwd.
+    private static func tarGzip(source: URL, destination: URL) throws {
+        let parent = source.deletingLastPathComponent()
+        let base = source.lastPathComponent
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        task.arguments = [
+            "-C", parent.path,
+            "-czf", destination.path,
+            base
+        ]
+        let errPipe = Pipe()
+        task.standardError = errPipe
+        try task.run()
+        task.waitUntilExit()
+        if task.terminationStatus != 0 {
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            let msg = String(data: errData, encoding: .utf8) ?? "tar failed (\(task.terminationStatus))"
+            throw NSError(domain: "BromureAC.Investigation", code: Int(task.terminationStatus),
+                          userInfo: [NSLocalizedDescriptionKey: "tar \(base): \(msg.trimmingCharacters(in: .whitespacesAndNewlines))"])
+        }
+    }
+
+    /// Modal alert. Big red banner + per-leak detail line. Returns
+    /// the user's chosen action.
+    @MainActor
+    private func presentCompromiseAlert(event: CompromiseEvent,
+                                         profileName: String) -> CompromiseAction {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        // NSAlert.critical paints a tiny yellow caution badge over the
+        // app icon by default, which doesn't read as "stop everything"
+        // at a glance. Replace the icon with a 64-pt red
+        // exclamationmark.octagon (the macOS "danger" symbol) so the
+        // alert visually screams the way the situation deserves.
+        if let symbol = NSImage(
+            systemSymbolName: "exclamationmark.octagon.fill",
+            accessibilityDescription: "VM compromise warning") {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 64, weight: .bold)
+                .applying(.init(paletteColors: [.systemRed]))
+            alert.icon = symbol.withSymbolConfiguration(cfg)
+        }
+        alert.messageText = String(
+            format: NSLocalizedString("⛔ VM “%@” has been compromised", comment: ""),
+            profileName)
+        var info = NSLocalizedString(
+            "Bromure detected an outbound attempt to leak a session credential to a host it was not minted for. The VM has been paused.",
+            comment: "") + "\n\n"
+        info += NSLocalizedString(
+            "Detected leaks:", comment: "") + "\n"
+        for leak in event.leaks {
+            info += "  • \(leak.fakeTokenPreview) (\(leak.credentialDisplayName))"
+            info += "  — expected \(leak.declaredHost), sent to \(leak.observedHost)\n"
+        }
+        info += "\n" + NSLocalizedString(
+            "Save for Investigation keeps the disk + RAM state and re-opens the VM with no network device, so you can inspect it offline.",
+            comment: "")
+        alert.informativeText = info
+        // Order: dismissive default first would let an enter-press hide
+        // the warning. Make Shut Down the default — it's the safest.
+        alert.addButton(withTitle: NSLocalizedString("Shut Down", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Save for Investigation", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
+        // Cmd-period / Esc maps to the third button (Continue) by
+        // default. Override so an accidental dismiss doesn't resume
+        // the compromised VM.
+        alert.buttons.last?.keyEquivalent = ""
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:  return .shutdown
+        case .alertSecondButtonReturn: return .saveForInvestigation
+        case .alertThirdButtonReturn:  return .continueAnyway
+        default:                        return .shutdown
+        }
+    }
+
+    enum CompromiseAction { case shutdown, saveForInvestigation, continueAnyway }
 
     /// Reboot dialog: soft (`sudo reboot` inside the guest) or hard
     /// (host-side `vm.stop()`). Both clear the saved RAM snapshot

@@ -80,6 +80,60 @@ public final class SessionDisk {
         fm.fileExists(atPath: savedStateURL.path)
     }
 
+    /// Marker file written when the proxy detected an outbound
+    /// credential leak from this profile's VM and the user picked
+    /// either "Shut Down" or "Save for Investigation". The next
+    /// launch refuses to boot until the user confirms a wipe — the
+    /// disk + home are presumed contaminated; only the profile's
+    /// declared tokens / config (which live in profile.json, NOT
+    /// here) are kept.
+    public var compromisedFlagURL: URL {
+        store.profileDirectory(for: profile).appendingPathComponent("compromised.flag")
+    }
+    public var isCompromised: Bool {
+        fm.fileExists(atPath: compromisedFlagURL.path)
+    }
+    public func markCompromised() {
+        let dir = compromisedFlagURL.deletingLastPathComponent()
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? Data().write(to: compromisedFlagURL, options: .atomic)
+    }
+    public func clearCompromised() {
+        try? fm.removeItem(at: compromisedFlagURL)
+    }
+
+    /// Static lookup used by the picker to badge profiles whose
+    /// per-profile dir holds a compromised flag — saves the picker
+    /// from having to construct a SessionDisk just to read one bit.
+    public static func isCompromised(profile: Profile, store: ProfileStore) -> Bool {
+        let url = store.profileDirectory(for: profile)
+            .appendingPathComponent("compromised.flag")
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    /// Wipe everything that could carry contamination from a
+    /// compromised session: the system disk, the persistent home,
+    /// the saved RAM snapshot, the tab state, the per-launch meta
+    /// share + outbox. Profile config (profile.json, MAC binding,
+    /// machine-identifier) is intentionally left alone — the user
+    /// keeps their tokens and ssh material so they can immediately
+    /// re-launch a fresh VM after the wipe.
+    ///
+    /// Shared folders (the user's project dirs) are NOT touched —
+    /// they live outside Bromure's storage and may legitimately
+    /// hold the user's source. The caller surfaces a warning about
+    /// this in the wipe-confirmation alert.
+    public func wipeForCompromise() {
+        let dir = store.profileDirectory(for: profile)
+        try? fm.removeItem(at: diskURL)
+        try? fm.removeItem(at: homeDirectory)
+        try? fm.removeItem(at: dir.appendingPathComponent("vm.state"))
+        try? fm.removeItem(at: dir.appendingPathComponent("tabs.json"))
+        try? fm.removeItem(at: dir.appendingPathComponent("meta-share"))
+        try? fm.removeItem(at: dir.appendingPathComponent("outbox"))
+        clearCompromised()
+    }
+
     /// Per-tab snapshot persisted alongside `vm.state` so the host
     /// can rebuild its tab bar with the same UUIDs the in-VM kittys
     /// were started under (`--class bromure-<UUID>`). Without this,

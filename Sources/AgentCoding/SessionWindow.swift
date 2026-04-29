@@ -55,6 +55,30 @@ final class TabbedSessionWindow: NSWindow {
     /// into this view because they all live in the same X session.
     let vmView: VZVirtualMachineView
 
+    /// Wraps `vmView` so we can toggle decorations (currently the
+    /// investigation-mode red frame and the suspended-VM tint) without
+    /// touching the VZ view's own layer — see the long comment in
+    /// `init` about why we don't poke VZVirtualMachineView's layer
+    /// directly.
+    private let vmContainer: NSView
+
+    /// Red translucent overlay sat on top of the VZ framebuffer while
+    /// the VM is paused for a compromise alert. Built once, hidden by
+    /// default; the compromise handler toggles its visibility.
+    private let suspendedTintView: NSView = {
+        let v = NSView()
+        v.wantsLayer = true
+        // Apple's systemRed in 35% alpha — visible enough that the
+        // user can't miss "the framebuffer is frozen and tinted",
+        // light enough that the underlying console output is still
+        // legible for forensics.
+        v.layer?.backgroundColor = NSColor.systemRed
+            .withAlphaComponent(0.35).cgColor
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.isHidden = true
+        return v
+    }()
+
     /// The single sandbox backing this whole window. Set by ACAppDelegate
     /// after the VM finishes starting; nil while booting.
     var sandbox: UbuntuSandboxVM?
@@ -91,6 +115,11 @@ final class TabbedSessionWindow: NSWindow {
         view.automaticallyReconfiguresDisplay = true
         self.vmView = view
 
+        // Container has to exist before super.init so the stored
+        // property is non-nil. The constraints + child view hookup
+        // happen after super.init below.
+        self.vmContainer = NSView()
+
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
@@ -103,16 +132,17 @@ final class TabbedSessionWindow: NSWindow {
         toolbarStyle = .unified
         model.accentHex = profile.color.hexInUI
 
-        // Wrap the VZ view in a plain NSView container. We apply the
-        // user's opacity to the *container's* layer, not the VZ view
-        // itself — touching VZVirtualMachineView's own wantsLayer /
-        // layer.opacity has been observed to crash AppKit's window
-        // transform animator (see the animationBehavior comment
-        // below). The container takes the layer alpha cleanly; the
-        // VZ framebuffer renders into the container at full opacity
-        // and inherits the alpha when composited. The titlebar paints
-        // separately via the window chrome and is unaffected.
-        let container = NSView()
+        // Wrap the VZ view in a plain NSView container (created above
+        // pre-super.init). We apply the user's opacity to the
+        // *container's* layer, not the VZ view itself — touching
+        // VZVirtualMachineView's own wantsLayer / layer.opacity has
+        // been observed to crash AppKit's window transform animator
+        // (see the animationBehavior comment below). The container
+        // takes the layer alpha cleanly; the VZ framebuffer renders
+        // into the container at full opacity and inherits the alpha
+        // when composited. The titlebar paints separately via the
+        // window chrome and is unaffected.
+        let container = vmContainer
         container.wantsLayer = true
         container.layer?.backgroundColor = .clear
         view.translatesAutoresizingMaskIntoConstraints = false
@@ -122,6 +152,18 @@ final class TabbedSessionWindow: NSWindow {
             view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        ])
+        // Tint overlay sits ABOVE the VZ view so it composites on top
+        // of whatever the framebuffer is showing. Hidden by default;
+        // the compromise handler reveals it the moment the VM is
+        // paused so the frozen frame visibly reads as "stopped, do
+        // not trust this".
+        container.addSubview(suspendedTintView)
+        NSLayoutConstraint.activate([
+            suspendedTintView.topAnchor.constraint(equalTo: container.topAnchor),
+            suspendedTintView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            suspendedTintView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            suspendedTintView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
         ])
         contentView = container
 
@@ -175,6 +217,14 @@ final class TabbedSessionWindow: NSWindow {
         bar.allowsUserCustomization = false
         bar.autosavesConfiguration = false
         self.toolbar = bar
+    }
+
+    /// Show / hide the red tint overlay on the framebuffer. Called
+    /// by the compromise handler around the pause + alert window so
+    /// the user sees the frame is frozen and tainted, not just
+    /// happens-to-be-still.
+    func setSuspendedTint(_ on: Bool) {
+        suspendedTintView.isHidden = !on
     }
 
     /// Called by ACAppDelegate when the in-VM agent reports the

@@ -53,6 +53,10 @@ struct ProfilePickerView: View {
     /// Profile IDs whose VM is currently running — shown as a green dot
     /// next to the row so the user knows which sessions are live.
     var runningProfiles: Set<Profile.ID>
+    /// Profile IDs flagged compromised by the MITM compromise detector.
+    /// Shown with a red exclamation badge; launching one prompts a
+    /// disk + home wipe before the VM will boot.
+    var compromisedProfiles: Set<Profile.ID>
     @State private var selectedID: Profile.ID?
 
     let onLaunch: (Profile) -> Void
@@ -92,6 +96,7 @@ struct ProfilePickerView: View {
                     ProfileRow(
                         profile: profile,
                         isRunning: runningProfiles.contains(profile.id),
+                        isCompromised: compromisedProfiles.contains(profile.id),
                         onEdit: { onEdit(profile) }
                     )
                     .tag(profile.id)
@@ -217,6 +222,7 @@ struct ProfilePickerView: View {
 private struct ProfileRow: View {
     let profile: Profile
     let isRunning: Bool
+    let isCompromised: Bool
     let onEdit: () -> Void
 
     var body: some View {
@@ -233,6 +239,12 @@ private struct ProfileRow: View {
                             .fill(.green)
                             .frame(width: 6, height: 6)
                             .help("Session is running")
+                    }
+                    if isCompromised {
+                        Image(systemName: "exclamationmark.octagon.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                            .help("Compromised — launching will prompt to wipe disk and home")
                     }
                 }
                 HStack(spacing: 4) {

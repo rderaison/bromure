@@ -87,6 +87,35 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // sees exactly which secrets escaped the swap pipeline.
         let leaks = swapper.detectLeaks(in: request, profileID: profileID)
 
+        // Aho-Corasick scan over headers + body for any fake token
+        // bound for a host outside the scope the fake was minted for.
+        // A fake should never appear on the wire to a third-party
+        // host: the VM only ever holds fakes, and the swap path
+        // strictly substitutes them on their designated domain. If
+        // one slips out elsewhere, the VM is exfiltrating — abort
+        // the upstream call and let the engine's compromise handler
+        // pause + alert.
+        let compromise = swapper.detectCompromise(
+            rawRequest: request, host: host, profileID: profileID)
+        if !compromise.isEmpty {
+            for c in compromise {
+                FileHandle.standardError.write(Data(
+                    "[mitm] COMPROMISE \(c.fakeTokenPreview) (declared \(c.declaredHost)) → \(c.observedHost)\n".utf8))
+            }
+            // Reply to the in-VM client with a plain 451; the agent
+            // sees a hard failure rather than a hung connection. We
+            // never forward a single byte to the destination host
+            // when a leak fires.
+            let body = "Bromure: outbound request blocked — leaked credential to non-designated host.\n"
+            var resp = "HTTP/1.1 451 Unavailable For Legal Reasons\r\n"
+            resp += "Content-Type: text/plain; charset=utf-8\r\n"
+            resp += "Content-Length: \(body.utf8.count)\r\n"
+            resp += "Connection: close\r\n\r\n"
+            resp += body
+            try? tls.write(Data(resp.utf8))
+            return
+        }
+
         // 5. Swap tokens. host param is the SNI name; entries that
         //    don't match are no-ops.
         let swap = await swapper.swap(rawRequest: request, host: host, profileID: profileID)
@@ -183,6 +212,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     SecIdentity (Kubernetes API server et al.) when the
         //     upstream challenges for a client cert.
         let session = upstreamSession(for: host)
+        // URLSession strong-refs its delegate until invalidated (per
+        // Apple's docs). Without this `defer`, every MITM connection
+        // leaks one URLSession + one ClientCertChallengeDelegate
+        // (which transitively retains the per-profile identity / CA /
+        // consent registries) for the rest of the process lifetime —
+        // visible as a steady RSS climb on long-running sessions.
+        // `finishTasksAndInvalidate` lets the in-flight request
+        // complete normally, then breaks the retain cycle.
+        defer { session.finishTasksAndInvalidate() }
         let upstreamResp = try await relayUpstream(rawRequest: toForward,
                                                    host: host, port: port,
                                                    session: session,

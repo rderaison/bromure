@@ -58,9 +58,21 @@ public struct TokenMap: Sendable {
 /// raw bytes (header section + body) to keep things zero-copy and
 /// preserve byte-for-byte semantics of unrelated headers.
 public final class TokenSwapper: @unchecked Sendable {
+    public typealias CompromiseHandler = @Sendable (CompromiseEvent) -> Void
+
     private var maps: [UUID: TokenMap] = [:]
+    /// One Aho-Corasick automaton per profile, rebuilt on `setMap`.
+    /// Used by `detectCompromise` to scan an outbound request for any
+    /// fake token in the map in O(n) — important because we scan both
+    /// headers AND body on every request and don't want to do
+    /// `entries.count` substring searches per call.
+    private var scanners: [UUID: AhoCorasick] = [:]
     private let lock = NSLock()
     private let consent: ConsentBroker
+    /// Single host-side hook the proxy fires when a fake token is
+    /// observed leaving the VM bound for a host outside its declared
+    /// scope. Set once by the engine wiring code.
+    private var compromiseHandler: CompromiseHandler?
 
     public init(consent: ConsentBroker) {
         self.consent = consent
@@ -70,13 +82,27 @@ public final class TokenSwapper: @unchecked Sendable {
     /// time a session launches (and on profile edit while running, if
     /// we ever wire that).
     public func setMap(_ map: TokenMap, for profileID: UUID) {
+        // Build the AC outside the critical section — scanner construction
+        // is O(total-pattern-length) and we don't want to block other
+        // proxy connections behind it.
+        let scanner = AhoCorasick(patterns: map.entries.map { Array($0.fake.utf8) })
         lock.lock(); defer { lock.unlock() }
         maps[profileID] = map
+        scanners[profileID] = scanner
     }
 
     public func clearMap(for profileID: UUID) {
         lock.lock(); defer { lock.unlock() }
         maps.removeValue(forKey: profileID)
+        scanners.removeValue(forKey: profileID)
+    }
+
+    /// Install the host-side compromise handler. Called by ACAppDelegate
+    /// once the engine is up; the handler's `Sendable` closure body
+    /// hops to MainActor to suspend the VM and present the alert.
+    public func setCompromiseHandler(_ handler: CompromiseHandler?) {
+        lock.lock(); defer { lock.unlock() }
+        self.compromiseHandler = handler
     }
 
     /// Snapshot of the current entries for a profile. Used by the
@@ -234,6 +260,67 @@ public final class TokenSwapper: @unchecked Sendable {
                     valuePreview: Self.preview(tok),
                     suspicion: .opaqueToken))
             }
+        }
+        return leaks
+    }
+
+    /// Scan the entire raw outgoing request (headers + body) for any
+    /// fake token in the profile's swap map. Returns one
+    /// `CompromiseLeak` per fake observed bound for a host outside
+    /// the scope the fake was minted for.
+    ///
+    /// A fake with an empty / nil host scope is "any host" by design
+    /// (manual entries the user didn't pin) — those can't leak and
+    /// are skipped here. Everything else has a designated domain; a
+    /// token landing on any other host is the signature of a VM that's
+    /// trying to exfiltrate credentials it shouldn't even know about.
+    ///
+    /// Side effect: when leaks are non-empty, the registered
+    /// `compromiseHandler` is fired synchronously with the event. The
+    /// proxy then aborts the upstream call so the malicious destination
+    /// never sees a single byte.
+    public func detectCompromise(rawRequest: Data,
+                                  host: String,
+                                  profileID: UUID) -> [CompromiseLeak] {
+        // Snapshot under lock so we don't hold it across the scan.
+        lock.lock()
+        let scanner = scanners[profileID]
+        let entries = maps[profileID]?.entries ?? []
+        let handler = compromiseHandler
+        lock.unlock()
+
+        guard let scanner, scanner.patternCount > 0, !entries.isEmpty else {
+            return []
+        }
+
+        let matches = scanner.scan(rawRequest)
+        if matches.isEmpty { return [] }
+
+        var leaks: [CompromiseLeak] = []
+        for idx in matches {
+            guard idx < entries.count else { continue }
+            let entry = entries[idx]
+            // No declared scope = "swap on any host" — by definition
+            // this fake isn't tied to a domain so leaving the VM is
+            // expected. Skip.
+            guard let scope = entry.host, !scope.isEmpty else { continue }
+            // The fake landed on the host it was scoped for — this is
+            // the swap path firing in normal operation, not exfil.
+            if Self.hostMatchesScope(host: host, scope: scope) { continue }
+            leaks.append(CompromiseLeak(
+                fakeTokenPreview: Self.preview(entry.fake),
+                credentialDisplayName: entry.consentDisplayName ?? "session token",
+                declaredHost: scope,
+                observedHost: host
+            ))
+        }
+
+        if !leaks.isEmpty, let handler {
+            handler(CompromiseEvent(
+                profileID: profileID,
+                observedHost: host,
+                leaks: leaks,
+                timestamp: Date()))
         }
         return leaks
     }

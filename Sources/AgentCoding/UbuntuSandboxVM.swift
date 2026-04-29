@@ -319,6 +319,22 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         state = .stopped
     }
 
+    /// Save the RAM state of an already-paused VM. Used by the
+    /// compromise handler, which pauses the VM the moment exfiltration
+    /// is detected and then asks the user what to do — by the time
+    /// "Save for Investigation" lands here, `canPause` is false because
+    /// we're already paused, so the regular `suspend()` would refuse.
+    @MainActor
+    public func saveAlreadyPausedState() async throws {
+        guard let vm = vm, let session = sessionDisk else {
+            throw UbuntuImageError.installerStoppedEarly
+        }
+        outboxPollTask?.cancel()
+        try? FileManager.default.removeItem(at: session.savedStateURL)
+        try await vm.saveMachineStateTo(url: session.savedStateURL)
+        state = .stopped
+    }
+
     /// VZVirtioSocketDevice for this VM. Exposed so the MITM engine
     /// can register listeners on it after start. nil before `prepare()`.
     public var socketDevice: VZVirtioSocketDevice? {
