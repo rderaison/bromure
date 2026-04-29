@@ -1980,16 +1980,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         info += NSLocalizedString(
             "Detected leaks:", comment: "") + "\n"
         for leak in event.leaks {
-            info += "  • \(leak.fakeTokenPreview) (\(leak.credentialDisplayName))"
-            info += "  — expected \(leak.declaredHost), sent to \(leak.observedHost)\n"
+            info += String(
+                format: NSLocalizedString(
+                    "  • %1$@ (%2$@) — expected %3$@, sent to %4$@\n",
+                    comment: "Compromise leak detail line: fake preview, credential name, expected host, observed host"),
+                leak.fakeTokenPreview,
+                leak.credentialDisplayName,
+                leak.declaredHost,
+                leak.observedHost)
         }
         info += "\n" + NSLocalizedString(
-            "Save for Investigation keeps the disk + RAM state and re-opens the VM with no network device, so you can inspect it offline.",
+            "Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the profile is marked compromised.",
             comment: "")
         alert.informativeText = info
         // Order: dismissive default first would let an enter-press hide
         // the warning. Make Shut Down the default — it's the safest.
-        alert.addButton(withTitle: NSLocalizedString("Shut Down", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Shut down", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Save for Investigation", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
         // Cmd-period / Esc maps to the third button (Continue) by

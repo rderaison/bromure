@@ -192,3 +192,21 @@
 "Value" = "Valeur";
 "Remove this variable" = "Supprimer cette variable";
 "Name must match `[A-Za-z_][A-Za-z0-9_]*` to be exported." = "Le nom doit correspondre à `[A-Za-z_][A-Za-z0-9_]*` pour être exporté.";
+
+/* Compromise detection — alert + wipe-on-launch flow */
+"⛔ VM “%@” has been compromised" = "⛔ La VM « %@ » est compromise";
+"Bromure detected an outbound attempt to leak a session credential to a host it was not minted for. The VM has been paused." = "Bromure a détecté une tentative d’exfiltration d’un identifiant de session vers un hôte pour lequel il n’a pas été émis. La VM a été mise en pause.";
+"Detected leaks:" = "Fuites détectées :";
+"  • %1$@ (%2$@) — expected %3$@, sent to %4$@\n" = "  • %1$@ (%2$@) — attendu %3$@, envoyé à %4$@\n";
+"Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the profile is marked compromised." = "« Sauvegarder pour analyse » vous permet de choisir un dossier dans lequel Bromure copiera l’image disque et des archives gzip du répertoire personnel et des dossiers partagés. L’état de la mémoire vive (RAM) est ignoré. La VM est ensuite arrêtée et le profil est marqué comme compromis.";
+"Save for Investigation" = "Sauvegarder pour analyse";
+"Continue" = "Continuer";
+"Save Investigation Here" = "Sauvegarder l’analyse ici";
+"Choose a folder to receive the disk image, home archive, and shared-folder archives for “%@”." = "Choisissez un dossier pour recevoir l’image disque, l’archive du répertoire personnel et les archives des dossiers partagés pour « %@ ».";
+"⛔ “%@” is marked as compromised" = "⛔ « %@ » est marqué comme compromis";
+"Bromure refused to boot this VM because the proxy detected an outbound credential leak in a previous session." = "Bromure refuse de démarrer cette VM : le proxy a détecté une fuite d’identifiants en sortie lors d’une session précédente.";
+"To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and profile settings are preserved." = "Pour continuer, l’image disque et le répertoire personnel persistant de la VM doivent être effacés. Vos jetons, clés SSH et paramètres de profil sont conservés.";
+"WARNING: shared folders are NOT wiped. Compromised packages or files may still be present in:" = "ATTENTION : les dossiers partagés ne sont PAS effacés. Des paquets ou fichiers compromis peuvent encore s’y trouver :";
+"Inspect those folders before launching anything that re-uses them." = "Inspectez ces dossiers avant de lancer quoi que ce soit qui les réutilise.";
+"Wipe and Launch" = "Effacer et lancer";
+"Compromised — launching will prompt to wipe disk and home" = "Compromis — un lancement demandera l’effacement du disque et du répertoire personnel";

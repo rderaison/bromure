@@ -192,3 +192,21 @@
 "Value" = "值";
 "Remove this variable" = "移除此變數";
 "Name must match `[A-Za-z_][A-Za-z0-9_]*` to be exported." = "名稱必須符合 `[A-Za-z_][A-Za-z0-9_]*` 才會被匯出。";
+
+/* Compromise detection — alert + wipe-on-launch flow */
+"⛔ VM “%@” has been compromised" = "⛔ 虛擬機「%@」已遭入侵";
+"Bromure detected an outbound attempt to leak a session credential to a host it was not minted for. The VM has been paused." = "Bromure 偵測到向非授權主機外傳工作階段憑證的嘗試。虛擬機已暫停。";
+"Detected leaks:" = "偵測到的洩漏:";
+"  • %1$@ (%2$@) — expected %3$@, sent to %4$@\n" = "  • %1$@(%2$@)— 應為 %3$@,送至 %4$@\n";
+"Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the profile is marked compromised." = "「儲存以供調查」可讓您選擇一個資料夾,Bromure 會將磁碟映像檔以及家目錄與共享資料夾的 gzip 封存檔複製到其中。虛擬機的記憶體狀態會被丟棄。接著虛擬機會關機,該設定檔會被標記為已入侵。";
+"Save for Investigation" = "儲存以供調查";
+"Continue" = "繼續";
+"Save Investigation Here" = "在此儲存調查內容";
+"Choose a folder to receive the disk image, home archive, and shared-folder archives for “%@”." = "請選擇一個資料夾以接收「%@」的磁碟映像檔、家目錄封存檔以及共享資料夾封存檔。";
+"⛔ “%@” is marked as compromised" = "⛔「%@」已被標記為已入侵";
+"Bromure refused to boot this VM because the proxy detected an outbound credential leak in a previous session." = "Bromure 拒絕啟動此虛擬機,因為代理伺服器在先前的工作階段中偵測到外傳憑證洩漏。";
+"To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and profile settings are preserved." = "若要繼續,必須清除虛擬機的磁碟映像檔與持續性家目錄。您的權杖、SSH 金鑰與設定檔內容會保留。";
+"WARNING: shared folders are NOT wiped. Compromised packages or files may still be present in:" = "警告:共享資料夾不會被清除。受入侵的套件或檔案可能仍位於:";
+"Inspect those folders before launching anything that re-uses them." = "在啟動任何會重複使用這些資料夾的程式之前,請先加以檢查。";
+"Wipe and Launch" = "清除並啟動";
+"Compromised — launching will prompt to wipe disk and home" = "已入侵 — 啟動時會提示清除磁碟與家目錄";

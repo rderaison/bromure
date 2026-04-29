@@ -192,3 +192,21 @@
 "Value" = "Valor";
 "Remove this variable" = "Remover esta variável";
 "Name must match `[A-Za-z_][A-Za-z0-9_]*` to be exported." = "O nome precisa coincidir com `[A-Za-z_][A-Za-z0-9_]*` para ser exportado.";
+
+/* Compromise detection — alert + wipe-on-launch flow */
+"⛔ VM “%@” has been compromised" = "⛔ A VM “%@” foi comprometida";
+"Bromure detected an outbound attempt to leak a session credential to a host it was not minted for. The VM has been paused." = "O Bromure detectou uma tentativa de saída para vazar uma credencial de sessão para um host para o qual ela não foi emitida. A VM foi pausada.";
+"Detected leaks:" = "Vazamentos detectados:";
+"  • %1$@ (%2$@) — expected %3$@, sent to %4$@\n" = "  • %1$@ (%2$@) — esperado %3$@, enviado para %4$@\n";
+"Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the profile is marked compromised." = "“Salvar para investigação” permite escolher uma pasta onde o Bromure copiará a imagem do disco e arquivos gzip do diretório pessoal e das pastas compartilhadas. O estado da RAM da VM é descartado. A VM é então desligada e o perfil é marcado como comprometido.";
+"Save for Investigation" = "Salvar para investigação";
+"Continue" = "Continuar";
+"Save Investigation Here" = "Salvar investigação aqui";
+"Choose a folder to receive the disk image, home archive, and shared-folder archives for “%@”." = "Escolha uma pasta para receber a imagem do disco, o arquivo do diretório pessoal e os arquivos das pastas compartilhadas de “%@”.";
+"⛔ “%@” is marked as compromised" = "⛔ “%@” está marcado como comprometido";
+"Bromure refused to boot this VM because the proxy detected an outbound credential leak in a previous session." = "O Bromure se recusou a inicializar esta VM porque o proxy detectou um vazamento de credencial de saída em uma sessão anterior.";
+"To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and profile settings are preserved." = "Para continuar, a imagem do disco da VM e a pasta pessoal persistente precisam ser apagadas. Seus tokens, chaves SSH e configurações de perfil são preservados.";
+"WARNING: shared folders are NOT wiped. Compromised packages or files may still be present in:" = "AVISO: as pastas compartilhadas NÃO são apagadas. Pacotes ou arquivos comprometidos ainda podem estar presentes em:";
+"Inspect those folders before launching anything that re-uses them." = "Inspecione essas pastas antes de iniciar qualquer coisa que as reutilize.";
+"Wipe and Launch" = "Apagar e iniciar";
+"Compromised — launching will prompt to wipe disk and home" = "Comprometido — ao iniciar, será solicitado apagar o disco e a pasta pessoal";
