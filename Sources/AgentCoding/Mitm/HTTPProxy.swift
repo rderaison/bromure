@@ -183,6 +183,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
             await emitTrace(host: host, port: port,
                             preSwapRequest: request,
                             upstreamResponse: response,
+                            upstreamWireBytes: response.count,
+                            responseTruncated: false,
                             swaps: swap.swaps,
                             leaks: leaks,
                             latencyMs: elapsed)
@@ -195,6 +197,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
             await emitTrace(host: host, port: port,
                             preSwapRequest: request,
                             upstreamResponse: response,
+                            upstreamWireBytes: response.count,
+                            responseTruncated: false,
                             swaps: swap.swaps,
                             leaks: leaks,
                             latencyMs: elapsed)
@@ -221,10 +225,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // `finishTasksAndInvalidate` lets the in-flight request
         // complete normally, then breaks the retain cycle.
         defer { session.finishTasksAndInvalidate() }
-        let upstreamResp = try await relayUpstream(rawRequest: toForward,
-                                                   host: host, port: port,
-                                                   session: session,
-                                                   tls: tls)
+        let relay = try await relayUpstream(rawRequest: toForward,
+                                            host: host, port: port,
+                                            session: session,
+                                            tls: tls)
 
         // 7. Trace. Build a TraceRecord from what we observed and
         //    hand it to the engine's TraceStore. Body capture is
@@ -232,7 +236,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let elapsed = Date().timeIntervalSince(t0) * 1000
         await emitTrace(host: host, port: port,
                         preSwapRequest: request,
-                        upstreamResponse: upstreamResp,
+                        upstreamResponse: relay.buffer,
+                        upstreamWireBytes: relay.wireBytes,
+                        responseTruncated: relay.truncatedForTrace,
                         swaps: swap.swaps,
                         leaks: leaks,
                         latencyMs: elapsed)
@@ -494,6 +500,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
     private func emitTrace(host: String, port: Int,
                            preSwapRequest: Data,
                            upstreamResponse: Data,
+                           upstreamWireBytes: Int,
+                           responseTruncated: Bool,
                            swaps: [SwapRecord],
                            leaks: [LeakEntry],
                            latencyMs: Double) async {
@@ -505,14 +513,22 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let statusCode = Self.parseStatusCode(upstreamResponse)
 
         let captureBody = session.level.capturesBodyForHost(host)
-        let bodyStored = captureBody && (!preSwapRequest.isEmpty || !upstreamResponse.isEmpty)
+        // Truncated responses are deliberately not stored as bodies —
+        // a partial dialogue would mislead the inspector. The trace
+        // record still carries accurate `responseBytes`, just no body
+        // file for the response side.
+        let canStoreResponseBody = captureBody && !responseTruncated
+        let bodyStored = (captureBody && !preSwapRequest.isEmpty)
+            || (canStoreResponseBody && !upstreamResponse.isEmpty)
 
         // Cheap eager parse — we still have the bodies in memory at
         // this point (no decrypt round-trip) and the parser short-
         // circuits fast on non-AI hosts. Lets the inspector's
         // "Conversations only" filter be a true boolean check
-        // instead of "host is AI" approximation.
-        let isConversation: Bool = bodyStored
+        // instead of "host is AI" approximation. Skip when the
+        // response was truncated; running the conversation parser on
+        // a partial SSE stream would misclassify.
+        let isConversation: Bool = (bodyStored && !responseTruncated)
             ? ConversationParser.parse(host: host,
                                        requestBody: preSwapRequest,
                                        responseBody: upstreamResponse) != nil
@@ -525,7 +541,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             method: method, path: path,
             statusCode: statusCode,
             requestBytes: preSwapRequest.count,
-            responseBytes: upstreamResponse.count,
+            responseBytes: upstreamWireBytes,
             latencyMs: latencyMs,
             swaps: swaps.map { SwapEntry(header: "Authorization/x-api-key",
                                          fakePreview: $0.fakePreview,
@@ -550,7 +566,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let req = captureBody
             ? Self.bodyForTrace(preSwapRequest).map { Self.redactSensitiveHeaders($0) }
             : nil
-        let res = captureBody
+        let res = canStoreResponseBody
             ? Self.bodyForTrace(upstreamResponse).map { Self.redactSensitiveHeaders($0) }
             : nil
         await MainActor.run {
@@ -879,7 +895,7 @@ private func writeAll(fd: Int32, bytes: [UInt8]) throws {
 @available(macOS, deprecated: 10.15, message: "uses TLSServerStream which wraps SecureTransport")
 private func relayUpstream(rawRequest: Data, host: String, port: Int,
                            session: URLSession,
-                           tls: TLSServerStream) async throws -> Data {
+                           tls: TLSServerStream) async throws -> RelayResponse {
     guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)) else {
         throw MitmError.malformedHTTPRequest
     }
@@ -970,7 +986,17 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         "upgrade", "proxy-authenticate", "proxy-authorization",
     ]
 
+    // Hard cap on what we keep in memory for the trace record. Set
+    // slightly above `bodyForTrace`'s 5 MB perRecordCap so any
+    // response we'd actually save fits, but a streaming SSE/Bedrock
+    // dialogue (think a multi-hour Claude conversation) doesn't
+    // accumulate in RAM only to be discarded by `bodyForTrace` later.
+    // Without this cap, a 1 TB streamed response would buffer 1 TB
+    // here just to hand it to a function that throws it away.
+    let bodyBufferCap = 8 * 1024 * 1024
     var responseBuffer = Data()
+    var totalWireBytes = 0
+    var truncatedForTrace = false
     for try await event in events {
         switch event {
         case .head(let http):
@@ -986,13 +1012,43 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
             head += "\r\n"
             let headData = Data(head.utf8)
             try tls.write(headData)
+            totalWireBytes += headData.count
+            // The head always fits — bound above by RFC's practical
+            // header limits, well under any sensible cap.
             responseBuffer.append(headData)
         case .chunk(let chunk):
             try tls.write(chunk)
-            responseBuffer.append(chunk)
+            totalWireBytes += chunk.count
+            if responseBuffer.count + chunk.count <= bodyBufferCap {
+                responseBuffer.append(chunk)
+            } else if responseBuffer.count < bodyBufferCap {
+                // Last partial chunk before the cap — keep just enough
+                // to fill the buffer and flag truncation so the trace
+                // path doesn't save a partial body that would mislead
+                // the inspector.
+                let take = bodyBufferCap - responseBuffer.count
+                responseBuffer.append(chunk.prefix(take))
+                truncatedForTrace = true
+            } else {
+                truncatedForTrace = true
+            }
         }
     }
-    return responseBuffer
+    return RelayResponse(buffer: responseBuffer,
+                         wireBytes: totalWireBytes,
+                         truncatedForTrace: truncatedForTrace)
+}
+
+/// Tuple-ish return for `relayUpstream`. Splits "what we kept for
+/// the trace record" from "what the wire actually saw" because
+/// large streaming responses are now capped in memory but their
+/// wire byte count must still be accurate in the trace.
+struct RelayResponse {
+    let buffer: Data
+    let wireBytes: Int
+    /// True when the response exceeded the in-memory cap. The trace
+    /// path uses this to refuse to save a partial body.
+    let truncatedForTrace: Bool
 }
 
 /// URLSessionDataDelegate that funnels the response head, each body
