@@ -702,6 +702,8 @@ public final class SessionDisk {
                 s += "• `\(spec.tool.rawValue)` — API key already in env.\n"
             case .subscription:
                 s += "• `\(spec.tool.rawValue) login` once, then `\(spec.tool.rawValue)`.\n"
+            case .bedrock:
+                s += "• `\(spec.tool.rawValue)` — using AWS Bedrock credentials.\n"
             }
         }
         return s

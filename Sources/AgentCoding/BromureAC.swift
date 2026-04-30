@@ -284,6 +284,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// otherwise the Task keeps pushing model updates after the window
     /// is gone and the autorelease pool over-releases on the next tick.
     private var installTask: Task<Void, Never>?
+    private var ssoRefreshTasks: [UUID: Task<Void, Never>] = [:]
 
     /// Process-lifetime MITM engine. One instance per app run, holds
     /// the CA + per-profile token swap maps + ssh-agent keystore. Lazy
@@ -838,6 +839,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             for key in loadAgentKeys(for: session.profile) {
                 removeKeyFromHostAgent(publicKey: key.publicKey)
             }
+            ssoRefreshTasks[session.profile.id]?.cancel()
+            ssoRefreshTasks.removeValue(forKey: session.profile.id)
             mitmEngine?.clearSessionTrace(for: session.profile.id)
             mitmEngine?.unregister(profileID: session.profile.id)
             SubscriptionTokenCoordinator.shared.unregister(profileID: session.profile.id)
@@ -1944,7 +1947,55 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // re-signs each AWS request with the real material so the
             // secret never lives in the VM at all. setCredentials clears
             // the slot when the profile has no usable AWS creds.
-            engine.awsCreds.setCredentials(profile.awsCredentials, for: profile.id)
+            if profile.awsCredentials.authMode == .ssoProfile
+                || profile.authMode == .bedrock {
+                let profileID = profile.id
+                let ssoProfileName = profile.awsCredentials.ssoProfileName
+                let awsCreds = profile.awsCredentials
+                FileHandle.standardError.write(Data(
+                    "[sso] resolving credentials for SSO profile '\(ssoProfileName)'\n".utf8))
+                Task { [weak engine, weak self] in
+                    guard let engine else { return }
+                    do {
+                        let resolved = try await AWSSSOResolver.resolve(
+                            profileName: ssoProfileName,
+                            progress: { msg in
+                                FileHandle.standardError.write(Data("[sso] \(msg)\n".utf8))
+                            }
+                        )
+                        var creds = awsCreds
+                        creds.accessKeyID = resolved.accessKeyID
+                        creds.secretAccessKey = resolved.secretAccessKey
+                        creds.sessionToken = resolved.sessionToken
+                        if creds.region.isEmpty { creds.region = resolved.region }
+                        engine.awsCreds.setCredentials(creds, for: profileID)
+
+                        self?.ssoRefreshTasks[profileID] = AWSSSOResolver.startRefreshLoop(
+                            profileName: ssoProfileName,
+                            initialExpiration: resolved.expiration,
+                            onRefresh: { [weak engine] newCreds in
+                                var updated = awsCreds
+                                updated.accessKeyID = newCreds.accessKeyID
+                                updated.secretAccessKey = newCreds.secretAccessKey
+                                updated.sessionToken = newCreds.sessionToken
+                                engine?.awsCreds.setCredentials(updated, for: profileID)
+                                FileHandle.standardError.write(Data(
+                                    "[sso] refreshed credentials for '\(ssoProfileName)'\n".utf8))
+                            },
+                            onError: { error in
+                                FileHandle.standardError.write(Data(
+                                    "[sso] refresh failed: \(error.localizedDescription)\n".utf8))
+                            }
+                        )
+                    } catch {
+                        FileHandle.standardError.write(Data(
+                            "[sso] credential resolution failed: \(error.localizedDescription)\n".utf8))
+                        engine.awsCreds.setCredentials(awsCreds, for: profileID)
+                    }
+                }
+            } else {
+                engine.awsCreds.setCredentials(profile.awsCredentials, for: profile.id)
+            }
             FileHandle.standardError.write(Data(
                 "[mitm] session launch for '\(profile.name)': loaded \(agentKeys.count) agent key(s)\n".utf8))
             // Mirror the per-profile key into our private bromure
