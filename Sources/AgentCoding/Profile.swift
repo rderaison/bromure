@@ -2809,14 +2809,20 @@ public final class ProfileStore {
         fi
     }
 
-    # Title reporter: every 1.5s, walk every running kitty (matched by
-    # its `--class bromure-<UUID>` argument), find the foreground
-    # process of its child shell's controlling tty, write
-    # /mnt/bromure-outbox/title-<UUID>.txt with that process name.
-    # The host's outbox poller uses these to drive the tab labels —
-    # claude / codex / vim / bash / etc. instead of "Session N".
+    # Title reporter + roster: every 1.5s, walk every running kitty
+    # (matched by its `--class bromure-<UUID>` argument). For each one
+    # write /mnt/bromure-outbox/title-<UUID>.txt with the foreground
+    # process name (drives tab labels). After the sweep, atomically
+    # rewrite /mnt/bromure-outbox/tabs-alive.txt with the full UUID
+    # roster — the host uses this to reconcile its tab pills against
+    # actually-running kittys, so a pill whose kitty died without a
+    # closed-* event (or never spawned at all) gets reaped instead of
+    # hanging around with nothing behind it. The empty-roster case is
+    # meaningful: it tells the host "no kittys are running" and lets
+    # any orphaned pill be reaped.
     title_loop() {
         while :; do
+            roster=""
             for entry in /proc/*/cmdline; do
                 [ -r "$entry" ] || continue
                 cmd=$(tr '\0' ' ' < "$entry" 2>/dev/null)
@@ -2828,6 +2834,7 @@ public final class ProfileStore {
                 # Pull the UUID out of "--class bromure-<uuid>".
                 uuid=$(printf '%s' "$cmd" | sed -n 's/.*--class bromure-\([^ ]*\).*/\1/p')
                 [ -z "$uuid" ] && continue
+                roster="${roster}${uuid}"$'\n'
                 # Kitty's child = the shell. Then the shell's tty
                 # foreground PG = whatever the user is running.
                 shell=$(pgrep -P "$pid" 2>/dev/null | head -1)
@@ -2838,6 +2845,11 @@ public final class ProfileStore {
                 [ -z "$title" ] && continue
                 printf '%s\n' "$title" > "$INBOX/title-${uuid}.txt" 2>/dev/null
             done
+            # Atomic rewrite via tmp + rename — virtiofs delivers the
+            # rename as a single event, so the host never reads a half-
+            # written roster.
+            printf '%s' "$roster" > "$INBOX/.tabs-alive.tmp" 2>/dev/null \
+                && mv -f "$INBOX/.tabs-alive.tmp" "$INBOX/tabs-alive.txt" 2>/dev/null
             sleep 1.5
         done
     }

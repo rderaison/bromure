@@ -2627,6 +2627,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sandbox.onTabClosed = { [weak win] id in
             Task { @MainActor in win?.handleTabClosedFromGuest(id: id) }
         }
+        sandbox.onTabRoster = { [weak win] alive in
+            Task { @MainActor in win?.reconcileTabRoster(alive: alive) }
+        }
         sandbox.onTabTitleUpdate = { [weak win] id, title in
             Task { @MainActor in win?.handleTabTitleUpdate(id: id, title: title) }
         }
