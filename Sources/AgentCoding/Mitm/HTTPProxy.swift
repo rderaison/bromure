@@ -292,38 +292,47 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // complete normally, then breaks the retain cycle.
         defer { session.finishTasksAndInvalidate() }
 
-        // OAuth rotation: when this is a refresh request on a token
-        // endpoint we know about, hold the response (don't stream) so
-        // the OAuthRotationRewriter can replace the new access /
-        // refresh / id tokens in the body before the VM sees them.
-        // Streaming would be too late — the SDK would write the real
-        // values to disk before our rewrite could fire.
-        let (_, refreshPath) = Self.parseRequestLine(toForward)
-        let oauthProvider = OAuthRotationRewriter.provider(
-            for: host, path: refreshPath)
-        let relay: RelayResponse
-        if let provider = oauthProvider {
-            let rotatedHook = self.oauthRotated
-            relay = try await relayUpstreamBuffered(
-                rawRequest: toForward,
-                host: host, port: port,
-                session: session,
-                tls: tls,
-                rewrite: { [profileID, swapper] raw in
-                    let result = OAuthRotationRewriter.rewrite(
-                        raw: raw, provider: provider,
-                        profileID: profileID, swapper: swapper)
-                    if let newReals = result.newReals {
-                        rotatedHook?(profileID, provider, newReals)
-                    }
-                    return result.bytes
-                })
-        } else {
-            relay = try await relayUpstream(rawRequest: toForward,
+        // TEMPORARILY DISABLED: OAuth rotation rewrite for Claude /
+        // Codex. The rewriter replaces the new access/refresh/id
+        // tokens in the response body with fakes, but in practice the
+        // refresh-token rotation isn't being mirrored back into the
+        // VM's stored fake reliably, leaving the VM with a stale fake
+        // that fails the next refresh. Until that's fixed we let the
+        // upstream response stream straight through so the VM receives
+        // the real rotated tokens (security regression accepted for
+        // now in exchange for the CLI staying logged in). Re-enable by
+        // uncommenting the if/else below.
+        //
+        // let (_, refreshPath) = Self.parseRequestLine(toForward)
+        // let oauthProvider = OAuthRotationRewriter.provider(
+        //     for: host, path: refreshPath)
+        // let relay: RelayResponse
+        // if let provider = oauthProvider {
+        //     let rotatedHook = self.oauthRotated
+        //     relay = try await relayUpstreamBuffered(
+        //         rawRequest: toForward,
+        //         host: host, port: port,
+        //         session: session,
+        //         tls: tls,
+        //         rewrite: { [profileID, swapper] raw in
+        //             let result = OAuthRotationRewriter.rewrite(
+        //                 raw: raw, provider: provider,
+        //                 profileID: profileID, swapper: swapper)
+        //             if let newReals = result.newReals {
+        //                 rotatedHook?(profileID, provider, newReals)
+        //             }
+        //             return result.bytes
+        //         })
+        // } else {
+        //     relay = try await relayUpstream(rawRequest: toForward,
+        //                                     host: host, port: port,
+        //                                     session: session,
+        //                                     tls: tls)
+        // }
+        let relay = try await relayUpstream(rawRequest: toForward,
                                             host: host, port: port,
                                             session: session,
                                             tls: tls)
-        }
 
         // 7. Trace. Build a TraceRecord from what we observed and
         //    hand it to the engine's TraceStore. Body capture is

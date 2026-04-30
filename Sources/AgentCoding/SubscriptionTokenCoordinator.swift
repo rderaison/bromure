@@ -77,17 +77,23 @@ public final class SubscriptionTokenCoordinator {
                              bridge: SubscriptionTokenBridge,
                              store: ProfileStore,
                              swapper: TokenSwapper) async {
-        // Wait briefly for the bridge to connect (in-VM agent
-        // launches a couple of seconds after VM boot). Bail if the
-        // VM already has real credentials — the user opted into a
-        // separate login that we shouldn't overwrite.
-        for _ in 0..<10 {
+        // Wait for the bridge to connect. The in-VM agent is started
+        // by xinitrc, which itself runs after getty starts the X
+        // session — on a fresh boot that's easily 15–30 s after
+        // sandbox.start() returns. Resumed snapshots are quicker
+        // (~2 s) but the first launch of a new profile is always a
+        // fresh boot, which is exactly when auto-seed needs to fire.
+        // 60 s covers a slow first boot with margin; if the agent
+        // never comes up the user can re-launch and we'll try again.
+        // Bail if the VM already has real credentials — the user
+        // opted into a separate login that we shouldn't overwrite.
+        for _ in 0..<120 {
             if bridge.isConnected { break }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
         guard bridge.isConnected else {
             FileHandle.standardError.write(Data(
-                "[subscription-swap] auto-seed skipped (bridge not connected)\n".utf8))
+                "[subscription-swap] auto-seed Claude timed out after 60s waiting for in-VM agent\n".utf8))
             return
         }
         do {
@@ -108,13 +114,18 @@ public final class SubscriptionTokenCoordinator {
                 real: stored.refreshToken,
                 salt: saltRefresh,
                 targetLength: stored.refreshToken.count)
+            // `acceptSiblings: true` so the swap also fires on Anthropic
+            // first-party subdomains like `mcp-tools.anthropic.com` —
+            // see TokenMap.Entry.acceptSiblings for the rationale.
             swapper.appendEntries([
                 .init(fake: fakeAccess, real: stored.accessToken,
                       host: "api.anthropic.com",
-                      header: .authorization),
+                      header: .authorization,
+                      acceptSiblings: true),
                 .init(fake: fakeRefresh, real: stored.refreshToken,
                       host: "console.anthropic.com",
-                      header: .authorization, body: true),
+                      header: .authorization, body: true,
+                      acceptSiblings: true),
             ], for: profile.id)
             try await bridge.write(access: fakeAccess, refresh: fakeRefresh)
         } catch {
@@ -128,13 +139,14 @@ public final class SubscriptionTokenCoordinator {
                             bridge: CodexTokenBridge,
                             store: ProfileStore,
                             swapper: TokenSwapper) async {
-        for _ in 0..<10 {
+        // See the matching comment in `seedClaude` for why 60 s.
+        for _ in 0..<120 {
             if bridge.isConnected { break }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
         guard bridge.isConnected else {
             FileHandle.standardError.write(Data(
-                "[subscription-swap] auto-seed skipped (codex bridge not connected)\n".utf8))
+                "[subscription-swap] auto-seed Codex timed out after 60s waiting for in-VM agent\n".utf8))
             return
         }
         guard let realID = stored.idToken else {
@@ -162,21 +174,28 @@ public final class SubscriptionTokenCoordinator {
             }
             let fakeRefresh = SubscriptionFakeMint.mintCodexRefreshFake(
                 real: stored.refreshToken, salt: saltRefresh)
+            // `acceptSiblings: true` so the swap also fires on OpenAI /
+            // ChatGPT first-party subdomains — see
+            // TokenMap.Entry.acceptSiblings for the rationale.
             swapper.appendEntries([
                 .init(fake: fakeAccess, real: stored.accessToken,
-                      host: "chatgpt.com", header: .authorization),
+                      host: "chatgpt.com", header: .authorization,
+                      acceptSiblings: true),
                 .init(fake: fakeAccess, real: stored.accessToken,
-                      host: "api.openai.com", header: .authorization),
+                      host: "api.openai.com", header: .authorization,
+                      acceptSiblings: true),
                 .init(fake: fakeRefresh, real: stored.refreshToken,
                       host: "auth.openai.com", header: .authorization,
-                      body: true),
+                      body: true, acceptSiblings: true),
                 .init(fake: fakeRefresh, real: stored.refreshToken,
                       host: "chatgpt.com", header: .authorization,
-                      body: true),
+                      body: true, acceptSiblings: true),
                 .init(fake: fakeID, real: realID,
-                      host: "chatgpt.com", header: .authorization),
+                      host: "chatgpt.com", header: .authorization,
+                      acceptSiblings: true),
                 .init(fake: fakeID, real: realID,
-                      host: "auth.openai.com", header: .authorization),
+                      host: "auth.openai.com", header: .authorization,
+                      acceptSiblings: true),
             ], for: profile.id)
             try await bridge.write(access: fakeAccess,
                                     refresh: fakeRefresh,
@@ -493,15 +512,19 @@ public final class SubscriptionTokenCoordinator {
         // with the now-fake access token before the swap is live and
         // get a 401.
         let entries: [TokenMap.Entry] = [
+            // `acceptSiblings: true` so first-party `*.anthropic.com`
+            // subdomains (mcp-tools, etc.) also pick up the swap.
             .init(fake: fakeAccess, real: tokens.access,
                   host: "api.anthropic.com",
-                  header: .authorization),
+                  header: .authorization,
+                  acceptSiblings: true),
             // Refresh rides in the JSON body of POST /v1/oauth/token.
             // `body: true` makes the swapper sweep the body too.
             .init(fake: fakeRefresh, real: tokens.refresh,
                   host: "console.anthropic.com",
                   header: .authorization,
-                  body: true),
+                  body: true,
+                  acceptSiblings: true),
         ]
         swapper.appendEntries(entries, for: profile.id)
 
@@ -571,21 +594,28 @@ public final class SubscriptionTokenCoordinator {
         // `body: true` because Codex's MCP / refresh path ships the
         // refresh token in the JSON body of POST /oauth/token, not in
         // an Authorization header.
+        // `acceptSiblings: true` on every entry so first-party
+        // `*.openai.com` / `*.chatgpt.com` subdomains also pick up
+        // the swap.
         let entries: [TokenMap.Entry] = [
             .init(fake: fakeAccess, real: tokens.access,
-                  host: "chatgpt.com", header: .authorization),
+                  host: "chatgpt.com", header: .authorization,
+                  acceptSiblings: true),
             .init(fake: fakeAccess, real: tokens.access,
-                  host: "api.openai.com", header: .authorization),
+                  host: "api.openai.com", header: .authorization,
+                  acceptSiblings: true),
             .init(fake: fakeRefresh, real: tokens.refresh,
                   host: "auth.openai.com", header: .authorization,
-                  body: true),
+                  body: true, acceptSiblings: true),
             .init(fake: fakeRefresh, real: tokens.refresh,
                   host: "chatgpt.com", header: .authorization,
-                  body: true),
+                  body: true, acceptSiblings: true),
             .init(fake: fakeID, real: tokens.idToken,
-                  host: "chatgpt.com", header: .authorization),
+                  host: "chatgpt.com", header: .authorization,
+                  acceptSiblings: true),
             .init(fake: fakeID, real: tokens.idToken,
-                  host: "auth.openai.com", header: .authorization),
+                  host: "auth.openai.com", header: .authorization,
+                  acceptSiblings: true),
         ]
         swapper.appendEntries(entries, for: profile.id)
 

@@ -118,13 +118,18 @@ public enum OAuthRotationRewriter {
             salt: saltRefresh,
             targetLength: realRefresh.count)
 
+        // `acceptSiblings: true` to keep parity with the seed/consent
+        // paths — the rotated tokens are still scoped to first-party
+        // `*.anthropic.com` subdomains.
         swapper.appendEntries([
             .init(fake: fakeAccess, real: realAccess,
                   host: "api.anthropic.com",
-                  header: .authorization),
+                  header: .authorization,
+                  acceptSiblings: true),
             .init(fake: fakeRefresh, real: realRefresh,
                   host: "console.anthropic.com",
-                  header: .authorization, body: true),
+                  header: .authorization, body: true,
+                  acceptSiblings: true),
         ], for: profileID)
 
         json["access_token"] = fakeAccess
@@ -191,25 +196,32 @@ public enum OAuthRotationRewriter {
             fakeID = SubscriptionFakeMint.mintJWTFake(realJWT: realID, salt: saltID)
         }
 
+        // `acceptSiblings: true` to keep parity with the seed/consent
+        // paths — first-party `*.openai.com` / `*.chatgpt.com` are
+        // expected fan-out targets for these tokens.
         var entries: [TokenMap.Entry] = [
             .init(fake: fakeAccess, real: realAccess,
-                  host: "chatgpt.com", header: .authorization),
+                  host: "chatgpt.com", header: .authorization,
+                  acceptSiblings: true),
             .init(fake: fakeAccess, real: realAccess,
-                  host: "api.openai.com", header: .authorization),
+                  host: "api.openai.com", header: .authorization,
+                  acceptSiblings: true),
             .init(fake: fakeRefresh, real: realRefresh,
                   host: "auth.openai.com", header: .authorization,
-                  body: true),
+                  body: true, acceptSiblings: true),
             .init(fake: fakeRefresh, real: realRefresh,
                   host: "chatgpt.com", header: .authorization,
-                  body: true),
+                  body: true, acceptSiblings: true),
         ]
         if let realID, let fakeID {
             entries.append(.init(fake: fakeID, real: realID,
                                  host: "chatgpt.com",
-                                 header: .authorization))
+                                 header: .authorization,
+                                 acceptSiblings: true))
             entries.append(.init(fake: fakeID, real: realID,
                                  host: "auth.openai.com",
-                                 header: .authorization))
+                                 header: .authorization,
+                                 acceptSiblings: true))
         }
         swapper.appendEntries(entries, for: profileID)
 

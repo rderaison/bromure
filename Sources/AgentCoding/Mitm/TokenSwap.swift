@@ -40,9 +40,20 @@ public struct TokenMap: Sendable {
         /// in the JSON body of `POST /oauth/token`.
         public let body: Bool
 
+        /// When true, the swap also fires on hosts that share the
+        /// registered domain with `host` (cookie-style sibling match,
+        /// see `TokenSwapper.hostMatchesScopeFamily`). Off by default;
+        /// only opt in for first-party providers that fan a single
+        /// auth credential across multiple subdomains (Claude /
+        /// Codex). AWS, kubeconfigs, manual tokens, etc. stay on
+        /// strict `hostMatchesScope` so a token minted for `s3` can
+        /// never be injected into a `lambda` call.
+        public let acceptSiblings: Bool
+
         public init(fake: String, real: String, host: String? = nil,
                     header: Header = .authorization,
                     body: Bool = false,
+                    acceptSiblings: Bool = false,
                     consentCredentialID: String? = nil,
                     consentDisplayName: String? = nil) {
             self.fake = fake
@@ -50,6 +61,7 @@ public struct TokenMap: Sendable {
             self.host = host
             self.header = header
             self.body = body
+            self.acceptSiblings = acceptSiblings
             self.consentCredentialID = consentCredentialID
             self.consentDisplayName = consentDisplayName
         }
@@ -171,8 +183,12 @@ public final class TokenSwapper: @unchecked Sendable {
         var newBody = bodyBytes
         var bodyDirty = false
         for entry in map.entries {
-            if let h = entry.host, !h.isEmpty,
-               !Self.hostMatchesScope(host: host, scope: h) { continue }
+            if let h = entry.host, !h.isEmpty {
+                let matched = entry.acceptSiblings
+                    ? Self.hostMatchesScopeFamily(host: host, scope: h)
+                    : Self.hostMatchesScope(host: host, scope: h)
+                if !matched { continue }
+            }
 
             let inHeader = (headerStr.range(of: entry.fake) != nil)
             // Body sweep is only attempted for entries that opted in
@@ -472,7 +488,15 @@ public final class TokenSwapper: @unchecked Sendable {
             guard let scope = entry.host, !scope.isEmpty else { continue }
             // The fake landed on the host it was scoped for — this is
             // the swap path firing in normal operation, not exfil.
-            if Self.hostMatchesScope(host: host, scope: scope) { continue }
+            // Mirror the swap's matching policy: entries flagged
+            // `acceptSiblings` (Claude / Codex) use the relaxed
+            // family match so a token minted for `api.anthropic.com`
+            // doesn't trip a compromise alert when it appears on
+            // `mcp-tools.anthropic.com`. Everything else stays strict.
+            let matched = entry.acceptSiblings
+                ? Self.hostMatchesScopeFamily(host: host, scope: scope)
+                : Self.hostMatchesScope(host: host, scope: scope)
+            if matched { continue }
             leaks.append(CompromiseLeak(
                 fakeTokenPreview: Self.preview(entry.fake),
                 credentialDisplayName: entry.consentDisplayName ?? "session token",
@@ -504,6 +528,26 @@ public final class TokenSwapper: @unchecked Sendable {
         let h = host.lowercased()
         let s = scope.lowercased()
         return h == s || h.hasSuffix("." + s)
+    }
+
+    /// Relaxed `hostMatchesScope` for compromise detection only.
+    /// Returns true when `host` is a sibling of `scope` under the same
+    /// registered domain (e.g. `mcp-tools.anthropic.com` is a sibling
+    /// of `api.anthropic.com`). Strips one leading label off `scope`
+    /// to derive the parent and re-runs the suffix match. Refuses to
+    /// strip below three labels so `example.com` → `com` doesn't match
+    /// every `.com` host.
+    ///
+    /// **Only** used by `detectCompromise`. The swap path still calls
+    /// the strict `hostMatchesScope`, so the real token never gets
+    /// injected into a sibling host's request.
+    static func hostMatchesScopeFamily(host: String, scope: String) -> Bool {
+        if hostMatchesScope(host: host, scope: scope) { return true }
+        let labels = scope.lowercased().split(separator: ".")
+        guard labels.count >= 3 else { return false }
+        let parent = labels.dropFirst().joined(separator: ".")
+        let h = host.lowercased()
+        return h == parent || h.hasSuffix("." + parent)
     }
 }
 

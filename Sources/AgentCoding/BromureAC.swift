@@ -297,28 +297,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // we're already on MainActor so we don't violate isolation.
             let storeRef = self.store
             let swapperRef = e.swapper
-            e.subscriptionTokenSeen = { [weak self] profileID, token in
-                Task { @MainActor in
-                    guard let profile = self?.profiles.first(where: { $0.id == profileID })
-                    else { return }
-                    SubscriptionTokenCoordinator.shared.handleCleanAccessToken(
-                        token,
-                        profile: profile,
-                        store: storeRef,
-                        swapper: swapperRef)
-                }
-            }
-            e.codexTokenSeen = { [weak self] profileID, token in
-                Task { @MainActor in
-                    guard let profile = self?.profiles.first(where: { $0.id == profileID })
-                    else { return }
-                    SubscriptionTokenCoordinator.shared.handleCleanCodexAccessToken(
-                        token,
-                        profile: profile,
-                        store: storeRef,
-                        swapper: swapperRef)
-                }
-            }
+            // TEMPORARILY DISABLED: Claude / Codex subscription-token
+            // swap. The OAuth rotation path doesn't reliably replace
+            // the rotated refresh token in the response body, so the
+            // VM ends up with a stale fake refresh and gets logged out
+            // on the next refresh attempt. Leaving the consent
+            // callbacks unset means clean Claude / Codex access tokens
+            // flow through the proxy untouched. Re-enable once the
+            // rotation rewriter is fixed.
+            //
+            // e.subscriptionTokenSeen = { [weak self] profileID, token in
+            //     Task { @MainActor in
+            //         guard let profile = self?.profiles.first(where: { $0.id == profileID })
+            //         else { return }
+            //         SubscriptionTokenCoordinator.shared.handleCleanAccessToken(
+            //             token,
+            //             profile: profile,
+            //             store: storeRef,
+            //             swapper: swapperRef)
+            //     }
+            // }
+            // e.codexTokenSeen = { [weak self] profileID, token in
+            //     Task { @MainActor in
+            //         guard let profile = self?.profiles.first(where: { $0.id == profileID })
+            //         else { return }
+            //         SubscriptionTokenCoordinator.shared.handleCleanCodexAccessToken(
+            //             token,
+            //             profile: profile,
+            //             store: storeRef,
+            //             swapper: swapperRef)
+            //     }
+            // }
+            _ = storeRef
+            _ = swapperRef
             e.oauthRotated = { [weak self] profileID, provider, tokens in
                 Task { @MainActor in
                     SubscriptionTokenCoordinator.shared.recordRotation(
@@ -2093,18 +2104,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 SubscriptionTokenCoordinator.shared.registerCodex(
                     profileID: profile.id, bridge: bridge)
             }
-            // Auto-seed: if this profile inherited real OAuth tokens
-            // from the user's preferences template, mint fakes,
-            // register them with the swapper, and write them into the
-            // VM's credentials file as soon as the bridge is up.
-            // Skipped when the VM already has its own credentials
-            // (user ran `claude login` / `codex login` manually).
-            if let engine = self.mitmEngine {
-                SubscriptionTokenCoordinator.shared.autoSeedIfNeeded(
-                    profile: profile,
-                    store: self.store,
-                    swapper: engine.swapper)
-            }
+            // TEMPORARILY DISABLED with the rest of the Claude / Codex
+            // subscription swap — see the comment on the disabled
+            // `subscriptionTokenSeen` callback wiring above.
+            //
+            // if let engine = self.mitmEngine {
+            //     SubscriptionTokenCoordinator.shared.autoSeedIfNeeded(
+            //         profile: profile,
+            //         store: self.store,
+            //         swapper: engine.swapper)
+            // }
             if sessionDisk.didCloneOnLastEnsure, let current = currentBaseVersion {
                 var p = profile
                 p.baseImageVersionAtClone = current
@@ -2518,12 +2527,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 .applying(.init(paletteColors: [.systemRed]))
             alert.icon = symbol.withSymbolConfiguration(cfg)
         }
-        alert.messageText = String(
-            format: NSLocalizedString("⛔ VM “%@” has been compromised", comment: ""),
-            profileName)
-        var info = NSLocalizedString(
-            "Bromure detected an outbound attempt to leak a session credential to a host it was not minted for. The VM has been paused.",
-            comment: "") + "\n\n"
+        alert.messageText = NSLocalizedString(
+            "This environment may have been compromised",
+            comment: "Compromise alert title")
+        var info = String(
+            format: NSLocalizedString(
+                "Bromure detected an outbound attempt to leak a session credential from “%@” to a host it was not minted for. The VM has been paused.",
+                comment: ""),
+            profileName) + "\n\n"
         info += NSLocalizedString(
             "Detected leaks:", comment: "") + "\n"
         for leak in event.leaks {
@@ -2732,12 +2743,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 SubscriptionTokenCoordinator.shared.registerCodex(
                     profileID: profile.id, bridge: bridge)
             }
-            if let engine = self.mitmEngine {
-                SubscriptionTokenCoordinator.shared.autoSeedIfNeeded(
-                    profile: profile,
-                    store: self.store,
-                    swapper: engine.swapper)
-            }
+            // TEMPORARILY DISABLED — see the comment on the first
+            // autoSeedIfNeeded site higher up in this file.
+            //
+            // if let engine = self.mitmEngine {
+            //     SubscriptionTokenCoordinator.shared.autoSeedIfNeeded(
+            //         profile: profile,
+            //         store: self.store,
+            //         swapper: engine.swapper)
+            // }
             self.wireSandboxCallbacks(sandbox, win: win)
             win.sandbox = sandbox
             self.requestSpawnKitty(id: firstTab.id, in: win)
