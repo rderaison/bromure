@@ -317,6 +317,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         swapper: swapperRef)
                 }
             }
+            e.oauthRotated = { [weak self] profileID, provider, tokens in
+                Task { @MainActor in
+                    SubscriptionTokenCoordinator.shared.recordRotation(
+                        profileID: profileID,
+                        provider: provider,
+                        tokens: tokens,
+                        store: storeRef)
+                    // Reload `profiles` so any subsequent picker
+                    // render / new-session launch sees the rotated
+                    // default-token state.
+                    self?.profiles = storeRef.loadAll()
+                }
+            }
             return e
         }
         catch {
@@ -389,6 +402,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         profiles = store.loadAll()
+
+        // Default SSH key: every new profile inherits this keypair via
+        // the user's preferences template. Generate it on first launch
+        // (idempotent — `ensureExists` no-ops when the files are
+        // already on disk), then make sure the template carries the
+        // matching public key so a freshly forked profile shows it in
+        // the editor without ticking the "Generate" toggle.
+        do {
+            try DefaultSSHKey.ensureExists()
+            let pub = try DefaultSSHKey.publicKeyText()
+            var template = store.loadTemplate()
+            if template.sshPublicKey != pub {
+                template.sshPublicKey = pub
+                try? store.saveTemplate(template)
+            }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[ssh] default key bootstrap failed: \(error)\n".utf8))
+        }
 
         // Sparkle: kick off scheduled update checks against the
         // release-agentic-coding appcast (separate channel from the
@@ -1244,6 +1276,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// secrets blob, host-only ssh material, and every credential — but
     /// skips the suspended VM state (a snapshot tied to the source's MAC
     /// can't safely resume on the duplicate).
+    /// Pick a default name for a brand-new profile that doesn't
+    /// collide with any existing profile name. Walks "Default profile",
+    /// "Default profile 2", "Default profile 3", … and returns the
+    /// first one not currently taken (case-insensitive comparison so
+    /// users typing "default profile" don't get an unexpected dupe).
+    private func nextDefaultProfileName() -> String {
+        let base = NSLocalizedString("Default profile",
+                                      comment: "Placeholder name for a new profile")
+        let existing = Set(profiles.map { $0.name.lowercased() })
+        if !existing.contains(base.lowercased()) { return base }
+        var n = 2
+        while existing.contains("\(base) \(n)".lowercased()) { n += 1 }
+        return "\(base) \(n)"
+    }
+
     private func duplicateProfile(_ source: Profile) {
         let copyName = source.name + " " + NSLocalizedString("copy", comment: "")
         do {
@@ -1272,13 +1319,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         win.title = editing == nil ? "New profile" : "Edit profile"
         win.center()
         // For new profiles, hand the editor a draft pre-populated from
-        // the user's preferences template (Bromure → Preferences…).
-        // Existing profiles keep their own values.
+        // the user's preferences template (Bromure → Preferences…)
+        // and a numbered placeholder name so the user can save
+        // immediately without typing one. Existing profiles keep
+        // their own values.
         let initialDraft: Profile? = editing
-            ?? store.newProfileFromTemplate(name: "", tool: .claude,
+            ?? store.newProfileFromTemplate(name: nextDefaultProfileName(),
+                                             tool: .claude,
                                              authMode: .token)
         win.contentView = NSHostingView(rootView: ProfileEditorView(
             profile: initialDraft,
+            isNew: editing == nil,
             terminalDefaults: terminalDefaults,
             storageContext: makeStorageContext(for: editing),
             onSave: { profile, generateSSH in
@@ -1432,15 +1483,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         do {
             try store.save(profile)
             try store.prepareHomeDirectory(for: profile, terminalDefaults: terminalDefaults)
+            let agentDir = store.profileDirectory(for: profile)
+                .appendingPathComponent("agent", isDirectory: true)
             if generateSSH {
                 // Agent dir is host-only — never mounted into the VM.
                 // The private seed lives here; the public key gets a
                 // courtesy copy into the VM's ~/.ssh for reference.
-                let agentDir = store.profileDirectory(for: profile)
-                    .appendingPathComponent("agent", isDirectory: true)
                 let pub = try makeSSHKey(in: agentDir)
                 profile.sshPublicKey = pub
                 try store.save(profile)
+            } else if editing == nil,
+                      profile.sshPublicKey != nil,
+                      !FileManager.default.fileExists(atPath:
+                        agentDir.appendingPathComponent("id_ed25519.raw").path) {
+                // New profile that inherited the default public key
+                // from the preferences template — copy the matching
+                // private seed in so the in-process ssh-agent has
+                // something to load. No-op when "Generate" was ticked
+                // (handled above) or when the user already imported a
+                // key (existing raw file).
+                try DefaultSSHKey.copy(to: agentDir)
             }
         } catch {
             showError(error, message: editing == nil
@@ -1450,10 +1512,190 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         profiles = store.loadAll()
         renderPicker()
+        // The privateMode toggle and enrollment-gated streaming flag
+        // both flow off `profiles`; resync the running session
+        // toolbars now so a flip from public → private (or back)
+        // doesn't wait for the next launch to take effect.
+        refreshStreamingState()
         closeEditorWindow()
         // Show the SSH key viewer right after a brand-new generation so the
         // user can paste it into GitHub before forgetting.
         if generateSSH, profile.sshPublicKey != nil { openSSHWindow(for: profile) }
+
+        // If the user edited a profile that already has a session
+        // window open, push the host-side cosmetic bits through live
+        // (window title, opacity, accent) and prompt to restart for
+        // anything that's baked into the booted VM or its host home
+        // dir. Without this, settings appear to "not stick" until the
+        // user closes and reopens the session.
+        if editing != nil, let win = profileWindows[profile.id] {
+            let runningProfile = win.profile
+            win.applyLiveProfileUpdates(profile)
+            let restartItems = restartRequiringChanges(from: runningProfile, to: profile)
+            if !restartItems.isEmpty {
+                promptRestartForChanges(items: restartItems, window: win)
+            }
+        }
+    }
+
+    /// Per-field categories that change behaviour inside the booted
+    /// VM (and therefore need a restart to take effect). Used to
+    /// coalesce diffs into a small, user-facing list of bullet points.
+    private enum RestartChange: CaseIterable {
+        case memory
+        case networking
+        case sharedFolders
+        case primaryTool
+        case additionalTools
+        case sshPublicKey
+        case httpsGitCredentials
+        case manualTokens
+        case importedSSHKeys
+        case environmentVariables
+        case traceLevel
+        case kubernetes
+        case digitalOcean
+        case awsCredentials
+        case containerRegistries
+        case approvalGates
+        case keyboardSettings
+        case terminalAppearance
+        case gitIdentity
+    }
+
+    private func restartLabel(for change: RestartChange) -> String {
+        switch change {
+        case .memory:
+            return NSLocalizedString("VM memory", comment: "")
+        case .networking:
+            return NSLocalizedString("Network mode", comment: "")
+        case .sharedFolders:
+            return NSLocalizedString("Shared folders", comment: "")
+        case .primaryTool:
+            return NSLocalizedString("Primary tool / auth mode / API key", comment: "")
+        case .additionalTools:
+            return NSLocalizedString("Additional tools", comment: "")
+        case .sshPublicKey:
+            return NSLocalizedString("SSH public key", comment: "")
+        case .httpsGitCredentials:
+            return NSLocalizedString("HTTPS git credentials", comment: "")
+        case .manualTokens:
+            return NSLocalizedString("Manual token rules", comment: "")
+        case .importedSSHKeys:
+            return NSLocalizedString("Imported SSH keys", comment: "")
+        case .environmentVariables:
+            return NSLocalizedString("Environment variables", comment: "")
+        case .traceLevel:
+            return NSLocalizedString("Trace level", comment: "")
+        case .kubernetes:
+            return NSLocalizedString("Kubernetes contexts", comment: "")
+        case .digitalOcean:
+            return NSLocalizedString("DigitalOcean token", comment: "")
+        case .awsCredentials:
+            return NSLocalizedString("AWS credentials", comment: "")
+        case .containerRegistries:
+            return NSLocalizedString("Container registry credentials", comment: "")
+        case .approvalGates:
+            return NSLocalizedString("Credential approval gates", comment: "")
+        case .keyboardSettings:
+            return NSLocalizedString("Cursor / keyboard settings", comment: "")
+        case .terminalAppearance:
+            return NSLocalizedString("Terminal font and colors", comment: "")
+        case .gitIdentity:
+            return NSLocalizedString("Git author identity", comment: "")
+        }
+    }
+
+    /// Diff two profiles and return the user-facing categories that
+    /// require a VM restart. Cosmetic / host-side fields (name,
+    /// color, comments, windowOpacity, closeAction, privateMode,
+    /// timestamps, default-token caches, subscription swap state,
+    /// `baseImageVersionAtClone`) are intentionally omitted — the
+    /// caller has already applied them live or they're consulted at
+    /// host-side decision points where re-reading the saved profile
+    /// is enough.
+    private func restartRequiringChanges(from old: Profile, to new: Profile) -> [String] {
+        var changes: [RestartChange] = []
+        if old.memoryGB != new.memoryGB { changes.append(.memory) }
+        if old.networkMode != new.networkMode
+            || old.bridgedInterfaceID != new.bridgedInterfaceID {
+            changes.append(.networking)
+        }
+        if old.folderPaths != new.folderPaths { changes.append(.sharedFolders) }
+        if old.tool != new.tool
+            || old.authMode != new.authMode
+            || old.apiKey != new.apiKey {
+            changes.append(.primaryTool)
+        }
+        if old.additionalTools != new.additionalTools { changes.append(.additionalTools) }
+        if old.sshPublicKey != new.sshPublicKey { changes.append(.sshPublicKey) }
+        if old.gitHTTPSCredentials != new.gitHTTPSCredentials {
+            changes.append(.httpsGitCredentials)
+        }
+        if old.manualTokens != new.manualTokens { changes.append(.manualTokens) }
+        if old.importedSSHKeys != new.importedSSHKeys { changes.append(.importedSSHKeys) }
+        if old.environmentVariables != new.environmentVariables {
+            changes.append(.environmentVariables)
+        }
+        if old.traceLevel != new.traceLevel { changes.append(.traceLevel) }
+        if old.kubeconfigs != new.kubeconfigs { changes.append(.kubernetes) }
+        if old.digitalOceanToken != new.digitalOceanToken { changes.append(.digitalOcean) }
+        if old.awsCredentials != new.awsCredentials { changes.append(.awsCredentials) }
+        if old.dockerRegistries != new.dockerRegistries {
+            changes.append(.containerRegistries)
+        }
+        if old.apiKeyRequiresApproval != new.apiKeyRequiresApproval
+            || old.digitalOceanTokenRequiresApproval != new.digitalOceanTokenRequiresApproval
+            || old.sshKeyRequiresApproval != new.sshKeyRequiresApproval {
+            changes.append(.approvalGates)
+        }
+        if old.cursorShape != new.cursorShape
+            || old.keyboardLayoutOverride != new.keyboardLayoutOverride
+            || old.keyRepeatDelayMs != new.keyRepeatDelayMs
+            || old.keyRepeatRateHz != new.keyRepeatRateHz {
+            changes.append(.keyboardSettings)
+        }
+        if old.useTerminalAppDefaults != new.useTerminalAppDefaults
+            || old.customFontFamily != new.customFontFamily
+            || old.customFontSize != new.customFontSize
+            || old.customBackgroundHex != new.customBackgroundHex
+            || old.customForegroundHex != new.customForegroundHex {
+            changes.append(.terminalAppearance)
+        }
+        if old.gitUserName != new.gitUserName
+            || old.gitUserEmail != new.gitUserEmail {
+            changes.append(.gitIdentity)
+        }
+        return changes.map { restartLabel(for: $0) }
+    }
+
+    /// Sheet a non-modal alert against the running session window,
+    /// listing the changed settings the VM hasn't picked up and
+    /// offering a reboot (which routes through `requestReboot`'s
+    /// usual soft / hard / cancel chooser). "Later" leaves the VM
+    /// alone — the next time it cold-boots it'll inherit the new
+    /// values from the saved profile JSON.
+    @MainActor
+    private func promptRestartForChanges(items: [String], window: TabbedSessionWindow) {
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString(
+                "Restart “%@” to apply these changes?", comment: ""),
+            window.profile.name)
+        let bullets = items.map { "• " + $0 }.joined(separator: "\n")
+        alert.informativeText = String(
+            format: NSLocalizedString(
+                "These settings are baked into the VM at boot, so the running session won't pick them up until it restarts:\n\n%@",
+                comment: ""),
+            bullets)
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: NSLocalizedString("Restart Now…", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
+        alert.beginSheetModal(for: window) { [weak self, weak window] response in
+            guard response == .alertFirstButtonReturn,
+                  let self, let window else { return }
+            self.requestReboot(for: window)
+        }
     }
 
     private func resetProfile(_ profile: Profile) {

@@ -29,6 +29,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Codex / ChatGPT counterpart: fires when a clean JWT-shaped
     /// access token is seen on chatgpt.com / openai.com.
     let codexTokenSeen: (@Sendable (UUID, String) -> Void)?
+    /// Fires after a successful `/oauth/token` response rewrite — the
+    /// host uses this to keep `Profile.default*Tokens` and the
+    /// preferences template in sync with whatever the upstream just
+    /// rotated to. nil = host doesn't care.
+    let oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?
 
     init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          awsResigner: AWSResigner,
@@ -38,7 +43,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
          consent: ConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)? = nil,
-         codexTokenSeen: (@Sendable (UUID, String) -> Void)? = nil) {
+         codexTokenSeen: (@Sendable (UUID, String) -> Void)? = nil,
+         oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)? = nil) {
         self.fd = fd
         self.profileID = profileID
         self.certCache = certCache
@@ -51,6 +57,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         self.sessionTraceProvider = sessionTraceProvider
         self.subscriptionTokenSeen = subscriptionTokenSeen
         self.codexTokenSeen = codexTokenSeen
+        self.oauthRotated = oauthRotated
     }
 
     /// Drives the full MITM exchange. Must be called from a Task —
@@ -285,25 +292,31 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // complete normally, then breaks the retain cycle.
         defer { session.finishTasksAndInvalidate() }
 
-        // Anthropic OAuth rotation: when this is a refresh request on
-        // the token endpoint, hold the response (don't stream) so the
-        // OAuthRotationRewriter can replace the new access/refresh
-        // tokens in the body before the VM sees them. Streaming would
-        // be too late — Claude Code would write the real values to
-        // ~/.claude/.credentials.json before our rewrite could fire.
+        // OAuth rotation: when this is a refresh request on a token
+        // endpoint we know about, hold the response (don't stream) so
+        // the OAuthRotationRewriter can replace the new access /
+        // refresh / id tokens in the body before the VM sees them.
+        // Streaming would be too late — the SDK would write the real
+        // values to disk before our rewrite could fire.
         let (_, refreshPath) = Self.parseRequestLine(toForward)
-        let bufferForOAuthRewrite = OAuthRotationRewriter.isOAuthTokenEndpoint(
-            host: host, path: refreshPath)
+        let oauthProvider = OAuthRotationRewriter.provider(
+            for: host, path: refreshPath)
         let relay: RelayResponse
-        if bufferForOAuthRewrite {
+        if let provider = oauthProvider {
+            let rotatedHook = self.oauthRotated
             relay = try await relayUpstreamBuffered(
                 rawRequest: toForward,
                 host: host, port: port,
                 session: session,
                 tls: tls,
                 rewrite: { [profileID, swapper] raw in
-                    OAuthRotationRewriter.rewrite(
-                        raw: raw, profileID: profileID, swapper: swapper)
+                    let result = OAuthRotationRewriter.rewrite(
+                        raw: raw, provider: provider,
+                        profileID: profileID, swapper: swapper)
+                    if let newReals = result.newReals {
+                        rotatedHook?(profileID, provider, newReals)
+                    }
+                    return result.bytes
                 })
         } else {
             relay = try await relayUpstream(rawRequest: toForward,

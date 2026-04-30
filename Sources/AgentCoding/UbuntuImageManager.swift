@@ -142,55 +142,87 @@ public final class UbuntuImageManager {
             return
         }
 
-        // 1. Alpine netboot files. Cached across runs.
-        if !fm.fileExists(atPath: alpineKernelURL.path) ||
-           !fm.fileExists(atPath: alpineInitrdURL.path) {
-            progress("Downloading Alpine netboot installer…")
-            try await downloadAlpineNetboot(progress: progress)
-        } else {
-            progress("Using cached Alpine netboot.")
-        }
-
-        // 2. Fresh raw target disk. Sparse — actual size on disk grows as
-        //    the installer writes blocks. Goes to a .partial path so the
-        //    existing base.img stays available for sessions that launch
-        //    while the rebuild is in flight.
         let scratchDisk = storageDir.appendingPathComponent("base.img.partial")
-        try? fm.removeItem(at: scratchDisk)
-        progress("Allocating \(Self.baseDiskBytes / (1024*1024*1024))GB sparse disk…")
-        try createSparseDisk(at: scratchDisk, sizeBytes: Self.baseDiskBytes)
-
-        // 3. Drive Alpine through the install.
-        progress("Booting Alpine installer (this drives the Ubuntu install)…")
-        try await runInstaller(
-            targetDisk: scratchDisk,
-            progress: progress,
-            output: output
-        )
-
-        // 4. Build a fresh EFI variable store next to the existing one.
-        //    First boot of the installed Ubuntu populates it with the
-        //    boot entry GRUB registers. Like the disk: keep the old
-        //    file in place until step 5's atomic swap.
         let scratchEFI = storageDir.appendingPathComponent("efivars.partial")
-        try? fm.removeItem(at: scratchEFI)
-        _ = try VZEFIVariableStore(
-            creatingVariableStoreAt: scratchEFI,
-            options: []
-        )
 
-        // 5. Promote — only now do we touch the live files. Disk
-        //    swap is atomic (rename); EFI vars + version stamp are
-        //    individual writes that we sequence so a crash mid-step
-        //    leaves the rebuild restartable from the .partial files
-        //    rather than killing the running image.
-        try? fm.removeItem(at: baseDiskURL)
-        try fm.moveItem(at: scratchDisk, to: baseDiskURL)
-        try? fm.removeItem(at: efiVarsURL)
-        try fm.moveItem(at: scratchEFI, to: efiVarsURL)
-        try Self.imageVersion.write(to: versionStampURL, atomically: true, encoding: .utf8)
+        // Snapshot whether a complete, bootable image was already in
+        // place before this build starts. On failure we use this to
+        // decide cleanup scope: if there was a working image, leave
+        // it alone; if there wasn't (initial setup, or recovery from
+        // a previously-failed setup), wipe every artefact so the
+        // next launch can't satisfy `hasBaseImage` with fragments
+        // and panic the kernel trying to boot a half-installed disk.
+        let hadCompletePriorImage = hasBaseImage
 
-        progress("Base image ready at \(baseDiskURL.path)")
+        do {
+            // 1. Alpine netboot files. Cached across runs.
+            if !fm.fileExists(atPath: alpineKernelURL.path) ||
+               !fm.fileExists(atPath: alpineInitrdURL.path) {
+                progress("Downloading Alpine netboot installer…")
+                try await downloadAlpineNetboot(progress: progress)
+            } else {
+                progress("Using cached Alpine netboot.")
+            }
+
+            // 2. Fresh raw target disk. Sparse — actual size on disk
+            //    grows as the installer writes blocks. Goes to a
+            //    .partial path so the existing base.img stays
+            //    available for sessions that launch while the
+            //    rebuild is in flight.
+            try? fm.removeItem(at: scratchDisk)
+            progress("Allocating \(Self.baseDiskBytes / (1024*1024*1024))GB sparse disk…")
+            try createSparseDisk(at: scratchDisk, sizeBytes: Self.baseDiskBytes)
+
+            // 3. Drive Alpine through the install.
+            progress("Booting Alpine installer (this drives the Ubuntu install)…")
+            try await runInstaller(
+                targetDisk: scratchDisk,
+                progress: progress,
+                output: output
+            )
+
+            // 4. Build a fresh EFI variable store next to the existing
+            //    one. First boot of the installed Ubuntu populates it
+            //    with the boot entry GRUB registers. Like the disk:
+            //    keep the old file in place until step 5's atomic swap.
+            try? fm.removeItem(at: scratchEFI)
+            _ = try VZEFIVariableStore(
+                creatingVariableStoreAt: scratchEFI,
+                options: []
+            )
+
+            // 5. Promote — only now do we touch the live files. Disk
+            //    swap is atomic (rename); EFI vars + version stamp are
+            //    individual writes that we sequence so a crash mid-step
+            //    leaves the rebuild restartable from the .partial files
+            //    rather than killing the running image.
+            try? fm.removeItem(at: baseDiskURL)
+            try fm.moveItem(at: scratchDisk, to: baseDiskURL)
+            try? fm.removeItem(at: efiVarsURL)
+            try fm.moveItem(at: scratchEFI, to: efiVarsURL)
+            try Self.imageVersion.write(to: versionStampURL, atomically: true, encoding: .utf8)
+
+            progress("Base image ready at \(baseDiskURL.path)")
+        } catch {
+            // Always discard scratch files — they're either incomplete
+            // installs or unswapped artefacts from a successful build
+            // that failed mid-promote.
+            try? fm.removeItem(at: scratchDisk)
+            try? fm.removeItem(at: scratchEFI)
+
+            // No prior working image means anything currently sitting
+            // at the live paths is from this (failed) run — possibly
+            // just `base.img` if we crashed between the two moves in
+            // step 5, possibly all three with mismatched contents.
+            // Either way it can't be trusted to boot. Wipe so the next
+            // launch routes back to setup with a clean slate.
+            if !hadCompletePriorImage {
+                try? fm.removeItem(at: baseDiskURL)
+                try? fm.removeItem(at: efiVarsURL)
+                try? fm.removeItem(at: versionStampURL)
+            }
+            throw error
+        }
     }
 
     // MARK: - Alpine netboot download

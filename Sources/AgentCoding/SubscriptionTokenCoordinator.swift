@@ -207,6 +207,85 @@ public final class SubscriptionTokenCoordinator {
         askedCodex.remove(profileID)
     }
 
+    /// Called by the proxy after an OAuth refresh response was
+    /// rewritten and we have a fresh real-token triple. Updates the
+    /// profile's `default*Tokens` (when set) so future sessions of
+    /// the same profile auto-seed against the rotated values; also
+    /// rotates the preferences template's defaults when they were
+    /// the source of the profile's existing copy (i.e., the refresh
+    /// token matches before the swap), so newly created profiles
+    /// inherit the fresh tokens.
+    public func recordRotation(profileID: UUID,
+                                provider: OAuthRotationProvider,
+                                tokens: StoredOAuthTokens,
+                                store: ProfileStore) {
+        guard var profile = store.loadAll().first(where: { $0.id == profileID })
+        else { return }
+
+        // Snapshot the pre-rotation refresh token so we can decide
+        // whether the template's stored defaults travel along.
+        let oldRefresh: String?
+        switch provider {
+        case .claude: oldRefresh = profile.defaultClaudeTokens?.refreshToken
+        case .codex:  oldRefresh = profile.defaultCodexTokens?.refreshToken
+        }
+
+        // Profile-level update only when the user previously opted
+        // into "save as default" — otherwise there's nothing to
+        // rotate at the profile layer (the swap map already saw the
+        // new pair via the rewriter).
+        var profileDirty = false
+        switch provider {
+        case .claude:
+            if profile.defaultClaudeTokens != nil {
+                profile.defaultClaudeTokens = tokens
+                profileDirty = true
+            }
+        case .codex:
+            if profile.defaultCodexTokens != nil {
+                profile.defaultCodexTokens = tokens
+                profileDirty = true
+            }
+        }
+        if profileDirty {
+            do {
+                try store.save(profile)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[oauth-rotate] couldn't save profile \(profileID): \(error)\n".utf8))
+            }
+        }
+
+        // Template-level update: only when the template's stored
+        // refresh matches the pre-rotation one — meaning the template
+        // was originally seeded from this profile (or another that
+        // shared the same login). If it diverged earlier (different
+        // user logged in), leave it alone.
+        guard let oldRefresh else { return }
+        var template = store.loadTemplate()
+        var templateDirty = false
+        switch provider {
+        case .claude:
+            if template.defaultClaudeTokens?.refreshToken == oldRefresh {
+                template.defaultClaudeTokens = tokens
+                templateDirty = true
+            }
+        case .codex:
+            if template.defaultCodexTokens?.refreshToken == oldRefresh {
+                template.defaultCodexTokens = tokens
+                templateDirty = true
+            }
+        }
+        if templateDirty {
+            do {
+                try store.saveTemplate(template)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[oauth-rotate] couldn't save template: \(error)\n".utf8))
+            }
+        }
+    }
+
     // MARK: - Detection hook
 
     /// Called by the proxy whenever a clean `sk-ant-oat01-…` access

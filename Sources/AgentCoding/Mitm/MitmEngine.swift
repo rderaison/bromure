@@ -85,6 +85,12 @@ public final class MitmEngine {
     public var subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?
     /// Codex / ChatGPT counterpart of `subscriptionTokenSeen`.
     public var codexTokenSeen: (@Sendable (UUID, String) -> Void)?
+    /// Fires whenever an OAuth refresh response is rewritten and we
+    /// have fresh real tokens. Receiver is expected to update any
+    /// host-side default-token storage (`Profile.default*Tokens` and
+    /// optionally the preferences template) so future sessions /
+    /// profiles auto-seed against the rotated values.
+    public var oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?
 
     /// Our spawned ssh-agent. Owns the per-profile bromure keys
     /// (loaded via `ssh-add` at session launch) plus any keys the
@@ -137,6 +143,7 @@ public final class MitmEngine {
     public func register(socketDevice: VZVirtioSocketDevice, profileID: UUID) {
         let tokenHook = self.subscriptionTokenSeen
         let codexHook = self.codexTokenSeen
+        let rotatedHook = self.oauthRotated
         let holder = ListenerHolder(
             profileID: profileID,
             certCache: certCache,
@@ -156,7 +163,8 @@ public final class MitmEngine {
                 self?.sessionTrace(for: profileID)
             },
             subscriptionTokenSeen: tokenHook,
-            codexTokenSeen: codexHook
+            codexTokenSeen: codexHook,
+            oauthRotated: rotatedHook
         )
         socketDevice.setSocketListener(holder.httpListener,
                                        forPort: Self.httpsVsockPort)
@@ -210,7 +218,8 @@ private final class ListenerHolder {
          consent: ConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?,
-         codexTokenSeen: (@Sendable (UUID, String) -> Void)?)
+         codexTokenSeen: (@Sendable (UUID, String) -> Void)?,
+         oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?)
     {
         self.profileID = profileID
         self.httpDelegate = HTTPListenerDelegate(
@@ -224,7 +233,8 @@ private final class ListenerHolder {
             consent: consent,
             sessionTraceProvider: sessionTraceProvider,
             subscriptionTokenSeen: subscriptionTokenSeen,
-            codexTokenSeen: codexTokenSeen)
+            codexTokenSeen: codexTokenSeen,
+            oauthRotated: oauthRotated)
         self.sshDelegate = SSHListenerDelegate(
             profileID: profileID, sshAgent: sshAgent)
         self.awsDelegate = AWSCredsListenerDelegate(
@@ -253,6 +263,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
     let subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?
     let codexTokenSeen: (@Sendable (UUID, String) -> Void)?
+    let oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?
 
     init(profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          awsResigner: AWSResigner,
@@ -262,7 +273,8 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
          consent: ConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?,
-         codexTokenSeen: (@Sendable (UUID, String) -> Void)?) {
+         codexTokenSeen: (@Sendable (UUID, String) -> Void)?,
+         oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?) {
         self.profileID = profileID
         self.certCache = certCache
         self.swapper = swapper
@@ -274,6 +286,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         self.sessionTraceProvider = sessionTraceProvider
         self.subscriptionTokenSeen = subscriptionTokenSeen
         self.codexTokenSeen = codexTokenSeen
+        self.oauthRotated = oauthRotated
     }
 
     @available(macOS, deprecated: 10.15)
@@ -284,6 +297,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         let providerCopy = sessionTraceProvider
         let tokenHook = subscriptionTokenSeen
         let codexHook = codexTokenSeen
+        let rotatedHook = oauthRotated
         let conn = HTTPMitmConnection(
             fd: fd,
             profileID: profileID,
@@ -296,7 +310,8 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             consent: consent,
             sessionTraceProvider: providerCopy,
             subscriptionTokenSeen: tokenHook,
-            codexTokenSeen: codexHook
+            codexTokenSeen: codexHook,
+            oauthRotated: rotatedHook
         )
         Task.detached(priority: .userInitiated) {
             await conn.run()

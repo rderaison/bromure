@@ -51,7 +51,11 @@ final class TabsModel {
 /// matching kitty window.
 @MainActor
 final class TabbedSessionWindow: NSWindow {
-    let profile: Profile
+    /// The profile the running VM was launched with. `applyLiveProfileUpdates`
+    /// rebinds this when the user saves the editor; everything in-flight
+    /// (close action, MITM lookups keyed off `profile.id`, etc.) sees the
+    /// new values without needing a restart.
+    var profile: Profile
     let model = TabsModel()
     weak var acDelegate: ACAppDelegate?
     private var toolbarChromeDelegate: TabsToolbarDelegate?
@@ -230,6 +234,35 @@ final class TabbedSessionWindow: NSWindow {
     /// happens-to-be-still.
     func setSuspendedTint(_ on: Bool) {
         suspendedTintView.isHidden = !on
+    }
+
+    /// Re-bind `profile` to a freshly-saved version and re-apply the
+    /// host-side window state that depends on it. Call this whenever
+    /// the user saves the profile editor while a session is open —
+    /// settings that don't affect the booted VM (window title /
+    /// tint / opacity, accent color, close-on-quit behaviour, comments)
+    /// pick up the change without a restart. Settings baked into the
+    /// VM image (memory, network, kitty font, gitconfig, env vars,
+    /// shared folders, …) are out of reach here; the caller is
+    /// responsible for prompting the user to restart for those.
+    func applyLiveProfileUpdates(_ newProfile: Profile) {
+        profile = newProfile
+
+        title = newProfile.name
+        model.accentHex = newProfile.color.hexInUI
+
+        let opacity = min(1.0, max(0.3, newProfile.windowOpacity))
+        vmContainer.layer?.opacity = Float(opacity)
+        if opacity < 1.0 {
+            isOpaque = false
+            backgroundColor = .clear
+        } else {
+            // Restore the standard opaque chrome so the framebuffer
+            // doesn't keep blending with the desktop after the user
+            // dialled opacity back to 1.0.
+            isOpaque = true
+            backgroundColor = nil
+        }
     }
 
     /// Called by ACAppDelegate when the in-VM agent reports the

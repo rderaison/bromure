@@ -410,6 +410,7 @@ struct ProfileEditorView: View {
 
     init(
         profile: Profile? = nil,
+        isNew: Bool? = nil,
         terminalDefaults: TerminalAppDefaults,
         storageContext: ProfileStorageContext?,
         onSave: @escaping (Profile, _ generateSSH: Bool) -> Void,
@@ -425,9 +426,16 @@ struct ProfileEditorView: View {
         // values. We always render the editable fields (no inherit toggle).
         p.seedAppearance(from: terminalDefaults)
         _draft = State(initialValue: p)
-        // Existing keys: don't regen by default. New profile: yes.
-        _generateSSH = State(initialValue: profile == nil)
-        isNew = profile == nil
+        // Caller-supplied isNew lets the picker pre-seed a draft from
+        // the user's preferences template while still telling the
+        // editor "this is a brand-new profile". Falls back to the
+        // legacy `profile == nil` heuristic for back-compat with the
+        // simpler "no draft, no template" call site.
+        let resolvedIsNew = isNew ?? (profile == nil)
+        // Existing keys: don't regen by default. New profile: regen
+        // only if there's no key already on the draft (template fork).
+        _generateSSH = State(initialValue: resolvedIsNew && p.sshPublicKey == nil)
+        self.isNew = resolvedIsNew
         self.terminalDefaults = terminalDefaults
         self.storageContext = storageContext
         self.onSave = onSave
