@@ -269,8 +269,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var profileWindows: [Profile.ID: TabbedSessionWindow] = [:]
 
     /// NSEvent monitor that intercepts ⌘T / ⌘W / ⌘1-9 at the
-    /// application level — before the responder chain, before VZ's
-    /// `capturesSystemKeys` swallows them.
+    /// application level — before the responder chain, before the
+    /// VZ view's keyDown forwards them to the guest. Returning nil
+    /// from the handler is what consumes the event; see the closure
+    /// in applicationDidFinishLaunching for why we don't `?? event`.
     private var keyMonitor: Any?
 
     /// Progress model for the in-app `init` flow (first-time setup or
@@ -537,12 +539,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
 
-        // ⌘T / ⌘W / ⌘1-9 must run BEFORE VZVirtualMachineView eats them
-        // (it sets capturesSystemKeys = true so menus + window
-        // performKeyEquivalent are bypassed). A local monitor fires
-        // before any of that, so we can intercept here.
+        // ⌘T / ⌘W / ⌘1-9 must run BEFORE VZVirtualMachineView's
+        // keyDown forwards them to the guest (where kitty's super+t /
+        // super+w mappings would create a kitty-internal tab instead
+        // of a host pill). A local monitor fires before window /
+        // menu / responder-chain dispatch, so this is the earliest
+        // hook we have. `interceptKey` returns nil when it has
+        // handled the event — propagate that nil so AppKit drops
+        // the event. A `?? event` here would silently re-emit the
+        // consumed event into normal dispatch, racing the host's
+        // performKeyEquivalent against the VZ view's keyDown.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.interceptKey(event) ?? event
+            guard let self else { return event }
+            return self.interceptKey(event)
         }
     }
 

@@ -404,30 +404,53 @@ final class TabbedSessionWindow: NSWindow {
         }
     }
 
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        // Match the relaxed-modifier test in ACAppDelegate.interceptKey:
-        // capsLock / numericPad / help / function leak in unrelated
-        // bits that a strict `== [.command]` would reject, leaving ⌘T
-        // and ⌘W appearing to work intermittently.
+    /// ⌘T / ⌘W / ⌘1-9 dispatch shared by `sendEvent`, `performKeyEquivalent`
+    /// and the app delegate's NSEvent monitor. Returns true when the
+    /// shortcut matched and the event should be consumed.
+    ///
+    /// The relaxed-modifier mask matches ACAppDelegate.interceptKey:
+    /// capsLock / numericPad / help / function leak in unrelated bits
+    /// that a strict `== [.command]` would reject, which made ⌘T / ⌘W
+    /// appear intermittent in the past.
+    func handleACShortcut(_ event: NSEvent) -> Bool {
         let userMods: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
         let mods = event.modifierFlags.intersection(userMods)
+        guard mods == [.command] else { return false }
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
-        if mods == [.command] {
-            switch chars {
-            case "t":
-                acDelegate?.spawnNewTab(in: self)
+        switch chars {
+        case "t":
+            acDelegate?.spawnNewTab(in: self)
+            return true
+        case "w":
+            closeTab(at: model.activeIndex)
+            return true
+        default:
+            if let n = Int(chars), (1...9).contains(n),
+               model.tabs.indices.contains(n - 1) {
+                switchTo(index: n - 1)
                 return true
-            case "w":
-                closeTab(at: model.activeIndex)
-                return true
-            default:
-                if let n = Int(chars), (1...9).contains(n),
-                   model.tabs.indices.contains(n - 1) {
-                    switchTo(index: n - 1)
-                    return true
-                }
             }
+            return false
         }
+    }
+
+    /// Last-resort intercept for ⌘T / ⌘W / ⌘1-9. NSWindow.sendEvent
+    /// runs before performKeyEquivalent and before the responder chain
+    /// dispatches keyDown to the VZ view, so this catches the event
+    /// even in focus states where the app-level NSEvent monitor failed
+    /// to fire (observed when VZVirtualMachineView has just captured
+    /// input — the keystroke reaches the window but bypasses earlier
+    /// hooks). Without this, ⌘T sometimes leaked through to the guest's
+    /// kitty (which maps super+t → new_tab inside the terminal) and
+    /// the user saw "Cmd-T did nothing" until they clicked the titlebar
+    /// to break VZ's capture state.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, handleACShortcut(event) { return }
+        super.sendEvent(event)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if handleACShortcut(event) { return true }
         return super.performKeyEquivalent(with: event)
     }
 }
