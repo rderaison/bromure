@@ -134,6 +134,12 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                     keyEquivalent: "")
     appMenu.addItem(NSMenuItem.separator())
 
+    let prefsItem = NSMenuItem(title: L("Preferences…"),
+                                action: #selector(ACAppDelegate.openPreferencesAction(_:)),
+                                keyEquivalent: ",")
+    prefsItem.target = delegate
+    appMenu.addItem(prefsItem)
+
     let rebuildItem = NSMenuItem(title: L("Rebuild Base Image…"),
                                  action: #selector(ACAppDelegate.rebuildBaseImageAction(_:)),
                                  keyEquivalent: "")
@@ -281,7 +287,38 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// the CA + per-profile token swap maps + ssh-agent keystore. Lazy
     /// because CA generation hits disk on first access.
     private lazy var mitmEngine: MitmEngine? = {
-        do { return try MitmEngine() }
+        do {
+            let e = try MitmEngine()
+            // Route clean-OAuth-token detections from the proxy hot
+            // path to the coordinator. Captured `store` and `swapper`
+            // are stable references; the profile lookup happens once
+            // we're already on MainActor so we don't violate isolation.
+            let storeRef = self.store
+            let swapperRef = e.swapper
+            e.subscriptionTokenSeen = { [weak self] profileID, token in
+                Task { @MainActor in
+                    guard let profile = self?.profiles.first(where: { $0.id == profileID })
+                    else { return }
+                    SubscriptionTokenCoordinator.shared.handleCleanAccessToken(
+                        token,
+                        profile: profile,
+                        store: storeRef,
+                        swapper: swapperRef)
+                }
+            }
+            e.codexTokenSeen = { [weak self] profileID, token in
+                Task { @MainActor in
+                    guard let profile = self?.profiles.first(where: { $0.id == profileID })
+                    else { return }
+                    SubscriptionTokenCoordinator.shared.handleCleanCodexAccessToken(
+                        token,
+                        profile: profile,
+                        store: storeRef,
+                        swapper: swapperRef)
+                }
+            }
+            return e
+        }
         catch {
             FileHandle.standardError.write(Data(
                 "[mitm] engine init failed: \(error) — sessions will run without proxy\n".utf8))
@@ -317,6 +354,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// ~/.aws/config so the SDK pulls JSON creds from the host on demand.
     private lazy var awsCredsHelperURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/bromure-aws-creds",
+                             withExtension: "py")
+    }()
+
+    /// SPM-resource-bundle path to the Claude subscription-token agent.
+    /// Dropped in the meta share, launched from xinitrc, talks vsock
+    /// to host port 8446 (`SubscriptionTokenBridge`).
+    private lazy var claudeTokenAgentURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/claude-token-agent",
+                             withExtension: "py")
+    }()
+
+    /// SPM-resource-bundle path to the Codex / ChatGPT
+    /// subscription-token agent. Vsock port 8447, reads/writes
+    /// ~/.codex/auth.json.
+    private lazy var codexTokenAgentURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/codex-token-agent",
                              withExtension: "py")
     }()
 
@@ -735,6 +788,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             mitmEngine?.clearSessionTrace(for: session.profile.id)
             mitmEngine?.unregister(profileID: session.profile.id)
+            SubscriptionTokenCoordinator.shared.unregister(profileID: session.profile.id)
             profileWindows.removeValue(forKey: session.profile.id)
             renderPicker()
             if mainWindow == nil && profileWindows.isEmpty {
@@ -898,6 +952,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var traceInspectorWindow: NSWindow?
     private var credentialApprovalsWindow: NSWindow?
     private var enrollmentWindow: NSWindow?
+    private var preferencesWindow: NSWindow?
 
     /// Wired to the "Trace Inspector…" menu item (⇧⌘I).
     /// Opens the inspector with no profile pre-filter.
@@ -1071,6 +1126,48 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         traceInspectorWindow = win
     }
 
+    @objc func openPreferencesAction(_ sender: Any?) {
+        if let win = preferencesWindow {
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false)
+        win.title = NSLocalizedString("Bromure — Preferences",
+                                       comment: "Preferences window title")
+        win.center()
+        win.isReleasedWhenClosed = false
+        win.delegate = self
+        let template = store.loadTemplate()
+        win.contentView = NSHostingView(rootView: ProfileEditorView(
+            profile: template,
+            terminalDefaults: terminalDefaults,
+            storageContext: nil,
+            onSave: { [weak self] updated, _ in
+                guard let self else { return }
+                do {
+                    try self.store.saveTemplate(updated)
+                } catch {
+                    self.showError(error,
+                                    message: "Couldn't save preferences.")
+                    return
+                }
+                self.preferencesWindow?.close()
+                self.preferencesWindow = nil
+            },
+            onCancel: { [weak self] in
+                self?.preferencesWindow?.close()
+                self?.preferencesWindow = nil
+            }
+        ))
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        preferencesWindow = win
+    }
+
     @objc func rebuildBaseImageAction(_ sender: Any?) {
         let alert = NSAlert()
         alert.messageText = "Rebuild the base image?"
@@ -1174,8 +1271,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         win.title = editing == nil ? "New profile" : "Edit profile"
         win.center()
+        // For new profiles, hand the editor a draft pre-populated from
+        // the user's preferences template (Bromure → Preferences…).
+        // Existing profiles keep their own values.
+        let initialDraft: Profile? = editing
+            ?? store.newProfileFromTemplate(name: "", tool: .claude,
+                                             authMode: .token)
         win.contentView = NSHostingView(rootView: ProfileEditorView(
-            profile: editing,
+            profile: initialDraft,
             terminalDefaults: terminalDefaults,
             storageContext: makeStorageContext(for: editing),
             onSave: { profile, generateSSH in
@@ -1190,7 +1293,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     throw NSError(domain: "BromureAC", code: 1, userInfo: [
                         NSLocalizedDescriptionKey: "App not available"])
                 }
-                let target = editing ?? Profile(name: "", tool: .claude, authMode: .token)
+                let target = editing ?? self.store.newProfileFromTemplate(
+                    name: "", tool: .claude, authMode: .token)
                 if editing == nil {
                     try self.store.save(target)
                 }
@@ -1659,7 +1763,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
                     keyboardAgentURL: keyboardAgentURL,
-                    awsCredsHelperURL: awsCredsHelperURL)
+                    awsCredsHelperURL: awsCredsHelperURL,
+                    claudeTokenAgentURL: claudeTokenAgentURL,
+                    codexTokenAgentURL: codexTokenAgentURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
             // True only when the resumed snapshot's kittys are still
@@ -1719,6 +1825,34 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 win.keyboardBridge = KeyboardBridge(
                     socketDevice: dev,
                     forcedLayout: profile.keyboardLayoutOverride)
+            }
+            // Claude subscription-token bridge — listens on vsock 8446
+            // for the in-VM agent. Registered with the coordinator so
+            // detection events from the proxy hot path can find it.
+            if let dev = sandbox.socketDevice,
+               profile.subscriptionTokenSwap != .declined {
+                let bridge = SubscriptionTokenBridge(socketDevice: dev)
+                SubscriptionTokenCoordinator.shared.register(
+                    profileID: profile.id, bridge: bridge)
+            }
+            // Codex subscription-token bridge — vsock 8447. Same gate.
+            if let dev = sandbox.socketDevice,
+               profile.codexTokenSwap != .declined {
+                let bridge = CodexTokenBridge(socketDevice: dev)
+                SubscriptionTokenCoordinator.shared.registerCodex(
+                    profileID: profile.id, bridge: bridge)
+            }
+            // Auto-seed: if this profile inherited real OAuth tokens
+            // from the user's preferences template, mint fakes,
+            // register them with the swapper, and write them into the
+            // VM's credentials file as soon as the bridge is up.
+            // Skipped when the VM already has its own credentials
+            // (user ran `claude login` / `codex login` manually).
+            if let engine = self.mitmEngine {
+                SubscriptionTokenCoordinator.shared.autoSeedIfNeeded(
+                    profile: profile,
+                    store: self.store,
+                    swapper: engine.swapper)
             }
             if sessionDisk.didCloneOnLastEnsure, let current = currentBaseVersion {
                 var p = profile
@@ -2304,7 +2438,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
                     keyboardAgentURL: keyboardAgentURL,
-                    awsCredsHelperURL: awsCredsHelperURL)
+                    awsCredsHelperURL: awsCredsHelperURL,
+                    claudeTokenAgentURL: claudeTokenAgentURL,
+                    codexTokenAgentURL: codexTokenAgentURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager,
                                           sessionDisk: sessionDisk)
@@ -2325,6 +2461,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 win.keyboardBridge = KeyboardBridge(
                     socketDevice: dev,
                     forcedLayout: profile.keyboardLayoutOverride)
+            }
+            // Subscription-token bridges + auto-seed: same wiring as
+            // the primary session-start path. Without these, a session
+            // launched via the secondary path would skip detection
+            // entirely and never fire the consent / seed flow.
+            if let dev = sandbox.socketDevice,
+               profile.subscriptionTokenSwap != .declined {
+                let bridge = SubscriptionTokenBridge(socketDevice: dev)
+                SubscriptionTokenCoordinator.shared.register(
+                    profileID: profile.id, bridge: bridge)
+            }
+            if let dev = sandbox.socketDevice,
+               profile.codexTokenSwap != .declined {
+                let bridge = CodexTokenBridge(socketDevice: dev)
+                SubscriptionTokenCoordinator.shared.registerCodex(
+                    profileID: profile.id, bridge: bridge)
+            }
+            if let engine = self.mitmEngine {
+                SubscriptionTokenCoordinator.shared.autoSeedIfNeeded(
+                    profile: profile,
+                    store: self.store,
+                    swapper: engine.swapper)
             }
             self.wireSandboxCallbacks(sandbox, win: win)
             win.sandbox = sandbox

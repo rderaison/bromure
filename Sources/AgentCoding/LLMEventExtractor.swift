@@ -34,7 +34,12 @@ enum LLMEventExtractor {
         responseBody: Data?,
         conversation: Conversation,
     ) {
+        let tokenT0 = Date()
+        BACDebug.log("[ac/llm]",
+                     "tokens parse start provider=\(conversation.provider.rawValue) bodyBytes=\(responseBody?.count ?? 0)")
         let tokens = parseTokenCounters(provider: conversation.provider, responseBody: responseBody)
+        BACDebug.log("[ac/llm]",
+                     "tokens parse done provider=\(conversation.provider.rawValue) input=\(tokens.inputTokens ?? -1) output=\(tokens.outputTokens ?? -1) took=\(BACDebug.ms(tokenT0))")
 
         // llm.request — one per exchange.
         var llmData: [String: AnyJSON] = [
@@ -60,10 +65,26 @@ enum LLMEventExtractor {
         // would double-count. The last assistant message in the
         // parsed Conversation is the one this exchange produced.
         guard let assistant = conversation.messages.last(where: { $0.role == .assistant })
-        else { return }
+        else {
+            BACDebug.log("[ac/llm]", "no assistant turn — emit done host=\(host)")
+            return
+        }
+        let toolBlocks = assistant.content.filter {
+            if case .toolUse = $0 { return true } else { return false }
+        }
+        BACDebug.log("[ac/llm]",
+                     "tools walk start host=\(host) blocks=\(assistant.content.count) toolBlocks=\(toolBlocks.count)")
+        let toolsT0 = Date()
+        defer {
+            BACDebug.log("[ac/llm]",
+                         "tools walk done host=\(host) took=\(BACDebug.ms(toolsT0))")
+        }
 
         for block in assistant.content {
             guard case .toolUse(let name, let input) = block else { continue }
+            let toolT0 = Date()
+            BACDebug.log("[ac/llm]",
+                         "tool.use emit name=\(name) inputBytes=\(input.utf8.count)")
             // Generic tool.use envelope first — useful for the
             // "tools" insights view that doesn't care about
             // file-vs-command specifics.
@@ -74,27 +95,37 @@ enum LLMEventExtractor {
                     "tool_name": .string(name),
                     "input_summary": .string(summarize(input: input, max: 240)),
                 ])
+            defer {
+                BACDebug.log("[ac/llm]",
+                             "tool.use done name=\(name) took=\(BACDebug.ms(toolT0))")
+            }
 
             // Specialised events for the categories admins care
             // about most. Tool naming follows Claude/Codex
             // conventions — see the cases below for the canonical
             // names per provider.
             if Self.isFileReadTool(name) {
-                if let p = extractPath(from: input) {
+                if let p = Self.extractPath(from: input) {
                     BACEventEmitter.shared.emitDetached(
                         profileID: profileID,
                         eventType: "file.read",
                         eventData: ["path": .string(p), "tool": .string(name)])
+                } else {
+                    BACDebug.log("[ac/llm]",
+                                 "no path extracted name=\(name) inputBytes=\(input.utf8.count)")
                 }
             } else if Self.isFileWriteTool(name) {
-                if let p = extractPath(from: input) {
+                if let p = Self.extractPath(from: input) {
                     BACEventEmitter.shared.emitDetached(
                         profileID: profileID,
                         eventType: "file.write",
                         eventData: ["path": .string(p), "tool": .string(name)])
+                } else {
+                    BACDebug.log("[ac/llm]",
+                                 "no path extracted name=\(name) inputBytes=\(input.utf8.count)")
                 }
             } else if Self.isCommandTool(name) {
-                if let cmd = extractCommand(from: input) {
+                if let cmd = Self.extractCommand(from: input) {
                     BACEventEmitter.shared.emitDetached(
                         profileID: profileID,
                         eventType: "command.run",
@@ -102,7 +133,13 @@ enum LLMEventExtractor {
                             "command": .string(cmd),
                             "tool": .string(name),
                         ])
+                } else {
+                    BACDebug.log("[ac/llm]",
+                                 "no command extracted name=\(name) inputBytes=\(input.utf8.count)")
                 }
+            } else {
+                BACDebug.log("[ac/llm]",
+                             "unknown tool name=\(name) inputBytes=\(input.utf8.count) — only generic tool.use emitted")
             }
         }
     }
@@ -110,26 +147,32 @@ enum LLMEventExtractor {
     // MARK: - Tool-name classification
 
     /// Read-the-file-system tools across providers / agent SDKs.
-    private static func isFileReadTool(_ name: String) -> Bool {
+    static func isFileReadTool(_ name: String) -> Bool {
         switch name {
-        case "Read", "ReadFile", "view", "View", "str_replace_editor": return true
+        case "Read", "ReadFile", "view", "View",
+             "read_file", "list_dir", "ls", "LS",
+             "Glob", "glob", "Grep", "grep",
+             "str_replace_editor": return true
         default: return false
         }
     }
 
     /// Mutate-the-file-system tools.
-    private static func isFileWriteTool(_ name: String) -> Bool {
+    static func isFileWriteTool(_ name: String) -> Bool {
         switch name {
         case "Write", "WriteFile", "Edit", "MultiEdit", "NotebookEdit",
-             "create", "Create", "str_replace": return true
+             "create", "Create", "str_replace",
+             "write_file", "apply_patch", "edit_file": return true
         default: return false
         }
     }
 
     /// Run-a-shell-command tools.
-    private static func isCommandTool(_ name: String) -> Bool {
+    static func isCommandTool(_ name: String) -> Bool {
         switch name {
-        case "Bash", "Shell", "shell", "Run", "RunCommand": return true
+        case "Bash", "Shell", "shell", "Run", "RunCommand",
+             "exec", "execute", "exec_command", "run_command",
+             "container.exec": return true
         default: return false
         }
     }
@@ -141,25 +184,38 @@ enum LLMEventExtractor {
     // as JSON when possible, fall back to regex on the rendered
     // text for malformed shapes.
 
-    private static func extractPath(from input: String) -> String? {
+    static func extractPath(from input: String) -> String? {
         if let dict = parseInputJSON(input) {
             // Common shapes across providers:
             //   Anthropic Read / Edit / Write: file_path
-            //   Codex view: path
+            //   Codex view / read_file / write_file / apply_patch: path
             //   str_replace_editor: path or file_path
-            for key in ["file_path", "path", "filename"] {
+            for key in ["file_path", "path", "filename", "target_file"] {
                 if let v = dict[key] as? String, !v.isEmpty { return v }
             }
         }
         return nil
     }
 
-    private static func extractCommand(from input: String) -> String? {
-        if let dict = parseInputJSON(input) {
-            for key in ["command", "cmd", "script"] {
-                if let v = dict[key] as? String, !v.isEmpty {
-                    return summarize(input: v, max: 500)
+    static func extractCommand(from input: String) -> String? {
+        guard let dict = parseInputJSON(input) else { return nil }
+        for key in ["command", "cmd", "script"] {
+            if let s = dict[key] as? String, !s.isEmpty {
+                return summarize(input: s, max: 500)
+            }
+            // Codex `shell` passes command as ["bash","-lc","<cmd>"].
+            // Pull the actual shell payload when we recognise that
+            // shape; otherwise fall back to space-joining the array
+            // so the admin still sees a meaningful preview.
+            if let arr = dict[key] as? [Any] {
+                let strs = arr.compactMap { $0 as? String }
+                if strs.count >= 3,
+                   ["bash", "/bin/bash", "sh", "/bin/sh", "zsh"].contains(strs[0]),
+                   strs[1].hasPrefix("-") {
+                    return summarize(input: strs[2], max: 500)
                 }
+                let joined = strs.joined(separator: " ")
+                if !joined.isEmpty { return summarize(input: joined, max: 500) }
             }
         }
         return nil

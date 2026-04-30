@@ -79,6 +79,13 @@ public final class MitmEngine {
     /// the VM is running. Keyed by profile UUID.
     private var listenerHolders: [UUID: ListenerHolder] = [:]
 
+    /// Set once by the host wiring code. Fires when the proxy sees a
+    /// clean Anthropic OAuth access token outbound — the receiver is
+    /// expected to throttle and present the consent sheet.
+    public var subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?
+    /// Codex / ChatGPT counterpart of `subscriptionTokenSeen`.
+    public var codexTokenSeen: (@Sendable (UUID, String) -> Void)?
+
     /// Our spawned ssh-agent. Owns the per-profile bromure keys
     /// (loaded via `ssh-add` at session launch) plus any keys the
     /// user explicitly imported through the profile UI; sole back-
@@ -128,6 +135,8 @@ public final class MitmEngine {
     /// session right after `vm.start()` (but before traffic flows).
     /// Releases on `unregister(profileID:)` or VM teardown.
     public func register(socketDevice: VZVirtioSocketDevice, profileID: UUID) {
+        let tokenHook = self.subscriptionTokenSeen
+        let codexHook = self.codexTokenSeen
         let holder = ListenerHolder(
             profileID: profileID,
             certCache: certCache,
@@ -145,7 +154,9 @@ public final class MitmEngine {
             // mutex — no actor hop required.
             sessionTraceProvider: { [weak self] in
                 self?.sessionTrace(for: profileID)
-            }
+            },
+            subscriptionTokenSeen: tokenHook,
+            codexTokenSeen: codexHook
         )
         socketDevice.setSocketListener(holder.httpListener,
                                        forPort: Self.httpsVsockPort)
@@ -197,7 +208,9 @@ private final class ListenerHolder {
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
-         sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?)
+         sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
+         subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?,
+         codexTokenSeen: (@Sendable (UUID, String) -> Void)?)
     {
         self.profileID = profileID
         self.httpDelegate = HTTPListenerDelegate(
@@ -209,7 +222,9 @@ private final class ListenerHolder {
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,
             consent: consent,
-            sessionTraceProvider: sessionTraceProvider)
+            sessionTraceProvider: sessionTraceProvider,
+            subscriptionTokenSeen: subscriptionTokenSeen,
+            codexTokenSeen: codexTokenSeen)
         self.sshDelegate = SSHListenerDelegate(
             profileID: profileID, sshAgent: sshAgent)
         self.awsDelegate = AWSCredsListenerDelegate(
@@ -236,6 +251,8 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
     let clusterCAs: ClusterCATrustRegistry
     let consent: ConsentBroker
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
+    let subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?
+    let codexTokenSeen: (@Sendable (UUID, String) -> Void)?
 
     init(profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          awsResigner: AWSResigner,
@@ -243,7 +260,9 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
-         sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?) {
+         sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
+         subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?,
+         codexTokenSeen: (@Sendable (UUID, String) -> Void)?) {
         self.profileID = profileID
         self.certCache = certCache
         self.swapper = swapper
@@ -253,6 +272,8 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         self.clusterCAs = clusterCAs
         self.consent = consent
         self.sessionTraceProvider = sessionTraceProvider
+        self.subscriptionTokenSeen = subscriptionTokenSeen
+        self.codexTokenSeen = codexTokenSeen
     }
 
     @available(macOS, deprecated: 10.15)
@@ -261,6 +282,8 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
                   from socketDevice: VZVirtioSocketDevice) -> Bool {
         let fd = dup(connection.fileDescriptor)
         let providerCopy = sessionTraceProvider
+        let tokenHook = subscriptionTokenSeen
+        let codexHook = codexTokenSeen
         let conn = HTTPMitmConnection(
             fd: fd,
             profileID: profileID,
@@ -271,7 +294,9 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,
             consent: consent,
-            sessionTraceProvider: providerCopy
+            sessionTraceProvider: providerCopy,
+            subscriptionTokenSeen: tokenHook,
+            codexTokenSeen: codexHook
         )
         Task.detached(priority: .userInitiated) {
             await conn.run()

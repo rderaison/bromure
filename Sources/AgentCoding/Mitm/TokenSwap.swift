@@ -32,14 +32,24 @@ public struct TokenMap: Sendable {
             case openaiApiKey      // Authorization: Bearer <token> (OpenAI)
         }
 
+        /// When true, the swapper also sweeps the request *body* for
+        /// `fake` (in addition to the header section) and substitutes
+        /// it with `real`. Off by default — the swap path is
+        /// header-scoped to keep multipart/binary uploads
+        /// untouchable. Turn on for OAuth refresh tokens that ride
+        /// in the JSON body of `POST /oauth/token`.
+        public let body: Bool
+
         public init(fake: String, real: String, host: String? = nil,
                     header: Header = .authorization,
+                    body: Bool = false,
                     consentCredentialID: String? = nil,
                     consentDisplayName: String? = nil) {
             self.fake = fake
             self.real = real
             self.host = host
             self.header = header
+            self.body = body
             self.consentCredentialID = consentCredentialID
             self.consentDisplayName = consentDisplayName
         }
@@ -97,6 +107,17 @@ public final class TokenSwapper: @unchecked Sendable {
         scanners.removeValue(forKey: profileID)
     }
 
+    /// Append new entries to the profile's map without clobbering the
+    /// ones we already registered (kubeconfigs, manual tokens, etc.).
+    /// Used by the subscription-token coordinator and the OAuth
+    /// rotation rewriter — both stream new fake↔real pairs into the
+    /// map after the initial session-prep call to `setMap`.
+    public func appendEntries(_ entries: [TokenMap.Entry], for profileID: UUID) {
+        let existing = (snapshotMap(for: profileID)?.entries) ?? []
+        let merged = TokenMap(entries: existing + entries)
+        setMap(merged, for: profileID)
+    }
+
     /// Install the host-side compromise handler. Called by ACAppDelegate
     /// once the engine is up; the handler's `Sendable` closure body
     /// hops to MainActor to suspend the VM and present the alert.
@@ -147,12 +168,21 @@ public final class TokenSwapper: @unchecked Sendable {
         }
 
         var swaps: [SwapRecord] = []
+        var newBody = bodyBytes
+        var bodyDirty = false
         for entry in map.entries {
             if let h = entry.host, !h.isEmpty,
                !Self.hostMatchesScope(host: host, scope: h) { continue }
-            // Quick check: is the fake even present? Avoid a consent
-            // hop just to prove there's nothing to substitute.
-            guard headerStr.range(of: entry.fake) != nil else { continue }
+
+            let inHeader = (headerStr.range(of: entry.fake) != nil)
+            // Body sweep is only attempted for entries that opted in
+            // (refresh tokens, etc.). Cheap pre-check on raw bytes so
+            // we don't run the consent broker for non-matching entries.
+            let fakeData = Data(entry.fake.utf8)
+            let inBody: Bool = entry.body
+                ? (newBody.range(of: fakeData) != nil)
+                : false
+            guard inHeader || inBody else { continue }
 
             // Gate on consent if the entry is flagged.
             if let credID = entry.consentCredentialID {
@@ -178,6 +208,19 @@ public final class TokenSwapper: @unchecked Sendable {
                     host: host
                 ))
             }
+
+            if inBody {
+                let realData = Data(entry.real.utf8)
+                while let r = newBody.range(of: fakeData) {
+                    newBody.replaceSubrange(r, with: realData)
+                    bodyDirty = true
+                    swaps.append(SwapRecord(
+                        fakePreview: Self.preview(entry.fake),
+                        realPreview: Self.preview(entry.real),
+                        host: host
+                    ))
+                }
+            }
         }
 
         // No-op if no swap actually fired — return the original buffer.
@@ -185,12 +228,48 @@ public final class TokenSwapper: @unchecked Sendable {
             return SwapResult(modified: rawRequest, swaps: [])
         }
 
+        // Body-mutated requests need Content-Length patched if the
+        // header was present; a stale length truncates the upstream's
+        // view of the body and breaks JSON parsing on the OAuth
+        // endpoint. We re-derive the length unconditionally when the
+        // body changed; otherwise the original request bytes are
+        // shipped verbatim (header-only swaps preserve length because
+        // fake and real are length-matched).
+        if bodyDirty {
+            headerStr = Self.replaceContentLength(headerStr, newLength: newBody.count)
+        }
         headerBytes = Data(headerStr.utf8)
         var out = Data()
-        out.reserveCapacity(headerBytes.count + bodyBytes.count)
+        out.reserveCapacity(headerBytes.count + newBody.count)
         out.append(headerBytes)
-        out.append(bodyBytes)
+        out.append(newBody)
         return SwapResult(modified: out, swaps: swaps)
+    }
+
+    /// Patch the `Content-Length` header in a CRLF-delimited HTTP
+    /// header block. Idempotent — adds a header when none was
+    /// present (rare for POST bodies, but handles HTTP/1.0 clients
+    /// that omit it).
+    private static func replaceContentLength(_ headerStr: String,
+                                              newLength: Int) -> String {
+        var lines = headerStr.components(separatedBy: "\r\n")
+        var saw = false
+        for i in lines.indices {
+            if lines[i].lowercased().hasPrefix("content-length:") {
+                lines[i] = "Content-Length: \(newLength)"
+                saw = true
+            }
+        }
+        if !saw {
+            // Insert before the trailing empty line (if any) so we
+            // don't push the header/body delimiter.
+            if let last = lines.last, last.isEmpty {
+                lines.insert("Content-Length: \(newLength)", at: lines.count - 1)
+            } else {
+                lines.append("Content-Length: \(newLength)")
+            }
+        }
+        return lines.joined(separator: "\r\n")
     }
 
     /// Scan a pre-swap request for `Authorization: Bearer …` and
@@ -262,6 +341,93 @@ public final class TokenSwapper: @unchecked Sendable {
             }
         }
         return leaks
+    }
+
+    /// Look for a Claude subscription OAuth access token in the
+    /// outgoing request's `Authorization: Bearer …` header. Returns
+    /// the cleartext token if it matches `sk-ant-oat01-…` AND is not
+    /// already a fake (`sk-ant-oat01-brm-…`) AND is not already
+    /// registered in the profile's swap map. Used by the consent flow
+    /// to decide whether to prompt the user once on first detection.
+    /// Caller is responsible for redacting / dropping the result if
+    /// they don't act on it — this method intentionally returns the
+    /// real value, since the coordinator needs it to mint a fake.
+    public func detectSubscriptionAccessToken(in rawRequest: Data,
+                                              profileID: UUID) -> String? {
+        lock.lock()
+        let knownFakes: Set<String> = Set(maps[profileID]?.entries.map { $0.fake } ?? [])
+        let knownReals: Set<String> = Set(maps[profileID]?.entries.map { $0.real } ?? [])
+        lock.unlock()
+
+        guard let headerEndIdx = rawRequest.range(of: Data("\r\n\r\n".utf8))?.lowerBound,
+              let headerStr = String(data: rawRequest.subdata(in: 0..<headerEndIdx),
+                                     encoding: .ascii)
+        else { return nil }
+
+        for line in headerStr.split(separator: "\r\n") {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = String(line[..<colon])
+                .trimmingCharacters(in: .whitespaces).lowercased()
+            guard name == "authorization" else { continue }
+            let value = String(line[line.index(after: colon)...])
+                .trimmingCharacters(in: .whitespaces)
+            let parts = value.split(separator: " ", maxSplits: 1)
+            guard parts.count == 2, parts[0].lowercased() == "bearer" else { continue }
+            let tok = String(parts[1])
+            guard tok.hasPrefix("sk-ant-oat01-") else { continue }
+            // Skip fakes (already swapped) and already-registered reals
+            // (we'll re-prompt only when a brand-new clean token shows
+            // up — covers the post-decline-Not-Now retry path).
+            if tok.hasPrefix("sk-ant-oat01-brm-") { continue }
+            if knownFakes.contains(tok) || knownReals.contains(tok) { continue }
+            return tok
+        }
+        return nil
+    }
+
+    /// Look for a Codex / ChatGPT subscription OAuth access token in
+    /// the outgoing request's `Authorization: Bearer …` header.
+    /// Returns the cleartext token if it looks JWT-shaped (`eyJ…`),
+    /// is NOT a brm-fake (the host's coordinator gives fakes a
+    /// distinctive base64url prefix that decodes to "brm-cdX-acc"),
+    /// and is not already registered in the profile's swap map.
+    /// Caller is expected to have already gated on the host being
+    /// chatgpt.com / openai.com / auth.openai.com.
+    public func detectCodexAccessToken(in rawRequest: Data,
+                                        profileID: UUID) -> String? {
+        lock.lock()
+        let knownFakes: Set<String> = Set(maps[profileID]?.entries.map { $0.fake } ?? [])
+        let knownReals: Set<String> = Set(maps[profileID]?.entries.map { $0.real } ?? [])
+        lock.unlock()
+
+        guard let headerEndIdx = rawRequest.range(of: Data("\r\n\r\n".utf8))?.lowerBound,
+              let headerStr = String(data: rawRequest.subdata(in: 0..<headerEndIdx),
+                                     encoding: .ascii)
+        else { return nil }
+
+        for line in headerStr.split(separator: "\r\n") {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = String(line[..<colon])
+                .trimmingCharacters(in: .whitespaces).lowercased()
+            guard name == "authorization" else { continue }
+            let value = String(line[line.index(after: colon)...])
+                .trimmingCharacters(in: .whitespaces)
+            let parts = value.split(separator: " ", maxSplits: 1)
+            guard parts.count == 2, parts[0].lowercased() == "bearer" else { continue }
+            let tok = String(parts[1])
+            // Codex tokens are JWTs. Bail out fast on anything that
+            // doesn't carry the `eyJ` (header `{"…"}`) prefix — keeps
+            // us from prompting on regular OpenAI API keys, which
+            // start with `sk-`.
+            guard tok.hasPrefix("eyJ"), tok.count >= 32 else { continue }
+            // Skip our own minted fakes — the swap path keeps the
+            // real header + payload and replaces only the signature
+            // segment with a `brm-cdX-sig`-prefixed marker.
+            if SubscriptionFakeMint.isJWTFake(tok) { continue }
+            if knownFakes.contains(tok) || knownReals.contains(tok) { continue }
+            return tok
+        }
+        return nil
     }
 
     /// Scan the entire raw outgoing request (headers + body) for any

@@ -21,6 +21,14 @@ final class HTTPMitmConnection: @unchecked Sendable {
     let clusterCAs: ClusterCATrustRegistry
     let consent: ConsentBroker
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
+    /// Fired when the proxy sees a clean Anthropic subscription OAuth
+    /// access token in an outbound request. The host wires this to
+    /// `SubscriptionTokenCoordinator.handleCleanAccessToken` which
+    /// throttles per-profile and presents the consent sheet.
+    let subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?
+    /// Codex / ChatGPT counterpart: fires when a clean JWT-shaped
+    /// access token is seen on chatgpt.com / openai.com.
+    let codexTokenSeen: (@Sendable (UUID, String) -> Void)?
 
     init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          awsResigner: AWSResigner,
@@ -28,7 +36,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
-         sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?) {
+         sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
+         subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)? = nil,
+         codexTokenSeen: (@Sendable (UUID, String) -> Void)? = nil) {
         self.fd = fd
         self.profileID = profileID
         self.certCache = certCache
@@ -39,6 +49,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
         self.clusterCAs = clusterCAs
         self.consent = consent
         self.sessionTraceProvider = sessionTraceProvider
+        self.subscriptionTokenSeen = subscriptionTokenSeen
+        self.codexTokenSeen = codexTokenSeen
     }
 
     /// Drives the full MITM exchange. Must be called from a Task —
@@ -130,6 +142,29 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 "[mitm] LEAK \(leak.header)=\(leak.valuePreview) on \(host) (\(leak.suspicion.rawValue))\n".utf8))
         }
 
+        // Subscription-token swap: clean `sk-ant-oat01-…` going out to
+        // anthropic.com? Surface to the coordinator so it can prompt
+        // (once per session per profile). The hook is fire-and-forget:
+        // we still forward the request as-is; the swap kicks in on the
+        // *next* outbound request once the user accepts.
+        if host == "api.anthropic.com" || host.hasSuffix(".anthropic.com") {
+            if let cleanToken = swapper.detectSubscriptionAccessToken(
+                in: swap.modified, profileID: profileID) {
+                subscriptionTokenSeen?(profileID, cleanToken)
+            }
+        }
+        // Codex / ChatGPT subscription-token swap. Codex CLI auths
+        // against chatgpt.com (browser flow) and refreshes against
+        // auth.openai.com — same JWT shape on the wire.
+        if host == "chatgpt.com" || host.hasSuffix(".chatgpt.com")
+            || host == "auth.openai.com"
+            || host == "api.openai.com" {
+            if let cleanToken = swapper.detectCodexAccessToken(
+                in: swap.modified, profileID: profileID) {
+                codexTokenSeen?(profileID, cleanToken)
+            }
+        }
+
         // 6a. WebSocket upgrade — bypass URLSession (which can't
         //     surface the 101 + raw bidirectional byte stream) and
         //     do a manual TLS-client connect + opaque pump. Used by
@@ -142,12 +177,35 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // frame-parsing cost when the user has tracing off.
             let captureBody = sessionTraceProvider()?
                 .level.capturesBodyForHost(host) ?? false
+            // Streaming event tap: extracts BAC events from
+            // `response.completed` server frames as they arrive, so
+            // long-lived OpenAI Realtime sessions don't wait until WS
+            // close to surface activity. Only attached when we're
+            // already capturing bodies on this host (managed AI
+            // hosts) — otherwise the per-frame JSON parse is wasted
+            // work for raw passthrough WebSockets.
+            let (_, reqPath) = Self.parseRequestLine(swap.modified)
+            let realtimeTap: RealtimeEventTap? = captureBody
+                ? RealtimeEventTap(
+                    profileID: profileID,
+                    host: host,
+                    path: reqPath,
+                    statusCode: 101)
+                : nil
             let result = try await handleWebSocketUpgrade(
                 serverTLS: tls,
                 rawRequest: swap.modified,
                 host: host, port: port,
-                captureBody: captureBody)
+                captureBody: captureBody,
+                onUpstreamMessage: realtimeTap.map { tap in
+                    { @Sendable msg in tap.handle(msg) }
+                })
             let elapsed = Date().timeIntervalSince(t0) * 1000
+            let streamedAny = realtimeTap?.streamedAnyEvents ?? false
+            if streamedAny {
+                BACDebug.log("[mitm/wsTrace]",
+                             "skip close-time llmextract (streamed=\(realtimeTap?.streamedResponseCount ?? 0)) host=\(host)")
+            }
             await emitWebSocketTrace(host: host, port: port,
                                      preSwapRequest: request,
                                      handshakeResponse: result.handshakeResponse,
@@ -157,7 +215,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                      statusCode: result.statusCode,
                                      swaps: swap.swaps,
                                      leaks: leaks,
-                                     latencyMs: elapsed)
+                                     latencyMs: elapsed,
+                                     skipLLMExtract: streamedAny)
             return
         }
 
@@ -225,10 +284,33 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // `finishTasksAndInvalidate` lets the in-flight request
         // complete normally, then breaks the retain cycle.
         defer { session.finishTasksAndInvalidate() }
-        let relay = try await relayUpstream(rawRequest: toForward,
+
+        // Anthropic OAuth rotation: when this is a refresh request on
+        // the token endpoint, hold the response (don't stream) so the
+        // OAuthRotationRewriter can replace the new access/refresh
+        // tokens in the body before the VM sees them. Streaming would
+        // be too late — Claude Code would write the real values to
+        // ~/.claude/.credentials.json before our rewrite could fire.
+        let (_, refreshPath) = Self.parseRequestLine(toForward)
+        let bufferForOAuthRewrite = OAuthRotationRewriter.isOAuthTokenEndpoint(
+            host: host, path: refreshPath)
+        let relay: RelayResponse
+        if bufferForOAuthRewrite {
+            relay = try await relayUpstreamBuffered(
+                rawRequest: toForward,
+                host: host, port: port,
+                session: session,
+                tls: tls,
+                rewrite: { [profileID, swapper] raw in
+                    OAuthRotationRewriter.rewrite(
+                        raw: raw, profileID: profileID, swapper: swapper)
+                })
+        } else {
+            relay = try await relayUpstream(rawRequest: toForward,
                                             host: host, port: port,
                                             session: session,
                                             tls: tls)
+        }
 
         // 7. Trace. Build a TraceRecord from what we observed and
         //    hand it to the engine's TraceStore. Body capture is
@@ -297,7 +379,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
     private func handleWebSocketUpgrade(serverTLS: TLSServerStream,
                                         rawRequest: Data,
                                         host: String, port: Int,
-                                        captureBody: Bool) async throws -> WebSocketResult {
+                                        captureBody: Bool,
+                                        onUpstreamMessage: (@Sendable (WSMessage) -> Void)? = nil) async throws -> WebSocketResult {
         let upstreamFD = try connectTCP(host: host, port: port)
         let upstreamTLS: TLSClientStream
         do {
@@ -365,6 +448,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             ? WSTraceCollector(direction: .clientToUpstream, inflater: c2uInflater) : nil
         let u2cCollector = captureBody
             ? WSTraceCollector(direction: .upstreamToClient, inflater: u2cInflater) : nil
+        u2cCollector?.onMessage = onUpstreamMessage
 
         await withTaskGroup(of: Void.self) { group in
             let server = serverTLS
@@ -427,7 +511,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                     statusCode: Int,
                                     swaps: [SwapRecord],
                                     leaks: [LeakEntry],
-                                    latencyMs: Double) async {
+                                    latencyMs: Double,
+                                    skipLLMExtract: Bool = false) async {
         guard let session = sessionTraceProvider(),
               session.level.recordsActivity else { return }
 
@@ -450,13 +535,21 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // `isConversation` flag at record-time, like the regular
         // HTTP path does). Re-use the Conversation for the cloud
         // event extractor when the parse succeeds.
+        let wsParseT0 = Date()
+        BACDebug.log("[mitm/wsTrace]",
+                     "convparse start host=\(host) gated=\(captureBody && transcript != nil)")
         let conversation: Conversation? = (captureBody && transcript != nil)
             ? ConversationParser.parse(host: host,
                                        requestBody: preSwapRequest,
                                        responseBody: responseBlob)
             : nil
         let isConversation = (conversation != nil)
-        if let conv = conversation {
+        BACDebug.log("[mitm/wsTrace]",
+                     "convparse done host=\(host) isConv=\(isConversation) took=\(BACDebug.ms(wsParseT0))")
+        if let conv = conversation, !skipLLMExtract {
+            let wsExtractT0 = Date()
+            BACDebug.log("[mitm/wsTrace]",
+                         "llmextract start host=\(host) provider=\(conv.provider.rawValue)")
             LLMEventExtractor.emit(
                 profileID: profileID,
                 host: host, path: path,
@@ -464,6 +557,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 latencyMs: latencyMs,
                 responseBody: responseBlob,
                 conversation: conv)
+            BACDebug.log("[mitm/wsTrace]",
+                         "llmextract done host=\(host) took=\(BACDebug.ms(wsExtractT0))")
         }
         // Audit trail for credential.token_swap on the WS path —
         // mirror the HTTP-emit hook above.
@@ -531,6 +626,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
                            latencyMs: Double) async {
         guard let session = sessionTraceProvider(),
               session.level.recordsActivity else { return }
+        let traceT0 = Date()
+        BACDebug.log("[mitm/trace]",
+                     "emit start host=\(host) reqBytes=\(preSwapRequest.count) respBytes=\(upstreamResponse.count) truncated=\(responseTruncated)")
+        defer {
+            BACDebug.log("[mitm/trace]",
+                         "emit done host=\(host) total=\(BACDebug.ms(traceT0))")
+        }
 
         // Parse the request line for the trace.
         let (method, path) = Self.parseRequestLine(preSwapRequest)
@@ -559,13 +661,21 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // `command.run` events even though the recording was for the
         // local trace inspector. The extractor only emits when the
         // Mac is enrolled with bromure.io.
+        let parseT0 = Date()
+        BACDebug.log("[mitm/trace]",
+                     "convparse start host=\(host) gated=\(bodyStored && !responseTruncated) bodyStored=\(bodyStored) responseTruncated=\(responseTruncated)")
         let conversation: Conversation? = (bodyStored && !responseTruncated)
             ? ConversationParser.parse(host: host,
                                        requestBody: preSwapRequest,
                                        responseBody: upstreamResponse)
             : nil
         let isConversation = (conversation != nil)
+        BACDebug.log("[mitm/trace]",
+                     "convparse done host=\(host) isConv=\(isConversation) took=\(BACDebug.ms(parseT0))")
         if let conv = conversation {
+            let extractT0 = Date()
+            BACDebug.log("[mitm/trace]",
+                         "llmextract start host=\(host) provider=\(conv.provider.rawValue) messages=\(conv.messages.count)")
             LLMEventExtractor.emit(
                 profileID: profileID,
                 host: host, path: path,
@@ -573,12 +683,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 latencyMs: latencyMs,
                 responseBody: upstreamResponse,
                 conversation: conv)
+            BACDebug.log("[mitm/trace]",
+                         "llmextract done host=\(host) took=\(BACDebug.ms(extractT0))")
         }
         // Audit trail for credential.token_swap: every fake → real
         // substitution that just left the VM. One event per swap so
         // the admin UI can list "AI authenticated as <token name>
         // against <host>". Previews only — real values stay in
         // memory; the server would never see the secret bytes.
+        if !swaps.isEmpty {
+            BACDebug.log("[mitm/trace]", "swap-events emit count=\(swaps.count) host=\(host)")
+        }
         for s in swaps {
             BACEventEmitter.shared.emitDetached(
                 profileID: profileID,
@@ -626,9 +741,14 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let res = canStoreResponseBody
             ? Self.bodyForTrace(upstreamResponse).map { Self.redactSensitiveHeaders($0) }
             : nil
+        let storeT0 = Date()
+        BACDebug.log("[mitm/trace]",
+                     "store.record hop->main start host=\(host) reqBodyBytes=\(req?.count ?? 0) resBodyBytes=\(res?.count ?? 0)")
         await MainActor.run {
             store.record(record, requestBody: req, responseBody: res)
         }
+        BACDebug.log("[mitm/trace]",
+                     "store.record hop->main done host=\(host) took=\(BACDebug.ms(storeT0))")
     }
 
     /// Rewrite the headers of an HTTP frame so any header on the
@@ -950,6 +1070,94 @@ private func writeAll(fd: Int32, bytes: [UInt8]) throws {
 /// of waiting for completion. Caller must NOT also `tls.write()` the
 /// returned bytes (already streamed during the call).
 @available(macOS, deprecated: 10.15, message: "uses TLSServerStream which wraps SecureTransport")
+/// Variant of `relayUpstream` for short responses we need to mutate
+/// before they hit the wire (Anthropic OAuth rotation). Accumulates the
+/// full upstream response, runs `rewrite`, then writes the rewritten
+/// bytes to TLS in one shot. Bounded by the same 8 MB body cap as the
+/// streaming path; OAuth refresh responses are well under 1 KB so this
+/// never trips.
+@available(macOS, deprecated: 10.15)
+private func relayUpstreamBuffered(rawRequest: Data, host: String, port: Int,
+                                   session: URLSession,
+                                   tls: TLSServerStream,
+                                   rewrite: (Data) -> Data) async throws -> RelayResponse {
+    let buffered = try await relayUpstreamCollecting(
+        rawRequest: rawRequest, host: host, port: port, session: session)
+    let rewritten = rewrite(buffered)
+    try tls.write(rewritten)
+    return RelayResponse(buffer: rewritten,
+                         wireBytes: rewritten.count,
+                         truncatedForTrace: false)
+}
+
+/// Collect the full upstream response (no TLS write side-effect).
+/// Shared between the buffered relay and any other call site that
+/// needs the full body before responding to the client.
+private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
+                                     session: URLSession) async throws -> Data {
+    guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)) else {
+        throw MitmError.malformedHTTPRequest
+    }
+    let headerData = rawRequest.subdata(in: 0..<endRange.lowerBound)
+    let body       = rawRequest.subdata(in: endRange.upperBound..<rawRequest.count)
+    guard let headerStr = String(data: headerData, encoding: .ascii) else {
+        throw MitmError.malformedHTTPRequest
+    }
+    var lines = headerStr.split(separator: "\r\n", omittingEmptySubsequences: false)
+        .map(String.init)
+    guard !lines.isEmpty else { throw MitmError.malformedHTTPRequest }
+    let requestLine = lines.removeFirst()
+    let lineParts = requestLine.split(separator: " ")
+    guard lineParts.count >= 3 else { throw MitmError.malformedHTTPRequest }
+    let method = String(lineParts[0])
+    let path   = String(lineParts[1])
+    let portStr = (port == 443) ? "" : ":\(port)"
+    guard let url = URL(string: "https://\(host)\(portStr)\(path)") else {
+        throw MitmError.malformedHTTPRequest
+    }
+    var req = URLRequest(url: url)
+    req.httpMethod = method
+    if !body.isEmpty { req.httpBody = body }
+    for line in lines where !line.isEmpty {
+        guard let colon = line.firstIndex(of: ":") else { continue }
+        let name = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
+        let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+        switch name.lowercased() {
+        case "host", "content-length", "connection", "transfer-encoding",
+             "proxy-connection", "keep-alive", "te", "upgrade":
+            continue
+        default:
+            req.setValue(value, forHTTPHeaderField: name)
+        }
+    }
+    let stripped: Set<String> = [
+        "content-encoding", "content-length",
+        "transfer-encoding", "connection",
+        "proxy-connection", "keep-alive", "te", "trailer",
+        "upgrade", "proxy-authenticate", "proxy-authorization",
+    ]
+    let (data, resp) = try await session.data(for: req)
+    let http = (resp as? HTTPURLResponse)
+    var head = "HTTP/1.1 \(http?.statusCode ?? 200) "
+    head += HTTPURLResponse.localizedString(
+        forStatusCode: http?.statusCode ?? 200).capitalized
+    head += "\r\n"
+    if let http {
+        for (k, v) in http.allHeaderFields {
+            guard let key = k as? String, let val = v as? String else { continue }
+            if stripped.contains(key.lowercased()) { continue }
+            head += "\(key): \(val)\r\n"
+        }
+    }
+    head += "Content-Length: \(data.count)\r\n"
+    head += "Connection: close\r\n"
+    head += "\r\n"
+    var out = Data(head.utf8)
+    out.append(data)
+    return out
+}
+
+@available(macOS, deprecated: 10.15)
 private func relayUpstream(rawRequest: Data, host: String, port: Int,
                            session: URLSession,
                            tls: TLSServerStream) async throws -> RelayResponse {

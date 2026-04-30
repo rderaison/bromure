@@ -365,7 +365,11 @@ struct ProfileEditorView: View {
     @State private var selectedCategory: EditorCategory = .general
     private let isNew: Bool
     private let terminalDefaults: TerminalAppDefaults
-    private let storageContext: ProfileStorageContext
+    /// Where the profile's bytes live + how to reset them. Optional
+    /// because the Preferences-window flavour of this editor binds to
+    /// a template, which has no on-disk session — that flavour passes
+    /// nil and the Storage section is hidden.
+    private let storageContext: ProfileStorageContext?
 
     /// "Generate SSH key" toggle is decoupled from the model — only used
     /// to decide whether to call ssh-keygen on save.
@@ -407,7 +411,7 @@ struct ProfileEditorView: View {
     init(
         profile: Profile? = nil,
         terminalDefaults: TerminalAppDefaults,
-        storageContext: ProfileStorageContext,
+        storageContext: ProfileStorageContext?,
         onSave: @escaping (Profile, _ generateSSH: Bool) -> Void,
         onCancel: @escaping () -> Void,
         onImportSSHKey: ((URL, _ passphrase: String?, _ label: String) throws -> ImportedSSHKey)? = nil,
@@ -519,7 +523,12 @@ struct ProfileEditorView: View {
         // That's what gives us one right-aligned label column +
         // one left-aligned control column — the System Settings look.
         Form {
-            TextField("Name", text: $draft.name)
+            // Preferences (= template) flavour: skip the Name field —
+            // the template's name is forced to "Defaults" on save and
+            // shouldn't be user-editable here.
+            if draft.id != ProfileStore.templateID {
+                TextField("Name", text: $draft.name)
+            }
 
             Picker("Color", selection: $draft.color) {
                 ForEach(ProfileColor.allCases, id: \.self) { c in
@@ -1641,23 +1650,76 @@ struct ProfileEditorView: View {
             // Private mode: opt-out of bromure.io streaming for this
             // profile. Independent of the local trace level above —
             // the trace inspector keeps recording per the picker;
-            // only the upstream metadata feed is suppressed. The
-            // section header is the "Bromure Web" / "Mac is enrolled"
-            // surface; show the toggle even on un-enrolled Macs so
-            // the preference travels with the profile.
-            VStack(alignment: .leading, spacing: 4) {
-                Toggle(isOn: $draft.privateMode) {
-                    Label("Private mode", systemImage: "eye.slash")
-                        .font(.subheadline.weight(.semibold))
+            // only the upstream metadata feed is suppressed. Hidden
+            // entirely on Macs that aren't enrolled with bromure.io
+            // because the toggle has no observable effect there: with
+            // no workspace to stream to, "private" is the only mode.
+            if BACEnrollmentStore.load() != nil {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle(isOn: $draft.privateMode) {
+                        Label("Private mode", systemImage: "eye.slash")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .toggleStyle(.switch)
+                    Text("Sessions running under this profile normally stream metadata (tools, files, commands, token usage) to your workspace. Turn this on to keep this profile's activity local — neither the title-bar indicator nor the admin's session list will see anything from this profile. The local trace inspector is unaffected.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .toggleStyle(.switch)
-                Text("When this Mac is enrolled with bromure.io, sessions running under this profile normally stream metadata (tools, files, commands, token usage) to your workspace. Turn this on to keep this profile's activity local — neither the title-bar indicator nor the admin's session list will see anything from this profile. The local trace inspector is unaffected.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Subscription-token swap state. The proxy prompts on
+            // first detection and persists `.declined` here when the
+            // user clicks "Never for this profile" — surface a reset
+            // so the user can change their mind without editing JSON.
+            // Hide the row when state is `.unset` (default) so we
+            // don't add a permanent control for something the user
+            // hasn't interacted with yet.
+            if draft.subscriptionTokenSwap != .unset {
+                subscriptionTokenSwapRow(
+                    title: "Claude subscription token swap",
+                    state: draft.subscriptionTokenSwap,
+                    outboundHost: "anthropic.com",
+                    onReset: { draft.subscriptionTokenSwap = .unset })
+            }
+            if draft.codexTokenSwap != .unset {
+                subscriptionTokenSwapRow(
+                    title: "Codex subscription token swap",
+                    state: draft.codexTokenSwap,
+                    outboundHost: "chatgpt.com",
+                    onReset: { draft.codexTokenSwap = .unset })
             }
 
             // Manual tokens moved to Credentials → Other API keys.
+        }
+    }
+
+    @ViewBuilder
+    private func subscriptionTokenSwapRow(title: String,
+                                          state: SubscriptionTokenSwapState,
+                                          outboundHost: String,
+                                          onReset: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Label(title, systemImage: "key.viewfinder")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(state == .accepted ? "Active" : "Declined")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(state == .accepted
+                 ? "The proxy is keeping the real OAuth tokens on this Mac and serving fakes inside the VM."
+                 : "You said \u{201C}Never\u{201D} on the swap prompt for this profile. Reset to be asked again next time the VM sends a real token to \(outboundHost).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(state == .accepted
+                   ? "Forget swap (re-prompt next session)"
+                   : "Re-enable prompt") {
+                onReset()
+            }
+            .controlSize(.small)
         }
     }
 
@@ -1672,10 +1734,17 @@ struct ProfileEditorView: View {
                 Text("Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                StorageStackView(
-                    isNewProfile: isNew,
-                    context: storageContext
-                )
+                if let storageContext {
+                    StorageStackView(
+                        isNewProfile: isNew,
+                        context: storageContext
+                    )
+                } else {
+                    Text("Storage controls only apply to real profiles. They appear in each profile's editor when you create or edit one.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Divider()

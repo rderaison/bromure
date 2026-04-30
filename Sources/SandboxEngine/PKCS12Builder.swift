@@ -26,11 +26,11 @@ import Security
 ///   - RFC 5208 (PKCS#8 PrivateKeyInfo, used as the plaintext for the
 ///               shrouded key bag)
 ///   - RFC 8018 (PBES2/PBKDF2)
-enum PKCS12Builder {
+public enum PKCS12Builder {
     /// Build a PFX from DER-encoded cert + PKCS#8 private key. The
     /// password is only used as input to the MAC key derivation; it
     /// never protects confidentiality because nothing here is encrypted.
-    static func build(
+    public static func build(
         certDER: Data,
         privateKeyDER: Data,
         password: String,

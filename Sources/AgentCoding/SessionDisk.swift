@@ -44,16 +44,29 @@ public final class SessionDisk {
         /// per-profile ~/.aws/config; pulls JSON creds on demand from
         /// the bridge's Unix socket.
         public let awsCredsHelperURL: URL?
+        /// Claude subscription-token agent. Reads/writes
+        /// ~/.claude/.credentials.json under host instruction over
+        /// vsock 8446. nil = managed-mode subscription swap not
+        /// available (e.g., no AC bundle / older base image).
+        public let claudeTokenAgentURL: URL?
+        /// Codex subscription-token agent. Same delivery pattern as
+        /// `claudeTokenAgentURL`, talks vsock 8447, edits
+        /// ~/.codex/auth.json.
+        public let codexTokenAgentURL: URL?
         public init(caCertificatePEM: String,
                     bridgeScriptURL: URL,
                     keyboardAgentURL: URL? = nil,
                     scrollAgentURL: URL? = nil,
-                    awsCredsHelperURL: URL? = nil) {
+                    awsCredsHelperURL: URL? = nil,
+                    claudeTokenAgentURL: URL? = nil,
+                    codexTokenAgentURL: URL? = nil) {
             self.caCertificatePEM = caCertificatePEM
             self.bridgeScriptURL = bridgeScriptURL
             self.keyboardAgentURL = keyboardAgentURL
             self.scrollAgentURL = scrollAgentURL
             self.awsCredsHelperURL = awsCredsHelperURL
+            self.claudeTokenAgentURL = claudeTokenAgentURL
+            self.codexTokenAgentURL = codexTokenAgentURL
         }
     }
 
@@ -367,6 +380,24 @@ public final class SessionDisk {
                 try fm.setAttributes(
                     [.posixPermissions: NSNumber(value: 0o755)],
                     ofItemAtPath: awsDest.path)
+            }
+
+            if let tokURL = assets.claudeTokenAgentURL {
+                let tokDest = tmp.appendingPathComponent("claude-token-agent.py")
+                try? fm.removeItem(at: tokDest)
+                try fm.copyItem(at: tokURL, to: tokDest)
+                try fm.setAttributes(
+                    [.posixPermissions: NSNumber(value: 0o755)],
+                    ofItemAtPath: tokDest.path)
+            }
+
+            if let cxURL = assets.codexTokenAgentURL {
+                let cxDest = tmp.appendingPathComponent("codex-token-agent.py")
+                try? fm.removeItem(at: cxDest)
+                try fm.copyItem(at: cxURL, to: cxDest)
+                try fm.setAttributes(
+                    [.posixPermissions: NSNumber(value: 0o755)],
+                    ofItemAtPath: cxDest.path)
             }
 
             // proxy.env — sourced by .bashrc to set HTTPS_PROXY etc.

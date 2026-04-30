@@ -79,6 +79,14 @@ public enum BACEnrollmentStore {
         managedDir.appendingPathComponent("ca.crt")
     }
 
+    /// Pointer to the keychain account holding the private key for
+    /// `leaf.crt`. Updated atomically with the cert during rotation so
+    /// readers always see a (cert, serial, key) triple from the same
+    /// issuance.
+    private static var leafSerialURL: URL {
+        managedDir.appendingPathComponent("leaf.serial")
+    }
+
     // MARK: - Install identity
 
     public static func load() -> BACInstall? {
@@ -103,6 +111,7 @@ public enum BACEnrollmentStore {
         try? FileManager.default.removeItem(at: installJSONURL)
         try? FileManager.default.removeItem(at: leafCertPemURL)
         try? FileManager.default.removeItem(at: caCertPemURL)
+        try? FileManager.default.removeItem(at: leafSerialURL)
         deleteKeychain(account: installTokenKey)
         // Leaf cert keys are stored per-serial so we walk known accounts.
         // (Cheap — there's at most a handful as cert renewal turns over.)
@@ -133,9 +142,14 @@ public enum BACEnrollmentStore {
     // happens in Phase 3b.
 
     public static func storeLeafCert(certPem: String, caPem: String, privateKeyDER: Data, serialHex: String) throws {
+        let lower = serialHex.lowercased()
         try certPem.write(to: leafCertPemURL, atomically: true, encoding: .utf8)
         try caPem.write(to: caCertPemURL, atomically: true, encoding: .utf8)
-        try storeKeychain(account: leafCertKeyPrefix + serialHex.lowercased(), data: privateKeyDER)
+        try storeKeychain(account: leafCertKeyPrefix + lower, data: privateKeyDER)
+        // Serial pointer is written last so a partially-completed rotation
+        // leaves the previous (cert, key) pair selectable rather than
+        // pointing at material that doesn't exist yet.
+        try lower.write(to: leafSerialURL, atomically: true, encoding: .utf8)
     }
 
     public static func loadLeafCertPem() -> String? {
@@ -144,6 +158,12 @@ public enum BACEnrollmentStore {
 
     public static func loadCAPem() -> String? {
         try? String(contentsOf: caCertPemURL, encoding: .utf8)
+    }
+
+    public static func loadLeafSerial() -> String? {
+        guard let s = try? String(contentsOf: leafSerialURL, encoding: .utf8) else { return nil }
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     public static func loadLeafPrivateKey(serialHex: String) -> Data? {
@@ -205,6 +225,18 @@ public final class BACEnrollment {
         if let s = UserDefaults.standard.string(forKey: "managed.serverURL"),
            let url = URL(string: s) { return url }
         return URL(string: "https://bromure.io/api")!
+    }
+
+    /// Where the BAC uploader POSTs event batches. Distinct from
+    /// `defaultServerURL` because the analytics service is internet-facing
+    /// with its own mTLS termination — bromure.io/api is HAProxy-fronted
+    /// and not in a position to verify the install's leaf cert.
+    public static var defaultAnalyticsURL: URL {
+        if let env = ProcessInfo.processInfo.environment["BROMURE_AC_INGEST_URL"],
+           let url = URL(string: env) { return url }
+        if let s = UserDefaults.standard.string(forKey: "managed.acIngestURL"),
+           let url = URL(string: s) { return url }
+        return URL(string: "https://analytics.bromure.io/ac-ingest")!
     }
 
     /// Posted on the main actor whenever the enrollment state changes
@@ -269,6 +301,9 @@ public final class BACEnrollment {
 
     public func unenroll() async {
         BACEnrollmentStore.destroy()
+        // Drop any cached SecIdentity so the next enrollment doesn't reuse
+        // the previous leaf for an mTLS handshake.
+        BACMTLSIdentity.purge()
         await MainActor.run { Self.onStateChange?() }
     }
 
@@ -308,6 +343,9 @@ public final class BACEnrollment {
             privateKeyDER: priv.derRepresentation,
             serialHex: resp.serialHex,
         )
+        // New material → drop any cached SecIdentity so subsequent uploads
+        // present the freshly-issued leaf.
+        BACMTLSIdentity.purge()
         return resp.notAfter
     }
 

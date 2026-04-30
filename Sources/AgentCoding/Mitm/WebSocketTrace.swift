@@ -277,6 +277,15 @@ final class WSTraceCollector: @unchecked Sendable {
 
     private(set) var messages: [WSMessage] = []
 
+    /// Per-message hook fired as soon as a complete frame is assembled
+    /// (data frames after defragment + inflate; control frames
+    /// directly). Used by the proxy to emit BAC `llm.request` /
+    /// `tool.use` events incrementally during long-lived OpenAI
+    /// Realtime sessions, instead of only at WS close.
+    /// Set once at construction; not synchronised — the owning Task
+    /// is the only writer.
+    var onMessage: (@Sendable (WSMessage) -> Void)?
+
     init(direction: WSMessage.Direction, inflater: WSInflater? = nil) {
         self.direction = direction
         self.inflater = inflater
@@ -371,13 +380,15 @@ final class WSTraceCollector: @unchecked Sendable {
         }
 
         let truncated = pendingTotal > payload.count
-        messages.append(WSMessage(
+        let msg = WSMessage(
             direction: direction,
             timestamp: Date(),
             kind: kind,
             payload: payload,
             truncated: truncated,
-            totalBytes: pendingTotal))
+            totalBytes: pendingTotal)
+        messages.append(msg)
+        onMessage?(msg)
         pendingKind = nil
         pendingPayload = Data()
         pendingTotal = 0
@@ -386,13 +397,15 @@ final class WSTraceCollector: @unchecked Sendable {
 
     private func emitControl(_ kind: WSMessage.Kind, payload: Data) {
         let preview = takePreview(payload)
-        messages.append(WSMessage(
+        let msg = WSMessage(
             direction: direction,
             timestamp: Date(),
             kind: kind,
             payload: preview,
             truncated: payload.count > preview.count,
-            totalBytes: payload.count))
+            totalBytes: payload.count)
+        messages.append(msg)
+        onMessage?(msg)
     }
 
     private func takePreview(_ data: Data) -> Data {

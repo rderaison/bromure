@@ -183,15 +183,28 @@ public final class BACEventEmitter: @unchecked Sendable {
         // Hard gate: no install identity → nothing to authenticate
         // as, nothing to upload.
         guard BACEnrollmentStore.load() != nil,
-              BACEnrollmentStore.loadInstallToken() != nil else { return }
+              BACEnrollmentStore.loadInstallToken() != nil else {
+            BACDebug.log("[ac/emit]",
+                         "drop (not enrolled) eventType=\(eventType)")
+            return
+        }
         // Soft gate: per-profile private mode (Phase 3c).
         let isPrivate: Bool = {
             lock.lock(); defer { lock.unlock() }
             return privateProfileIDs.contains(profileID)
         }()
-        if isPrivate { return }
+        if isPrivate {
+            BACDebug.log("[ac/emit]",
+                         "drop (private profile) eventType=\(eventType)")
+            return
+        }
 
+        let bumpT0 = Date()
+        BACDebug.log("[ac/emit]",
+                     "session bump start eventType=\(eventType) profile=\(profileID)")
         let bump = await BACSessionTracker.shared.bump(profileID: profileID)
+        BACDebug.log("[ac/emit]",
+                     "session bump done eventType=\(eventType) rolled=\(bump.rolled) took=\(BACDebug.ms(bumpT0))")
         if bump.rolled, let prior = bump.priorSessionId {
             // The previous session ended at "20 min after the last
             // event" but we only learn that on the *next* event, so
@@ -239,7 +252,14 @@ public final class BACEventEmitter: @unchecked Sendable {
         lock.lock()
         let up = uploader
         lock.unlock()
-        if let up { up.enqueue(event) }
+        if let up {
+            BACDebug.log("[ac/emit]",
+                         "queue eventType=\(event.eventType) session=\(event.sessionId)")
+            up.enqueue(event)
+        } else {
+            BACDebug.log("[ac/emit]",
+                         "drop (no uploader) eventType=\(event.eventType)")
+        }
     }
 }
 
@@ -247,8 +267,7 @@ extension BACEventEmitter {
     /// Flush any buffered events synchronously (best-effort). Called
     /// at app teardown.
     public func flush() async {
-        let up: BACCloudUploader?
-        lock.lock(); up = uploader; lock.unlock()
+        let up: BACCloudUploader? = lock.withLock { uploader }
         await up?.flushNow()
     }
 }

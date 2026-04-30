@@ -630,6 +630,36 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// see this"). Mirrors a similar opt-out on Bromure Web.
     public var privateMode: Bool
 
+    /// Whether the user has consented to swap the Claude subscription
+    /// OAuth tokens (access + refresh) on disk for proxy-side fakes.
+    /// `unset` = haven't asked yet (proxy will prompt on first clean
+    /// `sk-ant-oat01-…` it sees on anthropic.com). `accepted` = swap
+    /// is active; the proxy keeps the real tokens and the VM holds
+    /// fakes. `declined` = user said "Never for this profile" — proxy
+    /// must not prompt or call into the VM agent again for this
+    /// profile.
+    public var subscriptionTokenSwap: SubscriptionTokenSwapState
+
+    /// Same three-state swap consent as `subscriptionTokenSwap`, but
+    /// scoped to the Codex / ChatGPT OAuth tokens (`~/.codex/auth.json`
+    /// — access, refresh, id_token). Independent of the Claude one
+    /// because a profile may use either or both providers via
+    /// `additionalTools`.
+    public var codexTokenSwap: SubscriptionTokenSwapState
+
+    /// When set, the host already holds the user's real Claude OAuth
+    /// access + refresh tokens — typically because the user said
+    /// "save as default" after a swap on a previous profile (or saved
+    /// them in Preferences). New sessions for this profile mint fakes
+    /// from these reals at boot, register the swap, and seed the VM's
+    /// credentials file without prompting. Stored encrypted on disk
+    /// alongside the rest of the profile's secrets.
+    public var defaultClaudeTokens: StoredOAuthTokens?
+
+    /// Codex equivalent of `defaultClaudeTokens` — access + refresh +
+    /// id_token. Same auto-seed-at-boot semantics.
+    public var defaultCodexTokens: StoredOAuthTokens?
+
     /// Pre-configured Kubernetes contexts. At session prep we
     /// generate a synthetic ~/.kube/config in the VM and register the
     /// real credentials with the proxy for upstream substitution.
@@ -804,6 +834,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         environmentVariables: [EnvironmentVariable] = [],
         traceLevel: TraceLevel = .off,
         privateMode: Bool = false,
+        subscriptionTokenSwap: SubscriptionTokenSwapState = .unset,
+        codexTokenSwap: SubscriptionTokenSwapState = .unset,
+        defaultClaudeTokens: StoredOAuthTokens? = nil,
+        defaultCodexTokens: StoredOAuthTokens? = nil,
         kubeconfigs: [KubeconfigEntry] = [],
         digitalOceanToken: String = "",
         awsCredentials: AWSCredentials = AWSCredentials(),
@@ -847,6 +881,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.environmentVariables = environmentVariables
         self.traceLevel = traceLevel
         self.privateMode = privateMode
+        self.subscriptionTokenSwap = subscriptionTokenSwap
+        self.codexTokenSwap = codexTokenSwap
+        self.defaultClaudeTokens = defaultClaudeTokens
+        self.defaultCodexTokens = defaultCodexTokens
         self.kubeconfigs = kubeconfigs
         self.digitalOceanToken = digitalOceanToken
         self.awsCredentials = awsCredentials
@@ -896,6 +934,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case environmentVariables
         case traceLevel
         case privateMode
+        case subscriptionTokenSwap
+        case codexTokenSwap
         case kubeconfigs
         case digitalOceanToken
         case awsCredentials
@@ -964,6 +1004,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                                                      forKey: .environmentVariables) ?? []
         traceLevel = try c.decodeIfPresent(TraceLevel.self, forKey: .traceLevel) ?? .off
         privateMode = try c.decodeIfPresent(Bool.self, forKey: .privateMode) ?? false
+        subscriptionTokenSwap = try c.decodeIfPresent(SubscriptionTokenSwapState.self,
+                                                      forKey: .subscriptionTokenSwap) ?? .unset
+        codexTokenSwap = try c.decodeIfPresent(SubscriptionTokenSwapState.self,
+                                               forKey: .codexTokenSwap) ?? .unset
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
@@ -1028,6 +1072,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if privateMode {
             try c.encode(privateMode, forKey: .privateMode)
         }
+        if subscriptionTokenSwap != .unset {
+            try c.encode(subscriptionTokenSwap, forKey: .subscriptionTokenSwap)
+        }
+        if codexTokenSwap != .unset {
+            try c.encode(codexTokenSwap, forKey: .codexTokenSwap)
+        }
         if !kubeconfigs.isEmpty {
             try c.encode(kubeconfigs, forKey: .kubeconfigs)
         }
@@ -1087,6 +1137,27 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// Real OAuth tokens captured from a `claude login` / `codex login`
+/// flow inside the VM, stored on the host so the proxy can swap them
+/// onto the wire and so future sessions don't require re-login.
+/// Always lives in the encrypted secrets blob, never in profile.json.
+public struct StoredOAuthTokens: Codable, Sendable, Equatable {
+    public let accessToken: String
+    public let refreshToken: String
+    /// Codex carries an `id_token` alongside access/refresh; Claude
+    /// doesn't. Optional so one struct serves both providers.
+    public let idToken: String?
+    public let savedAt: Date
+
+    public init(accessToken: String, refreshToken: String,
+                idToken: String? = nil, savedAt: Date = Date()) {
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+        self.idToken = idToken
+        self.savedAt = savedAt
+    }
+}
+
 /// At-rest secret payload — everything that should never appear on
 /// disk in plaintext. ProfileStore extracts these out of the in-memory
 /// Profile before serialising profile.json, AES-GCM-encrypts the
@@ -1119,6 +1190,12 @@ struct ProfileSecrets: Codable {
     /// older `secrets.enc` blobs (written before this field existed)
     /// keep decoding cleanly.
     var dockerRegistryPasswords: [String: String]?
+    /// Real OAuth bearer pairs for the subscription-token swap path.
+    /// When set, new sessions for this profile auto-seed the VM's
+    /// credentials file with proxy-side fakes derived from these
+    /// reals; on the wire the proxy swaps fakes back to reals.
+    var defaultClaudeTokens: StoredOAuthTokens?
+    var defaultCodexTokens: StoredOAuthTokens?
 
     var isEmpty: Bool {
         (apiKey?.isEmpty ?? true)
@@ -1130,6 +1207,8 @@ struct ProfileSecrets: Codable {
             && (awsSecretAccessKey?.isEmpty ?? true)
             && (awsSessionToken?.isEmpty ?? true)
             && (dockerRegistryPasswords?.isEmpty ?? true)
+            && defaultClaudeTokens == nil
+            && defaultCodexTokens == nil
     }
 
     /// Pull every secret string out of the profile, replacing them
@@ -1191,6 +1270,15 @@ struct ProfileSecrets: Codable {
             }
         }
 
+        if let t = profile.defaultClaudeTokens {
+            s.defaultClaudeTokens = t
+            profile.defaultClaudeTokens = nil
+        }
+        if let t = profile.defaultCodexTokens {
+            s.defaultCodexTokens = t
+            profile.defaultCodexTokens = nil
+        }
+
         return s
     }
 
@@ -1229,6 +1317,8 @@ struct ProfileSecrets: Codable {
                 }
             }
         }
+        if let t = defaultClaudeTokens { profile.defaultClaudeTokens = t }
+        if let t = defaultCodexTokens { profile.defaultCodexTokens = t }
     }
 }
 
@@ -1345,6 +1435,99 @@ public final class ProfileStore {
     }
 
     public var profilesDirectory: URL { rootDir }
+
+    /// Where the templated "default profile" (Bromure → Preferences…)
+    /// is persisted. Sits next to the profiles dir, not inside it, so
+    /// `loadAll()` doesn't surface it as a real profile in the picker.
+    public var templateURL: URL {
+        rootDir.deletingLastPathComponent()
+            .appendingPathComponent("profile-template.json")
+    }
+    /// Encrypted secrets blob for the template (default OAuth tokens
+    /// + any other secrets the user pre-set in Preferences). Same
+    /// AES-GCM layout as a regular profile's `secrets.enc`.
+    public var templateSecretsURL: URL {
+        rootDir.deletingLastPathComponent()
+            .appendingPathComponent("profile-template.enc")
+    }
+
+    /// Stable identity of the template Profile. Picked deliberately
+    /// out of the random-UUID space so any code path that filters
+    /// `profile.id == .templateID` can route to template-specific
+    /// behaviour without ambiguity.
+    public static let templateID = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+
+    /// Load the user's preferences template, or a factory default if
+    /// none has been saved yet. Always returns a valid Profile —
+    /// downstream code can treat the template like any other profile.
+    public func loadTemplate() -> Profile {
+        var template: Profile
+        if let data = try? Data(contentsOf: templateURL),
+           let decoded = try? JSONDecoder.iso8601().decode(Profile.self, from: data) {
+            template = decoded
+        } else {
+            template = Profile(
+                id: Self.templateID,
+                name: "Defaults",
+                tool: .claude,
+                authMode: .subscription)
+        }
+        // Force the canonical id/name so the user can't accidentally
+        // shadow a real profile by saving over the template.
+        template.id = Self.templateID
+        template.name = "Defaults"
+        // Merge the encrypted secrets blob (default OAuth tokens etc).
+        let blobURL = templateSecretsURL
+        if let cipher = try? Data(contentsOf: blobURL),
+           let plain = try? SecretsVault.decrypt(cipher),
+           let secrets = try? JSONDecoder().decode(ProfileSecrets.self, from: plain) {
+            secrets.apply(to: &template)
+        }
+        return template
+    }
+
+    /// Persist the user's preferences template. Splits secrets the
+    /// same way regular profiles do.
+    public func saveTemplate(_ template: Profile) throws {
+        var stripped = template
+        stripped.id = Self.templateID
+        stripped.name = "Defaults"
+        let secrets = ProfileSecrets.extract(stripping: &stripped)
+        let data = try JSONEncoder.iso8601().encode(stripped)
+        try fm.createDirectory(at: templateURL.deletingLastPathComponent(),
+                               withIntermediateDirectories: true)
+        try data.write(to: templateURL, options: .atomic)
+        let blobURL = templateSecretsURL
+        if secrets.isEmpty {
+            try? fm.removeItem(at: blobURL)
+        } else {
+            let plain = try JSONEncoder().encode(secrets)
+            let cipher = try SecretsVault.encrypt(plain)
+            try cipher.write(to: blobURL, options: .atomic)
+            try fm.setAttributes(
+                [.posixPermissions: NSNumber(value: 0o600)],
+                ofItemAtPath: blobURL.path)
+        }
+    }
+
+    /// Fork a fresh, save-ready Profile from the user's template.
+    /// Generates a new UUID + createdAt; everything else (settings,
+    /// default OAuth tokens, kubeconfigs, etc.) is copied through
+    /// from the template. Caller fills `name`, `tool`, `authMode`
+    /// before saving.
+    public func newProfileFromTemplate(name: String,
+                                        tool: Profile.Tool,
+                                        authMode: Profile.AuthMode) -> Profile {
+        var p = loadTemplate()
+        p.id = UUID()
+        p.name = name
+        p.tool = tool
+        p.authMode = authMode
+        p.createdAt = Date()
+        p.lastUsedAt = nil
+        p.baseImageVersionAtClone = nil
+        return p
+    }
 
     public func profileDirectory(for profile: Profile) -> URL {
         rootDir.appendingPathComponent(profile.id.uuidString, isDirectory: true)
@@ -2397,6 +2580,23 @@ public final class ProfileStore {
                 >> /tmp/xinitrc.log \
             || echo "[xinit] docker restart failed (non-fatal)" \
                 >> /tmp/xinitrc.log
+    fi
+
+    # Claude subscription-token agent — connects to host vsock 8446
+    # and answers read/write RPCs against ~/.claude/.credentials.json.
+    # Owns the on-disk fake↔real swap when the user accepts the
+    # consent prompt. Idempotent: re-launching is fine because the
+    # agent guards its own retry loop.
+    if [ -r /mnt/bromure-meta/claude-token-agent.py ]; then
+        python3 /mnt/bromure-meta/claude-token-agent.py &
+        echo "[xinit] claude-token-agent pid $!" >> /tmp/xinitrc.log
+    fi
+
+    # Codex / ChatGPT subscription-token agent — vsock 8447, edits
+    # ~/.codex/auth.json. Same shape as the Claude one above.
+    if [ -r /mnt/bromure-meta/codex-token-agent.py ]; then
+        python3 /mnt/bromure-meta/codex-token-agent.py &
+        echo "[xinit] codex-token-agent pid $!" >> /tmp/xinitrc.log
     fi
 
     # Keyboard layout agent — listens on vsock 5006 for layout pushes
