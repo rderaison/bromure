@@ -287,6 +287,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case folders     = "Folders"
     case credentials = "Credentials"
     case environment = "Environment"
+    case mcp         = "MCP"
     case tracing     = "Tracing"
     case appearance  = "Appearance"
     case resources   = "Resources"
@@ -300,6 +301,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .folders:     "folder.fill"
         case .credentials: "key.fill"
         case .environment: "terminal.fill"
+        case .mcp:         "puzzle.piece.fill"
         case .tracing:     "doc.text.magnifyingglass"
         case .appearance:  "paintpalette.fill"
         case .resources:   "memorychip.fill"
@@ -313,6 +315,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .folders:     .orange
         case .credentials: .green
         case .environment: .teal
+        case .mcp:         .cyan
         case .tracing:     .red
         case .appearance:  .pink
         case .resources:   .gray
@@ -520,6 +523,7 @@ struct ProfileEditorView: View {
         case .folders:     foldersSection
         case .credentials: credentialsSection
         case .environment: environmentSection
+        case .mcp:         mcpSection
         case .tracing:     tracingSection
         case .appearance:  appearanceSection
         case .resources:   resourcesSection
@@ -1941,6 +1945,40 @@ struct ProfileEditorView: View {
         }
     }
 
+    // MARK: - MCP servers
+
+    private var mcpSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("MCP servers give your agent access to external tools and context. Configs are translated into the right format for the active agent (Claude Code or Codex) and injected into the VM at boot.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if draft.mcpServers.isEmpty {
+                Text("No MCP servers configured.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            } else {
+                ForEach(Array(draft.mcpServers.enumerated()), id: \.element.id) { (idx, _) in
+                    MCPServerRow(
+                        server: $draft.mcpServers[idx],
+                        onRemove: { draft.mcpServers.remove(at: idx) }
+                    )
+                }
+            }
+            HStack {
+                Spacer()
+                Button {
+                    draft.mcpServers.append(MCPServer())
+                } label: {
+                    Label("Add server", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+    }
+
     @ViewBuilder
     private var appearanceSection: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -2190,6 +2228,65 @@ private struct EnvironmentVariableRow: View {
         .padding(8)
         .background(Color(nsColor: .textBackgroundColor),
                     in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+// MARK: - MCP server row
+
+private struct MCPServerRow: View {
+    @Binding var server: MCPServer
+    var onRemove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                TextField("Name", text: $server.name, prompt: Text("my-server"))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 180)
+                Picker("", selection: $server.transport) {
+                    ForEach(MCPServer.Transport.allCases, id: \.self) { t in
+                        Text(t.rawValue.uppercased()).tag(t)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 120)
+                Toggle("", isOn: $server.enabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .help(server.enabled ? "Enabled" : "Disabled")
+                Spacer()
+                Button(action: onRemove) {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("Remove this server")
+            }
+            switch server.transport {
+            case .stdio:
+                HStack(spacing: 6) {
+                    TextField("Command", text: $server.command, prompt: Text("npx"))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 140)
+                    TextField("Arguments", text: Binding(
+                        get: { server.arguments.joined(separator: " ") },
+                        set: { server.arguments = $0.components(separatedBy: " ").filter { !$0.isEmpty } }
+                    ), prompt: Text("-y @upstash/context7-mcp"))
+                        .textFieldStyle(.roundedBorder)
+                }
+            case .http:
+                HStack(spacing: 6) {
+                    TextField("URL", text: $server.url, prompt: Text("https://mcp.example.com/mcp"))
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Bearer token env var", text: $server.bearerTokenEnvVar, prompt: Text("MY_TOKEN"))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 180)
+                }
+            }
+        }
+        .padding(8)
+        .background(Color(nsColor: .textBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: 6))
+        .opacity(server.enabled ? 1.0 : 0.6)
     }
 }
 

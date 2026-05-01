@@ -526,6 +526,69 @@ public struct EnvironmentVariable: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// An MCP server configured in a profile. At VM boot time the host
+/// serializes these into the agent-appropriate config file (Claude Code
+/// JSON or Codex TOML) and injects them into the guest.
+public struct MCPServer: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+
+    public var name: String
+
+    public enum Transport: String, Codable, CaseIterable, Sendable {
+        case stdio
+        case http
+    }
+    public var transport: Transport
+
+    public var command: String
+    public var arguments: [String]
+
+    public var url: String
+
+    public var environment: [EnvironmentVariable]
+
+    public var bearerTokenEnvVar: String
+
+    public var enabled: Bool
+
+    public var startupTimeoutSec: Int?
+    public var toolTimeoutSec: Int?
+
+    public init(
+        id: UUID = UUID(),
+        name: String = "",
+        transport: Transport = .stdio,
+        command: String = "",
+        arguments: [String] = [],
+        url: String = "",
+        environment: [EnvironmentVariable] = [],
+        bearerTokenEnvVar: String = "",
+        enabled: Bool = true,
+        startupTimeoutSec: Int? = nil,
+        toolTimeoutSec: Int? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.transport = transport
+        self.command = command
+        self.arguments = arguments
+        self.url = url
+        self.environment = environment
+        self.bearerTokenEnvVar = bearerTokenEnvVar
+        self.enabled = enabled
+        self.startupTimeoutSec = startupTimeoutSec
+        self.toolTimeoutSec = toolTimeoutSec
+    }
+
+    public var isUsable: Bool {
+        let hasName = !name.trimmingCharacters(in: .whitespaces).isEmpty
+        switch transport {
+        case .stdio: return hasName && !command.trimmingCharacters(in: .whitespaces).isEmpty
+        case .http:  return hasName && !url.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
+}
+
 /// One agentic-coding profile: which tool, how it auths, what folder it
 /// works against, and where its persistent disk lives.
 public struct Profile: Codable, Identifiable, Equatable, Sendable {
@@ -866,6 +929,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var customBackgroundHex: String?
     public var customForegroundHex: String?
 
+    public var mcpServers: [MCPServer]
+
     public init(
         id: UUID = UUID(),
         name: String,
@@ -914,7 +979,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         keyboardLayoutOverride: String? = nil,
         keyRepeatDelayMs: Int? = nil,
         keyRepeatRateHz: Int? = nil,
-        closeAction: CloseAction = .suspend
+        closeAction: CloseAction = .suspend,
+        mcpServers: [MCPServer] = []
     ) {
         self.id = id
         self.name = name
@@ -964,6 +1030,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.customBackgroundHex = customBackgroundHex
         self.customForegroundHex = customForegroundHex
         self.closeAction = closeAction
+        self.mcpServers = mcpServers
     }
 
     /// Default-tolerant decoder so old JSON files (missing newer fields) load.
@@ -996,6 +1063,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case digitalOceanTokenRequiresApproval
         case sshKeyRequiresApproval
         case closeAction
+        case mcpServers
     }
 
     public init(from decoder: Decoder) throws {
@@ -1070,6 +1138,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         digitalOceanTokenRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .digitalOceanTokenRequiresApproval) ?? false
         sshKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .sshKeyRequiresApproval) ?? false
         closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .suspend
+        mcpServers = try c.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
     }
 
     /// Explicit encoder — skips the legacy `folderPath` key (we only ever
@@ -1155,6 +1224,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if sshKeyRequiresApproval { try c.encode(true, forKey: .sshKeyRequiresApproval) }
         try c.encode(closeAction, forKey: .closeAction)
+        if !mcpServers.isEmpty {
+            try c.encode(mcpServers, forKey: .mcpServers)
+        }
     }
 
     /// Every tool configured on this profile, primary first. Each entry
@@ -2362,6 +2434,34 @@ public final class ProfileStore {
         set -a
         . /mnt/bromure-meta/api_key.env
         set +a
+    fi
+
+    # MCP server configs from the profile. The host generates both
+    # Claude Code and Codex formats; we install whichever matches
+    # the active tool.
+    if [ -d /mnt/bromure-meta/mcp ]; then
+        case "$BROMURE_AC_TOOL" in
+            claude)
+                if [ -r /mnt/bromure-meta/mcp/claude.json ]; then
+                    mkdir -p "$HOME/.claude"
+                    # Merge into existing .claude.json if present,
+                    # otherwise create a new one with just mcpServers.
+                    if [ -f "$HOME/.claude.json" ]; then
+                        python3 -c "import json,sys;e=json.load(open(sys.argv[1]));m=json.load(open(sys.argv[2]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};json.dump(e,open(sys.argv[1],'w'),indent=2)" "$HOME/.claude.json" /mnt/bromure-meta/mcp/claude.json 2>/dev/null
+                    else
+                        cp /mnt/bromure-meta/mcp/claude.json "$HOME/.claude.json"
+                    fi
+                fi
+                ;;
+            codex)
+                if [ -r /mnt/bromure-meta/mcp/codex.toml ]; then
+                    mkdir -p "$HOME/.codex"
+                    # Append MCP server blocks to config.toml (Codex
+                    # merges [mcp_servers.*] tables additively).
+                    cat /mnt/bromure-meta/mcp/codex.toml >> "$HOME/.codex/config.toml"
+                fi
+                ;;
+        esac
     fi
 
     # Stay in $HOME (~ubuntu) on shell start. Shared folders are
