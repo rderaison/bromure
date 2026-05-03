@@ -625,6 +625,7 @@ public struct MCPOAuthState: Codable, Equatable, Sendable {
     public var refreshToken: String?
     public var expiresAt: Date?
     public var authorizedAt: Date
+    public var callbackPort: UInt16?
 
     public init(
         clientID: String,
@@ -635,7 +636,8 @@ public struct MCPOAuthState: Codable, Equatable, Sendable {
         accessToken: String,
         refreshToken: String? = nil,
         expiresAt: Date? = nil,
-        authorizedAt: Date = Date()
+        authorizedAt: Date = Date(),
+        callbackPort: UInt16? = nil
     ) {
         self.clientID = clientID
         self.clientSecret = clientSecret
@@ -646,6 +648,7 @@ public struct MCPOAuthState: Codable, Equatable, Sendable {
         self.refreshToken = refreshToken
         self.expiresAt = expiresAt
         self.authorizedAt = authorizedAt
+        self.callbackPort = callbackPort
     }
 }
 

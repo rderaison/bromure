@@ -3223,7 +3223,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for i in profile.mcpServers.indices {
             guard profile.mcpServers[i].enabled,
                   profile.mcpServers[i].transport == .http,
-                  let oauth = profile.mcpServers[i].oauthState else { continue }
+                  var oauth = profile.mcpServers[i].oauthState else { continue }
+            guard !oauth.accessToken.isEmpty else { continue }
+            if let exp = oauth.expiresAt, exp.timeIntervalSinceNow < 60,
+               oauth.refreshToken != nil {
+                let sem = DispatchSemaphore(value: 0)
+                Task.detached {
+                    do {
+                        let refreshed = try await MCPOAuthBroker.refresh(state: oauth)
+                        oauth = refreshed
+                    } catch { /* keep stale token */ }
+                    sem.signal()
+                }
+                sem.wait(timeout: .now() + 10)
+                profile.mcpServers[i].oauthState = oauth
+            }
             profile.mcpServers[i].bearerToken = oauth.accessToken
         }
     }

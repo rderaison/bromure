@@ -49,22 +49,51 @@ public final class MCPOAuthBroker {
         public let authorizationEndpoint: String
         public let tokenEndpoint: String
         public let registrationEndpoint: String?
+        public let callbackPort: UInt16
+    }
+
+    deinit {
+        if listenFD >= 0 { close(listenFD) }
     }
 
     // MARK: - Public API
 
-    public func authorizeServer(url: String) async throws -> AuthResult {
+    public func authorizeServer(url: String, existingState: MCPOAuthState? = nil) async throws -> AuthResult {
         guard let serverURL = URL(string: url) else {
             throw BrokerError.discoveryFailed("Invalid URL")
         }
-        let metadata = try await discoverMetadata(serverURL: serverURL)
-        let (redirectURI, port) = try startCallbackListener()
-        let client = try await registerClient(metadata: metadata, redirectURI: redirectURI)
-        let (code, verifier) = try await authorize(
-            metadata: metadata, client: client, redirectURI: redirectURI, port: port)
-        return try await exchangeCode(
-            code, metadata: metadata, client: client,
-            codeVerifier: verifier, redirectURI: redirectURI)
+        let metadata: AuthMetadata
+        if let st = existingState,
+           let authURL = URL(string: st.authorizationEndpoint),
+           let tokenURL = URL(string: st.tokenEndpoint) {
+            metadata = AuthMetadata(
+                authorizationEndpoint: authURL,
+                tokenEndpoint: tokenURL,
+                registrationEndpoint: st.registrationEndpoint.flatMap(URL.init(string:))
+            )
+        } else {
+            metadata = try await discoverMetadata(serverURL: serverURL)
+        }
+        let preferredPort = existingState?.callbackPort
+        let (redirectURI, port) = try startCallbackListener(preferredPort: preferredPort)
+        let canReuseClient = preferredPort != nil && port == preferredPort
+        do {
+            let client: ClientRegistration
+            if let st = existingState, !st.clientID.isEmpty, canReuseClient {
+                client = ClientRegistration(clientID: st.clientID, clientSecret: st.clientSecret)
+            } else {
+                client = try await registerClient(metadata: metadata, redirectURI: redirectURI)
+            }
+            let (code, verifier) = try await authorize(
+                metadata: metadata, client: client, redirectURI: redirectURI, port: port)
+            return try await exchangeCode(
+                code, metadata: metadata, client: client,
+                codeVerifier: verifier, redirectURI: redirectURI,
+                callbackPort: port)
+        } catch {
+            if listenFD >= 0 { close(listenFD); listenFD = -1 }
+            throw error
+        }
     }
 
     public static func refresh(state: MCPOAuthState) async throws -> MCPOAuthState {
@@ -105,42 +134,48 @@ public final class MCPOAuthBroker {
 
     // MARK: - Localhost Callback Listener (POSIX socket)
 
+    static let portRangeStart: UInt16 = 28500
+    static let portRangeEnd: UInt16 = 28599
     private var listenFD: Int32 = -1
 
-    private func startCallbackListener() throws -> (redirectURI: String, port: UInt16) {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            throw BrokerError.discoveryFailed("Cannot create socket")
+    private func startCallbackListener(preferredPort: UInt16? = nil) throws -> (redirectURI: String, port: UInt16) {
+        var candidates: [UInt16] = []
+        if let p = preferredPort, p >= Self.portRangeStart, p <= Self.portRangeEnd {
+            candidates.append(p)
         }
+        for p in Self.portRangeStart...Self.portRangeEnd where !candidates.contains(p) {
+            candidates.append(p)
+        }
+        for port in candidates {
+            if let fd = tryBind(port: port) {
+                self.listenFD = fd
+                return ("http://127.0.0.1:\(port)/callback", port)
+            }
+        }
+        throw BrokerError.discoveryFailed(
+            "No available port in \(Self.portRangeStart)–\(Self.portRangeEnd)")
+    }
+
+    private func tryBind(port: UInt16) -> Int32? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
         var reuse: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
-
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = 0  // OS picks a free port
+        addr.sin_port = port.bigEndian
         addr.sin_addr.s_addr = UInt32(INADDR_LOOPBACK).bigEndian
-        let bindResult = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
-        }
-        guard bindResult == 0 else {
-            close(fd)
-            throw BrokerError.discoveryFailed("Cannot bind to loopback")
-        }
-        guard listen(fd, 1) == 0 else {
-            close(fd)
-            throw BrokerError.discoveryFailed("Cannot listen on socket")
-        }
-        var bound = sockaddr_in()
-        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-        withUnsafeMutablePointer(to: &bound) {
+        let ok = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                _ = getsockname(fd, $0, &len)
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        let port = UInt16(bigEndian: bound.sin_port)
-        self.listenFD = fd
-        return ("http://127.0.0.1:\(port)/callback", port)
+        guard ok == 0, listen(fd, 1) == 0 else {
+            close(fd)
+            return nil
+        }
+        return fd
     }
 
     private func waitForCallback(state: String) async throws -> String {
@@ -288,7 +323,8 @@ public final class MCPOAuthBroker {
         metadata: AuthMetadata,
         client: ClientRegistration,
         codeVerifier: String,
-        redirectURI: String
+        redirectURI: String,
+        callbackPort: UInt16
     ) async throws -> AuthResult {
         var body = [
             "grant_type=authorization_code",
@@ -321,7 +357,8 @@ public final class MCPOAuthBroker {
             clientSecret: client.clientSecret,
             authorizationEndpoint: metadata.authorizationEndpoint.absoluteString,
             tokenEndpoint: metadata.tokenEndpoint.absoluteString,
-            registrationEndpoint: metadata.registrationEndpoint?.absoluteString
+            registrationEndpoint: metadata.registrationEndpoint?.absoluteString,
+            callbackPort: callbackPort
         )
     }
 
@@ -344,8 +381,13 @@ public final class MCPOAuthBroker {
             .replacingOccurrences(of: "=", with: "")
     }
 
+    private static let formSafeCharacters: CharacterSet = {
+        var cs = CharacterSet.alphanumerics
+        cs.insert(charactersIn: "-._~")
+        return cs
+    }()
+
     private static func formEncode(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)?
-            .replacingOccurrences(of: "+", with: "%2B") ?? value
+        value.addingPercentEncoding(withAllowedCharacters: formSafeCharacters) ?? value
     }
 }

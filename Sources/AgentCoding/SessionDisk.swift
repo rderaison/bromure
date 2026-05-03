@@ -701,10 +701,12 @@ public final class SessionDisk {
                 }
             case .http:
                 lines.append("url = \(tomlQuote(server.url))")
-                if let swap = fakes[server.name], !swap.envVar.isEmpty {
-                    lines.append("bearer_token_env_var = \(tomlQuote(swap.envVar))")
-                } else if !server.bearerTokenEnvVar.isEmpty {
-                    lines.append("bearer_token_env_var = \(tomlQuote(server.bearerTokenEnvVar))")
+                if server.oauthState == nil {
+                    if let swap = fakes[server.name], !swap.envVar.isEmpty {
+                        lines.append("bearer_token_env_var = \(tomlQuote(swap.envVar))")
+                    } else if !server.bearerTokenEnvVar.isEmpty {
+                        lines.append("bearer_token_env_var = \(tomlQuote(server.bearerTokenEnvVar))")
+                    }
                 }
             }
             var env = server.environment.filter(\.isUsable)

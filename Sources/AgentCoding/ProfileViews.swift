@@ -2418,7 +2418,7 @@ private struct MCPServerRow: View {
             defer { isAuthorizing = false }
             do {
                 let broker = MCPOAuthBroker()
-                let result = try await broker.authorizeServer(url: server.url)
+                let result = try await broker.authorizeServer(url: server.url, existingState: server.oauthState)
                 server.oauthState = MCPOAuthState(
                     clientID: result.clientID,
                     clientSecret: result.clientSecret,
@@ -2429,7 +2429,8 @@ private struct MCPServerRow: View {
                     refreshToken: result.refreshToken,
                     expiresAt: result.expiresIn.map {
                         Date().addingTimeInterval(TimeInterval($0))
-                    }
+                    },
+                    callbackPort: result.callbackPort
                 )
                 server.bearerToken = result.accessToken
                 if server.bearerTokenEnvVar.isEmpty {
