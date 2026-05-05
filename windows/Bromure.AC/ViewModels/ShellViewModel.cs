@@ -194,77 +194,20 @@ public sealed partial class ShellViewModel : ObservableObject
         var sessionRoot = Path.Combine(_services.Paths.SessionsDirectory, "default-session");
         Directory.CreateDirectory(sessionRoot);
 
-        // The bromure-base.tar.gz is what RootfsBaker produces. If the
-        // user hasn't baked yet, build a preflight-failed session that
-        // surfaces a clear "run bake first" message instead of letting
-        // them click Boot into a path that NREs.
         var profileId = Guid.Parse("00000000-0000-0000-0000-000000000001");
         var rootfsPath = Path.Combine(_services.Paths.ImagesDirectory, RootfsBaker.OutputBaseFileName);
+        var activeProfile = _profileStore.LoadAll().FirstOrDefault();
+
+        Session = new SessionViewModel(profileId, activeProfile?.Name ?? "Default Profile",
+            _engine, activeProfile, rootfsPath, sessionRoot);
+
         if (!File.Exists(rootfsPath))
         {
-            var stubCfg = new WslSessionConfig
-            {
-                BaseRootfsPath = rootfsPath,
-                DistroName = "bromure-not-baked",
-                InstallPath = sessionRoot,
-            };
-            Session = new SessionViewModel(profileId, "Default Profile (rootfs not baked)",
-                _engine, stubCfg);
             Session.PreflightError =
                 $"WSL2 base rootfs not found at {rootfsPath}.\n\n" +
                 "Run the bake from Settings → Bake base image, or via\n" +
                 "  bromure-spike bake-wsl <source-rootfs> " + rootfsPath;
-            return;
         }
-
-        // Profile-derived per-session inputs. The MITM proxy port is
-        // allocated by SessionViewModel.StartAsync (port 0 → OS picks)
-        // because we want to bind only when the user actually clicks
-        // Boot — pre-allocating means a stale port leak if they never
-        // boot.
-        var activeProfile = _profileStore.LoadAll().FirstOrDefault();
-        var envVars = activeProfile is not null
-            ? new Dictionary<string, string>(ProfileEnvExports.ForProfile(activeProfile), StringComparer.Ordinal)
-            : new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["BROMURE_PROFILE_ID"] = profileId.ToString(),
-                ["BROMURE_SESSION_HOST"] = "windows",
-            };
-
-        // The home overlay: kitty.conf, .bashrc, .bash_profile, plus
-        // anything else SessionHomeBuilder grows over time (gh, glab,
-        // aws, kube, doctl, docker, gitconfig …). Dropped directly
-        // into the distro's home dir at session start via
-        // \\wsl$\<distro>\home\bromure\…
-        var homeFiles = SessionHomeBuilder.Build(activeProfile);
-
-        // Per-session distro name. GUID-derived so concurrent sessions
-        // don't collide and orphan-cleanup can list-and-match.
-        var distroName = "bromure-ses-" + Guid.NewGuid().ToString("N")[..8];
-        var installPath = Path.Combine(sessionRoot, distroName);
-
-        var cfg = new WslSessionConfig
-        {
-            BaseRootfsPath = rootfsPath,
-            DistroName = distroName,
-            InstallPath = installPath,
-            HomeFiles = homeFiles,
-            EnvVars = envVars,
-            // kitty --title <distro-name> so WslWindowHost can find
-            // exactly this session's WSLg-rendered HWND.
-            GuestArgv = new[]
-            {
-                "kitty",
-                "--title", distroName,
-                "--start-as=fullscreen",
-            },
-            // BromureCaPem is set by SessionViewModel.StartAsync once
-            // the per-tab MITM proxy is up — same lifetime as the
-            // proxy itself.
-        };
-
-        Session = new SessionViewModel(profileId, activeProfile?.Name ?? "Default Profile",
-            _engine, cfg);
     }
 
     private void UpdateImageInfoLine()

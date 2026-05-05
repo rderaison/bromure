@@ -28,24 +28,59 @@
                                Foreground="{StaticResource TextSecondary}" Margin="6,0,0,0"/>
                 </StackPanel>
 
-                <!-- Tab strip placeholder — mirrors the per-kitty tab pills the
-                     macOS port renders in the unified titlebar. -->
-                <ItemsControl Grid.Column="1" ItemsSource="{Binding Tabs}"
-                              HorizontalAlignment="Center" VerticalAlignment="Center">
-                    <ItemsControl.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <StackPanel Orientation="Horizontal"/>
-                        </ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Border Margin="2" Padding="10,4" CornerRadius="4"
-                                    Background="#22FFFFFF">
-                                <TextBlock Text="{Binding Label}" FontSize="11"/>
-                            </Border>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                <!-- Tab strip — one pill per kitty tab. Active tab gets a
+                     darker pill; clicking activates; "x" closes; "+" adds a
+                     fresh distro. Mirrors the macOS port's per-kitty tabs. -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal"
+                            HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <ItemsControl ItemsSource="{Binding Tabs}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Margin="2" Padding="10,4" CornerRadius="4">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Background" Value="#22FFFFFF"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                    <Setter Property="Background" Value="#55FFFFFF"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Content="{Binding Label}" FontSize="11"
+                                                Background="Transparent" BorderThickness="0"
+                                                Foreground="{StaticResource TextPrimary}"
+                                                Cursor="Hand" Padding="0"
+                                                Command="{Binding DataContext.ActivateTabCommand,
+                                                           RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                CommandParameter="{Binding}"/>
+                                        <Button Content="×" FontSize="12"
+                                                Background="Transparent" BorderThickness="0"
+                                                Foreground="{StaticResource TextSecondary}"
+                                                Margin="6,0,0,0" Padding="0" Cursor="Hand"
+                                                ToolTip="Close tab"
+                                                Command="{Binding DataContext.CloseTabCommand,
+                                                           RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                CommandParameter="{Binding}"/>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Button Content="+" Margin="6,0,0,0" Padding="8,4"
+                            Background="#33FFFFFF" Foreground="{StaticResource TextPrimary}"
+                            BorderThickness="0" Cursor="Hand"
+                            FontSize="13" FontWeight="Bold"
+                            ToolTip="New tab"
+                            Command="{Binding NewTabCommand}"
+                            Visibility="{Binding IsRunning, Converter={StaticResource BoolToVis}}"/>
+                </StackPanel>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                     <TextBlock Text="{Binding IpAddress, StringFormat='IP {0}'}"
@@ -65,41 +100,16 @@
             </Grid>
         </Border>
 
-        <!-- Display area. Three modes overlaid:
-             1. Embedded QEMU window (LocalSdl/LocalGtk) via DisplaySurface.
-             2. Live serial console (headless boot) bound to SerialBuffer.
-             3. Idle status pane (pre-boot). -->
+        <!-- Display area. Two modes overlaid:
+             1. Embedded WSLg-rendered kitty window via the active tab's
+                ActiveDisplaySurface (a WslWindowHost).
+             2. Idle status pane (pre-boot). -->
         <Grid Grid.Row="1" Background="#000000">
-            <ContentControl Content="{Binding DisplaySurface}"
+            <ContentControl Content="{Binding ActiveDisplaySurface}"
                             Visibility="{Binding HasDisplay, Converter={StaticResource BoolToVis}}"/>
 
-            <!-- Serial console pane — shown when QEMU is running headless
-                 and the host is reading the guest's first serial port.
-                 macOS uses VZ's virtio-console for parity here; on
-                 Windows we use QEMU's `-serial tcp:` listener. -->
-            <Grid Visibility="{Binding IsShowingSerial, Converter={StaticResource BoolToVis}}">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-                <Border Grid.Row="0" Background="#0B0B0E"
-                        BorderBrush="#22FFFFFF" BorderThickness="0,0,0,1"
-                        Padding="12,6">
-                    <TextBlock Text="Serial console (ttyS0) — read-only"
-                               Foreground="{StaticResource TextSecondary}" FontSize="10"/>
-                </Border>
-                <ScrollViewer x:Name="SerialScroll" Grid.Row="1"
-                              VerticalScrollBarVisibility="Auto"
-                              HorizontalScrollBarVisibility="Auto"
-                              Padding="12,8">
-                    <TextBlock Text="{Binding SerialBuffer}"
-                               FontFamily="Cascadia Mono, Consolas"
-                               FontSize="12" Foreground="#C9D1D9"
-                               TextWrapping="NoWrap"/>
-                </ScrollViewer>
-            </Grid>
-
-            <!-- Idle pane — pre-boot or while waiting for serial. -->
+            <!-- Idle pane (pre-boot). The QEMU port had a serial console
+                 fallback here; WSL2 has no equivalent and doesn't need one. -->
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
                         Visibility="{Binding IsIdle, Converter={StaticResource BoolToVis}}">
                 <TextBlock Text="{Binding VmStatus}" FontSize="14"
@@ -116,10 +126,9 @@
                              Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}"/>
             </StackPanel>
 
-            <!-- Compromise overlay — toggled by SessionViewModel when a leak
-                 is detected. Mirrors `suspendedTintView` on macOS. -->
-            <Border Background="#5AE14D5C" IsHitTestVisible="False"
-                    Visibility="{Binding ShowCompromiseOverlay, Converter={StaticResource BoolToVis}}"/>
+            <!-- Compromise overlay placeholder removed — ShowCompromiseOverlay
+                 binding wasn't in the WSL2 SessionViewModel. Will return when
+                 the leak-detection plumbing is ported. -->
 
             <!-- Failure panel: surfaces the actual QEMU stderr when boot
                  fails so "could not connect to QMP" becomes a specific
