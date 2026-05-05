@@ -55,6 +55,19 @@ public sealed class WslSession : IAsyncDisposable
     {
         if (_distro is not null) throw new InvalidOperationException("Already started");
 
+        // The whole pipeline does enough synchronous-ish I/O (UNC path
+        // probing, wsl.exe spawns, WslCli stdin pipes) that running
+        // it inline on the WPF UI thread freezes the window for ~15-20s
+        // at the cold-import stage. Hand it off to the thread pool and
+        // wrap a hard deadline so we don't hang the UI if WSL itself
+        // gets stuck.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(90));
+        await Task.Run(() => StartAsyncImpl(deadline.Token), deadline.Token).ConfigureAwait(false);
+    }
+
+    private async Task StartAsyncImpl(CancellationToken ct)
+    {
         // 1) Import the distro from the baked rootfs.
         _distro = new WslDistro(_cfg.DistroName, _cfg.InstallPath);
         await _distro.ImportAsync(_cfg.BaseRootfsPath, ct).ConfigureAwait(false);
@@ -84,20 +97,27 @@ public sealed class WslSession : IAsyncDisposable
 
     private async Task DropHomeOverlayAsync(CancellationToken ct)
     {
-        // \\wsl$\<distro>\home\bromure (or whatever WslSessionConfig.GuestUser
-        // says). We can write directly here since WSL2 mounts the distro
-        // filesystem read-write to Windows — much cleaner than tar-extracting
-        // inside the distro like the QEMU port had to.
+        // \\wsl$\<distro>\home\<user>. We can write directly here since
+        // WSL2 mounts the distro filesystem read-write to Windows —
+        // much cleaner than tar-extracting inside the distro like the
+        // QEMU port had to.
         var homeRoot = $@"\\wsl$\{_cfg.DistroName}\home\{_cfg.GuestUser}";
 
         // The distro might still be spinning up systemd at first
-        // touch — give it a couple of seconds to mount.
-        await WaitForPathAsync(homeRoot, TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+        // touch — give it a couple of seconds to mount. Run the
+        // probe on a background thread because Directory.Exists on
+        // a UNC \\wsl$\ path can block synchronously (UNC server
+        // discovery happens via SMB-style negotiation that doesn't
+        // honour async I/O). On the UI thread that hangs the dispatcher.
+        await WaitForPathAsync(homeRoot, TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
 
         foreach (var (relPath, bytes) in _cfg.HomeFiles)
         {
             var full = Path.Combine(homeRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
-            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            // Directory.CreateDirectory on a UNC \\wsl$\ path can also
+            // block — wrap in Task.Run for the same reason as above.
+            await Task.Run(() => Directory.CreateDirectory(Path.GetDirectoryName(full)!), ct)
+                .ConfigureAwait(false);
             await File.WriteAllBytesAsync(full, bytes, ct).ConfigureAwait(false);
         }
 
@@ -177,16 +197,29 @@ public sealed class WslSession : IAsyncDisposable
         // wsl.exe's launcher reads them and forwards into the distro
         // process's environment. The /u flag means "Unix-style" — no
         // path translation (we want raw values, not /mnt/c rewriting).
-        if (_cfg.EnvVars.Count > 0)
+        //
+        // We always inject the WSLg env vars so kitty (and any other
+        // Linux GUI app the agent spawns) can connect to the Wayland/
+        // X11 compositor regardless of which user runs it. WSL only
+        // auto-injects these for the configured default user (the one
+        // listed in /etc/wsl.conf); when our config maps to a different
+        // session user (or when our explicit WSLENV overrides what
+        // wsl.exe normally adds), the GUI app gets `Wayland: failed to
+        // connect to display` and exits.
+        var combinedEnv = new Dictionary<string, string>(_cfg.EnvVars, StringComparer.Ordinal)
         {
-            var wslenvNames = new List<string>(_cfg.EnvVars.Count);
-            foreach (var (k, v) in _cfg.EnvVars)
-            {
-                psi.Environment[k] = v;
-                wslenvNames.Add(k + "/u");
-            }
-            psi.Environment["WSLENV"] = string.Join(':', wslenvNames);
+            ["DISPLAY"] = ":0",
+            ["WAYLAND_DISPLAY"] = "wayland-0",
+            ["XDG_RUNTIME_DIR"] = "/mnt/wslg/runtime-dir",
+            ["PULSE_SERVER"] = "unix:/mnt/wslg/PulseServer",
+        };
+        var wslenvNames = new List<string>(combinedEnv.Count);
+        foreach (var (k, v) in combinedEnv)
+        {
+            psi.Environment[k] = v;
+            wslenvNames.Add(k + "/u");
         }
+        psi.Environment["WSLENV"] = string.Join(':', wslenvNames);
 
         foreach (var a in argList) psi.ArgumentList.Add(a);
 
@@ -233,8 +266,12 @@ public sealed class WslSession : IAsyncDisposable
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
-            if (Directory.Exists(path)) return;
-            await Task.Delay(150, ct).ConfigureAwait(false);
+            // Directory.Exists on a freshly imported \\wsl$\ path can
+            // block for a few seconds while WSL's 9p server boots.
+            // Off-thread it so the caller's await actually yields.
+            var exists = await Task.Run(() => Directory.Exists(path), ct).ConfigureAwait(false);
+            if (exists) return;
+            await Task.Delay(250, ct).ConfigureAwait(false);
         }
         throw new IOException($"WSL distro path never appeared: {path}");
     }

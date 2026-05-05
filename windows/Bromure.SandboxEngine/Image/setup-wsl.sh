@@ -112,8 +112,21 @@ retry apt-get install -y -q --no-install-recommends gh
 # wsl.conf default user reference unambiguous.
 # ---------------------------------------------------------------------
 log "configure bromure user"
+# bromure must take uid 1000 — that's what WSLg's /mnt/wslg/runtime-dir
+# is provisioned for (the canonical "first user" on every WSL distro).
+# Running kitty as a different uid produces "Wayland: failed to
+# connect to display" because XDG_RUNTIME_DIR symlinks resolve to the
+# uid-1000-owned tree. If a pre-existing user holds uid 1000 (the
+# source rootfs may have come with one — Microsoft Store Ubuntu does),
+# evict them.
+existing_1000=$(getent passwd 1000 | cut -d: -f1 || true)
+if [ -n "$existing_1000" ] && [ "$existing_1000" != "bromure" ]; then
+    log "  removing pre-existing user $existing_1000 (uid 1000) to free the slot"
+    userdel -r -f "$existing_1000" 2>/dev/null || userdel -f "$existing_1000" 2>/dev/null || true
+    rm -rf "/home/$existing_1000" 2>/dev/null || true
+fi
 if ! id bromure >/dev/null 2>&1; then
-    useradd -m -s /bin/bash -G sudo,video,audio bromure
+    useradd -m -u 1000 -s /bin/bash -G sudo,video,audio bromure
 fi
 echo "bromure ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/bromure
 chmod 0440 /etc/sudoers.d/bromure

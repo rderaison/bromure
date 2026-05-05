@@ -98,7 +98,38 @@ public sealed partial class ShellViewModel : ObservableObject
         _selectedNavigation = Navigation[0];
 
         UpdateImageInfoLine();
+        // Reap any leftover bromure-ses-* distros from prior crashes
+        // BEFORE we kick off the session phase. wsl --import collisions
+        // are otherwise possible; stale distros also keep WSL's utility
+        // VM running unnecessarily. Fire-and-forget — UI doesn't wait.
+        _ = Task.Run(CleanupOrphanedDistrosAsync);
         ResolvePhaseFromCache();
+    }
+
+    /// <summary>
+    /// On startup, list all WSL distros and unregister any whose name
+    /// starts with the Bromure session prefix. These are sessions
+    /// from prior runs that didn't dispose cleanly (crash, force-kill,
+    /// power loss). Idempotent.
+    /// </summary>
+    private static async Task CleanupOrphanedDistrosAsync()
+    {
+        try
+        {
+            var existing = await Bromure.SandboxEngine.Wsl.WslDistro.ListAsync().ConfigureAwait(false);
+            foreach (var d in existing)
+            {
+                if (!d.Name.StartsWith("bromure-ses-", StringComparison.Ordinal)) continue;
+                try
+                {
+                    var temp = new Bromure.SandboxEngine.Wsl.WslDistro(d.Name,
+                        Path.Combine(Path.GetTempPath(), d.Name));
+                    await temp.UnregisterAsync().ConfigureAwait(false);
+                }
+                catch { /* best-effort */ }
+            }
+        }
+        catch { /* WSL not installed → nothing to clean */ }
     }
 
     partial void OnSelectedNavigationChanged(NavigationItem value)

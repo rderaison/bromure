@@ -116,19 +116,84 @@ public sealed partial class SettingsViewModel : ObservableObject
     [RelayCommand]
     private async Task BuildUbuntuBaseAsync()
     {
-        if (BakeOverlay is null) return;
-        BakeOverlay.Completed -= OnBakeCompleted;
-        BakeOverlay.Completed += OnBakeCompleted;
-        await BakeOverlay.RunCommand.ExecuteAsync(null);
+        // The QEMU+Alpine bake (BakeOverlayViewModel + AlpineInstaller)
+        // is gone for the WSL2 path. Driving the WSL bake from the
+        // Settings UI requires a source rootfs (currently produced by
+        // exporting the user's existing Ubuntu distro), which we do
+        // synchronously here. Long-running — runs on a background
+        // thread to avoid hanging the UI.
+        if (BakeOverlay is not null)
+        {
+            BakeOverlay.Completed -= OnBakeCompleted;
+            BakeOverlay.Completed += OnBakeCompleted;
+            await BakeOverlay.RunCommand.ExecuteAsync(null);
+            return;
+        }
+
+        UbuntuBaseStatus = "Building base rootfs via WSL2…";
+        try
+        {
+            await Task.Run(() => RunWslBakeAsync()).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            UbuntuBaseStatus = "Bake failed: " + ex.Message;
+            return;
+        }
+        UbuntuBaseStatus = ComputeUbuntuStatus();
+    }
+
+    private async Task RunWslBakeAsync()
+    {
+        // Pick a source rootfs: the user's existing default WSL
+        // distro (we export it once to a temp tarball), or a hard
+        // error pointing them at `wsl --install Ubuntu` if they
+        // have nothing yet.
+        var distros = await Bromure.SandboxEngine.Wsl.WslDistro.ListAsync().ConfigureAwait(false);
+        var source = distros.FirstOrDefault(d =>
+            !d.Name.StartsWith("bromure-", StringComparison.Ordinal));
+        if (source is null)
+        {
+            throw new InvalidOperationException(
+                "No source WSL distro found. Run `wsl --install Ubuntu` first to install a base distro.");
+        }
+
+        var tempSource = Path.Combine(Path.GetTempPath(), "bromure-bake-source.tar.gz");
+        try { File.Delete(tempSource); } catch (IOException) { }
+
+        var export = await Bromure.SandboxEngine.Wsl.WslCli.RunAsync(
+            new[] { "--export", source.Name, tempSource, "--format", "tar.gz" }).ConfigureAwait(false);
+        export.ThrowIfFailed($"wsl --export {source.Name}");
+
+        var output = Path.Combine(_paths.ImagesDirectory,
+            Bromure.SandboxEngine.Wsl.RootfsBaker.OutputBaseFileName);
+        var baker = new Bromure.SandboxEngine.Wsl.RootfsBaker();
+        var progress = new Progress<Bromure.SandboxEngine.Wsl.RootfsBaker.BakeProgress>(p =>
+        {
+            // Marshal back to UI thread for the status update.
+            System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
+                UbuntuBaseStatus = $"{p.Stage}: {p.Message} ({p.Fraction:P0})");
+        });
+        await baker.BakeAsync(tempSource, output, progress).ConfigureAwait(false);
+        try { File.Delete(tempSource); } catch (IOException) { }
     }
 
     [RelayCommand]
     private void DeleteUbuntuBase()
     {
-        if (_baker is null) return;
-        if (!_baker.IsBaked) return;
-        try { File.Delete(_baker.ResultPath); }
-        catch (IOException) { }
+        if (_baker is not null && _baker.IsBaked)
+        {
+            try { File.Delete(_baker.ResultPath); }
+            catch (IOException) { }
+        }
+        // Also handle the WSL2-path artefact.
+        var rootfsPath = Path.Combine(_paths.ImagesDirectory,
+            Bromure.SandboxEngine.Wsl.RootfsBaker.OutputBaseFileName);
+        if (File.Exists(rootfsPath))
+        {
+            try { File.Delete(rootfsPath); }
+            catch (IOException) { }
+        }
         UbuntuBaseStatus = ComputeUbuntuStatus();
     }
 
@@ -154,11 +219,24 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     private string ComputeUbuntuStatus()
     {
-        if (_baker is null) return "QEMU not found — install required first.";
-        if (!_baker.IsBaked) return "Not built yet.";
-        var fi = new FileInfo(_baker.ResultPath);
-        var sizeMb = fi.Length / (1024.0 * 1024.0);
-        return $"Ready ({sizeMb:F0} MB at {fi.LastWriteTime:yyyy-MM-dd HH:mm})";
+        // First check the WSL2 artefact since that's the active path.
+        var rootfsPath = Path.Combine(_paths.ImagesDirectory,
+            Bromure.SandboxEngine.Wsl.RootfsBaker.OutputBaseFileName);
+        if (File.Exists(rootfsPath))
+        {
+            var fi = new FileInfo(rootfsPath);
+            var sizeMb = fi.Length / (1024.0 * 1024.0);
+            return $"Ready (WSL2 — {sizeMb:F0} MB at {fi.LastWriteTime:yyyy-MM-dd HH:mm})";
+        }
+        // Fall through to legacy QEMU bake artefact (kept for users
+        // upgrading from the QEMU baseline at commit 86be3d1).
+        if (_baker is not null && _baker.IsBaked)
+        {
+            var fi = new FileInfo(_baker.ResultPath);
+            var sizeMb = fi.Length / (1024.0 * 1024.0);
+            return $"Ready (legacy QEMU — {sizeMb:F0} MB at {fi.LastWriteTime:yyyy-MM-dd HH:mm})";
+        }
+        return "Not built yet — click Build to bake the WSL2 rootfs.";
     }
 }
 
