@@ -47,9 +47,11 @@
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <StackPanel Orientation="Horizontal" Margin="0,4">
-                                    <TextBlock Text="{Binding Glyph}" Margin="0,0,8,0"
+                                    <TextBlock Text="{Binding Glyph}" Margin="0,0,10,0"
+                                               FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
                                                Foreground="{StaticResource AccentBrush}"
-                                               Width="14" TextAlignment="Center"/>
+                                               FontSize="15"
+                                               Width="20" TextAlignment="Center"/>
                                     <TextBlock Text="{Binding Label}"/>
                                 </StackPanel>
                             </DataTemplate>
@@ -67,7 +69,9 @@
 
         <!-- Main content — five panes overlaid, one visible at a time. -->
         <Grid Grid.Column="1">
-            <!-- Sessions pane: itself a three-phase overlay. -->
+            <!-- Sessions pane = profile picker + (when image not built) a
+                 setup overlay. Mirrors macOS ProfilePickerView /
+                 SetupView split. -->
             <Grid Visibility="{Binding SelectedNavigation.Kind,
                               Converter={StaticResource EnumToVis},
                               ConverterParameter=Sessions}">
@@ -80,7 +84,7 @@
                                 RelativeSource={RelativeSource AncestorType=Window},
                                 Converter={StaticResource EnumToVis},
                                 ConverterParameter=Initializing}"/>
-                <views:SessionView DataContext="{Binding Session}"
+                <views:SessionsView DataContext="{Binding SessionsPane}"
                     Visibility="{Binding DataContext.Phase,
                                 RelativeSource={RelativeSource AncestorType=Window},
                                 Converter={StaticResource EnumToVis},

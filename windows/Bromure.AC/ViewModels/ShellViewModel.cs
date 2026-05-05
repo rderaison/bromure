@@ -46,13 +46,17 @@ public sealed partial class ShellViewModel : ObservableObject
     [ObservableProperty] private NavigationItem _selectedNavigation;
     public ObservableCollection<NavigationItem> Navigation { get; } = new()
     {
-        new NavigationItem("Sessions", "◆", NavigationKind.Sessions, selected: true),
-        new NavigationItem("Profiles", "◇", NavigationKind.Profiles),
-        new NavigationItem("Trace inspector", "◇", NavigationKind.TraceInspector),
-        new NavigationItem("Approvals", "◇", NavigationKind.Approvals),
-        new NavigationItem("Settings", "◇", NavigationKind.Settings),
+        // Sidebar items. Glyphs are Segoe Fluent Icons (UTF-16 PUA),
+        // rendered via FontFamily="Segoe Fluent Icons" in MainWindow.xaml.
+        // Profiles is the home — picker + start/edit per row, matching
+        // the macOS app's main window. No separate Sessions view.
+        new NavigationItem("Profiles", "", NavigationKind.Sessions, selected: true),
+        new NavigationItem("Trace inspector", "", NavigationKind.TraceInspector),
+        new NavigationItem("Approvals", "", NavigationKind.Approvals),
+        new NavigationItem("Settings", "", NavigationKind.Settings),
     };
 
+    public SessionsViewModel SessionsPane { get; }
     public ProfilesViewModel ProfilesPane { get; }
     public TraceInspectorViewModel TraceInspectorPane { get; }
     public ApprovalsViewModel ApprovalsPane { get; }
@@ -93,7 +97,27 @@ public sealed partial class ShellViewModel : ObservableObject
         SettingsPane = new SettingsViewModel(_services.Paths, enrollment, _engine, _services.Settings, baker: null)
         {
             BakeOverlay = null,
+            OpenTemplateEditor = () => OpenTemplateProfileEditor(),
         };
+        SessionsPane = new SessionsViewModel(profileStore, _engine,
+            baseRootfsPathProvider: () => Path.Combine(_services.Paths.ImagesDirectory, RootfsBaker.OutputBaseFileName),
+            sessionRootProvider: () => Path.Combine(_services.Paths.SessionsDirectory, "default-session"),
+            onEdit: profile =>
+            {
+                // Pre-select the profile in the editor view-model, then
+                // open a separate window with that as the DataContext —
+                // mirrors the macOS port's editorWindow.
+                ProfilesPane.Selected = ProfilesPane.Profiles.FirstOrDefault(p => p.Id == profile.Id);
+                var editor = new Views.ProfileEditorWindow
+                {
+                    DataContext = ProfilesPane,
+                    Owner = System.Windows.Application.Current.MainWindow,
+                };
+                editor.Show();
+                // Refresh the picker after the editor closes so name /
+                // colour / status changes show up immediately.
+                editor.Closed += (_, _) => SessionsPane!.Reload();
+            });
 
         _selectedNavigation = Navigation[0];
 
@@ -104,6 +128,36 @@ public sealed partial class ShellViewModel : ObservableObject
         // VM running unnecessarily. Fire-and-forget — UI doesn't wait.
         _ = Task.Run(CleanupOrphanedDistrosAsync);
         ResolvePhaseFromCache();
+    }
+
+    /// <summary>
+    /// Opens the profile editor window with the template profile
+    /// pre-loaded — what new profiles are seeded from. Mirrors the
+    /// macOS port's Preferences sheet.
+    /// </summary>
+    private void OpenTemplateProfileEditor()
+    {
+        var template = _profileStore.LoadOrCreateTemplate();
+        // Use a fresh ProfilesViewModel scoped to the template alone so
+        // edits don't surprise the regular profile picker. The generic
+        // editor view binds to ObservableCollection<Profile> so we
+        // present a single-element list with the template selected.
+        var pvm = new ProfilesViewModel(_profileStore);
+        pvm.Profiles.Clear();
+        pvm.Profiles.Add(template);
+        pvm.Selected = template;
+        var editor = new Views.ProfileEditorWindow
+        {
+            DataContext = pvm,
+            Owner = System.Windows.Application.Current.MainWindow,
+            Title = "Template profile (defaults for new profiles)",
+        };
+        editor.Closed += (_, _) =>
+        {
+            // Save whatever the user changed.
+            _profileStore.SaveTemplate(template);
+        };
+        editor.Show();
     }
 
     /// <summary>

@@ -41,6 +41,9 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// </summary>
     public BakeOverlayViewModel? BakeOverlay { get; set; }
 
+    /// <summary>Opens the template-profile editor window.</summary>
+    public Action? OpenTemplateEditor { get; set; }
+
     public SettingsViewModel(IAppPaths paths, EnrollmentStore enrollment, MitmEngine engine,
         ISettingsStore settings, AlpineInstaller? baker)
     {
@@ -69,6 +72,9 @@ public sealed partial class SettingsViewModel : ObservableObject
         _settings.Set("display.mode", value.Mode.ToString());
         _settings.Save();
     }
+
+    [RelayCommand]
+    private void EditTemplateProfile() => OpenTemplateEditor?.Invoke();
 
     [RelayCommand]
     private void OpenAppDataFolder()

@@ -24,13 +24,15 @@ public sealed class ProfileStore
         Directory.CreateDirectory(_root);
     }
 
-    /// <summary>Enumerate every profile.json in the store, newest first.</summary>
+    /// <summary>Enumerate every profile.json in the store, newest first.
+    /// Excludes the special template file (<c>_template.json</c>).</summary>
     public IReadOnlyList<Profile> LoadAll()
     {
         if (!Directory.Exists(_root)) return Array.Empty<Profile>();
         var output = new List<Profile>();
         foreach (var path in Directory.EnumerateFiles(_root, "*.json"))
         {
+            if (IsTemplatePath(path)) continue;
             try
             {
                 using var fs = File.OpenRead(path);
@@ -44,9 +46,17 @@ public sealed class ProfileStore
     }
 
     /// <summary>Atomic save — temp file + rename. The macOS source uses
-    /// <c>FileHandle</c>; Windows gets the same crash-safety here.</summary>
+    /// <c>FileHandle</c>; Windows gets the same crash-safety here.
+    /// A Profile with <see cref="Profile.Id"/> = <see cref="Guid.Empty"/>
+    /// is the template; it routes to <c>_template.json</c> instead of
+    /// a regular profile file.</summary>
     public void Save(Profile profile)
     {
+        if (profile.Id == Guid.Empty)
+        {
+            SaveTemplate(profile);
+            return;
+        }
         var path = PathFor(profile.Id);
         Directory.CreateDirectory(_root);
         var tmp = path + ".tmp";
@@ -78,4 +88,80 @@ public sealed class ProfileStore
     }
 
     private string PathFor(Guid id) => Path.Combine(_root, id.ToString("D") + ".json");
+
+    /// <summary>
+    /// macOS port has a "template profile" — the defaults new profiles
+    /// inherit from when the user clicks "+". Stored alongside the
+    /// regular profiles but at a fixed filename so it's distinguishable.
+    /// Created on first access if the file doesn't exist.
+    /// </summary>
+    private string TemplatePath => Path.Combine(_root, "_template.json");
+
+    public Profile LoadOrCreateTemplate()
+    {
+        if (File.Exists(TemplatePath))
+        {
+            try
+            {
+                using var fs = File.OpenRead(TemplatePath);
+                var existing = JsonSerializer.Deserialize<Profile>(fs, JsonOptions);
+                if (existing is not null) return existing;
+            }
+            catch (JsonException) { }
+            catch (IOException) { }
+        }
+        var seed = new Profile
+        {
+            Id = Guid.Empty,
+            Name = "Template",
+            Color = ProfileColor.Blue,
+            Tool = AgentTool.Claude,
+            AuthMode = AuthMode.Token,
+        };
+        SaveTemplate(seed);
+        return seed;
+    }
+
+    public void SaveTemplate(Profile template)
+    {
+        Directory.CreateDirectory(_root);
+        var tmp = TemplatePath + ".tmp";
+        using (var fs = File.Create(tmp))
+        {
+            JsonSerializer.Serialize(fs, template, JsonOptions);
+        }
+        File.Move(tmp, TemplatePath, overwrite: true);
+    }
+
+    /// <summary>
+    /// Build a fresh Profile seeded from the template — used by
+    /// <c>SessionsViewModel.NewProfile</c> so every new entry starts
+    /// from the user's preferences.
+    /// </summary>
+    public Profile NewFromTemplate()
+    {
+        var t = LoadOrCreateTemplate();
+        return new Profile
+        {
+            Id = Guid.NewGuid(),
+            Name = "New profile",
+            Color = t.Color,
+            Tool = t.Tool,
+            AuthMode = t.AuthMode,
+            ApiKey = t.ApiKey,
+            ApiKeyRequiresApproval = t.ApiKeyRequiresApproval,
+            AdditionalTools = new List<ToolSpec>(t.AdditionalTools),
+            FolderPaths = new List<string>(t.FolderPaths),
+            EnvironmentVariables = new List<EnvironmentVariable>(t.EnvironmentVariables),
+            TraceLevel = t.TraceLevel,
+            PrivateMode = t.PrivateMode,
+        };
+    }
+
+    /// <summary>True iff <paramref name="path"/> in the profiles dir
+    /// is the template file (not a regular profile). Used by
+    /// <see cref="LoadAll"/> on the Windows port to keep the template
+    /// out of the picker.</summary>
+    public static bool IsTemplatePath(string path)
+        => Path.GetFileName(path).Equals("_template.json", StringComparison.Ordinal);
 }

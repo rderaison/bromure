@@ -212,6 +212,13 @@ public sealed class WslSession : IAsyncDisposable
             ["WAYLAND_DISPLAY"] = "wayland-0",
             ["XDG_RUNTIME_DIR"] = "/mnt/wslg/runtime-dir",
             ["PULSE_SERVER"] = "unix:/mnt/wslg/PulseServer",
+            // X11/Wayland default cursor theme is 24-32 px which renders
+            // at ~2x what the user expects on a typical 1080p Windows
+            // display. Force a 16 px Adwaita cursor — installed by the
+            // Ubuntu base. XCURSOR_THEME picks the theme; XCURSOR_SIZE
+            // sets the rendered size in pixels.
+            ["XCURSOR_THEME"] = "Adwaita",
+            ["XCURSOR_SIZE"] = "16",
         };
         var wslenvNames = new List<string>(combinedEnv.Count);
         foreach (var (k, v) in combinedEnv)

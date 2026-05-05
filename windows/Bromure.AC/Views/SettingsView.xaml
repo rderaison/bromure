@@ -91,6 +91,29 @@
                     </StackPanel>
                 </Border>
 
+                <!-- Template profile — defaults inherited by every new
+                     profile created from the picker's "+" button. Mirrors
+                     the macOS port's Bromure → Preferences. -->
+                <Border Background="{StaticResource PanelBackground}" CornerRadius="6"
+                        Padding="20" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="Default profile (template)" FontSize="14" FontWeight="SemiBold"/>
+                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                   Margin="0,4,0,12" TextWrapping="Wrap">
+                            New profiles created from the picker's + button start
+                            from this template. Edit the defaults here so common
+                            settings (tool, colour, auth mode, folders) carry
+                            over to every fresh profile.
+                        </TextBlock>
+                        <Button Content="Edit template profile…" Padding="10,4"
+                                HorizontalAlignment="Left"
+                                Background="{StaticResource AccentBrush}"
+                                Foreground="White" BorderThickness="0"
+                                Cursor="Hand"
+                                Command="{Binding EditTemplateProfileCommand}"/>
+                    </StackPanel>
+                </Border>
+
                 <!-- Ubuntu base image -->
                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6"
                         Padding="20" Margin="0,0,0,16">

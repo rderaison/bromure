@@ -9,17 +9,21 @@
                 <ResourceDictionary Source="Themes/DarkInputs.xaml"/>
             </ResourceDictionary.MergedDictionaries>
 
-            <!-- Master colour brushes referenced from views + overlays. -->
-            <SolidColorBrush x:Key="ChromeBackground" Color="#0F0F12"/>
-            <SolidColorBrush x:Key="PanelBackground"  Color="#16161B"/>
-            <SolidColorBrush x:Key="AccentBrush"      Color="#7B4DFF"/>
-            <SolidColorBrush x:Key="TextPrimary"      Color="#F5F5F8"/>
-            <SolidColorBrush x:Key="TextSecondary"    Color="#A0A0AA"/>
-            <SolidColorBrush x:Key="DangerBrush"      Color="#E14D5C"/>
+            <!-- Master colour brushes — light theme to match macOS
+                 default appearance. The QEMU-era dark theme was a
+                 placeholder we never asked the user to pick. -->
+            <SolidColorBrush x:Key="ChromeBackground" Color="#F5F5F7"/>
+            <SolidColorBrush x:Key="PanelBackground"  Color="#FFFFFF"/>
+            <SolidColorBrush x:Key="AccentBrush"      Color="#0A84FF"/>
+            <SolidColorBrush x:Key="TextPrimary"      Color="#1F1F22"/>
+            <SolidColorBrush x:Key="TextSecondary"    Color="#6E6E73"/>
+            <SolidColorBrush x:Key="DangerBrush"      Color="#FF3B30"/>
+            <SolidColorBrush x:Key="BorderBrush"      Color="#D1D1D6"/>
 
             <cmn:BoolToVisibilityConverter x:Key="BoolToVis"/>
             <cmn:InverseBoolToVisibilityConverter x:Key="InverseBoolToVis"/>
             <cmn:EnumToVisibilityConverter x:Key="EnumToVis"/>
+            <cmn:StringToVisibilityConverter x:Key="StringToVis"/>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

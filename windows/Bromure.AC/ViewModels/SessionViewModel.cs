@@ -1,4 +1,3 @@
-using System.Collections.ObjectModel;
 using System.IO;
 using System.Net;
 using System.Windows.Media;
@@ -12,10 +11,17 @@ using CommunityToolkit.Mvvm.Input;
 namespace Bromure.AC.ViewModels;
 
 /// <summary>
-/// One Bromure session. Replaces the macOS-port <c>TabsModel</c> +
-/// <c>TabbedSessionWindow</c> for the WSL2 implementation. Holds the
-/// per-profile MITM proxy lifetime and a collection of
-/// <see cref="TabViewModel"/>s (one WSL distro per tab).
+/// One running session = one kitty WSLg window for a profile. The
+/// kitty window is a free-floating WSLg-rendered Windows window
+/// (NOT embedded). BromureAC is the control panel; the user
+/// alt-tabs to kitty for the actual terminal. Tab management is
+/// kitty's job — it has a built-in tab strip via Ctrl+Shift+T.
+///
+/// <para>This shape mirrors the macOS port: <c>ACAppDelegate</c>
+/// shows a profile picker; clicking a profile opens a
+/// <c>TabbedSessionWindow</c> that lives as a separate top-level
+/// window. We have the same separation, just without the in-process
+/// embedding.</para>
 /// </summary>
 public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposable
 {
@@ -24,32 +30,18 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
     private readonly string _baseRootfsPath;
     private readonly string _sessionRoot;
     private HttpMitmProxy? _mitm;
+    private WslSession? _session;
 
     [ObservableProperty] private string _profileName = "Default Profile";
     [ObservableProperty] private string _vmStatus = "Idle";
     [ObservableProperty] private string _vmStatusDetail = "";
-    [ObservableProperty] private string _ipAddress = "—";
-
-    /// <summary>True iff at least one tab is running.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(StatusBrush))]
     private bool _isRunning;
-
     [ObservableProperty] private bool _isBusy;
-
-    /// <summary>True iff at least one tab has its WSLg embed up.</summary>
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsIdle))]
-    private bool _hasDisplay;
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsIdle))]
-    private bool _hasFailure;
-
+    [ObservableProperty] private bool _hasFailure;
     [ObservableProperty] private string _failureDetail = "";
     [ObservableProperty] private string? _stderrLogPath;
-
-    public bool IsIdle => !HasDisplay && !HasFailure;
 
     public string? PreflightError
     {
@@ -69,19 +61,6 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
 
     public Guid ProfileId { get; }
 
-    public ObservableCollection<TabViewModel> Tabs { get; } = new();
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(ActiveDisplaySurface))]
-    private TabViewModel? _activeTab;
-
-    /// <summary>The display the SessionView's <c>ContentControl</c> binds to —
-    /// the active tab's <see cref="WslWindowHost"/>. Switches when
-    /// the user clicks a different tab.</summary>
-    public object? ActiveDisplaySurface => ActiveTab?.WindowHost;
-
-    public List<IAsyncDisposable> SessionResources { get; } = new();
-
     public Brush StatusBrush => IsRunning
         ? (Brush)new SolidColorBrush(Color.FromRgb(0x4C, 0xC9, 0x90))
         : (Brush)new SolidColorBrush(Color.FromRgb(0x88, 0x88, 0x99));
@@ -99,29 +78,64 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
     }
 
     /// <summary>
-    /// Boot session = bring up the per-profile MITM proxy + create
-    /// the first tab. Subsequent tabs are added via NewTabCommand.
+    /// Boot session = bring up the per-profile MITM proxy + import a
+    /// fresh WSL distro + spawn kitty via WSLg as a separate Windows
+    /// window. Kitty's own tab UI handles multi-pane work — the user
+    /// gets a real OS window they can move, alt-tab to, etc.
     /// </summary>
     [RelayCommand]
     public async Task StartAsync(CancellationToken ct = default)
     {
-        if (_mitm is not null) return;
+        if (_session is not null) return;
         IsBusy = true;
         VmStatus = "Booting…";
         VmStatusDetail = "Bringing up MITM proxy…";
 
         try
         {
-            // Per-profile MITM proxy on a unique loopback port. All
-            // tabs in this session share the same proxy — the swap
-            // map is keyed by profile, not by tab, so tokens issued
-            // via this profile are recognised across tabs.
             _mitm = await _engine.RegisterAsync(ProfileId,
                 new IPEndPoint(IPAddress.Loopback, 0), ct).ConfigureAwait(true);
             var proxyPort = _mitm.LocalEndpoint!.Port;
-            VmStatusDetail = $"MITM proxy on 127.0.0.1:{proxyPort}";
+            VmStatusDetail = $"Importing WSL distro… (proxy 127.0.0.1:{proxyPort})";
 
-            await NewTabAsyncCore(proxyPort, ct).ConfigureAwait(true);
+            var distroName = "bromure-ses-" + Guid.NewGuid().ToString("N")[..8];
+            var installPath = Path.Combine(_sessionRoot, distroName);
+
+            var envVars = _activeProfile is not null
+                ? new Dictionary<string, string>(ProfileEnvExports.ForProfile(_activeProfile), StringComparer.Ordinal)
+                : new Dictionary<string, string>(StringComparer.Ordinal);
+            envVars["HTTP_PROXY"] = $"http://127.0.0.1:{proxyPort}";
+            envVars["HTTPS_PROXY"] = $"http://127.0.0.1:{proxyPort}";
+            envVars["http_proxy"] = $"http://127.0.0.1:{proxyPort}";
+            envVars["https_proxy"] = $"http://127.0.0.1:{proxyPort}";
+            envVars["SSL_CERT_FILE"] = "/etc/ssl/certs/ca-certificates.crt";
+            envVars["NODE_EXTRA_CA_CERTS"] = "/usr/local/share/ca-certificates/bromure/bromure-ca.crt";
+
+            var cfg = new WslSessionConfig
+            {
+                BaseRootfsPath = _baseRootfsPath,
+                DistroName = distroName,
+                InstallPath = installPath,
+                HomeFiles = SessionHomeBuilder.Build(_activeProfile),
+                EnvVars = envVars,
+                // No --start-as=fullscreen and no --title-prefix-matching
+                // logic. Kitty surfaces as a free-floating WSLg-rendered
+                // RAIL_WINDOW; the user manages it like any OS window.
+                // The title carries the profile name so the taskbar
+                // entry is recognisable.
+                GuestArgv = new[]
+                {
+                    "kitty",
+                    "--title", $"{ProfileName} — Bromure",
+                },
+                BromureCaPem = System.Text.Encoding.ASCII.GetBytes(_engine.Ca.CertificatePem),
+            };
+
+            _session = new WslSession(cfg);
+            await _session.StartAsync(ct).ConfigureAwait(true);
+            IsRunning = true;
+            VmStatus = "Running";
+            VmStatusDetail = $"kitty up · MITM 127.0.0.1:{proxyPort}";
         }
         catch (Exception ex)
         {
@@ -130,6 +144,7 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
             FailureDetail = ex.ToString();
             HasFailure = true;
             IsRunning = false;
+            try { await DisposeInternalsAsync().ConfigureAwait(false); } catch { }
         }
         finally
         {
@@ -137,142 +152,15 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
         }
     }
 
-    /// <summary>Add another tab — same profile, fresh distro.</summary>
-    [RelayCommand]
-    public async Task NewTabAsync(CancellationToken ct = default)
-    {
-        if (_mitm is null)
-        {
-            await StartAsync(ct).ConfigureAwait(false);
-            return;
-        }
-        IsBusy = true;
-        try { await NewTabAsyncCore(_mitm.LocalEndpoint!.Port, ct).ConfigureAwait(true); }
-        finally { IsBusy = false; }
-    }
-
-    private async Task NewTabAsyncCore(int proxyPort, CancellationToken ct)
-    {
-        var tabId = Tabs.Count + 1;
-        var distroName = "bromure-ses-" + Guid.NewGuid().ToString("N")[..8];
-        var installPath = Path.Combine(_sessionRoot, distroName);
-
-        var envVars = _activeProfile is not null
-            ? new Dictionary<string, string>(ProfileEnvExports.ForProfile(_activeProfile), StringComparer.Ordinal)
-            : new Dictionary<string, string>(StringComparer.Ordinal);
-        envVars["HTTP_PROXY"] = $"http://127.0.0.1:{proxyPort}";
-        envVars["HTTPS_PROXY"] = $"http://127.0.0.1:{proxyPort}";
-        envVars["http_proxy"] = $"http://127.0.0.1:{proxyPort}";
-        envVars["https_proxy"] = $"http://127.0.0.1:{proxyPort}";
-        envVars["SSL_CERT_FILE"] = "/etc/ssl/certs/ca-certificates.crt";
-        envVars["NODE_EXTRA_CA_CERTS"] = "/usr/local/share/ca-certificates/bromure/bromure-ca.crt";
-
-        var cfg = new WslSessionConfig
-        {
-            BaseRootfsPath = _baseRootfsPath,
-            DistroName = distroName,
-            InstallPath = installPath,
-            HomeFiles = SessionHomeBuilder.Build(_activeProfile),
-            EnvVars = envVars,
-            // No --start-as=fullscreen here. WSLg honours that flag at
-            // the OS level — kitty's RAIL_WINDOW fullscreens on the
-            // Windows desktop *before* our SetParent reparents it,
-            // which strands it as a free-floating fullscreen window
-            // outside BromureAC. Default (normal) start lets the
-            // window come up unmaximised; WslWindowHost.ResizeChildToHost
-            // then sizes it to fill our HwndHost client area.
-            GuestArgv = new[]
-            {
-                "kitty", "--title", distroName,
-            },
-            BromureCaPem = System.Text.Encoding.ASCII.GetBytes(_engine.Ca.CertificatePem),
-        };
-
-        var tab = new TabViewModel($"tab {tabId}", cfg);
-        Tabs.Add(tab);
-        ActiveTab = tab;
-
-        try { await tab.StartAsync(ct).ConfigureAwait(true); }
-        catch
-        {
-            Tabs.Remove(tab);
-            if (ActiveTab == tab) ActiveTab = Tabs.Count > 0 ? Tabs[^1] : null;
-            throw;
-        }
-
-        // Re-fire ActiveDisplaySurface change in case Tab's WindowHost
-        // landed during StartAsync after we set ActiveTab.
-        OnPropertyChanged(nameof(ActiveDisplaySurface));
-        IsRunning = true;
-        HasDisplay = true;
-        VmStatus = "Running";
-    }
-
-    /// <summary>Close a tab — disposes its WSL distro and removes
-    /// it from the strip. If it was the active tab, focus shifts
-    /// to the previous tab (or none).</summary>
-    [RelayCommand]
-    public async Task CloseTabAsync(TabViewModel? tab)
-    {
-        if (tab is null) return;
-        var idx = Tabs.IndexOf(tab);
-        if (idx < 0) return;
-        await tab.DisposeAsync().ConfigureAwait(true);
-        Tabs.Remove(tab);
-        if (Tabs.Count == 0)
-        {
-            ActiveTab = null;
-            HasDisplay = false;
-            IsRunning = false;
-            VmStatus = "Stopped";
-        }
-        else
-        {
-            ActiveTab = Tabs[Math.Max(0, idx - 1)];
-        }
-        OnPropertyChanged(nameof(ActiveDisplaySurface));
-    }
-
-    /// <summary>Activate a tab (clicked from the strip).</summary>
-    [RelayCommand]
-    private void ActivateTab(TabViewModel? tab)
-    {
-        if (tab is null) return;
-        ActiveTab = tab;
-        foreach (var t in Tabs) t.IsActive = ReferenceEquals(t, tab);
-    }
-
     [RelayCommand]
     public async Task ShutdownAsync()
     {
         IsBusy = true;
         VmStatus = "Shutting down…";
-        // Close all tabs first (each disposes its distro).
-        var snapshot = Tabs.ToArray();
-        foreach (var tab in snapshot)
-        {
-            try { await tab.DisposeAsync().ConfigureAwait(true); } catch { }
-        }
-        Tabs.Clear();
-        ActiveTab = null;
-        HasDisplay = false;
+        await DisposeInternalsAsync().ConfigureAwait(true);
         IsRunning = false;
-
-        if (_mitm is not null)
-        {
-            try { await _engine.UnregisterAsync(ProfileId).ConfigureAwait(false); } catch { }
-            _mitm = null;
-        }
-
-        foreach (var r in SessionResources)
-        {
-            try { await r.DisposeAsync().ConfigureAwait(false); } catch { }
-        }
-        SessionResources.Clear();
-
         IsBusy = false;
         VmStatus = "Stopped";
-        OnPropertyChanged(nameof(ActiveDisplaySurface));
     }
 
     [RelayCommand]
@@ -306,7 +194,19 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
         catch { }
     }
 
-    public string? ProgressPercent => null;
+    private async Task DisposeInternalsAsync()
+    {
+        if (_session is not null)
+        {
+            try { await _session.DisposeAsync().ConfigureAwait(false); } catch { }
+            _session = null;
+        }
+        if (_mitm is not null)
+        {
+            try { await _engine.UnregisterAsync(ProfileId).ConfigureAwait(false); } catch { }
+            _mitm = null;
+        }
+    }
 
     public ValueTask DisposeAsync() => new(ShutdownAsync());
 }

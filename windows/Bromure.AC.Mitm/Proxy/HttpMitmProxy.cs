@@ -151,6 +151,19 @@ public sealed class HttpMitmProxy : IAsyncDisposable
         var wrapped = await ReadWrappedRequestAsync(tlsServer, ct).ConfigureAwait(false);
         if (wrapped is null) return;
 
+        // 4b. WebSocket upgrade fast-path. Anthropic / OpenAI streaming
+        // tools and many SaaS dashboards open WebSockets after the
+        // initial HTTPS handshake; URLSession-style request/response
+        // forwarding can't represent the bidirectional frame stream
+        // that follows a 101 Switching Protocols. Detect the upgrade
+        // and switch into a raw byte pump between the two TLS sides.
+        if (IsWebSocketUpgrade(wrapped))
+        {
+            _log.LogDebug("WebSocket upgrade for {Host}", host);
+            await HandleWebSocketUpgradeAsync(host, port, wrapped, tlsServer, t0, ct).ConfigureAwait(false);
+            return;
+        }
+
         // 5. Swap tokens, then re-sign if AWS.
         var swapResult = await _swapper.SwapAsync(wrapped, host, _profileId, ct).ConfigureAwait(false);
         var requestBytes = swapResult.Modified;
@@ -236,26 +249,199 @@ public sealed class HttpMitmProxy : IAsyncDisposable
         {
             TargetHost = host,
             EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            // Don't advertise h2 — we only speak HTTP/1.1. Without
+            // this, some upstreams (apple.com, anthropic) negotiate h2
+            // and we'd have to deal with frame parsing.
+            ApplicationProtocols = new List<SslApplicationProtocol>
+            {
+                SslApplicationProtocol.Http11,
+            },
         }, ct).ConfigureAwait(false);
 
-        await upstreamTls.WriteAsync(requestBytes, ct).ConfigureAwait(false);
+        // Force Connection: close on the forwarded request so upstream
+        // closes the TCP after the response — frees us from having
+        // to honour keep-alive on the upstream side. We still parse
+        // body framing properly below as a backstop.
+        var rewritten = ForceConnectionClose(requestBytes);
+        await upstreamTls.WriteAsync(rewritten, ct).ConfigureAwait(false);
         await upstreamTls.FlushAsync(ct).ConfigureAwait(false);
 
-        // Read until upstream closes. Production version honors
-        // Content-Length and Transfer-Encoding: chunked; for now we
-        // close-frame the response which works for HTTP/1.0-style flows
-        // and for any upstream that sets Connection: close on us.
+        // Properly frame the response: read header then body honouring
+        // Content-Length OR Transfer-Encoding: chunked. Reading until
+        // close (the previous heuristic) hung whenever upstream replied
+        // with Connection: keep-alive — which all modern HTTP/1.1
+        // servers do by default.
+        return await ReadFramedResponseAsync(upstreamTls, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Read an HTTP/1.1 response from <paramref name="stream"/>,
+    /// stopping at the right byte: Content-Length-many for plain
+    /// responses, end of last 0-sized chunk for chunked, EOF for
+    /// no-framing/HTTP-1.0 cases.
+    /// </summary>
+    private static async Task<byte[]> ReadFramedResponseAsync(Stream stream, CancellationToken ct)
+    {
         using var ms = new MemoryStream();
         var buf = new byte[16 * 1024];
+
+        // Step 1: accumulate bytes until we find the end of the header.
+        int headerEnd = -1;
+        while (headerEnd < 0)
+        {
+            var n = await stream.ReadAsync(buf, ct).ConfigureAwait(false);
+            if (n <= 0) return ms.ToArray();  // upstream closed mid-header → return what we got
+            ms.Write(buf, 0, n);
+            headerEnd = FindHeaderEnd(ms.GetBuffer(), (int)ms.Length);
+        }
+
+        var headerBytes = ms.GetBuffer().AsSpan(0, headerEnd).ToArray();
+        var headerStr = Encoding.ASCII.GetString(headerBytes);
+        var bodyStart = headerEnd;
+        var alreadyRead = (int)ms.Length - bodyStart;
+
+        // Step 2a: Transfer-Encoding: chunked.
+        if (Regex.IsMatch(headerStr, @"(?im)^Transfer-Encoding:\s*chunked\s*$"))
+        {
+            await ReadChunkedAsync(stream, ms, alreadyRead, ct).ConfigureAwait(false);
+            return ms.ToArray();
+        }
+
+        // Step 2b: Content-Length present.
+        var clMatch = Regex.Match(headerStr, @"(?im)^Content-Length:\s*(\d+)\s*$");
+        if (clMatch.Success && int.TryParse(clMatch.Groups[1].Value, out var contentLength))
+        {
+            await ReadExactlyAsync(stream, ms, contentLength - alreadyRead, ct).ConfigureAwait(false);
+            return ms.ToArray();
+        }
+
+        // Step 2c: HEAD / 204 / 304 → no body.
+        var statusMatch = Regex.Match(headerStr, @"^HTTP/\S+\s+(\d{3})", RegexOptions.Multiline);
+        if (statusMatch.Success && int.TryParse(statusMatch.Groups[1].Value, out var status))
+        {
+            if (status is 204 or 304 || (status >= 100 && status < 200))
+                return ms.ToArray();
+        }
+
+        // Step 2d: no framing → read until close.
         while (true)
         {
             int n;
-            try { n = await upstreamTls.ReadAsync(buf, ct).ConfigureAwait(false); }
+            try { n = await stream.ReadAsync(buf, ct).ConfigureAwait(false); }
             catch (IOException) { break; }
             if (n <= 0) break;
             ms.Write(buf, 0, n);
         }
         return ms.ToArray();
+    }
+
+    private static async Task ReadExactlyAsync(Stream stream, MemoryStream sink, int remaining, CancellationToken ct)
+    {
+        var buf = new byte[16 * 1024];
+        while (remaining > 0)
+        {
+            var want = Math.Min(buf.Length, remaining);
+            var n = await stream.ReadAsync(buf.AsMemory(0, want), ct).ConfigureAwait(false);
+            if (n <= 0) return;
+            sink.Write(buf, 0, n);
+            remaining -= n;
+        }
+    }
+
+    private static async Task ReadChunkedAsync(Stream stream, MemoryStream sink, int prefetched, CancellationToken ct)
+    {
+        // Read until the chunked terminator (0-length chunk + trailers
+        // ending in \r\n\r\n) is present in the buffer. We rescan
+        // from the body offset on each new read — chunked responses
+        // we typically MITM are small enough that the rescan cost
+        // is negligible compared to TLS reads.
+        var headerEnd = (int)sink.Length - prefetched;
+        var buf = new byte[16 * 1024];
+        while (true)
+        {
+            if (FindChunkedEnd(sink.GetBuffer(), headerEnd, (int)sink.Length)) return;
+            var n = await stream.ReadAsync(buf, ct).ConfigureAwait(false);
+            if (n <= 0) return;
+            sink.Write(buf, 0, n);
+        }
+    }
+
+    /// <summary>
+    /// Walk chunk-by-chunk over <paramref name="body"/> from
+    /// <paramref name="start"/> to <paramref name="end"/>, returning
+    /// true once we see the canonical chunked terminator
+    /// (<c>0\r\n[trailers]\r\n</c>). Fails gracefully on partial /
+    /// malformed input — caller just reads more bytes.
+    /// </summary>
+    private static bool FindChunkedEnd(byte[] body, int start, int end)
+    {
+        var pos = start;
+        while (pos < end)
+        {
+            var crlf = IndexOfCrLf(body, pos, end);
+            if (crlf < 0) return false;
+            var sizeLine = Encoding.ASCII.GetString(body, pos, crlf - pos);
+            var semi = sizeLine.IndexOf(';');
+            if (semi >= 0) sizeLine = sizeLine[..semi];
+            if (!int.TryParse(sizeLine.Trim(), System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture, out var sz)) return false;
+            pos = crlf + 2;
+            if (sz == 0)
+            {
+                // Final chunk; trailers (possibly empty) end with \r\n.
+                return IndexOfCrLf(body, pos, end) >= 0;
+            }
+            if (pos + sz + 2 > end) return false;
+            pos += sz + 2;
+        }
+        return false;
+    }
+
+    private static int IndexOfCrLf(byte[] body, int start, int end)
+    {
+        for (var i = start; i < end - 1; i++)
+        {
+            if (body[i] == 0x0D && body[i + 1] == 0x0A) return i;
+        }
+        return -1;
+    }
+
+    private static int FindHeaderEnd(byte[] buf, int len)
+    {
+        for (var i = 0; i <= len - 4; i++)
+        {
+            if (buf[i] == 0x0D && buf[i + 1] == 0x0A
+                && buf[i + 2] == 0x0D && buf[i + 3] == 0x0A)
+                return i + 4;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// Replace any <c>Connection:</c> header on the request with
+    /// <c>Connection: close</c>, or append one if absent. Lets upstream
+    /// signal end-of-response by closing the TCP, which our framing
+    /// path uses as a backstop.
+    /// </summary>
+    private static byte[] ForceConnectionClose(byte[] request)
+    {
+        var headerEnd = FindHeaderEnd(request, request.Length);
+        if (headerEnd < 0) return request;
+        var headerStr = Encoding.ASCII.GetString(request, 0, headerEnd);
+        var rewritten = Regex.Replace(headerStr,
+            @"(?im)^Connection:\s*[^\r\n]*\r\n", "Connection: close\r\n");
+        if (!Regex.IsMatch(rewritten, @"(?im)^Connection:\s*close\s*$"))
+        {
+            // No Connection header at all — insert one before the
+            // blank line that ends the headers.
+            rewritten = rewritten[..^2] + "Connection: close\r\n\r\n";
+        }
+        var headBytes = Encoding.ASCII.GetBytes(rewritten);
+        var bodyLen = request.Length - headerEnd;
+        var outBuf = new byte[headBytes.Length + bodyLen];
+        Buffer.BlockCopy(headBytes, 0, outBuf, 0, headBytes.Length);
+        Buffer.BlockCopy(request, headerEnd, outBuf, headBytes.Length, bodyLen);
+        return outBuf;
     }
 
     private static async Task<string?> ReadHttpHeaderAsync(Stream stream, int maxBytes, CancellationToken ct)
@@ -405,5 +591,151 @@ public sealed class HttpMitmProxy : IAsyncDisposable
             try { await _acceptLoop.ConfigureAwait(false); } catch { }
         }
         _cts?.Dispose();
+    }
+
+    // ----------------------------------------------------------------
+    // WebSocket upgrade
+    // ----------------------------------------------------------------
+
+    /// <summary>
+    /// Cheap header parse: HTTP/1.1 WebSocket upgrade requires both
+    /// <c>Upgrade: websocket</c> and a <c>Connection</c> header that
+    /// includes the <c>upgrade</c> token. Returns false on malformed
+    /// requests rather than throwing — falls back to the regular
+    /// request/response flow.
+    /// </summary>
+    private static bool IsWebSocketUpgrade(byte[] request)
+    {
+        var headerEnd = FindHeaderEnd(request, request.Length);
+        if (headerEnd < 0) return false;
+        var headers = Encoding.ASCII.GetString(request, 0, headerEnd);
+        var hasUpgradeWs = Regex.IsMatch(headers,
+            @"(?im)^Upgrade:\s*websocket\s*$");
+        var connectionHasUpgrade = Regex.IsMatch(headers,
+            @"(?im)^Connection:\s*[^\r\n]*\bupgrade\b[^\r\n]*$");
+        return hasUpgradeWs && connectionHasUpgrade;
+    }
+
+    /// <summary>
+    /// After detecting a WebSocket upgrade, forward the upgrade
+    /// request to upstream as-is (no token swap, no Connection: close
+    /// rewrite — those would break the handshake), relay the 101
+    /// Switching Protocols response back to the client, then pump
+    /// bytes bidirectionally between the two TLS streams until either
+    /// side closes. Records a basic TraceRecord with the wire-byte
+    /// counters at end-of-session.
+    ///
+    /// <para>This matches what <c>HTTPProxy.handleWebSocketUpgrade</c>
+    /// does on the macOS side at a behaviour level. Frame-level
+    /// inspection (using <c>WsFrameDecoder</c> / <c>WsInflater</c> for
+    /// per-message TraceRecord entries) is a follow-up — the
+    /// pass-through here is enough to unblock SaaS dashboards and
+    /// streaming agents.</para>
+    /// </summary>
+    private async Task HandleWebSocketUpgradeAsync(
+        string host, int port, byte[] upgradeRequest, SslStream clientTls,
+        DateTimeOffset t0, CancellationToken ct)
+    {
+        // 1) Connect upstream + complete TLS — same as ForwardAsync but
+        // we keep the stream alive for the bidirectional pump.
+        using var upstream = new TcpClient();
+        await upstream.ConnectAsync(host, port, ct).ConfigureAwait(false);
+        using var upstreamRaw = upstream.GetStream();
+        await using var upstreamTls = new SslStream(upstreamRaw, leaveInnerStreamOpen: true);
+        await upstreamTls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+        {
+            TargetHost = host,
+            EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            ApplicationProtocols = new List<SslApplicationProtocol>
+            {
+                SslApplicationProtocol.Http11,
+            },
+        }, ct).ConfigureAwait(false);
+
+        // 2) Forward the upgrade request VERBATIM. If we tampered with
+        // Connection / Upgrade / Sec-WebSocket-Key, upstream would
+        // refuse the handshake.
+        await upstreamTls.WriteAsync(upgradeRequest, ct).ConfigureAwait(false);
+        await upstreamTls.FlushAsync(ct).ConfigureAwait(false);
+
+        // 3) Read the upstream response header (always small, single
+        // 101 + headers).
+        var respHeaderRaw = await ReadHttpHeaderAsync(upstreamTls, 16 * 1024, ct).ConfigureAwait(false);
+        if (respHeaderRaw is null) return;
+        var respHeaderBytes = Encoding.ASCII.GetBytes(respHeaderRaw);
+        await clientTls.WriteAsync(respHeaderBytes, ct).ConfigureAwait(false);
+        await clientTls.FlushAsync(ct).ConfigureAwait(false);
+
+        // 4) If upstream rejected the upgrade (anything other than 101)
+        // we still relay the body but don't enter pump mode — there
+        // are no WebSocket frames to forward.
+        if (!respHeaderRaw.StartsWith("HTTP/1.1 101", StringComparison.Ordinal))
+        {
+            // Drain the upstream body, mirror to client, return.
+            var drainBuf = new byte[16 * 1024];
+            while (true)
+            {
+                int n;
+                try { n = await upstreamTls.ReadAsync(drainBuf, ct).ConfigureAwait(false); }
+                catch (IOException) { break; }
+                if (n <= 0) break;
+                await clientTls.WriteAsync(drainBuf.AsMemory(0, n), ct).ConfigureAwait(false);
+            }
+            return;
+        }
+
+        // 5) Bidirectional pump until either side closes. Tally bytes
+        // for the trace.
+        long upBytes = 0, downBytes = 0;
+        var clientToUpstream = Task.Run(async () =>
+        {
+            var buf = new byte[16 * 1024];
+            while (!ct.IsCancellationRequested)
+            {
+                int n;
+                try { n = await clientTls.ReadAsync(buf, ct).ConfigureAwait(false); }
+                catch { return; }
+                if (n <= 0) return;
+                Interlocked.Add(ref upBytes, n);
+                try { await upstreamTls.WriteAsync(buf.AsMemory(0, n), ct).ConfigureAwait(false); }
+                catch { return; }
+            }
+        }, ct);
+        var upstreamToClient = Task.Run(async () =>
+        {
+            var buf = new byte[16 * 1024];
+            while (!ct.IsCancellationRequested)
+            {
+                int n;
+                try { n = await upstreamTls.ReadAsync(buf, ct).ConfigureAwait(false); }
+                catch { return; }
+                if (n <= 0) return;
+                Interlocked.Add(ref downBytes, n);
+                try { await clientTls.WriteAsync(buf.AsMemory(0, n), ct).ConfigureAwait(false); }
+                catch { return; }
+            }
+        }, ct);
+
+        // Either direction ending kills the session.
+        await Task.WhenAny(clientToUpstream, upstreamToClient).ConfigureAwait(false);
+
+        // 6) Trace.
+        _traceStore?.Record(new TraceRecord(
+            Id: Guid.NewGuid(),
+            SessionId: Guid.Empty,
+            ProfileId: _profileId,
+            Timestamp: t0,
+            Host: host,
+            Port: port,
+            Method: "GET",
+            Path: ExtractPath(upgradeRequest),
+            StatusCode: 101,
+            RequestBytes: upgradeRequest.Length + (int)Interlocked.Read(ref upBytes),
+            ResponseBytes: respHeaderBytes.Length + (int)Interlocked.Read(ref downBytes),
+            LatencyMs: (DateTimeOffset.UtcNow - t0).TotalMilliseconds,
+            Swaps: Array.Empty<SwapEntry>(),
+            Leaks: Array.Empty<LeakEntry>(),
+            BodyStored: false,
+            IsConversation: false));
     }
 }

@@ -1,0 +1,192 @@
+<UserControl x:Class="Bromure.AC.Views.SessionsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{StaticResource ChromeBackground}"
+             Foreground="{StaticResource TextPrimary}">
+    <!-- Profile picker — port of macOS ProfilePickerView. List of
+         profiles, click row to launch a kitty session as a free WSLg
+         window. + / - buttons add and remove. -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header — app title block. -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="20,18,20,8">
+            <Border Width="40" Height="40" CornerRadius="9"
+                    Background="{StaticResource AccentBrush}" Margin="0,0,12,0">
+                <TextBlock Text="b" Foreground="White" FontSize="22"
+                           FontFamily="Segoe UI" FontWeight="Bold"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Margin="0,-2,0,0"/>
+            </Border>
+            <StackPanel VerticalAlignment="Center">
+                <TextBlock Text="Bromure Agentic Coding" FontSize="14" FontWeight="SemiBold"/>
+                <TextBlock Text="Pick a profile to open a session"
+                           FontSize="11" Foreground="{StaticResource TextSecondary}"/>
+            </StackPanel>
+        </StackPanel>
+
+        <!-- Profile list. -->
+        <Border Grid.Row="1" Margin="20,4,20,4" CornerRadius="8"
+                Background="{StaticResource PanelBackground}"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+            <Grid>
+                <ListBox ItemsSource="{Binding Rows}"
+                         SelectedItem="{Binding Selected}"
+                         Background="Transparent" BorderThickness="0"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Padding" Value="0"/>
+                            <Setter Property="Margin" Value="0"/>
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Border Padding="14,10" BorderBrush="{StaticResource BorderBrush}"
+                                    BorderThickness="0,0,0,1">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="14"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- Profile color dot -->
+                                    <Ellipse Grid.Column="0" Width="10" Height="10"
+                                             VerticalAlignment="Center"
+                                             Fill="{Binding ColorBrush}"/>
+
+                                    <!-- Name + subtitle -->
+                                    <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Name}" FontSize="13"
+                                                       FontWeight="SemiBold"/>
+                                            <Ellipse Width="7" Height="7" Margin="8,1,0,0"
+                                                     Visibility="{Binding IsRunning,
+                                                       Converter={StaticResource BoolToVis}}"
+                                                     Fill="#34C759" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                        <TextBlock Text="{Binding SubtitleText}" FontSize="11"
+                                                   Foreground="{StaticResource TextSecondary}"
+                                                   Margin="0,2,0,0"/>
+                                        <TextBlock Text="{Binding StatusDetail}" FontSize="10"
+                                                   Foreground="{StaticResource AccentBrush}"
+                                                   Margin="0,2,0,0" TextWrapping="Wrap"
+                                                   Visibility="{Binding StatusDetail,
+                                                     Converter={StaticResource StringToVis},
+                                                     FallbackValue=Collapsed}"/>
+                                    </StackPanel>
+
+                                    <!-- Column 2 — busy spinner while launching. -->
+                                    <ProgressBar Grid.Column="2" Width="80" Height="4"
+                                                 IsIndeterminate="True"
+                                                 Foreground="{StaticResource AccentBrush}"
+                                                 Background="#22000000" BorderThickness="0"
+                                                 Margin="0,0,12,0"
+                                                 VerticalAlignment="Center"
+                                                 Visibility="{Binding IsLaunching,
+                                                   Converter={StaticResource BoolToVis}}"/>
+
+                                    <!-- Single gear icon, where the "Idle" text used to
+                                         be. Clicking opens the profile editor. -->
+                                    <Button Grid.Column="3"
+                                            FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                            Content="" FontSize="14"
+                                            Background="Transparent" BorderThickness="0"
+                                            Foreground="{StaticResource TextSecondary}"
+                                            Padding="6,4" Cursor="Hand"
+                                            ToolTip="Edit profile"
+                                            Command="{Binding EditCommand}"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <!-- Empty state -->
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Visibility="{Binding HasRows,
+                              Converter={StaticResource InverseBoolToVis}}">
+                    <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                               Text="" FontSize="36"
+                               HorizontalAlignment="Center"
+                               Foreground="{StaticResource TextSecondary}"/>
+                    <TextBlock Text="No profiles yet" FontSize="14"
+                               Foreground="{StaticResource TextSecondary}"
+                               HorizontalAlignment="Center" Margin="0,8,0,0"/>
+                    <TextBlock Text="Click + to create one"
+                               FontSize="11"
+                               Foreground="{StaticResource TextSecondary}"
+                               HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Bottom toolbar: + / − on the left, Launch on the right.
+             Mirrors macOS ProfilePickerView's "+ −" + "Open Session". -->
+        <Border Grid.Row="2" Margin="20,4,20,16" Padding="6,4"
+                Background="{StaticResource PanelBackground}"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                CornerRadius="6">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                    <Button FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                            Content="" FontSize="11"
+                            Background="Transparent" BorderThickness="0"
+                            Padding="8,4" Cursor="Hand"
+                            ToolTip="New profile"
+                            Command="{Binding NewProfileCommand}"/>
+                    <Button FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                            Content="" FontSize="11"
+                            Background="Transparent" BorderThickness="0"
+                            Padding="8,4" Cursor="Hand"
+                            ToolTip="Delete selected profile"
+                            IsEnabled="{Binding HasSelection}"
+                            Command="{Binding DeleteSelectedCommand}"/>
+                </StackPanel>
+                <Button Grid.Column="2" Padding="16,6" Margin="0,0,4,0"
+                        Background="{StaticResource AccentBrush}"
+                        Foreground="White" BorderThickness="0"
+                        FontWeight="SemiBold" Cursor="Hand"
+                        IsEnabled="{Binding HasSelection}"
+                        Command="{Binding LaunchSelectedCommand}"
+                        Visibility="{Binding Selected.IsRunning,
+                          Converter={StaticResource InverseBoolToVis},
+                          FallbackValue=Visible}">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                   Text="" FontSize="11"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Launch" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Button Grid.Column="2" Padding="16,6"
+                        Background="{StaticResource DangerBrush}"
+                        Foreground="White" BorderThickness="0"
+                        FontWeight="SemiBold" Cursor="Hand"
+                        Command="{Binding StopSelectedCommand}"
+                        Visibility="{Binding Selected.IsRunning,
+                          Converter={StaticResource BoolToVis},
+                          FallbackValue=Collapsed}">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                   Text="" FontSize="11"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Stop" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>
