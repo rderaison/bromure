@@ -124,6 +124,22 @@ internal static class Program
         });
         root.AddCommand(sessionCmd);
 
+        // `wsl` subcommand: smoke-test the WSL2 lifecycle wrapper
+        // against a real rootfs tarball. Exists so we can verify
+        // ImportAsync / LaunchAsync / UnregisterAsync end-to-end
+        // outside the GUI before wiring them into the host shell.
+        var wslCmd = new Command("wsl", "Smoke-test WslDistro lifecycle against a rootfs tarball");
+        var wslRootfsArg = new Argument<string>("rootfs",
+            "Path to a rootfs tarball (.tar/.tar.gz/.tar.xz/.vhdx)");
+        wslCmd.AddArgument(wslRootfsArg);
+        wslCmd.SetHandler(async ctx =>
+        {
+            exitCode = await WslSpike.RunAsync(
+                new[] { ctx.ParseResult.GetValueForArgument(wslRootfsArg) }
+            ).ConfigureAwait(false);
+        });
+        root.AddCommand(wslCmd);
+
         await root.InvokeAsync(args).ConfigureAwait(false);
         return exitCode;
     }

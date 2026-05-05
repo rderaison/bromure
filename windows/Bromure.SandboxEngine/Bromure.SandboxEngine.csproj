@@ -7,6 +7,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Bromure.Platform\Bromure.Platform.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <InternalsVisibleTo Include="Bromure.Tests" />
   </ItemGroup>
   <ItemGroup>
     <!-- Stage-2 setup script — embedded so it travels with the host EXE
