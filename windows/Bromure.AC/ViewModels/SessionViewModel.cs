@@ -174,9 +174,16 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
             InstallPath = installPath,
             HomeFiles = SessionHomeBuilder.Build(_activeProfile),
             EnvVars = envVars,
+            // No --start-as=fullscreen here. WSLg honours that flag at
+            // the OS level — kitty's RAIL_WINDOW fullscreens on the
+            // Windows desktop *before* our SetParent reparents it,
+            // which strands it as a free-floating fullscreen window
+            // outside BromureAC. Default (normal) start lets the
+            // window come up unmaximised; WslWindowHost.ResizeChildToHost
+            // then sizes it to fill our HwndHost client area.
             GuestArgv = new[]
             {
-                "kitty", "--title", distroName, "--start-as=fullscreen",
+                "kitty", "--title", distroName,
             },
             BromureCaPem = System.Text.Encoding.ASCII.GetBytes(_engine.Ca.CertificatePem),
         };
