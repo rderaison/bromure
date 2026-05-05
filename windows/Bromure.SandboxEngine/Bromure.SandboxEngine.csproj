@@ -10,8 +10,11 @@
     <InternalsVisibleTo Include="Bromure.Tests" />
   </ItemGroup>
   <ItemGroup>
-    <!-- Stage-2 setup script — embedded so it travels with the host EXE
-         and the baker can pull it out on demand. -->
+    <!-- Stage-2 setup scripts — embedded so they travel with the host
+         EXE and the baker can pull them out on demand.
+         setup.sh is the QEMU+Alpine bake (preserved for reference);
+         setup-wsl.sh is the WSL2 bake the current code path uses. -->
     <EmbeddedResource Include="Image\setup.sh" />
+    <EmbeddedResource Include="Image\setup-wsl.sh" />
   </ItemGroup>
 </Project>

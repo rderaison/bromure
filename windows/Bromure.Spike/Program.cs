@@ -140,6 +140,46 @@ internal static class Program
         });
         root.AddCommand(wslCmd);
 
+        // `bake-wsl` subcommand: drive RootfsBaker headlessly to produce
+        // bromure-base.tar.gz. Stdout streams progress + the in-distro
+        // setup output. The bake takes ~5-10 min on a fresh source rootfs;
+        // exit non-zero if setup-wsl.sh emits SANDBOX_SETUP_FAILED.
+        var bakeWslCmd = new Command("bake-wsl",
+            "Bake bromure-base.tar.gz from a source rootfs (WSL2)");
+        var bakeSourceArg = new Argument<string>("source",
+            "Path to a source rootfs tarball (e.g. wsl --export Ubuntu-24.04 …)");
+        var bakeOutputArg = new Argument<string>("output",
+            "Path where bromure-base.tar.gz will be written");
+        bakeWslCmd.AddArgument(bakeSourceArg);
+        bakeWslCmd.AddArgument(bakeOutputArg);
+        bakeWslCmd.SetHandler(async ctx =>
+        {
+            exitCode = await WslBakeSpike.RunAsync(new[]
+            {
+                ctx.ParseResult.GetValueForArgument(bakeSourceArg),
+                ctx.ParseResult.GetValueForArgument(bakeOutputArg),
+            }).ConfigureAwait(false);
+        });
+        root.AddCommand(bakeWslCmd);
+
+        // `wsl-session` subcommand: end-to-end exercise of WslSession —
+        // import a baked rootfs, drop a synthetic home overlay, run a
+        // probe command inside, tear down. Verifies the FS overlay,
+        // env injection, and lifecycle work against the real bake.
+        var wslSessionCmd = new Command("wsl-session",
+            "End-to-end exercise of WslSession against a baked rootfs");
+        var sesRootfsArg = new Argument<string>("rootfs",
+            "Path to bromure-base.tar.gz (output of bake-wsl)");
+        wslSessionCmd.AddArgument(sesRootfsArg);
+        wslSessionCmd.SetHandler(async ctx =>
+        {
+            exitCode = await WslSessionSpike.RunAsync(new[]
+            {
+                ctx.ParseResult.GetValueForArgument(sesRootfsArg),
+            }).ConfigureAwait(false);
+        });
+        root.AddCommand(wslSessionCmd);
+
         await root.InvokeAsync(args).ConfigureAwait(false);
         return exitCode;
     }

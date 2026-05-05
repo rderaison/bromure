@@ -1,14 +1,12 @@
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Windows;
 using System.Windows.Media;
 using Bromure.AC.Display;
 using Bromure.AC.Mitm.Engine;
-using Bromure.SandboxEngine.Disk;
-using Bromure.SandboxEngine.Image;
-using Bromure.SandboxEngine.Qemu;
+using Bromure.AC.Mitm.Proxy;
+using Bromure.SandboxEngine.Wsl;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -17,15 +15,19 @@ namespace Bromure.AC.ViewModels;
 /// <summary>
 /// Lightweight equivalent of the macOS <c>TabsModel</c> + the bits of
 /// <c>TabbedSessionWindow</c> that aren't AppKit-specific. Each session
-/// holds the QEMU supervisor lifetime, the per-profile MITM proxy, and
-/// a small UI-facing state.
+/// holds the WSL distro lifetime, the per-profile MITM proxy, and a
+/// small UI-facing state.
+///
+/// <para>This is the WSL2 implementation. The QEMU+WHPX equivalent is
+/// preserved at commit <c>86be3d1</c> on the windows branch — see
+/// <c>WSL2_PIVOT.md</c> for context on why we switched.</para>
 /// </summary>
 public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposable
 {
     private readonly MitmEngine _engine;
-    private readonly ImageManager _images;
-    private readonly QemuConfig _qemuConfig;
-    private QemuSupervisor? _supervisor;
+    private readonly WslSessionConfig _wslConfig;
+    private WslSession? _session;
+    private HttpMitmProxy? _mitm;
 
     [ObservableProperty] private string _profileName = "Default Profile";
     [ObservableProperty] private string _vmStatus = "Idle";
@@ -36,7 +38,6 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsIdle))]
-    [NotifyPropertyChangedFor(nameof(IsShowingSerial))]
     private bool _hasDisplay;
 
     [ObservableProperty] private bool _showCompromiseOverlay;
@@ -50,29 +51,13 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
 
     [ObservableProperty] private string _failureDetail = "";
     [ObservableProperty] private string? _stderrLogPath;
-    [ObservableProperty] private string _serialBuffer = "";
 
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsIdle))]
-    [NotifyPropertyChangedFor(nameof(IsShowingSerial))]
-    private bool _hasSerialConsole;
+    /// <summary>True iff neither the embedded display nor a failure overlay is up.</summary>
+    public bool IsIdle => !HasDisplay && !HasFailure;
 
-    /// True iff neither the embedded display nor the serial pane is up.
-    /// Drives the placeholder "Running…" StackPanel so it doesn't
-    /// occlude the serial console pane.
-    public bool IsIdle => !HasDisplay && !HasSerialConsole && !HasFailure;
-    /// True iff serial console is attached but no embedded display.
-    public bool IsShowingSerial => !HasDisplay && HasSerialConsole;
-    private SerialConsoleClient? _serial;
-    /// 256 KiB rolling buffer — long enough for boot + a few interactive
-    /// minutes; short enough that the WPF TextBlock layout stays cheap.
-    private const int SerialBufferMaxBytes = 256 * 1024;
-
-    /// <summary>
-    /// Set by the shell when a hard precondition (e.g. QEMU not installed)
+    /// <summary>Set by the shell when a hard precondition (e.g. WSL2 not installed)
     /// rules the session out. Renders as a permanent failure overlay
-    /// instead of letting the user click Boot into an NRE.
-    /// </summary>
+    /// instead of letting the user click Boot into an NRE.</summary>
     public string? PreflightError
     {
         get => _preflightError;
@@ -97,20 +82,17 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
     };
 
     public SessionViewModel(Guid profileId, string profileName,
-        MitmEngine engine, ImageManager images, QemuConfig qemuConfig)
+        MitmEngine engine, WslSessionConfig wslConfig)
     {
         ProfileId = profileId;
         ProfileName = profileName;
         _engine = engine;
-        _images = images;
-        _qemuConfig = qemuConfig;
+        _wslConfig = wslConfig;
     }
 
     /// <summary>
-    /// Optional resources whose lifetime matches this session — e.g.
-    /// the per-session <see cref="Bromure.SandboxEngine.Sharing.FolderShareServer"/>
-    /// (sshd lifecycle) — disposed when the session shuts down. Set
-    /// by the shell after construction.
+    /// Optional resources whose lifetime matches this session — disposed
+    /// when the session shuts down. Set by the shell after construction.
     /// </summary>
     public List<IAsyncDisposable> SessionResources { get; } = new();
 
@@ -119,101 +101,75 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
         : (Brush)new SolidColorBrush(Color.FromRgb(0x88, 0x88, 0x99));
 
     /// <summary>
-    /// Boot the VM. Mirrors what <c>BromureAC.swift</c> does in
-    /// <c>launchSession</c>: register MITM hooks for the profile, spawn
-    /// QEMU under WHPX, hand the VM display surface to the view.
+    /// Boot the session. Mirrors what <c>BromureAC.swift</c> does in
+    /// <c>launchSession</c>: register the per-profile MITM proxy on a
+    /// loopback port, import the WSL distro, drop home overlay, spawn
+    /// kitty in the distro pointed at the proxy, embed the kitty HWND.
     /// </summary>
     [RelayCommand]
     public async Task StartAsync(CancellationToken ct = default)
     {
-        if (_supervisor is not null) return;
+        if (_session is not null) return;
         IsBusy = true;
         VmStatus = "Booting…";
-        VmStatusDetail = "Spawning QEMU under WHPX. First boot of an Alpine ISO takes a few seconds.";
+        VmStatusDetail = "Spawning WSL distro from base rootfs…";
 
         try
         {
-            _supervisor = new QemuSupervisor(_qemuConfig);
-            _supervisor.GuestShutdown += () =>
+            // 1) Per-tab MITM proxy on a unique loopback port.
+            // The user's profile id keys MitmEngine's per-session
+            // bookkeeping (token plan, trace bucket, etc.). Bind to
+            // 127.0.0.1 with port 0 → OS picks; we read it back for the
+            // HTTPS_PROXY env we'll inject into the distro.
+            _mitm = await _engine.RegisterAsync(ProfileId,
+                new IPEndPoint(IPAddress.Loopback, 0), ct).ConfigureAwait(false);
+            var proxyPort = _mitm.LocalEndpoint!.Port;
+
+            // 2) Splice the proxy URL + Bromure CA into the session env
+            // so curl/git/node trust the MITM-signed certs that come
+            // back from upstream.
+            var envVars = new Dictionary<string, string>(_wslConfig.EnvVars, StringComparer.Ordinal)
             {
-                LastEvent = "Guest sent ACPI shutdown";
-                IsRunning = false;
+                ["HTTP_PROXY"] = $"http://127.0.0.1:{proxyPort}",
+                ["HTTPS_PROXY"] = $"http://127.0.0.1:{proxyPort}",
+                ["http_proxy"] = $"http://127.0.0.1:{proxyPort}",
+                ["https_proxy"] = $"http://127.0.0.1:{proxyPort}",
+                // Some tools honour SSL_CERT_FILE over the system trust
+                // store. The path matches where setup-wsl.sh reserves
+                // the bromure CA dir; update-ca-certificates also writes
+                // /etc/ssl/certs/ca-certificates.crt which most tools
+                // pick up automatically.
+                ["SSL_CERT_FILE"] = "/etc/ssl/certs/ca-certificates.crt",
+                ["NODE_EXTRA_CA_CERTS"] = "/usr/local/share/ca-certificates/bromure/bromure-ca.crt",
             };
-            _supervisor.Crashed += ex =>
+            var caPem = System.Text.Encoding.ASCII.GetBytes(_engine.Ca.CertificatePem);
+            var perSessionConfig = _wslConfig with
             {
-                LastEvent = "QEMU crashed: " + ex.Message;
-                IsRunning = false;
+                EnvVars = envVars,
+                BromureCaPem = caPem,
             };
-            await _supervisor.StartAsync(ct).ConfigureAwait(false);
+
+            // 3) Import distro + drop home overlay + spawn kitty.
+            _session = new WslSession(perSessionConfig);
+            await _session.StartAsync(ct).ConfigureAwait(false);
             IsRunning = true;
             VmStatus = "Running";
-            LastEvent = $"QEMU PID {_supervisor.Process.Id}";
+            LastEvent = $"distro {_wslConfig.DistroName} up · MITM {proxyPort}";
 
-            // Embedded display only makes sense when QEMU is actually
-            // drawing a window. In headless (DisplayMode.None) there's
-            // no SDL/GTK window to find, so attempting to attach
-            // produced a confusing "window not found" footer message
-            // for the working case.
-            switch (_qemuConfig.Display)
-            {
-                case DisplayMode.LocalSdl:
-                case DisplayMode.LocalGtk:
-                    await AttachEmbeddedDisplayAsync(_supervisor.Process.Id);
-                    VmStatusDetail = "QMP handshake complete. QEMU window embedded.";
-                    break;
-                default:
-                    HasDisplay = false;
-                    DisplaySurface = null;
-                    VmStatusDetail = "Running headless. QMP + serial console active.";
-                    break;
-            }
-
-            // Attach the host-side serial reader so the user sees boot
-            // output / login prompt / dmesg in the SessionView's console
-            // pane without needing fb-agent. QEMU's `-serial tcp:` opens
-            // its listener slightly after process start; same connect
-            // backoff pattern as QMP.
-            if (!string.IsNullOrEmpty(_qemuConfig.SerialEndpoint))
-            {
-                try
-                {
-                    _serial = new SerialConsoleClient(_qemuConfig.SerialEndpoint!,
-                        chunk => Application.Current.Dispatcher.BeginInvoke(() => AppendSerial(chunk)));
-                    await _serial.StartAsync(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
-                    HasSerialConsole = true;
-                    LastEvent = $"QEMU PID {_supervisor.Process.Id} · serial attached";
-                }
-                catch (Exception ex)
-                {
-                    // Non-fatal — the VM is still running, the user just
-                    // doesn't get the live console. Surface as a status
-                    // line, not a failure overlay.
-                    HasSerialConsole = false;
-                    LastEvent = "Serial console not attached: " + ex.Message;
-                }
-            }
-        }
-        catch (QemuStartException qex)
-        {
-            VmStatus = "Boot failed";
-            VmStatusDetail = "QEMU exited before opening the QMP control socket.";
-            FailureDetail = string.IsNullOrEmpty(qex.StderrTail)
-                ? qex.Message
-                : qex.StderrTail;
-            StderrLogPath = qex.StderrLogPath;
-            HasFailure = true;
-            LastEvent = "Boot failed (see log)";
-            IsRunning = false;
-            try { await DisposeSupervisorAsync().ConfigureAwait(false); } catch { }
+            // 4) Embed the kitty window. Title prefix is the distro name
+            // (we asked kitty to use it via --title). Polls up to 10 s
+            // for the WSLg-rendered HWND to appear.
+            await AttachEmbeddedDisplayAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            VmStatus = "Failed";
+            VmStatus = "Boot failed";
             VmStatusDetail = ex.Message;
             FailureDetail = ex.ToString();
             HasFailure = true;
             LastEvent = "Boot failed";
             IsRunning = false;
+            try { await DisposeSessionAsync().ConfigureAwait(false); } catch { }
         }
         finally
         {
@@ -224,19 +180,19 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
     [RelayCommand]
     public async Task ShutdownAsync()
     {
-        if (_supervisor is null) return;
+        if (_session is null) return;
         IsBusy = true;
         VmStatus = "Shutting down…";
-        try { await _supervisor.ShutdownAsync().ConfigureAwait(false); }
+        try { await _session.ShutdownAsync().ConfigureAwait(false); }
         catch { }
         IsRunning = false;
         IsBusy = false;
         VmStatus = "Stopped";
         HasDisplay = false;
-        if (DisplaySurface is QemuWindowHost host) host.Detach();
+        if (DisplaySurface is WslWindowHost host) host.Detach();
         DisplaySurface = null;
-        await DisposeSupervisorAsync().ConfigureAwait(false);
-        // Tear down per-session resources (sshd, etc).
+        await DisposeSessionAsync().ConfigureAwait(false);
+        // Tear down per-session resources.
         foreach (var r in SessionResources)
         {
             try { await r.DisposeAsync().ConfigureAwait(false); } catch { }
@@ -245,12 +201,19 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
     }
 
     [RelayCommand]
+    private void DismissFailure()
+    {
+        HasFailure = false;
+        FailureDetail = "";
+    }
+
+    [RelayCommand]
     private void OpenLog()
     {
         if (string.IsNullOrEmpty(StderrLogPath) || !File.Exists(StderrLogPath)) return;
         try
         {
-            Process.Start(new ProcessStartInfo
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "notepad.exe",
                 Arguments = $"\"{StderrLogPath}\"",
@@ -268,71 +231,47 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
         catch { }
     }
 
-    [RelayCommand]
-    private void DismissFailure()
-    {
-        HasFailure = false;
-        FailureDetail = "";
-    }
-
-    private void AppendSerial(string chunk)
-    {
-        // Drop ANSI cursor-positioning escapes minimally — the kernel
-        // ring + most boot output is printable ASCII; keeping things
-        // simple here. A full VT100 emulator is overkill for a debug
-        // console, and Alpine's BIOS+kernel boot output is mostly clean.
-        var combined = SerialBuffer + chunk;
-        if (combined.Length > SerialBufferMaxBytes)
-        {
-            combined = combined[^SerialBufferMaxBytes..];
-        }
-        SerialBuffer = combined;
-    }
-
-    private Task AttachEmbeddedDisplayAsync(int pid)
+    private Task AttachEmbeddedDisplayAsync()
         => Application.Current.Dispatcher.InvokeAsync(() =>
         {
-            var hostControl = new QemuWindowHost
-            {
-                // Inject keystrokes via QMP — WPF eats WM_KEYDOWN before
-                // GTK can see it.
-                Qmp = _supervisor?.Qmp,
-            };
+            var hostControl = new WslWindowHost();
             DisplaySurface = hostControl;
             HasDisplay = true;
-            // Defer the Attach until the host has been laid out so its
-            // HWND exists. Loaded fires before the first render.
             hostControl.Loaded += (_, _) =>
             {
-                if (hostControl.Attach(pid, TimeSpan.FromSeconds(5)))
+                // The kitty window's title carries the distro name as
+                // a prefix because we set --title bromure-ses-... when
+                // spawning. Match on that to disambiguate concurrent
+                // sessions.
+                var titlePrefix = _wslConfig.DistroName;
+                if (hostControl.Attach(titlePrefix, TimeSpan.FromSeconds(15)))
                 {
-                    LastEvent = "QEMU display attached";
+                    LastEvent = "kitty window embedded";
                 }
                 else
                 {
-                    LastEvent = "QEMU display attach failed (window not found in 5s)";
+                    LastEvent = "kitty window not found in 15 s — WSLg may need a moment, click Reboot to retry";
                 }
             };
         }).Task;
 
-    private async Task DisposeSupervisorAsync()
+    private async Task DisposeSessionAsync()
     {
-        if (_serial is not null)
+        if (_mitm is not null)
         {
-            try { await _serial.DisposeAsync().ConfigureAwait(false); } catch { }
-            _serial = null;
-            HasSerialConsole = false;
+            try { await _engine.UnregisterAsync(ProfileId).ConfigureAwait(false); } catch { }
+            _mitm = null;
         }
-        if (_supervisor is not null)
+        if (_session is not null)
         {
-            try { await _supervisor.DisposeAsync().ConfigureAwait(false); } catch { }
-            _supervisor = null;
+            try { await _session.DisposeAsync().ConfigureAwait(false); } catch { }
+            _session = null;
         }
     }
 
     public string? ProgressPercent => null; // unused on the session view
 
-    public ValueTask DisposeAsync() => new(DisposeSupervisorAsync());
+    public ValueTask DisposeAsync() => new(DisposeSessionAsync());
 }
 
 public sealed partial class TabModel : ObservableObject
