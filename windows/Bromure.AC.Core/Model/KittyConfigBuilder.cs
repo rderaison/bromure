@@ -16,9 +16,11 @@ public static class KittyConfigBuilder
 {
     /// Default font size for the Windows port. macOS multiplies by the
     /// host's Retina scale (so font_size 28 renders as ~14pt physical
-    /// on a 2x display). Windows GTK has no Retina doubling, so the
-    /// physical size is what we configure directly.
-    public const int DefaultFontSize = 14;
+    /// on a 2x display). Windows + WSLg renders at the screen's actual
+    /// DPI without that doubling, so the physical size is what we
+    /// configure directly. 10 matches what most users find comfortable
+    /// on a typical 1080p/1440p display.
+    public const int DefaultFontSize = 10;
     public const string DefaultFontFamily = "JetBrains Mono";
     public const string DefaultBackground = "#212734";
     public const string DefaultForeground = "#E6E8EB";
@@ -46,6 +48,11 @@ public static class KittyConfigBuilder
         foreground        {foreground}
         cursor_shape      {cursorShape}
         cursor_blink_interval 0
+        # Cursor visually defaults to ~2x what users expect on Windows
+        # under WSLg's RDP-RAIL fractional scaling. Tighten the beam
+        # and underline so block-cursor pads feel less heavy too.
+        cursor_beam_thickness 1.0
+        cursor_underline_thickness 1.5
         # Disable shell integration's cursor management — by default it
         # injects bash hooks that toggle the cursor (beam during input,
         # block while a command runs), overriding cursor_shape.

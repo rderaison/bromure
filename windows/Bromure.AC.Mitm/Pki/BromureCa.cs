@@ -174,8 +174,16 @@ public sealed class BromureCa
         using var ms = new MemoryStream();
         store.Save(ms, "x".ToCharArray(), new SecureRandom());
         var pfx = ms.ToArray();
+        // EphemeralKeySet is NOT compatible with Schannel-based
+        // SslStream.AuthenticateAsServer on Windows — produces
+        // "Authentication failed because the platform does not
+        // support ephemeral keys." Use UserKeySet so the key lands
+        // in the user's CryptoAPI store, which Schannel can locate
+        // when negotiating a TLS server handshake. The cert is
+        // process-scoped (not persisted across restarts) and
+        // exportable so we can hand the public PEM to the guest.
         return new X509Certificate2(pfx, "x",
-            X509KeyStorageFlags.EphemeralKeySet | X509KeyStorageFlags.Exportable);
+            X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.Exportable);
     }
 
     internal static string ToPem(object obj)
