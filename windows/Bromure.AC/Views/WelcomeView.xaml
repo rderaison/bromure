@@ -1,0 +1,44 @@
+<UserControl x:Class="Bromure.AC.Views.WelcomeView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{StaticResource ChromeBackground}"
+             Foreground="{StaticResource TextPrimary}">
+    <Grid>
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="520">
+            <Border Width="96" Height="96" CornerRadius="20"
+                    Background="{StaticResource AccentBrush}"
+                    HorizontalAlignment="Center" Margin="0,0,0,24">
+                <TextBlock Text="b" Foreground="{StaticResource TextPrimary}"
+                           FontSize="56" FontWeight="Bold"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+
+            <TextBlock Text="Welcome to Bromure Agentic Coding"
+                       FontSize="22" FontWeight="SemiBold"
+                       HorizontalAlignment="Center" Margin="0,0,0,12"/>
+
+            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="13"
+                       TextWrapping="Wrap" TextAlignment="Center" MaxWidth="500">
+                <Run Text="First-time setup downloads a 62 MB Alpine virt boot image."/>
+                <LineBreak/>
+                <LineBreak/>
+                <Run FontSize="11"
+                     Text="The full Ubuntu base with Claude Code + Codex + kitty pre-installed is built by an in-VM bake step on macOS; that pipeline is a Phase-3 follow-up on Windows. The host can already boot, MITM, and exercise every credential surface against an Alpine guest today."/>
+            </TextBlock>
+
+            <Button Content="Get Started"
+                    Width="200" Height="40" Margin="0,32,0,0"
+                    Background="{StaticResource AccentBrush}"
+                    Foreground="{StaticResource TextPrimary}"
+                    BorderThickness="0" Cursor="Hand"
+                    FontSize="14" FontWeight="SemiBold"
+                    Command="{Binding StartCommand}"/>
+
+            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                       Margin="0,12,0,0" HorizontalAlignment="Center">
+                <Run Text="Phase-0 Windows preview · "/>
+                <Run Text="{Binding ImageInfoLine, Mode=OneWay}" FontFamily="Consolas"/>
+            </TextBlock>
+        </StackPanel>
+    </Grid>
+</UserControl>

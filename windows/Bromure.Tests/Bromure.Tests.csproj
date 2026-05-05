@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>Bromure.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Bromure.Platform\Bromure.Platform.csproj" />
+    <ProjectReference Include="..\Bromure.AC.Core\Bromure.AC.Core.csproj" />
+    <ProjectReference Include="..\Bromure.AC.Mitm\Bromure.AC.Mitm.csproj" />
+    <ProjectReference Include="..\Bromure.SandboxEngine\Bromure.SandboxEngine.csproj" />
+    <ProjectReference Include="..\Bromure.Cloud\Bromure.Cloud.csproj" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="FluentAssertions" />
+  </ItemGroup>
+</Project>

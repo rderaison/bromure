@@ -1,0 +1,156 @@
+<UserControl x:Class="Bromure.AC.Views.SettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{StaticResource ChromeBackground}"
+             Foreground="{StaticResource TextPrimary}">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid Margin="32,24" MaxWidth="780">
+            <StackPanel>
+                <TextBlock Text="Settings" FontSize="22" FontWeight="SemiBold"/>
+                <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                           Margin="0,4,0,24">
+                    Host paths, enrollment, MITM CA fingerprint, and the
+                    operational levers the app exposes outside per-profile
+                    config.
+                </TextBlock>
+
+                <!-- Paths -->
+                <Border Background="{StaticResource PanelBackground}" CornerRadius="6"
+                        Padding="20" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="Storage paths" FontSize="14" FontWeight="SemiBold"/>
+                        <Grid Margin="0,12,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="160"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition/>
+                                <RowDefinition/>
+                                <RowDefinition/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="App data"
+                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding AppDataRoot}"
+                                       FontFamily="Consolas" FontSize="11" Margin="0,4"
+                                       TextTrimming="CharacterEllipsis"/>
+                            <Button Grid.Row="0" Grid.Column="2" Content="Open" Padding="8,2"
+                                    Margin="8,0,0,0"
+                                    Command="{Binding OpenAppDataFolderCommand}"/>
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Machine data"
+                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding MachineDataRoot}"
+                                       FontFamily="Consolas" FontSize="11" Margin="0,4"
+                                       TextTrimming="CharacterEllipsis"/>
+
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Base images"
+                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding ImagesDirectory}"
+                                       FontFamily="Consolas" FontSize="11" Margin="0,4"
+                                       TextTrimming="CharacterEllipsis"/>
+                            <Button Grid.Row="2" Grid.Column="2" Content="Open" Padding="8,2"
+                                    Margin="8,0,0,0"
+                                    Command="{Binding OpenImagesFolderCommand}"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- Enrollment -->
+                <Border Background="{StaticResource PanelBackground}" CornerRadius="6"
+                        Padding="20" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="Enrollment" FontSize="14" FontWeight="SemiBold"/>
+                        <Grid Margin="0,12,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="160"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Status"
+                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                            <TextBlock Grid.Column="1" Text="{Binding EnrollmentStatus}" Margin="0,4"/>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                                <Button Content="Enroll…" Padding="8,2" Margin="0,0,8,0"
+                                        Background="{StaticResource AccentBrush}"
+                                        Foreground="{StaticResource TextPrimary}"
+                                        BorderThickness="0" Cursor="Hand"
+                                        Command="{Binding EnrollCommand}"/>
+                                <Button Content="Unenroll" Padding="8,2"
+                                        Foreground="{StaticResource DangerBrush}"
+                                        Command="{Binding UnenrollCommand}"/>
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                   Margin="0,8,0,0" TextWrapping="Wrap">
+                            Enroll your install with bromure.io to ship trace
+                            telemetry over mTLS. Unenrolled installs run
+                            fully offline.
+                        </TextBlock>
+                    </StackPanel>
+                </Border>
+
+                <!-- Ubuntu base image -->
+                <Border Background="{StaticResource PanelBackground}" CornerRadius="6"
+                        Padding="20" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="Ubuntu base image" FontSize="14" FontWeight="SemiBold"/>
+                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                   Margin="0,4,0,12" TextWrapping="Wrap">
+                            Bakes a customised Ubuntu Noble VM image used as the CoW
+                            backing for AC sessions. Downloads Canonical's cloud
+                            image, runs setup.sh inside QEMU+WHPX, snapshots the
+                            result. ~5–10 minutes on broadband + NVMe; no WSL,
+                            no admin escalation required.
+                        </TextBlock>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="160"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Status"
+                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                            <TextBlock Grid.Column="1" Text="{Binding UbuntuBaseStatus}" Margin="0,4"
+                                       TextWrapping="Wrap"/>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                                <Button Content="Build / rebuild" Padding="10,4" Margin="0,0,8,0"
+                                        Style="{StaticResource AccentButton}"
+                                        Command="{Binding BuildUbuntuBaseCommand}"/>
+                                <Button Content="Delete" Padding="10,4"
+                                        Style="{StaticResource DangerButton}"
+                                        Command="{Binding DeleteUbuntuBaseCommand}"/>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- MITM CA -->
+                <Border Background="{StaticResource PanelBackground}" CornerRadius="6"
+                        Padding="20" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="MITM root CA" FontSize="14" FontWeight="SemiBold"/>
+                        <Grid Margin="0,12,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="160"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Fingerprint (SHA-1)"
+                                       Foreground="{StaticResource TextSecondary}"/>
+                            <TextBlock Grid.Column="1" Text="{Binding CaFingerprint}"
+                                       FontFamily="Consolas" FontSize="11"/>
+                        </Grid>
+                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                   Margin="0,8,0,0" TextWrapping="Wrap">
+                            Mounted into every VM's trust store at session
+                            launch. The private key sits in DPAPI under
+                            machine scope; deleting the install
+                            regenerates it.
+                        </TextBlock>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

@@ -1,0 +1,128 @@
+<Window x:Class="Bromure.AC.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:Bromure.AC.ViewModels"
+        xmlns:views="clr-namespace:Bromure.AC.Views"
+        Title="Bromure Agentic Coding"
+        Height="780" Width="1180"
+        Background="{StaticResource ChromeBackground}"
+        Foreground="{StaticResource TextPrimary}"
+        WindowStartupLocation="CenterScreen">
+    <!--
+        Two layers of overlay-by-Visibility (no ContentTemplateSelector).
+        WPF's selector is only re-evaluated when Content itself changes,
+        so a property change on the bound object (Phase, SelectedNavigation)
+        wouldn't refresh the pane. Visibility binds re-evaluate on every
+        property change. Cheap: views past the active one are
+        Collapsed → not realised, no draw cost.
+    -->
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="220"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Sidebar — always present. -->
+        <Border Grid.Column="0" Background="{StaticResource PanelBackground}"
+                BorderBrush="#22FFFFFF" BorderThickness="0,0,1,0">
+            <DockPanel Margin="20,24" LastChildFill="False">
+                <StackPanel DockPanel.Dock="Top">
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                        <Border Width="28" Height="28" CornerRadius="6"
+                                Background="{StaticResource AccentBrush}" Margin="0,0,8,0">
+                            <TextBlock Text="b" Foreground="{StaticResource TextPrimary}"
+                                       FontSize="16" FontWeight="Bold"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <TextBlock Text="bromure" FontSize="18" FontWeight="SemiBold"
+                                   VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <TextBlock Text="Agentic Coding (Windows preview)" FontSize="11"
+                               Foreground="{StaticResource TextSecondary}"
+                               Margin="0,0,0,28"/>
+
+                    <ListBox ItemsSource="{Binding Navigation}"
+                             SelectedItem="{Binding SelectedNavigation}"
+                             Background="Transparent" BorderThickness="0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal" Margin="0,4">
+                                    <TextBlock Text="{Binding Glyph}" Margin="0,0,8,0"
+                                               Foreground="{StaticResource AccentBrush}"
+                                               Width="14" TextAlignment="Center"/>
+                                    <TextBlock Text="{Binding Label}"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </StackPanel>
+
+                <StackPanel DockPanel.Dock="Bottom">
+                    <TextBlock Text="{Binding ImageInfoLine}" FontSize="10"
+                               Foreground="{StaticResource TextSecondary}"
+                               TextWrapping="Wrap"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- Main content — five panes overlaid, one visible at a time. -->
+        <Grid Grid.Column="1">
+            <!-- Sessions pane: itself a three-phase overlay. -->
+            <Grid Visibility="{Binding SelectedNavigation.Kind,
+                              Converter={StaticResource EnumToVis},
+                              ConverterParameter=Sessions}">
+                <views:WelcomeView
+                    Visibility="{Binding Phase,
+                                Converter={StaticResource EnumToVis},
+                                ConverterParameter=Welcome}"/>
+                <views:InitializingView DataContext="{Binding Progress}"
+                    Visibility="{Binding DataContext.Phase,
+                                RelativeSource={RelativeSource AncestorType=Window},
+                                Converter={StaticResource EnumToVis},
+                                ConverterParameter=Initializing}"/>
+                <views:SessionView DataContext="{Binding Session}"
+                    Visibility="{Binding DataContext.Phase,
+                                RelativeSource={RelativeSource AncestorType=Window},
+                                Converter={StaticResource EnumToVis},
+                                ConverterParameter=Session}"/>
+            </Grid>
+
+            <views:ProfilesView DataContext="{Binding ProfilesPane}"
+                Visibility="{Binding DataContext.SelectedNavigation.Kind,
+                            RelativeSource={RelativeSource AncestorType=Window},
+                            Converter={StaticResource EnumToVis},
+                            ConverterParameter=Profiles}"/>
+
+            <views:TraceInspectorView DataContext="{Binding TraceInspectorPane}"
+                Visibility="{Binding DataContext.SelectedNavigation.Kind,
+                            RelativeSource={RelativeSource AncestorType=Window},
+                            Converter={StaticResource EnumToVis},
+                            ConverterParameter=TraceInspector}"/>
+
+            <views:ApprovalsView DataContext="{Binding ApprovalsPane}"
+                Visibility="{Binding DataContext.SelectedNavigation.Kind,
+                            RelativeSource={RelativeSource AncestorType=Window},
+                            Converter={StaticResource EnumToVis},
+                            ConverterParameter=Approvals}"/>
+
+            <views:SettingsView DataContext="{Binding SettingsPane}"
+                Visibility="{Binding DataContext.SelectedNavigation.Kind,
+                            RelativeSource={RelativeSource AncestorType=Window},
+                            Converter={StaticResource EnumToVis},
+                            ConverterParameter=Settings}"/>
+        </Grid>
+
+        <!--
+            Ubuntu base image bake overlay. Spans both columns so it
+            renders above the sidebar too — it's a modal-style task and
+            the sidebar shouldn't be clickable while it's running. The
+            UserControl itself binds Visibility to BakeOverlay.IsVisible,
+            so it's a no-op when no bake is active. Null when QEMU
+            wasn't found (BakeOverlay is null in ShellViewModel).
+        -->
+        <views:BakeOverlay Grid.Column="0" Grid.ColumnSpan="2"
+                          DataContext="{Binding BakeOverlay}"
+                          Visibility="{Binding IsVisible, FallbackValue=Collapsed,
+                                       Converter={StaticResource BoolToVis}}"/>
+    </Grid>
+</Window>

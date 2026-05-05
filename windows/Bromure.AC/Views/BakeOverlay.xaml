@@ -1,0 +1,94 @@
+<UserControl x:Class="Bromure.AC.Views.BakeOverlay"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="#CC0F0F12"
+             Visibility="{Binding IsVisible, Converter={StaticResource BoolToVis}}">
+    <!--
+        Modal-style bake progress card. Floats over the Settings pane
+        while the bake is running. Same shape as InitializingView but
+        bigger to accommodate the full 5–10 minute bake stream.
+    -->
+    <Border Background="{StaticResource ChromeBackground}"
+            BorderBrush="#33FFFFFF" BorderThickness="1"
+            CornerRadius="8"
+            Width="780" Height="520"
+            HorizontalAlignment="Center" VerticalAlignment="Center"
+            Padding="0">
+        <Grid Margin="28,24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header -->
+            <StackPanel Grid.Row="0">
+                <TextBlock Text="Building Ubuntu base image" FontSize="18" FontWeight="SemiBold"/>
+                <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                           Margin="0,6,0,0" TextWrapping="Wrap">
+                    Downloads the Ubuntu Noble cloud image (~600 MB), runs setup.sh inside
+                    a one-shot QEMU+WHPX VM, and snapshots the result. About 5–10 minutes
+                    on a typical broadband + NVMe machine. Don't close the window.
+                </TextBlock>
+            </StackPanel>
+
+            <!-- Status + bar -->
+            <Border Grid.Row="1" Background="{StaticResource PanelBackground}"
+                    CornerRadius="6" Padding="14,10" Margin="0,16,0,0">
+                <StackPanel>
+                    <Grid Margin="0,0,0,6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="{Binding Status}"
+                                   TextTrimming="CharacterEllipsis"
+                                   Foreground="{StaticResource TextPrimary}"/>
+                        <TextBlock Grid.Column="1" Text="{Binding ProgressPercent, Mode=OneWay}"
+                                   FontFamily="Consolas"
+                                   Foreground="{StaticResource TextSecondary}"/>
+                    </Grid>
+                    <ProgressBar Height="6" Minimum="0" Maximum="1.0"
+                                 Value="{Binding Progress, Mode=OneWay}"
+                                 Foreground="{StaticResource AccentBrush}"
+                                 Background="#22FFFFFF" BorderThickness="0"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Console -->
+            <Border Grid.Row="2" Background="#000000" CornerRadius="6"
+                    Padding="12" Margin="0,16,0,0">
+                <ScrollViewer x:Name="ConsoleScroll" VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled">
+                    <TextBlock Text="{Binding ConsoleLog}"
+                               FontFamily="Cascadia Mono, Consolas" FontSize="11"
+                               Foreground="#C9D1D9"
+                               TextWrapping="NoWrap"/>
+                </ScrollViewer>
+            </Border>
+
+            <!-- Footer buttons -->
+            <Grid Grid.Row="3" Margin="0,16,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="{Binding Error}"
+                           Foreground="{StaticResource DangerBrush}"
+                           VerticalAlignment="Center"
+                           TextWrapping="Wrap"
+                           Visibility="{Binding HasError, Converter={StaticResource BoolToVis}}"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button Content="Cancel" Padding="14,6" Margin="0,0,8,0"
+                            Command="{Binding CancelCommand}"
+                            Visibility="{Binding IsRunning, Converter={StaticResource BoolToVis}}"/>
+                    <Button Content="Close" Padding="14,6"
+                            Style="{StaticResource AccentButton}"
+                            Command="{Binding DismissCommand}"
+                            Visibility="{Binding IsRunning, Converter={StaticResource InverseBoolToVis}}"/>
+                </StackPanel>
+            </Grid>
+        </Grid>
+    </Border>
+</UserControl>

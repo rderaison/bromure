@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>Bromure.AC.Mitm</RootNamespace>
+    <AssemblyName>Bromure.AC.Mitm</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Bromure.Platform\Bromure.Platform.csproj" />
+    <ProjectReference Include="..\Bromure.SandboxEngine\Bromure.SandboxEngine.csproj" />
+    <ProjectReference Include="..\Bromure.AC.Core\Bromure.AC.Core.csproj" />
+    <PackageReference Include="BouncyCastle.Cryptography" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+  </ItemGroup>
+</Project>

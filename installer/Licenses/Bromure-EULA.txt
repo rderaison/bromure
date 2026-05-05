@@ -1,0 +1,9 @@
+Bromure Agentic Coding — End User License Agreement (placeholder).
+
+This is a preview build. The shipping EULA will replace this file
+before the public release.
+
+For now: distribution of this preview is limited to the dogfood ring.
+Don't forward the .exe outside that ring.
+
+For licensing questions: licensing@bromure.io

@@ -1,0 +1,15 @@
+# .NET build outputs
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Test outputs
+TestResults/
+
+# QEMU bundle output from windows/scripts/build-qemu.ps1.
+# The script + QEMU_BUILD.md are in git; the bundle itself is a build
+# artefact (~80 MB of binaries + DLLs) produced fresh on each build
+# machine and packaged by the installer step.
+dist/qemu-bundle/

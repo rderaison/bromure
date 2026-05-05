@@ -1,0 +1,84 @@
+<Window x:Class="Bromure.AC.Views.EnrollmentSheet"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Enroll in bromure.io"
+        Width="540" Height="500"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Background="{StaticResource ChromeBackground}"
+        Foreground="{StaticResource TextPrimary}">
+    <Grid Margin="28,24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Enroll in bromure.io"
+                   FontSize="20" FontWeight="SemiBold"/>
+
+        <TextBlock Grid.Row="1" Foreground="{StaticResource TextSecondary}"
+                   FontSize="11" TextWrapping="Wrap" Margin="0,8,0,16">
+            Your administrator will give you a six-word enrollment code.
+            Once enrolled, Bromure Agentic Coding sends session metadata
+            (tools, files, commands, token usage) to your workspace so
+            admins can review activity. Profiles in private mode never
+            stream.
+        </TextBlock>
+
+        <StackPanel Grid.Row="2" Margin="0,0,0,12">
+            <TextBlock Text="Enrollment code" FontSize="12" FontWeight="SemiBold"
+                       Margin="0,0,0,4"/>
+            <TextBox Text="{Binding Code, UpdateSourceTrigger=PropertyChanged}"
+                     FontFamily="Consolas" Padding="8,6"
+                     Background="{StaticResource PanelBackground}"
+                     Foreground="{StaticResource TextPrimary}"
+                     BorderThickness="1" BorderBrush="#33FFFFFF"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="3" Margin="0,0,0,12">
+            <TextBlock Text="Device name" FontSize="12" FontWeight="SemiBold"
+                       Margin="0,0,0,4"/>
+            <TextBox Text="{Binding DeviceName, UpdateSourceTrigger=PropertyChanged}"
+                     Padding="8,6"
+                     Background="{StaticResource PanelBackground}"
+                     Foreground="{StaticResource TextPrimary}"
+                     BorderThickness="1" BorderBrush="#33FFFFFF"/>
+            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="10"
+                       Margin="0,4,0,0">
+                Shown to your administrator so they can recognise this host.
+            </TextBlock>
+        </StackPanel>
+
+        <Expander Grid.Row="4" Header="Advanced" Foreground="{StaticResource TextSecondary}"
+                  Margin="0,0,0,12">
+            <StackPanel Margin="0,8,0,0">
+                <TextBlock Text="Server URL (optional)" FontSize="11"/>
+                <TextBox Text="{Binding ServerUrl, UpdateSourceTrigger=PropertyChanged}"
+                         FontFamily="Consolas" Padding="8,6" Margin="0,4,0,0"
+                         Background="{StaticResource PanelBackground}"
+                         Foreground="{StaticResource TextPrimary}"
+                         BorderThickness="1" BorderBrush="#33FFFFFF"/>
+            </StackPanel>
+        </Expander>
+
+        <StackPanel Grid.Row="5">
+            <TextBlock Text="{Binding ErrorMessage}" Foreground="{StaticResource DangerBrush}"
+                       TextWrapping="Wrap" Margin="0,0,0,8"
+                       Visibility="{Binding ErrorMessage, Converter={StaticResource BoolToVis}}"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="Cancel" Padding="14,6" Margin="0,0,8,0"
+                        Command="{Binding CancelCommand}"
+                        IsEnabled="{Binding InFlight, Converter={StaticResource InverseBoolToVis}}"/>
+                <Button Content="Enroll" Padding="14,6"
+                        Background="{StaticResource AccentBrush}"
+                        Foreground="{StaticResource TextPrimary}"
+                        BorderThickness="0" Cursor="Hand"
+                        Command="{Binding SubmitCommand}"/>
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Window>

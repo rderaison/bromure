@@ -1,0 +1,687 @@
+<UserControl x:Class="Bromure.AC.Views.ProfilesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:cmn="clr-namespace:Bromure.AC.Common"
+             Background="{StaticResource ChromeBackground}"
+             Foreground="{StaticResource TextPrimary}">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="240"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- LEFT: profile list -->
+        <Border Grid.Column="0" Background="{StaticResource PanelBackground}"
+                BorderBrush="#22FFFFFF" BorderThickness="0,0,1,0">
+            <DockPanel>
+                <Grid DockPanel.Dock="Top" Margin="14,18,14,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Profiles" FontSize="16" FontWeight="SemiBold"/>
+                    <Button Grid.Column="1" Content="+" Width="28" Height="28"
+                            FontSize="16" FontWeight="Bold"
+                            Style="{StaticResource AccentButton}"
+                            Command="{Binding AddProfileCommand}"
+                            ToolTip="Add a profile"/>
+                </Grid>
+
+                <ListBox ItemsSource="{Binding Profiles}" SelectedItem="{Binding Selected}"
+                         Background="Transparent" BorderThickness="0">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="0,2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Border Grid.Column="0" Width="10" Height="10"
+                                        CornerRadius="5"
+                                        Background="{StaticResource AccentBrush}"
+                                        Margin="0,2,8,0" VerticalAlignment="Top"/>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                                    <TextBlock Text="{Binding Tool}" FontSize="11"
+                                               Foreground="{StaticResource TextSecondary}"/>
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Border>
+
+        <!-- RIGHT: editor -->
+        <Grid Grid.Column="1" Visibility="{Binding HasSelection, Converter={StaticResource BoolToVis}}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header strip -->
+            <Border Grid.Row="0" Background="{StaticResource PanelBackground}"
+                    BorderBrush="#22FFFFFF" BorderThickness="0,0,0,1"
+                    Padding="32,18">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0">
+                        <TextBlock Text="{Binding Selected.Name, FallbackValue='—'}"
+                                   FontSize="20" FontWeight="SemiBold"/>
+                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11">
+                            <Run Text="{Binding Selected.Tool, Mode=OneWay}"/>
+                            <Run Text=" · "/>
+                            <Run Text="{Binding Selected.AuthMode, Mode=OneWay}"/>
+                            <Run Text=" · trace "/>
+                            <Run Text="{Binding Selected.TraceLevel, Mode=OneWay}"/>
+                        </TextBlock>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Content="Delete" Style="{StaticResource DangerButton}"
+                                Margin="0,0,8,0"
+                                Command="{Binding DeleteSelectedCommand}"/>
+                        <Button Content="Save" Style="{StaticResource AccentButton}"
+                                Command="{Binding SaveCommand}"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Tabbed editor -->
+            <TabControl Grid.Row="1" DataContext="{Binding Selected}" Background="Transparent"
+                        BorderThickness="0" Padding="32,16,32,16">
+                <TabControl.Resources>
+                    <Style TargetType="ScrollViewer">
+                        <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+                        <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/>
+                    </Style>
+                </TabControl.Resources>
+
+                <!-- ================================================
+                     GENERAL TAB
+                     ================================================ -->
+                <TabItem Header="General">
+                    <ScrollViewer>
+                        <StackPanel MaxWidth="640">
+                            <Grid Margin="0,0,0,14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="180"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition/>
+                                    <RowDefinition/>
+                                    <RowDefinition/>
+                                    <RowDefinition/>
+                                    <RowDefinition/>
+                                    <RowDefinition/>
+                                    <RowDefinition/>
+                                </Grid.RowDefinitions>
+
+                                <TextBlock Grid.Row="0" Grid.Column="0" Text="Display name"
+                                           Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                <TextBox  Grid.Row="0" Grid.Column="1"
+                                          Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                                          Margin="0,4"/>
+
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Accent colour"
+                                           Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                <ComboBox Grid.Row="1" Grid.Column="1"
+                                          ItemsSource="{Binding DataContext.ColorOptions,
+                                                       RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                          SelectedItem="{Binding Color}"
+                                          Margin="0,4"/>
+
+                                <TextBlock Grid.Row="2" Grid.Column="0" Text="Primary tool"
+                                           Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                <ComboBox Grid.Row="2" Grid.Column="1"
+                                          ItemsSource="{Binding DataContext.ToolOptions,
+                                                       RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                          SelectedItem="{Binding Tool}"
+                                          Margin="0,4"/>
+
+                                <TextBlock Grid.Row="3" Grid.Column="0" Text="Auth mode"
+                                           Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                <ComboBox Grid.Row="3" Grid.Column="1"
+                                          ItemsSource="{Binding DataContext.AuthModeOptions,
+                                                       RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                          SelectedItem="{Binding AuthMode}"
+                                          Margin="0,4"/>
+
+                                <TextBlock Grid.Row="4" Grid.Column="0" Text="API key"
+                                           Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                <PasswordBox Grid.Row="4" Grid.Column="1" Margin="0,4"
+                                             cmn:PasswordBoxBinding.Password="{Binding ApiKey, Mode=TwoWay}"/>
+
+                                <TextBlock Grid.Row="5" Grid.Column="0" Text="API key requires approval"
+                                           Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                <CheckBox Grid.Row="5" Grid.Column="1"
+                                          Content="Prompt before each use"
+                                          IsChecked="{Binding ApiKeyRequiresApproval}"
+                                          Margin="0,8"/>
+
+                                <TextBlock Grid.Row="6" Grid.Column="0" Text="Trace level"
+                                           Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                <ComboBox Grid.Row="6" Grid.Column="1"
+                                          ItemsSource="{Binding DataContext.TraceLevelOptions,
+                                                       RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                          SelectedItem="{Binding TraceLevel}"
+                                          Margin="0,4"/>
+                            </Grid>
+
+                            <Border Background="{StaticResource PanelBackground}" CornerRadius="6"
+                                    Padding="20" Margin="0,12,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="Privacy" FontSize="14" FontWeight="SemiBold"/>
+                                    <CheckBox Margin="0,12,0,0"
+                                              Content="Private mode — exclude this profile's traffic from cloud telemetry"
+                                              IsChecked="{Binding PrivateMode}"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- ================================================
+                     FOLDERS TAB
+                     ================================================ -->
+                <TabItem Header="Folders">
+                    <ScrollViewer>
+                        <StackPanel>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                       TextWrapping="Wrap" Margin="0,0,0,12">
+                                Each folder mounts at /home/ubuntu/&lt;basename&gt; in the guest.
+                                Capped at 8 (the base image's fstab pre-allocation).
+                            </TextBlock>
+
+                            <ItemsControl ItemsSource="{Binding FolderPaths}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,2">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Border Grid.Column="0" Background="{StaticResource PanelBackground}"
+                                                    Padding="12,8" CornerRadius="3">
+                                                <TextBlock Text="{Binding}" FontFamily="Consolas"
+                                                           VerticalAlignment="Center"/>
+                                            </Border>
+                                            <Button Grid.Column="1" Content="Remove" Margin="8,0,0,0"
+                                                    Style="{StaticResource DangerButton}"
+                                                    Command="{Binding DataContext.RemoveFolderCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                    CommandParameter="{Binding}"/>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <Button Content="Add folder…" Margin="0,12,0,0"
+                                    HorizontalAlignment="Left"
+                                    Style="{StaticResource AccentButton}"
+                                    Command="{Binding DataContext.AddFolderCommand,
+                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- ================================================
+                     CREDENTIALS TAB — accordion of credential types
+                     ================================================ -->
+                <TabItem Header="Credentials">
+                    <ScrollViewer>
+                        <StackPanel>
+                            <!-- AWS ............................................. -->
+                            <Expander Header="AWS" IsExpanded="True" Margin="0,0,0,8">
+                                <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
+                                    <StackPanel DataContext="{Binding Aws}">
+                                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                                   Margin="0,0,0,12" TextWrapping="Wrap">
+                                            Real AWS credentials live on the host. The proxy strips the
+                                            guest's signature and re-signs with these before the
+                                            request leaves the machine. Configure once; use anywhere.
+                                        </TextBlock>
+
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="160"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition/>
+                                                <RowDefinition/>
+                                                <RowDefinition/>
+                                                <RowDefinition/>
+                                                <RowDefinition/>
+                                                <RowDefinition/>
+                                            </Grid.RowDefinitions>
+
+                                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Auth mode"
+                                                       Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                            <ComboBox Grid.Row="0" Grid.Column="1"
+                                                      ItemsSource="{Binding DataContext.AwsAuthModes,
+                                                                   RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                      SelectedItem="{Binding AuthMode}"
+                                                      Margin="0,4"/>
+
+                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="SSO profile"
+                                                       Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                            <TextBox Grid.Row="1" Grid.Column="1"
+                                                     Text="{Binding SsoProfile, UpdateSourceTrigger=PropertyChanged}"
+                                                     Margin="0,4"/>
+
+                                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Access key ID"
+                                                       Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                            <TextBox Grid.Row="2" Grid.Column="1" FontFamily="Consolas"
+                                                     Text="{Binding AccessKeyId, UpdateSourceTrigger=PropertyChanged}"
+                                                     Margin="0,4"/>
+
+                                            <TextBlock Grid.Row="3" Grid.Column="0" Text="Secret access key"
+                                                       Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                            <PasswordBox Grid.Row="3" Grid.Column="1" Margin="0,4"
+                                                         cmn:PasswordBoxBinding.Password="{Binding SecretAccessKey, Mode=TwoWay}"/>
+
+                                            <TextBlock Grid.Row="4" Grid.Column="0" Text="Session token"
+                                                       Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                            <PasswordBox Grid.Row="4" Grid.Column="1" Margin="0,4"
+                                                         cmn:PasswordBoxBinding.Password="{Binding SessionToken, Mode=TwoWay}"/>
+
+                                            <CheckBox Grid.Row="5" Grid.Column="1" Margin="0,8,0,0"
+                                                      Content="Prompt before each AWS call"
+                                                      IsChecked="{Binding RequireApproval}"/>
+                                        </Grid>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
+                            <!-- Git HTTPS ........................................ -->
+                            <Expander Header="Git HTTPS credentials" Margin="0,8,0,8">
+                                <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                                   Margin="0,0,0,12" TextWrapping="Wrap">
+                                            Personal access tokens for forge hosts. Written to
+                                            ~/.git-credentials in the guest; the proxy swaps the fake
+                                            for the real value on the wire.
+                                        </TextBlock>
+                                        <ItemsControl ItemsSource="{Binding GitHttpsCredentials}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border Background="#0B0B0E" CornerRadius="4"
+                                                            Padding="12" Margin="0,4">
+                                                        <Grid>
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="100"/>
+                                                                <ColumnDefinition Width="*"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <Grid.RowDefinitions>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                            </Grid.RowDefinitions>
+                                                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Host"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <TextBox Grid.Row="0" Grid.Column="1" FontFamily="Consolas"
+                                                                     Text="{Binding Host, UpdateSourceTrigger=PropertyChanged}"
+                                                                     Margin="0,2"/>
+                                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Username"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <TextBox Grid.Row="1" Grid.Column="1"
+                                                                     Text="{Binding Username, UpdateSourceTrigger=PropertyChanged}"
+                                                                     Margin="0,2"/>
+                                                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Token"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <PasswordBox Grid.Row="2" Grid.Column="1" Margin="0,2"
+                                                                         cmn:PasswordBoxBinding.Password="{Binding Token, Mode=TwoWay}"/>
+                                                            <CheckBox Grid.Row="3" Grid.Column="1" Margin="0,8,0,0"
+                                                                      Content="Require approval"
+                                                                      IsChecked="{Binding RequireApproval}"/>
+                                                            <Button Grid.Row="4" Grid.Column="1" Content="Remove" Margin="0,8,0,0"
+                                                                    HorizontalAlignment="Left"
+                                                                    Style="{StaticResource DangerButton}"
+                                                                    Command="{Binding DataContext.RemoveGitCommand,
+                                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                    CommandParameter="{Binding}"/>
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <Button Content="Add Git credential" Margin="0,12,0,0"
+                                                HorizontalAlignment="Left"
+                                                Style="{StaticResource AccentButton}"
+                                                Command="{Binding DataContext.AddGitCommand,
+                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
+                            <!-- Manual tokens .................................... -->
+                            <Expander Header="Manual tokens" Margin="0,8,0,8">
+                                <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                                   Margin="0,0,0,12" TextWrapping="Wrap">
+                                            User-defined fake↔real swaps. Each entry can pin to a host
+                                            and optionally export the fake as a guest env var.
+                                        </TextBlock>
+                                        <ItemsControl ItemsSource="{Binding ManualTokens}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border Background="#0B0B0E" CornerRadius="4"
+                                                            Padding="12" Margin="0,4">
+                                                        <Grid>
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="120"/>
+                                                                <ColumnDefinition Width="*"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <Grid.RowDefinitions>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                            </Grid.RowDefinitions>
+                                                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Name"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <TextBox Grid.Row="0" Grid.Column="1"
+                                                                     Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                                                                     Margin="0,2"/>
+                                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Value (real)"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <PasswordBox Grid.Row="1" Grid.Column="1" Margin="0,2"
+                                                                         cmn:PasswordBoxBinding.Password="{Binding Value, Mode=TwoWay}"/>
+                                                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Env var"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <TextBox Grid.Row="2" Grid.Column="1" FontFamily="Consolas"
+                                                                     Text="{Binding EnvVarName, UpdateSourceTrigger=PropertyChanged}"
+                                                                     Margin="0,2"/>
+                                                            <TextBlock Grid.Row="3" Grid.Column="0" Text="Host filter"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <TextBox Grid.Row="3" Grid.Column="1" FontFamily="Consolas"
+                                                                     Text="{Binding HostFilter, UpdateSourceTrigger=PropertyChanged}"
+                                                                     Margin="0,2"/>
+                                                            <CheckBox Grid.Row="4" Grid.Column="1" Margin="0,8,0,0"
+                                                                      Content="Require approval"
+                                                                      IsChecked="{Binding RequireApproval}"/>
+                                                            <Button Grid.Row="5" Grid.Column="1" Content="Remove" Margin="0,8,0,0"
+                                                                    HorizontalAlignment="Left"
+                                                                    Style="{StaticResource DangerButton}"
+                                                                    Command="{Binding DataContext.RemoveManualCommand,
+                                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                    CommandParameter="{Binding}"/>
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <Button Content="Add manual token" Margin="0,12,0,0"
+                                                HorizontalAlignment="Left"
+                                                Style="{StaticResource AccentButton}"
+                                                Command="{Binding DataContext.AddManualCommand,
+                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
+                            <!-- Docker registries ................................ -->
+                            <Expander Header="Docker registries" Margin="0,8,0,8">
+                                <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
+                                    <StackPanel>
+                                        <ItemsControl ItemsSource="{Binding DockerRegistries}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border Background="#0B0B0E" CornerRadius="4"
+                                                            Padding="12" Margin="0,4">
+                                                        <Grid>
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="100"/>
+                                                                <ColumnDefinition Width="*"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <Grid.RowDefinitions>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                            </Grid.RowDefinitions>
+                                                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Host"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <TextBox Grid.Row="0" Grid.Column="1" FontFamily="Consolas"
+                                                                     Text="{Binding Host, UpdateSourceTrigger=PropertyChanged}"
+                                                                     Margin="0,2"/>
+                                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Username"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <TextBox Grid.Row="1" Grid.Column="1"
+                                                                     Text="{Binding Username, UpdateSourceTrigger=PropertyChanged}"
+                                                                     Margin="0,2"/>
+                                                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Password"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <PasswordBox Grid.Row="2" Grid.Column="1" Margin="0,2"
+                                                                         cmn:PasswordBoxBinding.Password="{Binding Password, Mode=TwoWay}"/>
+                                                            <CheckBox Grid.Row="3" Grid.Column="1" Margin="0,8,0,0"
+                                                                      Content="Require approval"
+                                                                      IsChecked="{Binding RequireApproval}"/>
+                                                            <Button Grid.Row="4" Grid.Column="1" Content="Remove" Margin="0,8,0,0"
+                                                                    HorizontalAlignment="Left"
+                                                                    Style="{StaticResource DangerButton}"
+                                                                    Command="{Binding DataContext.RemoveDockerCommand,
+                                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                    CommandParameter="{Binding}"/>
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <Button Content="Add Docker registry" Margin="0,12,0,0"
+                                                HorizontalAlignment="Left"
+                                                Style="{StaticResource AccentButton}"
+                                                Command="{Binding DataContext.AddDockerCommand,
+                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
+                            <!-- Kubeconfigs ...................................... -->
+                            <Expander Header="Kubeconfigs" Margin="0,8,0,8">
+                                <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                                   Margin="0,0,0,12" TextWrapping="Wrap">
+                                            kubectl contexts. Currently supports bearer-token auth;
+                                            client-cert + exec-plugin auth shapes ship in the underlying
+                                            model but the editor for them is iterative.
+                                        </TextBlock>
+                                        <ItemsControl ItemsSource="{Binding Kubeconfigs}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border Background="#0B0B0E" CornerRadius="4"
+                                                            Padding="12" Margin="0,4">
+                                                        <Grid>
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="120"/>
+                                                                <ColumnDefinition Width="*"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <Grid.RowDefinitions>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                            </Grid.RowDefinitions>
+                                                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Context name"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <TextBox Grid.Row="0" Grid.Column="1"
+                                                                     Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                                                                     Margin="0,2"/>
+                                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Server URL"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <TextBox Grid.Row="1" Grid.Column="1" FontFamily="Consolas"
+                                                                     Text="{Binding ServerUrl, UpdateSourceTrigger=PropertyChanged}"
+                                                                     Margin="0,2"/>
+                                                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Namespace"
+                                                                       Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                            <TextBox Grid.Row="2" Grid.Column="1"
+                                                                     Text="{Binding Namespace, UpdateSourceTrigger=PropertyChanged}"
+                                                                     Margin="0,2"/>
+                                                            <CheckBox Grid.Row="3" Grid.Column="1" Margin="0,8,0,0"
+                                                                      Content="Require approval"
+                                                                      IsChecked="{Binding RequireApproval}"/>
+                                                            <Button Grid.Row="4" Grid.Column="1" Content="Remove" Margin="0,8,0,0"
+                                                                    HorizontalAlignment="Left"
+                                                                    Style="{StaticResource DangerButton}"
+                                                                    Command="{Binding DataContext.RemoveKubeCommand,
+                                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                    CommandParameter="{Binding}"/>
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <Button Content="Add kubeconfig" Margin="0,12,0,0"
+                                                HorizontalAlignment="Left"
+                                                Style="{StaticResource AccentButton}"
+                                                Command="{Binding DataContext.AddKubeCommand,
+                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
+                            <!-- Imported SSH keys ................................ -->
+                            <Expander Header="Imported SSH keys" Margin="0,8,0,8">
+                                <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                                   Margin="0,0,0,12" TextWrapping="Wrap">
+                                            Private keys the host's ssh-agent will sign with on behalf of
+                                            the guest. The key bytes never leave the host — only the
+                                            agent SIGN_REQUEST protocol crosses to the VM.
+                                        </TextBlock>
+                                        <ItemsControl ItemsSource="{Binding ImportedSshKeys}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border Background="#0B0B0E" CornerRadius="4"
+                                                            Padding="12" Margin="0,4">
+                                                        <Grid>
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="*"/>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <Grid.RowDefinitions>
+                                                                <RowDefinition/>
+                                                                <RowDefinition/>
+                                                            </Grid.RowDefinitions>
+                                                            <TextBlock Grid.Row="0" Grid.Column="0"
+                                                                       Text="{Binding Label}" FontWeight="SemiBold"/>
+                                                            <CheckBox Grid.Row="1" Grid.Column="0" Margin="0,8,0,0"
+                                                                      Content="Require approval per signature"
+                                                                      IsChecked="{Binding RequireApproval}"/>
+                                                            <Button Grid.RowSpan="2" Grid.Column="1" Content="Remove"
+                                                                    Style="{StaticResource DangerButton}"
+                                                                    VerticalAlignment="Center"
+                                                                    Command="{Binding DataContext.RemoveSshCommand,
+                                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                    CommandParameter="{Binding}"/>
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <Button Content="Import SSH key…" Margin="0,12,0,0"
+                                                HorizontalAlignment="Left"
+                                                Style="{StaticResource AccentButton}"
+                                                Command="{Binding DataContext.ImportSshKeyCommand,
+                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- ================================================
+                     ENVIRONMENT TAB
+                     ================================================ -->
+                <TabItem Header="Environment">
+                    <ScrollViewer>
+                        <StackPanel>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                       TextWrapping="Wrap" Margin="0,0,0,12">
+                                Plain environment variables exported into the guest at session
+                                launch. Mark "Secret" for values that should be masked in the UI
+                                and excluded from screenshots.
+                            </TextBlock>
+                            <ItemsControl ItemsSource="{Binding EnvironmentVariables}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Background="{StaticResource PanelBackground}"
+                                                CornerRadius="4" Padding="12" Margin="0,4">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="200"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBox Grid.Column="0" FontFamily="Consolas"
+                                                         Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                                                         Margin="0,0,8,0"/>
+                                                <TextBox Grid.Column="1"
+                                                         Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}"
+                                                         Margin="0,0,8,0"/>
+                                                <CheckBox Grid.Column="2" Content="Secret"
+                                                          IsChecked="{Binding IsSecret}"
+                                                          VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                                <Button Grid.Column="3" Content="Remove"
+                                                        Style="{StaticResource DangerButton}"
+                                                        Command="{Binding DataContext.RemoveEnvCommand,
+                                                                  RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                        CommandParameter="{Binding}"/>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <Button Content="Add environment variable" Margin="0,12,0,0"
+                                    HorizontalAlignment="Left"
+                                    Style="{StaticResource AccentButton}"
+                                    Command="{Binding DataContext.AddEnvCommand,
+                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+            </TabControl>
+
+            <!-- Footer hint -->
+            <Border Grid.Row="2" Background="{StaticResource PanelBackground}"
+                    BorderBrush="#22FFFFFF" BorderThickness="0,1,0,0"
+                    Padding="32,10">
+                <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                           TextWrapping="Wrap">
+                    Edits in this pane persist on every change. The Save button forces
+                    an immediate write; Delete removes the profile (and any associated
+                    session state) entirely.
+                </TextBlock>
+            </Border>
+        </Grid>
+
+        <!-- Empty state when no profile is selected -->
+        <Grid Grid.Column="1" Visibility="{Binding HasSelection, Converter={StaticResource InverseBoolToVis}}">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                <TextBlock Text="No profile selected" FontSize="14"
+                           Foreground="{StaticResource TextSecondary}"
+                           HorizontalAlignment="Center"/>
+                <TextBlock Text="Pick one from the list, or add a new profile."
+                           FontSize="11" Foreground="{StaticResource TextSecondary}"
+                           HorizontalAlignment="Center" Margin="0,4,0,0"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</UserControl>

@@ -1,0 +1,25 @@
+<Application x:Class="Bromure.AC.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:cmn="clr-namespace:Bromure.AC.Common"
+             StartupUri="Views/MainWindow.xaml">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Themes/DarkInputs.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+
+            <!-- Master colour brushes referenced from views + overlays. -->
+            <SolidColorBrush x:Key="ChromeBackground" Color="#0F0F12"/>
+            <SolidColorBrush x:Key="PanelBackground"  Color="#16161B"/>
+            <SolidColorBrush x:Key="AccentBrush"      Color="#7B4DFF"/>
+            <SolidColorBrush x:Key="TextPrimary"      Color="#F5F5F8"/>
+            <SolidColorBrush x:Key="TextSecondary"    Color="#A0A0AA"/>
+            <SolidColorBrush x:Key="DangerBrush"      Color="#E14D5C"/>
+
+            <cmn:BoolToVisibilityConverter x:Key="BoolToVis"/>
+            <cmn:InverseBoolToVisibilityConverter x:Key="InverseBoolToVis"/>
+            <cmn:EnumToVisibilityConverter x:Key="EnumToVis"/>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

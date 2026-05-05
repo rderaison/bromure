@@ -1,0 +1,20 @@
+GPL SOURCE OFFER
+
+This product bundles QEMU (https://www.qemu.org/), which is licensed
+under GPLv2. As required by the GPL, the corresponding source code is
+available in either of two ways:
+
+  1. The matching source tarball ships in the Licenses/ directory of
+     this install (look for qemu-<version>-bromure-build.tar.xz).
+
+  2. Alternatively, you may request the source by writing to
+     gpl-source@bromure.io. We will deliver the corresponding source,
+     for the version of QEMU bundled with this build of Bromure AC,
+     for at least three years from the date of this distribution.
+     There is no fee for the source itself; we may charge for the
+     physical media + shipping.
+
+QEMU is invoked as a subprocess; the host code is NOT linked against
+GPL components. The full text of the GPLv2 ships at
+Licenses/QEMU-COPYING. For the host code's own license see
+Licenses/Bromure-EULA.txt.

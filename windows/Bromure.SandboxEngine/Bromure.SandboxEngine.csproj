@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>Bromure.SandboxEngine</RootNamespace>
+    <AssemblyName>Bromure.SandboxEngine</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Bromure.Platform\Bromure.Platform.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Stage-2 setup script — embedded so it travels with the host EXE
+         and the baker can pull it out on demand. -->
+    <EmbeddedResource Include="Image\setup.sh" />
+  </ItemGroup>
+</Project>

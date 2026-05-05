@@ -1,0 +1,56 @@
+<UserControl x:Class="Bromure.AC.Views.ApprovalsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{StaticResource ChromeBackground}"
+             Foreground="{StaticResource TextPrimary}">
+    <Grid Margin="32,24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Approvals"
+                   FontSize="22" FontWeight="SemiBold"/>
+        <TextBlock Grid.Row="0" Margin="0,30,0,0"
+                   Foreground="{StaticResource TextSecondary}" FontSize="11">
+            Per-credential consent grants the user has issued during
+            recent sessions. 5-min / 1-hour / session windows survive
+            until they expire or you revoke them here.
+        </TextBlock>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,16,0,16">
+            <Button Content="Refresh" Padding="14,6" Margin="0,0,8,0"
+                    Command="{Binding RefreshCommand}"/>
+            <Button Content="Revoke everything" Padding="14,6"
+                    Foreground="{StaticResource DangerBrush}"
+                    Command="{Binding RevokeEverythingCommand}"/>
+        </StackPanel>
+
+        <DataGrid Grid.Row="2" ItemsSource="{Binding Rows}"
+                  AutoGenerateColumns="False" IsReadOnly="True"
+                  Background="{StaticResource PanelBackground}"
+                  Foreground="{StaticResource TextPrimary}"
+                  BorderThickness="0" GridLinesVisibility="Horizontal"
+                  HorizontalGridLinesBrush="#22FFFFFF"
+                  RowBackground="{StaticResource PanelBackground}"
+                  AlternatingRowBackground="#11FFFFFF"
+                  HeadersVisibility="Column">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Profile" Width="100" Binding="{Binding ProfileShort}"/>
+                <DataGridTextColumn Header="Decision" Width="80" Binding="{Binding KindLabel}"/>
+                <DataGridTextColumn Header="Credential" Width="*" Binding="{Binding CredentialDisplayName}"/>
+                <DataGridTextColumn Header="Scope" Width="160" Binding="{Binding ScopeLabel}"/>
+                <DataGridTemplateColumn Header="" Width="100">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <Button Content="Revoke" Padding="6,2"
+                                    Foreground="{StaticResource DangerBrush}"
+                                    Command="{Binding RevokeCommand}"/>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</UserControl>
