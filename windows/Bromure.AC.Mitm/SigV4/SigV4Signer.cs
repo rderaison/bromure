@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/SigV4Signer.swift @ d9041f7dd0b1
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;

@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/LLMEventExtractor.swift @ fd23ee9e9675
 using System.Text.Json;
 using System.Text.Json.Nodes;
 

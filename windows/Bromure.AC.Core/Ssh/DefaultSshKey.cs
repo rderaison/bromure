@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/DefaultSSHKey.swift @ aefcb3b9834b
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;

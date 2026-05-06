@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/AWSSSOResolver.swift @ 3317b1110551
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Security.Cryptography;

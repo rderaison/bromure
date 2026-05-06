@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Profile.swift @ 5feff2fd78b5
 using System.Text.Json;
 
 namespace Bromure.AC.Core.Model;

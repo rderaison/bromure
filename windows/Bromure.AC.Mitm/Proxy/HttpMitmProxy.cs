@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/HTTPProxy.swift @ 875b644e56b1
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;

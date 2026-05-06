@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/CloudEvents.swift @ 5c8ad3c8d231
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;

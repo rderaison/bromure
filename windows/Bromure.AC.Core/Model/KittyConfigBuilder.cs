@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/TerminalAppDefaults.swift @ 7e499111f7db
 namespace Bromure.AC.Core.Model;
 
 /// <summary>

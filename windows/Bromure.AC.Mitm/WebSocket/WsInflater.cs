@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/WebSocketTrace.swift @ e5f95ab9ee6d
 using System.IO.Compression;
 
 namespace Bromure.AC.Mitm.WebSocket;

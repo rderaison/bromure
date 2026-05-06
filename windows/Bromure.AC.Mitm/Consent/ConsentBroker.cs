@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/ConsentBroker.swift @ e652007c2304
 using Bromure.AC.Mitm.Swap;
 
 namespace Bromure.AC.Mitm.Consent;

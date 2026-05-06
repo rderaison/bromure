@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/DockerConfigImport.swift @ 3b8f7e8af63b
 using System.Text;
 using System.Text.Json;
 

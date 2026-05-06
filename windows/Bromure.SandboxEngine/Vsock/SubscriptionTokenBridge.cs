@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/SubscriptionTokenBridge.swift @ 7ef3f5dcd1e3
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;

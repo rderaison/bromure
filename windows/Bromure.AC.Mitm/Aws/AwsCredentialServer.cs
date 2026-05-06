@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/AWSCredentialServer.swift @ 2a4bd9245f97
 using System.Security.Cryptography;
 using System.Text.Json;
 using Bromure.AC.Mitm.Consent;

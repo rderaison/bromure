@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/BromureCA.swift @ b0da05a3c2da
 using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;

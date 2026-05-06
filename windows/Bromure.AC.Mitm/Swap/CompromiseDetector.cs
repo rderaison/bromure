@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/CompromiseDetector.swift @ d0c48f35f503
 using System.Text;
 
 namespace Bromure.AC.Mitm.Swap;

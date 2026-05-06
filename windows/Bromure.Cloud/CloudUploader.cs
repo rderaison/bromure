@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/CloudUploader.swift @ 497d371a608c
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Net.Security;

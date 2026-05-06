@@ -1,0 +1,57 @@
+# macOS files we deliberately do NOT port to Windows.
+#
+# Format: one path per line, relative to repo root. Comments after `#`
+# are ignored. Each entry is an explicit "we looked at this and chose
+# not to port (yet)" — keeping the parity check's UNPORTED list focused
+# on actual TODO work.
+#
+# Add the reason in a comment alongside the path so future-us can audit.
+
+# --- VZ / Virtualization.framework specific ---
+# Windows uses WSL2 + WSLg; the VM lifecycle plumbing is entirely
+# different. Equivalent code lives in windows/Bromure.SandboxEngine/Wsl/.
+Sources/AgentCoding/UbuntuSandboxVM.swift   # VZVirtualMachine config
+Sources/AgentCoding/UbuntuImageManager.swift # VZ image manager
+Sources/AgentCoding/SessionDisk.swift        # APFS clonefile
+
+# --- AppKit / NSWindow specific ---
+# Windows uses WPF Window/HwndHost. The shapes don't 1:1.
+Sources/AgentCoding/SessionWindow.swift      # NSWindow + tabbing
+Sources/AgentCoding/EnrollmentSheet.swift    # NSPanel sheet
+
+# --- SwiftUI views ---
+# Each maps to one or more WPF UserControl/Window under
+# windows/Bromure.AC/Views/, but the SwiftUI shapes don't carry over.
+# We track UI parity by feature, not by file.
+Sources/AgentCoding/SetupViews.swift
+Sources/AgentCoding/ProfileViews.swift
+Sources/AgentCoding/CredentialApprovalsView.swift
+Sources/AgentCoding/ConversationView.swift
+Sources/AgentCoding/TraceInspectorView.swift
+Sources/AgentCoding/SubscriptionTokenSwapSheet.swift
+Sources/AgentCoding/SubscriptionTokenSwapState.swift
+
+# --- macOS app-shell wiring ---
+# The host side: NSApplicationDelegate, AppleScript bindings, debug
+# helpers. Windows has its own shell in Bromure.AC.csproj.
+Sources/AgentCoding/BromureAC.swift          # ACAppDelegate + ParsableCommand entry
+Sources/AgentCoding/BACDebug.swift           # macOS-only debug
+Sources/AgentCoding/ScriptCommands.swift     # AppleScript SDEF bindings
+Sources/AgentCoding/EnrollmentCLI.swift      # CLI hooks the Windows port doesn't expose
+
+# --- Keychain + macOS-specific secret storage ---
+# Replaced by Bromure.Platform.WindowsSecretStore (DPAPI + Credential
+# Manager). The interface contract is verified by ISecretStore tests.
+Sources/AgentCoding/Mitm/PassphraseKeychain.swift
+
+# --- Cloud credentials (different infra) ---
+# CloudCredentials.swift is macOS keychain glue; the Windows
+# equivalent is part of CloudMtlsIdentity.cs.
+Sources/AgentCoding/Mitm/CloudCredentials.swift
+
+# --- TLS plumbing — .NET SslStream covers it inline ---
+# TLSServerStream.swift wraps Network.framework's NWConnection for
+# the proxy's MITM termination. .NET gives us SslStream which we use
+# directly inside HttpMitmProxy.HandleConnectionAsync — no separate
+# wrapper file is needed.
+Sources/AgentCoding/Mitm/TLSServerStream.swift

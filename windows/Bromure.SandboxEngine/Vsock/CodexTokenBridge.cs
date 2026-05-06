@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/CodexTokenBridge.swift @ 8886701f30f0
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;

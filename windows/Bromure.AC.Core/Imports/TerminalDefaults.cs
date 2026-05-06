@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/TerminalAppDefaults.swift @ 7e499111f7db
 using System.Text.Json;
 
 namespace Bromure.AC.Core.Imports;

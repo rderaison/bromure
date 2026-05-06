@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/AWSConfigParser.swift @ 127753a8dc45
 namespace Bromure.AC.Core.Imports;
 
 /// <summary>

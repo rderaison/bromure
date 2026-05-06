@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/AWSResigner.swift @ ef724e93cadc
 using System.Text;
 using Bromure.AC.Mitm.Aws;
 

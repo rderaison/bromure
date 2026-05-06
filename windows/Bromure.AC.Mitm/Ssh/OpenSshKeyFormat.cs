@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/OpenSSHKeyFormat.swift @ 7e01322b8b99
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;

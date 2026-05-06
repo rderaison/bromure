@@ -1,4 +1,6 @@
 #!/bin/bash
+# macos-source: Sources/AgentCoding/Resources/vm-setup/setup.sh @ 0f47b224d2ef
+
 # Bromure AC base-image bake — WSL2 edition.
 #
 # Runs inside a transient bake distro that was just imported from a

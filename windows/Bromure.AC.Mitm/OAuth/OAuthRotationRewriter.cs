@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/OAuthRotationRewriter.swift @ d8b52768dec5
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;

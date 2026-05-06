@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/KubeconfigImport.swift @ eda5e5ddc96f
 using System.Text;
 using YamlDotNet.RepresentationModel;
 

@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/SessionTokenPlan.swift @ a663f52551c3
 using System.Security.Cryptography;
 using System.Text;
 

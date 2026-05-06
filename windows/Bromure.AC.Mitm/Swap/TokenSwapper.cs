@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/TokenSwap.swift @ 3ab4e2544b54
 using System.Collections.Concurrent;
 using System.Text;
 

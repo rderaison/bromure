@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/SubscriptionTokenCoordinator.swift @ 860e84441d77
 using System.Collections.Concurrent;
 using System.Text;
 using Bromure.AC.Mitm.Swap;

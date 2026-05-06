@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/HostAgentClient.swift @ 262d70583288
 using System.Buffers.Binary;
 using System.IO.Pipes;
 using System.Net;

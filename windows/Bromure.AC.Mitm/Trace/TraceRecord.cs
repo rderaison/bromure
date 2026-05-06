@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/TraceRecord.swift @ 0a0725f86ce2
 using System.Text.Json.Serialization;
 
 namespace Bromure.AC.Mitm.Trace;

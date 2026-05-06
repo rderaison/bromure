@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/SubscriptionFakeMint.swift @ d3fa6f532b8a
 namespace Bromure.AC.Mitm.Swap;
 
 /// <summary>

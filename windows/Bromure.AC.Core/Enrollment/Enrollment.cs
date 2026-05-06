@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Enrollment.swift @ 841d4b4e44e2
 using System.Text.Json;
 using Bromure.Platform;
 

@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/SecretsVault.swift @ f43defb5a4a0
 using System.Security.Cryptography;
 using Bromure.AC.Mitm.Trace;
 using Bromure.Platform;

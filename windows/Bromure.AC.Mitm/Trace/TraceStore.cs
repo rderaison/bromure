@@ -1,3 +1,4 @@
+// macos-source: Sources/AgentCoding/Mitm/TraceStore.swift @ 5768a9d918d1
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
