@@ -154,4 +154,20 @@ public sealed class EnrollmentStore
         => _secrets.ReadBlob(LeafCertKeyPrefix + serialHex.ToLowerInvariant(), BlobScope.LocalMachine);
 
     public bool IsEnrolled => Load() is not null && LoadInstallToken() is not null;
+
+    /// <summary>
+    /// Cloud event ingest endpoint. Honours
+    /// <c>BROMURE_AC_INGEST_URL</c> for local dev; defaults to the
+    /// production analytics frontend. Mirrors macOS
+    /// <c>BACEnrollmentStore.defaultAnalyticsURL</c> — the analytics
+    /// service is internet-facing with its own mTLS termination,
+    /// distinct from the API server in the install record.
+    /// </summary>
+    public static Uri DefaultIngestUrl()
+    {
+        var env = Environment.GetEnvironmentVariable("BROMURE_AC_INGEST_URL");
+        if (!string.IsNullOrEmpty(env) && Uri.TryCreate(env, UriKind.Absolute, out var u))
+            return u;
+        return new Uri("https://analytics.bromure.io/ac-ingest");
+    }
 }

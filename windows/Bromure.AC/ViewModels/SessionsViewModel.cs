@@ -25,6 +25,7 @@ public sealed partial class SessionsViewModel : ObservableObject
     private readonly MitmEngine _engine;
     private readonly Func<string> _baseRootfsPathProvider;
     private readonly Func<string> _sessionRootProvider;
+    private readonly WarmDistroPool? _warmPool;
     private readonly Action<Profile> _onEdit;
 
     public ObservableCollection<SessionRowViewModel> Rows { get; } = new();
@@ -40,12 +41,14 @@ public sealed partial class SessionsViewModel : ObservableObject
     public SessionsViewModel(ProfileStore store, MitmEngine engine,
         Func<string> baseRootfsPathProvider,
         Func<string> sessionRootProvider,
+        WarmDistroPool? warmPool,
         Action<Profile> onEdit)
     {
         _store = store;
         _engine = engine;
         _baseRootfsPathProvider = baseRootfsPathProvider;
         _sessionRootProvider = sessionRootProvider;
+        _warmPool = warmPool;
         _onEdit = onEdit;
         Rows.CollectionChanged += (_, _) =>
         {
@@ -68,7 +71,8 @@ public sealed partial class SessionsViewModel : ObservableObject
             else
             {
                 Rows.Add(new SessionRowViewModel(p, _engine,
-                    _baseRootfsPathProvider, _sessionRootProvider, _onEdit));
+                    _baseRootfsPathProvider, _sessionRootProvider,
+                    _warmPool, _onEdit));
             }
         }
         if (Selected is null && Rows.Count > 0) Selected = Rows[0];
@@ -119,6 +123,7 @@ public sealed partial class SessionRowViewModel : ObservableObject
     private readonly MitmEngine _engine;
     private readonly Func<string> _baseRootfsPathProvider;
     private readonly Func<string> _sessionRootProvider;
+    private readonly WarmDistroPool? _warmPool;
     private readonly Action<Profile> _onEdit;
 
     [ObservableProperty]
@@ -169,12 +174,14 @@ public sealed partial class SessionRowViewModel : ObservableObject
     public SessionRowViewModel(Profile profile, MitmEngine engine,
         Func<string> baseRootfsPathProvider,
         Func<string> sessionRootProvider,
+        WarmDistroPool? warmPool,
         Action<Profile> onEdit)
     {
         _profile = profile;
         _engine = engine;
         _baseRootfsPathProvider = baseRootfsPathProvider;
         _sessionRootProvider = sessionRootProvider;
+        _warmPool = warmPool;
         _onEdit = onEdit;
     }
 
@@ -199,11 +206,26 @@ public sealed partial class SessionRowViewModel : ObservableObject
         }
         Directory.CreateDirectory(sessionRoot);
         IsLaunching = true;
-        StatusDetail = "Importing distro + bringing up MITM proxy…";
+        // Try to grab a pre-imported warm distro. 250 ms is enough
+        // when the pool's already topped up; failure → null and we
+        // fall back to a cold import inside StartAsync.
+        WarmDistro? warm = null;
+        if (_warmPool is not null)
+        {
+            try
+            {
+                warm = await _warmPool.AcquireAsync(TimeSpan.FromMilliseconds(250),
+                    CancellationToken.None).ConfigureAwait(true);
+            }
+            catch { }
+        }
+        StatusDetail = warm is null
+            ? "Importing distro + bringing up MITM proxy…"
+            : "Adopting warm distro + bringing up MITM proxy…";
         try
         {
             var sv = new SessionViewModel(Profile.Id, Profile.Name, _engine, Profile,
-                rootfs, sessionRoot);
+                rootfs, sessionRoot, warm);
             Session = sv;
             // Mirror the inner VM's status-detail back to the row so
             // the user sees "Bringing up MITM proxy…" / "kitty up · …"

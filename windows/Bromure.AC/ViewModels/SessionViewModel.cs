@@ -29,6 +29,7 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
     private readonly Profile? _activeProfile;
     private readonly string _baseRootfsPath;
     private readonly string _sessionRoot;
+    private readonly WarmDistro? _warmDistro;
     private HttpMitmProxy? _mitm;
     private WslSession? _session;
 
@@ -67,7 +68,8 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
 
     public SessionViewModel(Guid profileId, string profileName,
         MitmEngine engine, Profile? activeProfile,
-        string baseRootfsPath, string sessionRoot)
+        string baseRootfsPath, string sessionRoot,
+        WarmDistro? warmDistro = null)
     {
         ProfileId = profileId;
         ProfileName = profileName;
@@ -75,6 +77,7 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
         _activeProfile = activeProfile;
         _baseRootfsPath = baseRootfsPath;
         _sessionRoot = sessionRoot;
+        _warmDistro = warmDistro;
     }
 
     /// <summary>
@@ -111,12 +114,38 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
             envVars["SSL_CERT_FILE"] = "/etc/ssl/certs/ca-certificates.crt";
             envVars["NODE_EXTRA_CA_CERTS"] = "/usr/local/share/ca-certificates/bromure/bromure-ca.crt";
 
+            // Build the home overlay. SessionHomeBuilder produces every
+            // dotfile that doesn't need PKI plumbing; we add the
+            // kubeconfig (which needs the Bromure CA so kubectl trusts
+            // the proxy's MITM leaves) on top.
+            var caPem = _engine.Ca.CertificatePem;
+            var homeFiles = new Dictionary<string, byte[]>(
+                SessionHomeBuilder.Build(_activeProfile, caPem),
+                StringComparer.Ordinal);
+            if (_activeProfile is not null && _activeProfile.Kubeconfigs.Count > 0)
+            {
+                try
+                {
+                    var matz = new Bromure.AC.Mitm.Pki.KubeconfigMaterializer()
+                        .Materialize(_activeProfile, caPem);
+                    if (!string.IsNullOrEmpty(matz.Yaml))
+                    {
+                        homeFiles[".kube/config"] = System.Text.Encoding.UTF8.GetBytes(
+                            matz.Yaml.Replace("\r\n", "\n"));
+                    }
+                }
+                catch (Exception kex)
+                {
+                    System.Diagnostics.Debug.WriteLine("kubeconfig materialise failed: " + kex);
+                }
+            }
+
             var cfg = new WslSessionConfig
             {
                 BaseRootfsPath = _baseRootfsPath,
                 DistroName = distroName,
                 InstallPath = installPath,
-                HomeFiles = SessionHomeBuilder.Build(_activeProfile),
+                HomeFiles = homeFiles,
                 EnvVars = envVars,
                 // No --start-as=fullscreen and no --title-prefix-matching
                 // logic. Kitty surfaces as a free-floating WSLg-rendered
@@ -129,6 +158,16 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
                     "--title", $"{ProfileName} — Bromure",
                 },
                 BromureCaPem = System.Text.Encoding.ASCII.GetBytes(_engine.Ca.CertificatePem),
+                // Profile-configured shared folders → ~bromure/<basename>
+                // symlinks into /mnt/<drive>/<host path>. Defaulting to
+                // an empty list when the profile has none keeps the
+                // session config simple.
+                SharedFolderPaths = _activeProfile?.FolderPaths.ToArray()
+                    ?? Array.Empty<string>(),
+                // Warm distro from the pool — the session adopts its
+                // pre-imported filesystem instead of paying the
+                // wsl --import cost. Null → cold import.
+                WarmDistro = _warmDistro,
             };
 
             _session = new WslSession(cfg);

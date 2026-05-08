@@ -48,6 +48,8 @@ public sealed class AwsCredentialsConfig
     public string AccessKeyId { get; set; } = "";
     public string SecretAccessKey { get; set; } = "";
     public string SessionToken { get; set; } = "";
+    /// Default region used in ~/.aws/config and AWS_DEFAULT_REGION env.
+    public string Region { get; set; } = "";
     public bool RequireApproval { get; set; }
 }
 

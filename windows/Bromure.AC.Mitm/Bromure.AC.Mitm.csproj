@@ -5,9 +5,13 @@
     <AssemblyName>Bromure.AC.Mitm</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Bromure.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\Bromure.Platform\Bromure.Platform.csproj" />
     <ProjectReference Include="..\Bromure.SandboxEngine\Bromure.SandboxEngine.csproj" />
     <ProjectReference Include="..\Bromure.AC.Core\Bromure.AC.Core.csproj" />
+    <ProjectReference Include="..\Bromure.Cloud\Bromure.Cloud.csproj" />
     <PackageReference Include="BouncyCastle.Cryptography" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
   </ItemGroup>

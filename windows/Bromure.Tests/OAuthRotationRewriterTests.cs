@@ -103,4 +103,82 @@ public class OAuthRotationRewriterTests
         Buffer.BlockCopy(body, 0, output, headBytes.Length, body.Length);
         return output;
     }
+
+    [Fact]
+    public void RewriteClaude_GzippedBody_DecompressesRotatesAndDropsEncoding()
+    {
+        var swapper = new TokenSwapper(new AlwaysAllowConsentBroker());
+        var profile = Guid.NewGuid();
+        swapper.SetMap(new TokenMap(Array.Empty<TokenMap.Entry>()), profile);
+
+        var realAccess = "sk-ant-oat01-" + new string('a', 50);
+        var realRefresh = "sk-ant-ort01-" + new string('b', 50);
+        var jsonBody = $"{{\"access_token\":\"{realAccess}\",\"refresh_token\":\"{realRefresh}\"}}";
+        var compressed = Gzip(Encoding.UTF8.GetBytes(jsonBody));
+        // Header advertises gzip + a Content-Length matching the
+        // compressed payload — the rewriter must decompress before
+        // parsing JSON.
+        var head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+                   "Content-Encoding: gzip\r\n" +
+                   $"Content-Length: {compressed.Length}\r\n\r\n";
+        var headBytes = Encoding.ASCII.GetBytes(head);
+        var raw = new byte[headBytes.Length + compressed.Length];
+        Buffer.BlockCopy(headBytes, 0, raw, 0, headBytes.Length);
+        Buffer.BlockCopy(compressed, 0, raw, headBytes.Length, compressed.Length);
+
+        var result = OAuthRotationRewriter.Rewrite(raw, OAuthRotationProvider.Claude, profile, swapper);
+
+        result.NewReals.Should().NotBeNull();
+        result.NewReals!.AccessToken.Should().Be(realAccess);
+
+        var output = Encoding.ASCII.GetString(result.Bytes);
+        output.Should().Contain("sk-ant-oat01-brm-",
+            "rewriter rotated the access token after decompressing");
+        output.Should().NotContain("Content-Encoding:",
+            "we drop the encoding header since the rewritten body is plain JSON");
+        // Content-Length now reflects the uncompressed JSON size.
+        var headerEnd = output.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+        var headers = output[..headerEnd];
+        headers.Should().Contain("Content-Length: ");
+    }
+
+    [Fact]
+    public void RewriteCodex_GzippedBody_DecompressesAndRotates()
+    {
+        var swapper = new TokenSwapper(new AlwaysAllowConsentBroker());
+        var profile = Guid.NewGuid();
+        swapper.SetMap(new TokenMap(Array.Empty<TokenMap.Entry>()), profile);
+
+        // Same JWT-shaped access token + opaque refresh shape that
+        // RewriteCodex_JwtAccessAndOpaqueRefresh_BothRotated uses —
+        // SubscriptionFakeMint.MintJwtFake requires three dot-separated
+        // base64 segments to mint a fake.
+        var realAccess = "eyJ" + new string('A', 50) + "." + new string('B', 50) + "." + new string('C', 50);
+        var realRefresh = "rt_" + new string('D', 43) + "." + new string('E', 43);
+        var jsonBody = $"{{\"access_token\":\"{realAccess}\",\"refresh_token\":\"{realRefresh}\"}}";
+        var compressed = Gzip(Encoding.UTF8.GetBytes(jsonBody));
+        var head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+                   "Content-Encoding: gzip\r\n" +
+                   $"Content-Length: {compressed.Length}\r\n\r\n";
+        var raw = new byte[head.Length + compressed.Length];
+        Buffer.BlockCopy(Encoding.ASCII.GetBytes(head), 0, raw, 0, head.Length);
+        Buffer.BlockCopy(compressed, 0, raw, head.Length, compressed.Length);
+
+        var result = OAuthRotationRewriter.Rewrite(raw, OAuthRotationProvider.Codex, profile, swapper);
+
+        result.NewReals.Should().NotBeNull();
+        result.NewReals!.AccessToken.Should().Be(realAccess);
+        Encoding.ASCII.GetString(result.Bytes).Should().NotContain("Content-Encoding:");
+    }
+
+    private static byte[] Gzip(byte[] raw)
+    {
+        using var ms = new MemoryStream();
+        using (var gz = new System.IO.Compression.GZipStream(ms,
+            System.IO.Compression.CompressionLevel.Fastest))
+        {
+            gz.Write(raw, 0, raw.Length);
+        }
+        return ms.ToArray();
+    }
 }

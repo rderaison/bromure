@@ -81,8 +81,16 @@ public static class OAuthRotationRewriter
             return new OAuthRotationResult(raw, null);
         if (bodyBytes.Length == 0) return new OAuthRotationResult(raw, null);
 
+        // Decompress the body if upstream applied Content-Encoding.
+        // Anthropic sometimes serves the OAuth refresh response gzipped;
+        // skipping this step would have us regex-fail on opaque bytes
+        // and silently no-op rotation.
+        var encoding = ParseContentEncoding(headerBytes);
+        var parseable = TryDecompress(bodyBytes, encoding);
+        if (parseable is null) return new OAuthRotationResult(raw, null);
+
         JsonNode? root;
-        try { root = JsonNode.Parse(bodyBytes); }
+        try { root = JsonNode.Parse(parseable); }
         catch (JsonException) { return new OAuthRotationResult(raw, null); }
         if (root is not JsonObject json) return new OAuthRotationResult(raw, null);
 
@@ -128,8 +136,12 @@ public static class OAuthRotationRewriter
             return new OAuthRotationResult(raw, null);
         if (bodyBytes.Length == 0) return new OAuthRotationResult(raw, null);
 
+        var encoding = ParseContentEncoding(headerBytes);
+        var parseable = TryDecompress(bodyBytes, encoding);
+        if (parseable is null) return new OAuthRotationResult(raw, null);
+
         JsonNode? root;
-        try { root = JsonNode.Parse(bodyBytes); }
+        try { root = JsonNode.Parse(parseable); }
         catch (JsonException) { return new OAuthRotationResult(raw, null); }
         if (root is not JsonObject json) return new OAuthRotationResult(raw, null);
 
@@ -200,15 +212,22 @@ public static class OAuthRotationRewriter
 
     private static byte[] Reassemble(byte[] headerBytes, byte[] body)
     {
+        // We write the rewritten body uncompressed, so drop any
+        // Content-Encoding header. Update Content-Length to the new
+        // body size. Both header munges happen in a single pass.
         var headerStr = Encoding.ASCII.GetString(headerBytes);
         var lines = headerStr.Split("\r\n").ToList();
         var sawCl = false;
-        for (var i = 0; i < lines.Count; i++)
+        for (var i = lines.Count - 1; i >= 0; i--)
         {
             if (lines[i].StartsWith("content-length:", StringComparison.OrdinalIgnoreCase))
             {
                 lines[i] = "Content-Length: " + body.Length;
                 sawCl = true;
+            }
+            else if (lines[i].StartsWith("content-encoding:", StringComparison.OrdinalIgnoreCase))
+            {
+                lines.RemoveAt(i);
             }
         }
         var patchedHead = sawCl
@@ -220,6 +239,76 @@ public static class OAuthRotationRewriter
         Buffer.BlockCopy(HeaderEnd, 0, output, patchedHead.Length, 4);
         Buffer.BlockCopy(body, 0, output, patchedHead.Length + 4, body.Length);
         return output;
+    }
+
+    /// <summary>
+    /// Read the response's <c>Content-Encoding</c> header (case-insensitive,
+    /// last-wins). Empty string when absent or identity-encoded.
+    /// </summary>
+    private static string ParseContentEncoding(byte[] headerBytes)
+    {
+        var headerStr = Encoding.ASCII.GetString(headerBytes);
+        foreach (var raw in headerStr.Split("\r\n"))
+        {
+            if (!raw.StartsWith("content-encoding:", StringComparison.OrdinalIgnoreCase)) continue;
+            var v = raw.Substring("content-encoding:".Length).Trim().ToLowerInvariant();
+            if (v == "identity") return "";
+            return v;
+        }
+        return "";
+    }
+
+    /// <summary>
+    /// Decompress <paramref name="body"/> according to
+    /// <paramref name="encoding"/> (gzip / deflate / br / empty).
+    /// Returns the original bytes when no encoding applies, or null
+    /// when decompression fails — caller treats null as "give up".
+    /// </summary>
+    private static byte[]? TryDecompress(byte[] body, string encoding)
+    {
+        if (string.IsNullOrEmpty(encoding)) return body;
+        try
+        {
+            using var input = new MemoryStream(body);
+            using var output = new MemoryStream();
+            switch (encoding)
+            {
+                case "gzip":
+                    {
+                        using var gz = new System.IO.Compression.GZipStream(input,
+                            System.IO.Compression.CompressionMode.Decompress);
+                        gz.CopyTo(output);
+                        break;
+                    }
+                case "deflate":
+                    {
+                        using var df = new System.IO.Compression.DeflateStream(input,
+                            System.IO.Compression.CompressionMode.Decompress);
+                        df.CopyTo(output);
+                        break;
+                    }
+                case "br":
+                    {
+                        using var br = new System.IO.Compression.BrotliStream(input,
+                            System.IO.Compression.CompressionMode.Decompress);
+                        br.CopyTo(output);
+                        break;
+                    }
+                default:
+                    // Unknown encoding (e.g., "zstd" — not in BCL).
+                    // Better to bail than corrupt the body.
+                    return null;
+            }
+            return output.ToArray();
+        }
+        catch (System.IO.InvalidDataException)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
     }
 
     private static int IndexOf(byte[] haystack, byte[] needle)

@@ -1,11 +1,13 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Reflection;
+using Bromure.AC.Cloud;
 using Bromure.AC.Consent;
 using Bromure.AC.Core.Enrollment;
 using Bromure.AC.Core.Model;
 using Bromure.AC.Mitm.Consent;
 using Bromure.AC.Mitm.Engine;
+using Bromure.Cloud;
 using Bromure.SandboxEngine.Image;
 using Bromure.SandboxEngine.Wsl;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -37,6 +39,12 @@ public sealed partial class ShellViewModel : ObservableObject
     private readonly ImageManager _images;
     private readonly MitmEngine _engine;
     private readonly ProfileStore _profileStore;
+    private readonly EnrollmentStore _enrollment;
+    private readonly EnrollmentCloudMtlsIdentity _cloudIdentity;
+    private readonly SessionTracker _cloudSessions = new();
+    private readonly CloudEventEmitter _cloudEmitter;
+    private CloudUploader? _cloudUploader;
+    private readonly Bromure.SandboxEngine.Wsl.WarmDistroPool _warmPool;
 
     [ObservableProperty] private ShellPhase _phase = ShellPhase.Welcome;
     [ObservableProperty] private InitProgressViewModel _progress = new();
@@ -82,7 +90,18 @@ public sealed partial class ShellViewModel : ObservableObject
 
         _profileStore = new ProfileStore(_services.Paths.ProfilesDirectory);
         var profileStore = _profileStore;
-        var enrollment = new EnrollmentStore(_services.Paths, _services.Secrets);
+        _enrollment = new EnrollmentStore(_services.Paths, _services.Secrets);
+        var enrollment = _enrollment;
+        _cloudIdentity = new EnrollmentCloudMtlsIdentity(_enrollment);
+        _cloudEmitter = new CloudEventEmitter(_cloudSessions, () => _enrollment.IsEnrolled);
+        AttachCloudUploaderIfEnrolled();
+        // Best-effort fan-out from the Mitm engine into the cloud
+        // emitter. Detached so a slow uploader can't back-pressure
+        // the proxy hot path.
+        _engine.OnCloudEvent = (profileId, type, data) =>
+        {
+            _ = _cloudEmitter.EmitAsync(profileId, type, data);
+        };
 
         // The QEMU+Alpine bake path is gone; WSL2 uses RootfsBaker via
         // bromure-spike for the time being. Wiring a UI button for the
@@ -99,9 +118,20 @@ public sealed partial class ShellViewModel : ObservableObject
             BakeOverlay = null,
             OpenTemplateEditor = () => OpenTemplateProfileEditor(),
         };
+        // Warm distro pool: pre-imports one bromure-base distro in the
+        // background so the user-visible launch path skips wsl --import.
+        // Started after orphan cleanup completes so a prior-run leftover
+        // doesn't collide with the new pool's distro names.
+        var warmPoolRoot = Path.Combine(_services.Paths.AppDataRoot, "warm-pool");
+        Directory.CreateDirectory(warmPoolRoot);
+        _warmPool = new Bromure.SandboxEngine.Wsl.WarmDistroPool(
+            baseRootfsPathProvider: () => Path.Combine(_services.Paths.ImagesDirectory, RootfsBaker.OutputBaseFileName),
+            poolRoot: warmPoolRoot);
+
         SessionsPane = new SessionsViewModel(profileStore, _engine,
             baseRootfsPathProvider: () => Path.Combine(_services.Paths.ImagesDirectory, RootfsBaker.OutputBaseFileName),
             sessionRootProvider: () => Path.Combine(_services.Paths.SessionsDirectory, "default-session"),
+            warmPool: _warmPool,
             onEdit: profile =>
             {
                 // Pre-select the profile in the editor view-model, then
@@ -122,12 +152,39 @@ public sealed partial class ShellViewModel : ObservableObject
         _selectedNavigation = Navigation[0];
 
         UpdateImageInfoLine();
+        // Pre-warm the WSL utility VM. First wsl.exe call after a
+        // boot pays a 3–5 s utility-VM cold-start cost; doing it
+        // here in the background means the user's first Launch
+        // click doesn't.
+        _ = Task.Run(async () =>
+        {
+            try { await Bromure.SandboxEngine.Wsl.WslCli.RunAsync(new[] { "--status" }, CancellationToken.None); }
+            catch { /* best-effort */ }
+        });
         // Reap any leftover bromure-ses-* distros from prior crashes
         // BEFORE we kick off the session phase. wsl --import collisions
         // are otherwise possible; stale distros also keep WSL's utility
         // VM running unnecessarily. Fire-and-forget — UI doesn't wait.
         _ = Task.Run(CleanupOrphanedDistrosAsync);
         ResolvePhaseFromCache();
+    }
+
+    /// <summary>
+    /// Build a <see cref="CloudUploader"/> from the install identity if
+    /// the host is enrolled, and attach it to the emitter. Called from
+    /// the constructor and after a successful enrollment so events
+    /// stop dropping with "no uploader".
+    /// </summary>
+    private void AttachCloudUploaderIfEnrolled()
+    {
+        if (!_enrollment.IsEnrolled) return;
+        try
+        {
+            _cloudUploader?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+        catch { /* best-effort */ }
+        _cloudUploader = new CloudUploader(EnrollmentStore.DefaultIngestUrl(), _cloudIdentity);
+        _cloudEmitter.SetUploader(_cloudUploader);
     }
 
     /// <summary>
@@ -166,24 +223,40 @@ public sealed partial class ShellViewModel : ObservableObject
     /// from prior runs that didn't dispose cleanly (crash, force-kill,
     /// power loss). Idempotent.
     /// </summary>
-    private static async Task CleanupOrphanedDistrosAsync()
+    private async Task CleanupOrphanedDistrosAsync()
     {
         try
         {
             var existing = await Bromure.SandboxEngine.Wsl.WslDistro.ListAsync().ConfigureAwait(false);
+            // Run unregisters in parallel — wsl --unregister blocks
+            // on disk + VM teardown, so a serial loop with N orphans
+            // costs N×~1 s. Cap concurrency so we don't slam the
+            // WSL service when there are many.
+            using var sema = new SemaphoreSlim(4);
+            var tasks = new List<Task>();
             foreach (var d in existing)
             {
-                if (!d.Name.StartsWith("bromure-ses-", StringComparison.Ordinal)) continue;
-                try
+                if (!d.Name.StartsWith("bromure-ses-", StringComparison.Ordinal)
+                    && !d.Name.StartsWith(Bromure.SandboxEngine.Wsl.WarmDistroPool.WarmNamePrefix, StringComparison.Ordinal))
+                    continue;
+                tasks.Add(Task.Run(async () =>
                 {
-                    var temp = new Bromure.SandboxEngine.Wsl.WslDistro(d.Name,
-                        Path.Combine(Path.GetTempPath(), d.Name));
-                    await temp.UnregisterAsync().ConfigureAwait(false);
-                }
-                catch { /* best-effort */ }
+                    await sema.WaitAsync().ConfigureAwait(false);
+                    try
+                    {
+                        var temp = new Bromure.SandboxEngine.Wsl.WslDistro(d.Name,
+                            Path.Combine(Path.GetTempPath(), d.Name));
+                        await temp.UnregisterAsync().ConfigureAwait(false);
+                    }
+                    catch { /* best-effort */ }
+                    finally { sema.Release(); }
+                }));
             }
+            try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { }
         }
         catch { /* WSL not installed → nothing to clean */ }
+        // Cleanup is done — start producing warm distros.
+        try { _warmPool.Start(); } catch { /* pool init guarded itself */ }
     }
 
     partial void OnSelectedNavigationChanged(NavigationItem value)

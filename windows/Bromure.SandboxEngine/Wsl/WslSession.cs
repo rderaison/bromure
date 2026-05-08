@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 
 namespace Bromure.SandboxEngine.Wsl;
@@ -36,6 +37,11 @@ public sealed class WslSession : IAsyncDisposable
     private WslDistro? _distro;
     private Process? _wslProcess;
     private bool _disposed;
+    /// <summary>The name actually in use — equals <c>_cfg.DistroName</c>
+    /// for cold imports, or the pool's chosen name when a warm
+    /// distro was adopted.</summary>
+    private string _effectiveDistroName = "";
+    private string _effectiveInstallPath = "";
 
     public WslSession(WslSessionConfig cfg)
     {
@@ -68,15 +74,39 @@ public sealed class WslSession : IAsyncDisposable
 
     private async Task StartAsyncImpl(CancellationToken ct)
     {
-        // 1) Import the distro from the baked rootfs.
-        _distro = new WslDistro(_cfg.DistroName, _cfg.InstallPath);
-        await _distro.ImportAsync(_cfg.BaseRootfsPath, ct).ConfigureAwait(false);
+        var t0 = Stopwatch.StartNew();
+        var phaseLog = new StringBuilder();
+        void Phase(string name, long ms) => phaseLog.AppendLine(
+            $"[wsl-start] {name} {ms} ms (total {t0.ElapsedMilliseconds} ms)");
+
+        // 1) Import the distro from the baked rootfs — OR adopt a
+        // pre-imported warm distro from the pool (skips the 8–15 s
+        // cost on the user-visible launch path). When the warm
+        // distro is adopted we keep its name + install path; the
+        // session's effective DistroName is whatever the pool gave us.
+        var phaseStart = t0.ElapsedMilliseconds;
+        if (_cfg.WarmDistro is { } warm)
+        {
+            _distro = warm.Distro;
+            _effectiveDistroName = warm.Distro.Name;
+            _effectiveInstallPath = warm.InstallPath;
+        }
+        else
+        {
+            _distro = new WslDistro(_cfg.DistroName, _cfg.InstallPath);
+            _effectiveDistroName = _cfg.DistroName;
+            _effectiveInstallPath = _cfg.InstallPath;
+            await _distro.ImportAsync(_cfg.BaseRootfsPath, ct).ConfigureAwait(false);
+        }
+        Phase(_cfg.WarmDistro is null ? "import" : "adopt-warm", t0.ElapsedMilliseconds - phaseStart);
 
         // 2) Drop the per-session home overlay. We write directly to
         // \\wsl$\<distro>\home\bromure\ via 9p — works because WSL2
         // mounts the distro's filesystem under that UNC path with
         // read/write access from Windows.
+        phaseStart = t0.ElapsedMilliseconds;
         await DropHomeOverlayAsync(ct).ConfigureAwait(false);
+        Phase("home-overlay", t0.ElapsedMilliseconds - phaseStart);
 
         // 3) Drop the Bromure CA cert into the distro and run
         // update-ca-certificates so the MITM proxy's signed certs
@@ -85,14 +115,153 @@ public sealed class WslSession : IAsyncDisposable
         // smoke spike).
         if (_cfg.BromureCaPem is { Length: > 0 })
         {
+            phaseStart = t0.ElapsedMilliseconds;
             await InstallCaCertAsync(ct).ConfigureAwait(false);
+            Phase("ca-cert", t0.ElapsedMilliseconds - phaseStart);
         }
 
-        // 4) Spawn the user-facing process (kitty). Don't await —
+        // 4) Materialise any profile-configured shared folders as
+        // symlinks under /home/<user>/<basename> → /mnt/<drive>/...
+        // so the agent CLI can `cd ~/<basename>` and edit files
+        // that round-trip to the Windows side immediately. WSL2's
+        // DrvFs (with metadata=on, set by setup-wsl.sh) handles
+        // permissions correctly across the boundary.
+        if (_cfg.SharedFolderPaths.Count > 0)
+        {
+            phaseStart = t0.ElapsedMilliseconds;
+            await MountSharedFoldersAsync(ct).ConfigureAwait(false);
+            Phase("shares", t0.ElapsedMilliseconds - phaseStart);
+        }
+
+        // 5) Spawn the user-facing process (kitty). Don't await —
         // the wsl.exe call stays alive for the kitty session's
         // lifetime; await would block indefinitely. We capture the
         // Process so the embed step can find its HWND.
+        phaseStart = t0.ElapsedMilliseconds;
         _wslProcess = SpawnGuestProcess();
+        Phase("spawn", t0.ElapsedMilliseconds - phaseStart);
+
+        // Persist the per-phase log so the user can inspect what
+        // dominated boot time. Best-effort; the file is small.
+        try
+        {
+            Directory.CreateDirectory(_effectiveInstallPath);
+            await File.WriteAllTextAsync(
+                Path.Combine(_effectiveInstallPath, "wsl-timings.log"),
+                phaseLog.ToString(), ct).ConfigureAwait(false);
+        }
+        catch { /* best-effort */ }
+        LastTimings = phaseLog.ToString();
+    }
+
+    /// <summary>
+    /// Phase-by-phase timings from the most recent <see cref="StartAsync"/>.
+    /// Populated even on failure (partial log). Useful for the UI to
+    /// surface "import 11200 ms" vs "spawn 320 ms" so users can see
+    /// where time goes.
+    /// </summary>
+    public string LastTimings { get; private set; } = "";
+
+    /// <summary>
+    /// For each entry in <see cref="WslSessionConfig.SharedFolderPaths"/>,
+    /// create a symlink at <c>/home/&lt;user&gt;/&lt;basename&gt;</c>
+    /// pointing into the WSL-mounted DrvFs path. Uses <c>wslpath -u</c>
+    /// inside the distro to translate Windows paths so quirks (UNC,
+    /// mapped drives, case) are handled by WSL's own translator.
+    /// Best-effort: a single failed share logs and continues, so a
+    /// dangling host path doesn't block the rest of the session.
+    /// </summary>
+    private async Task MountSharedFoldersAsync(CancellationToken ct)
+    {
+        // Build one shell command that translates and links every
+        // share. Doing this in a single sh -c invocation amortises
+        // the wsl.exe spawn cost and keeps ordering deterministic.
+        var script = new StringBuilder();
+        script.Append("set -e; ");
+        var seenBasenames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var winPath in _cfg.SharedFolderPaths)
+        {
+            if (string.IsNullOrWhiteSpace(winPath)) continue;
+            var basename = SafeBasename(winPath);
+            // Dedup so two host paths that share a basename don't
+            // race over the same link target. The first one wins;
+            // the duplicate is logged on the host side.
+            if (!seenBasenames.Add(basename)) continue;
+            // Single-quote the Windows path for shell, escape any
+            // existing single quotes per shell convention. Path
+            // separators stay as backslashes — wslpath handles them.
+            var quoted = "'" + winPath.Replace("'", "'\\''") + "'";
+            // mkdir -p the parent (always /home/<user>); then ln -sfn.
+            // ln -s (no -f) would fail if the target exists from a
+            // prior run; -f -n replaces atomically and won't follow
+            // an existing symlink as a directory.
+            script.Append($"target=$(wslpath -u {quoted}); ")
+                  .Append($"if [ -d \"$target\" ]; then ")
+                  .Append($"ln -sfn \"$target\" \"/home/{_cfg.GuestUser}/{basename}\"; ")
+                  .Append($"else echo \"[bromure] share missing: $target\" >&2; fi; ");
+        }
+        if (script.Length == "set -e; ".Length) return;  // nothing to do
+
+        // Append `ls` of the home dir afterwards so the log captures
+        // exactly which symlinks ended up in place — the most useful
+        // signal when debugging "shares didn't show up".
+        script.Append($"echo '--- /home/{_cfg.GuestUser} after mount ---'; ")
+              .Append($"ls -la /home/{_cfg.GuestUser} | grep -E '^l' || echo '(no symlinks)'; ");
+        // Pipe the script via stdin to `bash -s` instead of passing
+        // it as `bash -c <script>`. wsl.exe mangles `$var` references
+        // inside argv passed after `--` — empirically the script's
+        // command substitutions and parameter expansions return empty
+        // strings when delivered via -c. Stdin avoids the argv path
+        // entirely.
+        var argList = new List<string>
+        {
+            "-d", _effectiveDistroName,
+            "--user", _cfg.GuestUser,
+            "--",
+            "bash", "-s",
+        };
+        using var scriptStream = new MemoryStream(Encoding.UTF8.GetBytes(script.ToString()));
+        var sh = await WslCli.RunAsync(argList, ct, stdinSource: scriptStream).ConfigureAwait(false);
+        // Always log the result (success or failure) so users can
+        // verify the mount step ran. The file is small (a few hundred
+        // bytes) and lives next to wsl-stderr.log so the inspector
+        // shows them together.
+        try
+        {
+            var logPath = Path.Combine(_effectiveInstallPath, "wsl-shares.log");
+            Directory.CreateDirectory(_effectiveInstallPath);
+            await File.WriteAllTextAsync(logPath,
+                $"shares={_cfg.SharedFolderPaths.Count}\n" +
+                $"distro={_effectiveDistroName}\n" +
+                $"exit={sh.ExitCode}\n" +
+                $"--- script ---\n{script}\n" +
+                $"--- stdout ---\n{sh.Stdout}\n" +
+                $"--- stderr ---\n{sh.Stderr}\n",
+                ct).ConfigureAwait(false);
+        }
+        catch { /* best-effort */ }
+    }
+
+    /// <summary>
+    /// Extract a Linux-safe basename from a Windows folder path.
+    /// Strips trailing separators, trims path-illegal characters, and
+    /// falls back to "share" if nothing usable is left.
+    /// </summary>
+    internal static string SafeBasename(string winPath)
+    {
+        var trimmed = winPath.TrimEnd('\\', '/');
+        var lastSep = trimmed.LastIndexOfAny(new[] { '\\', '/' });
+        var raw = lastSep >= 0 ? trimmed[(lastSep + 1)..] : trimmed;
+        // Drop chars that are awkward in a Linux path / shell quoting:
+        // null byte, slash (already split), control characters.
+        var sb = new StringBuilder(raw.Length);
+        foreach (var c in raw)
+        {
+            if (c == '/' || c == '\\' || c == '\0' || c < 0x20) continue;
+            sb.Append(c);
+        }
+        var clean = sb.ToString().Trim();
+        return clean.Length == 0 ? "share" : clean;
     }
 
     private async Task DropHomeOverlayAsync(CancellationToken ct)
@@ -101,7 +270,7 @@ public sealed class WslSession : IAsyncDisposable
         // WSL2 mounts the distro filesystem read-write to Windows —
         // much cleaner than tar-extracting inside the distro like the
         // QEMU port had to.
-        var homeRoot = $@"\\wsl$\{_cfg.DistroName}\home\{_cfg.GuestUser}";
+        var homeRoot = $@"\\wsl$\{_effectiveDistroName}\home\{_cfg.GuestUser}";
 
         // The distro might still be spinning up systemd at first
         // touch — give it a couple of seconds to mount. Run the
@@ -146,7 +315,7 @@ public sealed class WslSession : IAsyncDisposable
         // already created the bromure subdirectory at bake time.
         var argList = new List<string>
         {
-            "-d", _cfg.DistroName,
+            "-d", _effectiveDistroName,
             "--user", "root",
             "--",
             "tee", "/usr/local/share/ca-certificates/bromure/bromure-ca.crt",
@@ -172,7 +341,7 @@ public sealed class WslSession : IAsyncDisposable
         // into the distro's environment.
         var argList = new List<string>
         {
-            "-d", _cfg.DistroName,
+            "-d", _effectiveDistroName,
             "--user", _cfg.GuestUser,
             "--cd", $"/home/{_cfg.GuestUser}",
             "--",
@@ -239,8 +408,8 @@ public sealed class WslSession : IAsyncDisposable
         // Drain stderr/stdout into a per-session log file alongside the
         // distro's install path. Async — runs for the lifetime of the
         // wsl.exe process. A blocking read would freeze us.
-        var logPath = Path.Combine(_cfg.InstallPath, "wsl-stderr.log");
-        try { Directory.CreateDirectory(_cfg.InstallPath); } catch { }
+        var logPath = Path.Combine(_effectiveInstallPath, "wsl-stderr.log");
+        try { Directory.CreateDirectory(_effectiveInstallPath); } catch { }
         _ = Task.Run(async () =>
         {
             try
@@ -355,4 +524,21 @@ public sealed record WslSessionConfig
     /// and trusted via <c>update-ca-certificates</c>. Null skips the
     /// install (useful for smoke tests against a real upstream).</summary>
     public byte[]? BromureCaPem { get; init; }
+
+    /// <summary>
+    /// Absolute Windows folder paths to expose inside the distro. Each
+    /// path appears at <c>/home/&lt;GuestUser&gt;/&lt;basename&gt;</c>
+    /// as a symlink into the WSL-mounted DrvFs (<c>/mnt/c/...</c>).
+    /// Mirrors the macOS port's VirtioFS share-at-/home/ubuntu/&lt;basename&gt;
+    /// behavior. Empty → no shares.
+    /// </summary>
+    public IReadOnlyList<string> SharedFolderPaths { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Pre-imported distro from the warm pool. When set, the session
+    /// adopts it instead of running <c>wsl --import</c>; the session's
+    /// effective name + install path are taken from the warm distro.
+    /// Null → cold import (the original code path; ~8–15 s slower).
+    /// </summary>
+    public WarmDistro? WarmDistro { get; init; }
 }

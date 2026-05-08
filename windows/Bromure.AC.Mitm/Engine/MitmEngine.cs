@@ -81,6 +81,14 @@ public sealed class MitmEngine : IAsyncDisposable
     /// <summary>Fires after a successful /oauth/token response rewrite.</summary>
     public Action<Guid, OAuthRotationProvider, StoredOAuthTokens>? OAuthRotated { get; set; }
 
+    /// <summary>
+    /// Cloud event sink. The proxy emits one
+    /// <c>credential.token_swap</c> event per fake → real
+    /// substitution for the audit trail. Caller wires this to a
+    /// <c>CloudEventEmitter</c>.
+    /// </summary>
+    public Action<Guid, string, System.Text.Json.Nodes.JsonObject>? OnCloudEvent { get; set; }
+
     private const string FakeSaltBlobName = "ac-fake-token-salt-v1";
 
     public MitmEngine(
@@ -140,7 +148,12 @@ public sealed class MitmEngine : IAsyncDisposable
     /// </summary>
     public async Task<HttpMitmProxy> RegisterAsync(Guid profileId, System.Net.IPEndPoint listenEndpoint, CancellationToken ct = default)
     {
-        var proxy = new HttpMitmProxy(profileId, Swapper, AwsResigner, CertCache, TraceStore, _log);
+        var proxy = new HttpMitmProxy(profileId, Swapper, AwsResigner, CertCache, TraceStore,
+            ClientIdentities, ClusterCaTrust,
+            consent: Consent,
+            sessionTraceProvider: () => GetSessionTrace(profileId),
+            onCloudEvent: OnCloudEvent,
+            log: _log);
         await proxy.StartAsync(listenEndpoint, ct).ConfigureAwait(false);
         _proxies[profileId] = proxy;
         return proxy;

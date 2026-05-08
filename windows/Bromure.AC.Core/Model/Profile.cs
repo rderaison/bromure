@@ -43,6 +43,11 @@ public sealed class Profile
     /// </summary>
     public string? SshPublicKey { get; set; }
 
+    /// <summary>Git identity written to ~/.gitconfig at session start.
+    /// Empty string → that field is omitted from the generated file.</summary>
+    public string GitUserName { get; set; } = "";
+    public string GitUserEmail { get; set; } = "";
+
     public List<GitHttpsCredential> GitHttpsCredentials { get; set; } = new();
     public List<ManualToken> ManualTokens { get; set; } = new();
     public List<ImportedSshKey> ImportedSshKeys { get; set; } = new();
@@ -59,6 +64,16 @@ public sealed class Profile
     public AwsCredentialsConfig Aws { get; set; } = new();
     public string? DigitalOceanToken { get; set; }
     public bool DigitalOceanRequiresApproval { get; set; }
+
+    /// <summary>
+    /// Route Claude Code through AWS Bedrock instead of Anthropic
+    /// directly. Mirrors the macOS port. When true, the session
+    /// drops a ~/.claude/settings.json that sets
+    /// <c>CLAUDE_CODE_USE_BEDROCK=1</c> + AWS_PROFILE/AWS_REGION/
+    /// ANTHROPIC_MODEL.
+    /// </summary>
+    public bool BedrockEnabled { get; set; }
+    public string BedrockModelID { get; set; } = "";
 
     /// <summary>
     /// "Real" OAuth tokens we previously pulled out of the VM via the
