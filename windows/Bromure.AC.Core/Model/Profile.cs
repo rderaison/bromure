@@ -1,4 +1,5 @@
 // macos-source: Sources/AgentCoding/Profile.swift @ 5feff2fd78b5
+using System.Collections.ObjectModel;
 using System.Text.Json.Serialization;
 
 namespace Bromure.AC.Core.Model;
@@ -32,10 +33,10 @@ public sealed class Profile
     public bool ApiKeyRequiresApproval { get; set; }
 
     /// <summary>Other coding agents pre-configured but not auto-launched.</summary>
-    public List<ToolSpec> AdditionalTools { get; set; } = new();
+    public ObservableCollection<ToolSpec> AdditionalTools { get; set; } = new();
 
     /// <summary>Absolute host paths shared into the VM (capped at 8).</summary>
-    public List<string> FolderPaths { get; set; } = new();
+    public ObservableCollection<string> FolderPaths { get; set; } = new();
 
     /// <summary>
     /// Public half of the SSH key generated for this profile, for the
@@ -48,12 +49,16 @@ public sealed class Profile
     public string GitUserName { get; set; } = "";
     public string GitUserEmail { get; set; } = "";
 
-    public List<GitHttpsCredential> GitHttpsCredentials { get; set; } = new();
-    public List<ManualToken> ManualTokens { get; set; } = new();
-    public List<ImportedSshKey> ImportedSshKeys { get; set; } = new();
-    public List<KubeconfigEntry> Kubeconfigs { get; set; } = new();
-    public List<DockerRegistryCredential> DockerRegistries { get; set; } = new();
-    public List<EnvironmentVariable> EnvironmentVariables { get; set; } = new();
+    // Observable so the editor's ItemsControls re-render when the
+    // Add* commands push a new entry. Plain List<T> doesn't fire
+    // CollectionChanged → buttons appeared broken because the new
+    // row never showed.
+    public ObservableCollection<GitHttpsCredential> GitHttpsCredentials { get; set; } = new();
+    public ObservableCollection<ManualToken> ManualTokens { get; set; } = new();
+    public ObservableCollection<ImportedSshKey> ImportedSshKeys { get; set; } = new();
+    public ObservableCollection<KubeconfigEntry> Kubeconfigs { get; set; } = new();
+    public ObservableCollection<DockerRegistryCredential> DockerRegistries { get; set; } = new();
+    public ObservableCollection<EnvironmentVariable> EnvironmentVariables { get; set; } = new();
 
     /// <summary>
     /// Always non-null — the editor's AWS tab two-way-binds against

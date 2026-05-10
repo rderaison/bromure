@@ -151,9 +151,9 @@ public sealed class ProfileStore
             AuthMode = t.AuthMode,
             ApiKey = t.ApiKey,
             ApiKeyRequiresApproval = t.ApiKeyRequiresApproval,
-            AdditionalTools = new List<ToolSpec>(t.AdditionalTools),
-            FolderPaths = new List<string>(t.FolderPaths),
-            EnvironmentVariables = new List<EnvironmentVariable>(t.EnvironmentVariables),
+            AdditionalTools = new System.Collections.ObjectModel.ObservableCollection<ToolSpec>(t.AdditionalTools),
+            FolderPaths = new System.Collections.ObjectModel.ObservableCollection<string>(t.FolderPaths),
+            EnvironmentVariables = new System.Collections.ObjectModel.ObservableCollection<EnvironmentVariable>(t.EnvironmentVariables),
             TraceLevel = t.TraceLevel,
             PrivateMode = t.PrivateMode,
         };

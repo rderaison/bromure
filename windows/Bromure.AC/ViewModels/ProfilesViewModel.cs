@@ -4,6 +4,8 @@ using System.Windows;
 using Microsoft.Win32;
 using Bromure.AC.Common;
 using Bromure.AC.Core.Model;
+using Bromure.AC.Core.Ssh;
+using Bromure.Platform;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -22,6 +24,13 @@ namespace Bromure.AC.ViewModels;
 public sealed partial class ProfilesViewModel : ObservableObject
 {
     private readonly ProfileStore _store;
+    private readonly IAppPaths? _paths;
+
+    /// <summary>True when the view should hide the profile picker
+    /// (left column) and show only the editor for the selected
+    /// profile. Set by <c>ProfileEditorWindow</c>; default false for
+    /// the main pane that wants the full picker UI.</summary>
+    [ObservableProperty] private bool _editorOnly;
 
     public ObservableCollection<Profile> Profiles { get; } = new();
 
@@ -45,9 +54,10 @@ public sealed partial class ProfilesViewModel : ObservableObject
     public SimpleRelayCommand<EnvironmentVariable> RemoveEnvCommand { get; }
     public SimpleRelayCommand<string> RemoveFolderCommand { get; }
 
-    public ProfilesViewModel(ProfileStore store)
+    public ProfilesViewModel(ProfileStore store, IAppPaths? paths = null)
     {
         _store = store;
+        _paths = paths;
         RemoveGitCommand    = new SimpleRelayCommand<GitHttpsCredential>(g => RemoveAndSave(p => p.GitHttpsCredentials.Remove(g)));
         RemoveManualCommand = new SimpleRelayCommand<ManualToken>(m => RemoveAndSave(p => p.ManualTokens.Remove(m)));
         RemoveDockerCommand = new SimpleRelayCommand<DockerRegistryCredential>(d => RemoveAndSave(p => p.DockerRegistries.Remove(d)));
@@ -68,6 +78,14 @@ public sealed partial class ProfilesViewModel : ObservableObject
             // `"aws": null`, materialise an empty config so the
             // editor's AWS tab can two-way bind into it.
             p.Aws ??= new AwsCredentialsConfig();
+            // Lazy-mint the SSH keypair for older profiles that
+            // predate the auto-gen flow. New profiles get one in
+            // AddProfile; this catches the upgrade path.
+            if (_paths is not null && string.IsNullOrEmpty(p.SshPublicKey))
+            {
+                ProfileSshKey.EnsureExists(_paths, p);
+                _store.Save(p);
+            }
             Profiles.Add(p);
         }
         if (Profiles.Count == 0)
@@ -96,6 +114,9 @@ public sealed partial class ProfilesViewModel : ObservableObject
             AuthMode = AuthMode.Token,
             Color = ProfileColor.Blue,
         };
+        // Mint a fresh ed25519 keypair on creation. Mirrors the
+        // macOS ProfileEditView's `generateSSH` initial-state.
+        if (_paths is not null) ProfileSshKey.EnsureExists(_paths, p);
         _store.Save(p);
         Profiles.Add(p);
         Selected = p;
@@ -106,9 +127,40 @@ public sealed partial class ProfilesViewModel : ObservableObject
     {
         if (Selected is null) return;
         if (Profiles.Count <= 1) return;
-        _store.Delete(Selected.Id);
+        var doomedId = Selected.Id;
+        _store.Delete(doomedId);
         Profiles.Remove(Selected);
+        if (_paths is not null) ProfileSshKey.Delete(_paths, doomedId);
         Selected = Profiles.FirstOrDefault();
+    }
+
+    /// <summary>Generate (or re-generate) the profile's ed25519
+    /// keypair. Confirms first when a key already exists — rotating
+    /// invalidates anything authorised against the old public half
+    /// (GitHub deploy keys, ~/.ssh/authorized_keys entries).</summary>
+    [RelayCommand]
+    private void RegenerateSshKey()
+    {
+        if (Selected is null || _paths is null) return;
+        if (!string.IsNullOrEmpty(Selected.SshPublicKey))
+        {
+            var ok = MessageBox.Show(
+                "Replacing the keypair invalidates anywhere the current public key has been authorised " +
+                "(GitHub deploy keys, ~/.ssh/authorized_keys, etc.).\n\nGenerate a new keypair anyway?",
+                "Bromure AC", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
+            if (ok != MessageBoxResult.OK) return;
+        }
+        ProfileSshKey.EnsureExists(_paths, Selected, force: true);
+        _store.Save(Selected);
+        OnPropertyChanged(nameof(Selected));
+    }
+
+    [RelayCommand]
+    private void CopySshPublicKey()
+    {
+        if (string.IsNullOrEmpty(Selected?.SshPublicKey)) return;
+        try { Clipboard.SetText(Selected.SshPublicKey); }
+        catch { /* Clipboard can briefly throw; user can retry. */ }
     }
 
     [RelayCommand]

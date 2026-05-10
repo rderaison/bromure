@@ -6,13 +6,17 @@
              Foreground="{StaticResource TextPrimary}">
     <Grid>
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="240"/>
+            <ColumnDefinition Width="240" x:Name="PickerColumn"/>
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 
-        <!-- LEFT: profile list -->
+        <!-- LEFT: profile list. Hidden by ProfilesView code-behind
+             when EditorOnly is set on the bound view-model — that
+             flag is true for the ProfileEditorWindow popup so the
+             user only sees the one profile they clicked Edit on. -->
         <Border Grid.Column="0" Background="{StaticResource PanelBackground}"
-                BorderBrush="#22FFFFFF" BorderThickness="0,0,1,0">
+                BorderBrush="#22000000" BorderThickness="0,0,1,0"
+                Visibility="{Binding EditorOnly, Converter={StaticResource InverseBoolToVis}}">
             <DockPanel>
                 <Grid DockPanel.Dock="Top" Margin="14,18,14,8">
                     <Grid.ColumnDefinitions>
@@ -62,7 +66,7 @@
 
             <!-- Header strip -->
             <Border Grid.Row="0" Background="{StaticResource PanelBackground}"
-                    BorderBrush="#22FFFFFF" BorderThickness="0,0,0,1"
+                    BorderBrush="#22000000" BorderThickness="0,0,0,1"
                     Padding="32,18">
                 <Grid>
                     <Grid.ColumnDefinitions>
@@ -311,7 +315,7 @@
                                         <ItemsControl ItemsSource="{Binding GitHttpsCredentials}">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <Border Background="#0B0B0E" CornerRadius="4"
+                                                    <Border Background="#F2F2F4" CornerRadius="4"
                                                             Padding="12" Margin="0,4">
                                                         <Grid>
                                                             <Grid.ColumnDefinitions>
@@ -374,7 +378,7 @@
                                         <ItemsControl ItemsSource="{Binding ManualTokens}">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <Border Background="#0B0B0E" CornerRadius="4"
+                                                    <Border Background="#F2F2F4" CornerRadius="4"
                                                             Padding="12" Margin="0,4">
                                                         <Grid>
                                                             <Grid.ColumnDefinitions>
@@ -438,7 +442,7 @@
                                         <ItemsControl ItemsSource="{Binding DockerRegistries}">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <Border Background="#0B0B0E" CornerRadius="4"
+                                                    <Border Background="#F2F2F4" CornerRadius="4"
                                                             Padding="12" Margin="0,4">
                                                         <Grid>
                                                             <Grid.ColumnDefinitions>
@@ -502,7 +506,7 @@
                                         <ItemsControl ItemsSource="{Binding Kubeconfigs}">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <Border Background="#0B0B0E" CornerRadius="4"
+                                                    <Border Background="#F2F2F4" CornerRadius="4"
                                                             Padding="12" Margin="0,4">
                                                         <Grid>
                                                             <Grid.ColumnDefinitions>
@@ -554,6 +558,39 @@
                                 </Border>
                             </Expander>
 
+                            <!-- Profile SSH key (auto-generated) ................. -->
+                            <Expander Header="Profile SSH key" IsExpanded="True" Margin="0,8,0,8">
+                                <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                                   TextWrapping="Wrap" Margin="0,0,0,12">
+                                            Per-profile ed25519 keypair. The private seed lives only on
+                                            the host (in the agent dir); the guest sees the public key
+                                            via the forwarded ssh-agent. Paste the public key into
+                                            github.com/settings/keys to use the agent for git over SSH.
+                                        </TextBlock>
+                                        <Border Background="#F2F2F4" CornerRadius="4" Padding="12">
+                                            <TextBox FontFamily="Consolas" FontSize="11"
+                                                     IsReadOnly="True" BorderThickness="0"
+                                                     Background="Transparent"
+                                                     TextWrapping="Wrap"
+                                                     Text="{Binding SshPublicKey, Mode=OneWay, FallbackValue='(no key)'}"/>
+                                        </Border>
+                                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                            <Button Content="Copy public key"
+                                                    Style="{StaticResource AccentButton}"
+                                                    Command="{Binding DataContext.CopySshPublicKeyCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                    Margin="0,0,8,0"/>
+                                            <Button Content="Regenerate keypair"
+                                                    Style="{StaticResource DangerButton}"
+                                                    Command="{Binding DataContext.RegenerateSshKeyCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
                             <!-- Imported SSH keys ................................ -->
                             <Expander Header="Imported SSH keys" Margin="0,8,0,8">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
@@ -567,7 +604,7 @@
                                         <ItemsControl ItemsSource="{Binding ImportedSshKeys}">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <Border Background="#0B0B0E" CornerRadius="4"
+                                                    <Border Background="#F2F2F4" CornerRadius="4"
                                                             Padding="12" Margin="0,4">
                                                         <Grid>
                                                             <Grid.ColumnDefinitions>
@@ -661,7 +698,7 @@
 
             <!-- Footer hint -->
             <Border Grid.Row="2" Background="{StaticResource PanelBackground}"
-                    BorderBrush="#22FFFFFF" BorderThickness="0,1,0,0"
+                    BorderBrush="#22000000" BorderThickness="0,1,0,0"
                     Padding="32,10">
                 <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
                            TextWrapping="Wrap">

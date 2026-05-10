@@ -17,7 +17,7 @@ public class ProfileStoreTests
             Tool = AgentTool.Claude,
             AuthMode = AuthMode.Token,
             ApiKey = "sk-test",
-            FolderPaths = new List<string> { @"C:\src" },
+            FolderPaths = new() { @"C:\src" },
             ManualTokens = new()
             {
                 new ManualToken

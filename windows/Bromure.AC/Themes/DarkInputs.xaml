@@ -3,31 +3,26 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!--
-        App-wide dark-theme styles for input controls. WPF's default
-        ControlTemplates ignore Foreground/Background setters set on
-        the control directly (the template hard-codes SystemColors)
-        which is why the previous Profile editor showed black-on-black
-        text. These styles override the templates so dark colours
-        propagate to the inner editing surface.
+        App-wide input-control templates. WPF's default
+        ControlTemplates ignore Foreground/Background setters on the
+        control directly (the template hard-codes SystemColors) — so
+        we rebuild the templates and read colours from the App.xaml
+        light theme. Without these templates the editor renders
+        invisible text (default-light text on default-light input).
 
-        Implicit (no x:Key) — applies to every TextBox / PasswordBox /
-        ComboBox / ListBox / Expander / DataGrid in the app unless
-        overridden locally.
+        Filename is historical ("DarkInputs"); colours are light-themed
+        to match App.xaml's master palette.
     -->
 
-    <!-- Shared brushes referenced from these templates. The App.xaml
-         master copies are SolidColorBrush; alias them here so the
-         resource lookup hits without re-defining colours. -->
-    <Color x:Key="ChromeColor">#0F0F12</Color>
-    <Color x:Key="PanelColor">#16161B</Color>
-    <Color x:Key="InputBackColor">#1E1E24</Color>
-    <Color x:Key="InputBorderColor">#33FFFFFF</Color>
-    <Color x:Key="InputFocusBorderColor">#7B4DFF</Color>
-    <Color x:Key="InputHoverBorderColor">#55FFFFFF</Color>
-    <Color x:Key="TextPrimaryColor">#F5F5F8</Color>
-    <Color x:Key="TextSecondaryColor">#A0A0AA</Color>
-    <Color x:Key="SelectionColor">#7B4DFF</Color>
-    <Color x:Key="DisabledColor">#3A3A40</Color>
+    <!-- Local colour aliases — kept in sync with App.xaml's master
+         palette. Defined here as plain Colors so the SolidColorBrush
+         resources below can hold them by reference. -->
+    <Color x:Key="InputBackColor">#FFFFFF</Color>
+    <Color x:Key="InputBorderColor">#D1D1D6</Color>
+    <Color x:Key="InputFocusBorderColor">#0A84FF</Color>
+    <Color x:Key="InputHoverBorderColor">#A0A0A8</Color>
+    <Color x:Key="SelectionColor">#0A84FF</Color>
+    <Color x:Key="DisabledColor">#C7C7CC</Color>
 
     <SolidColorBrush x:Key="InputBackBrush"        Color="{StaticResource InputBackColor}"/>
     <SolidColorBrush x:Key="InputBorderBrush"      Color="{StaticResource InputBorderColor}"/>
@@ -38,7 +33,7 @@
          synthesise from SelectionColor inside a Setter Value (it parses
          as a brush string at template-load time) so we keep it as a
          separate Color resource. -->
-    <SolidColorBrush x:Key="SelectionTintBrush"    Color="#337B4DFF"/>
+    <SolidColorBrush x:Key="SelectionTintBrush"    Color="#330A84FF"/>
 
     <!-- TextBox: rebuild the template entirely so Background/Foreground
          setters reach the editing surface. -->
@@ -155,7 +150,7 @@
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="bd" Property="Background" Value="#22FFFFFF"/>
+                            <Setter TargetName="bd" Property="Background" Value="#15000000"/>
                         </Trigger>
                         <Trigger Property="IsHighlighted" Value="True">
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource SelectionBrush}"/>
@@ -279,7 +274,7 @@
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="bd" Property="Background" Value="#15FFFFFF"/>
+                            <Setter TargetName="bd" Property="Background" Value="#10000000"/>
                         </Trigger>
                         <Trigger Property="IsSelected" Value="True">
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource SelectionTintBrush}"/>
@@ -391,14 +386,14 @@
         <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="GridLinesVisibility" Value="Horizontal"/>
-        <Setter Property="HorizontalGridLinesBrush" Value="#22FFFFFF"/>
+        <Setter Property="HorizontalGridLinesBrush" Value="#22000000"/>
         <Setter Property="HeadersVisibility" Value="Column"/>
         <Setter Property="RowBackground" Value="Transparent"/>
-        <Setter Property="AlternatingRowBackground" Value="#11FFFFFF"/>
+        <Setter Property="AlternatingRowBackground" Value="#08000000"/>
         <Setter Property="ColumnHeaderHeight" Value="32"/>
     </Style>
     <Style TargetType="DataGridColumnHeader">
-        <Setter Property="Background" Value="#0B0B0E"/>
+        <Setter Property="Background" Value="#E8E8EC"/>
         <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
         <Setter Property="FontSize" Value="11"/>
@@ -434,9 +429,12 @@
         <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
     </Style>
 
-    <!-- Buttons — replace WPF's pale grey default with our accent shape. -->
+    <!-- Buttons — light-theme default. Background reads from the
+         master BorderBrush (a soft grey) so buttons are visible on
+         both white panels and the slightly-darker chrome. Hover +
+         pressed darken the surface. -->
     <Style TargetType="Button">
-        <Setter Property="Background" Value="#22FFFFFF"/>
+        <Setter Property="Background" Value="#E8E8EC"/>
         <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="12,6"/>
@@ -451,10 +449,10 @@
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="bd" Property="Background" Value="#33FFFFFF"/>
+                            <Setter TargetName="bd" Property="Background" Value="#D8D8DC"/>
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="bd" Property="Background" Value="#11FFFFFF"/>
+                            <Setter TargetName="bd" Property="Background" Value="#C7C7CC"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter Property="Opacity" Value="0.45"/>
@@ -465,14 +463,16 @@
         </Setter>
     </Style>
 
-    <!-- Accent button — opt-in via Style="{StaticResource Accent}". -->
+    <!-- Accent button — Apple-style filled blue. White text reads
+         on the saturated background regardless of light/dark. -->
     <Style x:Key="AccentButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
         <Setter Property="Background" Value="{DynamicResource AccentBrush}"/>
+        <Setter Property="Foreground" Value="#FFFFFF"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
     </Style>
-    <!-- Danger button -->
+    <!-- Danger button — pale red surface, danger-coloured text. -->
     <Style x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-        <Setter Property="Background" Value="#3AE14D5C"/>
+        <Setter Property="Background" Value="#FFE5E5"/>
         <Setter Property="Foreground" Value="{DynamicResource DangerBrush}"/>
     </Style>
 

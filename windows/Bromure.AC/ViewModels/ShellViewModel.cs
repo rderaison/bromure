@@ -110,7 +110,7 @@ public sealed partial class ShellViewModel : ObservableObject
         Baker = null;
         BakeOverlay = null;
 
-        ProfilesPane = new ProfilesViewModel(profileStore);
+        ProfilesPane = new ProfilesViewModel(profileStore, _services.Paths);
         TraceInspectorPane = new TraceInspectorViewModel(_engine.TraceStore);
         ApprovalsPane = new ApprovalsViewModel(_engine.Consent);
         SettingsPane = new SettingsViewModel(_services.Paths, enrollment, _engine, _services.Settings, baker: null)
@@ -134,19 +134,32 @@ public sealed partial class ShellViewModel : ObservableObject
             warmPool: _warmPool,
             onEdit: profile =>
             {
-                // Pre-select the profile in the editor view-model, then
-                // open a separate window with that as the DataContext —
-                // mirrors the macOS port's editorWindow.
-                ProfilesPane.Selected = ProfilesPane.Profiles.FirstOrDefault(p => p.Id == profile.Id);
+                // Open the editor on a fresh, single-profile VM so the
+                // popup shows ONLY this profile — no picker, no Add,
+                // no risk of editing a different one. Mirrors the
+                // macOS port's modal editorWindow. Saves go through
+                // the same ProfileStore so the main pane re-reads the
+                // updated entry on close.
+                var pvm = new ProfilesViewModel(_profileStore, _services.Paths)
+                {
+                    EditorOnly = true,
+                };
+                var fresh = pvm.Profiles.FirstOrDefault(p => p.Id == profile.Id);
+                if (fresh is not null) pvm.Selected = fresh;
                 var editor = new Views.ProfileEditorWindow
                 {
-                    DataContext = ProfilesPane,
+                    DataContext = pvm,
                     Owner = System.Windows.Application.Current.MainWindow,
+                    Title = $"Edit profile — {profile.Name}",
                 };
                 editor.Show();
-                // Refresh the picker after the editor closes so name /
-                // colour / status changes show up immediately.
-                editor.Closed += (_, _) => SessionsPane!.Reload();
+                editor.Closed += (_, _) =>
+                {
+                    // Re-read both panes so name / colour / status /
+                    // SSH key changes propagate.
+                    ProfilesPane.Reload();
+                    SessionsPane!.Reload();
+                };
             });
 
         _selectedNavigation = Navigation[0];
@@ -199,7 +212,10 @@ public sealed partial class ShellViewModel : ObservableObject
         // edits don't surprise the regular profile picker. The generic
         // editor view binds to ObservableCollection<Profile> so we
         // present a single-element list with the template selected.
-        var pvm = new ProfilesViewModel(_profileStore);
+        var pvm = new ProfilesViewModel(_profileStore, _services.Paths)
+        {
+            EditorOnly = true,
+        };
         pvm.Profiles.Clear();
         pvm.Profiles.Add(template);
         pvm.Selected = template;

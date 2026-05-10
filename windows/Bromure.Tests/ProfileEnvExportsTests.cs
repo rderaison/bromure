@@ -94,7 +94,7 @@ public class ProfileEnvExportsTests
         {
             Tool = AgentTool.Claude,
             ApiKey = "claude-primary",
-            AdditionalTools = new List<ToolSpec>
+            AdditionalTools = new()
             {
                 new() { Tool = AgentTool.Codex, ApiKey = "codex-secondary" },
             },
