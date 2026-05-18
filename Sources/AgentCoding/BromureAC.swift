@@ -3235,7 +3235,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     } catch { /* keep stale token */ }
                     sem.signal()
                 }
-                sem.wait(timeout: .now() + 10)
+                _ = sem.wait(timeout: .now() + 10)
                 profile.mcpServers[i].oauthState = oauth
             }
             profile.mcpServers[i].bearerToken = oauth.accessToken
