@@ -116,7 +116,7 @@ private actor MCPServerImpl {
                  [:]),
             tool("bromure_open_session",
                  "Open a new sandboxed browser session. Returns the session ID.",
-                 ["profile": prop("string", "Profile name", required: true),
+                 ["profile": prop("string", "Profile name. If omitted, uses the only profile if there's exactly one; otherwise the error lists available profiles."),
                   "url": prop("string", "Initial URL to navigate to")]),
             tool("bromure_close_session",
                  "Close and destroy a browser session.",
@@ -126,10 +126,13 @@ private actor MCPServerImpl {
                  ["sessionId": prop("string", "Session ID", required: true),
                   "url": prop("string", "URL to navigate to", required: true)]),
             tool("bromure_screenshot",
-                 "Take a screenshot of the current page. Returns base64-encoded PNG.",
+                 "Take a screenshot of the current page. By default returns the PNG inline (visible to the agent); pass outputPath to save it to disk instead.",
                  ["sessionId": prop("string", "Session ID", required: true),
-                  "fullPage": prop("boolean", "Capture full scrollable page"),
-                  "selector": prop("string", "CSS selector of element to screenshot")]),
+                  "fullPage": prop("boolean", "Capture full scrollable page (uses captureBeyondViewport)"),
+                  "selector": prop("string", "CSS selector of element to screenshot (overrides fullPage)"),
+                  "outputPath": prop("string", "Absolute or tilde-prefixed path on the host (e.g. ~/screens/page.png). When set, the file is written and the tool returns a text confirmation instead of the inline image."),
+                  "viewport": prop("object", "Set the page viewport before capturing, e.g. {\"width\":1920,\"height\":1080}. Sticky for the session until changed; pass {\"width\":0,\"height\":0} to clear and return to native."),
+                  "dismissBanners": prop("boolean", "Try to click common cookie/consent/paywall dismiss buttons before capturing (best-effort, curated selector list).")]),
             tool("bromure_click",
                  "Click an element on the page by CSS selector.",
                  ["sessionId": prop("string", "Session ID", required: true),
@@ -162,11 +165,11 @@ private actor MCPServerImpl {
             tool("bromure_search",
                  "Search Google and return results. Opens a session, searches, extracts results, closes.",
                  ["query": prop("string", "Search query", required: true),
-                  "profile": prop("string", "Profile name (default: Private Browsing)")]),
+                  "profile": prop("string", "Profile name. If omitted, uses the only profile if there's exactly one; otherwise lists available profiles in the error.")]),
             tool("bromure_get_page",
                  "Fetch a URL and return its text content. Opens, loads, extracts, closes.",
                  ["url": prop("string", "URL to fetch", required: true),
-                  "profile": prop("string", "Profile name (default: Private Browsing)"),
+                  "profile": prop("string", "Profile name. If omitted, uses the only profile if there's exactly one; otherwise lists available profiles in the error."),
                   "selector": prop("string", "CSS selector to extract (default: body)")]),
         ]
         if debug {
@@ -429,6 +432,36 @@ private actor MCPServerImpl {
 
     // MARK: - Session Tools
 
+    /// Fetch available profile names from the automation API.
+    /// Returns names in the order the server reports them.
+    private func fetchProfileNames() async throws -> [String] {
+        let data = try await apiCall("GET", "/profiles")
+        let list = (data["profiles"] as? [[String: Any]]) ?? []
+        return list.compactMap { $0["name"] as? String }
+    }
+
+    /// Resolve a profile name for tools that create their own session.
+    /// - If `requested` matches an existing profile, return it.
+    /// - If `requested` is nil and exactly one profile exists, return it.
+    /// - Otherwise throw with the available list so the agent can self-correct.
+    private func resolveProfile(_ requested: String?) async throws -> String {
+        let names = try await fetchProfileNames()
+        if let r = requested, !r.isEmpty {
+            if names.contains(r) { return r }
+            let avail = names.isEmpty ? "(none)" : names.joined(separator: ", ")
+            throw MCPError.apiFailed("Profile \"\(r)\" not found. Available: \(avail)")
+        }
+        switch names.count {
+        case 0:
+            throw MCPError.apiFailed("No profiles configured. Open Bromure and create a profile first.")
+        case 1:
+            return names[0]
+        default:
+            throw MCPError.apiFailed(
+                "Multiple profiles available — please specify the 'profile' parameter. Available: \(names.joined(separator: ", "))")
+        }
+    }
+
     private func toolListProfiles() async throws -> [String: Any] {
         let data = try await apiCall("GET", "/profiles")
         let profiles = data["profiles"] ?? data
@@ -442,8 +475,7 @@ private actor MCPServerImpl {
     }
 
     private func toolOpenSession(_ args: [String: Any]) async throws -> [String: Any] {
-        let profile = args["profile"] as? String ?? ""
-        guard !profile.isEmpty else { throw MCPError.missingParam("profile") }
+        let profile = try await resolveProfile(args["profile"] as? String)
         var body: [String: Any] = ["profile": profile]
         if let url = args["url"] as? String { body["url"] = url }
 
@@ -481,9 +513,37 @@ private actor MCPServerImpl {
     private func toolScreenshot(_ args: [String: Any]) async throws -> [String: Any] {
         let conn = try await cdp(for: requireSession(args))
         let selector = args["selector"] as? String
+        let fullPage = args["fullPage"] as? Bool ?? false
+        let dismissBanners = args["dismissBanners"] as? Bool ?? false
+        let outputPath = args["outputPath"] as? String
 
+        // viewport: {width, height [, deviceScaleFactor]}
+        // {0,0} clears any existing override and restores native sizing.
+        if let vp = args["viewport"] as? [String: Any] {
+            let w = (vp["width"] as? Int) ?? Int((vp["width"] as? Double) ?? 0)
+            let h = (vp["height"] as? Int) ?? Int((vp["height"] as? Double) ?? 0)
+            if w == 0 && h == 0 {
+                _ = try? await conn.send("Emulation.clearDeviceMetricsOverride", params: [:])
+            } else {
+                let dsf = (vp["deviceScaleFactor"] as? Double) ?? Double(vp["deviceScaleFactor"] as? Int ?? 1)
+                _ = try await conn.send("Emulation.setDeviceMetricsOverride", params: [
+                    "width": w,
+                    "height": h,
+                    "deviceScaleFactor": dsf,
+                    "mobile": false,
+                ])
+            }
+        }
+
+        if dismissBanners {
+            _ = try? await conn.evaluate(Self.dismissBannersJS)
+            // Give the page a beat to settle after the click.
+            try? await Task.sleep(for: .milliseconds(400))
+        }
+
+        let b64: String
         if let selector {
-            // Element screenshot via JS
+            // Element screenshot — clip to bounding rect of the selected element.
             let js = """
                 (() => {
                     const el = document.querySelector(\(jsQuote(selector)));
@@ -501,14 +561,100 @@ private actor MCPServerImpl {
                 "scale": rect["scale"] ?? 1,
             ]
             let result = try await conn.send("Page.captureScreenshot", params: ["format": "png", "clip": clip])
-            let b64 = result["data"] as? String ?? ""
-            return image(b64)
+            b64 = result["data"] as? String ?? ""
+        } else if fullPage {
+            // Full-page capture — query the document's full scroll size,
+            // then clip to that with captureBeyondViewport so we get
+            // everything below the fold in one image.
+            let sizeJS = """
+                (() => {
+                    const e = document.documentElement, b = document.body;
+                    return {
+                        width: Math.max(e.scrollWidth, b ? b.scrollWidth : 0, e.clientWidth),
+                        height: Math.max(e.scrollHeight, b ? b.scrollHeight : 0, e.clientHeight),
+                        scale: window.devicePixelRatio,
+                    };
+                })()
+            """
+            guard let size = try await conn.evaluate(sizeJS) as? [String: Any] else {
+                throw MCPError.apiFailed("Failed to query page size")
+            }
+            let clip: [String: Any] = [
+                "x": 0, "y": 0,
+                "width": size["width"] ?? 0,
+                "height": size["height"] ?? 0,
+                "scale": size["scale"] ?? 1,
+            ]
+            let result = try await conn.send("Page.captureScreenshot", params: [
+                "format": "png",
+                "clip": clip,
+                "captureBeyondViewport": true,
+            ])
+            b64 = result["data"] as? String ?? ""
         } else {
             let result = try await conn.send("Page.captureScreenshot", params: ["format": "png"])
-            let b64 = result["data"] as? String ?? ""
-            return image(b64)
+            b64 = result["data"] as? String ?? ""
         }
+
+        if let outputPath, !outputPath.isEmpty {
+            guard let data = Data(base64Encoded: b64) else {
+                throw MCPError.apiFailed("Screenshot returned no decodable PNG data")
+            }
+            let expanded = (outputPath as NSString).expandingTildeInPath
+            let url = URL(fileURLWithPath: expanded)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            return text("Saved \(data.count) bytes to \(expanded)")
+        }
+        return image(b64)
     }
+
+    /// Best-effort cookie/consent banner dismissal. Tries well-known
+    /// framework selectors first (most reliable), then falls back to
+    /// scanning visible buttons for accept/agree/dismiss text. Stops
+    /// after the first click so we don't dismiss legitimate page UI.
+    private static let dismissBannersJS = """
+        (() => {
+            // Known consent frameworks — high-precision selectors.
+            const knownSelectors = [
+                "#onetrust-accept-btn-handler",
+                "#CybotCookiebotDialogBodyButtonAccept",
+                "#CybotCookiebotDialogBodyLevelButtonAccept",
+                ".truste-button1",
+                ".truste-consent-button",
+                ".qc-cmp2-summary-buttons button[mode='primary']",
+                "[aria-label='AGREE']",
+                "[aria-label='Accept all']",
+                "[data-testid='uc-accept-all-button']",
+                ".fc-cta-consent",
+                ".cookie-accept",
+                "#accept-cookies",
+            ];
+            for (const sel of knownSelectors) {
+                const el = document.querySelector(sel);
+                if (el && el.offsetParent !== null) {
+                    el.click();
+                    return sel;
+                }
+            }
+            // Text-based fallback: visible buttons with accept-like
+            // labels. Walk role=button + native button + native a.
+            const acceptRE = /^(accept|accept all|agree|i agree|i accept|got it|ok|continue|allow all|allow|dismiss|close)$/i;
+            const candidates = Array.from(document.querySelectorAll(
+                "button, [role='button'], a"));
+            for (const el of candidates) {
+                if (el.offsetParent === null) continue;
+                const t = (el.innerText || el.textContent || "").trim();
+                if (t && acceptRE.test(t)) {
+                    el.click();
+                    return t;
+                }
+            }
+            return null;
+        })()
+        """
 
     private func toolClick(_ args: [String: Any]) async throws -> [String: Any] {
         let conn = try await cdp(for: requireSession(args))
@@ -600,7 +746,7 @@ private actor MCPServerImpl {
 
     private func toolSearch(_ args: [String: Any]) async throws -> [String: Any] {
         let query = args["query"] as? String ?? ""
-        let profile = args["profile"] as? String ?? "Private Browsing"
+        let profile = try await resolveProfile(args["profile"] as? String)
         let url = "https://www.google.com/search?q=\(query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query)"
 
         let sess = try await apiCall("POST", "/sessions", body: ["profile": profile, "url": url])
@@ -618,7 +764,7 @@ private actor MCPServerImpl {
 
     private func toolGetPage(_ args: [String: Any]) async throws -> [String: Any] {
         let url = args["url"] as? String ?? ""
-        let profile = args["profile"] as? String ?? "Private Browsing"
+        let profile = try await resolveProfile(args["profile"] as? String)
         let selector = args["selector"] as? String ?? "body"
 
         let sess = try await apiCall("POST", "/sessions", body: ["profile": profile, "url": url])
