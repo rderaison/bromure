@@ -89,6 +89,8 @@ Controls how this browser interacts with your Mac.
 | **Shared Clipboard** | Allow copy-paste of text and images between your Mac and the browser VM. When turned off, the browser's clipboard is completely isolated. |
 | **Match Keyboard Layout** | Automatically switches the browser's keyboard layout when you change it on your Mac. Turn this off to always use the layout set in App Settings > Input. |
 | **Use macOS Passkeys** | Sign in to websites using passkeys stored on your Mac. Each request requires Touch ID or password approval. |
+| **Use macOS Passwords** | Autofill usernames and passwords from your Mac's saved passwords and iCloud Keychain. Disables Chromium's built-in password manager. |
+| **Allow Printing** | When enabled, pressing ⌘P captures the current page as a PDF and hands it to your Mac's print system — so you can pick a real printer or save to a file from the standard macOS print dialog. The PDF stays in memory; nothing is written to your Mac's disk. Requires Native Tabs to be enabled. |
 
 ### Privacy & Safety
 
