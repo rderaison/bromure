@@ -13,7 +13,7 @@ PROFILE="Work"
 OUTPUT_DIR="$(pwd)/Resources"
 mkdir -p "$OUTPUT_DIR"
 
-CATEGORIES=(general performance media fileTransfer privacy network vpnAds enterprise advanced)
+CATEGORIES=(general performance media fileTransfer hostIsolation network privacy extensions vpnAds enterprise advanced)
 LOCALES=(en fr de es pt ja zh-Hant-TW zh-Hans-CN)
 LOCALE_NAMES=(en fr de es pt ja zh-TW zh-CN)
 

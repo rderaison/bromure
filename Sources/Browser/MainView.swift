@@ -482,6 +482,7 @@ struct MainView: View {
         case "fileTransfer": initialCat = .fileTransfer
         case "hostIsolation": initialCat = .hostIsolation
         case "privacy": initialCat = .privacy
+        case "extensions": initialCat = .extensions
         case "network": initialCat = .network
         case "vpnAds": initialCat = .vpnAds
         case "enterprise": initialCat = .enterprise
