@@ -85,13 +85,38 @@ editor_window_id() {
     ac_tell "get editor window id" || echo "0"
 }
 
-capture_window_id() {
+# Mirrors take-screenshots.sh's capture_settings_window: activate the
+# app, find the editor window via System Events, raise it, then
+# screencapture -R the rect. Screen-rect capture is more reliable than
+# `-l <windowID>` across macOS versions and respects Screen Recording
+# permissions consistently.
+capture_editor_window() {
     local outfile="$1"
-    local wid="$2"
-    [ -z "$wid" ] || [ "$wid" = "0" ] && return 1
-    rm -f "$outfile"
-    screencapture -x -o -l "$wid" "$outfile" 2>/dev/null
-    [ -s "$outfile" ]
+    local rect
+    rect=$(osascript -e '
+        tell application "'"$APP_NAME"'" to activate
+        delay 0.3
+        tell application "System Events"
+            tell process "bromure-ac"
+                repeat with w in windows
+                    if name of w is not "'"$APP_NAME"'" then
+                        perform action "AXRaise" of w
+                        delay 0.2
+                        set p to position of w
+                        set s to size of w
+                        return "" & (item 1 of p) & "," & (item 2 of p) & "," & (item 1 of s) & "," & (item 2 of s)
+                    end if
+                end repeat
+            end tell
+        end tell
+    ' 2>/dev/null)
+    if [ -n "$rect" ]; then
+        rm -f "$outfile"
+        screencapture -x -t jpg -R "$rect" "$outfile" 2>/dev/null
+        [ -s "$outfile" ]
+        return $?
+    fi
+    return 1
 }
 
 # ----------------------------------------------------------------------
@@ -133,11 +158,13 @@ for entry in "${LOCALES[@]}"; do
 
     ensure_profile || continue
 
-    # Open editor for the screenshot profile. Surface failures —
-    # if the bridge can't find the profile we want the operator to see
-    # it, not skip the locale with an empty Resources/ac/ directory.
+    # Open editor for the screenshot profile. Fire and verify by side
+    # effect (the editor window's ID) rather than the command's stdout —
+    # older sdef revisions omitted the <result> declaration, which made
+    # the bridge swallow the "ok" return value even on success. Only
+    # treat an explicit "error: …" string as failure here.
     open_result=$(ac_tell "open ac profile editor \"$PROFILE\"")
-    if ! ac_response_ok "$open_result"; then
+    if [[ "$open_result" == error* ]]; then
         echo "  ERROR opening editor: $open_result" >&2
         continue
     fi
@@ -145,19 +172,19 @@ for entry in "${LOCALES[@]}"; do
 
     wid=$(editor_window_id)
     if [ -z "$wid" ] || [ "$wid" = "0" ]; then
-        echo "  WARN: editor window didn't open"
+        echo "  WARN: editor window didn't open (open_result: '$open_result')"
         continue
     fi
 
     for category in "${CATEGORIES[@]}"; do
         sel=$(ac_tell "select editor category \"$category\"")
-        if ! ac_response_ok "$sel"; then
+        if [[ "$sel" == error* ]]; then
             echo "  $category SKIP (select failed: $sel)" >&2
             continue
         fi
         sleep 0.6
-        outfile="$OUTPUT_DIR/editor_${category}_${suffix}.png"
-        if capture_window_id "$outfile" "$wid"; then
+        outfile="$OUTPUT_DIR/editor_${category}_${suffix}.jpg"
+        if capture_editor_window "$outfile"; then
             printf "  %-12s → %s\n" "$category" "$(basename "$outfile")"
         else
             echo "  $category SKIP (capture failed)"
@@ -176,5 +203,5 @@ defaults delete io.bromure.agentic-coding AppleLanguages 2>/dev/null || true
 
 echo ""
 echo "=== Done ==="
-count=$(find "$OUTPUT_DIR" -name "editor_*.png" -type f | wc -l | tr -d ' ')
+count=$(find "$OUTPUT_DIR" -name "editor_*.jpg" -type f | wc -l | tr -d ' ')
 echo "$count screenshots captured under $OUTPUT_DIR/"

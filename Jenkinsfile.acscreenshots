@@ -44,7 +44,7 @@ pipeline {
         stage('Update SETTINGS_AGENTIC.md') {
             steps {
                 sh '''
-                    claude -p "Look at every English screenshot in Resources/ac/editor_*_en.png and compare them to what is currently documented in SETTINGS_AGENTIC.md. If SETTINGS_AGENTIC.md does not exist yet, create it modeled on SETTINGS.md's structure (one section per editor category with a table of settings). Add any new settings that appear in the screenshots but are missing from the documentation. Use the Swift source code in Sources/AgentCoding/ for accurate descriptions. Only modify the settings tables — do not change the structure, screenshots, or other sections. Do not remove any existing entries." \
+                    claude -p "Look at every English screenshot in Resources/ac/editor_*_en.jpg and compare them to what is currently documented in SETTINGS_AGENTIC.md. If SETTINGS_AGENTIC.md does not exist yet, create it modeled on SETTINGS.md's structure (one section per editor category with a table of settings). Add any new settings that appear in the screenshots but are missing from the documentation. Use the Swift source code in Sources/AgentCoding/ for accurate descriptions. Only modify the settings tables — do not change the structure, screenshots, or other sections. Do not remove any existing entries." \
                         --allowedTools 'Read,Edit,Write,Grep,Glob' \
                         --max-turns 30
                 '''
@@ -54,7 +54,7 @@ pipeline {
         stage('Commit') {
             steps {
                 sh '''
-                    git add Resources/ac/editor_*.png SETTINGS_AGENTIC.md
+                    git add Resources/ac/editor_*.jpg SETTINGS_AGENTIC.md
                     if git diff --cached --quiet; then
                         echo "No changes to commit"
                     else
@@ -78,7 +78,7 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
                 pkill -x bromure-ac 2>/dev/null || true
                 security default-keychain -s login.keychain-db || true
             '''
-            archiveArtifacts artifacts: 'Resources/ac/editor_*.png, SETTINGS_AGENTIC.md', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'Resources/ac/editor_*.jpg, SETTINGS_AGENTIC.md', allowEmptyArchive: true
         }
     }
 }

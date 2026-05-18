@@ -51,15 +51,18 @@
         <command name="open ac profile editor" code="BrAcOpEd" description="Open the editor for a profile by name or UUID.">
             <cocoa class="BromureACOpenProfileEditorCommand"/>
             <direct-parameter type="text" description="Profile name or UUID"/>
+            <result type="text" description="'ok' on success or 'error: …' otherwise"/>
         </command>
 
         <command name="close ac profile editor" code="BrAcClEd" description="Close the editor window if open.">
             <cocoa class="BromureACCloseProfileEditorCommand"/>
+            <result type="text" description="'ok'"/>
         </command>
 
         <command name="select editor category" code="BrAcSlCt" description="Switch the editor sidebar to the given category. Names: general, agent, folders, credentials, environment, mcp, tracing, appearance, resources.">
             <cocoa class="BromureACSelectEditorCategoryCommand"/>
             <direct-parameter type="text" description="Category key"/>
+            <result type="text" description="'ok' or 'error: …'"/>
         </command>
 
         <command name="get editor window id" code="BrAcGtId" description="Returns the CGWindowID of the editor window, or 0 if not open. Use with `screencapture -l ID` from the shell.">

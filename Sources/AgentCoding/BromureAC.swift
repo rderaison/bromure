@@ -33,6 +33,22 @@ struct BromureAC: ParsableCommand {
         // want headless setup still have `bromure-ac init`.
         defaultSubcommand: Run.self
     )
+
+    /// Strip Apple-internal flags (e.g. -AppleLanguages, -AppleLocale) from
+    /// CommandLine.arguments so ArgumentParser doesn't reject them. Without
+    /// this, `bromure-ac -AppleLanguages "(fr)"` exits with "Unknown option"
+    /// before NSApplication starts. Mirrors the browser entry point.
+    static func main() {
+        let args = Array(CommandLine.arguments.dropFirst())
+        var filtered: [String] = []
+        var skipNext = false
+        for arg in args {
+            if skipNext { skipNext = false; continue }
+            if arg.hasPrefix("-Apple") { skipNext = true; continue }
+            filtered.append(arg)
+        }
+        Self.main(filtered)
+    }
 }
 
 // MARK: - init
