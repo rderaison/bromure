@@ -673,3 +673,23 @@
 
 /* Network Healer — DHCP fallback warning (bridged-mode incompatible cases) */
 "The VM could not obtain an IP address via DHCP. Browsing will not work in this session.\n\nTry switching to Bridge mode in Settings \U2192 Network for more reliable connectivity." = "虚拟机无法通过 DHCP 获取 IP 地址,本次会话将无法浏览。\n\n请尝试在 设置 \U2192 网络 中切换到桥接模式以获得更可靠的连接。";
+
+/* ProfileSettingsView — Extensions */
+"Extensions" = "扩展程序";
+"Add browser extensions to this profile" = "为该配置文件添加浏览器扩展程序";
+"Enable Extensions" = "启用扩展程序";
+"Extensions require Chrome's built-in toolbar. Enabling extensions will disable Native Tabs for this profile." = "扩展程序需要 Chrome 内置工具栏。启用扩展程序将禁用该配置文件的原生标签页。";
+"Disable Native Tabs?" = "禁用原生标签页吗？";
+"Disable Native Tabs" = "禁用原生标签页";
+"Extensions require Chrome's native toolbar to display icons and popups. Native Tabs will be turned off for this profile." = "扩展程序需要 Chrome 的原生工具栏来显示图标和弹窗。该配置文件将关闭原生标签页。";
+"Recommended" = "推荐";
+"Popular privacy and security extensions. Toggling an extension will download it on first use." = "热门的隐私和安全扩展程序。启用扩展程序后将在首次使用时下载。";
+"Custom Extensions" = "自定义扩展程序";
+"Add third-party extensions by pasting a Chrome Web Store URL. These extensions can access all browsing data within the session." = "通过粘贴 Chrome 网上应用店 URL 添加第三方扩展程序。这些扩展程序可以访问会话中的所有浏览数据。";
+"Custom extensions are not vetted by Bromure. Only install extensions you trust." = "自定义扩展程序未经 Bromure 审查。请仅安装您信任的扩展程序。";
+"Chrome Web Store URL" = "Chrome 网上应用店 URL";
+"Add" = "添加";
+"Add Extension\U2026" = "添加扩展程序\U2026";
+"Invalid Chrome Web Store URL. Expected format: chromewebstore.google.com/detail/.../EXTENSION_ID" = "Chrome 网上应用店 URL 无效。预期格式：chromewebstore.google.com/detail/.../EXTENSION_ID";
+"This extension is already added." = "此扩展程序已添加。";
+"Failed to download extension: %@" = "下载扩展程序失败：%@";

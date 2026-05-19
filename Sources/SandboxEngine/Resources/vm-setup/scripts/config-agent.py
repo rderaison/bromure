@@ -13,6 +13,7 @@ This replaces serial-based config delivery for lower latency.
 
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -343,10 +344,11 @@ def write_chrome_env(cfg):
         extensions.append("/opt/bromure/extensions/corporate-guard")
     if extensions:
         extra_flags.append(f"--load-extension={','.join(extensions)}")
-        # Only allow our bundled extensions — disable every other extension
-        # Chromium might try to load (policy-pushed, user-installed in a
-        # persistent profile, etc.).
-        extra_flags.append(f"--disable-extensions-except={','.join(extensions)}")
+        # Only restrict extensions when no user extensions are configured.
+        # Policy-installed user extensions need unrestricted loading;
+        # the ExtensionSettings policy controls what gets installed.
+        if not cfg.get("userExtensionIDs"):
+            extra_flags.append(f"--disable-extensions-except={','.join(extensions)}")
 
     profile_dir = cfg.get("profileDir")
     if profile_dir:
@@ -761,6 +763,22 @@ def write_dynamic_policy(cfg):
         policy["PasswordManagerEnabled"] = False
         policy["AutofillCreditCardEnabled"] = False
         policy["CredentialProviderPromoEnabled"] = False
+
+    # When user extensions are configured, use ExtensionSettings policy
+    # to force-install them. Chrome handles the download, installation,
+    # and DNR rule compilation — no unpacking needed.
+    _VALID_EXT_ID = re.compile(r"^[a-p]{32}$")
+    ext_ids = [eid for eid in cfg.get("userExtensionIDs", []) if _VALID_EXT_ID.match(eid)]
+    if ext_ids:
+        policy["ExtensionsToolbarAccessEnabled"] = True
+        ext_settings = {}
+        for ext_id in ext_ids:
+            ext_settings[ext_id] = {
+                "installation_mode": "force_installed",
+                "update_url": "https://clients2.google.com/service/update2/crx",
+                "toolbar_pin": "force_pinned",
+            }
+        policy["ExtensionSettings"] = ext_settings
 
     policy_path = "/etc/chromium/policies/managed/session.json"
     os.makedirs(os.path.dirname(policy_path), exist_ok=True)

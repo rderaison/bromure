@@ -673,3 +673,23 @@
 
 /* Network Healer — DHCP fallback warning (bridged-mode incompatible cases) */
 "The VM could not obtain an IP address via DHCP. Browsing will not work in this session.\n\nTry switching to Bridge mode in Settings \U2192 Network for more reliable connectivity." = "VM は DHCP で IP アドレスを取得できませんでした。このセッションではブラウジングできません。\n\nより安定した接続のため、設定 \U2192 ネットワークでブリッジモードに切り替えてみてください。";
+
+/* ProfileSettingsView — Extensions */
+"Extensions" = "拡張機能";
+"Add browser extensions to this profile" = "このプロファイルにブラウザ拡張機能を追加";
+"Enable Extensions" = "拡張機能を有効にする";
+"Extensions require Chrome's built-in toolbar. Enabling extensions will disable Native Tabs for this profile." = "拡張機能には Chrome の組み込みツールバーが必要です。拡張機能を有効にすると、このプロファイルではネイティブタブが無効になります。";
+"Disable Native Tabs?" = "ネイティブタブを無効にしますか？";
+"Disable Native Tabs" = "ネイティブタブを無効にする";
+"Extensions require Chrome's native toolbar to display icons and popups. Native Tabs will be turned off for this profile." = "拡張機能のアイコンとポップアップを表示するには Chrome のネイティブツールバーが必要です。このプロファイルではネイティブタブがオフになります。";
+"Recommended" = "おすすめ";
+"Popular privacy and security extensions. Toggling an extension will download it on first use." = "人気のあるプライバシーおよびセキュリティ拡張機能です。拡張機能を有効にすると、初回使用時にダウンロードされます。";
+"Custom Extensions" = "カスタム拡張機能";
+"Add third-party extensions by pasting a Chrome Web Store URL. These extensions can access all browsing data within the session." = "Chrome ウェブストアの URL を貼り付けて、サードパーティ製の拡張機能を追加します。これらの拡張機能はセッション中のすべての閲覧データにアクセスできます。";
+"Custom extensions are not vetted by Bromure. Only install extensions you trust." = "カスタム拡張機能は Bromure によって審査されていません。信頼できる拡張機能のみインストールしてください。";
+"Chrome Web Store URL" = "Chrome ウェブストアの URL";
+"Add" = "追加";
+"Add Extension\U2026" = "拡張機能を追加\U2026";
+"Invalid Chrome Web Store URL. Expected format: chromewebstore.google.com/detail/.../EXTENSION_ID" = "Chrome ウェブストアの URL が無効です。想定される形式：chromewebstore.google.com/detail/.../EXTENSION_ID";
+"This extension is already added." = "この拡張機能はすでに追加されています。";
+"Failed to download extension: %@" = "拡張機能のダウンロードに失敗しました：%@";

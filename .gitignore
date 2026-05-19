@@ -13,3 +13,4 @@ xcuserdata/
 Package.resolved
 *.provisionprofile
 Tests/node_modules/
+.claude/dev/

@@ -1577,3 +1577,112 @@ struct VPNEndpointPortTests {
         #expect(VMPool.vpnEndpointPorts(for: config(vpnMode: .wireGuard, wireGuardConfig: conf)) == [9999])
     }
 }
+
+// MARK: - UserExtension Tests
+
+@Suite("UserExtension")
+struct UserExtensionTests {
+    @Test("Codable roundtrip preserves all fields")
+    func codableRoundtrip() throws {
+        let ext = UserExtension(name: "Test Ext", extensionID: "abcdefghijklmnopabcdefghijklmnop", curated: true)
+        let data = try JSONEncoder().encode(ext)
+        let decoded = try JSONDecoder().decode(UserExtension.self, from: data)
+        #expect(decoded.name == ext.name)
+        #expect(decoded.extensionID == ext.extensionID)
+        #expect(decoded.enabled == ext.enabled)
+        #expect(decoded.curated == ext.curated)
+    }
+
+    @Test("Default enabled is true")
+    func defaultEnabled() {
+        let ext = UserExtension(name: "Test", extensionID: "abcdefghijklmnopabcdefghijklmnop")
+        #expect(ext.enabled == true)
+        #expect(ext.curated == false)
+    }
+}
+
+// MARK: - ProfileSettings UserExtensions Tests
+
+@Suite("ProfileSettings UserExtensions")
+struct ProfileSettingsUserExtensionsTests {
+    @Test("Backward compatibility: old profiles without userExtensions decode cleanly")
+    func backwardCompatibility() throws {
+        let json = """
+        {
+            "homePage": "https://example.com",
+            "enableGPU": true,
+            "enableWebGL": false,
+            "enableZeroCopy": true,
+            "enableSmoothScrolling": true,
+            "enableAdBlocking": false,
+            "enableClipboardSharing": false,
+            "canUpload": false,
+            "canDownload": false,
+            "phishingWarning": false,
+            "blockMalwareSites": false,
+            "enableAudio": true,
+            "audioVolume": 100
+        }
+        """
+        let settings = try JSONDecoder().decode(ProfileSettings.self, from: Data(json.utf8))
+        #expect(settings.userExtensions.isEmpty)
+    }
+
+    @Test("Roundtrip with user extensions")
+    func roundtripWithExtensions() throws {
+        var settings = ProfileSettings()
+        settings.userExtensions = [
+            UserExtension(name: "uBlock Origin Lite", extensionID: "ddkjiahejlhfcafbddmgiahcphecmpfh", curated: true),
+            UserExtension(name: "Custom Ext", extensionID: "abcdefghijklmnopabcdefghijklmnop", curated: false),
+        ]
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(ProfileSettings.self, from: data)
+        #expect(decoded.userExtensions.count == 2)
+        #expect(decoded.userExtensions[0].name == "uBlock Origin Lite")
+        #expect(decoded.userExtensions[1].curated == false)
+    }
+
+    @Test("toVMConfig maps only enabled extensions")
+    func toVMConfigFiltersDisabled() {
+        var settings = ProfileSettings()
+        settings.extensionsEnabled = true
+        var ext1 = UserExtension(name: "Enabled", extensionID: "aaaaaaaaaaaaaaapaaaaaaaaaaaaaaap", curated: true)
+        ext1.enabled = true
+        var ext2 = UserExtension(name: "Disabled", extensionID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", curated: false)
+        ext2.enabled = false
+        settings.userExtensions = [ext1, ext2]
+        let config = settings.toVMConfig()
+        #expect(config.userExtensionIDs == ["aaaaaaaaaaaaaaapaaaaaaaaaaaaaaap"])
+    }
+}
+
+// MARK: - CuratedExtensions Tests
+
+@Suite("CuratedExtensions")
+struct CuratedExtensionsTests {
+    @Test("Curated list is non-empty")
+    func nonEmpty() {
+        #expect(!CuratedExtensions.all.isEmpty)
+    }
+
+    @Test("All curated extensions have valid 32-char IDs")
+    func validIDs() {
+        for ext in CuratedExtensions.all {
+            #expect(ext.extensionID.count == 32)
+            #expect(ext.extensionID.allSatisfy { $0 >= "a" && $0 <= "p" })
+        }
+    }
+
+    @Test("All curated extensions are marked as curated")
+    func markedCurated() {
+        for ext in CuratedExtensions.all {
+            #expect(ext.curated == true)
+        }
+    }
+
+    @Test("No duplicate extension IDs")
+    func noDuplicates() {
+        let ids = CuratedExtensions.all.map(\.extensionID)
+        #expect(Set(ids).count == ids.count)
+    }
+}

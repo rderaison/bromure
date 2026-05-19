@@ -73,8 +73,9 @@ struct ProfilePickerView: View {
             // styling.
             HStack(spacing: 10) {
                 if let icon = NSApp.applicationIconImage {
-                    Image(nsImage: icon)
+                    Image(nsImage: { $0.size = NSSize(width: 40, height: 40); return $0 }(icon))
                         .resizable()
+                        .interpolation(.high)
                         .frame(width: 40, height: 40)
                 }
                 VStack(alignment: .leading, spacing: 1) {
@@ -287,9 +288,14 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case folders     = "Folders"
     case credentials = "Credentials"
     case environment = "Environment"
+    case mcp         = "MCP"
     case tracing     = "Tracing"
     case appearance  = "Appearance"
     case resources   = "Resources"
+    /// App-wide automation toggles. Only shown when the editor is opened
+    /// from "Bromure → Preferences" (i.e., `storageContext == nil`); the
+    /// settings here are not per-profile.
+    case automation  = "Automation"
 
     var id: String { rawValue }
 
@@ -300,9 +306,11 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .folders:     "folder.fill"
         case .credentials: "key.fill"
         case .environment: "terminal.fill"
+        case .mcp:         "network"
         case .tracing:     "doc.text.magnifyingglass"
         case .appearance:  "paintpalette.fill"
         case .resources:   "memorychip.fill"
+        case .automation:  "antenna.radiowaves.left.and.right"
         }
     }
 
@@ -313,9 +321,11 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .folders:     .orange
         case .credentials: .green
         case .environment: .teal
+        case .mcp:         .blue
         case .tracing:     .red
         case .appearance:  .pink
         case .resources:   .gray
+        case .automation:  .cyan
         }
     }
 }
@@ -444,17 +454,25 @@ struct ProfileEditorView: View {
         self.onCancel = onCancel
     }
 
+    /// Which categories show up in the sidebar. The Automation pane
+    /// holds app-wide settings (UserDefaults), so it's only relevant
+    /// when the editor is opened via Bromure → Preferences (where the
+    /// caller doesn't pass a `storageContext`).
+    private var visibleCategories: [EditorCategory] {
+        EditorCategory.allCases.filter { c in
+            c != .automation || storageContext == nil
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 // Sidebar
-                List(EditorCategory.allCases, selection: $selectedCategory) { category in
+                List(visibleCategories, selection: $selectedCategory) { category in
                     Label {
-                        Text(category.rawValue)
+                        Text(LocalizedStringKey(category.rawValue))
                     } icon: {
-                        Image(systemName: category.symbol)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.white)
+                        categoryIcon(category)
                             .frame(width: 22, height: 22)
                             .background(category.color.gradient,
                                         in: RoundedRectangle(cornerRadius: 5))
@@ -505,8 +523,12 @@ struct ProfileEditorView: View {
         }
         .onReceive(NotificationCenter.default.publisher(
             for: .bromureACSelectEditorCategory)) { note in
-            if let raw = note.object as? String,
-               let cat = EditorCategory(rawValue: raw) {
+            // ScriptCommands lower-cases the category name before
+            // posting; EditorCategory rawValues are title-cased
+            // (e.g. "General", "MCP"). Match case-insensitively so
+            // the AppleScript bridge picks the right tab.
+            if let raw = (note.object as? String)?.lowercased(),
+               let cat = EditorCategory.allCases.first(where: { $0.rawValue.lowercased() == raw }) {
                 selectedCategory = cat
             }
         }
@@ -520,9 +542,30 @@ struct ProfileEditorView: View {
         case .folders:     foldersSection
         case .credentials: credentialsSection
         case .environment: environmentSection
+        case .mcp:         mcpSection
         case .tracing:     tracingSection
         case .appearance:  appearanceSection
         case .resources:   resourcesSection
+        case .automation:  automationSection
+        }
+    }
+
+    @ViewBuilder
+    private func categoryIcon(_ category: EditorCategory) -> some View {
+        if category == .mcp, let url = Bundle.module.url(forResource: "mcp", withExtension: "svg", subdirectory: "icons"),
+           let data = try? Data(contentsOf: url),
+           let svgImage = NSImage(data: data) {
+            Image(nsImage: svgImage)
+                .renderingMode(.template)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 16, height: 16)
+                .foregroundStyle(.white)
+        } else {
+            Image(systemName: category.symbol)
+                .font(.system(size: 12))
+                .foregroundStyle(.white)
         }
     }
 
@@ -1941,6 +1984,151 @@ struct ProfileEditorView: View {
         }
     }
 
+    // MARK: - Automation (app-wide, Preferences only)
+
+    /// Hosts the `automation.enabled` / `automation.port` /
+    /// `automation.bindAddress` toggles. These drive `ACAutomationServer`,
+    /// which in turn powers `Tests/ac-e2e.mjs` (via HTTP) and the
+    /// `bromure-ac mcp` stdio subcommand (which wraps the same HTTP API).
+    /// Settings are stored in UserDefaults, NOT the profile JSON.
+    @ViewBuilder
+    private var automationSection: some View {
+        let store = AutomationDefaultsStore()
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Automation API & MCP server")
+                .font(.headline)
+            Text("Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle(isOn: store.enabledBinding) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Enable automation server")
+                    // Split the ternary — `Text(condition ? "a" : "b")`
+                    // resolves to the non-localizing `Text(some String)`
+                    // overload when one branch has a String interpolation,
+                    // so we end up bypassing the strings table. Two
+                    // `Text("literal \(var)")` calls each hit LocalizedStringKey.
+                    if store.enabled {
+                        Text("Listening on \(store.bindAddress):\(store.port). Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Off — the HTTP API and the MCP subcommand are unavailable.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .toggleStyle(.switch)
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Text("Port")
+                    .frame(width: 100, alignment: .trailing)
+                TextField("", value: store.portBinding, formatter: Self.portFormatter)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 90)
+                Text("(default: 9223)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+            }
+
+            HStack(spacing: 8) {
+                Text("Bind address")
+                    .frame(width: 100, alignment: .trailing)
+                TextField("127.0.0.1", text: store.bindAddressBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 160)
+                if store.bindAddress != "127.0.0.1" && !store.bindAddress.isEmpty {
+                    Label("Non-loopback bind exposes the API to the network. The MCP server has no auth.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+            }
+
+            Text("Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+
+            Divider()
+
+            Text("MCP client configuration")
+                .font(.headline)
+            Text("Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(Self.mcpConfigSnippet)
+                .font(.system(size: 11, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .textBackgroundColor),
+                            in: RoundedRectangle(cornerRadius: 6))
+
+            Spacer()
+        }
+        .padding(.top, 4)
+    }
+
+    private static let portFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.allowsFloats = false
+        f.minimum = 1
+        f.maximum = 65535
+        return f
+    }()
+
+    private static let mcpConfigSnippet: String =
+        #"""
+        {
+          "mcpServers": {
+            "bromure-ac": {
+              "command": "/Applications/Bromure Agentic Coding.app/Contents/MacOS/bromure-ac",
+              "args": ["mcp"]
+            }
+          }
+        }
+        """#
+
+    // MARK: - MCP servers
+
+    private var mcpSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("MCP servers give your agent access to external tools and context. Configs are translated into the right format for the active agent (Claude Code or Codex) and injected into the VM at boot.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if draft.mcpServers.isEmpty {
+                Text("No MCP servers configured.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            } else {
+                ForEach(Array(draft.mcpServers.enumerated()), id: \.element.id) { (idx, _) in
+                    MCPServerRow(
+                        server: $draft.mcpServers[idx],
+                        onRemove: { draft.mcpServers.remove(at: idx) }
+                    )
+                }
+            }
+            HStack {
+                Spacer()
+                Button {
+                    draft.mcpServers.append(MCPServer())
+                } label: {
+                    Label("Add server", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+    }
+
     @ViewBuilder
     private var appearanceSection: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -2190,6 +2378,259 @@ private struct EnvironmentVariableRow: View {
         .padding(8)
         .background(Color(nsColor: .textBackgroundColor),
                     in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+// MARK: - MCP server row
+
+private struct MCPServerRow: View {
+    @Binding var server: MCPServer
+    var onRemove: () -> Void
+    @State private var showJSON = false
+    @State private var isAuthorizing = false
+    @State private var authError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                TextField("Name", text: $server.name, prompt: Text("my-server"))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 180)
+                if !showJSON {
+                    Picker("", selection: $server.transport) {
+                        ForEach(MCPServer.Transport.allCases, id: \.self) { t in
+                            Text(t.rawValue.uppercased()).tag(t)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 120)
+                }
+                Toggle("", isOn: $server.enabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .help(LocalizedStringKey(server.enabled ? "Enabled" : "Disabled"))
+                Spacer()
+                Button {
+                    if !showJSON && server.rawJSON.isEmpty {
+                        server.rawJSON = generateJSON()
+                    } else if showJSON {
+                        server.rawJSON = ""
+                    }
+                    showJSON.toggle()
+                } label: {
+                    Image(systemName: showJSON ? "slider.horizontal.3" : "curlybraces")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .help(LocalizedStringKey(showJSON ? "Switch to form" : "Edit as JSON"))
+                Button(action: onRemove) {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("Remove this server")
+            }
+            if showJSON {
+                jsonEditor
+            } else {
+                formFields
+            }
+        }
+        .padding(8)
+        .background(Color(nsColor: .textBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: 6))
+        .opacity(server.enabled ? 1.0 : 0.6)
+        .onAppear {
+            if !server.rawJSON.isEmpty { showJSON = true }
+        }
+    }
+
+    @ViewBuilder
+    private var formFields: some View {
+        switch server.transport {
+        case .stdio:
+            HStack(spacing: 6) {
+                TextField("Command", text: $server.command, prompt: Text("npx"))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 140)
+                TextField("Arguments", text: Binding(
+                    get: { server.arguments.joined(separator: " ") },
+                    set: { server.arguments = $0.components(separatedBy: " ").filter { !$0.isEmpty } }
+                ), prompt: Text("-y @upstash/context7-mcp"))
+                    .textFieldStyle(.roundedBorder)
+            }
+        case .http:
+            TextField("URL", text: $server.url, prompt: Text("https://mcp.example.com/mcp"))
+                .textFieldStyle(.roundedBorder)
+            DisclosureGroup("Authentication") {
+                VStack(alignment: .leading, spacing: 6) {
+                    // OAuth section
+                    if !server.url.isEmpty {
+                        HStack(spacing: 8) {
+                            if server.oauthState != nil {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                                Text("Authorized")
+                                    .font(.caption)
+                                if let exp = server.oauthState?.expiresAt {
+                                    Text("expires \(exp, style: .relative)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("Re-authorize") { authorizeOAuth() }
+                                    .font(.caption)
+                                    .disabled(isAuthorizing)
+                                Button("Revoke") {
+                                    server.oauthState = nil
+                                    server.bearerToken = ""
+                                }
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                            } else {
+                                Button(LocalizedStringKey(isAuthorizing ? "Authorizing\u{2026}" : "Authorize with OAuth\u{2026}")) {
+                                    authorizeOAuth()
+                                }
+                                .font(.caption)
+                                .disabled(isAuthorizing)
+                                if let err = authError {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(.orange)
+                                    Text(err)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                            }
+                        }
+                        Divider()
+                        Text("Or enter a static token:")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    // Manual token fields
+                    HStack(spacing: 6) {
+                        Text("Env var name")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 80, alignment: .trailing)
+                        TextField("", text: $server.bearerTokenEnvVar,
+                                  prompt: Text("e.g. FIGMA_OAUTH_TOKEN"))
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(server.oauthState != nil)
+                    }
+                    if !server.bearerTokenEnvVar.isEmpty {
+                        HStack(spacing: 6) {
+                            Text("Token")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 80, alignment: .trailing)
+                            if server.oauthState != nil {
+                                Text("Managed by OAuth")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                SecureField("", text: $server.bearerToken,
+                                            prompt: Text("Never sent to VM — swapped by proxy"))
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            }
+            .font(.caption)
+        }
+    }
+
+    private func authorizeOAuth() {
+        guard !isAuthorizing else { return }
+        isAuthorizing = true
+        authError = nil
+        Task { @MainActor in
+            defer { isAuthorizing = false }
+            do {
+                let broker = MCPOAuthBroker()
+                let result = try await broker.authorizeServer(url: server.url, existingState: server.oauthState)
+                server.oauthState = MCPOAuthState(
+                    clientID: result.clientID,
+                    clientSecret: result.clientSecret,
+                    authorizationEndpoint: result.authorizationEndpoint,
+                    tokenEndpoint: result.tokenEndpoint,
+                    registrationEndpoint: result.registrationEndpoint,
+                    accessToken: result.accessToken,
+                    refreshToken: result.refreshToken,
+                    expiresAt: result.expiresIn.map {
+                        Date().addingTimeInterval(TimeInterval($0))
+                    },
+                    callbackPort: result.callbackPort
+                )
+                server.bearerToken = result.accessToken
+                if server.bearerTokenEnvVar.isEmpty {
+                    let sanitized = server.name
+                        .uppercased()
+                        .replacingOccurrences(of: " ", with: "_")
+                        .replacingOccurrences(of: "-", with: "_")
+                    server.bearerTokenEnvVar = "MCP_OAUTH_\(sanitized)"
+                }
+            } catch MCPOAuthBroker.BrokerError.authorizationCancelled {
+                // User cancelled — no error to show.
+            } catch {
+                authError = error.localizedDescription
+            }
+        }
+    }
+
+    private var jsonEditor: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Raw JSON config — passed directly to the agent's MCP config file.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            TextEditor(text: $server.rawJSON)
+                .font(.system(size: 11, design: .monospaced))
+                .frame(minHeight: 80, maxHeight: 160)
+                .scrollContentBackground(.hidden)
+                .padding(4)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(jsonValid ? Color.clear : Color.red.opacity(0.5))
+                )
+            if !jsonValid {
+                Text("Invalid JSON")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private var jsonValid: Bool {
+        guard !server.rawJSON.isEmpty,
+              let data = server.rawJSON.data(using: .utf8) else { return true }
+        return (try? JSONSerialization.jsonObject(with: data)) != nil
+    }
+
+    private func generateJSON() -> String {
+        var obj: [String: Any] = [:]
+        switch server.transport {
+        case .stdio:
+            obj["command"] = server.command
+            if !server.arguments.isEmpty { obj["args"] = server.arguments }
+        case .http:
+            obj["type"] = "http"
+            obj["url"] = server.url
+            if !server.bearerTokenEnvVar.isEmpty {
+                obj["bearerTokenEnvVar"] = server.bearerTokenEnvVar
+            }
+        }
+        let env = server.environment.filter(\.isUsable)
+        if !env.isEmpty {
+            obj["env"] = env.reduce(into: [String: String]()) { $0[$1.name] = $1.value }
+        }
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]
+        ), let str = String(data: data, encoding: .utf8) else { return "{}" }
+        return str
     }
 }
 
@@ -2997,5 +3438,59 @@ struct SSHKeyView: View {
         }
         .padding()
         .frame(width: 540, height: 280)
+    }
+}
+
+// MARK: - Automation defaults bridge
+
+/// Read/write the app-wide automation settings stored in UserDefaults,
+/// and live-toggle the HTTP server on the AC delegate when the user flips
+/// the switch. Used only by the Preferences "Automation" pane.
+@MainActor
+private struct AutomationDefaultsStore {
+    private let std = UserDefaults.standard
+
+    var enabled: Bool {
+        // Defaults to false (opt-in). Matches the delegate's
+        // `startAutomationServerIfNeeded` gate.
+        std.bool(forKey: "automation.enabled")
+    }
+    var port: Int {
+        let n = std.integer(forKey: "automation.port")
+        return n > 0 ? n : 9223
+    }
+    var bindAddress: String {
+        std.string(forKey: "automation.bindAddress") ?? "127.0.0.1"
+    }
+
+    var enabledBinding: Binding<Bool> {
+        Binding(
+            get: { self.enabled },
+            set: { on in
+                self.std.set(on, forKey: "automation.enabled")
+                guard let d = NSApp.delegate as? ACAppDelegate else { return }
+                if on {
+                    d.startAutomationServerIfNeeded()
+                } else {
+                    d.stopAutomationServer()
+                }
+            }
+        )
+    }
+
+    var portBinding: Binding<Int> {
+        Binding(
+            get: { self.port },
+            set: { v in self.std.set(max(1, min(65535, v)), forKey: "automation.port") }
+        )
+    }
+
+    var bindAddressBinding: Binding<String> {
+        Binding(
+            get: { self.bindAddress },
+            set: { v in
+                self.std.set(v.isEmpty ? "127.0.0.1" : v, forKey: "automation.bindAddress")
+            }
+        )
     }
 }

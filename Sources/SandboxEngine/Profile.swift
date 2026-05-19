@@ -86,6 +86,20 @@ public struct CustomRootCA: Codable, Equatable, Identifiable {
     }
 }
 
+public struct UserExtension: Codable, Equatable, Identifiable {
+    public var id = UUID()
+    public var name: String
+    public var extensionID: String
+    public var enabled: Bool = true
+    public var curated: Bool
+
+    public init(name: String, extensionID: String, curated: Bool = false) {
+        self.name = name
+        self.extensionID = extensionID
+        self.curated = curated
+    }
+}
+
 /// VPN mode for the browser session.
 public enum VPNMode: String, Codable, CaseIterable, Equatable, Sendable {
     /// No VPN — direct connection.
@@ -274,6 +288,10 @@ public struct ProfileSettings: Codable, Equatable {
     // Certificates
     public var rootCAs: [CustomRootCA] = []
 
+    // User extensions
+    public var extensionsEnabled: Bool = false
+    public var userExtensions: [UserExtension] = []
+
     // Input
     public var matchKeyboardLayout: Bool = true  // dynamically sync host keyboard layout
 
@@ -323,7 +341,7 @@ public struct ProfileSettings: Codable, Equatable {
         case isolateFromLAN, restrictPorts, allowedPorts, networkInterface
         case enableAudio, audioVolume, enableWebcam, webcamQuality, enableMicrophone
         case webcamDeviceID, microphoneDeviceID, speakerDeviceID, webcamEffects
-        case rootCAs, matchKeyboardLayout, locale, allowAutomation
+        case rootCAs, extensionsEnabled, userExtensions, matchKeyboardLayout, locale, allowAutomation
         case traceLevel, traceAutoStart, persistent, encryptOnDisk
         case nativeChrome, allowPrinting
     }
@@ -394,6 +412,8 @@ public struct ProfileSettings: Codable, Equatable {
         speakerDeviceID = try c.decodeIfPresent(String.self, forKey: .speakerDeviceID)
         webcamEffects = try c.decodeIfPresent(WebcamEffects.self, forKey: .webcamEffects) ?? defaults.webcamEffects
         rootCAs = try c.decodeIfPresent([CustomRootCA].self, forKey: .rootCAs) ?? defaults.rootCAs
+        extensionsEnabled = try c.decodeIfPresent(Bool.self, forKey: .extensionsEnabled) ?? defaults.extensionsEnabled
+        userExtensions = try c.decodeIfPresent([UserExtension].self, forKey: .userExtensions) ?? defaults.userExtensions
         matchKeyboardLayout = try c.decodeIfPresent(Bool.self, forKey: .matchKeyboardLayout) ?? defaults.matchKeyboardLayout
         locale = try c.decodeIfPresent(String.self, forKey: .locale)
         allowAutomation = try c.decodeIfPresent(Bool.self, forKey: .allowAutomation) ?? defaults.allowAutomation
@@ -461,6 +481,8 @@ public struct ProfileSettings: Codable, Equatable {
         try c.encodeIfPresent(speakerDeviceID, forKey: .speakerDeviceID)
         try c.encode(webcamEffects, forKey: .webcamEffects)
         try c.encode(rootCAs, forKey: .rootCAs)
+        try c.encode(extensionsEnabled, forKey: .extensionsEnabled)
+        try c.encode(userExtensions, forKey: .userExtensions)
         try c.encode(matchKeyboardLayout, forKey: .matchKeyboardLayout)
         try c.encodeIfPresent(locale, forKey: .locale)
         try c.encode(allowAutomation, forKey: .allowAutomation)
@@ -561,7 +583,8 @@ public struct ProfileSettings: Codable, Equatable {
             traceLevel: traceLevel,
             matchKeyboardLayout: matchKeyboardLayout,
             extraKernelOptions: defaults.string(forKey: "vm.extraKernelOptions") ?? VMConfig.defaultExtraKernelOptions,
-            locale: locale
+            locale: locale,
+            userExtensionIDs: extensionsEnabled ? userExtensions.filter(\.enabled).map(\.extensionID) : []
         )
     }
 

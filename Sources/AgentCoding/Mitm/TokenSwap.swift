@@ -552,7 +552,7 @@ public final class TokenSwapper: @unchecked Sendable {
 }
 
 public struct SwapResult: Sendable {
-    public let modified: Data
+    public var modified: Data
     public let swaps: [SwapRecord]
 }
 

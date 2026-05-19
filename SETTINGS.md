@@ -75,6 +75,23 @@ Controls file uploads and downloads between your Mac and the browser VM.
 | **Block Threats** | Automatically prevent files that VirusTotal flags as malicious from being saved or dragged to your Mac. |
 | **Block Unscannable Files** | Block files that could not be scanned -- files too large for VirusTotal, rate-limited requests, or unknown file types. When disabled, unscannable files can still be saved manually. |
 
+### Host Isolation
+
+<p align="center">
+  <img src="Resources/prefs_hostIsolation_en.jpg" width="600" alt="Host Isolation settings panel">
+</p>
+
+Controls how this browser interacts with your Mac.
+
+| Setting | Description |
+|---|---|
+| **Native Tabs** | Hides Chromium's tab strip and address bar and renders them as native macOS toolbar items instead. Tabs, favicons, the URL bar, and a share button appear in the window's titlebar — so the page uses the full window and the browser feels like a native Mac app. Automatically disabled when Extensions are enabled. |
+| **Shared Clipboard** | Allow copy-paste of text and images between your Mac and the browser VM. When turned off, the browser's clipboard is completely isolated. |
+| **Match Keyboard Layout** | Automatically switches the browser's keyboard layout when you change it on your Mac. Turn this off to always use the layout set in App Settings > Input. |
+| **Use macOS Passkeys** | Sign in to websites using passkeys stored on your Mac. Each request requires Touch ID or password approval. |
+| **Use macOS Passwords** | Autofill usernames and passwords from your Mac's saved passwords and iCloud Keychain. Disables Chromium's built-in password manager. |
+| **Allow Printing** | When enabled, pressing ⌘P captures the current page as a PDF and hands it to your Mac's print system — so you can pick a real printer or save to a file from the standard macOS print dialog. The PDF stays in memory; nothing is written to your Mac's disk. Requires Native Tabs to be enabled. |
+
 ### Privacy & Safety
 
 <p align="center">
@@ -105,6 +122,21 @@ Restricts which networks and ports the browser can reach.
 | **Network Interface** | Override the global network setting for this profile. Use this to attach different profiles to different network adapters. Options: Default (use global setting), NAT, or bridge on a specific physical interface. |
 | **Isolate from Local Network** | Prevents the browser VM from reaching any device on your home or office network -- printers, NAS drives, routers, internal servers. Internet access is unaffected. |
 | **Restrict Outgoing Ports** | Only allows the browser to connect on specific TCP ports. Enter a comma-separated list of ports or ranges (e.g., `80, 443, 8000-9000`). DNS (port 53) is always allowed. |
+
+### Extensions
+
+<p align="center">
+  <img src="Resources/prefs_extensions_en.jpg" width="600" alt="Extensions settings panel">
+</p>
+
+Manage browser extensions for this profile.
+
+| Setting | Description |
+|---|---|
+| **Enable Extensions** | Enables Chrome extensions for this profile. Extensions require Chrome's built-in toolbar, so enabling this automatically disables Native Tabs. When enabled, a list of recommended privacy and security extensions appears along with a Custom Extensions section for installing any extension by ID. |
+| **uBlock Origin Lite** | A content blocker that removes ads, trackers, and annoyances from websites. Listed under Recommended. Downloaded automatically on first use when toggled on. |
+| **Privacy Badger** | An EFF extension that automatically learns to block invisible trackers as you browse. Listed under Recommended. Downloaded automatically on first use when toggled on. |
+| **Custom Extensions** | Install any Chrome extension by pasting a Chrome Web Store URL. Custom extensions are not vetted by Bromure and have full access to all browsing data within the session. |
 
 ### VPN & Ads
 

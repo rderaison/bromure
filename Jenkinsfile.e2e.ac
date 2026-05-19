@@ -1,0 +1,165 @@
+pipeline {
+    agent { label 'macosx-builder' }
+
+    triggers {
+        cron('H 5 * * *')  // daily ~5am, an hour after the browser e2e
+    }
+
+    environment {
+        PATH                   = "/opt/homebrew/bin:${env.PATH}"
+        KEYCHAIN_PASSWORD      = credentials('KEYCHAIN_PASSWORD')
+        BUILD_KEYCHAIN         = "${HOME}/build.keychain"
+        BROMURE_DEBUG_CLAUDE   = '1'
+        BROMURE_AC_API_URL     = 'http://127.0.0.1:9223'
+    }
+
+    stages {
+        stage('Unlock Keychain') {
+            steps {
+                sh '''
+                    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$BUILD_KEYCHAIN"
+                    security list-keychains -s "$BUILD_KEYCHAIN" login.keychain-db
+                    security default-keychain -s "$BUILD_KEYCHAIN"
+                '''
+            }
+        }
+
+        stage('Build') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DEVELOPER_ID', variable: 'CODESIGN_IDENTITY'),
+                    file(credentialsId: 'PROVISION_PROFILE_AC', variable: 'PROVISION_PROFILE')
+                ]) {
+                    sh '''
+                        rm -f bromure-ac.provisionprofile
+                        cp "$PROVISION_PROFILE" bromure-ac.provisionprofile
+                        ./build.sh bromure-ac 2>&1 | tee build.log
+                        grep "^App bundle:" build.log | sed 's/App bundle: //' > .app_bundle_path
+                    '''
+                }
+            }
+        }
+
+        stage('Init Base Image') {
+            // Needed for sections 6 (Session control) and 8 (VM-side via /exec).
+            // Without it those sections gracefully skip but most of the test
+            // value is gone — fail the build hard rather than silently degrade.
+            steps {
+                sh '''
+                    APP_BUNDLE=$(cat .app_bundle_path)
+                    "$APP_BUNDLE/Contents/MacOS/bromure-ac" init
+                '''
+            }
+        }
+
+        stage('Start App') {
+            steps {
+                sh '''
+                    APP_BUNDLE=$(cat .app_bundle_path)
+                    # The automation server is opt-in (off by default) since
+                    # it exposes a loopback HTTP surface with no auth. Flip
+                    # it on for the CI run via UserDefaults before launch.
+                    defaults write io.bromure.agentic-coding automation.enabled -bool true
+                    BROMURE_DEBUG_CLAUDE=1 "$APP_BUNDLE/Contents/MacOS/bromure-ac" > /tmp/bromure-ac.log 2>&1 &
+                    echo $! > .bromure_ac_pid
+                    # Wait up to 60s for the HTTP automation server to come up.
+                    for i in $(seq 1 60); do
+                        curl -s http://127.0.0.1:9223/health > /dev/null 2>&1 && break
+                        sleep 2
+                    done
+                    curl -s http://127.0.0.1:9223/health || { echo "AC automation API never came up"; exit 1; }
+                '''
+            }
+        }
+
+        stage('Install Test Deps') {
+            steps {
+                sh '''
+                    # Tests/ac-e2e.mjs uses only Node's standard library
+                    # (child_process, fetch), so socket npm ci is a no-op
+                    # against the existing Tests/package-lock.json. Run it
+                    # anyway so any future dep additions land deterministically.
+                    command -v socket > /dev/null 2>&1 || npm install -g @socketsecurity/cli
+                    cd Tests && socket npm ci
+                '''
+            }
+        }
+
+        stage('1. App state') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^1\\."'
+                }
+            }
+        }
+
+        stage('2. Profile CRUD') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^2\\."'
+                }
+            }
+        }
+
+        stage('3. Profile JSON') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^3\\."'
+                }
+            }
+        }
+
+        stage('4. Editor windowing') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^4\\."'
+                }
+            }
+        }
+
+        stage('5. HTTP automation API') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^5\\."'
+                }
+            }
+        }
+
+        stage('6. Session control') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^6\\."'
+                }
+            }
+        }
+
+        stage('7. App-wide settings') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^7\\."'
+                }
+            }
+        }
+
+        stage('8. VM-side via /exec') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^8\\."'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                if [ -f .bromure_ac_pid ]; then
+                    kill "$(cat .bromure_ac_pid)" 2>/dev/null || true
+                    rm -f .bromure_ac_pid
+                fi
+                security default-keychain -s login.keychain-db || true
+            '''
+            archiveArtifacts artifacts: '/tmp/bromure-ac.log', allowEmptyArchive: true
+        }
+    }
+}

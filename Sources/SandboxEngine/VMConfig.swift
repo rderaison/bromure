@@ -262,6 +262,9 @@ public struct VMConfig {
     /// Default includes module loading and M4 CPU workarounds.
     public var extraKernelOptions: String
 
+    /// Chrome Web Store extension IDs to download and load in the guest.
+    public var userExtensionIDs: [String]
+
     public init(
         cpuCount: Int? = nil,
         memorySize: UInt64 = 4 * 1024 * 1024 * 1024,
@@ -329,7 +332,8 @@ public struct VMConfig {
         extraKernelOptions: String = "arm64.nosme",
         keyboardLayout: String? = nil,
         naturalScrolling: Bool? = nil,
-        locale: String? = nil
+        locale: String? = nil,
+        userExtensionIDs: [String] = []
     ) {
         let memGB = Int(memorySize / (1024 * 1024 * 1024))
         self.cpuCount = cpuCount ?? min(max(2, memGB * 2), ProcessInfo.processInfo.processorCount)
@@ -399,6 +403,7 @@ public struct VMConfig {
         self.keyboardLayout = keyboardLayout ?? VMConfig.detectKeyboardLayout()
         self.naturalScrolling = naturalScrolling ?? VMConfig.detectNaturalScrolling()
         self.locale = locale ?? VMConfig.detectLocale()
+        self.userExtensionIDs = userExtensionIDs
     }
 
     /// Mapping from macOS keyboard layout names (lowercased, without `com.apple.keylayout.` prefix)

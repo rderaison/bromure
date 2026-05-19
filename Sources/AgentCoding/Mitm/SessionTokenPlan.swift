@@ -49,6 +49,10 @@ public struct SessionTokenPlan: Sendable {
         /// docker writes in `~/.docker/config.json` and sends as
         /// `Authorization: Basic <…>`. host is the registry hostname.
         case dockerRegistry(host: String, username: String)
+        /// MCP server bearer token. The real token never reaches the VM;
+        /// a fake is injected into the MCP config and the MITM proxy
+        /// swaps it for the real value on the wire.
+        case mcpBearer(serverName: String, envVarName: String, host: String)
     }
 
     public var entries: [Entry]
@@ -109,6 +113,7 @@ public struct SessionTokenPlan: Sendable {
         case .manual(_, _, let host): return host.isEmpty ? nil : host
         case .digitalOcean:           return "digitalocean.com"
         case .dockerRegistry(let host, _): return host
+        case .mcpBearer(_, _, let host): return host.isEmpty ? nil : host
         }
     }
 
@@ -151,6 +156,18 @@ public struct SessionTokenPlan: Sendable {
             if case .digitalOcean = e.purpose { return e.fakeValue }
         }
         return nil
+    }
+
+    /// MCP bearer token entries keyed by server name. SessionDisk uses
+    /// this to inject fake tokens into the MCP config files.
+    public var mcpBearerFakes: [(serverName: String, envVarName: String, fake: String)] {
+        var out: [(String, String, String)] = []
+        for e in entries {
+            if case .mcpBearer(let name, let envVar, _) = e.purpose {
+                out.append((name, envVar, e.fakeValue))
+            }
+        }
+        return out
     }
 
     /// Manual entries that have an env var name set, formatted as
@@ -239,6 +256,22 @@ public extension Profile {
                 consentCredentialID: consentID,
                 consentDisplayName: entry.name.isEmpty
                     ? "manual token" : "“\(entry.name)” token"))
+        }
+
+        // MCP server bearer tokens.
+        for server in mcpServers where server.enabled && server.transport == .http {
+            let real = server.bearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            if real.isEmpty { continue }
+            let host = server.urlHost ?? ""
+            entries.append(.init(
+                realValue: real,
+                fakeValue: SessionTokenPlan.deriveFake(prefix: "brm-mcp_",
+                                                         real: real, salt: salt),
+                purpose: .mcpBearer(serverName: server.name,
+                                    envVarName: server.bearerTokenEnvVar,
+                                    host: host),
+                consentCredentialID: nil,
+                consentDisplayName: "\u{201c}\(server.name)\u{201d} MCP token"))
         }
 
         // DigitalOcean PAT.

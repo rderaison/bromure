@@ -53,13 +53,18 @@ public final class SessionDisk {
         /// `claudeTokenAgentURL`, talks vsock 8447, edits
         /// ~/.codex/auth.json.
         public let codexTokenAgentURL: URL?
+        /// Debug shell agent. Vsock 5800. Shipped only when the host
+        /// runs with BROMURE_DEBUG_CLAUDE; xinitrc no-ops otherwise.
+        /// Powers `POST /sessions/{id}/exec` in AutomationServer.
+        public let shellAgentURL: URL?
         public init(caCertificatePEM: String,
                     bridgeScriptURL: URL,
                     keyboardAgentURL: URL? = nil,
                     scrollAgentURL: URL? = nil,
                     awsCredsHelperURL: URL? = nil,
                     claudeTokenAgentURL: URL? = nil,
-                    codexTokenAgentURL: URL? = nil) {
+                    codexTokenAgentURL: URL? = nil,
+                    shellAgentURL: URL? = nil) {
             self.caCertificatePEM = caCertificatePEM
             self.bridgeScriptURL = bridgeScriptURL
             self.keyboardAgentURL = keyboardAgentURL
@@ -67,6 +72,7 @@ public final class SessionDisk {
             self.awsCredsHelperURL = awsCredsHelperURL
             self.claudeTokenAgentURL = claudeTokenAgentURL
             self.codexTokenAgentURL = codexTokenAgentURL
+            self.shellAgentURL = shellAgentURL
         }
     }
 
@@ -326,6 +332,12 @@ public final class SessionDisk {
             for (envName, fake) in plan.manualEnvExports {
                 lines.append("export \(envName)=\(shellQuote(fake))")
             }
+            // MCP bearer tokens — Claude Code reads bearerTokenEnvVar
+            // from the system environment for HTTP servers, not from
+            // the config's env block.
+            for entry in plan.mcpBearerFakes where !entry.envVarName.isEmpty {
+                lines.append("export \(entry.envVarName)=\(shellQuote(entry.fake))")
+            }
         }
 
         lines.append("export BROMURE_AC_TOOL=\(profile.tool.rawValue)")
@@ -398,6 +410,15 @@ public final class SessionDisk {
                 try fm.setAttributes(
                     [.posixPermissions: NSNumber(value: 0o755)],
                     ofItemAtPath: cxDest.path)
+            }
+
+            if let shURL = assets.shellAgentURL {
+                let shDest = tmp.appendingPathComponent("shell-agent.py")
+                try? fm.removeItem(at: shDest)
+                try fm.copyItem(at: shURL, to: shDest)
+                try fm.setAttributes(
+                    [.posixPermissions: NSNumber(value: 0o755)],
+                    ofItemAtPath: shDest.path)
             }
 
             // proxy.env — sourced by .bashrc to set HTTPS_PROXY etc.
@@ -576,8 +597,167 @@ public final class SessionDisk {
             atomically: true, encoding: .utf8
         )
 
+        // MCP servers — write agent-specific config files so Claude Code
+        // or Codex discovers them on launch. Claude Code uses JSON
+        // (~/.claude.json mcpServers key), Codex uses TOML
+        // (~/.codex/config.toml [mcp_servers.*] tables).
+        let enabledMCP = profile.mcpServers.filter(\.enabled)
+        if !enabledMCP.isEmpty {
+            let mcpDir = tmp.appendingPathComponent("mcp", isDirectory: true)
+            try fm.createDirectory(at: mcpDir, withIntermediateDirectories: true)
+
+            // Build a lookup of fake tokens by server name so the
+            // config files carry fakes, not real secrets.
+            var mcpFakes: [String: (envVar: String, fake: String)] = [:]
+            if let plan = tokenPlan {
+                for entry in plan.mcpBearerFakes {
+                    mcpFakes[entry.serverName] = (entry.envVarName, entry.fake)
+                }
+            }
+
+            // Claude Code format
+            let claudeJSON = Self.claudeCodeMCPConfig(servers: enabledMCP, fakes: mcpFakes)
+            try claudeJSON.write(
+                to: mcpDir.appendingPathComponent("claude.json"),
+                atomically: true, encoding: .utf8
+            )
+
+            // Codex format
+            let codexTOML = Self.codexMCPConfig(servers: enabledMCP, fakes: mcpFakes)
+            try codexTOML.write(
+                to: mcpDir.appendingPathComponent("codex.toml"),
+                atomically: true, encoding: .utf8
+            )
+        }
+
         self.metadataDirectory = tmp
         return tmp
+    }
+
+    /// Serialize MCP servers into Claude Code's ~/.claude.json format.
+    /// `fakes` maps server name → (envVarName, fake token). When present
+    /// the fake is set as an env var value so the real token never
+    /// reaches the VM; the MITM proxy swaps it on the wire.
+    static func claudeCodeMCPConfig(
+        servers: [MCPServer],
+        fakes: [String: (envVar: String, fake: String)] = [:]
+    ) -> String {
+        var mcpServers: [String: Any] = [:]
+        for server in servers {
+            // Raw JSON mode: parse and use as-is (allows OAuth blocks,
+            // custom fields, or any config shape the form can't express).
+            // Skip raw JSON if a fake token is available — the structured
+            // path handles token injection; raw JSON can't.
+            if !server.rawJSON.isEmpty, fakes[server.name] == nil,
+               let data = server.rawJSON.data(using: .utf8),
+               let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                mcpServers[server.name] = raw
+                continue
+            }
+            var entry: [String: Any] = [:]
+            var env = server.environment.filter(\.isUsable)
+                .reduce(into: [String: String]()) { $0[$1.name] = $1.value }
+            switch server.transport {
+            case .stdio:
+                entry["command"] = server.command
+                if !server.arguments.isEmpty {
+                    entry["args"] = server.arguments
+                }
+            case .http:
+                entry["type"] = "http"
+                entry["url"] = server.url
+                // OAuth-brokered servers: proxy injects the real
+                // Authorization header transparently — no auth fields
+                // in the config. Static bearer tokens still use the
+                // env var path.
+                if server.oauthState == nil {
+                    if let swap = fakes[server.name] {
+                        if !swap.envVar.isEmpty {
+                            entry["bearerTokenEnvVar"] = swap.envVar
+                            env[swap.envVar] = swap.fake
+                        }
+                    } else if !server.bearerTokenEnvVar.isEmpty {
+                        entry["bearerTokenEnvVar"] = server.bearerTokenEnvVar
+                    }
+                }
+            }
+            if !env.isEmpty {
+                entry["env"] = env
+            }
+            mcpServers[server.name] = entry
+        }
+        let root: [String: Any] = ["mcpServers": mcpServers]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: root, options: [.prettyPrinted, .sortedKeys]
+        ), let str = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return str
+    }
+
+    /// Serialize MCP servers into Codex's ~/.codex/config.toml format.
+    static func codexMCPConfig(
+        servers: [MCPServer],
+        fakes: [String: (envVar: String, fake: String)] = [:]
+    ) -> String {
+        var lines: [String] = ["# Generated by Bromure AC; do not edit."]
+        for server in servers {
+            // Raw JSON servers are written to Claude Code config only;
+            // TOML can't represent arbitrary JSON shapes.
+            if !server.rawJSON.isEmpty { continue }
+            lines.append("")
+            lines.append("[mcp_servers.\(tomlKey(server.name))]")
+            switch server.transport {
+            case .stdio:
+                lines.append("command = \(tomlQuote(server.command))")
+                if !server.arguments.isEmpty {
+                    let args = server.arguments.map { tomlQuote($0) }.joined(separator: ", ")
+                    lines.append("args = [\(args)]")
+                }
+            case .http:
+                lines.append("url = \(tomlQuote(server.url))")
+                if server.oauthState == nil {
+                    if let swap = fakes[server.name], !swap.envVar.isEmpty {
+                        lines.append("bearer_token_env_var = \(tomlQuote(swap.envVar))")
+                    } else if !server.bearerTokenEnvVar.isEmpty {
+                        lines.append("bearer_token_env_var = \(tomlQuote(server.bearerTokenEnvVar))")
+                    }
+                }
+            }
+            var env = server.environment.filter(\.isUsable)
+                .reduce(into: [String: String]()) { $0[$1.name] = $1.value }
+            if let swap = fakes[server.name], !swap.envVar.isEmpty {
+                env[swap.envVar] = swap.fake
+            }
+            if !env.isEmpty {
+                lines.append("")
+                lines.append("[mcp_servers.\(tomlKey(server.name)).env]")
+                for (k, v) in env.sorted(by: { $0.key < $1.key }) {
+                    lines.append("\(k) = \(tomlQuote(v))")
+                }
+            }
+            if let t = server.startupTimeoutSec {
+                lines.append("startup_timeout_sec = \(t)")
+            }
+            if let t = server.toolTimeoutSec {
+                lines.append("tool_timeout_sec = \(t)")
+            }
+        }
+        lines.append("")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func tomlQuote(_ s: String) -> String {
+        let escaped = s.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
+    private static func tomlKey(_ s: String) -> String {
+        let safe = s.lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+            .filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+        return safe.isEmpty ? "server" : safe
     }
 
     /// Coerce an arbitrary profile name into a valid POSIX hostname.

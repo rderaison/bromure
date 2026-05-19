@@ -673,3 +673,23 @@
 
 /* Network Healer — DHCP fallback warning (bridged-mode incompatible cases) */
 "The VM could not obtain an IP address via DHCP. Browsing will not work in this session.\n\nTry switching to Bridge mode in Settings \U2192 Network for more reliable connectivity." = "The VM could not obtain an IP address via DHCP. Browsing will not work in this session.\n\nTry switching to Bridge mode in Settings \U2192 Network for more reliable connectivity.";
+
+/* ProfileSettingsView — Extensions */
+"Extensions" = "Extensions";
+"Add browser extensions to this profile" = "Add browser extensions to this profile";
+"Enable Extensions" = "Enable Extensions";
+"Extensions require Chrome's built-in toolbar. Enabling extensions will disable Native Tabs for this profile." = "Extensions require Chrome\U2019s built-in toolbar. Enabling extensions will disable Native Tabs for this profile.";
+"Disable Native Tabs?" = "Disable Native Tabs?";
+"Disable Native Tabs" = "Disable Native Tabs";
+"Extensions require Chrome's native toolbar to display icons and popups. Native Tabs will be turned off for this profile." = "Extensions require Chrome\U2019s native toolbar to display icons and popups. Native Tabs will be turned off for this profile.";
+"Recommended" = "Recommended";
+"Popular privacy and security extensions. Toggling an extension will download it on first use." = "Popular privacy and security extensions. Toggling an extension will download it on first use.";
+"Custom Extensions" = "Custom Extensions";
+"Add third-party extensions by pasting a Chrome Web Store URL. These extensions can access all browsing data within the session." = "Add third-party extensions by pasting a Chrome Web Store URL. These extensions can access all browsing data within the session.";
+"Custom extensions are not vetted by Bromure. Only install extensions you trust." = "Custom extensions are not vetted by Bromure. Only install extensions you trust.";
+"Chrome Web Store URL" = "Chrome Web Store URL";
+"Add" = "Add";
+"Add Extension\U2026" = "Add Extension\U2026";
+"Invalid Chrome Web Store URL. Expected format: chromewebstore.google.com/detail/.../EXTENSION_ID" = "Invalid Chrome Web Store URL. Expected format: chromewebstore.google.com/detail/.../EXTENSION_ID";
+"This extension is already added." = "This extension is already added.";
+"Failed to download extension: %@" = "Failed to download extension: %@";

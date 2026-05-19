@@ -673,3 +673,23 @@
 
 /* Network Healer — DHCP fallback warning (bridged-mode incompatible cases) */
 "The VM could not obtain an IP address via DHCP. Browsing will not work in this session.\n\nTry switching to Bridge mode in Settings \U2192 Network for more reliable connectivity." = "虛擬機無法透過 DHCP 取得 IP 位址,此工作階段將無法瀏覽。\n\n請嘗試在 設定 \U2192 網路 中切換為橋接模式以獲得更穩定的連線。";
+
+/* ProfileSettingsView — Extensions */
+"Extensions" = "擴充功能";
+"Add browser extensions to this profile" = "為此設定加入瀏覽器擴充功能";
+"Enable Extensions" = "啟用擴充功能";
+"Extensions require Chrome's built-in toolbar. Enabling extensions will disable Native Tabs for this profile." = "擴充功能需要 Chrome 內建工具列。啟用擴充功能會停用此設定的原生分頁。";
+"Disable Native Tabs?" = "停用原生分頁？";
+"Disable Native Tabs" = "停用原生分頁";
+"Extensions require Chrome's native toolbar to display icons and popups. Native Tabs will be turned off for this profile." = "擴充功能需要 Chrome 的原生工具列以顯示圖示與彈出視窗。此設定的原生分頁將被關閉。";
+"Recommended" = "推薦";
+"Popular privacy and security extensions. Toggling an extension will download it on first use." = "熱門的隱私與安全擴充功能。啟用後將於首次使用時下載。";
+"Custom Extensions" = "自訂擴充功能";
+"Add third-party extensions by pasting a Chrome Web Store URL. These extensions can access all browsing data within the session." = "透過貼上 Chrome 線上應用程式商店 URL 加入第三方擴充功能。這些擴充功能可存取此工作階段中的所有瀏覽資料。";
+"Custom extensions are not vetted by Bromure. Only install extensions you trust." = "自訂擴充功能未經 Bromure 審核。請只安裝您信任的擴充功能。";
+"Chrome Web Store URL" = "Chrome 線上應用程式商店 URL";
+"Add" = "加入";
+"Add Extension\U2026" = "加入擴充功能\U2026";
+"Invalid Chrome Web Store URL. Expected format: chromewebstore.google.com/detail/.../EXTENSION_ID" = "Chrome 線上應用程式商店 URL 無效。預期格式：chromewebstore.google.com/detail/.../EXTENSION_ID";
+"This extension is already added." = "此擴充功能已加入。";
+"Failed to download extension: %@" = "無法下載擴充功能：%@";

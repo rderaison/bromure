@@ -673,3 +673,23 @@
 
 /* Network Healer — DHCP fallback warning (bridged-mode incompatible cases) */
 "The VM could not obtain an IP address via DHCP. Browsing will not work in this session.\n\nTry switching to Bridge mode in Settings \U2192 Network for more reliable connectivity." = "Die VM konnte keine IP-Adresse über DHCP beziehen. Surfen ist in dieser Sitzung nicht möglich.\n\nWechsle in Einstellungen \U2192 Netzwerk in den Bridge-Modus für eine zuverlässigere Verbindung.";
+
+/* ProfileSettingsView — Extensions */
+"Extensions" = "Erweiterungen";
+"Add browser extensions to this profile" = "Browser-Erweiterungen zu diesem Profil hinzuf\U00fcgen";
+"Enable Extensions" = "Erweiterungen aktivieren";
+"Extensions require Chrome's built-in toolbar. Enabling extensions will disable Native Tabs for this profile." = "Erweiterungen ben\U00f6tigen Chromes integrierte Symbolleiste. Beim Aktivieren von Erweiterungen werden Native Tabs f\U00fcr dieses Profil deaktiviert.";
+"Disable Native Tabs?" = "Native Tabs deaktivieren?";
+"Disable Native Tabs" = "Native Tabs deaktivieren";
+"Extensions require Chrome's native toolbar to display icons and popups. Native Tabs will be turned off for this profile." = "Erweiterungen ben\U00f6tigen Chromes native Symbolleiste, um Symbole und Popups anzuzeigen. Native Tabs werden f\U00fcr dieses Profil deaktiviert.";
+"Recommended" = "Empfohlen";
+"Popular privacy and security extensions. Toggling an extension will download it on first use." = "Beliebte Datenschutz- und Sicherheitserweiterungen. Beim Aktivieren wird die Erweiterung beim ersten Verwenden heruntergeladen.";
+"Custom Extensions" = "Eigene Erweiterungen";
+"Add third-party extensions by pasting a Chrome Web Store URL. These extensions can access all browsing data within the session." = "F\U00fcgen Sie Drittanbieter-Erweiterungen durch Einf\U00fcgen einer Chrome Web Store-URL hinzu. Diese Erweiterungen k\U00f6nnen auf alle Browsing-Daten in der Sitzung zugreifen.";
+"Custom extensions are not vetted by Bromure. Only install extensions you trust." = "Eigene Erweiterungen werden nicht von Bromure gepr\U00fcft. Installieren Sie nur Erweiterungen, denen Sie vertrauen.";
+"Chrome Web Store URL" = "Chrome Web Store-URL";
+"Add" = "Hinzuf\U00fcgen";
+"Add Extension\U2026" = "Erweiterung hinzuf\U00fcgen\U2026";
+"Invalid Chrome Web Store URL. Expected format: chromewebstore.google.com/detail/.../EXTENSION_ID" = "Ung\U00fcltige Chrome Web Store-URL. Erwartetes Format: chromewebstore.google.com/detail/.../EXTENSION_ID";
+"This extension is already added." = "Diese Erweiterung wurde bereits hinzugef\U00fcgt.";
+"Failed to download extension: %@" = "Erweiterung konnte nicht heruntergeladen werden: %@";

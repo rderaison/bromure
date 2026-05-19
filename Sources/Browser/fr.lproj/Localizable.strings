@@ -673,3 +673,23 @@
 
 /* Network Healer — DHCP fallback warning (bridged-mode incompatible cases) */
 "The VM could not obtain an IP address via DHCP. Browsing will not work in this session.\n\nTry switching to Bridge mode in Settings \U2192 Network for more reliable connectivity." = "La VM n\U2019a pas pu obtenir d\U2019adresse IP via DHCP. La navigation ne fonctionnera pas pendant cette session.\n\nEssayez de passer en mode Pont dans Réglages \U2192 Réseau pour une connectivité plus fiable.";
+
+/* ProfileSettingsView — Extensions */
+"Extensions" = "Extensions";
+"Add browser extensions to this profile" = "Ajouter des extensions de navigateur \U00e0 ce profil";
+"Enable Extensions" = "Activer les extensions";
+"Extensions require Chrome's built-in toolbar. Enabling extensions will disable Native Tabs for this profile." = "Les extensions n\U00e9cessitent la barre d\U2019outils int\U00e9gr\U00e9e de Chrome. Activer les extensions d\U00e9sactivera les Onglets natifs pour ce profil.";
+"Disable Native Tabs?" = "D\U00e9sactiver les Onglets natifs\U00a0?";
+"Disable Native Tabs" = "D\U00e9sactiver les Onglets natifs";
+"Extensions require Chrome's native toolbar to display icons and popups. Native Tabs will be turned off for this profile." = "Les extensions n\U00e9cessitent la barre d\U2019outils native de Chrome pour afficher les ic\U00f4nes et les fen\U00eatres contextuelles. Les Onglets natifs seront d\U00e9sactiv\U00e9s pour ce profil.";
+"Recommended" = "Recommand\U00e9es";
+"Popular privacy and security extensions. Toggling an extension will download it on first use." = "Extensions populaires de confidentialit\U00e9 et de s\U00e9curit\U00e9. Activer une extension la t\U00e9l\U00e9chargera lors de sa premi\U00e8re utilisation.";
+"Custom Extensions" = "Extensions personnalis\U00e9es";
+"Add third-party extensions by pasting a Chrome Web Store URL. These extensions can access all browsing data within the session." = "Ajoutez des extensions tierces en collant une URL du Chrome Web Store. Ces extensions peuvent acc\U00e9der \U00e0 toutes les donn\U00e9es de navigation de la session.";
+"Custom extensions are not vetted by Bromure. Only install extensions you trust." = "Les extensions personnalis\U00e9es ne sont pas v\U00e9rifi\U00e9es par Bromure. N\U2019installez que des extensions auxquelles vous faites confiance.";
+"Chrome Web Store URL" = "URL du Chrome Web Store";
+"Add" = "Ajouter";
+"Add Extension\U2026" = "Ajouter une extension\U2026";
+"Invalid Chrome Web Store URL. Expected format: chromewebstore.google.com/detail/.../EXTENSION_ID" = "URL Chrome Web Store invalide. Format attendu\U00a0: chromewebstore.google.com/detail/.../EXTENSION_ID";
+"This extension is already added." = "Cette extension est d\U00e9j\U00e0 ajout\U00e9e.";
+"Failed to download extension: %@" = "\U00c9chec du t\U00e9l\U00e9chargement de l\U2019extension\U00a0: %@";

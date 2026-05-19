@@ -4,5 +4,8 @@
   },
   "dependencies": {
     "puppeteer-core": "^24.39.1"
+  },
+  "overrides": {
+    "ws": "^8.20.1"
   }
 }

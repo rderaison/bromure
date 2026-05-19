@@ -526,6 +526,132 @@ public struct EnvironmentVariable: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// An MCP server configured in a profile. At VM boot time the host
+/// serializes these into the agent-appropriate config file (Claude Code
+/// JSON or Codex TOML) and injects them into the guest.
+public struct MCPServer: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+
+    public var name: String
+
+    public enum Transport: String, Codable, CaseIterable, Sendable {
+        case http
+        case stdio
+    }
+    public var transport: Transport
+
+    public var command: String
+    public var arguments: [String]
+
+    public var url: String
+
+    public var environment: [EnvironmentVariable]
+
+    public var bearerTokenEnvVar: String
+
+    public var bearerToken: String
+
+    public var enabled: Bool
+
+    /// When non-empty, this raw JSON is used as the server config
+    /// instead of the structured fields above. Allows arbitrary
+    /// MCP config shapes (OAuth blocks, custom fields, etc.).
+    public var rawJSON: String
+
+    public var startupTimeoutSec: Int?
+    public var toolTimeoutSec: Int?
+
+    /// OAuth state obtained by the host-side broker. When non-nil the
+    /// bearer token is managed — the broker populates `bearerToken`
+    /// from `oauthState.accessToken` and refreshes it on launch.
+    public var oauthState: MCPOAuthState?
+
+    public init(
+        id: UUID = UUID(),
+        name: String = "",
+        transport: Transport = .http,
+        command: String = "",
+        arguments: [String] = [],
+        url: String = "",
+        environment: [EnvironmentVariable] = [],
+        bearerTokenEnvVar: String = "",
+        bearerToken: String = "",
+        enabled: Bool = true,
+        rawJSON: String = "",
+        startupTimeoutSec: Int? = nil,
+        toolTimeoutSec: Int? = nil,
+        oauthState: MCPOAuthState? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.transport = transport
+        self.command = command
+        self.arguments = arguments
+        self.url = url
+        self.environment = environment
+        self.bearerTokenEnvVar = bearerTokenEnvVar
+        self.bearerToken = bearerToken
+        self.enabled = enabled
+        self.rawJSON = rawJSON
+        self.startupTimeoutSec = startupTimeoutSec
+        self.toolTimeoutSec = toolTimeoutSec
+        self.oauthState = oauthState
+    }
+
+    public var urlHost: String? {
+        guard transport == .http, let parsed = URL(string: url) else { return nil }
+        return parsed.host
+    }
+
+    public var isUsable: Bool {
+        let hasName = !name.trimmingCharacters(in: .whitespaces).isEmpty
+        switch transport {
+        case .stdio: return hasName && !command.trimmingCharacters(in: .whitespaces).isEmpty
+        case .http:  return hasName && !url.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
+}
+
+/// OAuth tokens and client registration obtained by the host-side broker
+/// for an HTTP MCP server. Persisted in the profile so the access token
+/// can be refreshed across sessions without re-authorizing.
+public struct MCPOAuthState: Codable, Equatable, Sendable {
+    public var clientID: String
+    public var clientSecret: String?
+    public var authorizationEndpoint: String
+    public var tokenEndpoint: String
+    public var registrationEndpoint: String?
+    public var accessToken: String
+    public var refreshToken: String?
+    public var expiresAt: Date?
+    public var authorizedAt: Date
+    public var callbackPort: UInt16?
+
+    public init(
+        clientID: String,
+        clientSecret: String? = nil,
+        authorizationEndpoint: String,
+        tokenEndpoint: String,
+        registrationEndpoint: String? = nil,
+        accessToken: String,
+        refreshToken: String? = nil,
+        expiresAt: Date? = nil,
+        authorizedAt: Date = Date(),
+        callbackPort: UInt16? = nil
+    ) {
+        self.clientID = clientID
+        self.clientSecret = clientSecret
+        self.authorizationEndpoint = authorizationEndpoint
+        self.tokenEndpoint = tokenEndpoint
+        self.registrationEndpoint = registrationEndpoint
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+        self.expiresAt = expiresAt
+        self.authorizedAt = authorizedAt
+        self.callbackPort = callbackPort
+    }
+}
+
 /// One agentic-coding profile: which tool, how it auths, what folder it
 /// works against, and where its persistent disk lives.
 public struct Profile: Codable, Identifiable, Equatable, Sendable {
@@ -866,6 +992,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var customBackgroundHex: String?
     public var customForegroundHex: String?
 
+    public var mcpServers: [MCPServer]
+
     public init(
         id: UUID = UUID(),
         name: String,
@@ -914,7 +1042,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         keyboardLayoutOverride: String? = nil,
         keyRepeatDelayMs: Int? = nil,
         keyRepeatRateHz: Int? = nil,
-        closeAction: CloseAction = .suspend
+        closeAction: CloseAction = .suspend,
+        mcpServers: [MCPServer] = []
     ) {
         self.id = id
         self.name = name
@@ -964,6 +1093,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.customBackgroundHex = customBackgroundHex
         self.customForegroundHex = customForegroundHex
         self.closeAction = closeAction
+        self.mcpServers = mcpServers
     }
 
     /// Default-tolerant decoder so old JSON files (missing newer fields) load.
@@ -996,6 +1126,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case digitalOceanTokenRequiresApproval
         case sshKeyRequiresApproval
         case closeAction
+        case mcpServers
     }
 
     public init(from decoder: Decoder) throws {
@@ -1070,6 +1201,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         digitalOceanTokenRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .digitalOceanTokenRequiresApproval) ?? false
         sshKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .sshKeyRequiresApproval) ?? false
         closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .suspend
+        mcpServers = try c.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
     }
 
     /// Explicit encoder — skips the legacy `folderPath` key (we only ever
@@ -1155,6 +1287,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if sshKeyRequiresApproval { try c.encode(true, forKey: .sshKeyRequiresApproval) }
         try c.encode(closeAction, forKey: .closeAction)
+        if !mcpServers.isEmpty {
+            try c.encode(mcpServers, forKey: .mcpServers)
+        }
     }
 
     /// Every tool configured on this profile, primary first. Each entry
@@ -1253,6 +1388,10 @@ struct ProfileSecrets: Codable {
     /// reals; on the wire the proxy swaps fakes back to reals.
     var defaultClaudeTokens: StoredOAuthTokens?
     var defaultCodexTokens: StoredOAuthTokens?
+    /// MCP server bearer tokens. Keyed by MCPServer.id.uuidString.
+    var mcpBearerTokens: [String: String]?
+    /// MCP OAuth state blobs. Keyed by MCPServer.id.uuidString.
+    var mcpOAuthStates: [String: MCPOAuthState]?
 
     var isEmpty: Bool {
         (apiKey?.isEmpty ?? true)
@@ -1266,6 +1405,8 @@ struct ProfileSecrets: Codable {
             && (dockerRegistryPasswords?.isEmpty ?? true)
             && defaultClaudeTokens == nil
             && defaultCodexTokens == nil
+            && (mcpBearerTokens?.isEmpty ?? true)
+            && (mcpOAuthStates?.isEmpty ?? true)
     }
 
     /// Pull every secret string out of the profile, replacing them
@@ -1336,6 +1477,19 @@ struct ProfileSecrets: Codable {
             profile.defaultCodexTokens = nil
         }
 
+        for (i, server) in profile.mcpServers.enumerated() {
+            if !server.bearerToken.isEmpty {
+                if s.mcpBearerTokens == nil { s.mcpBearerTokens = [:] }
+                s.mcpBearerTokens?[server.id.uuidString] = server.bearerToken
+                profile.mcpServers[i].bearerToken = ""
+            }
+            if let oauth = server.oauthState {
+                if s.mcpOAuthStates == nil { s.mcpOAuthStates = [:] }
+                s.mcpOAuthStates?[server.id.uuidString] = oauth
+                profile.mcpServers[i].oauthState = nil
+            }
+        }
+
         return s
     }
 
@@ -1376,6 +1530,20 @@ struct ProfileSecrets: Codable {
         }
         if let t = defaultClaudeTokens { profile.defaultClaudeTokens = t }
         if let t = defaultCodexTokens { profile.defaultCodexTokens = t }
+        if let map = mcpBearerTokens {
+            for (i, server) in profile.mcpServers.enumerated() {
+                if let t = map[server.id.uuidString] {
+                    profile.mcpServers[i].bearerToken = t
+                }
+            }
+        }
+        if let map = mcpOAuthStates {
+            for (i, server) in profile.mcpServers.enumerated() {
+                if let state = map[server.id.uuidString] {
+                    profile.mcpServers[i].oauthState = state
+                }
+            }
+        }
     }
 }
 
@@ -2364,6 +2532,34 @@ public final class ProfileStore {
         set +a
     fi
 
+    # MCP server configs from the profile. The host generates both
+    # Claude Code and Codex formats; we install whichever matches
+    # the active tool.
+    if [ -d /mnt/bromure-meta/mcp ]; then
+        case "$BROMURE_AC_TOOL" in
+            claude)
+                if [ -r /mnt/bromure-meta/mcp/claude.json ]; then
+                    mkdir -p "$HOME/.claude"
+                    # Merge into existing .claude.json if present,
+                    # otherwise create a new one with just mcpServers.
+                    if [ -f "$HOME/.claude.json" ]; then
+                        python3 -c "import json,sys;e=json.load(open(sys.argv[1]));m=json.load(open(sys.argv[2]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};json.dump(e,open(sys.argv[1],'w'),indent=2)" "$HOME/.claude.json" /mnt/bromure-meta/mcp/claude.json 2>/dev/null
+                    else
+                        cp /mnt/bromure-meta/mcp/claude.json "$HOME/.claude.json"
+                    fi
+                fi
+                ;;
+            codex)
+                if [ -r /mnt/bromure-meta/mcp/codex.toml ]; then
+                    mkdir -p "$HOME/.codex"
+                    # Append MCP server blocks to config.toml (Codex
+                    # merges [mcp_servers.*] tables additively).
+                    cat /mnt/bromure-meta/mcp/codex.toml >> "$HOME/.codex/config.toml"
+                fi
+                ;;
+        esac
+    fi
+
     # Stay in $HOME (~ubuntu) on shell start. Shared folders are
     # available as ~/<basename> symlinks if you want them.
 
@@ -2695,6 +2891,16 @@ public final class ProfileStore {
     if [ -r /mnt/bromure-meta/keyboard-agent.py ]; then
         python3 /mnt/bromure-meta/keyboard-agent.py &
         echo "[xinit] keyboard-agent pid $!" >> /tmp/xinitrc.log
+    fi
+
+    # Debug shell agent — proactively opens a vsock pool to host port
+    # 5800 so the AutomationServer's /sessions/{id}/exec endpoint can
+    # dequeue a connection on demand. Only launched when the meta
+    # share carries the script, which only happens when the host runs
+    # with BROMURE_DEBUG_CLAUDE set (SessionDisk gates the copy).
+    if [ -r /mnt/bromure-meta/shell-agent.py ]; then
+        python3 /mnt/bromure-meta/shell-agent.py &
+        echo "[xinit] shell-agent pid $!" >> /tmp/xinitrc.log
     fi
 
     # Natural scrolling is handled at the kitty level via

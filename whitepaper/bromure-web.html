@@ -1,0 +1,1014 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bromure Web — Technical White Paper</title>
+<style>
+  @page {
+    size: Letter;
+    margin: 22mm 20mm 22mm 20mm;
+    @bottom-right { content: counter(page) " / " counter(pages); font-family: "Helvetica Neue", Arial, sans-serif; font-size: 9pt; color: #888; }
+    @bottom-left  { content: "Bromure Web — Technical White Paper"; font-family: "Helvetica Neue", Arial, sans-serif; font-size: 9pt; color: #888; }
+  }
+
+  :root {
+    --ink: #0f172a;
+    --muted: #475569;
+    --line: #cbd5e1;
+    --soft: #f1f5f9;
+    --accent: #b45309;
+    --accent-soft: #fef3c7;
+    --code-bg: #0b1220;
+    --code-ink: #e2e8f0;
+  }
+
+  html, body {
+    color: var(--ink);
+    font-family: "Helvetica Neue", "Inter", "Segoe UI", Arial, sans-serif;
+    font-size: 10.5pt;
+    line-height: 1.45;
+    margin: 0;
+  }
+
+  /* Cover */
+  .cover {
+    page-break-after: always;
+    height: 230mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding-top: 30mm;
+  }
+  .cover .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 10pt;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .cover h1 {
+    font-size: 38pt;
+    line-height: 1.1;
+    margin: 12pt 0 6pt 0;
+    letter-spacing: -0.5pt;
+  }
+  .cover .subtitle {
+    font-size: 15pt;
+    color: var(--muted);
+    max-width: 140mm;
+    line-height: 1.35;
+  }
+  .cover .meta {
+    border-top: 1px solid var(--line);
+    padding-top: 12pt;
+    color: var(--muted);
+    font-size: 10pt;
+    display: flex;
+    justify-content: space-between;
+  }
+  .cover .meta strong { color: var(--ink); font-weight: 600; }
+
+  /* Section headings */
+  h1, h2, h3, h4 { color: var(--ink); }
+  h2 {
+    font-size: 18pt;
+    margin: 28pt 0 10pt 0;
+    padding-bottom: 4pt;
+    border-bottom: 1px solid var(--line);
+    page-break-after: avoid;
+  }
+  h3 {
+    font-size: 12.5pt;
+    margin: 18pt 0 6pt 0;
+    page-break-after: avoid;
+  }
+  h4 {
+    font-size: 10.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 14pt 0 4pt 0;
+    color: var(--accent);
+  }
+
+  p { margin: 6pt 0; }
+  ul, ol { margin: 6pt 0 6pt 18pt; }
+  li { margin: 2pt 0; }
+
+  /* TOC */
+  .toc { page-break-after: always; }
+  .toc h2 { border: none; margin-top: 0; }
+  .toc ol { list-style: none; margin: 0; padding: 0; counter-reset: tocn; }
+  .toc ol li {
+    counter-increment: tocn;
+    padding: 4pt 0;
+    border-bottom: 1px dotted var(--line);
+    display: flex;
+    justify-content: space-between;
+    font-size: 11pt;
+  }
+  .toc ol li::before {
+    content: counter(tocn, decimal) ".  ";
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    width: 22pt;
+    flex-shrink: 0;
+  }
+  .toc ol li .ttl { flex: 1; }
+
+  /* Callouts */
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 8pt 12pt;
+    margin: 10pt 0;
+    border-radius: 2pt;
+  }
+  .callout strong { color: var(--accent); }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8pt 0;
+    font-size: 9.8pt;
+  }
+  th, td {
+    border-bottom: 1px solid var(--line);
+    padding: 6pt 8pt;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: var(--soft);
+    font-weight: 600;
+    border-bottom: 1.5px solid var(--ink);
+  }
+
+  /* Code / monospace block */
+  pre {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 10pt 12pt;
+    border-radius: 4pt;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8.5pt;
+    line-height: 1.4;
+    overflow-x: auto;
+    white-space: pre;
+    page-break-inside: avoid;
+  }
+  code {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 9.2pt;
+    background: var(--soft);
+    padding: 1pt 4pt;
+    border-radius: 2pt;
+  }
+
+  /* SVG figures */
+  .figure {
+    margin: 12pt 0 2pt 0;
+    padding: 0;
+    page-break-inside: avoid;
+    text-align: center;
+  }
+  .figure svg {
+    width: 100%;
+    max-width: 170mm;
+    height: auto;
+    display: block;
+    margin: 0 auto;
+  }
+  .caption {
+    font-size: 9pt;
+    color: var(--muted);
+    text-align: center;
+    margin-top: -4pt;
+    margin-bottom: 12pt;
+  }
+
+  /* Two-column comparisons */
+  .twocol {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10pt;
+    margin: 8pt 0;
+  }
+  .twocol .col {
+    border: 1px solid var(--line);
+    border-radius: 4pt;
+    padding: 8pt 10pt;
+    background: #fff;
+  }
+  .twocol .col h4 { margin-top: 0; }
+
+  /* Key points box */
+  .keypoints {
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--ink);
+    background: #fff;
+    padding: 10pt 14pt;
+    border-radius: 2pt;
+    margin: 12pt 0;
+  }
+  .keypoints h4 {
+    margin-top: 0;
+    color: var(--ink);
+    border: none;
+  }
+  .keypoints ul { margin: 0 0 0 16pt; }
+
+  .pagebreak { page-break-before: always; }
+
+  .footer-note {
+    color: var(--muted);
+    font-size: 9pt;
+    font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================ COVER ============================ -->
+<section class="cover">
+  <div>
+    <div class="eyebrow">Technical White Paper</div>
+    <h1>Bromure Web</h1>
+    <div class="subtitle">
+      A disposable-VM browsing architecture for the enterprise:
+      how we contain the web, see what employees do on it, and force
+      every corporate session through a managed boundary.
+    </div>
+  </div>
+  <div class="meta">
+    <span><strong>Bromure, Inc.</strong> &nbsp;·&nbsp; bromure.io</span>
+    <span><strong>Revision:</strong> May 2026</span>
+    <span><strong>Audience:</strong> Security &amp; IT leadership, technical investors</span>
+  </div>
+</section>
+
+<!-- ============================ TOC ============================ -->
+<section class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><span class="ttl">Executive summary</span></li>
+    <li><span class="ttl">Threat model: what the corporate browser is up against</span></li>
+    <li><span class="ttl">The Bromure Web isolation architecture</span></li>
+    <li><span class="ttl">Why this design is safe — five containment claims, defended</span></li>
+    <li><span class="ttl">The visibility problem, and what enterprise management solves</span></li>
+    <li><span class="ttl">Enforcement: making Bromure the only way in (Google Workspace, Entra, Okta)</span></li>
+    <li><span class="ttl">Privacy, data residency, and the dual-use line</span></li>
+    <li><span class="ttl">Operational model and rollout</span></li>
+    <li><span class="ttl">Appendix A — Cryptographic specifics</span></li>
+    <li><span class="ttl">Appendix B — Comparison with adjacent categories</span></li>
+  </ol>
+</section>
+
+<!-- ============================ 1. EXEC SUMMARY ============================ -->
+<h2>1. Executive summary</h2>
+
+<p>
+  Bromure Web turns the browser — the single largest unmanaged attack surface
+  on a corporate endpoint — into a disposable, fully observable, fully
+  controllable resource. Every browsing session runs inside its own
+  short-lived Linux virtual machine on the employee's Mac. When the window
+  closes, the VM and everything it touched are destroyed.
+</p>
+
+<p>
+  Built on Apple's <code>Virtualization.framework</code>, Bromure pre-warms
+  a pool of VMs so a new session opens in under a second. Inside that VM,
+  Chromium runs against a clean OS image, isolated from the host's files,
+  keychain, network stack, and other browser sessions. The user sees a
+  normal browser; what's actually running is a one-shot OS.
+</p>
+
+<div class="keypoints">
+  <h4>The three claims this paper defends</h4>
+  <ul>
+    <li><strong>Safety.</strong> A successful browser exploit cannot read host files, persist on the device, or laterally attack the corporate network. The blast radius ends at the VM boundary, and the VM is destroyed on close.</li>
+    <li><strong>Visibility.</strong> For enterprise-managed sessions, every HTTP request, response, and form submission is recorded against a verified user identity and shipped to the customer's tenant — without the user being able to tamper with capture or disable it locally.</li>
+    <li><strong>Enforcement.</strong> Identity-provider conditional-access rules (Google Workspace, Microsoft Entra ID, Okta) can be configured to admit only requests presenting a Bromure-issued mTLS client certificate. That certificate exists exclusively inside managed Bromure VMs. Other browsers cannot pass the check.</li>
+  </ul>
+</div>
+
+<p>
+  The rest of the paper walks each claim back to the implementation:
+  hypervisor, copy-on-write disks, virtio sockets, signed managed-profile
+  manifests, mTLS leaf certificates, and the integration surface with
+  enterprise identity providers.
+</p>
+
+<!-- ============================ 2. THREAT MODEL ============================ -->
+<h2>2. Threat model: what the corporate browser is up against</h2>
+
+<p>
+  The browser is the only piece of software on a corporate laptop that:
+  loads untrusted code from arbitrary third parties every minute of the
+  workday; holds long-lived session tokens for the company's most
+  sensitive SaaS; can be re-targeted by a phishing link in any chat
+  message; and runs with the user's own privileges on the host OS.
+</p>
+
+<p>The threats Bromure Web is designed to defeat are:</p>
+
+<table>
+  <thead>
+    <tr><th style="width:32%">Threat</th><th>Why the conventional browser fails</th><th>How Bromure changes the equation</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Browser zero-day or n-day RCE</td>
+      <td>A renderer or GPU process compromise can pivot to the host: read <code>~/Documents</code>, the keychain, SSH keys, dotfiles.</td>
+      <td>Renderer runs inside a Linux guest under a hardware hypervisor. There is no <code>~/Documents</code> in the guest; the host is on the other side of a Type-1 boundary.</td>
+    </tr>
+    <tr>
+      <td>Malicious extension / supply-chain extension update</td>
+      <td>Persists across sessions, reads cookies for every site, exfiltrates indefinitely.</td>
+      <td>Extension set is server-controlled per managed profile. The disk it lives on is destroyed at window close. Persistence has no surface.</td>
+    </tr>
+    <tr>
+      <td>Drive-by malware / drive-by data theft</td>
+      <td>Dropped binary executes, harvests creds, beacons to C2.</td>
+      <td>Dropped binary lands in an ephemeral guest with no host filesystem reachable and no inbound vsock to abuse. The guest is shredded on close.</td>
+    </tr>
+    <tr>
+      <td>Phishing leading to credential paste</td>
+      <td>Credentials end up at the attacker's IdP-impersonation site, then the attacker logs into the real SaaS from a residential VPN.</td>
+      <td>The IdP requires the Bromure mTLS leaf cert as a precondition for finishing the login. The attacker's residential VPN doesn't have one. The credential is useless on its own.</td>
+    </tr>
+    <tr>
+      <td>Insider exfiltration via webmail or paste</td>
+      <td>Endpoint EDR sees a TLS connection but cannot read the body. Sensitive POSTs are invisible.</td>
+      <td>The managed profile's trace policy records request body and form fields in-VM, before TLS, and ships them to the customer tenant over mTLS.</td>
+    </tr>
+    <tr>
+      <td>Cross-session contamination</td>
+      <td>Two tabs in the same browser share cookies, storage, and the same renderer pool.</td>
+      <td>Each session is a separate VM, separate IP, separate cookie jar, separate kernel.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  Out of scope for this paper: physical attacks on the Mac itself,
+  compromise of macOS below the user account, and supply-chain attacks
+  on Apple's Virtualization.framework. We rely on Apple's hypervisor as
+  the trust anchor in the same way every macOS security product does.
+</p>
+
+<!-- ============================ 3. ARCHITECTURE ============================ -->
+<h2>3. The Bromure Web isolation architecture</h2>
+
+<h3>3.1 One VM per session</h3>
+
+<p>
+  A Bromure Web "session" is one browser window. Behind that window sits
+  a dedicated Linux VM, booted from a sealed Bromure-built base image
+  cloned via APFS copy-on-write — so cloning a 4&nbsp;GB image is an
+  O(1) metadata operation, not a 4&nbsp;GB copy. The VM has its own
+  kernel, its own filesystem, its own MAC address, and its own
+  network namespace.
+</p>
+
+<div class="figure">
+<svg viewBox="0 0 720 440" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Inter', system-ui, sans-serif">
+  <defs>
+    <marker id="webArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="webArrAcc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b45309"/>
+    </marker>
+    <filter id="webShadow" x="-2%" y="-2%" width="104%" height="108%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1.2"/>
+      <feOffset dx="0" dy="1.5" result="off"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.18"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- macOS host outer -->
+  <rect x="20" y="40" width="680" height="300" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <rect x="20" y="40" width="680" height="26" rx="10" fill="#f1f5f9"/>
+  <rect x="20" y="55" width="680" height="11" fill="#f1f5f9"/>
+  <circle cx="38" cy="53" r="4" fill="#ef4444"/>
+  <circle cx="52" cy="53" r="4" fill="#eab308"/>
+  <circle cx="66" cy="53" r="4" fill="#22c55e"/>
+  <text x="690" y="58" font-size="9" font-weight="600" fill="#64748b" letter-spacing="1" text-anchor="end">macOS HOST</text>
+
+  <!-- Bromure.app -->
+  <rect x="50" y="90" width="200" height="180" rx="6" fill="#fafbfd" stroke="#cbd5e1" filter="url(#webShadow)"/>
+  <text x="65" y="110" font-size="10.5" font-weight="600" fill="#0f172a">Bromure.app</text>
+  <text x="65" y="125" font-size="8.5" fill="#64748b">AppKit window management</text>
+  <rect x="65" y="138" width="170" height="118" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-dasharray="3,2"/>
+  <rect x="65" y="138" width="170" height="14" rx="4" fill="#e2e8f0"/>
+  <circle cx="74" cy="145" r="2.5" fill="#94a3b8"/>
+  <circle cx="83" cy="145" r="2.5" fill="#94a3b8"/>
+  <circle cx="92" cy="145" r="2.5" fill="#94a3b8"/>
+  <text x="150" y="200" font-size="9" fill="#94a3b8" font-style="italic" text-anchor="middle">browser session</text>
+  <text x="150" y="215" font-size="9" fill="#94a3b8" font-style="italic" text-anchor="middle">(NSHostingView)</text>
+
+  <!-- Bidi display+input -->
+  <path d="M 252 180 L 318 180" stroke="#475569" stroke-width="1.4" marker-end="url(#webArr)" marker-start="url(#webArr)"/>
+  <text x="285" y="170" font-size="8.5" fill="#64748b" text-anchor="middle">display</text>
+  <text x="285" y="195" font-size="8.5" fill="#64748b" text-anchor="middle">+ input</text>
+
+  <!-- Ephemeral VM -->
+  <rect x="320" y="90" width="350" height="180" rx="6" fill="#fffbeb" stroke="#b45309" stroke-width="1.6" filter="url(#webShadow)"/>
+  <rect x="320" y="90" width="350" height="22" rx="6" fill="#b45309"/>
+  <text x="495" y="105" font-size="10.5" font-weight="600" fill="#ffffff" text-anchor="middle" letter-spacing="0.5">EPHEMERAL VM</text>
+  <text x="335" y="130" font-size="9.5" font-weight="600" fill="#0f172a">Linux + Chromium</text>
+  <text x="335" y="144" font-size="9" fill="#64748b">APFS CoW clone of sealed base image</text>
+
+  <line x1="335" y1="155" x2="655" y2="155" stroke="#fde68a" stroke-width="1"/>
+
+  <text x="345" y="172" font-size="9" fill="#0f172a">▸ /home/user on tmpfs — destroyed on close</text>
+  <text x="345" y="188" font-size="9" fill="#0f172a">▸ no host filesystem mounts, no keychain access</text>
+  <text x="345" y="204" font-size="9" fill="#0f172a">▸ NAT-only egress — no LAN reachability</text>
+  <text x="345" y="220" font-size="9" fill="#0f172a">▸ fresh kernel, MAC, IP, namespace per session</text>
+  <text x="345" y="236" font-size="9" fill="#0f172a">▸ signed manifest pins extension set</text>
+
+  <text x="335" y="258" font-size="8.5" font-style="italic" fill="#b45309">close → CoW clone unlinked, nothing persists</text>
+
+  <!-- vsock channels callout -->
+  <line x1="495" y1="270" x2="495" y2="300" stroke="#475569" stroke-width="1.4" marker-end="url(#webArr)"/>
+  <rect x="100" y="298" width="540" height="50" rx="5" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="370" y="316" font-size="9.5" font-weight="600" fill="#0f172a" text-anchor="middle">vsock bridges (typed, narrow, audited)</text>
+  <text x="370" y="333" font-size="9" fill="#475569" text-anchor="middle">clipboard · file transfer (user-explicit) · trace (5900) · mTLS reload · network refresh</text>
+
+  <!-- NAT egress -->
+  <path d="M 600 270 L 600 380 L 660 380" stroke="#b45309" stroke-width="1.6" marker-end="url(#webArrAcc)" fill="none"/>
+  <text x="610" y="300" font-size="9" font-weight="600" fill="#b45309">NAT egress</text>
+  <text x="610" y="313" font-size="8.5" fill="#64748b">(host TCP stack)</text>
+
+  <ellipse cx="680" cy="408" rx="32" ry="14" fill="#fef3c7" stroke="#b45309" stroke-width="1.2"/>
+  <text x="680" y="412" font-size="9" font-weight="600" fill="#b45309" text-anchor="middle">WAN</text>
+  <path d="M 660 380 L 660 395" stroke="#b45309" stroke-width="1.6" fill="none"/>
+
+  <!-- Annotation arrow from VM pool note -->
+  <text x="285" y="278" font-size="8" fill="#475569" font-style="italic" text-anchor="middle">pre-warmed pool</text>
+  <text x="285" y="289" font-size="8" fill="#475569" font-style="italic" text-anchor="middle">behind the scenes</text>
+</svg>
+</div>
+<div class="caption">Figure 1 — Per-session VM with explicit, narrow channels to the host.</div>
+
+<p>
+  When the user closes the window, the VM is shut down, its CoW clone
+  is unlinked from the APFS volume, and the only durable artifact that
+  remains is whatever the trace pipeline (§5) has already shipped to
+  the customer tenant — not anything on the device.
+</p>
+
+<h3>3.2 The pool and the cold start problem</h3>
+
+<p>
+  A throwaway VM is useless if it takes 30 seconds to start. Bromure
+  keeps a small pool of pre-booted "warm" VMs sitting on the login
+  screen of the in-guest Chromium. When the user opens a new window,
+  the pool hands one over and immediately starts warming a replacement
+  in the background. Perceived cold-start is sub-second.
+</p>
+
+<h3>3.3 Channels between host and guest</h3>
+
+<p>
+  Linux guests on Apple Silicon talk to the host over <strong>virtio
+  sockets</strong> — a typed, point-to-point channel, not a network. A
+  guest cannot accidentally send a packet to the corporate LAN by
+  binding to the wrong interface; it can only speak the protocols we
+  expose. The full list is small and audited:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Channel</th><th>Direction</th><th>Purpose</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Clipboard bridge</td><td>both</td><td>User-initiated copy/paste. Off by default for managed profiles that forbid it.</td></tr>
+    <tr><td>File-transfer bridge</td><td>both</td><td>User-explicit drag/drop. No filesystem mount, no implicit access.</td></tr>
+    <tr><td>Trace bridge (port 5900)</td><td>guest → host</td><td>HTTP trace events from in-guest CDP listener.</td></tr>
+    <tr><td>mTLS reload bridge</td><td>host → guest</td><td>Push renewed client certificate without restarting the VM.</td></tr>
+    <tr><td>Network-refresh bridge</td><td>host → guest</td><td>Notify the guest that the host's upstream link changed (Wi-Fi switch, VPN up/down).</td></tr>
+  </tbody>
+</table>
+
+<p>
+  This is a deliberately small surface. Everything else — DNS, HTTP,
+  IPC to host services — is unavailable to the guest. The guest cannot
+  reach <code>localhost</code> on the host. It cannot enumerate the
+  host's LAN. It cannot probe the user's network printer.
+</p>
+
+<h3>3.4 Guest network egress</h3>
+
+<p>
+  Guest traffic is NAT'd through the host's TCP stack to the WAN. The
+  host can optionally interpose a network filter or push the guest
+  through an enterprise IKEv2 or WireGuard tunnel so all browsing
+  egresses from a corporate gateway. For an admin, this gives a single
+  place to apply DNS filtering, URL allow/deny, and IP allow-listing
+  for sensitive SaaS — exactly where the regulatory framework wants
+  it: at the boundary, not on the endpoint.
+</p>
+
+<!-- ============================ 4. SAFETY ============================ -->
+<h2 class="pagebreak">4. Why this design is safe — five containment claims, defended</h2>
+
+<p>
+  Each subsection states a claim, names the property in the
+  implementation that establishes it, and points at what would have
+  to be true for the claim to fail.
+</p>
+
+<h3>4.1 An RCE in the renderer cannot read host files</h3>
+
+<p>
+  Chromium runs in a Linux guest. The guest's view of "the filesystem"
+  is the CoW-cloned APFS image; it does not include the user's home
+  directory, the keychain, the host's TLS store, or anything the user
+  might lose sleep over. There is no <code>9p</code> or VirtioFS mount
+  exposing host files. File transfers happen by an explicit user
+  action that the host approves; there is no implicit shared mount.
+</p>
+
+<p>
+  For an attacker to reach a host file from inside the guest, they
+  would need a chained exploit through Apple's Virtualization.framework
+  — the same hardware-backed boundary that protects every other
+  hypervisor product on Apple Silicon.
+</p>
+
+<h3>4.2 Nothing persists across sessions</h3>
+
+<p>
+  Each VM is a fresh APFS CoW clone of the sealed base image. The
+  clone is unlinked when the window closes. There is no per-user
+  scratch volume. There is no cookie jar that survives. A malicious
+  extension installed by exploit at <code>t=0</code> is gone at
+  <code>t=close</code>; the next session starts from the same
+  pristine image as the first.
+</p>
+
+<div class="callout">
+  <strong>Implication for IR.</strong> "Wipe and re-image" is not an
+  incident-response step in Bromure — it is the steady state. Every
+  close is a wipe. The mean time between fresh images, per browser
+  window, is the length of one browsing task.
+</div>
+
+<h3>4.3 One session cannot see another</h3>
+
+<p>
+  Two windows are two VMs. They share no kernel, no memory, no
+  storage, no cookies. A cookie stolen in window A is not visible in
+  window B, even for the same user, even for the same site. This is
+  qualitatively stronger than Chromium's "profile" or "container"
+  features, which are software boundaries inside one process tree.
+</p>
+
+<h3>4.4 The guest cannot pivot onto the corporate LAN</h3>
+
+<p>
+  The guest has no L2 reachability to the host's LAN. Traffic is NAT'd
+  out of the host's TCP stack. A guest cannot ARP the user's printer,
+  scan the office /24, or open an SMB connection to a file server.
+  The path off the host is a forwarded socket, not a bridged interface.
+</p>
+
+<h3>4.5 The supply chain for what the user runs is signed and pinned</h3>
+
+<p>
+  Managed profiles arrive as <strong>signed manifests</strong> from
+  the control plane. The manifest enumerates settings, extensions,
+  and asset SHA-256s. Bromure refuses to load a profile whose
+  signature does not verify against the org's signing key. Extension
+  bundles are content-addressed and cached; a tampered cached blob
+  is rejected at load time. The user has no UI to "trust this
+  extension anyway" for managed profiles — the surface for
+  social-engineering an end user into running malicious code is
+  closed.
+</p>
+
+<div class="keypoints">
+  <h4>Summary of the safety story</h4>
+  <ul>
+    <li>The renderer runs on the wrong side of a hardware hypervisor.</li>
+    <li>The disk it writes to dies with the window.</li>
+    <li>The network it speaks on is NAT-only, not LAN-bridged.</li>
+    <li>The extensions it loads are signature-pinned by the admin, not the user.</li>
+    <li>The IPC channels it has to the host are typed, narrow, and audited.</li>
+  </ul>
+</div>
+
+<!-- ============================ 5. VISIBILITY ============================ -->
+<h2>5. The visibility problem, and what enterprise management solves</h2>
+
+<h3>5.1 What endpoint security cannot see</h3>
+
+<p>
+  Standard endpoint EDRs see process trees, file writes, and the
+  outside of TLS connections. They cannot read encrypted HTTP bodies.
+  They cannot tell you which fields of a form a user submitted. They
+  cannot link a specific HTTP POST to a specific employee identity in
+  a way that survives load balancers or shared egress.
+</p>
+
+<p>
+  For an industry that increasingly does its work entirely inside the
+  browser, this means the most important workplace activity — the
+  document uploaded to a personal Gmail, the prompt pasted into a
+  third-party LLM, the credential typed into a phishing replica of
+  the IdP — is the part the security team is most blind to.
+</p>
+
+<h3>5.2 Where Bromure captures, and why that's the right layer</h3>
+
+<p>
+  Bromure observes traffic <strong>inside the browser, before TLS
+  encrypts it.</strong> The capture point is the Chrome DevTools
+  Protocol's Network domain running on the in-guest Chromium. Every
+  request, response, header, body, and form-field submission is
+  surfaced as a typed event. The event is shipped over a guest→host
+  vsock channel (port 5900) to the host's Trace Bridge, then handed
+  to the Cloud Trace Uploader for batched delivery to the customer
+  tenant.
+</p>
+
+<div class="figure">
+<svg viewBox="0 0 720 260" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Inter', system-ui, sans-serif">
+  <defs>
+    <marker id="webArr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <filter id="webShadow2" x="-2%" y="-2%" width="104%" height="108%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1.2"/>
+      <feOffset dx="0" dy="1.5" result="off"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.18"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Top zone labels -->
+  <rect x="20" y="20" width="290" height="200" rx="8" fill="#fffbeb" fill-opacity="0.5" stroke="#fde68a"/>
+  <rect x="320" y="20" width="380" height="200" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="35" y="38" font-size="9" font-weight="600" fill="#b45309" letter-spacing="1">IN GUEST</text>
+  <text x="335" y="38" font-size="9" font-weight="600" fill="#475569" letter-spacing="1">ON HOST</text>
+
+  <!-- Chromium -->
+  <rect x="40" y="70" width="115" height="70" rx="6" fill="#ffffff" stroke="#cbd5e1" filter="url(#webShadow2)"/>
+  <text x="97" y="92" font-size="10" font-weight="600" fill="#0f172a" text-anchor="middle">Chromium</text>
+  <text x="97" y="106" font-size="8.5" fill="#64748b" text-anchor="middle">CDP Network</text>
+  <text x="97" y="119" font-size="8.5" fill="#64748b" text-anchor="middle">domain</text>
+  <text x="97" y="135" font-size="7.5" font-style="italic" fill="#94a3b8" text-anchor="middle">pre-TLS capture</text>
+
+  <!-- trace-agent.py -->
+  <rect x="180" y="70" width="115" height="70" rx="6" fill="#ffffff" stroke="#cbd5e1" filter="url(#webShadow2)"/>
+  <text x="237" y="92" font-size="10" font-weight="600" fill="#0f172a" text-anchor="middle">trace-agent.py</text>
+  <text x="237" y="108" font-size="8.5" fill="#64748b" text-anchor="middle">in-guest forwarder</text>
+
+  <!-- TraceBridge -->
+  <rect x="340" y="70" width="115" height="70" rx="6" fill="#ffffff" stroke="#cbd5e1" filter="url(#webShadow2)"/>
+  <text x="397" y="92" font-size="10" font-weight="600" fill="#0f172a" text-anchor="middle">TraceBridge</text>
+  <text x="397" y="106" font-size="8.5" fill="#64748b" text-anchor="middle">host, Swift</text>
+  <text x="397" y="122" font-size="8" fill="#64748b" text-anchor="middle">batches + adds</text>
+  <text x="397" y="133" font-size="8" fill="#64748b" text-anchor="middle">session context</text>
+
+  <!-- CloudTraceUploader -->
+  <rect x="480" y="70" width="125" height="70" rx="6" fill="#fffbeb" stroke="#b45309" stroke-width="1.4" filter="url(#webShadow2)"/>
+  <text x="542" y="92" font-size="10" font-weight="600" fill="#b45309" text-anchor="middle">CloudTrace</text>
+  <text x="542" y="105" font-size="10" font-weight="600" fill="#b45309" text-anchor="middle">Uploader</text>
+  <text x="542" y="122" font-size="8.5" fill="#64748b" text-anchor="middle">mTLS, leaf cert</text>
+
+  <!-- Customer tenant -->
+  <rect x="625" y="70" width="65" height="70" rx="6" fill="#b45309" filter="url(#webShadow2)"/>
+  <text x="657" y="93" font-size="9" font-weight="600" fill="#ffffff" text-anchor="middle">customer</text>
+  <text x="657" y="106" font-size="9" font-weight="600" fill="#ffffff" text-anchor="middle">tenant</text>
+  <text x="657" y="125" font-size="8" fill="#fef3c7" text-anchor="middle">/ingest</text>
+
+  <!-- Arrows -->
+  <path d="M 155 105 L 178 105" stroke="#475569" stroke-width="1.4" marker-end="url(#webArr2)"/>
+  <text x="166" y="98" font-size="7.5" fill="#64748b" text-anchor="middle">CDP</text>
+  <path d="M 295 105 L 338 105" stroke="#475569" stroke-width="1.4" marker-end="url(#webArr2)"/>
+  <text x="316" y="98" font-size="7.5" font-weight="600" fill="#475569" text-anchor="middle">vsock 5900</text>
+  <path d="M 455 105 L 478 105" stroke="#475569" stroke-width="1.4" marker-end="url(#webArr2)"/>
+  <text x="466" y="98" font-size="7.5" fill="#64748b" text-anchor="middle">batch</text>
+  <path d="M 605 105 L 623 105" stroke="#b45309" stroke-width="1.6" marker-end="url(#webArr2)"/>
+
+  <!-- Annotation bracket -->
+  <path d="M 40 165 L 40 175 L 605 175 L 605 165" stroke="#b45309" stroke-width="1.2" fill="none"/>
+  <text x="322" y="195" font-size="10" font-weight="600" fill="#b45309" text-anchor="middle">capture happens upstream of TLS — bodies and form fields are visible</text>
+  <text x="322" y="210" font-size="9" fill="#64748b" text-anchor="middle">policy levels: basic · headers · full</text>
+</svg>
+</div>
+<div class="caption">Figure 2 — In-browser capture, host-side batching, mTLS shipping. The capture point is upstream of TLS.</div>
+
+<h3>5.3 Three policy levels, set by the admin</h3>
+
+<p>
+  The amount of detail captured is a server-controlled policy attached
+  to the managed profile. It cannot be lowered by the end user. The
+  three levels:
+</p>
+
+<div class="twocol">
+  <div class="col">
+    <h4>Basic</h4>
+    <p>URL, HTTP method, status code, timing. No headers. No bodies. Suitable for audit and incident scoping where content sensitivity is high.</p>
+  </div>
+  <div class="col">
+    <h4>Headers</h4>
+    <p>Basic, plus request and response headers. Distinguishes API calls from page loads, captures content types, surfaces auth scheme metadata without recording the credential itself.</p>
+  </div>
+</div>
+<div class="twocol">
+  <div class="col">
+    <h4>Full</h4>
+    <p>Headers, plus request body, response body, and explicit form-field snapshots. Captures the document pasted into a chat, the prompt typed into an LLM, the field filled in a phishing form.</p>
+  </div>
+  <div class="col">
+    <h4>Off</h4>
+    <p>No upload. The profile's behavior collapses to the unmanaged Bromure default: a session-local trace inspector that lives and dies with the window.</p>
+  </div>
+</div>
+
+<h3>5.4 Why the user can't turn it off</h3>
+
+<p>
+  The trace policy is delivered inside a signed manifest from the
+  control plane. The host enforces it; the in-window UI for "stop
+  recording" is disabled and read-only for managed profiles where the
+  level is non-off. The end user cannot edit the profile, cannot
+  rotate the cert, cannot swap the endpoint. The local trace store
+  is bypassed entirely — events go straight to the cloud uploader
+  and never touch local SQLite.
+</p>
+
+<h3>5.5 Why the data on the wire is trustworthy</h3>
+
+<p>
+  Events are shipped over <strong>mTLS</strong>, authenticated by the
+  managed profile's leaf certificate. The server identifies the
+  install by the cert's subject CN; bearer tokens never ride with
+  trace data. Each batch is denormalized with the install ID,
+  org slug, and the verified user email recorded at enrollment time,
+  so every captured request is searchable per-employee in the
+  customer's tenant.
+</p>
+
+<div class="callout">
+  <strong>For a VC reading this:</strong> the "visibility" product is
+  the part that creates lock-in. Once an enterprise wires its
+  conditional-access rules to require the Bromure leaf cert, every
+  sensitive SaaS interaction by every employee flows through a
+  controlled, observable channel they own — and replacing Bromure
+  means rebuilding that control plane.
+</div>
+
+<!-- ============================ 6. ENFORCEMENT ============================ -->
+<h2 class="pagebreak">6. Enforcement: making Bromure the only way in</h2>
+
+<p>
+  Visibility into a managed browser is worthless if employees can
+  bypass the managed browser by opening Safari, Chrome, or a personal
+  Edge instance for the same SaaS. The enforcement story is how
+  Bromure becomes the only path that succeeds — not by software on
+  the endpoint, but by a policy at the identity provider.
+</p>
+
+<h3>6.1 The enrollment and certificate flow</h3>
+
+<p>
+  When a user is added to an org in the Bromure control plane, they
+  receive a six-word enrollment code (e.g.
+  <code>acid-aloe-arson-bench-cat-drum</code>). On their Mac, they
+  redeem it:
+</p>
+
+<pre>$ bromure enroll acid-aloe-arson-bench-cat-drum
+Enrolling against https://bromure.io/api as Renaud-MBP…
+Enrolled. Received 2 managed profile(s):
+  - Sales SaaS   v7   mTLS=yes  assets=3
+  - Finance      v3   mTLS=yes  assets=2</pre>
+
+<p>
+  Behind that single command:
+</p>
+<ol>
+  <li>An X25519 install keypair is generated and the private half is stored in the macOS Keychain with <code>WhenUnlockedThisDeviceOnly</code>.</li>
+  <li>The install is registered with the control plane. The server returns an install token and the set of profiles assigned to the user (directly or through groups).</li>
+  <li>For each managed profile that has <code>mtls.enabled</code>, the control plane's per-org CA issues a leaf certificate whose subject CN ties the cert to a specific (install, profile, user) tuple. The private key is generated on the device and never leaves it.</li>
+  <li>Inside every VM that boots for that profile, the leaf cert + key are imported into Chromium's NSS DB at startup. The browser presents the cert during TLS handshakes whenever a server requests one.</li>
+</ol>
+
+<h3>6.2 The IdP conditional-access rule</h3>
+
+<p>
+  The admin then configures their identity provider — Google
+  Workspace, Microsoft Entra ID, or Okta — to require a valid
+  Bromure-issued client certificate for the corporate SaaS apps they
+  care about. This is a single rule, configured once per app, and it
+  is the linchpin of the entire enforcement model.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Identity provider</th><th>Mechanism</th><th>Effect</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Google Workspace</td>
+      <td>Context-Aware Access policy that requires a client certificate issued by the org's uploaded Bromure CA trust chain.</td>
+      <td>Login to Workspace apps (Gmail, Drive, Sheets) and any SAML/OIDC SaaS fronted by Workspace SSO fails for browsers that don't present the cert.</td>
+    </tr>
+    <tr>
+      <td>Microsoft Entra ID</td>
+      <td>Conditional Access policy with "Require approved client app" / certificate-based authentication, using the Bromure CA as a trusted issuer.</td>
+      <td>Access to Microsoft 365, and any SaaS using Entra as IdP, is gated on cert presentation.</td>
+    </tr>
+    <tr>
+      <td>Okta</td>
+      <td>Okta Device Assurance with client certificate, anchored on the Bromure CA.</td>
+      <td>Any application behind Okta SSO inherits the constraint.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>6.3 What this looks like to users and attackers</h3>
+
+<div class="twocol">
+  <div class="col">
+    <h4>Legitimate employee</h4>
+    <p>
+      Clicks the SaaS link from Slack. Bromure intercepts and routes
+      the URL into a managed-profile VM (or pops the OS handler that
+      directs <code>https</code> URLs to Bromure). The in-VM browser
+      presents the leaf cert during the IdP handshake. IdP is happy.
+      Login proceeds as normal. The user never sees a cert dialog.
+    </p>
+  </div>
+  <div class="col">
+    <h4>Phished credential</h4>
+    <p>
+      Attacker has the password from a typo-squatted login page. They
+      try to sign in from a residential proxy in Chrome on Windows.
+      The IdP demands a client certificate. Their browser has none.
+      The login is rejected before any session token is issued. The
+      stolen password is worth nothing.
+    </p>
+  </div>
+</div>
+
+<div class="twocol">
+  <div class="col">
+    <h4>Insider on personal browser</h4>
+    <p>
+      Employee opens Safari to bypass logging and download a
+      sensitive document to a personal Drive. Workspace rejects the
+      login because Safari doesn't have a Bromure cert. To download
+      the document they must use Bromure, where the trace pipeline
+      records the action.
+    </p>
+  </div>
+  <div class="col">
+    <h4>Lost laptop</h4>
+    <p>
+      Admin unenrolls the install in the control plane. The next
+      profile sync removes the leaf cert (and revokes it server-side).
+      The IdP rejects any further attempts to authenticate from that
+      device. The user keeps the Mac; the org keeps its data.
+    </p>
+  </div>
+</div>
+
+<h3>6.4 Why this is stronger than "managed browser" or "device-bound token"</h3>
+
+<p>
+  Existing approaches require either deploying a fork of Chrome with
+  proprietary management hooks (a heavy maintenance burden and a
+  parallel browser the user has to remember to use), or relying on a
+  device-bound bearer token that lives in the OS keychain and can be
+  read by any process on that user account, including malware. The
+  Bromure approach inverts both:
+</p>
+
+<ul>
+  <li><strong>The cert lives inside the VM</strong>, not on the host. Malware on the host's user account cannot read it; the host doesn't have it.</li>
+  <li><strong>The cert is profile-scoped.</strong> The Finance VM has the Finance cert; the Sales VM has the Sales cert. Cross-profile pivoting is structurally impossible.</li>
+  <li><strong>Renewal is silent.</strong> The host's <code>MTLSReloadBridge</code> pushes new material into a running VM without restarting it; users never see expiration prompts.</li>
+</ul>
+
+<!-- ============================ 7. PRIVACY ============================ -->
+<h2>7. Privacy, data residency, and the dual-use line</h2>
+
+<p>
+  Bromure Web is, deliberately, a tool that lets administrators see
+  more than employees might expect a corporate browser to surface.
+  We treat that as a feature only inside a strict frame:
+</p>
+
+<ul>
+  <li><strong>Managed profiles only.</strong> Cloud trace upload is bound to managed profiles delivered by the org's control plane. The unmanaged Bromure user has no upload pipeline, by construction.</li>
+  <li><strong>Server-controlled endpoint.</strong> Each org points the trace stream at a tenant they own (or, for hosted customers, at <code>analytics.bromure.io/ingest</code> under a tenant-bound DPA). The endpoint is part of the signed manifest, so it cannot be silently redirected.</li>
+  <li><strong>Visible indicator.</strong> Sessions whose trace level is non-off are shown with a recording indicator in the window chrome. The user knows when the session is being captured. This is a non-negotiable UX requirement.</li>
+  <li><strong>Profile-bound capture.</strong> Trace recording only happens when a session is opened under a managed profile that mandates it. A user opening a personal browsing session under their own (unmanaged) profile is not captured.</li>
+</ul>
+
+<p>
+  Data residency is a function of where the customer points the
+  ingest endpoint. For Bromure-hosted customers, regional ingest
+  clusters are part of the SLA. For self-hosted customers, traces
+  never leave the customer's cloud account.
+</p>
+
+<!-- ============================ 8. OPERATIONS ============================ -->
+<h2>8. Operational model and rollout</h2>
+
+<h3>8.1 Day-zero deployment</h3>
+
+<ol>
+  <li>Admin signs up at <code>bromure.io</code>, creates an org, uploads (or generates) the org's signing key and the CA the IdP will trust.</li>
+  <li>Admin defines one or more managed profiles: which extensions, which network policy, which trace level, which SaaS endpoints they cover.</li>
+  <li>Admin mints enrollment codes (one per user, or one per group with capacity).</li>
+  <li>End users install Bromure (or have it installed by MDM) and run <code>bromure enroll &lt;code&gt;</code> once.</li>
+  <li>Admin configures the IdP rule to require the Bromure CA on the SaaS apps in scope. After this step, those apps are reachable only from Bromure-managed sessions.</li>
+</ol>
+
+<h3>8.2 Steady-state operations</h3>
+
+<ul>
+  <li>Profile updates (new extension, tighter URL allow-list, raised trace level) propagate at next sync; users do not need to restart.</li>
+  <li>mTLS certs renew silently via the host→guest reload channel.</li>
+  <li>Traces appear in the customer tenant in near real time, searchable by user, profile, URL, and form field.</li>
+  <li>Off-boarding is a single unenroll in the control plane; the cert revokes, the IdP rejects, the device loses access.</li>
+</ul>
+
+<h3>8.3 What breaks well</h3>
+
+<p>
+  The system is built to degrade visibly rather than silently. If the
+  control plane is unreachable, existing sessions keep working with
+  the last signed manifest; new enrollments are blocked. If the
+  trace endpoint is unreachable, the host uploader buffers and
+  retries — bounded by a queue cap that drops oldest events first
+  rather than newest, so the recent activity around an incident is
+  the part most likely to survive.
+</p>
+
+<!-- ============================ APPENDIX A ============================ -->
+<h2 class="pagebreak">Appendix A — Cryptographic specifics</h2>
+
+<table>
+  <thead><tr><th>Purpose</th><th>Primitive</th><th>Note</th></tr></thead>
+  <tbody>
+    <tr><td>Install identity</td><td>X25519 keypair</td><td>Generated at enroll, private half in macOS Keychain (device-only).</td></tr>
+    <tr><td>Profile manifest signature</td><td>Ed25519 over a canonicalized JSON serialization</td><td>Org signing key; public key shipped with the manifest, verified against the org record at the control plane.</td></tr>
+    <tr><td>Sealed payload delivery</td><td>libsodium-style sealed box to the install pubkey</td><td>Lets the server pre-encrypt assets for a specific install without holding their key material.</td></tr>
+    <tr><td>mTLS leaf cert</td><td>ECDSA P-256 over org CA</td><td>Subject CN encodes (orgSlug, installId, profileId); short validity; renewed silently.</td></tr>
+    <tr><td>Trace upload transport</td><td>TLS 1.3 with mutual auth</td><td>Server identifies install by client cert; no bearer token on the wire.</td></tr>
+    <tr><td>Asset integrity</td><td>SHA-256 in manifest</td><td>Verified on load; mismatched assets are refused.</td></tr>
+  </tbody>
+</table>
+
+<!-- ============================ APPENDIX B ============================ -->
+<h2>Appendix B — Comparison with adjacent categories</h2>
+
+<table>
+  <thead>
+    <tr><th></th><th>Endpoint EDR</th><th>Enterprise browser (Island, Talon)</th><th>Remote browser isolation (RBI)</th><th>Bromure Web</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Where the browser runs</td><td>Host OS</td><td>Host OS (custom Chromium fork)</td><td>Vendor cloud (pixel-stream)</td><td>Ephemeral VM on the user's Mac</td>
+    </tr>
+    <tr>
+      <td>Reads HTTPS bodies</td><td>No</td><td>Yes (in-process)</td><td>Yes</td><td>Yes (in-VM CDP, pre-TLS)</td>
+    </tr>
+    <tr>
+      <td>Persistence after window close</td><td>Yes (host disk)</td><td>Yes (host disk)</td><td>Vendor-managed</td><td>None</td>
+    </tr>
+    <tr>
+      <td>Sandbox boundary</td><td>Process</td><td>Process</td><td>Network</td><td>Hardware hypervisor</td>
+    </tr>
+    <tr>
+      <td>Enforcement model</td><td>Endpoint policy</td><td>Forked browser binary + MDM</td><td>DNS / proxy redirect</td><td>IdP-bound client certificate inside the VM</td>
+    </tr>
+    <tr>
+      <td>Latency cost</td><td>None</td><td>None</td><td>High (cloud pixel-stream)</td><td>~Sub-second (local VM)</td>
+    </tr>
+    <tr>
+      <td>Works offline</td><td>Yes</td><td>Yes</td><td>No</td><td>Yes (host alone is enough)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="footer-note">
+  This document describes the Bromure Web architecture as of May 2026.
+  Implementation details — file paths, vsock port numbers, and the
+  shape of in-VM agents — are accurate to the current release but
+  may evolve. The architectural claims about safety, visibility, and
+  enforcement are stable.
+</p>
+
+</body>
+</html>
