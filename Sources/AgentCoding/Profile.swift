@@ -2893,6 +2893,16 @@ public final class ProfileStore {
         echo "[xinit] keyboard-agent pid $!" >> /tmp/xinitrc.log
     fi
 
+    # Debug shell agent — proactively opens a vsock pool to host port
+    # 5800 so the AutomationServer's /sessions/{id}/exec endpoint can
+    # dequeue a connection on demand. Only launched when the meta
+    # share carries the script, which only happens when the host runs
+    # with BROMURE_DEBUG_CLAUDE set (SessionDisk gates the copy).
+    if [ -r /mnt/bromure-meta/shell-agent.py ]; then
+        python3 /mnt/bromure-meta/shell-agent.py &
+        echo "[xinit] shell-agent pid $!" >> /tmp/xinitrc.log
+    fi
+
     # Natural scrolling is handled at the kitty level via
     # wheel_scroll_multiplier / touch_scroll_multiplier in the
     # generated kitty.conf — see TerminalAppDefaults.scrollDirectionStanza.

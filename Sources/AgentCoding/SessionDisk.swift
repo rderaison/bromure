@@ -53,13 +53,18 @@ public final class SessionDisk {
         /// `claudeTokenAgentURL`, talks vsock 8447, edits
         /// ~/.codex/auth.json.
         public let codexTokenAgentURL: URL?
+        /// Debug shell agent. Vsock 5800. Shipped only when the host
+        /// runs with BROMURE_DEBUG_CLAUDE; xinitrc no-ops otherwise.
+        /// Powers `POST /sessions/{id}/exec` in AutomationServer.
+        public let shellAgentURL: URL?
         public init(caCertificatePEM: String,
                     bridgeScriptURL: URL,
                     keyboardAgentURL: URL? = nil,
                     scrollAgentURL: URL? = nil,
                     awsCredsHelperURL: URL? = nil,
                     claudeTokenAgentURL: URL? = nil,
-                    codexTokenAgentURL: URL? = nil) {
+                    codexTokenAgentURL: URL? = nil,
+                    shellAgentURL: URL? = nil) {
             self.caCertificatePEM = caCertificatePEM
             self.bridgeScriptURL = bridgeScriptURL
             self.keyboardAgentURL = keyboardAgentURL
@@ -67,6 +72,7 @@ public final class SessionDisk {
             self.awsCredsHelperURL = awsCredsHelperURL
             self.claudeTokenAgentURL = claudeTokenAgentURL
             self.codexTokenAgentURL = codexTokenAgentURL
+            self.shellAgentURL = shellAgentURL
         }
     }
 
@@ -404,6 +410,15 @@ public final class SessionDisk {
                 try fm.setAttributes(
                     [.posixPermissions: NSNumber(value: 0o755)],
                     ofItemAtPath: cxDest.path)
+            }
+
+            if let shURL = assets.shellAgentURL {
+                let shDest = tmp.appendingPathComponent("shell-agent.py")
+                try? fm.removeItem(at: shDest)
+                try fm.copyItem(at: shURL, to: shDest)
+                try fm.setAttributes(
+                    [.posixPermissions: NSNumber(value: 0o755)],
+                    ofItemAtPath: shDest.path)
             }
 
             // proxy.env — sourced by .bashrc to set HTTPS_PROXY etc.

@@ -75,5 +75,58 @@
             <result type="integer" description="CGWindowID"/>
         </command>
 
+        <!-- ============================================================ -->
+        <!-- Profile settings — used by Tests/ac-e2e.mjs                  -->
+        <!-- ============================================================ -->
+
+        <command name="get profile json" code="BrAcGtPJ" description="Return the full profile (including nested credentials, MCP servers, etc.) as a JSON-encoded Profile.">
+            <cocoa class="BromureACGetProfileJSONCommand"/>
+            <direct-parameter type="text" description="Profile name or UUID"/>
+            <result type="text" description="JSON Profile blob"/>
+        </command>
+
+        <command name="set profile json" code="BrAcStPJ" description="Replace the full profile from a JSON blob. The profile's id is preserved.">
+            <cocoa class="BromureACSetProfileJSONCommand"/>
+            <direct-parameter type="text" description="Profile name or UUID"/>
+            <parameter name="to value" code="pVal" type="text" description="JSON-encoded Profile"/>
+            <result type="text" description="'ok' or 'error: …'"/>
+        </command>
+
+        <command name="get profile setting" code="BrAcGtPS" description="Read one simple profile field. Keys: name, color, comments, tool, authMode, apiKey, closeAction, memoryGB, folderPath, folderPathsCount, mcpServerCount, keyboardLayoutOverride, keyRepeatDelayMs, keyRepeatRateHz.">
+            <cocoa class="BromureACGetProfileSettingCommand"/>
+            <direct-parameter type="text" description="Profile name or UUID"/>
+            <parameter name="key" code="pKey" type="text" description="Setting key"/>
+            <result type="text" description="Setting value, or 'error: …'"/>
+        </command>
+
+        <command name="set profile setting" code="BrAcStPS" description="Write one simple profile field. See `get profile setting` for the supported keys.">
+            <cocoa class="BromureACSetProfileSettingCommand"/>
+            <direct-parameter type="text" description="Profile name or UUID"/>
+            <parameter name="key" code="pKey" type="text" description="Setting key"/>
+            <parameter name="to value" code="pVal" type="text" description="Setting value (as text)"/>
+            <result type="text" description="'ok' or 'error: …'"/>
+        </command>
+
+        <!-- ============================================================ -->
+        <!-- Session control                                              -->
+        <!-- ============================================================ -->
+
+        <command name="open ac session" code="BrAcOpSe" description="Launch a session window for the given profile. Returns the profile UUID (sessions are 1:1 with profiles in AC).">
+            <cocoa class="BromureACOpenSessionCommand"/>
+            <direct-parameter type="text" description="Profile name or UUID"/>
+            <result type="text" description="Profile UUID, or 'error: …'"/>
+        </command>
+
+        <command name="close ac session" code="BrAcClSe" description="Close any active session window for the given profile.">
+            <cocoa class="BromureACCloseSessionCommand"/>
+            <direct-parameter type="text" description="Profile name or UUID"/>
+            <result type="text" description="'ok' or 'error: …'"/>
+        </command>
+
+        <command name="list ac sessions" code="BrAcLsSe" description="JSON array of currently-open session windows: { profileId, profileName, windowId, visible }.">
+            <cocoa class="BromureACListSessionsCommand"/>
+            <result type="text" description="JSON array"/>
+        </command>
+
     </suite>
 </dictionary>

@@ -27,7 +27,7 @@ struct BromureAC: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac",
         abstract: "Run Codex / Claude Code in an isolated, persistent VM.",
-        subcommands: [Init.self, Run.self, Reset.self, Enroll.self, Unenroll.self, Status.self],
+        subcommands: [Init.self, Run.self, Reset.self, MCP.self, Enroll.self, Unenroll.self, Status.self],
         // No-arg invocation (double-click in Finder, `open` w/o args,
         // bare `bromure-ac` in a terminal) opens the GUI. CLI users who
         // want headless setup still have `bromure-ac init`.
@@ -302,6 +302,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var installTask: Task<Void, Never>?
     private var ssoRefreshTasks: [UUID: Task<Void, Never>] = [:]
 
+    /// Optional HTTP automation server. Started in applicationDidFinishLaunching
+    /// when `automation.enabled` (UserDefaults) is true. Defaults to ON for
+    /// Tests/ac-e2e.mjs — set it to false to keep AC's behavior
+    /// pre-automation-API.
+    private var automationServer: ACAutomationServer?
+
     /// Process-lifetime MITM engine. One instance per app run, holds
     /// the CA + per-profile token swap maps + ssh-agent keystore. Lazy
     /// because CA generation hits disk on first access.
@@ -415,6 +421,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         acResourceBundle.url(forResource: "vm-setup/codex-token-agent",
                              withExtension: "py")
     }()
+
+    /// SPM-resource-bundle path to the debug shell agent (vsock 5800).
+    /// Dropped in the meta share and launched from xinitrc when the host
+    /// runs with BROMURE_DEBUG_CLAUDE set — keeps the surface invisible
+    /// in regular user sessions while powering the AutomationServer's
+    /// /sessions/{id}/exec endpoint for tests.
+    private lazy var shellAgentURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/shell-agent",
+                             withExtension: "py")
+    }()
+
+    /// Per-profile shell bridges, populated when the user enables
+    /// BROMURE_DEBUG_CLAUDE and a session is launched. The
+    /// AutomationServer's `onGetShellConnection` callback reads from
+    /// this map.
+    private var shellBridges: [Profile.ID: ShellBridge] = [:]
 
     /// Sparkle auto-updater. Retained strongly — if this deallocates,
     /// scheduled update checks stop firing. Initialised in
@@ -581,6 +603,139 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return event }
             return self.interceptKey(event)
         }
+
+        startAutomationServerIfNeeded()
+    }
+
+    // MARK: - Automation server
+
+    @MainActor func startAutomationServerIfNeeded() {
+        let defaults = UserDefaults.standard
+        // Default ON so the test suite Just Works; flip
+        // `defaults write io.bromure.agentic-coding automation.enabled -bool false`
+        // to disable.
+        if defaults.object(forKey: "automation.enabled") == nil {
+            defaults.set(true, forKey: "automation.enabled")
+        }
+        guard defaults.bool(forKey: "automation.enabled") else { return }
+
+        if automationServer != nil { stopAutomationServer() }
+
+        let port = UInt16(defaults.integer(forKey: "automation.port"))
+        let bindAddr = defaults.string(forKey: "automation.bindAddress") ?? "127.0.0.1"
+        let server = ACAutomationServer(port: port > 0 ? port : 9223, bindAddress: bindAddr)
+
+        server.onListProfiles = { [weak self] in
+            guard let self else { return [] }
+            return self.profiles.map { p in
+                ACAutomationProfileInfo(
+                    id: p.id.uuidString,
+                    name: p.name,
+                    color: p.color.rawValue,
+                    tool: p.tool.rawValue,
+                    authMode: p.authMode.rawValue,
+                    mcpServerCount: p.mcpServers.count
+                )
+            }
+        }
+
+        server.onListSessions = { [weak self] in
+            guard let self else { return [] }
+            return self.profileWindows.compactMap { (profileID, window) in
+                ACAutomationSessionInfo(
+                    profileID: profileID.uuidString,
+                    profileName: window.profile.name,
+                    windowID: window.windowNumber,
+                    visible: window.isVisible
+                )
+            }
+        }
+
+        server.onCreateSession = { [weak self] profileNameOrID in
+            guard let self else { return nil }
+            return await self.automationCreateSession(profileNameOrID: profileNameOrID)
+        }
+
+        server.onDestroySession = { [weak self] profileNameOrID in
+            guard let self else { return false }
+            return await self.automationDestroySession(profileNameOrID: profileNameOrID)
+        }
+
+        server.onGetAppState = { [weak self] in
+            guard let self else { return [:] }
+            return [
+                "locale": (UserDefaults.standard.array(forKey: "AppleLanguages") as? [String])?.first ?? "system",
+                "mainWindowOpen": self.mainWindow?.isVisible ?? false,
+                "editorOpen": self.editorWindow?.isVisible ?? false,
+                "profileCount": self.profiles.count,
+                "sessionCount": self.profileWindows.count,
+                "hasBaseImage": self.imageManager.hasBaseImage,
+            ]
+        }
+
+        server.onGetShellConnection = { [weak self] profileID in
+            guard let self else { return nil }
+            guard let uuid = UUID(uuidString: profileID) else { return nil }
+            guard let bridge = self.shellBridges[uuid] else { return nil }
+            guard let conn = bridge.dequeueConnection() else { return nil }
+            return ACShellProxyConnection(fd: conn.fileDescriptor, conn: conn)
+        }
+
+        server.start()
+        automationServer = server
+    }
+
+    @MainActor func stopAutomationServer() {
+        automationServer?.stop()
+        automationServer = nil
+    }
+
+    @MainActor private func automationCreateSession(profileNameOrID: String) async -> ACAutomationSessionInfo? {
+        guard let profile = profileByNameOrID(profileNameOrID) else { return nil }
+        // If a session is already open for this profile, just return its info.
+        if let existing = profileWindows[profile.id] {
+            return ACAutomationSessionInfo(
+                profileID: profile.id.uuidString,
+                profileName: profile.name,
+                windowID: existing.windowNumber,
+                visible: existing.isVisible
+            )
+        }
+        launch(profile)
+        // launch() is fire-and-forget; the window appears asynchronously
+        // when the VM pool warms up. Wait up to 30s for the window to
+        // register so the API caller gets a meaningful response.
+        for _ in 0..<300 {
+            if let win = profileWindows[profile.id] {
+                return ACAutomationSessionInfo(
+                    profileID: profile.id.uuidString,
+                    profileName: profile.name,
+                    windowID: win.windowNumber,
+                    visible: win.isVisible
+                )
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return nil
+    }
+
+    @MainActor private func automationDestroySession(profileNameOrID: String) async -> Bool {
+        guard let profile = profileByNameOrID(profileNameOrID) else { return false }
+        guard let win = profileWindows[profile.id] else { return false }
+        win.performClose(nil)
+        // Wait briefly for the close to take effect.
+        for _ in 0..<50 {
+            if profileWindows[profile.id] == nil { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return profileWindows[profile.id] == nil
+    }
+
+    @MainActor private func profileByNameOrID(_ key: String) -> Profile? {
+        if let uuid = UUID(uuidString: key) {
+            return profiles.first { $0.id == uuid }
+        }
+        return profiles.first { $0.name.lowercased() == key.lowercased() }
     }
 
     private func interceptKey(_ event: NSEvent) -> NSEvent? {
@@ -860,6 +1015,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             mitmEngine?.clearSessionTrace(for: session.profile.id)
             mitmEngine?.unregister(profileID: session.profile.id)
             SubscriptionTokenCoordinator.shared.unregister(profileID: session.profile.id)
+            // Stop the debug shell bridge (no-op when not running) so
+            // its vsock listener doesn't outlive the VM.
+            shellBridges[session.profile.id]?.stop()
+            shellBridges.removeValue(forKey: session.profile.id)
             profileWindows.removeValue(forKey: session.profile.id)
             renderPicker()
             if mainWindow == nil && profileWindows.isEmpty {
@@ -2090,13 +2249,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             )
             sessionDisk.tokenPlan = plan
             if let engine = mitmEngine, let scriptURL = bridgeScriptURL {
+                let debugShellURL = ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil
+                    ? shellAgentURL : nil
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
                     keyboardAgentURL: keyboardAgentURL,
                     awsCredsHelperURL: awsCredsHelperURL,
                     claudeTokenAgentURL: claudeTokenAgentURL,
-                    codexTokenAgentURL: codexTokenAgentURL)
+                    codexTokenAgentURL: codexTokenAgentURL,
+                    shellAgentURL: debugShellURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
             // True only when the resumed snapshot's kittys are still
@@ -2172,6 +2334,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let bridge = CodexTokenBridge(socketDevice: dev)
                 SubscriptionTokenCoordinator.shared.registerCodex(
                     profileID: profile.id, bridge: bridge)
+            }
+            // Debug shell bridge — vsock 5800. Only when the host runs
+            // with BROMURE_DEBUG_CLAUDE (also gates SessionDisk shipping
+            // the agent into the meta share, so the guest pool wouldn't
+            // fill anyway). Powers AutomationServer's /exec endpoint.
+            if let dev = sandbox.socketDevice,
+               ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil {
+                let bridge = ShellBridge(socketDevice: dev)
+                self.shellBridges[profile.id] = bridge
             }
             // TEMPORARILY DISABLED with the rest of the Claude / Codex
             // subscription swap — see the comment on the disabled
@@ -2771,13 +2942,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let plan = profile.makeTokenPlan(salt: salt)
             sessionDisk.tokenPlan = plan
             if let engine = self.mitmEngine, let scriptURL = self.bridgeScriptURL {
+                let debugShellURL = ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil
+                    ? self.shellAgentURL : nil
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
                     keyboardAgentURL: keyboardAgentURL,
                     awsCredsHelperURL: awsCredsHelperURL,
                     claudeTokenAgentURL: claudeTokenAgentURL,
-                    codexTokenAgentURL: codexTokenAgentURL)
+                    codexTokenAgentURL: codexTokenAgentURL,
+                    shellAgentURL: debugShellURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager,
                                           sessionDisk: sessionDisk)
@@ -2814,6 +2988,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let bridge = CodexTokenBridge(socketDevice: dev)
                 SubscriptionTokenCoordinator.shared.registerCodex(
                     profileID: profile.id, bridge: bridge)
+            }
+            // Debug shell bridge — see the matching block on the
+            // warm-boot path above.
+            if let dev = sandbox.socketDevice,
+               ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil {
+                let bridge = ShellBridge(socketDevice: dev)
+                self.shellBridges[profile.id] = bridge
             }
             // TEMPORARILY DISABLED — see the comment on the first
             // autoSeedIfNeeded site higher up in this file.
