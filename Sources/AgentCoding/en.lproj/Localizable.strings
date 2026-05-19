@@ -316,3 +316,18 @@
 "VM sits behind NAT. Egress works; nothing on your LAN can reach it." = "VM sits behind NAT. Egress works; nothing on your LAN can reach it.";
 "Your Name" = "Your Name";
 "real secret — stays on macOS" = "real secret — stays on macOS";
+
+/* Preferences — Automation pane */
+"Automation" = "Automation";
+"Automation API & MCP server" = "Automation API & MCP server";
+"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide.";
+"Enable automation server" = "Enable automation server";
+"Listening on %@:%@. Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app." = "Listening on %@:%@. Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app.";
+"Off — the HTTP API and the MCP subcommand are unavailable." = "Off — the HTTP API and the MCP subcommand are unavailable.";
+"Port" = "Port";
+"(default: 9223)" = "(default: 9223)";
+"Bind address" = "Bind address";
+"Non-loopback bind exposes the API to the network. The MCP server has no auth." = "Non-loopback bind exposes the API to the network. The MCP server has no auth.";
+"Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now." = "Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now.";
+"MCP client configuration" = "MCP client configuration";
+"Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):" = "Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):";

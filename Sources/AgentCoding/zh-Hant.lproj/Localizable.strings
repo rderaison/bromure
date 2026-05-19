@@ -315,3 +315,18 @@
 "VM sits behind NAT. Egress works; nothing on your LAN can reach it." = "虛擬機位於 NAT 之後。對外連線可用；區域網路內的其他裝置無法存取它。";
 "Your Name" = "您的姓名";
 "real secret — stays on macOS" = "真實密鑰 — 僅保留在 macOS 上";
+
+/* Preferences — Automation pane */
+"Automation" = "自動化";
+"Automation API & MCP server" = "自動化 API 與 MCP 伺服器";
+"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "Bromure AC 於回送介面上公開 HTTP API，讓外部工具可管理設定與工作階段。隨附的 `bromure-ac mcp` 子指令為 AI 代理（Claude Code、Claude Desktop）包裝同一介面。這些設定會套用到整個 App。";
+"Enable automation server" = "啟用自動化伺服器";
+"Listening on %@:%@. Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app." = "正在 %@:%@ 接聽。關閉此項會立即停止伺服器，MCP 子指令將無法與 App 連線。";
+"Off — the HTTP API and the MCP subcommand are unavailable." = "已關閉 — HTTP API 與 MCP 子指令皆無法使用。";
+"Port" = "連接埠";
+"(default: 9223)" = "（預設：9223）";
+"Bind address" = "繫結位址";
+"Non-loopback bind exposes the API to the network. The MCP server has no auth." = "非回送位址繫結會將 API 暴露至網路。MCP 伺服器沒有任何驗證。";
+"Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now." = "連接埠與繫結位址會在伺服器下次啟動時生效。將開關關閉再開啟即可立即套用。";
+"MCP client configuration" = "MCP 用戶端設定";
+"Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):" = "請將此加入到 `~/.config/claude-code/.mcp.json`（或您 MCP 用戶端的對應檔案）：";

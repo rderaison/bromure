@@ -2005,11 +2005,20 @@ struct ProfileEditorView: View {
             Toggle(isOn: store.enabledBinding) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Enable automation server")
-                    Text(store.enabled
-                         ? "Listening on \(store.bindAddress):\(store.port). Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app."
-                         : "Off — the HTTP API and the MCP subcommand are unavailable.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    // Split the ternary — `Text(condition ? "a" : "b")`
+                    // resolves to the non-localizing `Text(some String)`
+                    // overload when one branch has a String interpolation,
+                    // so we end up bypassing the strings table. Two
+                    // `Text("literal \(var)")` calls each hit LocalizedStringKey.
+                    if store.enabled {
+                        Text("Listening on \(store.bindAddress):\(store.port). Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Off — the HTTP API and the MCP subcommand are unavailable.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .toggleStyle(.switch)
@@ -3442,10 +3451,9 @@ private struct AutomationDefaultsStore {
     private let std = UserDefaults.standard
 
     var enabled: Bool {
-        // The delegate's `startAutomationServerIfNeeded` defaults this to
-        // true on first launch. Read what's in defaults, with a true
-        // fallback so a brand-new Preferences open shows the on state.
-        std.object(forKey: "automation.enabled") as? Bool ?? true
+        // Defaults to false (opt-in). Matches the delegate's
+        // `startAutomationServerIfNeeded` gate.
+        std.bool(forKey: "automation.enabled")
     }
     var port: Int {
         let n = std.integer(forKey: "automation.port")

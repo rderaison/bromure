@@ -56,6 +56,10 @@ pipeline {
             steps {
                 sh '''
                     APP_BUNDLE=$(cat .app_bundle_path)
+                    # The automation server is opt-in (off by default) since
+                    # it exposes a loopback HTTP surface with no auth. Flip
+                    # it on for the CI run via UserDefaults before launch.
+                    defaults write io.bromure.agentic-coding automation.enabled -bool true
                     BROMURE_DEBUG_CLAUDE=1 "$APP_BUNDLE/Contents/MacOS/bromure-ac" > /tmp/bromure-ac.log 2>&1 &
                     echo $! > .bromure_ac_pid
                     # Wait up to 60s for the HTTP automation server to come up.

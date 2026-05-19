@@ -303,9 +303,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var ssoRefreshTasks: [UUID: Task<Void, Never>] = [:]
 
     /// Optional HTTP automation server. Started in applicationDidFinishLaunching
-    /// when `automation.enabled` (UserDefaults) is true. Defaults to ON for
-    /// Tests/ac-e2e.mjs — set it to false to keep AC's behavior
-    /// pre-automation-API.
+    /// when `automation.enabled` (UserDefaults) is true. Defaults to OFF —
+    /// the user enables it explicitly via Bromure → Preferences →
+    /// Automation, or via `defaults write io.bromure.agentic-coding
+    /// automation.enabled -bool true`. Tests/ac-e2e.mjs sets this before
+    /// launching the app.
     private var automationServer: ACAutomationServer?
 
     /// Process-lifetime MITM engine. One instance per app run, holds
@@ -611,12 +613,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @MainActor func startAutomationServerIfNeeded() {
         let defaults = UserDefaults.standard
-        // Default ON so the test suite Just Works; flip
-        // `defaults write io.bromure.agentic-coding automation.enabled -bool false`
-        // to disable.
-        if defaults.object(forKey: "automation.enabled") == nil {
-            defaults.set(true, forKey: "automation.enabled")
-        }
+        // Default OFF — opt-in to keep the loopback HTTP API hidden
+        // until the user enables it (Bromure → Preferences → Automation,
+        // or `defaults write io.bromure.agentic-coding automation.enabled
+        // -bool true`). The e2e Jenkinsfile sets this before launching.
         guard defaults.bool(forKey: "automation.enabled") else { return }
 
         if automationServer != nil { stopAutomationServer() }

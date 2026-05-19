@@ -315,3 +315,18 @@
 "VM sits behind NAT. Egress works; nothing on your LAN can reach it." = "Die VM sitzt hinter NAT. Ausgehender Verkehr funktioniert; nichts in Ihrem LAN kann sie erreichen.";
 "Your Name" = "Ihr Name";
 "real secret — stays on macOS" = "echtes Geheimnis — bleibt auf macOS";
+
+/* Preferences — Automation pane */
+"Automation" = "Automatisierung";
+"Automation API & MCP server" = "Automatisierungs-API und MCP-Server";
+"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "Bromure AC stellt eine HTTP-API auf der Loopback-Schnittstelle bereit, mit der externe Tools Profile und Sitzungen verwalten können. Der mitgelieferte Unterbefehl `bromure-ac mcp` stellt dieselbe Oberfläche für KI-Agenten (Claude Code, Claude Desktop) bereit. Diese Einstellungen gelten anwendungsweit.";
+"Enable automation server" = "Automatisierungsserver aktivieren";
+"Listening on %@:%@. Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app." = "Empfängt auf %@:%@. Das Deaktivieren stoppt den Server sofort; der MCP-Unterbefehl erreicht die App nicht mehr.";
+"Off — the HTTP API and the MCP subcommand are unavailable." = "Aus – die HTTP-API und der MCP-Unterbefehl sind nicht verfügbar.";
+"Port" = "Port";
+"(default: 9223)" = "(Standard: 9223)";
+"Bind address" = "Bind-Adresse";
+"Non-loopback bind exposes the API to the network. The MCP server has no auth." = "Eine Nicht-Loopback-Bindung gibt die API im Netzwerk frei. Der MCP-Server hat keine Authentifizierung.";
+"Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now." = "Port und Bind-Adresse werden beim nächsten Serverstart wirksam. Schalten Sie den Schalter aus und wieder ein, um sie sofort anzuwenden.";
+"MCP client configuration" = "MCP-Client-Konfiguration";
+"Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):" = "Fügen Sie dies zu `~/.config/claude-code/.mcp.json` (oder der entsprechenden Datei Ihres MCP-Clients) hinzu:";

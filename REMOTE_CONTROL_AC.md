@@ -12,6 +12,15 @@ Bromure Agentic Coding exposes the same three-layer remote-control stack as the 
 
 JSON REST on `http://127.0.0.1:9223`. Bound to loopback only.
 
+> **Off by default.** The automation server is opt-in. Enable it via
+> **Bromure → Preferences → Automation → Enable automation server**, or
+> from the shell:
+> ```bash
+> defaults write io.bromure.agentic-coding automation.enabled -bool true
+> ```
+> Disable the same way (or just flip the toggle off). Tests/ac-e2e.mjs
+> expects it on; `Jenkinsfile.e2e.ac` sets the default before launch.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Health check |

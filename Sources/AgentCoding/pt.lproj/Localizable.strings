@@ -315,3 +315,18 @@
 "VM sits behind NAT. Egress works; nothing on your LAN can reach it." = "A VM fica atrás de NAT. A saída funciona; nada na sua LAN consegue alcançá-la.";
 "Your Name" = "Seu nome";
 "real secret — stays on macOS" = "segredo real — permanece no macOS";
+
+/* Preferences — Automation pane */
+"Automation" = "Automação";
+"Automation API & MCP server" = "API de automação e servidor MCP";
+"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "O Bromure AC expõe uma API HTTP na interface de loopback que permite a ferramentas externas gerenciar perfis e sessões. O subcomando `bromure-ac mcp` incluído envolve a mesma superfície para agentes de IA (Claude Code, Claude Desktop). Estas configurações se aplicam a todo o app.";
+"Enable automation server" = "Ativar servidor de automação";
+"Listening on %@:%@. Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app." = "Escutando em %@:%@. Desativar interrompe o servidor imediatamente; o subcomando MCP deixa de alcançar o app.";
+"Off — the HTTP API and the MCP subcommand are unavailable." = "Desligado — a API HTTP e o subcomando MCP estão indisponíveis.";
+"Port" = "Porta";
+"(default: 9223)" = "(padrão: 9223)";
+"Bind address" = "Endereço de bind";
+"Non-loopback bind exposes the API to the network. The MCP server has no auth." = "Bind fora do loopback expõe a API à rede. O servidor MCP não tem autenticação.";
+"Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now." = "Porta e endereço de bind entram em vigor na próxima inicialização do servidor. Desligar e religar o interruptor aplica-os agora.";
+"MCP client configuration" = "Configuração do cliente MCP";
+"Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):" = "Adicione isto em `~/.config/claude-code/.mcp.json` (ou no equivalente do seu cliente MCP):";

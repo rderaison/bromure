@@ -315,3 +315,18 @@
 "VM sits behind NAT. Egress works; nothing on your LAN can reach it." = "VM は NAT の背後にあります。アウトバウンドは動作しますが、LAN 内の他のホストからは到達できません。";
 "Your Name" = "あなたの名前";
 "real secret — stays on macOS" = "本物のシークレット — macOS 上にとどまります";
+
+/* Preferences — Automation pane */
+"Automation" = "オートメーション";
+"Automation API & MCP server" = "オートメーション API と MCP サーバー";
+"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "Bromure AC はループバックインターフェイス上に HTTP API を公開し、外部ツールがプロファイルとセッションを管理できるようにします。同梱のサブコマンド `bromure-ac mcp` は同じ機能を AI エージェント（Claude Code、Claude Desktop）向けにラップします。これらの設定はアプリ全体に適用されます。";
+"Enable automation server" = "オートメーションサーバーを有効にする";
+"Listening on %@:%@. Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app." = "%@:%@ で待ち受け中。オフにするとサーバーは即座に停止し、MCP サブコマンドはアプリに到達できなくなります。";
+"Off — the HTTP API and the MCP subcommand are unavailable." = "オフ — HTTP API および MCP サブコマンドは利用できません。";
+"Port" = "ポート";
+"(default: 9223)" = "（既定: 9223）";
+"Bind address" = "バインドアドレス";
+"Non-loopback bind exposes the API to the network. The MCP server has no auth." = "ループバック以外にバインドすると API がネットワークに公開されます。MCP サーバーには認証がありません。";
+"Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now." = "ポートとバインドアドレスは次回サーバー起動時に反映されます。スイッチをオフにしてからオンに戻すと即座に適用されます。";
+"MCP client configuration" = "MCP クライアント設定";
+"Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):" = "これを `~/.config/claude-code/.mcp.json`（または MCP クライアントの相当ファイル）に追加してください:";

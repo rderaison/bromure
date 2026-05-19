@@ -315,3 +315,18 @@
 "VM sits behind NAT. Egress works; nothing on your LAN can reach it." = "虚拟机位于 NAT 后。出口可用；局域网内的任何设备都无法访问它。";
 "Your Name" = "您的姓名";
 "real secret — stays on macOS" = "真实密钥 — 仅保留在 macOS 上";
+
+/* Preferences — Automation pane */
+"Automation" = "自动化";
+"Automation API & MCP server" = "自动化 API 与 MCP 服务器";
+"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "Bromure AC 在回环接口上公开一个 HTTP API，允许外部工具管理配置文件和会话。随附的 `bromure-ac mcp` 子命令为 AI 智能体（Claude Code、Claude Desktop）包装了相同的接口。这些设置在整个应用范围内生效。";
+"Enable automation server" = "启用自动化服务器";
+"Listening on %@:%@. Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app." = "正在监听 %@:%@。关闭此项将立即停止服务器，MCP 子命令将无法访问该应用。";
+"Off — the HTTP API and the MCP subcommand are unavailable." = "已关闭 — HTTP API 与 MCP 子命令均不可用。";
+"Port" = "端口";
+"(default: 9223)" = "（默认：9223）";
+"Bind address" = "绑定地址";
+"Non-loopback bind exposes the API to the network. The MCP server has no auth." = "非回环地址绑定会将 API 暴露到网络中。MCP 服务器没有身份验证。";
+"Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now." = "端口与绑定地址将在下次启动服务器时生效。将开关关闭再打开即可立即应用。";
+"MCP client configuration" = "MCP 客户端配置";
+"Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):" = "将此添加到 `~/.config/claude-code/.mcp.json`（或您 MCP 客户端的对应文件）：";
