@@ -128,5 +128,22 @@
             <result type="text" description="JSON array"/>
         </command>
 
+        <!-- ============================================================ -->
+        <!-- App-wide settings                                            -->
+        <!-- ============================================================ -->
+
+        <command name="get ac app setting" code="BrAcGtAS" description="Read an app-wide setting (UserDefaults). Keys: automation.enabled, automation.port, automation.bindAddress, managed.serverURL, managed.acIngestURL.">
+            <cocoa class="BromureACGetAppSettingCommand"/>
+            <direct-parameter type="text" description="Setting key"/>
+            <result type="text" description="Setting value, or 'error: …'"/>
+        </command>
+
+        <command name="set ac app setting" code="BrAcStAS" description="Write an app-wide setting. Booleans as 'true'/'false'; integers as digit strings. Setting automation.enabled toggles the HTTP server live.">
+            <cocoa class="BromureACSetAppSettingCommand"/>
+            <direct-parameter type="text" description="Setting key"/>
+            <parameter name="to value" code="pVal" type="text" description="New value (as text)"/>
+            <result type="text" description="'ok' or 'error: …'"/>
+        </command>
+
     </suite>
 </dictionary>

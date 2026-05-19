@@ -682,6 +682,187 @@ async function main() {
   }
 
   // ======================================================================
+  // 7. App-wide settings (UserDefaults via AppleScript)
+  // ======================================================================
+  console.log("\n--- 7. App-wide settings ---");
+
+  await test("7.1 get ac app setting reads automation.enabled", async () => {
+    const v = ac('get ac app setting "automation.enabled"');
+    assert(v === "true" || v === "false", `Expected boolean string, got: ${v}`);
+  });
+
+  await test("7.2 get ac app setting rejects unknown key", async () => {
+    const v = ac('get ac app setting "definitelyNotAKey"');
+    assert(v.startsWith("error:"), `Expected error, got: ${v}`);
+  });
+
+  await test("7.3 set ac app setting roundtrips bindAddress", async () => {
+    const orig = ac('get ac app setting "automation.bindAddress"');
+    const r = ac('set ac app setting "automation.bindAddress" to value "127.0.0.1"');
+    assertEq(r, "ok");
+    assertEq(ac('get ac app setting "automation.bindAddress"'), "127.0.0.1");
+    if (orig && orig !== "127.0.0.1") {
+      ac(`set ac app setting "automation.bindAddress" to value "${orig}"`);
+    }
+  });
+
+  await test("7.4 set ac app setting rejects invalid automation.port", async () => {
+    const r = ac('set ac app setting "automation.port" to value "not-a-number"');
+    assert(r.startsWith("error:"), `Expected error, got: ${r}`);
+  });
+
+  // ======================================================================
+  // 8. VM-side verification via /exec (requires base image + debug shell)
+  // ======================================================================
+  if (!SKIP_SESSIONS) {
+    console.log("\n--- 8. VM-side verification ---");
+
+    // Same gate as section 6 — skip when no base image / no debug shell.
+    const h = await api("GET", "/health");
+    const hasDebugShell = h?.debugEnabled === true;
+    let canExec = hasDebugShell;
+    if (!hasDebugShell) {
+      console.log(
+        "  \x1b[33mSKIP\x1b[0m  VM-side tests (BROMURE_DEBUG_CLAUDE not set on the running app)"
+      );
+    } else {
+      // Probe whether sessions can actually start.
+      try {
+        const id = createProfile("ACE2E_VMProbe");
+        const r = ac(`open ac session "${id}"`);
+        if (r.startsWith("error:")) canExec = false;
+        await sleep(1000);
+        ac(`close ac session "${id}"`);
+        await sleep(500);
+        deleteProfile(id);
+      } catch {
+        canExec = false;
+      }
+    }
+
+    if (hasDebugShell && !canExec) {
+      console.log(
+        "  \x1b[33mSKIP\x1b[0m  VM-side tests (no base image — run `bromure-ac init` first)"
+      );
+    } else if (canExec) {
+      // Helper: open a session and wait for the shell-agent vsock pool to
+      // fill before trying /exec. The agent dials back on guest boot,
+      // which takes ~5-15s after the session window appears.
+      async function withVMSession(profileName, profileConfigFn, cb) {
+        const id = createProfile(profileName);
+        try {
+          if (profileConfigFn) profileConfigFn(id);
+          await api("POST", "/sessions", { profile: id });
+          // The /exec endpoint waits up to 10s internally; we also retry
+          // a few times to ride out the boot lag.
+          let lastErr;
+          for (let attempt = 0; attempt < 6; attempt++) {
+            const r = await api("POST", `/sessions/${id}/exec`, {
+              command: "true",
+              timeout: 5,
+            });
+            if (r._status === 200) {
+              await cb(id);
+              return;
+            }
+            lastErr = `status=${r._status} error=${r.error}`;
+            await sleep(3000);
+          }
+          throw new Error(`VM shell never came up: ${lastErr}`);
+        } finally {
+          await api("DELETE", `/sessions/${id}`);
+          await sleep(500);
+          deleteProfile(id);
+        }
+      }
+
+      await test("8.1 vm_exec returns stdout / stderr / exit code", async () => {
+        await withVMSession("ACE2E_Exec_Hello", null, async (id) => {
+          const r = await api("POST", `/sessions/${id}/exec`, {
+            command: "echo hi && echo whoops >&2 && exit 7",
+            timeout: 5,
+          });
+          assertEq(r._status, 200);
+          assertEq(r.stdout.trim(), "hi");
+          assertEq(r.stderr.trim(), "whoops");
+          assertEq(r.exitCode, 7);
+        });
+      });
+
+      await test("8.2 shell-agent.py is present in the meta-share at the expected path", async () => {
+        await withVMSession("ACE2E_Exec_Agent", null, async (id) => {
+          const r = await api("POST", `/sessions/${id}/exec`, {
+            command: "test -r /mnt/bromure-meta/shell-agent.py && wc -c < /mnt/bromure-meta/shell-agent.py",
+            timeout: 5,
+          });
+          assertEq(r._status, 200);
+          assertEq(r.exitCode, 0);
+          const size = parseInt(r.stdout.trim(), 10);
+          assert(size > 1000, `Expected shell-agent.py to be > 1KB, got ${size} bytes`);
+        });
+      });
+
+      await test("8.3 BROMURE_AC_TOOL env var is exported in the user environment", async () => {
+        await withVMSession("ACE2E_Exec_Env", null, async (id) => {
+          // The api_key.env file the host writes to the meta-share carries
+          // BROMURE_AC_TOOL and BROMURE_AC_AUTH; verify they're sourced.
+          const r = await api("POST", `/sessions/${id}/exec`, {
+            command: "cat /mnt/bromure-meta/api_key.env | grep BROMURE_AC_",
+            timeout: 5,
+          });
+          assertEq(r._status, 200);
+          assertEq(r.exitCode, 0);
+          assertIncludes(r.stdout, "BROMURE_AC_TOOL=");
+          assertIncludes(r.stdout, "BROMURE_AC_AUTH=");
+        });
+      });
+
+      await test("8.4 MCP server config ships with FAKE bearer token (real stays on host)", async () => {
+        await withVMSession(
+          "ACE2E_Exec_MCP",
+          (id) => {
+            // Add an MCP server with a real bearer token before launching.
+            const p = getProfileJSON(id);
+            p.mcpServers = [
+              {
+                id: "44444444-4444-4444-4444-444444444444",
+                name: "test-api",
+                transport: "http",
+                command: "",
+                arguments: [],
+                url: "https://api.example.com/mcp",
+                environment: [],
+                bearerTokenEnvVar: "TEST_API_TOKEN",
+                bearerToken: "real-secret-do-not-leak-XYZZY",
+                enabled: true,
+                rawJSON: "",
+              },
+            ];
+            setProfileJSON(id, p);
+          },
+          async (id) => {
+            const r = await api("POST", `/sessions/${id}/exec`, {
+              command: "cat /mnt/bromure-meta/mcp/claude.json 2>/dev/null || cat /mnt/bromure-meta/mcp/codex.toml",
+              timeout: 5,
+            });
+            assertEq(r._status, 200);
+            assertEq(r.exitCode, 0);
+            assertIncludes(r.stdout, "test-api");
+            assert(
+              !r.stdout.includes("real-secret-do-not-leak-XYZZY"),
+              "Real bearer token leaked into the VM-visible MCP config!"
+            );
+            // Fakes are prefixed brm-mcp_ (SessionTokenPlan deriveFake)
+            assertIncludes(r.stdout, "brm-mcp_");
+          }
+        );
+      });
+    }
+  } else {
+    console.log("\n--- 8. VM-side verification --- (skipped via --no-sessions)");
+  }
+
+  // ======================================================================
   // Done
   // ======================================================================
   console.log(

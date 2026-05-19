@@ -365,3 +365,58 @@ final class BromureACListSessionsCommand: NSScriptCommand {
         }
     }
 }
+
+// MARK: - App-wide settings (UserDefaults)
+//
+// AC's per-app settings live in UserDefaults; the per-profile settings are
+// reachable via `get/set profile setting`. The browser exposes a wider set
+// (vm.memoryGB, vm.appearance, etc.); AC's current automation surface
+// covers the keys the test suite actually needs.
+
+private let acAppSettingDefaults: [String: () -> String] = [
+    "automation.enabled":     { String(UserDefaults.standard.bool(forKey: "automation.enabled")) },
+    "automation.port":        { String(UserDefaults.standard.integer(forKey: "automation.port")) },
+    "automation.bindAddress": { UserDefaults.standard.string(forKey: "automation.bindAddress") ?? "127.0.0.1" },
+    "managed.serverURL":      { UserDefaults.standard.string(forKey: "managed.serverURL") ?? "" },
+    "managed.acIngestURL":    { UserDefaults.standard.string(forKey: "managed.acIngestURL") ?? "" },
+]
+
+@objc(BromureACGetAppSettingCommand)
+final class BromureACGetAppSettingCommand: NSScriptCommand {
+    override func performDefaultImplementation() -> Any? {
+        let key = directParameter as? String ?? ""
+        guard let reader = acAppSettingDefaults[key] else {
+            return "error: unknown app setting '\(key)'" as Any
+        }
+        return reader() as Any
+    }
+}
+
+@objc(BromureACSetAppSettingCommand)
+final class BromureACSetAppSettingCommand: NSScriptCommand {
+    override func performDefaultImplementation() -> Any? {
+        onMain {
+            guard let d = NSApp.delegate as? ACAppDelegate else { return "error: app not ready" as Any }
+            let key = directParameter as? String ?? ""
+            let v = evaluatedArguments?["toValue"] as? String ?? ""
+            let std = UserDefaults.standard
+
+            switch key {
+            case "automation.enabled":
+                let on = (v == "true" || v == "1" || v == "yes")
+                std.set(on, forKey: key)
+                if on { d.startAutomationServerIfNeeded() } else { d.stopAutomationServer() }
+            case "automation.port":
+                guard let n = Int(v), n > 0, n < 65536 else { return "error: port must be in 1..65535" as Any }
+                std.set(n, forKey: key)
+            case "automation.bindAddress":
+                std.set(v.isEmpty ? "127.0.0.1" : v, forKey: key)
+            case "managed.serverURL", "managed.acIngestURL":
+                std.set(v, forKey: key)
+            default:
+                return "error: unknown app setting '\(key)'" as Any
+            }
+            return "ok" as Any
+        }
+    }
+}
