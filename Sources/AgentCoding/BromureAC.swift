@@ -13,7 +13,7 @@ import SwiftUI
 /// resources under `Contents/Resources/`. Reading `Bundle.module`
 /// directly traps on a fresh-system .app launch — check the resource
 /// dir first and only fall back to `Bundle.module` for `swift run`.
-private let acResourceBundle: Bundle = {
+let acResourceBundle: Bundle = {
     let bundleName = "bromure_bromure-ac"
     if let resourceURL = Bundle.main.resourceURL,
        let bundle = Bundle(url: resourceURL.appendingPathComponent("\(bundleName).bundle")) {

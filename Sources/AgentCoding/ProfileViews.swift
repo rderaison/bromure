@@ -552,7 +552,7 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private func categoryIcon(_ category: EditorCategory) -> some View {
-        if category == .mcp, let url = Bundle.module.url(forResource: "mcp", withExtension: "svg", subdirectory: "icons"),
+        if category == .mcp, let url = acResourceBundle.url(forResource: "mcp", withExtension: "svg", subdirectory: "icons"),
            let data = try? Data(contentsOf: url),
            let svgImage = NSImage(data: data) {
             Image(nsImage: svgImage)
