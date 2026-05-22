@@ -36,7 +36,11 @@ public static class SessionHomeBuilder
     /// store pointed at our forged leaves. Pass null to skip the
     /// kubeconfig drop.
     /// </summary>
-    public static Dictionary<string, byte[]> Build(Profile? profile, string? bromureCaPem = null)
+    public static Dictionary<string, byte[]> Build(
+        Profile? profile,
+        string? bromureCaPem = null,
+        IReadOnlyDictionary<string, (string EnvVar, string Fake)>? mcpFakes = null,
+        string? digitalOceanFake = null)
     {
         var files = new Dictionary<string, byte[]>(StringComparer.Ordinal);
 
@@ -49,6 +53,11 @@ public static class SessionHomeBuilder
         files[".npm-global/.gitkeep"] = Array.Empty<byte>();
 
         if (profile is null) return files;
+
+        // Per-session profile-id marker. The in-VM
+        // bromure-aws-credentials helper reads this to figure out
+        // which profile to ask the host for credentials on.
+        files[".bromure-profile-id"] = Utf8(profile.Id.ToString("D") + "\n");
 
         // -- Git ----------------------------------------------------------
 
@@ -86,9 +95,18 @@ public static class SessionHomeBuilder
 
         if (!string.IsNullOrWhiteSpace(profile.DigitalOceanToken))
         {
+            // Audit 03 #2: previously this file received the real
+            // PAT. The proxy now swaps a fake on the wire so the
+            // VM only ever sees a doomed-by-construction token —
+            // identical fail-closed shape as the AWS .aws/credentials
+            // path. When no fake was minted (host didn't pass one in)
+            // we fall back to the real token rather than break the
+            // tooling outright, but the WPF host wires the fake on
+            // every launch when DigitalOceanToken is non-empty.
+            var doToken = digitalOceanFake ?? profile.DigitalOceanToken;
             files[".config/doctl/config.yaml"] = Utf8(
                 "# Managed by Bromure Agentic Coding.\n" +
-                $"access-token: {profile.DigitalOceanToken}\n");
+                $"access-token: {doToken}\n");
         }
 
         // -- Docker -------------------------------------------------------
@@ -108,13 +126,29 @@ public static class SessionHomeBuilder
         if (IsAwsUsable(profile.Aws))
         {
             files[".aws/config"] = Utf8(BuildAwsConfig(profile.Aws));
-            // Static-keys mode also writes ~/.aws/credentials so the
-            // SDK can find the AKID/secret without our credential_process
-            // helper (which the macOS port uses but isn't ported yet).
+            // Static-keys mode writes ~/.aws/credentials with FAKE
+            // material — the host's AwsResigner strips the doomed
+            // signature and re-signs with the real key on the wire.
+            // The real secret never reaches the VM. Same fail-closed
+            // story the macOS port documents in Localizable.strings:
+            // anything that bypasses the proxy gets
+            // InvalidSignatureException from AWS.
             if (profile.Aws.AuthMode == AwsAuthMode.StaticKeys)
             {
-                files[".aws/credentials"] = Utf8(BuildAwsCredentials(profile.Aws));
+                files[".aws/credentials"] = Utf8(BuildFakeAwsCredentials());
             }
+        }
+
+        // -- MCP servers --------------------------------------------------
+        // Enabled MCP servers materialize into the agent's config file at
+        // boot. Bearer tokens get replaced with proxy-side fakes
+        // (registered by the caller into TokenSwapper); the MITM swaps
+        // them on the wire. Direct port of macOS SessionDisk's MCP write.
+        var enabledMcp = profile.McpServers.Where(s => s.Enabled).ToList();
+        if (enabledMcp.Count > 0)
+        {
+            files[".claude.json"] = Utf8(McpConfigBuilder.ClaudeCodeJson(enabledMcp, mcpFakes));
+            files[".codex/config.toml"] = Utf8(McpConfigBuilder.CodexToml(enabledMcp, mcpFakes));
         }
 
         // -- Bedrock for Claude Code --------------------------------------
@@ -253,6 +287,15 @@ public static class SessionHomeBuilder
         var sb = new StringBuilder();
         sb.AppendLine("# Managed by Bromure Agentic Coding.");
         sb.AppendLine("[default]");
+        // Audit 04 §25: point the SDK at the in-guest credential
+        // helper. The helper reads ~/.bromure-profile-id and dials
+        // AF_VSOCK CID_HOST:8445 to fetch a fresh credential_process
+        // JSON document from the host — letting the host rotate fake
+        // material per call without re-writing the credentials file.
+        // macOS uses the same shape; the path differs because the
+        // Windows port installs the helper into /usr/local/bin via
+        // setup.sh rather than /mnt/bromure-meta.
+        sb.AppendLine("credential_process = /usr/local/bin/bromure-aws-credentials");
         if (aws.AuthMode == AwsAuthMode.Sso && !string.IsNullOrWhiteSpace(aws.SsoProfile))
         {
             sb.AppendLine($"sso_session = {aws.SsoProfile}");
@@ -282,17 +325,39 @@ public static class SessionHomeBuilder
         return root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
     }
 
-    private static string BuildAwsCredentials(AwsCredentialsConfig aws)
+    /// <summary>
+    /// Build a credentials file whose AKID + secret are FAKES the
+    /// AWS SDK accepts (right shape, right length) but which produce
+    /// signatures the AWS service will reject. The host's MITM
+    /// resigner strips the doomed signature and replaces it with one
+    /// minted from the real material, which lives only on the host.
+    ///
+    /// <para>Same fail-closed model the macOS port describes verbatim
+    /// in the AWS-credentials onboarding string: if the guest sends an
+    /// AWS request that bypasses the proxy, AWS rejects with
+    /// InvalidSignatureException. Real secret material never touches
+    /// the VM file system.</para>
+    /// </summary>
+    internal static string BuildFakeAwsCredentials()
     {
         var sb = new StringBuilder();
         sb.AppendLine("# Managed by Bromure Agentic Coding.");
+        sb.AppendLine("# These credentials are intentional fakes — the real");
+        sb.AppendLine("# AKID + secret live on the host and never reach this VM.");
+        sb.AppendLine("# AWS will reject any signed request that bypasses the");
+        sb.AppendLine("# Bromure proxy with InvalidSignatureException. The");
+        sb.AppendLine("# proxy strips the doomed signature and re-signs with");
+        sb.AppendLine("# the real material before the request leaves your host.");
         sb.AppendLine("[default]");
-        sb.AppendLine($"aws_access_key_id = {aws.AccessKeyId}");
-        sb.AppendLine($"aws_secret_access_key = {aws.SecretAccessKey}");
-        if (!string.IsNullOrWhiteSpace(aws.SessionToken))
-        {
-            sb.AppendLine($"aws_session_token = {aws.SessionToken}");
-        }
+        // AKID format: 20 chars, ASIA prefix (temporary-creds shape so
+        // the SDK accepts the session token line that follows).
+        sb.AppendLine("aws_access_key_id = ASIABROMUREFAKEFAKE0");
+        // Secret: 40 chars base64-ish — enough to pass SDK length checks.
+        sb.AppendLine("aws_secret_access_key = BROMUREFAKEsecretBROMUREFAKEsecret0000000");
+        // Session token: any string the SDK will accept. Without it
+        // the SDK won't pass through ASIA-prefixed AKIDs to STS-aware
+        // services. The proxy strips this header before forwarding.
+        sb.AppendLine("aws_session_token = BROMUREFAKEsessionTokenForRedirectionThroughHostProxy");
         return sb.ToString();
     }
 

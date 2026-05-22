@@ -28,8 +28,17 @@ public static class ProfileSshKey
     /// <summary>Generate a fresh keypair if the profile doesn't have
     /// one yet, or always when <paramref name="force"/> is true. Updates
     /// <see cref="Profile.SshPublicKey"/> in place. Caller is
-    /// responsible for persisting the profile.</summary>
-    public static void EnsureExists(IAppPaths paths, Profile profile, bool force = false)
+    /// responsible for persisting the profile.
+    ///
+    /// <para>If <paramref name="defaultKey"/> is supplied AND a fresh
+    /// key would have been generated AND <paramref name="force"/> is
+    /// false, the default keypair is COPIED into the per-profile
+    /// agent dir instead of minting a new one. This implements the
+    /// macOS contract that all profiles spawned from the template
+    /// share one default identity (so the user pastes the public key
+    /// into GitHub once and every profile authenticates).
+    /// Audit 05 §3.1.</para></summary>
+    public static void EnsureExists(IAppPaths paths, Profile profile, bool force = false, DefaultSshKey? defaultKey = null)
     {
         var dir = DirectoryFor(paths, profile.Id);
         var rawPath = Path.Combine(dir, "id_ed25519.raw");
@@ -43,6 +52,18 @@ public static class ProfileSshKey
         }
 
         Directory.CreateDirectory(dir);
+
+        // Seed-from-default path: macOS contract. Skipped when the
+        // caller explicitly asked for a fresh mint (force=true) so
+        // the "Regenerate SSH key" gesture in the profile editor still
+        // works and lands on a unique keypair.
+        if (!force && defaultKey is not null)
+        {
+            defaultKey.CopyTo(dir);
+            profile.SshPublicKey = File.ReadAllText(pubPath).Trim();
+            return;
+        }
+
         var generator = new Ed25519KeyPairGenerator();
         generator.Init(new Ed25519KeyGenerationParameters(new SecureRandom()));
         var pair = generator.GenerateKeyPair();

@@ -26,6 +26,7 @@ public enum NavigationKind
 {
     Sessions,
     Profiles,
+    // UX #6: Conversations removed — folded into TraceInspector.
     TraceInspector,
     Approvals,
     Settings,

@@ -5,9 +5,29 @@
         xmlns:views="clr-namespace:Bromure.AC.Views"
         Title="Bromure Agentic Coding"
         Height="780" Width="1180"
+        Icon="/BromureAC.ico"
         Background="{StaticResource ChromeBackground}"
         Foreground="{StaticResource TextPrimary}"
         WindowStartupLocation="CenterScreen">
+    <Window.InputBindings>
+        <!-- Keyboard shortcuts (macOS parity, Cmd→Ctrl). UX #6: the
+             sidebar is gone; secondary panes are reached via the View
+             menu or the shortcuts here. Ctrl+1 = Sessions (the
+             default), Ctrl+2 = Profiles (manage list), then everything
+             else lives behind a single chord since the user shouldn't
+             need to think about Approvals/Trace daily. -->
+        <KeyBinding Key="N" Modifiers="Control" Command="{Binding NewSessionCommand}"/>
+        <KeyBinding Key="W" Modifiers="Control" Command="{x:Static SystemCommands.CloseWindowCommand}"/>
+        <KeyBinding Key="D1" Modifiers="Control"
+                    Command="{Binding GoToNavigationCommand}" CommandParameter="Sessions"/>
+        <KeyBinding Key="D2" Modifiers="Control"
+                    Command="{Binding GoToNavigationCommand}" CommandParameter="Profiles"/>
+        <KeyBinding Key="OemComma" Modifiers="Control"
+                    Command="{Binding GoToNavigationCommand}" CommandParameter="Settings"/>
+        <KeyBinding Key="I" Modifiers="Control+Shift"
+                    Command="{Binding GoToNavigationCommand}" CommandParameter="TraceInspector"/>
+        <KeyBinding Key="F1" Command="{Binding OpenDocumentationCommand}"/>
+    </Window.InputBindings>
     <!--
         Two layers of overlay-by-Visibility (no ContentTemplateSelector).
         WPF's selector is only re-evaluated when Content itself changes,
@@ -16,59 +36,54 @@
         property change. Cheap: views past the active one are
         Collapsed → not realised, no draw cost.
     -->
-    <Grid>
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="220"/>
-            <ColumnDefinition Width="*"/>
-        </Grid.ColumnDefinitions>
-
-        <!-- Sidebar — always present. -->
-        <Border Grid.Column="0" Background="{StaticResource PanelBackground}"
-                BorderBrush="#22FFFFFF" BorderThickness="0,0,1,0">
-            <DockPanel Margin="20,24" LastChildFill="False">
-                <StackPanel DockPanel.Dock="Top">
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-                        <Border Width="28" Height="28" CornerRadius="6"
-                                Background="{StaticResource AccentBrush}" Margin="0,0,8,0">
-                            <TextBlock Text="b" Foreground="{StaticResource TextPrimary}"
-                                       FontSize="16" FontWeight="Bold"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        </Border>
-                        <TextBlock Text="bromure" FontSize="18" FontWeight="SemiBold"
-                                   VerticalAlignment="Center"/>
-                    </StackPanel>
-                    <TextBlock Text="Agentic Coding (Windows preview)" FontSize="11"
-                               Foreground="{StaticResource TextSecondary}"
-                               Margin="0,0,0,28"/>
-
-                    <ListBox ItemsSource="{Binding Navigation}"
-                             SelectedItem="{Binding SelectedNavigation}"
-                             Background="Transparent" BorderThickness="0">
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
-                                <StackPanel Orientation="Horizontal" Margin="0,4">
-                                    <TextBlock Text="{Binding Glyph}" Margin="0,0,10,0"
-                                               FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                                               Foreground="{StaticResource AccentBrush}"
-                                               FontSize="15"
-                                               Width="20" TextAlignment="Center"/>
-                                    <TextBlock Text="{Binding Label}"/>
-                                </StackPanel>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
-                </StackPanel>
-
-                <StackPanel DockPanel.Dock="Bottom">
-                    <TextBlock Text="{Binding ImageInfoLine}" FontSize="10"
-                               Foreground="{StaticResource TextSecondary}"
-                               TextWrapping="Wrap"/>
-                </StackPanel>
-            </DockPanel>
+    <DockPanel>
+        <Menu DockPanel.Dock="Top" Background="{StaticResource PanelBackground}"
+              Foreground="{StaticResource TextPrimary}">
+            <MenuItem Header="_File">
+                <MenuItem Header="_New Session" InputGestureText="Ctrl+N"
+                          Command="{Binding NewSessionCommand}"/>
+                <Separator/>
+                <MenuItem Header="_Close Window" InputGestureText="Ctrl+W"
+                          Command="{x:Static SystemCommands.CloseWindowCommand}"/>
+                <MenuItem Header="E_xit"
+                          Command="{x:Static SystemCommands.CloseWindowCommand}"/>
+            </MenuItem>
+            <MenuItem Header="_View">
+                <MenuItem Header="_Sessions" InputGestureText="Ctrl+1"
+                          Command="{Binding GoToNavigationCommand}" CommandParameter="Sessions"/>
+                <MenuItem Header="_Profiles" InputGestureText="Ctrl+2"
+                          Command="{Binding GoToNavigationCommand}" CommandParameter="Profiles"/>
+                <Separator/>
+                <MenuItem Header="_Trace Inspector" InputGestureText="Ctrl+Shift+I"
+                          Command="{Binding GoToNavigationCommand}" CommandParameter="TraceInspector"/>
+                <MenuItem Header="_Approvals"
+                          Command="{Binding GoToNavigationCommand}" CommandParameter="Approvals"/>
+                <Separator/>
+                <MenuItem Header="_Preferences…" InputGestureText="Ctrl+,"
+                          Command="{Binding GoToNavigationCommand}" CommandParameter="Settings"/>
+            </MenuItem>
+            <MenuItem Header="_Help">
+                <MenuItem Header="_Documentation" InputGestureText="F1"
+                          Command="{Binding OpenDocumentationCommand}"/>
+                <Separator/>
+                <MenuItem Header="_About Bromure…"
+                          Command="{Binding ShowAboutCommand}"/>
+            </MenuItem>
+        </Menu>
+        <!-- UX #6: sidebar removed. Main content fills the window;
+             secondary panes (Profiles, Trace, Approvals, Settings)
+             live under the View menu so the daily UX is "just
+             sessions", macOS-style. ImageInfoLine moved to a status
+             strip at the bottom. -->
+        <Border DockPanel.Dock="Bottom" Background="{StaticResource PanelBackground}"
+                BorderBrush="#22FFFFFF" BorderThickness="0,1,0,0"
+                Padding="14,4">
+            <TextBlock Text="{Binding ImageInfoLine}" FontSize="11"
+                       Foreground="{StaticResource TextSecondary}"
+                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
         </Border>
 
-        <!-- Main content — five panes overlaid, one visible at a time. -->
-        <Grid Grid.Column="1">
+        <Grid>
             <!-- Sessions pane = profile picker + (when image not built) a
                  setup overlay. Mirrors macOS ProfilePickerView /
                  SetupView split. -->
@@ -97,6 +112,12 @@
                             Converter={StaticResource EnumToVis},
                             ConverterParameter=Profiles}"/>
 
+            <!-- UX #6: ConversationsView removed. Its content (per-session
+                 LLM conversation rendering) is now reachable from the
+                 Trace Inspector — every llm.request body is already
+                 captured by the trace store; the inspector groups by
+                 conversation when expanded. -->
+
             <views:TraceInspectorView DataContext="{Binding TraceInspectorPane}"
                 Visibility="{Binding DataContext.SelectedNavigation.Kind,
                             RelativeSource={RelativeSource AncestorType=Window},
@@ -114,19 +135,14 @@
                             RelativeSource={RelativeSource AncestorType=Window},
                             Converter={StaticResource EnumToVis},
                             ConverterParameter=Settings}"/>
-        </Grid>
 
-        <!--
-            Ubuntu base image bake overlay. Spans both columns so it
-            renders above the sidebar too — it's a modal-style task and
-            the sidebar shouldn't be clickable while it's running. The
-            UserControl itself binds Visibility to BakeOverlay.IsVisible,
-            so it's a no-op when no bake is active. Null when QEMU
-            wasn't found (BakeOverlay is null in ShellViewModel).
-        -->
-        <views:BakeOverlay Grid.Column="0" Grid.ColumnSpan="2"
-                          DataContext="{Binding BakeOverlay}"
-                          Visibility="{Binding IsVisible, FallbackValue=Collapsed,
-                                       Converter={StaticResource BoolToVis}}"/>
-    </Grid>
+            <!-- Ubuntu base-image bake overlay. Sits as the last child
+                 inside the main Grid so it overlays every content
+                 pane; bound to BakeOverlay.IsVisible. -->
+            <views:BakeOverlay DataContext="{Binding BakeOverlay}"
+                              Visibility="{Binding IsVisible, FallbackValue=Collapsed,
+                                           Converter={StaticResource BoolToVis}}"/>
+        </Grid>
+    </DockPanel>
 </Window>
+

@@ -1,7 +1,7 @@
 using System.Buffers;
-using System.IO.Pipes;
 using System.Net;
 using System.Net.Sockets;
+using Bromure.SandboxEngine.Hcs;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -12,16 +12,23 @@ namespace Bromure.SandboxEngine.Vsock;
 ///
 /// On macOS, <c>VZVirtioSocketDevice</c> + <c>VZVirtioSocketListener</c>
 /// hand the host a callback for every guest <c>connect(VMADDR_CID_HOST, port)</c>.
-/// QEMU's <c>vhost-vsock-pci</c> device exposes the host endpoint as either
-/// a UNIX domain socket (Linux/macOS) or — via QEMU's
-/// <c>-chardev socket</c> + a small accept loop — a TCP listener bound
-/// to localhost on a per-port basis.
+/// On Windows / HCS we bind an <c>AF_HYPERV</c> listener per port (via
+/// <see cref="HvSocket.Listen"/>); a Linux guest dialling
+/// <c>AF_VSOCK CID_HOST:&lt;port&gt;</c> lands here and we hand the
+/// accepted stream to the per-port handler.
 ///
-/// We keep the wire format identical to the macOS bridges
-/// (<c>SubscriptionTokenBridge</c>, <c>CodexTokenBridge</c>): newline-
-/// delimited JSON. The bridge multiplexes per-port handlers; each port
-/// becomes its own Windows named pipe, so callers consume them with the
-/// same shape they'd use for a vsock listener.
+/// <para>Audit 07 #3 (CRITICAL) called this out: the earlier
+/// implementation used Windows Named Pipes
+/// (<c>\\.\pipe\bromure-ac-vsock-&lt;port&gt;</c>), which Linux
+/// guests can't dial — the SubscriptionTokenCoordinator's wiring
+/// was therefore dead even after my Phase 1 work. The hvsocket
+/// transport fixes the actual reachability.</para>
+///
+/// <para>Wire format identical to the macOS bridges
+/// (<c>SubscriptionTokenBridge</c>, <c>CodexTokenBridge</c>):
+/// newline-delimited JSON. Each registered port gets its own
+/// service-table entry in the VM's HCS schema (see
+/// <see cref="HcsSession"/>'s <c>HvSocketPorts</c>).</para>
 /// </summary>
 public sealed class VsockBridge : IAsyncDisposable
 {
@@ -46,8 +53,7 @@ public sealed class VsockBridge : IAsyncDisposable
             {
                 throw new InvalidOperationException($"Port {port} already has a listener");
             }
-            var pipeName = $"bromure-ac-vsock-{port}";
-            var listener = new PortListener(port, pipeName, onConnection, _log);
+            var listener = new PortListener(port, onConnection, _log);
             _listeners[port] = listener;
             listener.Start();
         }
@@ -85,83 +91,106 @@ public sealed class VsockBridge : IAsyncDisposable
     }
 
     /// <summary>
-    /// One named-pipe server per registered port. We accept connections
-    /// in a loop and dispatch each to <see cref="_handler"/> on a Task.
+    /// Test seam: invoke the registered handler on
+    /// <paramref name="port"/> with an arbitrary bidirectional
+    /// stream, bypassing the AF_HYPERV transport. Used by the token
+    /// bridge tests since xunit can't open an AF_HYPERV listener and
+    /// nothing dials AF_VSOCK CID_HOST on the other side without a
+    /// real VM. Production callers never use this.
+    /// </summary>
+    internal async Task TestInvokeAsync(uint port, Stream stream, CancellationToken ct)
+    {
+        PortListener? listener;
+        lock (_gate)
+        {
+            _listeners.TryGetValue(port, out listener);
+        }
+        if (listener is null) throw new InvalidOperationException($"No listener for port {port}");
+        await listener.InvokeHandlerAsync(stream, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// One AF_HYPERV listener per registered port. We accept
+    /// connections in a loop and dispatch each to the handler on a
+    /// Task. Failure to bind (no Hyper-V, missing service-table
+    /// entry, permission) is logged but doesn't crash the engine —
+    /// the caller decides whether the feature is degraded.
     /// </summary>
     private sealed class PortListener : IAsyncDisposable
     {
         private readonly uint _port;
-        private readonly string _pipeName;
         private readonly Func<Stream, CancellationToken, Task> _handler;
         private readonly CancellationTokenSource _cts = new();
         private readonly ILogger _log;
+        private Socket? _listener;
         private Task? _acceptLoop;
 
-        public PortListener(uint port, string pipeName, Func<Stream, CancellationToken, Task> handler, ILogger log)
+        public PortListener(uint port, Func<Stream, CancellationToken, Task> handler, ILogger log)
         {
             _port = port;
-            _pipeName = pipeName;
             _handler = handler;
             _log = log;
         }
 
-        public string PipeName => _pipeName;
-
         public void Start()
         {
+            try
+            {
+                _listener = HvSocket.Listen(_port, backlog: 4);
+                _log.LogInformation("[vsock] hvsocket listener up on port {Port}", _port);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[vsock] hvsocket bind on port {Port} failed — feature degraded", _port);
+                return;
+            }
             _acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token));
         }
 
         private async Task AcceptLoopAsync(CancellationToken ct)
         {
+            var listener = _listener!;
             while (!ct.IsCancellationRequested)
             {
-                NamedPipeServerStream? server = null;
-                try
+                Socket peer;
+                try { peer = await listener.AcceptAsync(ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+                catch (ObjectDisposedException) { return; }
+                catch (SocketException ex)
                 {
-                    server = new NamedPipeServerStream(
-                        _pipeName,
-                        PipeDirection.InOut,
-                        maxNumberOfServerInstances: NamedPipeServerStream.MaxAllowedServerInstances,
-                        PipeTransmissionMode.Byte,
-                        PipeOptions.Asynchronous);
-                    await server.WaitForConnectionAsync(ct).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    server?.Dispose();
-                    return;
-                }
-                catch (IOException ex)
-                {
-                    _log.LogWarning(ex, "Accept failed on port {Port}, retrying", _port);
-                    server?.Dispose();
-                    await Task.Delay(50, ct).ConfigureAwait(false);
+                    _log.LogDebug(ex, "[vsock] accept on port {Port} threw — continuing", _port);
                     continue;
                 }
 
-                var pipe = server;
                 _ = Task.Run(async () =>
                 {
+                    Stream? stream = null;
                     try
                     {
-                        await _handler(pipe, ct).ConfigureAwait(false);
+                        stream = new NetworkStream(peer, ownsSocket: false);
+                        await _handler(stream, ct).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
-                        _log.LogWarning(ex, "Vsock handler on port {Port} threw", _port);
+                        _log.LogWarning(ex, "[vsock] handler on port {Port} threw", _port);
                     }
                     finally
                     {
-                        try { pipe.Dispose(); } catch { }
+                        try { stream?.Dispose(); } catch { }
+                        try { peer.Dispose(); } catch { }
                     }
                 });
             }
         }
 
+        /// <summary>Test-only direct handler invocation.</summary>
+        internal Task InvokeHandlerAsync(Stream stream, CancellationToken ct)
+            => _handler(stream, ct);
+
         public async ValueTask DisposeAsync()
         {
             _cts.Cancel();
+            try { _listener?.Close(); } catch { }
             if (_acceptLoop is not null)
             {
                 try { await _acceptLoop.ConfigureAwait(false); } catch { }

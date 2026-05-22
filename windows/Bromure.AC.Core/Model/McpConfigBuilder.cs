@@ -1,0 +1,191 @@
+// macos-source: Sources/AgentCoding/SessionDisk.swift @ a663f52551c3  (claudeCodeMCPConfig / codexMCPConfig)
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
+namespace Bromure.AC.Core.Model;
+
+/// <summary>
+/// Serializes <see cref="McpServer"/> entries into the per-agent config
+/// formats Claude Code and Codex consume. Direct port of the
+/// <c>claudeCodeMCPConfig</c> + <c>codexMCPConfig</c> static methods on
+/// the macOS <c>SessionDisk</c>.
+///
+/// <para><c>fakes</c> maps server <see cref="McpServer.Name"/> →
+/// (envVarName, fakeToken). When present the fake is set as an env-var
+/// value so the real token never reaches the VM; the MITM proxy swaps
+/// it on the wire.</para>
+/// </summary>
+public static class McpConfigBuilder
+{
+    // Default JsonSerializerOptions ctor leaves TypeInfoResolver null,
+    // and the System.Text.Json.Nodes writer chokes on that for plain
+    // string values. Use the standard default resolver.
+    private static readonly JsonSerializerOptions IndentedJson = new()
+    {
+        WriteIndented = true,
+        TypeInfoResolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver(),
+    };
+
+    /// <summary>
+    /// Serialize MCP servers into Claude Code's <c>~/.claude.json</c>
+    /// format. OAuth-brokered servers get no auth fields in the config —
+    /// the proxy injects the Authorization header transparently.
+    /// </summary>
+    public static string ClaudeCodeJson(
+        IEnumerable<McpServer> servers,
+        IReadOnlyDictionary<string, (string EnvVar, string Fake)>? fakes = null)
+    {
+        var fakeMap = fakes ?? new Dictionary<string, (string, string)>(StringComparer.Ordinal);
+        var mcpServers = new JsonObject();
+        foreach (var server in servers)
+        {
+            // Raw JSON mode: parse and use as-is. Bypassed when a fake
+            // token is available — the structured path handles injection.
+            if (!string.IsNullOrEmpty(server.RawJson) && !fakeMap.ContainsKey(server.Name))
+            {
+                try
+                {
+                    var parsed = JsonNode.Parse(server.RawJson) as JsonObject;
+                    if (parsed is not null)
+                    {
+                        mcpServers[server.Name] = parsed;
+                        continue;
+                    }
+                }
+                catch (JsonException) { /* fall through to structured path */ }
+            }
+
+            var entry = new JsonObject();
+            var env = new SortedDictionary<string, string>(StringComparer.Ordinal);
+            foreach (var ev in server.Environment)
+            {
+                if (!string.IsNullOrEmpty(ev.Name)) env[ev.Name] = ev.Value;
+            }
+
+            switch (server.Transport)
+            {
+                case McpTransport.Stdio:
+                    entry["command"] = server.Command;
+                    if (server.Arguments.Count > 0)
+                    {
+                        var args = new JsonArray();
+                        foreach (var a in server.Arguments) args.Add(a);
+                        entry["args"] = args;
+                    }
+                    break;
+                case McpTransport.Http:
+                    entry["type"] = "http";
+                    entry["url"] = server.Url;
+                    if (server.OAuthState is null)
+                    {
+                        if (fakeMap.TryGetValue(server.Name, out var swap))
+                        {
+                            if (!string.IsNullOrEmpty(swap.EnvVar))
+                            {
+                                entry["bearerTokenEnvVar"] = swap.EnvVar;
+                                env[swap.EnvVar] = swap.Fake;
+                            }
+                        }
+                        else if (!string.IsNullOrEmpty(server.BearerTokenEnvVar))
+                        {
+                            entry["bearerTokenEnvVar"] = server.BearerTokenEnvVar;
+                        }
+                    }
+                    break;
+            }
+            if (env.Count > 0)
+            {
+                var envObj = new JsonObject();
+                foreach (var (k, v) in env) envObj[k] = v;
+                entry["env"] = envObj;
+            }
+            mcpServers[server.Name] = entry;
+        }
+        var root = new JsonObject { ["mcpServers"] = mcpServers };
+        return root.ToJsonString(IndentedJson);
+    }
+
+    /// <summary>
+    /// Serialize MCP servers into Codex's <c>~/.codex/config.toml</c>
+    /// format. Raw-JSON servers are skipped (TOML can't represent
+    /// arbitrary JSON shapes).
+    /// </summary>
+    public static string CodexToml(
+        IEnumerable<McpServer> servers,
+        IReadOnlyDictionary<string, (string EnvVar, string Fake)>? fakes = null)
+    {
+        var fakeMap = fakes ?? new Dictionary<string, (string, string)>(StringComparer.Ordinal);
+        var lines = new List<string> { "# Generated by Bromure AC; do not edit." };
+        foreach (var server in servers)
+        {
+            if (!string.IsNullOrEmpty(server.RawJson)) continue;
+            lines.Add("");
+            lines.Add($"[mcp_servers.{TomlKey(server.Name)}]");
+            switch (server.Transport)
+            {
+                case McpTransport.Stdio:
+                    lines.Add($"command = {TomlQuote(server.Command)}");
+                    if (server.Arguments.Count > 0)
+                    {
+                        var args = string.Join(", ", server.Arguments.Select(TomlQuote));
+                        lines.Add($"args = [{args}]");
+                    }
+                    break;
+                case McpTransport.Http:
+                    lines.Add($"url = {TomlQuote(server.Url)}");
+                    if (server.OAuthState is null)
+                    {
+                        if (fakeMap.TryGetValue(server.Name, out var swap)
+                            && !string.IsNullOrEmpty(swap.EnvVar))
+                        {
+                            lines.Add($"bearer_token_env_var = {TomlQuote(swap.EnvVar)}");
+                        }
+                        else if (!string.IsNullOrEmpty(server.BearerTokenEnvVar))
+                        {
+                            lines.Add($"bearer_token_env_var = {TomlQuote(server.BearerTokenEnvVar)}");
+                        }
+                    }
+                    break;
+            }
+            var env = new SortedDictionary<string, string>(StringComparer.Ordinal);
+            foreach (var ev in server.Environment)
+            {
+                if (!string.IsNullOrEmpty(ev.Name)) env[ev.Name] = ev.Value;
+            }
+            if (fakeMap.TryGetValue(server.Name, out var swap2)
+                && !string.IsNullOrEmpty(swap2.EnvVar))
+            {
+                env[swap2.EnvVar] = swap2.Fake;
+            }
+            if (env.Count > 0)
+            {
+                lines.Add("");
+                lines.Add($"[mcp_servers.{TomlKey(server.Name)}.env]");
+                foreach (var (k, v) in env) lines.Add($"{k} = {TomlQuote(v)}");
+            }
+            if (server.StartupTimeoutSec is { } sst) lines.Add($"startup_timeout_sec = {sst}");
+            if (server.ToolTimeoutSec is { } tt) lines.Add($"tool_timeout_sec = {tt}");
+        }
+        lines.Add("");
+        return string.Join("\n", lines);
+    }
+
+    private static string TomlQuote(string s)
+    {
+        var escaped = s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        return $"\"{escaped}\"";
+    }
+
+    private static string TomlKey(string s)
+    {
+        var lowered = s.ToLowerInvariant().Replace(' ', '-');
+        var sb = new StringBuilder(lowered.Length);
+        foreach (var c in lowered)
+        {
+            if (char.IsLetterOrDigit(c) || c == '-' || c == '_') sb.Append(c);
+        }
+        var key = sb.ToString();
+        return key.Length == 0 ? "server" : key;
+    }
+}

@@ -51,6 +51,24 @@ public class HttpMitmProxyTests
     }
 
     [Fact]
+    public async Task Connect_ProxyAcceptsIpv6Loopback_DualStack()
+    {
+        // Audit 02 #3: VM dialing [::1]:<port> used to fail because
+        // the proxy was IPv4-loopback-only. Dual-stack now accepts
+        // both 127.0.0.1 and [::1].
+        await using var harness = await Harness.CreateAsync();
+        using var vm = new TcpClient(AddressFamily.InterNetworkV6);
+        await vm.ConnectAsync(IPAddress.IPv6Loopback, harness.ProxyPort);
+        using var raw = vm.GetStream();
+        var line = "CONNECT api.anthropic.com:65535 HTTP/1.1\r\nHost: api.anthropic.com:65535\r\n\r\n";
+        await raw.WriteAsync(Encoding.ASCII.GetBytes(line));
+        var buf = new byte[256];
+        var n = await raw.ReadAsync(buf);
+        Encoding.ASCII.GetString(buf, 0, n)
+            .Should().StartWith("HTTP/1.1 200 Connection established");
+    }
+
+    [Fact]
     public async Task NonConnectVerb_Returns405()
     {
         await using var harness = await Harness.CreateAsync();

@@ -85,29 +85,115 @@
                         </TextBlock>
                     </StackPanel>
                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                        <Button Content="Delete" Style="{StaticResource DangerButton}"
-                                Margin="0,0,8,0"
-                                Command="{Binding DeleteSelectedCommand}"/>
+                        <!-- Cancel reverts in-memory edits to the
+                             on-disk state. Save persists. The Delete
+                             affordance moved to the per-row context
+                             menu in the picker (audit 08 §2.4) — it
+                             was confusing as a primary header button. -->
+                        <Button Content="Cancel" Margin="0,0,8,0"
+                                Command="{Binding CancelCommand}"/>
                         <Button Content="Save" Style="{StaticResource AccentButton}"
                                 Command="{Binding SaveCommand}"/>
                     </StackPanel>
                 </Grid>
             </Border>
 
-            <!-- Tabbed editor -->
-            <TabControl Grid.Row="1" DataContext="{Binding Selected}" Background="Transparent"
-                        BorderThickness="0" Padding="32,16,32,16">
+            <!-- Editor — macOS-style category sidebar on the left,
+                 content pane on the right. Same shape as Windows
+                 Settings + macOS System Settings, so a user
+                 switching platforms doesn't have to hunt for things.
+                 Implemented as a TabControl with TabStripPlacement=Left
+                 + a custom TabItem template (icon + label, with a
+                 selected indicator) — keeps the existing per-tab
+                 content unchanged so this is a pure visual refactor. -->
+            <TabControl Grid.Row="1" DataContext="{Binding Selected}"
+                        Background="Transparent" BorderThickness="0"
+                        Padding="0" TabStripPlacement="Left">
                 <TabControl.Resources>
                     <Style TargetType="ScrollViewer">
                         <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
                         <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/>
                     </Style>
+                    <!-- Category-list tab item. Tag carries the Segoe
+                         Fluent Icons glyph (rendered with the same
+                         font the sessions sidebar uses). Selected
+                         state paints an accent background + accent
+                         text, matching Windows Settings. -->
+                    <Style TargetType="TabItem">
+                        <Setter Property="Background" Value="Transparent"/>
+                        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+                        <Setter Property="Padding" Value="14,10"/>
+                        <Setter Property="Cursor" Value="Hand"/>
+                        <Setter Property="Margin" Value="6,2"/>
+                        <Setter Property="HorizontalAlignment" Value="Stretch"/>
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="TabItem">
+                                    <Border x:Name="row"
+                                            Background="{TemplateBinding Background}"
+                                            CornerRadius="8"
+                                            Padding="{TemplateBinding Padding}">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{TemplateBinding Tag}"
+                                                       FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                                       FontSize="16"
+                                                       Foreground="{DynamicResource AccentBrush}"
+                                                       Width="24"
+                                                       TextAlignment="Center"
+                                                       VerticalAlignment="Center"/>
+                                            <ContentPresenter ContentSource="Header"
+                                                              VerticalAlignment="Center"
+                                                              Margin="10,0,0,0"
+                                                              RecognizesAccessKey="True"
+                                                              TextElement.FontSize="{DynamicResource FontSizeBody}"
+                                                              TextElement.Foreground="{TemplateBinding Foreground}"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="row" Property="Background" Value="{DynamicResource HoverBrush}"/>
+                                        </Trigger>
+                                        <Trigger Property="IsSelected" Value="True">
+                                            <Setter TargetName="row" Property="Background" Value="{DynamicResource AccentDimBrush}"/>
+                                            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
                 </TabControl.Resources>
+                <TabControl.Template>
+                    <ControlTemplate TargetType="TabControl">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="220"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Grid.Column="0"
+                                    Background="{DynamicResource PanelElevated}"
+                                    BorderBrush="{DynamicResource BorderBrush}"
+                                    BorderThickness="0,0,1,0">
+                                <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                              HorizontalScrollBarVisibility="Disabled"
+                                              Padding="0,16">
+                                    <TabPanel IsItemsHost="True" Background="Transparent"/>
+                                </ScrollViewer>
+                            </Border>
+                            <Border Grid.Column="1"
+                                    Background="{DynamicResource PanelBackground}"
+                                    Padding="32,20">
+                                <ContentPresenter ContentSource="SelectedContent"/>
+                            </Border>
+                        </Grid>
+                    </ControlTemplate>
+                </TabControl.Template>
 
                 <!-- ================================================
                      GENERAL TAB
                      ================================================ -->
-                <TabItem Header="General">
+                <TabItem Header="General" Tag="">
                     <ScrollViewer>
                         <StackPanel MaxWidth="640">
                             <Grid Margin="0,0,0,14">
@@ -185,6 +271,56 @@
                                               IsChecked="{Binding PrivateMode}"/>
                                 </StackPanel>
                             </Border>
+
+                            <!-- Audit 09 §A7: subscription token swap state row.
+                                 Shows whether the user has accepted/declined the
+                                 swap prompt for Claude / Codex on this profile,
+                                 with a button to reset the decision so the
+                                 prompt fires again on next swap detection. -->
+                            <Border Background="{StaticResource PanelBackground}" CornerRadius="6"
+                                    Padding="20" Margin="0,12,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="Subscription token swap" FontSize="14" FontWeight="SemiBold"/>
+                                    <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                               TextWrapping="Wrap" Margin="0,4,0,8">
+                                        Whether the proxy swaps real Anthropic / OpenAI OAuth tokens with fakes
+                                        before they reach the VM. Reset to clear the decision and re-prompt
+                                        next time a fresh token is observed.
+                                    </TextBlock>
+                                    <Grid Margin="0,8,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="Claude (Anthropic)" VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="1" Margin="12,0,0,0"
+                                                   Text="{Binding SubscriptionTokenSwap, Mode=OneWay}"
+                                                   Foreground="{StaticResource TextSecondary}"
+                                                   VerticalAlignment="Center"/>
+                                        <Button Grid.Column="2" Content="Reset"
+                                                Padding="12,4"
+                                                Command="{Binding DataContext.ResetSubscriptionSwapCommand,
+                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                    </Grid>
+                                    <Grid Margin="0,8,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="Codex (ChatGPT)" VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="1" Margin="12,0,0,0"
+                                                   Text="{Binding CodexTokenSwap, Mode=OneWay}"
+                                                   Foreground="{StaticResource TextSecondary}"
+                                                   VerticalAlignment="Center"/>
+                                        <Button Grid.Column="2" Content="Reset"
+                                                Padding="12,4"
+                                                Command="{Binding DataContext.ResetCodexSwapCommand,
+                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
@@ -192,7 +328,7 @@
                 <!-- ================================================
                      FOLDERS TAB
                      ================================================ -->
-                <TabItem Header="Folders">
+                <TabItem Header="Folders" Tag="">
                     <ScrollViewer>
                         <StackPanel>
                             <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
@@ -236,7 +372,7 @@
                 <!-- ================================================
                      CREDENTIALS TAB — accordion of credential types
                      ================================================ -->
-                <TabItem Header="Credentials">
+                <TabItem Header="Credentials" Tag="">
                     <ScrollViewer>
                         <StackPanel>
                             <!-- AWS ............................................. -->
@@ -297,6 +433,106 @@
                                             <CheckBox Grid.Row="5" Grid.Column="1" Margin="0,8,0,0"
                                                       Content="Prompt before each AWS call"
                                                       IsChecked="{Binding RequireApproval}"/>
+                                        </Grid>
+                                        <Button Content="Discover from ~/.aws/config" Margin="0,12,0,0"
+                                                HorizontalAlignment="Left"
+                                                Command="{Binding DataContext.DiscoverAwsSsoCommand,
+                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
+                            <!-- AWS Bedrock (audit 09 §A2) ....................... -->
+                            <Expander Header="AWS Bedrock" Margin="0,8,0,8">
+                                <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                                   Margin="0,0,0,12" TextWrapping="Wrap">
+                                            Route Claude calls through Bedrock instead of api.anthropic.com.
+                                            Uses the AWS credentials configured above for SigV4 signing.
+                                        </TextBlock>
+                                        <CheckBox Content="Enable Bedrock for this profile"
+                                                  IsChecked="{Binding BedrockEnabled}"
+                                                  Margin="0,0,0,12"/>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="100"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="Model ID"
+                                                       Foreground="{StaticResource TextSecondary}" Margin="0,8"
+                                                       VerticalAlignment="Center"/>
+                                            <TextBox Grid.Column="1" Margin="0,4" FontFamily="Consolas"
+                                                     IsEnabled="{Binding BedrockEnabled}"
+                                                     Text="{Binding BedrockModelID, UpdateSourceTrigger=LostFocus}"/>
+                                        </Grid>
+                                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="10"
+                                                   Margin="0,4,0,0" TextWrapping="Wrap">
+                                            Example: anthropic.claude-3-5-sonnet-20241022-v2:0
+                                        </TextBlock>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
+                            <!-- DigitalOcean access token (audit 09 §A4) ........ -->
+                            <Expander Header="DigitalOcean" Margin="0,8,0,8">
+                                <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                                   Margin="0,0,0,12" TextWrapping="Wrap">
+                                            Personal access token for the DigitalOcean API +
+                                            <Hyperlink NavigateUri="https://cloud.digitalocean.com/account/api/tokens"
+                                                       RequestNavigate="OnHyperlinkNavigate">
+                                                doctl
+                                            </Hyperlink>.
+                                            The proxy swaps a fake into the guest's environment;
+                                            the real value never leaves the host.
+                                        </TextBlock>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="100"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="Token"
+                                                       Foreground="{StaticResource TextSecondary}" Margin="0,8"
+                                                       VerticalAlignment="Center"/>
+                                            <PasswordBox Grid.Column="1" Margin="0,4"
+                                                         cmn:PasswordBoxBinding.Password="{Binding DigitalOceanToken, Mode=TwoWay}"/>
+                                        </Grid>
+                                        <CheckBox Margin="0,8,0,0"
+                                                  Content="Prompt before each DigitalOcean call"
+                                                  IsChecked="{Binding DigitalOceanRequiresApproval}"/>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
+                            <!-- Git identity (audit 09 §A4) ...................... -->
+                            <Expander Header="Git identity" Margin="0,8,0,8" IsExpanded="True">
+                                <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                                   Margin="0,0,0,12" TextWrapping="Wrap">
+                                            Written to ~/.gitconfig in the guest as
+                                            [user] name / email. Optional — leave blank to inherit
+                                            the system default.
+                                        </TextBlock>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="100"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition/>
+                                                <RowDefinition/>
+                                            </Grid.RowDefinitions>
+                                            <TextBlock Grid.Row="0" Grid.Column="0" Text="user.name"
+                                                       Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                            <TextBox Grid.Row="0" Grid.Column="1" Margin="0,4"
+                                                     Text="{Binding GitUserName, UpdateSourceTrigger=LostFocus}"/>
+                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="user.email"
+                                                       Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                            <TextBox Grid.Row="1" Grid.Column="1" Margin="0,4"
+                                                     Text="{Binding GitUserEmail, UpdateSourceTrigger=LostFocus}"/>
                                         </Grid>
                                     </StackPanel>
                                 </Border>
@@ -549,11 +785,18 @@
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>
-                                        <Button Content="Add kubeconfig" Margin="0,12,0,0"
-                                                HorizontalAlignment="Left"
-                                                Style="{StaticResource AccentButton}"
-                                                Command="{Binding DataContext.AddKubeCommand,
-                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                            <Button Content="Add kubeconfig"
+                                                    Style="{StaticResource AccentButton}"
+                                                    Command="{Binding DataContext.AddKubeCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                            <!-- Audit 09 §A4: import every context from
+                                                 a kubectl YAML in one shot. Mirrors macOS
+                                                 profile editor's import flow. -->
+                                            <Button Content="Import kubeconfig…" Margin="8,0,0,0"
+                                                    Command="{Binding DataContext.ImportKubeconfigCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                        </StackPanel>
                                     </StackPanel>
                                 </Border>
                             </Expander>
@@ -646,7 +889,7 @@
                 <!-- ================================================
                      ENVIRONMENT TAB
                      ================================================ -->
-                <TabItem Header="Environment">
+                <TabItem Header="Environment" Tag="">
                     <ScrollViewer>
                         <StackPanel>
                             <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
@@ -691,6 +934,196 @@
                                     Style="{StaticResource AccentButton}"
                                     Command="{Binding DataContext.AddEnvCommand,
                                               RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- ================================================
+                     RESOURCES TAB — memory, network, close action
+                     ================================================ -->
+                <TabItem Header="Resources" Tag="">
+                    <ScrollViewer>
+                        <StackPanel>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                       TextWrapping="Wrap" Margin="0,0,0,12">
+                                VM resources baked at boot. Changing these requires restarting
+                                the session — the app will prompt to reboot.
+                            </TextBlock>
+
+                            <TextBlock Text="Memory (GiB)" FontWeight="SemiBold" Margin="0,4,0,4"/>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="10"
+                                       Margin="0,0,0,4">0 = let the engine pick a default that scales to the host.</TextBlock>
+                            <TextBox Width="120" HorizontalAlignment="Left"
+                                     Text="{Binding MemoryGB, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <TextBlock Text="Network mode" FontWeight="SemiBold" Margin="0,16,0,4"/>
+                            <ComboBox Width="220" HorizontalAlignment="Left"
+                                      ItemsSource="{Binding DataContext.NetworkModeOptions,
+                                                    RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                      SelectedItem="{Binding NetworkMode}"/>
+                            <TextBlock Text="Bridged interface ID (when NetworkMode = Bridged)"
+                                       FontSize="10" Foreground="{StaticResource TextSecondary}"
+                                       Margin="0,8,0,4"/>
+                            <TextBox Width="320" HorizontalAlignment="Left"
+                                     Text="{Binding BridgedInterfaceID, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <TextBlock Text="When closing the session window" FontWeight="SemiBold" Margin="0,16,0,4"/>
+                            <ComboBox Width="220" HorizontalAlignment="Left"
+                                      ItemsSource="{Binding DataContext.CloseActionOptions,
+                                                    RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                      SelectedItem="{Binding CloseAction}"/>
+
+                            <TextBlock Text="Notes" FontWeight="SemiBold" Margin="0,16,0,4"/>
+                            <TextBox MinHeight="60" AcceptsReturn="True" TextWrapping="Wrap"
+                                     Text="{Binding Comments, UpdateSourceTrigger=PropertyChanged}"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- ================================================
+                     APPEARANCE TAB — cursor, opacity, font, colors
+                     ================================================ -->
+                <TabItem Header="Appearance" Tag="">
+                    <ScrollViewer>
+                        <StackPanel>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                       TextWrapping="Wrap" Margin="0,0,0,12">
+                                Terminal + window cosmetics. Empty custom fields fall through to
+                                the host terminal's defaults when "Inherit from host terminal" is on.
+                            </TextBlock>
+
+                            <CheckBox Content="Inherit colors / font from host terminal"
+                                      IsChecked="{Binding UseTerminalAppDefaults}"
+                                      Margin="0,0,0,12"/>
+
+                            <TextBlock Text="Cursor shape" FontWeight="SemiBold" Margin="0,4,0,4"/>
+                            <ComboBox Width="220" HorizontalAlignment="Left"
+                                      ItemsSource="{Binding DataContext.CursorShapeOptions,
+                                                    RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                      SelectedItem="{Binding CursorShape}"/>
+
+                            <TextBlock Text="Window opacity (0.3 – 1.0)" FontWeight="SemiBold" Margin="0,16,0,4"/>
+                            <TextBox Width="120" HorizontalAlignment="Left"
+                                     Text="{Binding WindowOpacity, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <TextBlock Text="Custom font family (kitty)" FontWeight="SemiBold" Margin="0,16,0,4"/>
+                            <TextBox Width="320" HorizontalAlignment="Left"
+                                     Text="{Binding CustomFontFamily, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <TextBlock Text="Custom font size" FontWeight="SemiBold" Margin="0,12,0,4"/>
+                            <TextBox Width="120" HorizontalAlignment="Left"
+                                     Text="{Binding CustomFontSize, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <TextBlock Text="Background hex (#RRGGBB)" FontWeight="SemiBold" Margin="0,16,0,4"/>
+                            <TextBox Width="200" HorizontalAlignment="Left" FontFamily="Consolas"
+                                     Text="{Binding CustomBackgroundHex, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <TextBlock Text="Foreground hex (#RRGGBB)" FontWeight="SemiBold" Margin="0,12,0,4"/>
+                            <TextBox Width="200" HorizontalAlignment="Left" FontFamily="Consolas"
+                                     Text="{Binding CustomForegroundHex, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <TextBlock Text="Keyboard layout override (e.g. fr, ch:fr)" FontWeight="SemiBold" Margin="0,16,0,4"/>
+                            <TextBox Width="220" HorizontalAlignment="Left"
+                                     Text="{Binding KeyboardLayoutOverride, UpdateSourceTrigger=PropertyChanged}"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- ================================================
+                     MCP SERVERS TAB
+                     Audit 09 #1: macOS Profile.swift has a full MCP
+                     editor pane (add / enable / OAuth-authorize); the
+                     Windows port had model + builder + broker but no
+                     UI surface. This tab adds parity.
+                     ================================================ -->
+                <TabItem Header="MCP servers" Tag="">
+                    <ScrollViewer>
+                        <StackPanel>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                       TextWrapping="Wrap" Margin="0,0,0,12">
+                                Model Context Protocol servers wired into Claude Code / Codex.
+                                Stdio servers run as a child process; HTTP servers are reached
+                                over the network with bearer-token auth (the proxy swaps a
+                                fake on the wire so the real token never leaves the host).
+                            </TextBlock>
+                            <ItemsControl ItemsSource="{Binding McpServers}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Background="{StaticResource PanelBackground}"
+                                                CornerRadius="4" Padding="12" Margin="0,4">
+                                            <StackPanel>
+                                                <Grid Margin="0,0,0,6">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBox Grid.Column="0" FontFamily="Consolas"
+                                                             Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                                                             Margin="0,0,8,0"/>
+                                                    <ComboBox Grid.Column="1" MinWidth="100"
+                                                              ItemsSource="{Binding DataContext.McpTransportOptions,
+                                                                            RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                              SelectedItem="{Binding Transport}"
+                                                              Margin="0,0,8,0"/>
+                                                    <CheckBox Grid.Column="2" Content="Enabled"
+                                                              IsChecked="{Binding Enabled}"
+                                                              VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                                    <Button Grid.Column="3" Content="Remove"
+                                                            Style="{StaticResource DangerButton}"
+                                                            Command="{Binding DataContext.RemoveMcpCommand,
+                                                                      RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                            CommandParameter="{Binding}"/>
+                                                </Grid>
+                                                <!-- Stdio: command + args -->
+                                                <StackPanel Visibility="{Binding Transport,
+                                                            Converter={StaticResource EnumToVis},
+                                                            ConverterParameter=Stdio}">
+                                                    <TextBlock Text="Command" FontSize="10"
+                                                               Foreground="{StaticResource TextSecondary}"
+                                                               Margin="0,4,0,2"/>
+                                                    <TextBox FontFamily="Consolas"
+                                                             Text="{Binding Command, UpdateSourceTrigger=PropertyChanged}"/>
+                                                </StackPanel>
+                                                <!-- HTTP: url + bearer env var -->
+                                                <StackPanel Visibility="{Binding Transport,
+                                                            Converter={StaticResource EnumToVis},
+                                                            ConverterParameter=Http}">
+                                                    <TextBlock Text="URL" FontSize="10"
+                                                               Foreground="{StaticResource TextSecondary}"
+                                                               Margin="0,4,0,2"/>
+                                                    <TextBox FontFamily="Consolas"
+                                                             Text="{Binding Url, UpdateSourceTrigger=PropertyChanged}"/>
+                                                    <TextBlock Text="Bearer-token env var (e.g. MCP_BEARER)"
+                                                               FontSize="10"
+                                                               Foreground="{StaticResource TextSecondary}"
+                                                               Margin="0,6,0,2"/>
+                                                    <TextBox FontFamily="Consolas"
+                                                             Text="{Binding BearerTokenEnvVar, UpdateSourceTrigger=PropertyChanged}"/>
+                                                    <TextBlock Text="Bearer token (proxied — fake substituted on the wire)"
+                                                               FontSize="10"
+                                                               Foreground="{StaticResource TextSecondary}"
+                                                               Margin="0,6,0,2"/>
+                                                    <TextBox FontFamily="Consolas"
+                                                             Text="{Binding BearerToken, UpdateSourceTrigger=PropertyChanged}"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                <Button Content="Add stdio server"
+                                        Style="{StaticResource AccentButton}"
+                                        Margin="0,0,8,0"
+                                        Command="{Binding DataContext.AddMcpStdioCommand,
+                                                  RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                <Button Content="Add HTTP server"
+                                        Style="{StaticResource AccentButton}"
+                                        Command="{Binding DataContext.AddMcpHttpCommand,
+                                                  RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                            </StackPanel>
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>

@@ -8,7 +8,8 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
-            <RowDefinition Height="200"/>
+            <RowDefinition Height="220"/>
+            <RowDefinition Height="180"/>
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" Text="Trace Inspector"
@@ -108,5 +109,66 @@
                 </StackPanel>
             </ScrollViewer>
         </Border>
+
+        <!-- Request + response body panes — newly added. Bodies are
+             AES-GCM-encrypted at rest; the inspector decrypts on
+             demand through the engine's Vault (passed at ctor). -->
+        <Grid Grid.Row="4" Margin="0,16,0,0"
+              Visibility="{Binding SelectedBodyStored, Converter={StaticResource BoolToVis}}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Background="{StaticResource PanelBackground}"
+                    CornerRadius="6" Padding="12" Margin="0,0,4,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <Grid Grid.Row="0" Margin="0,0,0,6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Request body" FontWeight="SemiBold"/>
+                        <Button Grid.Column="1" Content="Copy" Padding="6,2"
+                                Command="{Binding CopyRequestBodyCommand}"/>
+                    </Grid>
+                    <TextBox Grid.Row="1" Text="{Binding SelectedRequestBody, Mode=OneWay}"
+                             IsReadOnly="True" FontFamily="Consolas" FontSize="11"
+                             Background="Transparent" Foreground="{StaticResource TextPrimary}"
+                             BorderThickness="0" TextWrapping="NoWrap"
+                             HorizontalScrollBarVisibility="Auto"
+                             VerticalScrollBarVisibility="Auto"
+                             AcceptsReturn="True"/>
+                </Grid>
+            </Border>
+            <Border Grid.Column="1" Background="{StaticResource PanelBackground}"
+                    CornerRadius="6" Padding="12" Margin="4,0,0,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <Grid Grid.Row="0" Margin="0,0,0,6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Response body" FontWeight="SemiBold"/>
+                        <Button Grid.Column="1" Content="Copy" Padding="6,2"
+                                Command="{Binding CopyResponseBodyCommand}"/>
+                    </Grid>
+                    <TextBox Grid.Row="1" Text="{Binding SelectedResponseBody, Mode=OneWay}"
+                             IsReadOnly="True" FontFamily="Consolas" FontSize="11"
+                             Background="Transparent" Foreground="{StaticResource TextPrimary}"
+                             BorderThickness="0" TextWrapping="NoWrap"
+                             HorizontalScrollBarVisibility="Auto"
+                             VerticalScrollBarVisibility="Auto"
+                             AcceptsReturn="True"/>
+                </Grid>
+            </Border>
+        </Grid>
     </Grid>
 </UserControl>

@@ -41,9 +41,19 @@ public sealed class PrivateSshAgent : IAsyncDisposable
 
     private readonly string _pipeName;
     private readonly ILogger _log;
-    private readonly ConcurrentDictionary<string, KeyEntry> _keys = new();
+    // Audit 05 §1.4: per-profile namespace. Two simultaneously-active
+    // sessions used to clobber each other when the engine called
+    // Clear() + AddEd25519() per profile — the second profile's
+    // bindings wiped the first. Now each profile has its own slot,
+    // and ServeAsync presents the UNION to the host so `ssh-add -l`
+    // shows every active profile's keys at once. Guid.Empty is
+    // reserved for legacy unparameterized callers (mostly tests).
+    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, KeyEntry>> _keysByProfile = new();
     private CancellationTokenSource? _cts;
     private Task? _acceptLoop;
+
+    private ConcurrentDictionary<string, KeyEntry> KeysFor(Guid profileId)
+        => _keysByProfile.GetOrAdd(profileId, _ => new ConcurrentDictionary<string, KeyEntry>());
 
     public PrivateSshAgent(string pipeName = DefaultPipeName, ILogger? log = null)
     {
@@ -52,7 +62,7 @@ public sealed class PrivateSshAgent : IAsyncDisposable
     }
 
     public string PipePath => @$"\\.\pipe\{_pipeName}";
-    public int KeyCount => _keys.Count;
+    public int KeyCount => _keysByProfile.Values.Sum(d => d.Count);
 
     public Task StartAsync(CancellationToken ct = default)
     {
@@ -64,21 +74,60 @@ public sealed class PrivateSshAgent : IAsyncDisposable
     }
 
     public bool AddEd25519(ReadOnlySpan<byte> seed, ReadOnlySpan<byte> publicKey, string comment = "bromure-ac")
+        => AddEd25519(seed, publicKey, comment, Guid.Empty);
+
+    public bool AddEd25519(ReadOnlySpan<byte> seed, ReadOnlySpan<byte> publicKey, string comment, Guid profileId)
     {
         if (seed.Length != 32 || publicKey.Length != 32) return false;
         var blob = OpenSshKeyFormat.Ed25519PublicBlob(publicKey);
         var key = Convert.ToBase64String(blob);
-        _keys[key] = new KeyEntry(blob, seed.ToArray(), publicKey.ToArray(), comment);
+        KeysFor(profileId)[key] = new KeyEntry(blob, seed.ToArray(), publicKey.ToArray(), comment);
         return true;
     }
 
     public void RemoveByPublicBlob(ReadOnlySpan<byte> publicBlob)
     {
         var key = Convert.ToBase64String(publicBlob);
-        _keys.TryRemove(key, out _);
+        // Remove from EVERY profile that holds this blob — the wire
+        // protocol's REMOVE_IDENTITY has no profile dimension, so we
+        // mirror "remove everywhere it exists".
+        foreach (var bucket in _keysByProfile.Values)
+        {
+            bucket.TryRemove(key, out _);
+        }
     }
 
-    public void Clear() => _keys.Clear();
+    /// <summary>Wipe ALL profiles. Mostly for tests / shutdown — the
+    /// engine should prefer <see cref="ClearForProfile"/> so it
+    /// doesn't drop the OTHER active sessions' keys.</summary>
+    public void Clear() => _keysByProfile.Clear();
+
+    /// <summary>Audit 05 §1.4: wipe one profile's namespace without
+    /// touching the others. The engine calls this on
+    /// <c>UnregisterAsync</c> for a single session teardown.</summary>
+    public void ClearForProfile(Guid profileId)
+    {
+        if (_keysByProfile.TryGetValue(profileId, out var bucket))
+        {
+            bucket.Clear();
+        }
+    }
+
+    /// <summary>Atomic per-profile replace — engine calls this from
+    /// <c>ApplyProfileBindingsAsync</c> so the previous session's keys
+    /// for this same profile are dropped and the new set installed in
+    /// one shot, without a "no keys" window between.</summary>
+    public void ReplaceForProfile(Guid profileId, IEnumerable<(byte[] Seed, byte[] PublicKey, string Comment)> keys)
+    {
+        var fresh = new ConcurrentDictionary<string, KeyEntry>();
+        foreach (var (seed, pub, comment) in keys)
+        {
+            if (seed.Length != 32 || pub.Length != 32) continue;
+            var blob = OpenSshKeyFormat.Ed25519PublicBlob(pub);
+            fresh[Convert.ToBase64String(blob)] = new KeyEntry(blob, seed, pub, comment);
+        }
+        _keysByProfile[profileId] = fresh;
+    }
 
     private async Task AcceptLoopAsync(CancellationToken ct)
     {
@@ -115,6 +164,15 @@ public sealed class PrivateSshAgent : IAsyncDisposable
             }, ct);
         }
     }
+
+    /// <summary>
+    /// Serve OpenSSH agent protocol over an arbitrary bidirectional
+    /// stream. Used by the named-pipe listener (host-side ssh-add)
+    /// and by the hvsocket bridge (in-VM ssh-add). Exposed so the
+    /// engine can hand it any inbound transport.
+    /// </summary>
+    public async Task ServePublicAsync(Stream stream, CancellationToken ct = default)
+        => await ServeAsync(stream, ct).ConfigureAwait(false);
 
     private async Task ServeAsync(Stream stream, CancellationToken ct)
     {
@@ -164,10 +222,22 @@ public sealed class PrivateSshAgent : IAsyncDisposable
 
     private byte[] BuildIdentitiesAnswer()
     {
+        // Dedupe across profiles by public blob — if two profiles
+        // happen to share the same shared default key, the host should
+        // see it ONCE. Keep the first-seen comment, mirroring the way
+        // a real ssh-agent dedupes by fingerprint.
+        var seen = new Dictionary<string, KeyEntry>(StringComparer.Ordinal);
+        foreach (var bucket in _keysByProfile.Values)
+        {
+            foreach (var (k, v) in bucket)
+            {
+                if (!seen.ContainsKey(k)) seen[k] = v;
+            }
+        }
         var ms = new MemoryStream();
         ms.WriteByte(SSH_AGENT_IDENTITIES_ANSWER);
-        WriteU32Be(ms, (uint)_keys.Count);
-        foreach (var entry in _keys.Values)
+        WriteU32Be(ms, (uint)seen.Count);
+        foreach (var entry in seen.Values)
         {
             WriteSshString(ms, entry.PublicBlob);
             WriteSshString(ms, System.Text.Encoding.UTF8.GetBytes(entry.Comment));
@@ -183,7 +253,12 @@ public sealed class PrivateSshAgent : IAsyncDisposable
         // flags ignored — we always do raw ed25519.
 
         var key = Convert.ToBase64String(publicBlob);
-        if (!_keys.TryGetValue(key, out var entry))
+        KeyEntry? entry = null;
+        foreach (var bucket in _keysByProfile.Values)
+        {
+            if (bucket.TryGetValue(key, out entry)) break;
+        }
+        if (entry is null)
         {
             return new[] { SSH_AGENT_FAILURE };
         }

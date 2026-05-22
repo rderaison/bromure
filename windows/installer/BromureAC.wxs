@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bromure Agentic Coding — Windows MSI installer.
+
+    Built with WiX Toolset 5 (`wix build`). The packaging script at
+    windows/scripts/build-msi.ps1 publishes a self-contained release
+    of the WPF app into ../publish/ and then invokes `wix build` with
+    -d StagingDir pointing at that publish output. Everything WiX
+    sees is rooted under StagingDir; this file doesn't hardcode any
+    paths beyond %ProgramFiles64Folder%.
+
+    UpgradeCode is the durable identity for this product line — it
+    NEVER changes between releases. Bumping the Version (or having
+    MSI compute it from the assembly) drives major-upgrade detection;
+    Windows uninstalls the old version and installs the new one
+    automatically.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <Package Name="Bromure Agentic Coding"
+             Manufacturer="Bromure"
+             Version="0.1.0"
+             UpgradeCode="6F2A2C9E-7D14-4D2F-9A52-3F2B1E8C9A11"
+             Scope="perMachine"
+             InstallerVersion="500">
+
+        <SummaryInformation Description="Disposable Linux VMs for agentic coding"
+                            Keywords="bromure;agentic;coding;hyper-v"/>
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of Bromure Agentic Coding is already installed."/>
+        <MediaTemplate EmbedCab="yes"/>
+
+        <!-- Icon for Add/Remove Programs. The .ico is a source asset,
+             not a publish output — pulled from the project tree via
+             the IconSource variable that build-msi.ps1 passes in. -->
+        <Icon Id="BromureAC.ico" SourceFile="$(IconSource)"/>
+        <Property Id="ARPPRODUCTICON" Value="BromureAC.ico"/>
+        <Property Id="ARPHELPLINK" Value="https://bromure.io"/>
+        <Property Id="ARPNOMODIFY" Value="1"/>
+        <Property Id="ARPNOREPAIR" Value="1"/>
+
+        <StandardDirectory Id="ProgramFiles64Folder">
+            <Directory Id="INSTALLFOLDER" Name="Bromure">
+                <Directory Id="ACFolder" Name="AC"/>
+            </Directory>
+        </StandardDirectory>
+
+        <!-- Start Menu shortcut. The component must explicitly remove
+             the folder it created on uninstall. -->
+        <StandardDirectory Id="ProgramMenuFolder">
+            <Directory Id="ShortcutFolder" Name="Bromure">
+                <Component Id="StartMenuShortcut" Guid="C0E2F5A8-4C8F-4A1E-8B11-9F1E2A6D3C90">
+                    <Shortcut Id="BromureACStartMenu"
+                              Name="Bromure Agentic Coding"
+                              Description="Disposable Linux VMs for agentic coding"
+                              Target="[ACFolder]BromureAC.exe"
+                              WorkingDirectory="ACFolder"
+                              Icon="BromureAC.ico"/>
+                    <RemoveFolder Id="RemoveShortcutFolder" On="uninstall"/>
+                    <RegistryValue Root="HKCU"
+                                   Key="Software\Bromure\AC"
+                                   Name="StartMenuShortcut"
+                                   Type="integer" Value="1" KeyPath="yes"/>
+                </Component>
+            </Directory>
+        </StandardDirectory>
+
+        <Feature Id="Main" Title="Bromure Agentic Coding" Level="1">
+            <!-- WiX 5's <Files Directory="..."/> walks the staging tree
+                 recursively and generates one component per file, all
+                 anchored at the named install directory. Subdirectory
+                 structure under $(StagingDir) is preserved. -->
+            <Files Directory="ACFolder" Include="$(StagingDir)**"/>
+            <ComponentRef Id="StartMenuShortcut"/>
+        </Feature>
+    </Package>
+</Wix>

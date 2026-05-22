@@ -4,9 +4,16 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <!-- The host app itself runs unelevated; the installer
-             handles UAC. -->
-        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+        <!-- Auto-elevate at launch so the bake can drive Mount-VHD
+             (which needs SeManageVolumePrivilege, not granted to
+             Hyper-V Administrators on its own). One UAC "Yes" per
+             launch, no right-click required. Session use after
+             baking would technically run fine unelevated, but it's
+             cleaner to keep a single permission profile across the
+             app's lifetime. Follow-up: eliminate Mount-VHD via a
+             fixed-VHDX direct-file-read extraction path, which would
+             let us drop this back to asInvoker. -->
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

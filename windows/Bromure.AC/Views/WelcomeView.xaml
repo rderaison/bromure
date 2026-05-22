@@ -4,41 +4,128 @@
              Background="{StaticResource ChromeBackground}"
              Foreground="{StaticResource TextPrimary}">
     <Grid>
-        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="520">
-            <Border Width="96" Height="96" CornerRadius="20"
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="560">
+            <!-- UX #1: app mark — bigger, with a subtle accent halo
+                 instead of a flat tile. Gives the welcome screen a
+                 modern "logo + tagline" identity instead of a
+                 button-and-text layout. -->
+            <Border Width="112" Height="112" CornerRadius="24"
                     Background="{StaticResource AccentBrush}"
-                    HorizontalAlignment="Center" Margin="0,0,0,24">
-                <TextBlock Text="b" Foreground="{StaticResource TextPrimary}"
-                           FontSize="56" FontWeight="Bold"
+                    HorizontalAlignment="Center" Margin="0,0,0,28">
+                <Border.Effect>
+                    <DropShadowEffect Color="#0A84FF" BlurRadius="32"
+                                      ShadowDepth="0" Opacity="0.30"/>
+                </Border.Effect>
+                <TextBlock Text="b" Foreground="#FFFFFF"
+                           FontSize="64" FontWeight="Bold"
                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
 
-            <TextBlock Text="Welcome to Bromure Agentic Coding"
-                       FontSize="22" FontWeight="SemiBold"
-                       HorizontalAlignment="Center" Margin="0,0,0,12"/>
+            <TextBlock Text="Bromure Agentic Coding"
+                       FontSize="{StaticResource FontSizeHero}"
+                       FontWeight="SemiBold"
+                       Foreground="{StaticResource TextPrimary}"
+                       HorizontalAlignment="Center" Margin="0,0,0,8"/>
 
-            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="13"
-                       TextWrapping="Wrap" TextAlignment="Center" MaxWidth="500">
-                <Run Text="First-time setup downloads a 62 MB Alpine virt boot image."/>
-                <LineBreak/>
-                <LineBreak/>
-                <Run FontSize="11"
-                     Text="The full Ubuntu base with Claude Code + Codex + kitty pre-installed is built by an in-VM bake step on macOS; that pipeline is a Phase-3 follow-up on Windows. The host can already boot, MITM, and exercise every credential surface against an Alpine guest today."/>
+            <TextBlock Text="Disposable Linux VMs for your AI agents"
+                       FontSize="{StaticResource FontSizeBody}"
+                       Foreground="{StaticResource AccentBrush}"
+                       HorizontalAlignment="Center" Margin="0,0,0,24"/>
+
+            <TextBlock Foreground="{StaticResource TextSecondary}"
+                       FontSize="{StaticResource FontSizeBody}"
+                       TextWrapping="Wrap" TextAlignment="Center" MaxWidth="540"
+                       LineHeight="22">
+                <Run Text="First-time setup downloads a ~60 MB Alpine virt ISO, boots it inside a transient Hyper-V VM, and runs setup.sh — debootstraps Ubuntu Noble, installs kitty and the agent toolchain. ~10 minutes, one time."/>
             </TextBlock>
 
             <Button Content="Get Started"
-                    Width="200" Height="40" Margin="0,32,0,0"
-                    Background="{StaticResource AccentBrush}"
-                    Foreground="{StaticResource TextPrimary}"
-                    BorderThickness="0" Cursor="Hand"
-                    FontSize="14" FontWeight="SemiBold"
+                    Width="220" Height="46" Margin="0,36,0,0"
+                    Style="{StaticResource AccentButton}"
+                    FontSize="15"
                     Command="{Binding StartCommand}"/>
 
-            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
-                       Margin="0,12,0,0" HorizontalAlignment="Center">
-                <Run Text="Phase-0 Windows preview · "/>
+            <TextBlock Foreground="{StaticResource TextSecondary}"
+                       FontSize="{StaticResource FontSizeCaption}"
+                       Margin="0,20,0,0" HorizontalAlignment="Center">
+                <Run Text="Windows preview · "/>
                 <Run Text="{Binding ImageInfoLine, Mode=OneWay}" FontFamily="Consolas"/>
             </TextBlock>
+
+            <!-- UX #2 — Hyper-V missing surface. Shown when the
+                 startup pre-flight detected no Microsoft-Hyper-V
+                 feature. Offers Copy + UAC-elevated Enable buttons. -->
+            <Border Margin="0,16,0,0"
+                    Background="#33FF9C33"
+                    BorderBrush="#FF9C33"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="14,12"
+                    Visibility="{Binding HyperVMessage, Converter={StaticResource StringToVis}}">
+                <StackPanel>
+                    <TextBlock Text="Hyper-V isn't enabled yet"
+                               Foreground="{StaticResource TextPrimary}"
+                               FontSize="13" FontWeight="SemiBold"
+                               Margin="0,0,0,6"/>
+                    <TextBlock Text="{Binding HyperVMessage, Mode=OneWay}"
+                               Foreground="{StaticResource TextPrimary}"
+                               FontSize="12" TextWrapping="Wrap" MaxWidth="500"
+                               Margin="0,0,0,10"/>
+                    <Border Background="#1A000000" CornerRadius="4"
+                            Padding="10,8" Margin="0,0,0,10">
+                        <TextBlock Text="{Binding HyperVFixCommand, Mode=OneWay}"
+                                   Foreground="{StaticResource TextPrimary}"
+                                   FontFamily="Consolas" FontSize="11"
+                                   TextWrapping="Wrap"/>
+                    </Border>
+                    <StackPanel Orientation="Horizontal">
+                        <Button Content="Enable now (UAC)" Padding="14,6"
+                                Background="{StaticResource AccentBrush}"
+                                Foreground="{StaticResource TextPrimary}"
+                                BorderThickness="0" Cursor="Hand"
+                                FontWeight="SemiBold"
+                                Command="{Binding EnableHyperVCommand}"/>
+                        <Button Content="Copy command" Padding="14,6" Margin="8,0,0,0"
+                                Cursor="Hand"
+                                Command="{Binding CopyHyperVCommandCommand}"/>
+                    </StackPanel>
+                    <TextBlock FontSize="10" Margin="0,8,0,0"
+                               Foreground="{StaticResource TextSecondary}"
+                               TextWrapping="Wrap" MaxWidth="500">
+                        After dism finishes, reboot to activate Hyper-V and relaunch Bromure.
+                        Windows 11 Pro / Enterprise / Education only — Home doesn't ship Hyper-V.
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+
+            <!-- Other errors (non-Hyper-V) — bake failures, artefact
+                 misses, etc. Suppressed when the Hyper-V block is
+                 already shown so the user isn't double-blamed. -->
+            <Border Margin="0,16,0,0"
+                    Background="#33FF4D4F"
+                    BorderBrush="#FF4D4F"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="14,10">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers>
+                            <MultiDataTrigger>
+                                <MultiDataTrigger.Conditions>
+                                    <Condition Binding="{Binding Progress.Error, Converter={StaticResource StringToVis}}" Value="Visible"/>
+                                    <Condition Binding="{Binding HyperVMessage}" Value=""/>
+                                </MultiDataTrigger.Conditions>
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </MultiDataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <TextBlock Text="{Binding Progress.Error, Mode=OneWay}"
+                           Foreground="{StaticResource TextPrimary}"
+                           FontSize="12" FontFamily="Consolas"
+                           TextWrapping="Wrap" MaxWidth="500"/>
+            </Border>
         </StackPanel>
     </Grid>
 </UserControl>

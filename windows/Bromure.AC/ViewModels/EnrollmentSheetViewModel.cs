@@ -48,9 +48,27 @@ public sealed partial class EnrollmentSheetViewModel : ObservableObject
                     return;
                 }
             }
-            var install = await _client.EnrollAsync(Code.Trim(), DeviceName.Trim(), server);
-            _store.Save(install);
-            Result = install;
+            var outcome = await _client.EnrollAsync(Code.Trim(), DeviceName.Trim(), server);
+            _store.Save(outcome.Install);
+            _store.StoreInstallToken(outcome.BearerToken);
+
+            // Best-effort cert issuance — the install is real even
+            // if the org's CA isn't configured yet, and the next
+            // heartbeat will retry. Matches Enrollment.swift:291-296.
+            try
+            {
+                var cert = await _client.RequestCertAsync(
+                    outcome.Install.InstallId, outcome.BearerToken,
+                    outcome.Install.ServerUrl);
+                _store.StoreLeafCert(cert.CertPem, cert.CaCertPem,
+                    cert.PrivateKeyDer, cert.SerialHex);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("Enrollment cert issuance deferred: " + ex.Message);
+            }
+
+            Result = outcome.Install;
             Done?.Invoke(this, EventArgs.Empty);
         }
         catch (EnrollmentException ex) { ErrorMessage = ex.Message; }

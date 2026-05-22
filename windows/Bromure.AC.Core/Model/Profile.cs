@@ -61,6 +61,15 @@ public sealed class Profile
     public ObservableCollection<EnvironmentVariable> EnvironmentVariables { get; set; } = new();
 
     /// <summary>
+    /// MCP (Model Context Protocol) servers configured for this profile.
+    /// At session boot the host serializes enabled entries into
+    /// <c>~/.claude.json</c> and <c>~/.codex/config.toml</c> inside the
+    /// guest, with bearer tokens replaced by fakes that the proxy swaps
+    /// on the wire. Direct port of macOS <c>Profile.mcpServers</c>.
+    /// </summary>
+    public ObservableCollection<McpServer> McpServers { get; set; } = new();
+
+    /// <summary>
     /// Always non-null — the editor's AWS tab two-way-binds against
     /// the leaf fields, so a null instance would mean the bindings
     /// can't write back. The persisted JSON simply carries an empty
@@ -96,6 +105,78 @@ public sealed class Profile
 
     /// <summary>How aggressively the proxy records traffic.</summary>
     public TraceLevel TraceLevel { get; set; } = TraceLevel.Off;
+
+    // --- Lifecycle metadata (macOS Profile.swift:870-876) ---
+
+    /// <summary>UTC timestamp the profile was first created. Drives
+    /// "newest first" sort + "created X ago" display.</summary>
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>UTC timestamp of the most recent session that used this
+    /// profile. Drives the "last used X ago" UX. <c>ProfileStore.Touch</c>
+    /// updates this on every successful session start. Null = never used.</summary>
+    public DateTimeOffset? LastUsedAt { get; set; }
+
+    /// <summary>The base-image version this profile's session disk was
+    /// cloned from. Stamped at clone time. When the engine's current
+    /// image version differs, the app surfaces the "Reset and launch /
+    /// Launch as-is / Cancel" image-versioning alert. Null = no clone
+    /// yet (first session).</summary>
+    public string? BaseImageVersionAtClone { get; set; }
+
+    // --- VM resources (macOS Profile.swift:889-939) ---
+
+    /// <summary>RAM allocated to this profile's VM, in GiB. 0 = let the
+    /// engine pick a sensible default that scales to the host.</summary>
+    public int MemoryGB { get; set; }
+
+    /// <summary>Network mode for this profile's VM.</summary>
+    public NetworkMode NetworkMode { get; set; } = NetworkMode.Nat;
+    public string? BridgedInterfaceID { get; set; }
+
+    /// <summary>What happens when the session window's close button
+    /// is clicked. macOS exposes the same three choices.</summary>
+    public CloseAction CloseAction { get; set; } = CloseAction.Ask;
+
+    // --- Appearance (macOS Profile.swift:945-993) ---
+
+    public CursorShape CursorShape { get; set; } = CursorShape.Block;
+
+    /// <summary>Window opacity 0.3–1.0. Applied to both the kitty
+    /// config and the WPF session window's background.</summary>
+    public double WindowOpacity { get; set; } = 1.0;
+
+    /// <summary>XKB layout override, e.g. "fr", "ch:fr". Null = inherit
+    /// from the host (live sync).</summary>
+    public string? KeyboardLayoutOverride { get; set; }
+
+    /// <summary>X-server <c>xset r rate</c> overrides. Null = engine default.</summary>
+    public int? KeyRepeatDelayMs { get; set; }
+    public int? KeyRepeatRateHz { get; set; }
+
+    /// <summary>When true, the kitty font / color fields are filled in
+    /// from the host terminal's defaults at session start. Per-profile
+    /// overrides (<see cref="CustomFontFamily"/> etc.) win when set.</summary>
+    public bool UseTerminalAppDefaults { get; set; } = true;
+
+    public string? CustomFontFamily { get; set; }
+    public int? CustomFontSize { get; set; }
+    public string? CustomBackgroundHex { get; set; }
+    public string? CustomForegroundHex { get; set; }
+
+    // --- SSH agent consent (macOS Profile.swift:868) ---
+
+    /// <summary>Per-sign consent gate for the auto-generated bromure
+    /// SSH key. When true, every SIGN_REQUEST prompts the user.</summary>
+    public bool SshKeyRequiresApproval { get; set; }
+
+    // --- Subscription token swap consent (macOS Profile.swift:805/812) ---
+
+    public SubscriptionTokenSwapState SubscriptionTokenSwap { get; set; } = SubscriptionTokenSwapState.Unset;
+    public SubscriptionTokenSwapState CodexTokenSwap { get; set; } = SubscriptionTokenSwapState.Unset;
+
+    /// <summary>Free-form notes shown in the profile editor.</summary>
+    public string Comments { get; set; } = "";
 
     /// <summary>All tool specs (primary + additional). Convenience.</summary>
     [JsonIgnore]

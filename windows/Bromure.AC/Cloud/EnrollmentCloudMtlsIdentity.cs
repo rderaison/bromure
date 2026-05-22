@@ -63,30 +63,17 @@ public sealed class EnrollmentCloudMtlsIdentity : ICloudMtlsIdentity, IDisposabl
             var keyDer = _store.LoadLeafPrivateKey(serial);
             if (certPem is null || keyDer is null) return null;
 
-            try
-            {
-                var cert = X509Certificate2.CreateFromPem(certPem);
-                using var rsa = RSA.Create();
-                rsa.ImportPkcs8PrivateKey(keyDer, out _);
-                using var withKey = cert.CopyWithPrivateKey(rsa);
-                cert.Dispose();
-
-                // Round-trip through PFX so SslStream sees a persisted
-                // key. EphemeralKeySet fails Schannel server-auth on
-                // some Windows revisions; UserKeySet is the safe pick.
-                var pfx = withKey.Export(X509ContentType.Pfx);
-                _cached?.Dispose();
-                _cached = new X509Certificate2(pfx, (string?)null,
-                    X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.Exportable);
-                _cachedSerial = serial;
-                return _cached;
-            }
-            catch (Exception)
+            var loaded = MtlsCertificateLoader.TryLoadEphemeral(certPem, keyDer);
+            if (loaded is null)
             {
                 _cached = null;
                 _cachedSerial = null;
                 return null;
             }
+            _cached?.Dispose();
+            _cached = loaded;
+            _cachedSerial = serial;
+            return _cached;
         }
     }
 

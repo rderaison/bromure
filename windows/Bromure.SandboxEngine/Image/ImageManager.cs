@@ -64,6 +64,62 @@ public sealed class ImageManager
         _http = http ?? new HttpClient { Timeout = TimeSpan.FromMinutes(20) };
     }
 
+    /// <summary>
+    /// Human-readable major version this build of the app targets.
+    /// Bumped whenever the bake script changes in a way that
+    /// invalidates an existing child VHDX (kernel rebuild, layout
+    /// change, etc.). Matches the macOS port's
+    /// <c>UbuntuImageManager.imageVersion</c>. The stamp written to
+    /// disk combines this with a per-bake UUID, so two bakes of the
+    /// same code version still invalidate stale children (the parent
+    /// VHDX gets a new <c>UniqueId</c> on every bake and HCS rejects
+    /// child VHDXs whose parent locator no longer matches).
+    /// </summary>
+    public const string ImageVersion = "100";
+
+    /// <summary>
+    /// Path of the stamp file written into the images dir at the end
+    /// of every successful bake. Format: <c>&lt;ImageVersion&gt;:&lt;bake-uuid&gt;</c>
+    /// — e.g. <c>100:bake-1f3a…</c>. The UUID half ensures every
+    /// rebake produces a different stamp even when ImageVersion
+    /// didn't bump, so drift detection in the launcher actually
+    /// fires and the user gets the "Reset and launch" prompt.
+    /// </summary>
+    public string VersionStampPath
+        => Path.Combine(_paths.ImagesDirectory, "base.version");
+
+    /// <summary>Read the version stamp left by the most recent bake, or
+    /// null if no stamp exists (no base baked, or a pre-stamping bake).</summary>
+    public string? ReadInstalledImageVersion()
+    {
+        try
+        {
+            return File.Exists(VersionStampPath)
+                ? File.ReadAllText(VersionStampPath).Trim()
+                : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Stamp the installed image version. Called by the bake driver at
+    /// the end of a successful bake. Always rotates the per-bake UUID
+    /// so subsequent launches see a different string even when
+    /// <see cref="ImageVersion"/> didn't bump. Idempotent within a
+    /// single call but not across calls — that's the whole point.
+    /// </summary>
+    public void WriteInstalledImageVersion(string version)
+    {
+        Directory.CreateDirectory(_paths.ImagesDirectory);
+        // Always append a fresh UUID. Without this two bakes of the
+        // same ImageVersion string would produce identical stamps,
+        // and the launcher would reuse a stale child VHDX whose
+        // parent locator no longer matches — HCS rejects with
+        // 0xC03A000E ("parent identifier mismatch") at VM start.
+        var stamped = version + ":" + Guid.NewGuid().ToString("N");
+        File.WriteAllText(VersionStampPath, stamped);
+    }
+
     /// <summary>Local cache path for <paramref name="image"/>.</summary>
     public string LocalPath(ImageDescriptor image)
         => Path.Combine(_paths.ImagesDirectory, image.FileName);

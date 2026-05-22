@@ -139,4 +139,105 @@ public class TokenSwapperTests
 
         swapper.DetectLeaks(raw, profile).Should().BeEmpty();
     }
+
+    [Fact]
+    public void DetectSubscriptionAccessToken_ReturnsCleanToken()
+    {
+        var swapper = new TokenSwapper(new AlwaysAllowConsentBroker());
+        var profile = Guid.NewGuid();
+
+        var raw = BuildRequest(
+            "POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n"
+            + "Authorization: Bearer sk-ant-oat01-abc123-realLooking",
+            Array.Empty<byte>());
+
+        swapper.DetectSubscriptionAccessToken(raw, profile)
+            .Should().Be("sk-ant-oat01-abc123-realLooking");
+    }
+
+    [Fact]
+    public void DetectSubscriptionAccessToken_SkipsBrmFake()
+    {
+        var swapper = new TokenSwapper(new AlwaysAllowConsentBroker());
+        var profile = Guid.NewGuid();
+
+        var raw = BuildRequest(
+            "POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n"
+            + "Authorization: Bearer sk-ant-oat01-brm-fakefakefake",
+            Array.Empty<byte>());
+
+        swapper.DetectSubscriptionAccessToken(raw, profile).Should().BeNull();
+    }
+
+    [Fact]
+    public void DetectSubscriptionAccessToken_SkipsAlreadyKnownTokens()
+    {
+        var swapper = new TokenSwapper(new AlwaysAllowConsentBroker());
+        var profile = Guid.NewGuid();
+        var realTok = "sk-ant-oat01-already-known";
+        swapper.SetMap(new TokenMap(new[]
+        {
+            new TokenMap.Entry("sk-ant-oat01-brm-fake1", realTok,
+                Host: "api.anthropic.com",
+                Header: EntryHeader.Authorization),
+        }), profile);
+
+        var raw = BuildRequest(
+            "POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n"
+            + $"Authorization: Bearer {realTok}",
+            Array.Empty<byte>());
+
+        swapper.DetectSubscriptionAccessToken(raw, profile).Should().BeNull();
+    }
+
+    [Fact]
+    public void DetectCodexAccessToken_ReturnsJwtToken()
+    {
+        var swapper = new TokenSwapper(new AlwaysAllowConsentBroker());
+        var profile = Guid.NewGuid();
+
+        // Real-looking JWT shape — base64url header.payload.signature
+        var jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.signaturepartsignaturepart";
+        var raw = BuildRequest(
+            $"GET /api/conversations HTTP/1.1\r\nHost: chatgpt.com\r\n"
+            + $"Authorization: Bearer {jwt}",
+            Array.Empty<byte>());
+
+        swapper.DetectCodexAccessToken(raw, profile).Should().Be(jwt);
+    }
+
+    [Fact]
+    public void DetectCodexAccessToken_SkipsBrmFakeJwt()
+    {
+        var swapper = new TokenSwapper(new AlwaysAllowConsentBroker());
+        var profile = Guid.NewGuid();
+
+        // Mint a real fake so this test stays in lock-step with the
+        // actual fake-marker constants.
+        var realJwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.realSignatureXXXXXXXX";
+        var fake = SubscriptionFakeMint.MintJwtFake(realJwt, new byte[32]);
+
+        var raw = BuildRequest(
+            $"GET /api/conversations HTTP/1.1\r\nHost: chatgpt.com\r\n"
+            + $"Authorization: Bearer {fake}",
+            Array.Empty<byte>());
+
+        swapper.DetectCodexAccessToken(raw, profile).Should().BeNull();
+    }
+
+    [Fact]
+    public void DetectCodexAccessToken_SkipsNonJwtSecret()
+    {
+        var swapper = new TokenSwapper(new AlwaysAllowConsentBroker());
+        var profile = Guid.NewGuid();
+
+        // Regular OpenAI API key starts with `sk-…`, not `eyJ`. The
+        // detector should ignore it — we only want subscription JWTs.
+        var raw = BuildRequest(
+            "GET /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n"
+            + "Authorization: Bearer sk-proj-secretkey1234567890abcdefg",
+            Array.Empty<byte>());
+
+        swapper.DetectCodexAccessToken(raw, profile).Should().BeNull();
+    }
 }

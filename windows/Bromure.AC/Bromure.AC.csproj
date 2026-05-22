@@ -6,6 +6,7 @@
     <AssemblyName>BromureAC</AssemblyName>
     <UseWPF>true</UseWPF>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>BromureAC.ico</ApplicationIcon>
     <Nullable>enable</Nullable>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
@@ -18,5 +19,62 @@
     <PackageReference Include="CommunityToolkit.Mvvm" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
+    <Resource Include="BromureAC.ico" />
+  </ItemGroup>
+
+  <!--
+    Bundle Win32-OpenSSH (ssh.exe, ssh-add.exe, ssh-keygen.exe,
+    ssh-keyscan.exe) alongside BromureAC.exe so a novice user on a
+    machine without the Windows OpenSSH Optional Feature still has
+    `ssh-add -l` etc. work out of the box. SSH_AUTH_SOCK is set by
+    App.OnStartup to our pipe — these clients pick it up.
+
+    Pulled from the PowerShell/Win32-OpenSSH release on GitHub
+    (BSD-style license, redistributable). Pinned to a known-good
+    version. The zip caches under obj/ so subsequent builds skip
+    the download.
+  -->
+  <PropertyGroup>
+    <Win32OpenSshVersion>10.0.0.0p2-Preview</Win32OpenSshVersion>
+    <Win32OpenSshUrl>https://github.com/PowerShell/Win32-OpenSSH/releases/download/$(Win32OpenSshVersion)/OpenSSH-Win64.zip</Win32OpenSshUrl>
+    <Win32OpenSshCacheDir>$(MSBuildThisFileDirectory)obj\openssh-cache\$(Win32OpenSshVersion)</Win32OpenSshCacheDir>
+    <Win32OpenSshZip>$(Win32OpenSshCacheDir)\OpenSSH-Win64.zip</Win32OpenSshZip>
+    <Win32OpenSshExtractDir>$(Win32OpenSshCacheDir)\extracted</Win32OpenSshExtractDir>
+  </PropertyGroup>
+
+  <Target Name="FetchWin32OpenSsh"
+          BeforeTargets="PrepareForBuild"
+          Inputs="$(MSBuildThisFileFullPath)"
+          Outputs="$(Win32OpenSshExtractDir)\OpenSSH-Win64\ssh-add.exe">
+    <MakeDir Directories="$(Win32OpenSshCacheDir)" />
+    <DownloadFile SourceUrl="$(Win32OpenSshUrl)"
+                  DestinationFolder="$(Win32OpenSshCacheDir)"
+                  Condition="!Exists('$(Win32OpenSshZip)')"
+                  Retries="2" />
+    <Unzip SourceFiles="$(Win32OpenSshZip)"
+           DestinationFolder="$(Win32OpenSshExtractDir)"
+           Condition="!Exists('$(Win32OpenSshExtractDir)\OpenSSH-Win64\ssh-add.exe')" />
+  </Target>
+
+  <ItemGroup>
+    <!-- Only the four client binaries the user actually invokes —
+         skip the server-side daemons (sshd, sftp-server) to keep
+         the bundle slim. -->
+    <Content Include="$(Win32OpenSshExtractDir)\OpenSSH-Win64\ssh.exe"
+             Link="openssh\ssh.exe"
+             CopyToOutputDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(Win32OpenSshExtractDir)\OpenSSH-Win64\ssh-add.exe"
+             Link="openssh\ssh-add.exe"
+             CopyToOutputDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(Win32OpenSshExtractDir)\OpenSSH-Win64\ssh-keygen.exe"
+             Link="openssh\ssh-keygen.exe"
+             CopyToOutputDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(Win32OpenSshExtractDir)\OpenSSH-Win64\ssh-keyscan.exe"
+             Link="openssh\ssh-keyscan.exe"
+             CopyToOutputDirectory="PreserveNewest"
+             Visible="false" />
   </ItemGroup>
 </Project>

@@ -1,6 +1,7 @@
 // macos-source: Sources/AgentCoding/Mitm/TraceStore.swift @ 5768a9d918d1
 using System.Globalization;
 using System.Text.Json;
+using System.Threading.Channels;
 using Microsoft.Data.Sqlite;
 
 namespace Bromure.AC.Mitm.Trace;
@@ -30,13 +31,37 @@ public sealed class TraceStore : IDisposable
     public const long TotalDirCap = 5L * 1024 * 1024 * 1024;
     private const int CleanupInterval = 200;
 
+    // _lock protects the SQLite connection (it serializes writes
+    // even with WAL mode) AND _bodyBytesPerSession. Only the drain
+    // task touches these now, so contention is gone from the
+    // proxy hot path — audit 06 §1.7.
     private readonly object _lock = new();
     private readonly SqliteConnection _connection;
     private long _appendCount;
     private readonly Dictionary<Guid, long> _bodyBytesPerSession = new();
 
+    // Audit 06 §1.3 + §1.7: in-memory ring that's updated
+    // SYNCHRONOUSLY on Record() so Recent() returns just-written
+    // records without waiting on the disk drain. Falls through to
+    // SQL only when the caller asks for more than RingCapacity.
+    private readonly object _ringLock = new();
+    private readonly LinkedList<TraceRecord> _ring = new();
+
+    // Audit 06 §1.7: writes are off-thread. Record() snapshots
+    // body buffers + enqueues; the drain task does SQL + file I/O
+    // serially on a dedicated thread.
+    private readonly Channel<WriteJob> _writes;
+    private readonly Task _drainTask;
+    private readonly CancellationTokenSource _shutdownCts = new();
+
     public string RootDirectory { get; }
     public int RingCapacity { get; set; } = 5000;
+
+    private readonly record struct WriteJob(
+        TraceRecord? Record,
+        byte[]? RequestBody,
+        byte[]? ResponseBody,
+        IBodyEncryptor? Encryptor);
 
     public TraceStore(string rootDirectory)
     {
@@ -73,6 +98,14 @@ public sealed class TraceStore : IDisposable
             CREATE INDEX IF NOT EXISTS idx_traces_ts ON traces(timestamp_utc);
             CREATE INDEX IF NOT EXISTS idx_traces_host ON traces(host);
         ");
+
+        _writes = Channel.CreateUnbounded<WriteJob>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            AllowSynchronousContinuations = false,
+        });
+        _drainTask = Task.Run(DrainLoopAsync);
     }
 
     /// <summary>
@@ -85,6 +118,117 @@ public sealed class TraceStore : IDisposable
         ReadOnlySpan<byte> responseBody = default,
         IBodyEncryptor? encryptor = null)
     {
+        // Update the in-memory ring synchronously so Recent() sees
+        // the record IMMEDIATELY, even before the disk write lands.
+        // Cap to RingCapacity by evicting the oldest entry.
+        lock (_ringLock)
+        {
+            _ring.AddLast(record);
+            while (_ring.Count > RingCapacity)
+            {
+                _ring.RemoveFirst();
+            }
+        }
+        // Snapshot the body spans BEFORE returning to the caller —
+        // they're ReadOnlySpan<byte> which can't cross the channel
+        // boundary anyway, and the caller's backing buffer may be
+        // reused/freed once we return.
+        var reqCopy = requestBody.IsEmpty ? null : requestBody.ToArray();
+        var resCopy = responseBody.IsEmpty ? null : responseBody.ToArray();
+        // TryWrite always succeeds for an unbounded channel.
+        _writes.Writer.TryWrite(new WriteJob(record, reqCopy, resCopy, encryptor));
+    }
+
+    /// <summary>Block until all currently-queued writes have been
+    /// committed to SQLite + body files. Tests call this between
+    /// <see cref="Record"/> and any direct SQLite query so they
+    /// observe a consistent on-disk state.</summary>
+    public void Flush()
+    {
+        // Tracer trick: enqueue a sentinel that completes a TCS when
+        // the drain task processes it. Because the channel is
+        // single-reader and FIFO, every job written before the
+        // sentinel has already been drained when the TCS resolves.
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _writes.Writer.TryWrite(new WriteJob(
+            Record: null,
+            RequestBody: null,
+            ResponseBody: null,
+            Encryptor: new FlushSentinel(tcs)));
+        tcs.Task.Wait();
+    }
+
+    private sealed class FlushSentinel : IBodyEncryptor
+    {
+        public readonly TaskCompletionSource Tcs;
+        public FlushSentinel(TaskCompletionSource tcs) => Tcs = tcs;
+        public byte[] Encrypt(ReadOnlySpan<byte> p) => throw new NotSupportedException();
+        public byte[] Decrypt(ReadOnlySpan<byte> c) => throw new NotSupportedException();
+    }
+
+    public IReadOnlyList<TraceRecord> Recent(int limit = 5000)
+    {
+        // Ring is updated synchronously on Record(), so the recent
+        // newest-first slice is available immediately even when
+        // SQLite hasn't drained yet. Limit is capped at RingCapacity
+        // (same as before) — older history would require a SQL fetch.
+        var ringSize = Math.Min(limit, RingCapacity);
+        lock (_ringLock)
+        {
+            // Snapshot in reverse-insertion order. Ties on Timestamp
+            // are broken by insertion order (newer-inserted wins).
+            var snapshot = new List<TraceRecord>(Math.Min(ringSize, _ring.Count));
+            for (var node = _ring.Last; node is not null && snapshot.Count < ringSize; node = node.Previous)
+            {
+                snapshot.Add(node.Value);
+            }
+            // Stable sort by Timestamp DESC — matches the SQL
+            // ORDER BY semantics for callers that mix records with
+            // varying timestamps.
+            snapshot.Sort((a, b) => b.Timestamp.CompareTo(a.Timestamp));
+            return snapshot;
+        }
+    }
+
+    /// <summary>Direct SQL query for traces older than the in-memory
+    /// ring. Forces a flush first so the SQL state is current.</summary>
+    public IReadOnlyList<TraceRecord> RecentFromDisk(int limit = 5000)
+    {
+        Flush();
+        lock (_lock)
+        {
+            var output = new List<TraceRecord>(limit);
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM traces ORDER BY timestamp_utc DESC LIMIT $limit";
+            cmd.Parameters.AddWithValue("$limit", limit);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) output.Add(ReadRecord(reader));
+            return output;
+        }
+    }
+
+    private async Task DrainLoopAsync()
+    {
+        // Channel.ReadAllAsync handles cancellation by completing the
+        // sequence when the writer is completed. We Complete() it
+        // from Dispose() to signal end-of-stream.
+        await foreach (var job in _writes.Reader.ReadAllAsync().ConfigureAwait(false))
+        {
+            // Flush sentinel — signal the waiting Flush() caller.
+            if (job.Encryptor is FlushSentinel s)
+            {
+                s.Tcs.TrySetResult();
+                continue;
+            }
+            try { ProcessWriteJob(job); }
+            catch (Exception) { /* never let one bad record kill the loop */ }
+        }
+    }
+
+    private void ProcessWriteJob(WriteJob job)
+    {
+        if (job.Record is null) return; // sentinel — already handled in DrainLoopAsync
+        var record = job.Record;
         lock (_lock)
         {
             using var cmd = _connection.CreateCommand();
@@ -111,13 +255,13 @@ public sealed class TraceStore : IDisposable
             cmd.ExecuteNonQuery();
 
             var added = 0;
-            if (!requestBody.IsEmpty)
+            if (job.RequestBody is not null)
             {
-                added += WriteBody(record, BodyKind.Request, requestBody, encryptor);
+                added += WriteBody(record, BodyKind.Request, job.RequestBody, job.Encryptor);
             }
-            if (!responseBody.IsEmpty)
+            if (job.ResponseBody is not null)
             {
-                added += WriteBody(record, BodyKind.Response, responseBody, encryptor);
+                added += WriteBody(record, BodyKind.Response, job.ResponseBody, job.Encryptor);
             }
 
             if (added > 0)
@@ -142,23 +286,15 @@ public sealed class TraceStore : IDisposable
         }
     }
 
-    public IReadOnlyList<TraceRecord> Recent(int limit = 5000)
-    {
-        lock (_lock)
-        {
-            var output = new List<TraceRecord>(Math.Min(limit, RingCapacity));
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "SELECT * FROM traces ORDER BY timestamp_utc DESC LIMIT $limit";
-            cmd.Parameters.AddWithValue("$limit", Math.Min(limit, RingCapacity));
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read()) output.Add(ReadRecord(reader));
-            return output;
-        }
-    }
-
     public byte[]? LoadBody(TraceRecord record, BodyKind kind, IBodyEncryptor? encryptor = null)
     {
         if (!record.BodyStored) return null;
+        // The body write is async via the drain queue; flush so we
+        // can observe writes that were enqueued before this call.
+        // Tracer/UI callers always want "what's on disk right now",
+        // and the small extra latency is fine outside the proxy hot
+        // path (LoadBody isn't on the request-handling thread).
+        Flush();
         var path = BodyPath(record, kind);
         if (!File.Exists(path)) return null;
         var blob = File.ReadAllBytes(path);
@@ -188,11 +324,11 @@ public sealed class TraceStore : IDisposable
             IsConversation: r.GetInt64(15) != 0);
     }
 
-    private int WriteBody(TraceRecord record, BodyKind kind, ReadOnlySpan<byte> data, IBodyEncryptor? enc)
+    private int WriteBody(TraceRecord record, BodyKind kind, byte[] data, IBodyEncryptor? enc)
     {
         var path = BodyPath(record, kind);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var sealed_ = enc?.Encrypt(data) ?? data.ToArray();
+        var sealed_ = enc?.Encrypt(data) ?? data;
         File.WriteAllBytes(path, sealed_);
         return sealed_.Length;
     }
@@ -261,7 +397,18 @@ public sealed class TraceStore : IDisposable
         cmd.ExecuteNonQuery();
     }
 
-    public void Dispose() => _connection.Dispose();
+    public void Dispose()
+    {
+        // Complete the channel so the drain loop exits its
+        // ReadAllAsync, then wait for it to finish writing whatever
+        // was already enqueued. Without this, in-flight Records get
+        // lost on app close.
+        try { _writes.Writer.TryComplete(); } catch { }
+        try { _drainTask.Wait(TimeSpan.FromSeconds(5)); } catch { }
+        _shutdownCts.Cancel();
+        _connection.Dispose();
+        _shutdownCts.Dispose();
+    }
 
     public enum BodyKind { Request, Response }
 }

@@ -124,7 +124,7 @@ Notable security-critical coverage:
 
 | Plan area | Status |
 |-----------|--------|
-| `WebSocketTrace.swift` deflate path | Frame decoder + permessage-deflate inflater ported (`WsFrameDecoder` / `WsInflater`); the proxy itself doesn't yet hook them on the WS upgrade path. |
+| `WebSocketTrace.swift` deflate path | Fully wired — `WsFrameDecoder` + `WsInflater` are hooked into the proxy's WS upgrade path via `WsMessageAssembler` / `WsTranscriptCollector`. RFC 7692 inflation is covered end-to-end by `WsMessageAssemblerTests.PermessageDeflate_NegotiatedExtension_InflatesPayload`. |
 | `RealtimeEventTap.swift` | Pending. |
 | `ConversationParser` + the deeper LLM body capture | Pending; `LlmEventExtractor` covers tool classification + token counts. |
 | `EnrollmentCLI.swift` | Pending; the GUI sheet covers the interactive flow. |

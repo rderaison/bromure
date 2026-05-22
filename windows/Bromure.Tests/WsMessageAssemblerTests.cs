@@ -88,6 +88,69 @@ public class WsMessageAssemblerTests
         tap.StreamedAnyEvents.Should().BeFalse();
     }
 
+    [Fact]
+    public void PermessageDeflate_NegotiatedExtension_InflatesPayload()
+    {
+        // RFC 7692 wire payload: raw DEFLATE stream of the message
+        // bytes, with the trailing 0x00 0x00 0xFF 0xFF marker
+        // stripped by the sender. We rebuild that exact framing
+        // here and confirm the assembler's WsInflater path
+        // reconstructs the original text.
+        using var asm = new WsMessageAssembler(
+            permessageDeflateNegotiated: true,
+            serverNoContextTakeover: true);
+
+        var original = "Hello, deflated WebSocket world! "
+                       + new string('x', 200);   // make compression observable
+        var deflated = RawDeflateWithTrailerStripped(Encoding.UTF8.GetBytes(original));
+
+        // Rsv1 set on the FIN text frame signals "this payload was
+        // compressed with permessage-deflate".
+        var frame = BuildFrameRaw(fin: true, rsv1: true, opcode: 0x1, payload: deflated);
+
+        var msgs = asm.Feed(frame).ToArray();
+        msgs.Should().HaveCount(1);
+        msgs[0].Kind.Should().Be(WsMessageAssembler.MessageKind.Text);
+        Encoding.UTF8.GetString(msgs[0].Payload).Should().Be(original);
+        deflated.Length.Should().BeLessThan(original.Length,
+            "the deflated payload should be shorter than the original — proves we actually compressed");
+    }
+
+    [Fact]
+    public void PermessageDeflate_NotNegotiated_DropsRsv1Frame()
+    {
+        // Server set Rsv1 but the extension wasn't negotiated → the
+        // assembler must drop the frame (it can't safely emit
+        // compressed bytes as if they were plaintext).
+        using var asm = new WsMessageAssembler(
+            permessageDeflateNegotiated: false,
+            serverNoContextTakeover: false);
+        var frame = BuildFrameRaw(fin: true, rsv1: true, opcode: 0x1,
+            payload: new byte[] { 0xAB, 0xCD });
+        var msgs = asm.Feed(frame).ToArray();
+        msgs.Should().BeEmpty();
+    }
+
+    /// <summary>RFC 7692 §7.2.2 wire shape: raw DEFLATE bytes with the
+    /// trailing <c>0x00 0x00 0xFF 0xFF</c> stripped by the sender. We
+    /// reproduce that here so the assembler's inflater (which appends
+    /// the marker before feeding zlib) round-trips cleanly.</summary>
+    private static byte[] RawDeflateWithTrailerStripped(byte[] plain)
+    {
+        using var ms = new System.IO.MemoryStream();
+        using (var deflate = new System.IO.Compression.DeflateStream(
+            ms, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+        {
+            deflate.Write(plain, 0, plain.Length);
+        }
+        var bytes = ms.ToArray();
+        // DEFLATE doesn't append the 0x00 0x00 0xFF 0xFF marker on
+        // its own — only zlib + permessage-deflate's framing do. So
+        // we just return the raw DEFLATE bytes; the inflater under
+        // test appends 0x00 0x00 0xFF 0xFF before decompressing.
+        return bytes;
+    }
+
     /// <summary>Build a (server→client, unmasked) WebSocket frame.</summary>
     private static byte[] BuildFrame(bool fin, byte opcode, string text)
     {

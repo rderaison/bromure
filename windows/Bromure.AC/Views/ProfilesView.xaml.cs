@@ -41,4 +41,21 @@ public partial class ProfilesView : UserControl
             ? new GridLength(0)
             : new GridLength(240);
     }
+
+    /// <summary>Open an external URL in the user's default browser.
+    /// Bound by Hyperlink.RequestNavigate in the editor's
+    /// "Open … token page" affordances.</summary>
+    private void OnHyperlinkNavigate(object sender, System.Windows.Navigation.RequestNavigateEventArgs e)
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = e.Uri.AbsoluteUri,
+                UseShellExecute = true,
+            });
+            e.Handled = true;
+        }
+        catch { /* best-effort */ }
+    }
 }

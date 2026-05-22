@@ -8,12 +8,30 @@
     <SelfContained>false</SelfContained>
     <PublishSingleFile>false</PublishSingleFile>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- Enables the WPF (PresentationFramework + WindowsBase) refs
+         needed by the `vnc-test` subcommand, which pops up a WPF
+         window hosting Bromure.AC's VncControl against a running
+         session bridge — verifies the display end-to-end without
+         booting the full BromureAC UI. -->
+    <UseWPF>true</UseWPF>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- UseWPF=true drops some of the default implicit usings the
+         non-WPF spike files rely on. Add them back as global usings
+         so we don't have to sprinkle `using System.IO;` everywhere. -->
+    <Using Include="System.IO" />
+    <Using Include="System.Threading" />
+    <Using Include="System.Threading.Tasks" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Bromure.Platform\Bromure.Platform.csproj" />
     <ProjectReference Include="..\Bromure.SandboxEngine\Bromure.SandboxEngine.csproj" />
     <ProjectReference Include="..\Bromure.AC.Mitm\Bromure.AC.Mitm.csproj" />
     <ProjectReference Include="..\Bromure.AC.Core\Bromure.AC.Core.csproj" />
+    <!-- For the `vnc-test` subcommand — uses Bromure.AC's VncControl
+         to verify the display end-to-end without booting the full WPF
+         shell. -->
+    <ProjectReference Include="..\Bromure.AC\Bromure.AC.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
     <PackageReference Include="System.CommandLine" />

@@ -41,14 +41,67 @@
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
                             <Setter Property="Padding" Value="0"/>
-                            <Setter Property="Margin" Value="0"/>
+                            <Setter Property="Margin" Value="8,4"/>
                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                            <!-- UX #1: card-style rows. Default WPF
+                                 ListBoxItem chrome looks like Win95.
+                                 Custom template gives each profile a
+                                 rounded card with subtle hover + a
+                                 left accent stripe when selected. -->
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="ListBoxItem">
+                                        <Border x:Name="card"
+                                                Background="{StaticResource PanelElevated}"
+                                                BorderBrush="{StaticResource BorderBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                Padding="0">
+                                            <ContentPresenter/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="card" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                                                <Setter TargetName="card" Property="Background" Value="{StaticResource HoverBrush}"/>
+                                            </Trigger>
+                                            <Trigger Property="IsSelected" Value="True">
+                                                <Setter TargetName="card" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                                                <Setter TargetName="card" Property="BorderThickness" Value="1,1,1,1"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
                         </Style>
                     </ListBox.ItemContainerStyle>
                     <ListBox.ItemTemplate>
                         <DataTemplate>
-                            <Border Padding="14,10" BorderBrush="{StaticResource BorderBrush}"
-                                    BorderThickness="0,0,0,1">
+                            <!-- Audit 08 §2.4: per-row right-click menu.
+                                 ContextMenu lives on the row's Border (not in
+                                 ItemContainerStyle Setter) — Click handlers
+                                 don't survive the XAML compiler's connection-ID
+                                 generation when they live inside a Style.Setter
+                                 template, causing a "MenuItem cannot cast to
+                                 StackPanel" crash at view instantiation. -->
+                            <Border Padding="18,16" BorderThickness="0">
+                                <Border.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="Edit profile"
+                                                  Command="{Binding EditCommand}"/>
+                                        <MenuItem Header="Duplicate profile"
+                                                  Click="OnDuplicateProfileClick"/>
+                                        <Separator/>
+                                        <MenuItem Header="View SSH public key"
+                                                  Click="OnViewSshPublicKey"/>
+                                        <Separator/>
+                                        <MenuItem Header="Reset disk…"
+                                                  Click="OnResetDiskClick"/>
+                                        <Separator/>
+                                        <MenuItem Header="Delete profile…"
+                                                  Click="OnDeleteProfileClick"/>
+                                    </ContextMenu>
+                                </Border.ContextMenu>
                                 <Grid>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="14"/>
@@ -57,24 +110,38 @@
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
 
-                                    <!-- Profile color dot -->
-                                    <Ellipse Grid.Column="0" Width="10" Height="10"
+                                    <!-- UX #1: bigger color dot (visual anchor)
+                                         + brighter name. The dot doubles as the
+                                         profile's identity so make it pop. -->
+                                    <Ellipse Grid.Column="0" Width="14" Height="14"
                                              VerticalAlignment="Center"
                                              Fill="{Binding ColorBrush}"/>
 
                                     <!-- Name + subtitle -->
-                                    <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                                    <StackPanel Grid.Column="1" Margin="14,0,0,0">
                                         <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="{Binding Name}" FontSize="13"
-                                                       FontWeight="SemiBold"/>
+                                            <TextBlock Text="{Binding Name}"
+                                                       FontSize="{StaticResource FontSizeTitle}"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{StaticResource TextPrimary}"/>
                                             <Ellipse Width="7" Height="7" Margin="8,1,0,0"
                                                      Visibility="{Binding IsRunning,
                                                        Converter={StaticResource BoolToVis}}"
                                                      Fill="#34C759" VerticalAlignment="Center"/>
+                                            <!-- Audit 08 §2.2: compromise badge. macOS shows
+                                                 a red ⓘ next to compromised profiles in the
+                                                 picker so the user can spot them before
+                                                 attempting to launch. -->
+                                            <TextBlock Text="⚠" FontSize="13" Margin="8,0,0,0"
+                                                       Foreground="#FF4D4F" VerticalAlignment="Center"
+                                                       ToolTip="A real credential was seen leaving this profile. The session disk will be wiped on next launch."
+                                                       Visibility="{Binding IsCompromised,
+                                                         Converter={StaticResource BoolToVis}}"/>
                                         </StackPanel>
-                                        <TextBlock Text="{Binding SubtitleText}" FontSize="11"
+                                        <TextBlock Text="{Binding SubtitleText}"
+                                                   FontSize="{StaticResource FontSizeCaption}"
                                                    Foreground="{StaticResource TextSecondary}"
-                                                   Margin="0,2,0,0"/>
+                                                   Margin="0,6,0,0"/>
                                         <TextBlock Text="{Binding StatusDetail}" FontSize="10"
                                                    Foreground="{StaticResource AccentBrush}"
                                                    Margin="0,2,0,0" TextWrapping="Wrap"

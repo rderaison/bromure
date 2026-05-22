@@ -22,8 +22,18 @@ namespace Bromure.AC.Mitm.SigV4;
 public sealed class AwsResigner
 {
     private readonly IAwsCredentialServer _credServer;
+    private Action<Guid, string, System.Text.Json.Nodes.JsonObject>? _onCloudEvent;
 
     public AwsResigner(IAwsCredentialServer credServer) => _credServer = credServer;
+
+    /// <summary>
+    /// Wire the cloud-event sink that the resigner uses for the
+    /// <c>credential.aws_sign</c> audit emission. Set by the engine
+    /// after construction. Matches the macOS port's
+    /// <c>BACEventEmitter.shared.emitDetached</c> at AWSResigner.swift:199.
+    /// </summary>
+    public void SetCloudEventSink(Action<Guid, string, System.Text.Json.Nodes.JsonObject>? sink)
+        => _onCloudEvent = sink;
 
     public abstract record Outcome
     {
@@ -159,6 +169,28 @@ public sealed class AwsResigner
         var onWire = signed.Where(h => !string.Equals(h.Name, "Host", StringComparison.OrdinalIgnoreCase))
             .Append(("Authorization", output.Authorization))
             .ToList();
+
+        // Audit emission. Already-non-secret bits only — service +
+        // region come from the scope, the AKID is masked, and the
+        // path is the request path (no body, no query). Mirrors macOS
+        // AWSResigner.swift:199-209.
+        if (_onCloudEvent is not null)
+        {
+            try
+            {
+                var data = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["method"] = parsed.Method,
+                    ["host"] = host,
+                    ["path"] = parsed.Path,
+                    ["service"] = scope.Value.Service,
+                    ["region"] = scope.Value.Region,
+                    ["access_key_masked"] = MaskAccessKey(creds.AccessKeyId),
+                };
+                _onCloudEvent(profileId, "credential.aws_sign", data);
+            }
+            catch { /* audit emission is best-effort */ }
+        }
 
         return new Outcome.Resigned(Assemble(parsed.RequestLine, onWire, parsed.Body));
     }

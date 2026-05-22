@@ -1,0 +1,3 @@
+# Build artefacts; nothing in dist/ is checked in.
+*
+!.gitignore

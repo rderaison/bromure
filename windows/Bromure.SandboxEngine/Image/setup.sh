@@ -53,9 +53,27 @@ case "$(uname -m)" in
 esac
 UBUNTU_MIRROR="${UBUNTU_MIRROR:-$UBUNTU_MIRROR_DEFAULT}"
 
-TARGET_DEV=/dev/vda
-TARGET_EFI=${TARGET_DEV}1
-TARGET_ROOT=${TARGET_DEV}2
+# TARGET_DEV: which block device receives the installed Ubuntu.
+# HCS/Hyper-V Gen2 exposes SCSI as /dev/sda; macOS-VZ and QEMU expose
+# virtio-blk as /dev/vda. Honour the host driver's env-var override
+# (the Windows HyperVAlpineBaker sets TARGET_DEV=/dev/sda); else probe.
+if [ -z "${TARGET_DEV:-}" ]; then
+    for dev in /dev/vda /dev/sda /dev/nvme0n1; do
+        [ -b "$dev" ] || continue
+        # Skip whatever Alpine itself is running from.
+        grep -qE "^${dev}[[:space:]]" /proc/mounts && continue
+        TARGET_DEV="$dev"
+        break
+    done
+    [ -z "${TARGET_DEV:-}" ] && fail "could not auto-detect TARGET_DEV (none of /dev/vda /dev/sda /dev/nvme0n1 are present)"
+fi
+# Partition suffix differs for NVMe (pN) vs virtio/SCSI (N).
+case "$TARGET_DEV" in
+    *nvme*) TARGET_PART_SUFFIX="p" ;;
+    *)      TARGET_PART_SUFFIX="" ;;
+esac
+TARGET_EFI=${TARGET_DEV}${TARGET_PART_SUFFIX}1
+TARGET_ROOT=${TARGET_DEV}${TARGET_PART_SUFFIX}2
 
 log() { printf '[ac-setup] %s\n' "$*"; }
 fail() { printf 'SANDBOX_SETUP_FAILED: %s\n' "$*"; exit 1; }
@@ -74,10 +92,36 @@ retry() {
 # debootstrap is in the community repo; ensure it's enabled.
 # ---------------------------------------------------------------------------
 
+# Sync the system clock before any apt/apk operation. The bake VM's
+# RTC is whatever the hypervisor's firmware passed at boot — on
+# Hyper-V Gen2 VMs that's often hours off real time, which trips
+# apt's "InRelease file not yet valid" check inside the chroot
+# (Ubuntu signs Release files with a future-bounded validity
+# window). busybox ntpd does a single iburst sync and exits; the
+# `|| true` tail is defensive — if NTP UDP/123 egress is firewalled
+# we still try and rely on the Acquire::Check-Valid-Until=false
+# fallback below. time.cloudflare.com is more firewall-tolerant
+# than pool.ntp.org.
+log "syncing clock (was: $(date -u +%FT%TZ))"
+busybox ntpd -d -q -n -p time.cloudflare.com 2>&1 | head -3 || true
+log "clock now: $(date -u +%FT%TZ)"
+
 log "preparing alpine bootstrap toolchain (host arch: $(uname -m), guest: $DEB_ARCH)"
 . /etc/os-release 2>/dev/null || true
 ALPINE_VER="${VERSION_ID:-3.22}"
 ALPINE_VER_SHORT=$(echo "$ALPINE_VER" | cut -d. -f1,2)
+# The macOS port boots Alpine via netboot with
+#   alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.22/main
+# in the kernel cmdline, so its initramfs auto-adds the main repo to
+# /etc/apk/repositories. The Windows path boots from the Alpine virt
+# ISO, whose stock /etc/apk/repositories only contains the on-ISO
+# local cache (/media/sr0/apks) — not enough to apk add parted,
+# ca-certificates, tar, etc. Add main + community explicitly here;
+# the macOS path already has main so the duplicate-check skips.
+if ! grep -q '/main' /etc/apk/repositories; then
+    echo "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER_SHORT}/main" \
+        >> /etc/apk/repositories
+fi
 if ! grep -q '/community' /etc/apk/repositories; then
     echo "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER_SHORT}/community" \
         >> /etc/apk/repositories
@@ -178,6 +222,35 @@ echo "EFI_ARCH=$EFI_ARCH"           >> /mnt/tmp/bromure-build.env
 echo "DEB_ARCH=$DEB_ARCH"           >> /mnt/tmp/bromure-build.env
 echo "EFI_BOOT_DIR=$EFI_BOOT_DIR"   >> /mnt/tmp/bromure-build.env
 echo "KERN_EXTRA_CMDLINE=$KERN_EXTRA_CMDLINE" >> /mnt/tmp/bromure-build.env
+# BROMURE_HOST = "windows" | "macos". The Windows HyperVAlpineBaker
+# passes BROMURE_HOST=windows; macOS leaves it unset and the chroot
+# defaults to "macos". The chroot phase uses this to decide whether
+# to install the weston-rdp + hvsock-proxy stack (Windows-only — no
+# framebuffer device on HCS-direct VMs) or the X11 + openbox + kitty
+# stack (macOS-only — VZ framebuffer rendering).
+echo "BROMURE_HOST=${BROMURE_HOST:-macos}" >> /mnt/tmp/bromure-build.env
+
+# Copy the hvsocket→TCP proxy source from the setup ISO into the
+# chroot's /tmp so the chroot phase can `gcc` it. Only meaningful on
+# Windows; on macOS the file is absent and the cp silently no-ops.
+if [ -f /tmp/setup/hvsock-proxy.c ]; then
+    cp /tmp/setup/hvsock-proxy.c /mnt/tmp/hvsock-proxy.c
+fi
+if [ -f /tmp/setup/title-pusher.c ]; then
+    cp /tmp/setup/title-pusher.c /mnt/tmp/title-pusher.c
+fi
+if [ -f /tmp/setup/overlay-fetch.c ]; then
+    cp /tmp/setup/overlay-fetch.c /mnt/tmp/overlay-fetch.c
+fi
+if [ -f /tmp/setup/cmd-server.c ]; then
+    cp /tmp/setup/cmd-server.c /mnt/tmp/cmd-server.c
+fi
+if [ -f /tmp/setup/ssh-agent-bridge.c ]; then
+    cp /tmp/setup/ssh-agent-bridge.c /mnt/tmp/ssh-agent-bridge.c
+fi
+if [ -f /tmp/setup/bromure-aws-credentials.py ]; then
+    cp /tmp/setup/bromure-aws-credentials.py /mnt/tmp/bromure-aws-credentials.py
+fi
 
 cp /etc/resolv.conf /mnt/etc/resolv.conf
 
@@ -229,7 +302,7 @@ update-locale LANG=en_US.UTF-8
 # ---------------------------------------------------------------------------
 
 step "apt-get update" \
-    retry apt-get update -y -qq
+    retry apt-get update -y -qq -o Acquire::Check-Valid-Until=false
 step "apt-get dist-upgrade" \
     retry apt-get dist-upgrade -y -q -o Dpkg::Options::="--force-confnew"
 step "apt-get install kernel+grub+systemd+base" \
@@ -252,7 +325,7 @@ GRUB_TIMEOUT=0
 GRUB_TIMEOUT_STYLE=hidden
 GRUB_RECORDFAIL_TIMEOUT=0
 GRUB_DISTRIBUTOR=Ubuntu
-GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=0 vt.global_cursor_default=0 systemd.show_status=false rd.systemd.show_status=false"
+GRUB_CMDLINE_LINUX_DEFAULT="loglevel=7 systemd.log_level=info systemd.log_target=console systemd.show_status=true systemd.journald.forward_to_console=1"
 GRUB_CMDLINE_LINUX="console=ttyS0,115200n8 console=tty0 root=LABEL=root rootfstype=ext4${EXTRA}"
 GRUB_TERMINAL=console
 EOF
@@ -520,7 +593,7 @@ chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
     > /etc/apt/sources.list.d/github-cli.list
 step "apt-get update (after adding gh repo)" \
-    retry apt-get update -y -qq
+    retry apt-get update -y -qq -o Acquire::Check-Valid-Until=false
 step "apt-get install gh" \
     retry apt-get install -y -q --no-install-recommends gh
 
@@ -749,20 +822,17 @@ done
 spice-vdagent &
 sleep 0.2
 
-RETRIES=0
-while [ $RETRIES -lt 5 ]; do
-    kitty --start-as=fullscreen
-    EXIT=$?
-    echo "kitty exited with $EXIT (attempt $((RETRIES+1)))"
-    if [ $EXIT -eq 0 ]; then
-        exit 0
-    fi
-    RETRIES=$((RETRIES+1))
-    sleep 1
-done
-
-echo "kitty failed to stay up after 5 attempts — falling back to xterm"
-exec xterm -fullscreen -fa 'JetBrains Mono' -fs 14 -bg '#0d1117' -fg '#c9d1d9'
+# NO auto-kitty here. Tabs are kitty PROCESSES driven by the host:
+# the host's SessionWindow.AddTab appends a UUID-tagged tab to its
+# model and dispatches `spawn-kitty <UUID>` to the in-VM command
+# channel (bromure-cmd-server on AF_VSOCK port 9226). Each kitty
+# launches with `--class bromure-<UUID>` so xdotool can target it
+# for raise / close. Same shape as the macOS TabbedSessionWindow.
+#
+# Block forever (X session keeps running) — host orchestrates the
+# user-visible windows. Without this `exec sleep` the X session
+# would exit and openbox would die.
+exec sleep infinity
 EOX
 chmod +x /etc/X11/xinit/xinitrc
 
@@ -771,9 +841,15 @@ cat > /etc/xdg/openbox/rc.xml <<'EOO'
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_config xmlns="http://openbox.org/3.4/rc">
   <applications>
+    <!-- Bromure runs ONE app per VM (kitty on macOS, xterm on
+         Windows). Force every client to be undecorated AND fullscreen
+         so it always fills the Xvnc / VZ framebuffer, and so it tracks
+         framebuffer resize events (RandR / SetDesktopSize). -->
     <application class="*">
       <decor>no</decor>
       <focus>yes</focus>
+      <fullscreen>yes</fullscreen>
+      <maximized>true</maximized>
     </application>
   </applications>
 </openbox_config>
@@ -791,20 +867,33 @@ window_padding_width 16
 enable_audio_bell no
 remember_window_size no
 
+# Run bash as a LOGIN shell so .bash_profile + .bashrc are sourced
+# (cd to \$HOME, PATH exports, etc.). Without this, kitty execs a
+# plain shell with cwd=/ and an empty environment.
+shell bash -l
+
+# Native kitty tabs visible — we surface them through the
+# Bromure-host tab strip eventually; for now they sit at the
+# top of the kitty window so users can switch with Ctrl+Shift+→.
+tab_bar_style                  fade
+tab_bar_edge                   top
+
 sync_to_monitor yes
 repaint_delay 16
 input_delay 10
 update_check_interval 0
 
-map super+c    copy_to_clipboard
-map super+v    paste_from_clipboard
-map super+a    select_all
-map super+t    new_tab
-map super+w    close_tab
-map super+shift+left previous_tab
-map super+shift+right next_tab
-map super+plus change_font_size all +2.0
-map super+minus change_font_size all -2.0
+# Windows Terminal-style clipboard: Ctrl+Shift+C/V. Keeps Ctrl+C's
+# SIGINT semantics intact (terminals MUST be able to send ^C).
+map ctrl+shift+c    copy_to_clipboard
+map ctrl+shift+v    paste_from_clipboard
+map ctrl+shift+a    select_all
+map ctrl+shift+t    new_tab
+map ctrl+shift+w    close_tab
+map ctrl+shift+left previous_tab
+map ctrl+shift+right next_tab
+map ctrl+plus       change_font_size all +2.0
+map ctrl+minus      change_font_size all -2.0
 map super+0    change_font_size all 0
 
 open_url_with /usr/local/bin/bromure-open
@@ -821,6 +910,488 @@ systemctl enable systemd-networkd systemd-resolved >/dev/null 2>&1 || true
 ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
 systemctl enable spice-vdagentd.socket spice-vdagentd.service >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
+# Windows-only: weston-rdp + hvsock-proxy display stack.
+#
+# HCS-direct session VMs have NO framebuffer device (vmcompute does
+# not attach a virtual GPU on the LinuxKernelDirect / UEFI-VHDX
+# path — that's a Hyper-V Manager thing). The macOS port renders via
+# VZ's framebuffer; for Windows we instead run weston with the
+# rdp-backend.so plugin (Wayland desktop → RDP server on TCP
+# 127.0.0.1:3389), then bridge that to AF_VSOCK port 3389 via the
+# bromure-hvsock-proxy daemon compiled below. The Windows host's
+# mstsc dials hvsocket://<vm-guid>:3389 and gets the desktop.
+#
+# Stock weston's rdp-backend listens on TCP only. The wslg fork has
+# hvsocket support compiled in but building it is multi-hundred-MB
+# of source + cross-deps; the proxy hop adds a couple of
+# microseconds of latency and is straightforward to maintain.
+# ---------------------------------------------------------------------------
+
+if [ "$BROMURE_HOST" = "windows" ]; then
+    log "BROMURE_HOST=windows — installing Xvnc + hvsock-proxy stack"
+
+    # Windows-only delta vs. the macOS X stack: install Xvnc
+    # (TigerVNC) as the display + RFB server, plus gcc/libc to
+    # compile the hvsocket→TCP proxy below. Openbox, kitty, xterm,
+    # JetBrains Mono and friends are already installed in the
+    # common stack above (and the same xinitrc launches them on
+    # both hosts — see /etc/X11/xinit/xinitrc and the
+    # bromure-xsession.service unit below).
+    apt-get install -y -q --no-install-recommends \
+        tigervnc-standalone-server tigervnc-common \
+        gcc libc6-dev
+
+    if [ ! -f /tmp/hvsock-proxy.c ]; then
+        fail "hvsock-proxy.c missing in chroot /tmp — the setup ISO didn't carry it"
+    fi
+    gcc -O2 -Wall -pthread -o /usr/local/bin/bromure-hvsock-proxy \
+        /tmp/hvsock-proxy.c -lpthread
+    strip /usr/local/bin/bromure-hvsock-proxy || true
+    rm -f /tmp/hvsock-proxy.c
+
+    if [ ! -f /tmp/title-pusher.c ]; then
+        fail "title-pusher.c missing in chroot /tmp — the setup ISO didn't carry it"
+    fi
+    gcc -O2 -Wall -o /usr/local/bin/bromure-title-pusher \
+        /tmp/title-pusher.c
+    strip /usr/local/bin/bromure-title-pusher || true
+    rm -f /tmp/title-pusher.c
+
+    if [ ! -f /tmp/overlay-fetch.c ]; then
+        fail "overlay-fetch.c missing in chroot /tmp — the setup ISO didn't carry it"
+    fi
+    gcc -O2 -Wall -o /usr/local/bin/bromure-overlay-fetch \
+        /tmp/overlay-fetch.c
+    strip /usr/local/bin/bromure-overlay-fetch || true
+    rm -f /tmp/overlay-fetch.c
+
+    if [ ! -f /tmp/cmd-server.c ]; then
+        fail "cmd-server.c missing in chroot /tmp — the setup ISO didn't carry it"
+    fi
+    gcc -O2 -Wall -o /usr/local/bin/bromure-cmd-server \
+        /tmp/cmd-server.c
+    strip /usr/local/bin/bromure-cmd-server || true
+    rm -f /tmp/cmd-server.c
+
+    # ssh-agent bridge: Unix-socket frontend for ssh-add, AF_VSOCK
+    # backend to the host's SshAgentHvSocketListener (port 8444).
+    # Without this in-VM ssh-add can't reach the agent that lives on
+    # the Windows host.
+    if [ ! -f /tmp/ssh-agent-bridge.c ]; then
+        fail "ssh-agent-bridge.c missing in chroot /tmp — the setup ISO didn't carry it"
+    fi
+    gcc -O2 -Wall -pthread -o /usr/local/bin/bromure-ssh-agent-bridge \
+        /tmp/ssh-agent-bridge.c -lpthread
+    strip /usr/local/bin/bromure-ssh-agent-bridge || true
+    rm -f /tmp/ssh-agent-bridge.c
+
+    cat > /etc/systemd/system/bromure-ssh-agent-bridge.service <<'AGENT_UNIT'
+[Unit]
+Description=Bromure ssh-agent bridge (Unix socket → AF_VSOCK)
+After=network-pre.target
+DefaultDependencies=no
+
+[Service]
+ExecStart=/usr/local/bin/bromure-ssh-agent-bridge
+Restart=always
+RestartSec=2
+# Run as root so the bind succeeds in /run; the socket is chmod 0660
+# so anyone in the `bromure` group can read it. The daemon itself is
+# tiny and has no external attack surface — it's a byte pump.
+
+[Install]
+WantedBy=multi-user.target
+AGENT_UNIT
+    systemctl enable bromure-ssh-agent-bridge.service
+
+    # Expose the socket via SSH_AUTH_SOCK in every shell. Two seams:
+    #   /etc/profile.d/  — sourced by login shells (PAM-managed
+    #     logins, kitty's bash --login, etc.). Belt and suspenders.
+    #   /etc/environment — read by pam_env on EVERY login, including
+    #     non-login shells spawned through automation /exec, sudo,
+    #     and SSH. This is the one that actually fixes our case.
+    cat > /etc/profile.d/bromure-ssh-auth-sock.sh <<'SOCK_PROFILE'
+# Bromure: route ssh-add / ssh through the in-guest bridge, which
+# forwards over AF_VSOCK to the SSH-agent on the Windows host.
+if [ -S /run/bromure-ssh-agent.sock ]; then
+    export SSH_AUTH_SOCK=/run/bromure-ssh-agent.sock
+fi
+SOCK_PROFILE
+    chmod 0644 /etc/profile.d/bromure-ssh-auth-sock.sh
+    # /etc/environment is consumed by pam_env without shell
+    # interpretation — bare assignments only. Anyone with a shell
+    # in the VM gets SSH_AUTH_SOCK set even before
+    # /etc/profile.d/* runs.
+    if ! grep -q "^SSH_AUTH_SOCK=" /etc/environment 2>/dev/null; then
+        echo "SSH_AUTH_SOCK=/run/bromure-ssh-agent.sock" >> /etc/environment
+    fi
+
+    # AWS credential_process helper. Python's AF_VSOCK support is
+    # 3.7+; the bake already installs python3 above. The helper
+    # reads /etc/bromure-profile-id (written by the per-session home
+    # overlay) and shells the host's AwsCredentialHvSocketListener
+    # for the credential_process JSON document the AWS SDK expects.
+    if [ ! -f /tmp/bromure-aws-credentials.py ]; then
+        fail "bromure-aws-credentials.py missing in chroot /tmp"
+    fi
+    install -m 0755 /tmp/bromure-aws-credentials.py /usr/local/bin/bromure-aws-credentials
+    rm -f /tmp/bromure-aws-credentials.py
+
+    # Default ~/.aws/config that points the SDK at our helper.
+    # SessionHomeBuilder lays per-profile contents over /home/ubuntu
+    # so this default applies whenever the profile doesn't supply
+    # its own ~/.aws/config.
+    mkdir -p /home/ubuntu/.aws
+    cat > /home/ubuntu/.aws/config <<'AWS_CFG'
+# Managed by Bromure Agentic Coding. Routes all SDK credential
+# lookups through the host's AWS credential server — the real
+# secret never reaches this VM.
+[default]
+credential_process = /usr/local/bin/bromure-aws-credentials
+AWS_CFG
+    chown -R ubuntu:ubuntu /home/ubuntu/.aws
+
+    # Bromure now uses our own VNC client → no weston needed. Xvnc
+    # is both an X server and an RFB server in one binary; xterm is
+    # its only client. Display geometry matches a 16:10 dev laptop
+    # default; the host can resize via VNC extension messages.
+
+    # systemd unit: in-guest hvsocket→TCP proxy. Port 5900 on both
+    # sides — host's HvSocketTcpBridge connects via AF_HYPERV service
+    # GUID derived from 5900 (RFB / VNC default), the proxy forwards
+    # to TigerVNC's Xvnc listening on TCP 127.0.0.1:5900.
+    cat > /etc/systemd/system/bromure-hvsock-proxy.service <<'PROXY_UNIT'
+[Unit]
+Description=Bromure hvsocket → TCP RFB/VNC proxy
+After=network.target
+Before=bromure-xvnc.service
+
+[Service]
+Type=simple
+ExecStartPre=/sbin/modprobe -q hv_sock
+ExecStart=/usr/local/bin/bromure-hvsock-proxy 5900 127.0.0.1 5900
+Restart=on-failure
+RestartSec=1
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+PROXY_UNIT
+
+    # systemd unit: TigerVNC's Xvnc. One binary, two protocols at
+    # once: an X server (talks to xterm/clients) AND an RFB server
+    # (talks to our WPF VNC client). `-SecurityTypes None` skips
+    # auth — the AF_HYPERV channel is already in-hypervisor secure.
+    cat > /etc/systemd/system/bromure-xvnc.service <<'XVNC_UNIT'
+[Unit]
+Description=Bromure Xvnc — X server + RFB on TCP 5900
+After=bromure-hvsock-proxy.service
+Wants=bromure-hvsock-proxy.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+RuntimeDirectory=user/1000
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/bin/Xvnc :1 -SecurityTypes None -localhost no \
+    -geometry 2560x1600 -depth 24 -rfbport 5900 -AlwaysShared=1 \
+    -AcceptSetDesktopSize=1 -SendCutText=1 -AcceptCutText=1 \
+    -desktop bromure
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+XVNC_UNIT
+
+    # 9p mount units for the per-session Plan9 shares the host stages
+    # at session-start (HcsSession.cs ports them to bromure-overlay,
+    # bromure-certs, bromure-outbox). The shares carry the kitty.conf
+    # / bashrc / token files (overlay), the MITM CA cert (certs), and
+    # a guest-writable drop-zone the host watches (outbox).
+    install -d /mnt/bromure-overlay /mnt/bromure-outbox
+    install -d /usr/local/share/ca-certificates/bromure
+    chown ubuntu:ubuntu /mnt/bromure-outbox
+
+    cat > /etc/systemd/system/bromure-overlay-mount.service <<'OVL_UNIT'
+[Unit]
+Description=Mount Bromure home-overlay 9p share
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/sbin/modprobe -q 9p
+ExecStartPre=-/sbin/modprobe -q 9pnet_virtio
+ExecStartPre=-/sbin/modprobe -q hv_sock
+ExecStart=/bin/mount -t 9p -o trans=hyperv,port=50001,version=9p2000.L,access=client bromure-overlay /mnt/bromure-overlay
+ExecStop=/bin/umount /mnt/bromure-overlay
+
+[Install]
+WantedBy=multi-user.target
+OVL_UNIT
+
+    cat > /etc/systemd/system/bromure-certs-mount.service <<'CERTS_UNIT'
+[Unit]
+Description=Mount Bromure CA certs 9p share
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/sbin/modprobe -q 9p
+ExecStartPre=-/sbin/modprobe -q 9pnet_virtio
+ExecStartPre=-/sbin/modprobe -q hv_sock
+ExecStart=/bin/mount -t 9p -o trans=hyperv,port=50002,version=9p2000.L,access=client bromure-certs /usr/local/share/ca-certificates/bromure
+ExecStop=/bin/umount /usr/local/share/ca-certificates/bromure
+
+[Install]
+WantedBy=multi-user.target
+CERTS_UNIT
+
+    cat > /etc/systemd/system/bromure-outbox-mount.service <<'OB_UNIT'
+[Unit]
+Description=Mount Bromure outbox 9p share (guest→host events)
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/sbin/modprobe -q 9p
+ExecStartPre=-/sbin/modprobe -q 9pnet_virtio
+ExecStartPre=-/sbin/modprobe -q hv_sock
+ExecStart=/bin/mount -t 9p -o trans=hyperv,port=50003,version=9p2000.L,access=client,uname=ubuntu bromure-outbox /mnt/bromure-outbox
+ExecStop=/bin/umount /mnt/bromure-outbox
+
+[Install]
+WantedBy=multi-user.target
+OB_UNIT
+
+    # Apply the home overlay into /home/ubuntu after the 9p mount lands.
+    # cp -a preserves the host's mtime so re-running is idempotent (cp
+    # copies even if dest exists, fine for our regenerate-each-session
+    # model). update-ca-certificates picks up the CA the certs mount
+    # dropped.
+    cat > /usr/local/sbin/bromure-overlay-apply <<'APPLY_SH'
+#!/bin/sh
+set -e
+SRC=/mnt/bromure-overlay
+DST=/home/ubuntu
+# Sentinel: prove bidirectional 9p write works. The host's
+# FileSystemWatcher in SessionViewModel will fire as soon as
+# this file lands.
+printf 'overlay-apply started at %s\n' "$(date)" > "$SRC/.bromure-applied" 2>&1 || true
+if [ -d "$SRC" ] && [ "$(ls -A "$SRC" 2>/dev/null)" ]; then
+    cp -a "$SRC"/. "$DST/" 2>/dev/null || true
+    chown -R ubuntu:ubuntu "$DST"
+    if [ -f "$DST/.bromure-env" ]; then
+        install -m 0644 "$DST/.bromure-env" /etc/profile.d/bromure-env.sh
+    fi
+fi
+# Refresh CA trust store if the certs share dropped anything.
+if [ -d /usr/local/share/ca-certificates/bromure ]; then
+    update-ca-certificates >/dev/null 2>&1 || true
+fi
+# Make the overlay share writable for the ubuntu user so the
+# bromure-title-poll service (running as ubuntu) can drop the
+# window-title file there.
+chown ubuntu:ubuntu "$SRC" 2>/dev/null || true
+printf 'overlay-apply done at %s\n' "$(date)" >> "$SRC/.bromure-applied" 2>&1 || true
+exit 0
+APPLY_SH
+    chmod 0755 /usr/local/sbin/bromure-overlay-apply
+
+    cat > /etc/systemd/system/bromure-overlay-apply.service <<'APPLY_UNIT'
+[Unit]
+Description=Apply Bromure home overlay into /home/ubuntu
+After=bromure-overlay-mount.service bromure-certs-mount.service
+Wants=bromure-overlay-mount.service bromure-certs-mount.service
+Before=bromure-xsession.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/bromure-overlay-apply
+
+[Install]
+WantedBy=multi-user.target
+APPLY_UNIT
+
+    # Title-poll runs bromure-title-pusher (compiled above): walks
+    # /proc every 1.5 s, resolves the foreground process (via tpgid)
+    # inside every `kitty --class bromure-<UUID>` it finds, and
+    # pushes one `tab|<UUID>|<TITLE>\n` line per kitty to the host
+    # over AF_VSOCK (port 9224 → ServiceIdFromPort on the host's
+    # AF_HYPERV listener). The host dispatches each line to the
+    # matching tab pill, so each tab's label reflects its OWN
+    # foreground process — matching macOS tab-agent.sh's title_loop.
+    # We use vsock instead of TCP over the Default Switch NIC because
+    # Windows Firewall on that interface drops outbound guest→host
+    # packets even with explicit allow rules; AF_HYPERV bypasses the
+    # IP firewall entirely.
+    # Overlay-fetch: oneshot at boot that pulls the per-session home
+    # overlay (kitty.conf with profile colour, .bashrc, MCP config,
+    # git tokens, etc.) from the host over AF_VSOCK port 9225 and
+    # untars it into /home/ubuntu. This replaces the Plan9-share
+    # overlay path (which doesn't work because stock Ubuntu kernels
+    # lack CONFIG_NET_9P_HV_SOCK).
+    cat > /etc/systemd/system/bromure-overlay-fetch.service <<'OFETCH_UNIT'
+[Unit]
+Description=Bromure home overlay fetch (AF_VSOCK 9225 → /home/ubuntu)
+DefaultDependencies=no
+After=systemd-modules-load.service local-fs.target
+Before=multi-user.target bromure-xsession.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=+-/sbin/modprobe -q vsock
+ExecStartPre=+-/sbin/modprobe -q vmw_vsock_virtio_transport
+ExecStartPre=+-/sbin/modprobe -q hv_sock
+ExecStart=/usr/local/bin/bromure-overlay-fetch 9225 /home/ubuntu
+ExecStartPost=/bin/chown -R ubuntu:ubuntu /home/ubuntu
+# Source any .bromure-env the host packed into the tar (replaces
+# the WSLENV-style env injection from the WSL port).
+ExecStartPost=/bin/sh -c '[ -f /home/ubuntu/.bromure-env ] && install -m 0644 /home/ubuntu/.bromure-env /etc/profile.d/bromure-env.sh || true'
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+OFETCH_UNIT
+
+    # Guest command server: listens on AF_VSOCK port 9226 and execs
+    # commands the host sends. Used by Bromure's + button (host
+    # sends "DISPLAY=:1 kitty --title bromure-tab-N &") and by
+    # the tab-raise / tab-close actions (host sends xdotool …).
+    cat > /etc/systemd/system/bromure-cmd-server.service <<'CMD_UNIT'
+[Unit]
+Description=Bromure guest command server (AF_VSOCK 9226)
+# Independent of xsession — the host needs to dial cmd-server
+# right after boot signal to spawn the first kitty, and at that
+# point xsession may still be waiting on overlay-fetch.
+DefaultDependencies=no
+After=systemd-modules-load.service local-fs.target
+Before=multi-user.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Environment=DISPLAY=:1
+Environment=HOME=/home/ubuntu
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStartPre=+-/sbin/modprobe -q vsock
+ExecStartPre=+-/sbin/modprobe -q hv_sock
+ExecStart=/usr/local/bin/bromure-cmd-server 9226
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+CMD_UNIT
+
+    cat > /etc/systemd/system/bromure-title-poll.service <<'POLL_UNIT'
+[Unit]
+Description=Bromure terminal-title pusher (xdotool → AF_VSOCK 9224)
+After=bromure-xsession.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Environment=DISPLAY=:1
+# AF_VSOCK requires the hv_sock module — load it before the
+# pusher tries socket(AF_VSOCK, ...). Done as a + ExecStartPre
+# so the failure (if module name differs) doesn't kill the unit;
+# the actual socket() call will report the real error in journal.
+ExecStartPre=+-/sbin/modprobe -q vsock
+ExecStartPre=+-/sbin/modprobe -q hv_sock
+ExecStart=/usr/local/bin/bromure-title-pusher 9224
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+POLL_UNIT
+
+    systemctl enable bromure-overlay-mount.service bromure-certs-mount.service \
+        bromure-outbox-mount.service bromure-overlay-apply.service \
+        bromure-overlay-fetch.service bromure-title-poll.service \
+        bromure-cmd-server.service >/dev/null 2>&1 || true
+
+    # systemd unit: X session = openbox + spice-vdagent + kitty
+    # fullscreen. The session content lives in /etc/X11/xinit/xinitrc
+    # which is shared with macOS (the macOS path runs it via getty
+    # autologin → startx). On Windows there's no getty login (no real
+    # console), so we just exec the same xinitrc with DISPLAY=:1 set
+    # to point at our Xvnc — same WM, same client, same retry loop.
+    cat > /etc/systemd/system/bromure-xsession.service <<'XSESSION_UNIT'
+[Unit]
+Description=Bromure X session — runs /etc/X11/xinit/xinitrc on Xvnc :1
+After=bromure-xvnc.service bromure-overlay-apply.service
+Requires=bromure-xvnc.service
+Wants=bromure-overlay-apply.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu
+# Mirror the env a real login shell would set. Without these
+# kitty inherits systemd's pristine env (no HOME, no SHELL, no
+# LOGNAME) and starts in /. PAMName=login also opens a PAM
+# session, which registers utmp so `w` / `who` work.
+Environment=DISPLAY=:1
+Environment=HOME=/home/ubuntu
+Environment=USER=ubuntu
+Environment=LOGNAME=ubuntu
+Environment=SHELL=/bin/bash
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=LIBGL_ALWAYS_SOFTWARE=1
+PAMName=login
+RuntimeDirectory=user/1000
+RuntimeDirectoryMode=0700
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /tmp/.X11-unix/X1 ] && exit 0; sleep 0.5; done; exit 1'
+ExecStart=/bin/sh /etc/X11/xinit/xinitrc
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+XSESSION_UNIT
+
+    systemctl enable bromure-hvsock-proxy.service bromure-xvnc.service \
+        bromure-xsession.service >/dev/null 2>&1 || true
+
+    # On Windows we DON'T want the X11 / xinitrc / kitty-on-X path to
+    # fight weston for the display. Disable the existing
+    # spice-vdagent + getty autologin services that the macOS code
+    # path enabled above (they're harmless if left running on
+    # Windows but waste a getty + ~30 MB).
+    systemctl disable getty@tty1.service >/dev/null 2>&1 || true
+
+    log "BROMURE_HOST=windows — Xvnc + xterm stack installed"
+fi
 
 log "cleaning up apt caches"
 apt-get clean

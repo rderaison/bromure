@@ -29,17 +29,20 @@ public sealed class RealtimeEventTap
     public int StatusCode { get; }
 
     private readonly ILogger _log;
+    private readonly Action<Guid, string, JsonObject>? _onCloudEvent;
     private readonly object _gate = new();
     private int _streamedResponseCount;
 
     public RealtimeEventTap(Guid profileId, string host, string path, int statusCode,
-        ILogger? log = null)
+        ILogger? log = null,
+        Action<Guid, string, JsonObject>? onCloudEvent = null)
     {
         ProfileId = profileId;
         Host = host;
         Path = path;
         StatusCode = statusCode;
         _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+        _onCloudEvent = onCloudEvent;
     }
 
     /// <summary>True once any <c>response.completed</c> has been streamed.
@@ -87,6 +90,33 @@ public sealed class RealtimeEventTap
             "ws-realtime response.completed host={Host} model={Model} input_tokens={InputTokens} output_tokens={OutputTokens} response_id={ResponseId}",
             Host, model ?? "?", inputTokens?.ToString() ?? "?",
             outputTokens?.ToString() ?? "?", respId ?? "?");
+
+        // Emit a cloud audit event so realtime streaming sessions
+        // show up in the dashboard incrementally — the close-time
+        // LlmEventExtractor wouldn't see streamed responses since
+        // there's no buffered body. Direct port of macOS
+        // RealtimeEventTap.swift:69-72.
+        if (_onCloudEvent is not null)
+        {
+            try
+            {
+                var data = new JsonObject
+                {
+                    ["host"] = Host,
+                    ["path"] = Path,
+                    ["model"] = model,
+                    ["response_id"] = respId,
+                    ["input_tokens"] = inputTokens,
+                    ["output_tokens"] = outputTokens,
+                    ["status_code"] = StatusCode,
+                };
+                _onCloudEvent(ProfileId, "llm.request", data);
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "RealtimeEventTap cloud-event emission threw");
+            }
+        }
     }
 
     /// <summary>

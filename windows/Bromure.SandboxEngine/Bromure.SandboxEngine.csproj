@@ -8,13 +8,22 @@
     <ProjectReference Include="..\Bromure.Platform\Bromure.Platform.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <InternalsVisibleTo Include="Bromure.Tests" />
+    <InternalsVisibleTo Include="bromure-spike" />
   </ItemGroup>
   <ItemGroup>
     <!-- Stage-2 setup scripts — embedded so they travel with the host
          EXE and the baker can pull them out on demand.
-         setup.sh is the QEMU+Alpine bake (preserved for reference);
-         setup-wsl.sh is the WSL2 bake the current code path uses. -->
+         setup.sh is the QEMU+Alpine bake (preserved for reference at
+         commit 86be3d1); setup-wsl.sh is the WSL2 bake (preserved for
+         reference at commit 9185fc6); setup-hcs.sh is the active HCS
+         bake. -->
     <EmbeddedResource Include="Image\setup.sh" />
-    <EmbeddedResource Include="Image\setup-wsl.sh" />
+    <EmbeddedResource Include="Image\setup-hcs.sh" />
+    <EmbeddedResource Include="Image\hvsock-proxy.c" />
+    <EmbeddedResource Include="Image\title-pusher.c" />
+    <EmbeddedResource Include="Image\overlay-fetch.c" />
+    <EmbeddedResource Include="Image\cmd-server.c" />
+    <EmbeddedResource Include="Image\ssh-agent-bridge.c" />
+    <EmbeddedResource Include="Image\bromure-aws-credentials.py" />
   </ItemGroup>
 </Project>

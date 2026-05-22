@@ -76,6 +76,35 @@ public sealed class ProfileStore
         return true;
     }
 
+    /// <summary>
+    /// Bump <see cref="Profile.LastUsedAt"/> to "now" and persist —
+    /// called by SessionsViewModel each time a session for this profile
+    /// starts. Mirrors the macOS <c>ProfileStore.touch</c> helper.
+    /// Silently no-ops when the profile isn't on disk yet (template-
+    /// only profiles, etc.) so callers don't have to gate.
+    /// </summary>
+    public void Touch(Guid profileId)
+    {
+        var profile = Load(profileId);
+        if (profile is null) return;
+        profile.LastUsedAt = DateTimeOffset.UtcNow;
+        Save(profile);
+    }
+
+    /// <summary>
+    /// Stamp the base-image version this profile's disk was cloned
+    /// from. Called by the engine the first time it materialises a
+    /// per-profile child VHDX, and on user-confirmed "Reset and launch"
+    /// after the image-versioning alert.
+    /// </summary>
+    public void StampBaseImageVersion(Guid profileId, string version)
+    {
+        var profile = Load(profileId);
+        if (profile is null) return;
+        profile.BaseImageVersionAtClone = version;
+        Save(profile);
+    }
+
     public Profile? Load(Guid profileId)
     {
         var path = PathFor(profileId);

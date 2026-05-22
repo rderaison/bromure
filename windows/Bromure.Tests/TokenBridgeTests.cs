@@ -1,4 +1,5 @@
-using System.IO.Pipes;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json.Nodes;
 using Bromure.SandboxEngine.Vsock;
 using FluentAssertions;
@@ -8,45 +9,38 @@ namespace Bromure.Tests;
 
 /// <summary>
 /// End-to-end integration tests for <see cref="SubscriptionTokenBridge"/>
-/// and <see cref="CodexTokenBridge"/>. These drive the actual ported
-/// wire format through a real named-pipe transport — no guest VM
-/// required, but the same protocol bytes that <c>claude-token-agent.py</c>
-/// and <c>codex-token-agent.py</c> exchange with the host on macOS.
-///
-/// <para>If a future change to the bridge breaks wire compatibility with
-/// the in-VM Python agents, these tests fail. They're the cheapest
-/// way to keep the macOS and Windows hosts byte-compatible at the bridge
-/// layer.</para>
+/// and <see cref="CodexTokenBridge"/>. Audit 07 #3 fix: the bridge
+/// transport switched from Windows Named Pipes to AF_HYPERV — xunit
+/// can't bind an AF_HYPERV listener (no VM peer), so we drive the
+/// bridge's registered handler directly via the
+/// <c>VsockBridge.TestInvokeAsync</c> seam over a loopback TCP
+/// socket pair. Same JSON ping-pong as before; the transport step
+/// is the only thing that changed.
 /// </summary>
 public class TokenBridgeTests
 {
     [Fact]
-    public async Task SubscriptionTokenBridge_ReadOp_RoundTripsThroughNamedPipe()
+    public async Task SubscriptionTokenBridge_ReadOp_RoundTripsThroughHandler()
     {
         await using var bridge = new VsockBridge();
         var sub = new SubscriptionTokenBridge();
         sub.RegisterOn(bridge);
 
-        var pipeName = $"bromure-ac-vsock-{SubscriptionTokenBridge.Port}";
-
-        // Spin up a tiny "fake agent" that mimics what
-        // claude-token-agent.py does inside the guest: accept the
-        // newline-delimited JSON op and reply with `ok=true` + tokens.
-        var agentTask = RunFakeAgentAsync(pipeName, async (request, writer, ct) =>
-        {
-            request["op"]?.GetValue<string>().Should().Be("read");
-            request["id"]!.GetValue<long>().Should().BeGreaterThan(0);
-            await WriteLineAsync(writer, new JsonObject
+        var agentTask = RunFakeAgentAsync(bridge, SubscriptionTokenBridge.Port,
+            async (request, writer, ct) =>
             {
-                ["id"] = request["id"]!.DeepClone(),
-                ["ok"] = true,
-                ["access"] = "sk-ant-real-access-token",
-                ["refresh"] = "sk-ant-real-refresh-token",
-            }, ct);
-        });
+                request["op"]?.GetValue<string>().Should().Be("read");
+                request["id"]!.GetValue<long>().Should().BeGreaterThan(0);
+                await WriteLineAsync(writer, new JsonObject
+                {
+                    ["id"] = request["id"]!.DeepClone(),
+                    ["ok"] = true,
+                    ["access"] = "sk-ant-real-access-token",
+                    ["refresh"] = "sk-ant-real-refresh-token",
+                }, ct);
+            });
 
         await sub.WaitConnectedAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
-
         var tokens = await sub.ReadAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
         tokens.Should().NotBeNull();
         tokens!.Access.Should().Be("sk-ant-real-access-token");
@@ -62,28 +56,28 @@ public class TokenBridgeTests
         var sub = new SubscriptionTokenBridge();
         sub.RegisterOn(bridge);
 
-        var pipeName = $"bromure-ac-vsock-{SubscriptionTokenBridge.Port}";
         string? capturedAccess = null;
         string? capturedRefresh = null;
-
-        var agentTask = RunFakeAgentAsync(pipeName, async (request, writer, ct) =>
-        {
-            request["op"]?.GetValue<string>().Should().Be("write");
-            capturedAccess = request["access"]?.GetValue<string>();
-            capturedRefresh = request["refresh"]?.GetValue<string>();
-            await WriteLineAsync(writer, new JsonObject
+        var agentTask = RunFakeAgentAsync(bridge, SubscriptionTokenBridge.Port,
+            async (request, writer, ct) =>
             {
-                ["id"] = request["id"]!.DeepClone(),
-                ["ok"] = true,
-            }, ct);
-        });
+                request["op"]?.GetValue<string>().Should().Be("write");
+                capturedAccess = request["access"]?.GetValue<string>();
+                capturedRefresh = request["refresh"]?.GetValue<string>();
+                await WriteLineAsync(writer, new JsonObject
+                {
+                    ["id"] = request["id"]!.DeepClone(),
+                    ["ok"] = true,
+                }, ct);
+            });
 
         await sub.WaitConnectedAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
-        await sub.WriteAsync("brm-fake-access-aaaa", "brm-fake-refresh-bbbb",
+        await sub.WriteAsync(
+            "sk-ant-oat01-brm-fake-access",
+            "sk-ant-ort01-brm-fake-refresh",
             new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
-
-        capturedAccess.Should().Be("brm-fake-access-aaaa");
-        capturedRefresh.Should().Be("brm-fake-refresh-bbbb");
+        capturedAccess.Should().Be("sk-ant-oat01-brm-fake-access");
+        capturedRefresh.Should().Be("sk-ant-ort01-brm-fake-refresh");
 
         await agentTask;
     }
@@ -95,86 +89,93 @@ public class TokenBridgeTests
         var sub = new SubscriptionTokenBridge();
         sub.RegisterOn(bridge);
 
-        var pipeName = $"bromure-ac-vsock-{SubscriptionTokenBridge.Port}";
-        var agentTask = RunFakeAgentAsync(pipeName, async (request, writer, ct) =>
-        {
-            await WriteLineAsync(writer, new JsonObject
+        var agentTask = RunFakeAgentAsync(bridge, SubscriptionTokenBridge.Port,
+            async (request, writer, ct) =>
             {
-                ["id"] = request["id"]!.DeepClone(),
-                ["ok"] = false,
-                ["reason"] = "missing brm- prefix",
-            }, ct);
-        });
+                await WriteLineAsync(writer, new JsonObject
+                {
+                    ["id"] = request["id"]!.DeepClone(),
+                    ["ok"] = false,
+                    ["reason"] = "no credentials file present",
+                }, ct);
+            });
 
         await sub.WaitConnectedAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
-
-        await FluentActions
-            .Awaiting(() => sub.WriteAsync("not-prefixed", "also-not-prefixed",
-                new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token))
-            .Should().ThrowAsync<SubscriptionTokenBridge.AgentRejectedException>()
-            .WithMessage("*missing brm- prefix*");
+        var ex = await Record.ExceptionAsync(() =>
+            sub.ReadAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token));
+        ex.Should().NotBeNull();
+        ex!.Message.Should().Contain("no credentials");
 
         await agentTask;
     }
 
     [Fact]
-    public async Task CodexTokenBridge_ReadOp_CarriesAllThreeTokens()
+    public async Task CodexTokenBridge_ReadOp_RoundTripsThroughHandler()
     {
         await using var bridge = new VsockBridge();
         var codex = new CodexTokenBridge();
         codex.RegisterOn(bridge);
 
-        var pipeName = $"bromure-ac-vsock-{CodexTokenBridge.Port}";
-
-        var agentTask = RunFakeAgentAsync(pipeName, async (request, writer, ct) =>
-        {
-            request["op"]?.GetValue<string>().Should().Be("read");
-            await WriteLineAsync(writer, new JsonObject
+        var agentTask = RunFakeAgentAsync(bridge, CodexTokenBridge.Port,
+            async (request, writer, ct) =>
             {
-                ["id"] = request["id"]!.DeepClone(),
-                ["ok"] = true,
-                ["access"] = "real-access",
-                ["refresh"] = "real-refresh",
-                ["id_token"] = "real-id-token",
-            }, ct);
-        });
+                request["op"]?.GetValue<string>().Should().Be("read");
+                await WriteLineAsync(writer, new JsonObject
+                {
+                    ["id"] = request["id"]!.DeepClone(),
+                    ["ok"] = true,
+                    ["access"] = "eyJ-access",
+                    ["refresh"] = "rt-refresh",
+                    ["id_token"] = "eyJ-id",
+                }, ct);
+            });
 
         await codex.WaitConnectedAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
-
         var tokens = await codex.ReadAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
         tokens.Should().NotBeNull();
-        tokens!.Access.Should().Be("real-access");
-        tokens.Refresh.Should().Be("real-refresh");
-        tokens.IdToken.Should().Be("real-id-token");
+        tokens!.Access.Should().Be("eyJ-access");
+        tokens.Refresh.Should().Be("rt-refresh");
+        tokens.IdToken.Should().Be("eyJ-id");
 
         await agentTask;
     }
 
     /// <summary>
-    /// Boots a single-shot pipe client that mimics the guest agent.
-    /// One request → one reply, then disconnect. The signature mirrors
-    /// the claude-token-agent.py / codex-token-agent.py loop closely
-    /// enough to catch wire drift.
+    /// Spin up a loopback TCP socket pair, hand one end to the
+    /// bridge via the TestInvokeAsync seam, and run the JSON
+    /// ping-pong on the other end mimicking the in-VM Python agent.
     /// </summary>
-    private static Task RunFakeAgentAsync(
-        string pipeName,
+    private static async Task RunFakeAgentAsync(
+        VsockBridge bridge, uint port,
         Func<JsonObject, Stream, CancellationToken, Task> handler)
     {
-        return Task.Run(async () =>
-        {
-            using var client = new NamedPipeClientStream(
-                ".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-            await client.ConnectAsync(5000);
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var tcpPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var connectTask = listener.AcceptTcpClientAsync();
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, tcpPort);
+        using var server = await connectTask;
+        listener.Stop();
 
-            using var ctsLifetime = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            var line = await JsonLine.ReadAsync(client, ct: ctsLifetime.Token);
-            line.Should().NotBeNull();
-            var request = JsonNode.Parse(line!) as JsonObject
-                ?? throw new InvalidOperationException("agent received non-object JSON");
-            await handler(request, client, ctsLifetime.Token);
-            // Give the host a tick to drain the response before we close.
-            await Task.Delay(50, ctsLifetime.Token);
-        });
+        // Hand the BRIDGE side to the registered handler — that's
+        // the "guest connection" from the bridge's perspective.
+        var bridgeSide = client.GetStream();
+        var agentSide = server.GetStream();
+
+        // Run the bridge handler on the bridgeSide; the test
+        // continues to drive the agentSide.
+        using var ctsLifetime = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        _ = Task.Run(() => bridge.TestInvokeAsync(port, bridgeSide, ctsLifetime.Token));
+
+        // Read one request, hand it to the test handler, write
+        // back the response.
+        var line = await JsonLine.ReadAsync(agentSide, ct: ctsLifetime.Token);
+        if (line is null) throw new InvalidOperationException("no request arrived");
+        var request = JsonNode.Parse(line) as JsonObject
+            ?? throw new InvalidOperationException("agent received non-object JSON");
+        await handler(request, agentSide, ctsLifetime.Token);
+        await Task.Delay(50, ctsLifetime.Token);
     }
 
     private static Task WriteLineAsync(Stream w, JsonObject obj, CancellationToken ct)

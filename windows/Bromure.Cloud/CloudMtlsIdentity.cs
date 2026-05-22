@@ -1,8 +1,50 @@
 // macos-source: Sources/AgentCoding/CloudMTLSIdentity.swift @ 905dd3dd2742
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Bromure.Platform;
 
 namespace Bromure.Cloud;
+
+/// <summary>
+/// Pure helper that loads a leaf cert PEM + PKCS#8 private-key DER
+/// into an <see cref="X509Certificate2"/> with the key attached but
+/// <b>not</b> persisted to any Windows certificate store. Direct
+/// port of macOS's <c>SecPKCS12Import</c>-without-keychain pattern.
+///
+/// <para>The audit flagged the previous Windows path for using
+/// <c>UserKeySet | Exportable</c>, which silently dropped the
+/// private key into <c>%APPDATA%\Microsoft\Crypto\RSA</c>. This
+/// loader uses <see cref="X509KeyStorageFlags.EphemeralKeySet"/>
+/// so the key lives only in this process's address space.</para>
+/// </summary>
+public static class MtlsCertificateLoader
+{
+    /// <summary>
+    /// Build an in-memory X509Certificate2 from PEM + PKCS#8 DER.
+    /// Returns null when the cert/key combination is malformed —
+    /// callers fall back to "no client cert" rather than crash.
+    /// </summary>
+    public static X509Certificate2? TryLoadEphemeral(string certPem, byte[] pkcs8KeyDer)
+    {
+        if (string.IsNullOrEmpty(certPem) || pkcs8KeyDer is null || pkcs8KeyDer.Length == 0)
+            return null;
+        try
+        {
+            var cert = X509Certificate2.CreateFromPem(certPem);
+            using var rsa = RSA.Create();
+            rsa.ImportPkcs8PrivateKey(pkcs8KeyDer, out _);
+            using var withKey = cert.CopyWithPrivateKey(rsa);
+            cert.Dispose();
+            // PFX round-trip with EphemeralKeySet preserves the key
+            // inside the cert without persisting to disk.
+            var pfx = withKey.Export(X509ContentType.Pfx);
+            return new X509Certificate2(pfx, (string?)null,
+                X509KeyStorageFlags.EphemeralKeySet);
+        }
+        catch (CryptographicException) { return null; }
+        catch (ArgumentException) { return null; }  // CopyWithPrivateKey on mismatched key
+    }
+}
 
 /// <summary>
 /// Direct port of <c>Sources/AgentCoding/CloudMTLSIdentity.swift</c>.

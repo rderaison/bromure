@@ -40,16 +40,23 @@ public sealed class HttpMitmProxy : IAsyncDisposable
     private readonly AwsResigner _awsResigner;
     private readonly CertCache _certCache;
     private readonly TraceStore? _traceStore;
+    private readonly IBodyEncryptor? _bodyEncryptor;
     private readonly ClientIdentityRegistry? _clientIdentities;
     private readonly ClusterCaTrustRegistry? _clusterCaTrust;
     private readonly ConsentBroker? _consent;
     private readonly Func<MitmEngine.SessionTrace?>? _sessionTraceProvider;
     private readonly Action<Guid, string, System.Text.Json.Nodes.JsonObject>? _onCloudEvent;
+    private readonly Action<Guid, string>? _onSubscriptionTokenSeen;
+    private readonly Action<Guid, string>? _onCodexTokenSeen;
+    private readonly Action<Guid, Bromure.AC.Mitm.OAuth.OAuthRotationProvider, Bromure.AC.Mitm.OAuth.StoredOAuthTokens>? _onOAuthRotated;
+    private readonly Bromure.AC.Mitm.Swap.CompromiseDetector? _bodyScanDetector;
     private readonly ILogger _log;
     private readonly Guid _profileId;
     private TcpListener? _listener;
+    private TcpListener? _listenerV4;     // optional second listener for dual-stack
     private CancellationTokenSource? _cts;
     private Task? _acceptLoop;
+    private Task? _acceptLoopV4;
 
     public HttpMitmProxy(
         Guid profileId,
@@ -57,11 +64,16 @@ public sealed class HttpMitmProxy : IAsyncDisposable
         AwsResigner awsResigner,
         CertCache certCache,
         TraceStore? traceStore = null,
+        IBodyEncryptor? bodyEncryptor = null,
         ClientIdentityRegistry? clientIdentities = null,
         ClusterCaTrustRegistry? clusterCaTrust = null,
         ConsentBroker? consent = null,
         Func<MitmEngine.SessionTrace?>? sessionTraceProvider = null,
         Action<Guid, string, System.Text.Json.Nodes.JsonObject>? onCloudEvent = null,
+        Action<Guid, string>? onSubscriptionTokenSeen = null,
+        Action<Guid, string>? onCodexTokenSeen = null,
+        Action<Guid, Bromure.AC.Mitm.OAuth.OAuthRotationProvider, Bromure.AC.Mitm.OAuth.StoredOAuthTokens>? onOAuthRotated = null,
+        Bromure.AC.Mitm.Swap.CompromiseDetector? bodyScanDetector = null,
         ILogger? log = null)
     {
         _profileId = profileId;
@@ -69,13 +81,59 @@ public sealed class HttpMitmProxy : IAsyncDisposable
         _awsResigner = awsResigner;
         _certCache = certCache;
         _traceStore = traceStore;
+        _bodyEncryptor = bodyEncryptor;
         _clientIdentities = clientIdentities;
         _clusterCaTrust = clusterCaTrust;
         _consent = consent;
         _sessionTraceProvider = sessionTraceProvider;
         _onCloudEvent = onCloudEvent;
+        _onSubscriptionTokenSeen = onSubscriptionTokenSeen;
+        _onCodexTokenSeen = onCodexTokenSeen;
+        _onOAuthRotated = onOAuthRotated;
+        _bodyScanDetector = bodyScanDetector;
         _log = log ?? NullLogger.Instance;
     }
+
+    /// <summary>
+    /// Fire the subscription / Codex token-seen callbacks when the
+    /// host matches the expected scope and the swapper detects a
+    /// clean OAuth access token. Extracted from the swap path so
+    /// tests can exercise the exact decision logic the proxy uses
+    /// without mounting full TLS-MITM.
+    /// </summary>
+    internal void FireSubscriptionTokenSeenIfApplicable(string host, byte[] rawRequest)
+    {
+        if (_onSubscriptionTokenSeen is not null && IsAnthropicHost(host))
+        {
+            if (_swapper.DetectSubscriptionAccessToken(rawRequest, _profileId) is { } cleanTok)
+            {
+                try { _onSubscriptionTokenSeen(_profileId, cleanTok); }
+                catch (Exception ex) { _log.LogDebug(ex, "SubscriptionTokenSeen handler threw"); }
+            }
+        }
+        if (_onCodexTokenSeen is not null && IsCodexHost(host))
+        {
+            if (_swapper.DetectCodexAccessToken(rawRequest, _profileId) is { } cleanTok)
+            {
+                try { _onCodexTokenSeen(_profileId, cleanTok); }
+                catch (Exception ex) { _log.LogDebug(ex, "CodexTokenSeen handler threw"); }
+            }
+        }
+    }
+
+    /// <summary>macOS HTTPProxy.swift:182 — anthropic.com itself or
+    /// any subdomain. case-insensitive.</summary>
+    internal static bool IsAnthropicHost(string host)
+        => host.Equals("api.anthropic.com", StringComparison.OrdinalIgnoreCase)
+           || host.EndsWith(".anthropic.com", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>macOS HTTPProxy.swift:191 — chatgpt.com (incl.
+    /// subdomains), auth.openai.com, api.openai.com.</summary>
+    internal static bool IsCodexHost(string host)
+        => host.Equals("chatgpt.com", StringComparison.OrdinalIgnoreCase)
+           || host.EndsWith(".chatgpt.com", StringComparison.OrdinalIgnoreCase)
+           || host.Equals("auth.openai.com", StringComparison.OrdinalIgnoreCase)
+           || host.Equals("api.openai.com", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Gate every <see cref="_traceStore"/> persist + body capture on
@@ -95,21 +153,59 @@ public sealed class HttpMitmProxy : IAsyncDisposable
     public Task StartAsync(IPEndPoint endpoint, CancellationToken ct = default)
     {
         if (_listener is not null) throw new InvalidOperationException("Already started");
-        _listener = new TcpListener(endpoint);
-        _listener.Start();
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token));
+
+        // Specific non-loopback IP: honour caller's choice verbatim,
+        // single listener. Loopback / Any: bind BOTH IPv4 and IPv6
+        // on the same port so the VM can dial either stack.
+        // Audit 02 #3 fix: VM dialing [::1]:<port> used to fail.
+        if (!endpoint.Address.Equals(IPAddress.Loopback)
+            && !endpoint.Address.Equals(IPAddress.Any))
+        {
+            _listener = new TcpListener(endpoint);
+            _listener.Start();
+            _acceptLoop = Task.Run(() => AcceptLoopAsync(_listener, _cts.Token));
+            return Task.CompletedTask;
+        }
+
+        var v4Addr = endpoint.Address.Equals(IPAddress.Any) ? IPAddress.Any : IPAddress.Loopback;
+        var v6Addr = endpoint.Address.Equals(IPAddress.Any) ? IPAddress.IPv6Any : IPAddress.IPv6Loopback;
+        // Bind IPv4 first to get a concrete port number, then bind
+        // the IPv6 listener on the same port. (Inverted order can
+        // fail if the IPv6 socket grabs DualMode + the kernel binds
+        // both stacks for us — Windows DualMode behaviour varies
+        // between builds, so we use two explicit listeners.)
+        _listener = new TcpListener(v4Addr, endpoint.Port);
+        _listener.Start();
+        var boundPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
+        try
+        {
+            _listenerV4 = _listener;
+            _listener = new TcpListener(v6Addr, boundPort);
+            _listener.Start();
+            _acceptLoop = Task.Run(() => AcceptLoopAsync(_listener, _cts.Token));
+            _acceptLoopV4 = Task.Run(() => AcceptLoopAsync(_listenerV4, _cts.Token));
+        }
+        catch (SocketException)
+        {
+            // IPv6 binding failed (very old Windows build, IPv6 disabled
+            // at the network stack). Fall back to IPv4-only — better
+            // than failing the whole proxy.
+            _listener = _listenerV4!;
+            _listenerV4 = null;
+            _acceptLoop = Task.Run(() => AcceptLoopAsync(_listener, _cts.Token));
+        }
         return Task.CompletedTask;
     }
 
-    private async Task AcceptLoopAsync(CancellationToken ct)
+    private async Task AcceptLoopAsync(TcpListener listener, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             TcpClient client;
             try
             {
-                client = await _listener!.AcceptTcpClientAsync(ct).ConfigureAwait(false);
+                client = await listener.AcceptTcpClientAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { return; }
             catch (ObjectDisposedException) { return; }
@@ -181,6 +277,18 @@ public sealed class HttpMitmProxy : IAsyncDisposable
         var wrapped = await ReadWrappedRequestAsync(tlsServer, ct).ConfigureAwait(false);
         if (wrapped is null) return;
 
+        // 4a. MCP discovery block. For hosts we're brokering as MCP
+        // servers (any swap entry has a brm-mcp_* fake), short-circuit
+        // OAuth/OIDC discovery probes so the in-VM client can't find
+        // and bypass the broker. Mirrors macOS HTTPProxy step 4a.
+        var requestPath = ExtractPath(wrapped);
+        if (_swapper.HostHasMcpBearer(host, _profileId)
+            && McpProxyHooks.IsOauthDiscoveryPath(requestPath))
+        {
+            await tlsServer.WriteAsync(McpProxyHooks.BuildDiscoveryBlockedResponse(), ct).ConfigureAwait(false);
+            return;
+        }
+
         // 4b. WebSocket upgrade fast-path. Anthropic / OpenAI streaming
         // tools and many SaaS dashboards open WebSockets after the
         // initial HTTPS handshake; URLSession-style request/response
@@ -198,6 +306,55 @@ public sealed class HttpMitmProxy : IAsyncDisposable
         var swapResult = await _swapper.SwapAsync(wrapped, host, _profileId, ct).ConfigureAwait(false);
         var requestBytes = swapResult.Modified;
         var leaks = _swapper.DetectLeaks(wrapped, _profileId);
+
+        // 5'. Body-scan compromise detection. Audit 03 #1 — DetectLeaks
+        // above is header-only; this scans the entire pre-swap
+        // request (headers + body) for any of the per-profile fake
+        // tokens being sent to a host outside the fake's declared
+        // scope. The detector's scanner is auto-rebuilt by
+        // MitmEngine whenever the swap map mutates (initial set,
+        // OAuth rotation, subscription-token coordinator append).
+        if (_bodyScanDetector is not null)
+        {
+            var compromises = _bodyScanDetector.Scan(_profileId, wrapped, host);
+            if (compromises.Count > 0)
+            {
+                // Surface every cross-scope leak as a compromise
+                // event. The engine's per-profile flag-file handler
+                // sees these and refuses next-launch boots. The
+                // detector's CompromiseLeak shape is converted to
+                // the swapper's LeakReport shape so existing event
+                // sinks don't need a new branch.
+                var reports = compromises.Select(c => new LeakReport(
+                        Header: c.CredentialDisplayName,
+                        ValuePreview: c.FakeTokenPreview,
+                        Suspicion: LeakSuspicionKind.OpaqueToken))
+                    .ToList();
+                _swapper.FireCompromise(new CompromiseEvent(
+                    ProfileId: _profileId,
+                    ObservedHost: host,
+                    Leaks: reports,
+                    Timestamp: DateTimeOffset.UtcNow));
+            }
+        }
+
+        // 5a. Subscription-token detection. Surface a clean
+        // `sk-ant-oat01-…` on anthropic.com or a clean Codex JWT on
+        // chatgpt.com / openai.com to the host so the coordinator can
+        // prompt the user once per session. Fire-and-forget — the
+        // request still forwards as-is; the swap kicks in on the
+        // *next* outbound request once the user accepts. Mirrors macOS
+        // HTTPProxy.swift:182-198.
+        FireSubscriptionTokenSeenIfApplicable(host, swapResult.Modified);
+
+        // 5b. MCP bearer injection. OAuth-brokered MCP servers don't put
+        // bearerTokenEnvVar in the config, so the agent issues requests
+        // with no Authorization header — the proxy injects the real
+        // bearer on the wire. Mirrors macOS HTTPProxy step 5b.
+        if (_swapper.RealForMcpHost(host, _profileId) is { } mcpReal)
+        {
+            requestBytes = McpProxyHooks.InjectMcpBearer(requestBytes, mcpReal);
+        }
 
         if (AwsResigner.IsAwsHost(host))
         {
@@ -265,8 +422,16 @@ public sealed class HttpMitmProxy : IAsyncDisposable
         {
             var rotated = OAuthRotationRewriter.Rewrite(responseBytes, prov, _profileId, _swapper);
             responseBytes = rotated.Bytes;
-            // OAuth rotation downstream (storing new reals) is the host's
-            // responsibility; the proxy just exposes it via the result.
+            // Audit 07 §4 recordRotation: surface the fresh real
+            // tokens so the host can update the profile's stored
+            // defaults — without this, the next session boot sees
+            // expired tokens. macOS does this via
+            // SubscriptionTokenCoordinator.recordRotation.
+            if (rotated.NewReals is { } newReals && _onOAuthRotated is not null)
+            {
+                try { _onOAuthRotated(_profileId, prov, newReals); }
+                catch (Exception ex) { _log.LogDebug(ex, "OAuthRotated handler threw"); }
+            }
         }
 
         await tlsServer.WriteAsync(responseBytes, ct).ConfigureAwait(false);
@@ -323,7 +488,8 @@ public sealed class HttpMitmProxy : IAsyncDisposable
                         : LeakSuspicion.OpaqueToken)).ToArray(),
                 BodyStored: bodyStored),
             requestBody: requestForTrace ?? Array.Empty<byte>(),
-            responseBody: responseForTrace ?? Array.Empty<byte>());
+            responseBody: responseForTrace ?? Array.Empty<byte>(),
+            encryptor: _bodyEncryptor);
     }
 
     /// <summary>
@@ -954,9 +1120,14 @@ public sealed class HttpMitmProxy : IAsyncDisposable
     {
         try { _cts?.Cancel(); } catch { }
         try { _listener?.Stop(); } catch { }
+        try { _listenerV4?.Stop(); } catch { }
         if (_acceptLoop is not null)
         {
             try { await _acceptLoop.ConfigureAwait(false); } catch { }
+        }
+        if (_acceptLoopV4 is not null)
+        {
+            try { await _acceptLoopV4.ConfigureAwait(false); } catch { }
         }
         _cts?.Dispose();
     }
@@ -1080,7 +1251,7 @@ public sealed class HttpMitmProxy : IAsyncDisposable
         var u2cCollector = new WebSocket.WsTranscriptCollector(
             WebSocket.WsTranscriptCollector.Direction.UpstreamToClient, pmDeflate, serverNoCtx);
         var realtimeTap = WebSocket.RealtimeEventTap.ShouldTap(host)
-            ? new WebSocket.RealtimeEventTap(_profileId, host, ExtractPath(upgradeRequest), 101, _log)
+            ? new WebSocket.RealtimeEventTap(_profileId, host, ExtractPath(upgradeRequest), 101, _log, _onCloudEvent)
             : null;
 
         long upBytes = 0, downBytes = 0;
@@ -1189,6 +1360,7 @@ public sealed class HttpMitmProxy : IAsyncDisposable
             BodyStored: transcriptStored,
             IsConversation: transcriptStored && WebSocket.RealtimeEventTap.ShouldTap(host)),
             requestBody: ReadOnlySpan<byte>.Empty,
-            responseBody: transcriptBytes ?? ReadOnlySpan<byte>.Empty);
+            responseBody: transcriptBytes ?? ReadOnlySpan<byte>.Empty,
+            encryptor: _bodyEncryptor);
     }
 }

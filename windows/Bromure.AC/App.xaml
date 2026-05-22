@@ -9,16 +9,117 @@
                 <ResourceDictionary Source="Themes/DarkInputs.xaml"/>
             </ResourceDictionary.MergedDictionaries>
 
-            <!-- Master colour brushes — light theme to match macOS
-                 default appearance. The QEMU-era dark theme was a
-                 placeholder we never asked the user to pick. -->
+            <!-- UX #1 — light, macOS-style palette. Big type, airy
+                 panels, vibrant accents. macOS Sonoma uses category-
+                 specific accent colours in its System Settings
+                 sidebar; we follow that intent with a base accent
+                 (Apple-blue) plus per-category tints applied at the
+                 view level (Profile.Color for sessions, category
+                 icons for the editor). -->
             <SolidColorBrush x:Key="ChromeBackground" Color="#F5F5F7"/>
             <SolidColorBrush x:Key="PanelBackground"  Color="#FFFFFF"/>
+            <SolidColorBrush x:Key="PanelElevated"    Color="#FBFBFD"/>
             <SolidColorBrush x:Key="AccentBrush"      Color="#0A84FF"/>
+            <SolidColorBrush x:Key="AccentDimBrush"   Color="#BFDEFF"/>
             <SolidColorBrush x:Key="TextPrimary"      Color="#1F1F22"/>
             <SolidColorBrush x:Key="TextSecondary"    Color="#6E6E73"/>
             <SolidColorBrush x:Key="DangerBrush"      Color="#FF3B30"/>
             <SolidColorBrush x:Key="BorderBrush"      Color="#D1D1D6"/>
+            <SolidColorBrush x:Key="HoverBrush"       Color="#EFEFF2"/>
+
+            <!-- Typography. The previous styles hardcoded sizes
+                 between 11 and 18 with no rhythm. Establish a scale
+                 and let views reference these so any future tweak is
+                 one place. -->
+            <System:Double x:Key="FontSizeBody"    xmlns:System="clr-namespace:System;assembly=mscorlib">14</System:Double>
+            <System:Double x:Key="FontSizeCaption" xmlns:System="clr-namespace:System;assembly=mscorlib">12</System:Double>
+            <System:Double x:Key="FontSizeTitle"   xmlns:System="clr-namespace:System;assembly=mscorlib">22</System:Double>
+            <System:Double x:Key="FontSizeHero"    xmlns:System="clr-namespace:System;assembly=mscorlib">32</System:Double>
+
+            <!-- Modern button — rounded, accent-tinted hover. Replaces
+                 the default WPF button chrome which looks like Win95.
+                 Default style applies app-wide; explicit Style="..."
+                 overrides on a per-control basis where needed. -->
+            <Style TargetType="{x:Type Button}" x:Key="ModernButton">
+                <Setter Property="Background" Value="{StaticResource PanelElevated}"/>
+                <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+                <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="Padding" Value="14,8"/>
+                <Setter Property="FontSize" Value="{StaticResource FontSizeBody}"/>
+                <Setter Property="Cursor" Value="Hand"/>
+                <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="{x:Type Button}">
+                            <Border x:Name="border"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="8"
+                                    Padding="{TemplateBinding Padding}">
+                                <ContentPresenter HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center"
+                                                  TextElement.Foreground="{TemplateBinding Foreground}"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="border" Property="Background" Value="{StaticResource HoverBrush}"/>
+                                    <Setter TargetName="border" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                                </Trigger>
+                                <Trigger Property="IsEnabled" Value="False">
+                                    <Setter TargetName="border" Property="Opacity" Value="0.4"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+            <Style TargetType="{x:Type Button}" BasedOn="{StaticResource ModernButton}"/>
+
+            <!-- Accent button — fill colour is the accent, used for
+                 primary actions ("Launch", "Get Started", etc.).
+                 White on blue is the macOS standard. -->
+            <Style TargetType="{x:Type Button}" x:Key="AccentButton" BasedOn="{StaticResource ModernButton}">
+                <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
+                <Setter Property="Foreground" Value="#FFFFFF"/>
+                <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+            </Style>
+            <Style TargetType="{x:Type Button}" x:Key="DangerButton" BasedOn="{StaticResource ModernButton}">
+                <Setter Property="Background" Value="{StaticResource DangerBrush}"/>
+                <Setter Property="Foreground" Value="#FFFFFF"/>
+                <Setter Property="BorderBrush" Value="{StaticResource DangerBrush}"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+            </Style>
+
+            <!-- Menu styling — the default WPF Menu picks up system
+                 colours which on Windows render as flat grey-on-grey,
+                 unreadable against the new light palette. Override
+                 both the strip and the dropdown so they match the
+                 rest of the chrome. -->
+            <Style TargetType="{x:Type Menu}">
+                <Setter Property="Background" Value="{StaticResource PanelBackground}"/>
+                <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+                <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+                <Setter Property="BorderThickness" Value="0,0,0,1"/>
+                <Setter Property="Padding" Value="4,2"/>
+                <Setter Property="FontSize" Value="{StaticResource FontSizeBody}"/>
+            </Style>
+            <Style TargetType="{x:Type MenuItem}">
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+                <Setter Property="Padding" Value="10,6"/>
+                <Setter Property="FontSize" Value="{StaticResource FontSizeBody}"/>
+                <Style.Triggers>
+                    <Trigger Property="IsHighlighted" Value="True">
+                        <Setter Property="Background" Value="{StaticResource HoverBrush}"/>
+                    </Trigger>
+                    <Trigger Property="IsEnabled" Value="False">
+                        <Setter Property="Foreground" Value="{StaticResource TextSecondary}"/>
+                    </Trigger>
+                </Style.Triggers>
+            </Style>
 
             <cmn:BoolToVisibilityConverter x:Key="BoolToVis"/>
             <cmn:InverseBoolToVisibilityConverter x:Key="InverseBoolToVis"/>

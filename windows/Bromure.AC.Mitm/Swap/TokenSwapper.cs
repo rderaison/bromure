@@ -30,16 +30,28 @@ public sealed class TokenSwapper
     private readonly IConsentBroker _consent;
     private Action<CompromiseEvent>? _compromiseHandler;
 
+    /// <summary>
+    /// Fired after every per-profile map mutation (set / append /
+    /// clear). The compromise detector subscribes here so the AC
+    /// scanner is rebuilt whenever new fake↔real entries land —
+    /// previously the rotation rewriter added new tokens but the
+    /// detector kept scanning the old pattern set, missing leaks.
+    /// (Audit 03 #1, CRITICAL.)
+    /// </summary>
+    public event Action<Guid>? MapMutated;
+
     public TokenSwapper(IConsentBroker consent) => _consent = consent;
 
     public void SetMap(TokenMap map, Guid profileId)
     {
         lock (_gate) _maps[profileId] = map;
+        try { MapMutated?.Invoke(profileId); } catch { /* handlers must not break the swap path */ }
     }
 
     public void ClearMap(Guid profileId)
     {
         lock (_gate) _maps.Remove(profileId);
+        try { MapMutated?.Invoke(profileId); } catch { }
     }
 
     /// <summary>
@@ -55,6 +67,7 @@ public sealed class TokenSwapper
             var existing = _maps.TryGetValue(profileId, out var m) ? m.Entries : Array.Empty<TokenMap.Entry>();
             _maps[profileId] = new TokenMap(existing.Concat(newEntries).ToArray());
         }
+        try { MapMutated?.Invoke(profileId); } catch { }
     }
 
     public IReadOnlyList<TokenMap.Entry> EntriesFor(Guid profileId)
@@ -62,9 +75,98 @@ public sealed class TokenSwapper
         lock (_gate) return _maps.TryGetValue(profileId, out var m) ? m.Entries : Array.Empty<TokenMap.Entry>();
     }
 
+    /// <summary>
+    /// Direct port of <c>TokenSwap.detectSubscriptionAccessToken</c>:
+    /// look at the outgoing request's <c>Authorization: Bearer …</c>
+    /// header and return the cleartext token if it's a clean
+    /// <c>sk-ant-oat01-…</c> token (NOT a brm-fake, NOT already in the
+    /// swap map). Caller is expected to have already gated on the
+    /// host being anthropic.com.
+    /// </summary>
+    public string? DetectSubscriptionAccessToken(byte[] rawRequest, Guid profileId)
+    {
+        var (knownFakes, knownReals) = SnapshotKnownTokens(profileId);
+        return ExtractBearer(rawRequest) is { } tok
+               && tok.StartsWith("sk-ant-oat01-", StringComparison.Ordinal)
+               && !tok.StartsWith("sk-ant-oat01-brm-", StringComparison.Ordinal)
+               && !knownFakes.Contains(tok)
+               && !knownReals.Contains(tok)
+            ? tok
+            : null;
+    }
+
+    /// <summary>
+    /// Direct port of <c>TokenSwap.detectCodexAccessToken</c>. Codex
+    /// tokens are JWT-shaped (<c>eyJ…</c>); we skip our minted fakes
+    /// (whose signature segment is replaced by a <c>brm-cdX-sig</c>
+    /// marker) and tokens already known to the swap map.
+    /// </summary>
+    public string? DetectCodexAccessToken(byte[] rawRequest, Guid profileId)
+    {
+        var (knownFakes, knownReals) = SnapshotKnownTokens(profileId);
+        var tok = ExtractBearer(rawRequest);
+        if (tok is null) return null;
+        if (!tok.StartsWith("eyJ", StringComparison.Ordinal) || tok.Length < 32) return null;
+        if (SubscriptionFakeMint.IsJwtFake(tok)) return null;
+        if (knownFakes.Contains(tok) || knownReals.Contains(tok)) return null;
+        return tok;
+    }
+
+    private (HashSet<string> Fakes, HashSet<string> Reals) SnapshotKnownTokens(Guid profileId)
+    {
+        lock (_gate)
+        {
+            if (!_maps.TryGetValue(profileId, out var map))
+            {
+                return (new HashSet<string>(StringComparer.Ordinal), new HashSet<string>(StringComparer.Ordinal));
+            }
+            var fakes = new HashSet<string>(map.Entries.Select(e => e.Fake), StringComparer.Ordinal);
+            var reals = new HashSet<string>(map.Entries.Select(e => e.Real), StringComparer.Ordinal);
+            return (fakes, reals);
+        }
+    }
+
+    private static string? ExtractBearer(byte[] rawRequest)
+    {
+        var headerEndIdx = IndexOf(rawRequest, HeaderEndPattern);
+        if (headerEndIdx < 0) return null;
+        string headerStr;
+        try { headerStr = Encoding.ASCII.GetString(rawRequest, 0, headerEndIdx); }
+        catch { return null; }
+        foreach (var line in headerStr.Split("\r\n"))
+        {
+            var colon = line.IndexOf(':');
+            if (colon < 0) continue;
+            var name = line[..colon].Trim();
+            if (!name.Equals("authorization", StringComparison.OrdinalIgnoreCase)) continue;
+            var value = line[(colon + 1)..].Trim();
+            var space = value.IndexOf(' ');
+            if (space < 0) continue;
+            var scheme = value[..space];
+            if (!scheme.Equals("bearer", StringComparison.OrdinalIgnoreCase)) continue;
+            return value[(space + 1)..].Trim();
+        }
+        return null;
+    }
+
     public void SetCompromiseHandler(Action<CompromiseEvent>? handler)
     {
         lock (_gate) _compromiseHandler = handler;
+    }
+
+    /// <summary>
+    /// Surface a compromise event to whatever handler the engine
+    /// registered via <see cref="SetCompromiseHandler"/>. The
+    /// caller (proxy hot path or the body-scan detector) builds
+    /// the event with all the context it has; the swapper only
+    /// fans it out.
+    /// </summary>
+    public void FireCompromise(CompromiseEvent evt)
+    {
+        Action<CompromiseEvent>? handler;
+        lock (_gate) handler = _compromiseHandler;
+        try { handler?.Invoke(evt); }
+        catch { /* handler is host-side; the swap path must never propagate */ }
     }
 
     private TokenMap? SnapshotMap(Guid profileId)

@@ -29,6 +29,30 @@ public class OpenSshKeyFormatTests
     }
 
     [Fact]
+    public void ParseEd25519PrivatePem_RoundTripsSeedAndPublic()
+    {
+        var seed = new byte[32];
+        var pub = new byte[32];
+        for (var i = 0; i < 32; i++) { seed[i] = (byte)i; pub[i] = (byte)(255 - i); }
+
+        var pemBytes = OpenSshKeyFormat.Ed25519Pem(seed, pub, "round-trip-tester");
+        var pem = Encoding.ASCII.GetString(pemBytes);
+
+        var parsed = OpenSshKeyFormat.ParseEd25519PrivatePem(pem);
+        parsed.Should().NotBeNull();
+        parsed!.Value.Seed.Should().Equal(seed);
+        parsed.Value.PublicKey.Should().Equal(pub);
+    }
+
+    [Fact]
+    public void ParseEd25519PrivatePem_RejectsGarbage()
+    {
+        OpenSshKeyFormat.ParseEd25519PrivatePem("").Should().BeNull();
+        OpenSshKeyFormat.ParseEd25519PrivatePem("-----BEGIN OPENSSH PRIVATE KEY-----\nblahblah\n-----END OPENSSH PRIVATE KEY-----\n").Should().BeNull();
+        OpenSshKeyFormat.ParseEd25519PrivatePem("not even a pem").Should().BeNull();
+    }
+
+    [Fact]
     public void Ed25519PublicBlob_FollowsSshWireFormat()
     {
         var pub = new byte[32];

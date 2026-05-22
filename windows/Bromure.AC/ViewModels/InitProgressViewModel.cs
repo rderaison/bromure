@@ -12,9 +12,17 @@ public sealed partial class InitProgressViewModel : ObservableObject
 {
     [ObservableProperty] private string _status = "Preparing…";
     [ObservableProperty] private string _consoleLog = "";
-    [ObservableProperty] private string? _error;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasError))]
+    private string? _error;
     [ObservableProperty] private bool _isRunning;
-    [ObservableProperty] private double _progress;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ProgressPercent))]
+    private double _progress;
+
+    public bool HasError => Error is not null;
+    public string ProgressPercent => string.Format(
+        System.Globalization.CultureInfo.InvariantCulture, "{0:F1}%", Progress * 100);
 
     private const int MaxLines = 100;
     private readonly List<string> _lines = new();

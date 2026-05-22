@@ -13,3 +13,11 @@ TestResults/
 # artefact (~80 MB of binaries + DLLs) produced fresh on each build
 # machine and packaged by the installer step.
 dist/qemu-bundle/
+
+# MSI packaging output from windows/scripts/build-msi.ps1.
+# The .wxs + script live in git; the .msi + publish staging are
+# regenerated on every build.
+dist/publish/
+dist/qemu/
+dist/*.msi
+dist/*.wixpdb

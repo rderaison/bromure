@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.Diagnostics;
+using System.IO;
 using Bromure.Platform;
 using Bromure.SandboxEngine.Disk;
 using Bromure.SandboxEngine.Image;
@@ -124,61 +125,65 @@ internal static class Program
         });
         root.AddCommand(sessionCmd);
 
-        // `wsl` subcommand: smoke-test the WSL2 lifecycle wrapper
-        // against a real rootfs tarball. Exists so we can verify
-        // ImportAsync / LaunchAsync / UnregisterAsync end-to-end
-        // outside the GUI before wiring them into the host shell.
-        var wslCmd = new Command("wsl", "Smoke-test WslDistro lifecycle against a rootfs tarball");
-        var wslRootfsArg = new Argument<string>("rootfs",
-            "Path to a rootfs tarball (.tar/.tar.gz/.tar.xz/.vhdx)");
-        wslCmd.AddArgument(wslRootfsArg);
-        wslCmd.SetHandler(async ctx =>
+        // `e2e` subcommand: walk the HCS stack bottom-up, PASS/SKIP/FAIL
+        // each layer. Catches "why does X do nothing" without round-
+        // tripping through the WPF UI.
+        var e2eCmd = new Command("e2e",
+            "End-to-end HCS harness — checks each layer of the stack and reports PASS/SKIP/FAIL");
+        var e2eDirOpt = new Option<string?>("--artefact-dir",
+            description: "Optional path to a bake-artefacts directory; VM-boot phases SKIP without it");
+        var e2eStubsOpt = new Option<bool>("--with-stubs",
+            description: "Synthesise stub artefacts (real VHDX, fake kernel/initrd) to exercise schema + HcsVm.CreateAsync — Start is expected to fail at kernel-load");
+        e2eCmd.AddOption(e2eDirOpt);
+        e2eCmd.AddOption(e2eStubsOpt);
+        e2eCmd.SetHandler(async ctx =>
         {
-            exitCode = await WslSpike.RunAsync(
-                new[] { ctx.ParseResult.GetValueForArgument(wslRootfsArg) }
-            ).ConfigureAwait(false);
+            var dir = ctx.ParseResult.GetValueForOption(e2eDirOpt);
+            var stubs = ctx.ParseResult.GetValueForOption(e2eStubsOpt);
+            var rest = new List<string>();
+            if (dir is not null) { rest.Add("--artefact-dir"); rest.Add(dir); }
+            if (stubs) rest.Add("--with-stubs");
+            exitCode = await E2eSpike.RunAsync(rest.ToArray()).ConfigureAwait(false);
         });
-        root.AddCommand(wslCmd);
+        root.AddCommand(e2eCmd);
 
-        // `bake-wsl` subcommand: drive RootfsBaker headlessly to produce
-        // bromure-base.tar.gz. Stdout streams progress + the in-distro
-        // setup output. The bake takes ~5-10 min on a fresh source rootfs;
-        // exit non-zero if setup-wsl.sh emits SANDBOX_SETUP_FAILED.
-        var bakeWslCmd = new Command("bake-wsl",
-            "Bake bromure-base.tar.gz from a source rootfs (WSL2)");
-        var bakeSourceArg = new Argument<string>("source",
-            "Path to a source rootfs tarball (e.g. wsl --export Ubuntu-24.04 …)");
-        var bakeOutputArg = new Argument<string>("output",
-            "Path where bromure-base.tar.gz will be written");
-        bakeWslCmd.AddArgument(bakeSourceArg);
-        bakeWslCmd.AddArgument(bakeOutputArg);
-        bakeWslCmd.SetHandler(async ctx =>
+        // `bake-hcs` subcommand: drive VmBaker headlessly to produce
+        // bromure-base.vhdx + matching kernel/initrd. The in-process
+        // bake driver is a follow-up; for now this surfaces the
+        // interactive-bake instructions VmBaker.BakeAsync emits.
+        var bakeHcsCmd = new Command("bake-hcs",
+            "Bake bromure-base.vhdx + kernel + initrd (HCS). Drives setup.sh inside an Alpine ISO; source is downloaded as needed.");
+        var bakeOutputArg = new Argument<string>("output-dir",
+            "Directory where bromure-base.vhdx + vmlinuz + initrd.img will be written");
+        bakeHcsCmd.AddArgument(bakeOutputArg);
+        bakeHcsCmd.SetHandler(async ctx =>
         {
-            exitCode = await WslBakeSpike.RunAsync(new[]
+            exitCode = await HcsBakeSpike.RunAsync(new[]
             {
-                ctx.ParseResult.GetValueForArgument(bakeSourceArg),
                 ctx.ParseResult.GetValueForArgument(bakeOutputArg),
             }).ConfigureAwait(false);
         });
-        root.AddCommand(bakeWslCmd);
+        root.AddCommand(bakeHcsCmd);
 
-        // `wsl-session` subcommand: end-to-end exercise of WslSession —
-        // import a baked rootfs, drop a synthetic home overlay, run a
-        // probe command inside, tear down. Verifies the FS overlay,
-        // env injection, and lifecycle work against the real bake.
-        var wslSessionCmd = new Command("wsl-session",
-            "End-to-end exercise of WslSession against a baked rootfs");
-        var sesRootfsArg = new Argument<string>("rootfs",
-            "Path to bromure-base.tar.gz (output of bake-wsl)");
-        wslSessionCmd.AddArgument(sesRootfsArg);
-        wslSessionCmd.SetHandler(async ctx =>
+        // `hcs-session` subcommand: end-to-end exercise of HcsSession —
+        // clone the VHDX, boot the VM with a synthetic home overlay,
+        // wait for the boot signal, tear down. Verifies the share +
+        // env-file injection + lifecycle work against the real bake.
+        var hcsSessionCmd = new Command("hcs-session",
+            "End-to-end exercise of HcsSession against a baked VHDX");
+        var sesArtefactDirArg = new Argument<string>("artefact-dir",
+            "Directory containing bromure-base.vhdx + vmlinuz + initrd.img");
+        var displayOpt = new Option<bool>("--display",
+            "After boot signal, open a WPF window with Bromure.AC's VncControl pointed at the loopback bridge — the guest terminal renders inside it");
+        hcsSessionCmd.AddArgument(sesArtefactDirArg);
+        hcsSessionCmd.AddOption(displayOpt);
+        hcsSessionCmd.SetHandler(async ctx =>
         {
-            exitCode = await WslSessionSpike.RunAsync(new[]
-            {
-                ctx.ParseResult.GetValueForArgument(sesRootfsArg),
-            }).ConfigureAwait(false);
+            var dir = ctx.ParseResult.GetValueForArgument(sesArtefactDirArg);
+            var launch = ctx.ParseResult.GetValueForOption(displayOpt);
+            exitCode = await HcsSessionSpike.RunAsync(launch ? new[] { dir, "--display" } : new[] { dir }).ConfigureAwait(false);
         });
-        root.AddCommand(wslSessionCmd);
+        root.AddCommand(hcsSessionCmd);
 
         await root.InvokeAsync(args).ConfigureAwait(false);
         return exitCode;

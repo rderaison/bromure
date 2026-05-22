@@ -19,6 +19,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Bromure.AC", "Bromure.AC\Br
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Bromure.Cloud", "Bromure.Cloud\Bromure.Cloud.csproj", "{30CFBB1E-1980-42B7-9F25-227B338199B1}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Bromure.AC.Mcp", "Bromure.AC.Mcp\Bromure.AC.Mcp.csproj", "{C783E418-79A3-47D0-8EA1-ED9FF013CE81}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -60,5 +62,9 @@ Global
 		{30CFBB1E-1980-42B7-9F25-227B338199B1}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{30CFBB1E-1980-42B7-9F25-227B338199B1}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{30CFBB1E-1980-42B7-9F25-227B338199B1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C783E418-79A3-47D0-8EA1-ED9FF013CE81}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C783E418-79A3-47D0-8EA1-ED9FF013CE81}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C783E418-79A3-47D0-8EA1-ED9FF013CE81}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C783E418-79A3-47D0-8EA1-ED9FF013CE81}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
