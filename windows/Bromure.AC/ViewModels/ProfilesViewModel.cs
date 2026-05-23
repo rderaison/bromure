@@ -234,6 +234,15 @@ public sealed partial class ProfilesViewModel : ObservableObject
         OpenUrlInBrowser("https://github.com/settings/keys");
     }
 
+    /// <summary>Audit 09 §A4 — "Open IAM credentials page" launcher
+    /// matching the macOS link button. Drops the user in the AWS
+    /// console's security-credentials view (region-agnostic URL).</summary>
+    [RelayCommand]
+    private void OpenAwsIamCredentialsPage()
+    {
+        OpenUrlInBrowser("https://console.aws.amazon.com/iam/home#/security_credentials");
+    }
+
     private static void OpenUrlInBrowser(string url)
     {
         try

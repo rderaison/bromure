@@ -434,10 +434,17 @@
                                                       Content="Prompt before each AWS call"
                                                       IsChecked="{Binding RequireApproval}"/>
                                         </Grid>
-                                        <Button Content="Discover from ~/.aws/config" Margin="0,12,0,0"
-                                                HorizontalAlignment="Left"
-                                                Command="{Binding DataContext.DiscoverAwsSsoCommand,
-                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                            <Button Content="Discover from ~/.aws/config" Margin="0,0,8,0"
+                                                    Command="{Binding DataContext.DiscoverAwsSsoCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                            <!-- Audit 09 §A4: "Open IAM credentials page" launcher.
+                                                 Drops the user in the AWS console's security-credentials
+                                                 view so they can create / rotate access keys. -->
+                                            <Button Content="Open IAM credentials page"
+                                                    Command="{Binding DataContext.OpenAwsIamCredentialsPageCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                        </StackPanel>
                                     </StackPanel>
                                 </Border>
                             </Expander>
