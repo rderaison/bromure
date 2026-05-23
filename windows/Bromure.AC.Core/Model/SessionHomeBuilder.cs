@@ -70,6 +70,17 @@ public static class SessionHomeBuilder
             files[".bromure-tz"] = Utf8(ianaTz + "\n");
         }
 
+        // Audit 10 §1.6 — share the host's custom font into the guest
+        // when the profile pinned one in CustomFontFamily. We don't
+        // ship every Windows font (the System fonts dir is 100s of
+        // MiB and most are display fonts kitty wouldn't pick up
+        // anyway); we copy ONLY the requested family from the user's
+        // installed-fonts dir, so a user who installed JetBrains Mono
+        // and selected it in the profile editor gets it inside the VM
+        // without the ~100ms overlay-tar penalty for fonts they didn't
+        // ask for. fontconfig auto-discovers anything in ~/.fonts/.
+        TryDropRequestedFont(profile, files);
+
         // -- Git ----------------------------------------------------------
 
         var gitCreds = profile.GitHttpsCredentials
@@ -487,6 +498,51 @@ public static class SessionHomeBuilder
             exec startx
         fi
         """;
+
+    /// <summary>Drop the requested font family (if any) from the
+    /// user's installed-fonts dir into the home overlay. Best-effort:
+    /// matches by case-insensitive substring against the font file
+    /// name. If we can't find it or the profile doesn't pin a family,
+    /// we leave fontconfig to its own defaults inside the guest.</summary>
+    private static void TryDropRequestedFont(Profile? profile, Dictionary<string, byte[]> files)
+    {
+        try
+        {
+            if (profile is null) return;
+            var family = profile.CustomFontFamily?.Trim();
+            if (string.IsNullOrEmpty(family)) return;
+            // %LOCALAPPDATA%\Microsoft\Windows\Fonts is the user-installed
+            // fonts dir; readable without elevation. The system dir at
+            // C:\Windows\Fonts is technically accessible but full of
+            // unrelated UI fonts and adds size without value.
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrEmpty(localAppData)) return;
+            var fontsDir = System.IO.Path.Combine(localAppData, "Microsoft", "Windows", "Fonts");
+            if (!Directory.Exists(fontsDir)) return;
+            // Case-insensitive contains is forgiving: "JetBrains Mono"
+            // matches "JetBrainsMono-Regular.ttf" / "JetBrainsMonoNL-
+            // Bold.ttf". We push every variant we find so kitty's
+            // weight/style requests resolve.
+            var simplified = new string(family.Where(char.IsLetterOrDigit).ToArray());
+            if (simplified.Length < 3) return;  // refuse "Co" / "JB" — too noisy
+            foreach (var path in Directory.EnumerateFiles(fontsDir))
+            {
+                var ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+                if (ext != ".ttf" && ext != ".otf") continue;
+                var fileName = System.IO.Path.GetFileNameWithoutExtension(path);
+                var fileSimplified = new string(fileName.Where(char.IsLetterOrDigit).ToArray());
+                if (!fileSimplified.Contains(simplified, StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    var bytes = File.ReadAllBytes(path);
+                    if (bytes.Length > 8 * 1024 * 1024) continue;  // skip outliers >8MiB
+                    files[".fonts/" + System.IO.Path.GetFileName(path)] = bytes;
+                }
+                catch (IOException) { /* in-use, skip */ }
+            }
+        }
+        catch { /* never break session boot over fonts */ }
+    }
 
     /// <summary>Best-effort lookup of the host's IANA timezone name
     /// (e.g. "Europe/Paris"). On Linux/macOS <see cref="TimeZoneInfo.Local.Id"/>

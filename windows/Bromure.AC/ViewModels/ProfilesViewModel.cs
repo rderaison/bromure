@@ -542,6 +542,31 @@ public sealed partial class ProfilesViewModel : ObservableObject
         try
         {
             var pem = File.ReadAllText(dlg.FileName);
+            // Audit 05 §2.1: the Windows SshAgentServer signs ed25519
+            // only. Detect classic RSA / ECDSA / DSA PEM headers and
+            // surface a clear error rather than silently importing a
+            // key that will fail every SIGN_REQUEST inside the VM.
+            // OpenSSH new-format keys ("-----BEGIN OPENSSH PRIVATE KEY-----")
+            // can still be RSA underneath, but the common case the
+            // user trips over is the classic PKCS#1 RSA PEM.
+            var head = pem.TrimStart();
+            string? unsupported = head switch
+            {
+                _ when head.StartsWith("-----BEGIN RSA PRIVATE KEY-----") => "RSA (PKCS#1)",
+                _ when head.StartsWith("-----BEGIN EC PRIVATE KEY-----") => "ECDSA",
+                _ when head.StartsWith("-----BEGIN DSA PRIVATE KEY-----") => "DSA",
+                _ => null,
+            };
+            if (unsupported is not null)
+            {
+                MessageBox.Show(
+                    $"This appears to be a {unsupported} key. The Windows port currently signs ed25519 keys only.\n\n" +
+                    "Convert with:\n  ssh-keygen -p -m PEM -f " + Path.GetFileName(dlg.FileName) + "\n" +
+                    "or generate a fresh ed25519 key with:\n  ssh-keygen -t ed25519",
+                    "Unsupported key type",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
             Selected.ImportedSshKeys.Add(new ImportedSshKey
             {
                 Label = Path.GetFileName(dlg.FileName),
