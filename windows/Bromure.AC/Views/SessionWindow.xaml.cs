@@ -119,6 +119,42 @@ public partial class SessionWindow : Window
         catch { /* clipboard can transiently fail (locked by another process) */ }
     }
 
+    private void RefreshSharesButton(SessionViewModel vm)
+    {
+        var paths = vm.SharedFolderHostPaths;
+        if (paths.Count == 0)
+        {
+            SharesButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+        SharesList.ItemsSource = paths;
+        SharesButton.Visibility = Visibility.Visible;
+    }
+
+    private void OnSharesClick(object sender, RoutedEventArgs e)
+    {
+        SharesPopup.IsOpen = !SharesPopup.IsOpen;
+    }
+
+    private void OnSharesItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.Button b && b.Tag is string path
+            && !string.IsNullOrWhiteSpace(path))
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = $"\"{path}\"",
+                    UseShellExecute = true,
+                });
+            }
+            catch { /* best-effort */ }
+        }
+        SharesPopup.IsOpen = false;
+    }
+
     /// <summary>3-button prompt asking what to do when the user
     /// closes the window with profile.CloseAction = Ask. Returns
     /// true → suspend, false → shutdown. Cancel resets _shuttingDown
@@ -384,10 +420,12 @@ public partial class SessionWindow : Window
             _vnc = BuildVncControl(vm);
             ActiveContent.Content = _vnc;
             SubscribeAliveRoster(vm);
-            // Audit 10 §4.1 — IP chip. Pull the initial value and
-            // subscribe to live changes (guest pushes ip|<addr> every
-            // ~5s via title-pusher).
+            // Audit 10 §4.1 — IP chip + shared-folders popover. Pull
+            // initial values and subscribe to live changes (guest
+            // pushes ip|<addr> every ~5s via title-pusher; folder set
+            // is fixed for the lifetime of the session).
             RefreshIpChip(vm.VmGuestIpAddress);
+            RefreshSharesButton(vm);
             vm.PropertyChanged += (_, e) =>
             {
                 if (e.PropertyName == nameof(SessionViewModel.VmGuestIpAddress))

@@ -59,6 +59,50 @@
                         Orientation="Horizontal"
                         VerticalAlignment="Top"
                         shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                <!-- Audit 10 §4.1: shared-folders popover. Lists the
+                     active profile's mounted host paths; click a row
+                     to jump to it in Explorer. Hidden when the profile
+                     has no shared folders. -->
+                <Button x:Name="SharesButton"
+                        Click="OnSharesClick"
+                        Visibility="Collapsed"
+                        VerticalAlignment="Center"
+                        Margin="0,0,8,0"
+                        Padding="8,4"
+                        Background="#22FFFFFF"
+                        BorderBrush="#33FFFFFF"
+                        BorderThickness="1"
+                        Foreground="#E6EDF3"
+                        FontSize="11"
+                        Cursor="Hand"
+                        ToolTip="Shared folders">
+                    <TextBlock x:Name="SharesButtonLabel" Text="📁 Shares"/>
+                </Button>
+                <Popup x:Name="SharesPopup"
+                       PlacementTarget="{Binding ElementName=SharesButton}"
+                       Placement="Bottom"
+                       AllowsTransparency="True"
+                       StaysOpen="False">
+                    <Border Background="#1F2530" BorderBrush="#33FFFFFF"
+                            BorderThickness="1" CornerRadius="6" Padding="6">
+                        <ItemsControl x:Name="SharesList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Button Content="{Binding}"
+                                            Tag="{Binding}"
+                                            Click="OnSharesItemClick"
+                                            HorizontalContentAlignment="Left"
+                                            Padding="10,4"
+                                            Background="Transparent"
+                                            Foreground="#E6EDF3"
+                                            BorderThickness="0"
+                                            Cursor="Hand"
+                                            FontSize="12"/>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Border>
+                </Popup>
                 <!-- Audit 10 §4.1: IP chip. Shows the guest's current
                      LAN IP; click copies to clipboard (handy for
                      ssh / scp into the VM from another host shell).

@@ -112,6 +112,13 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
     public Bromure.AC.Core.Model.CloseAction CloseAction
         => _activeProfile?.CloseAction ?? Bromure.AC.Core.Model.CloseAction.Ask;
 
+    /// <summary>Host paths the active profile shares into the VM at
+    /// /home/bromure/&lt;basename&gt;. Surfaced by the session window's
+    /// shared-folders popover so the user can jump straight to a
+    /// share in Explorer. Audit 10 §4.1.</summary>
+    public IReadOnlyList<string> SharedFolderHostPaths
+        => _activeProfile?.FolderPaths ?? (IReadOnlyList<string>)Array.Empty<string>();
+
     public Bromure.AC.Core.Model.ProfileColor ProfileColor =>
         _activeProfile?.Color ?? Bromure.AC.Core.Model.ProfileColor.Blue;
 

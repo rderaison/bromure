@@ -1046,6 +1046,25 @@ public sealed partial class ShellViewModel : ObservableObject
     [RelayCommand]
     private void Cancel()
     {
+        // Audit 10 §0.6 — mid-rebuild cancel confirmation. When the
+        // bake is actually running, warn the user before signalling
+        // the token; cancelling mid-bake leaves the image dir empty
+        // until they kick off another bake. When no bake is running
+        // (e.g. caller hit cancel from the welcome / settings phases
+        // without ever having started one), skip the prompt and just
+        // reset the phase.
+        if (_bakeCts is { IsCancellationRequested: false })
+        {
+            var choice = System.Windows.MessageBox.Show(
+                "Cancel base-image rebuild?\n\n" +
+                "The image will be left in an incomplete state. " +
+                "You'll need to re-run the rebuild before launching new sessions.",
+                "Cancel rebuild?",
+                System.Windows.MessageBoxButton.YesNo,
+                System.Windows.MessageBoxImage.Warning,
+                System.Windows.MessageBoxResult.No);
+            if (choice != System.Windows.MessageBoxResult.Yes) return;
+        }
         // Cancel any in-flight bake. The actual VM stop happens in
         // VmBaker's finally block — we just signal the token here.
         try { _bakeCts?.Cancel(); } catch { /* best-effort */ }
