@@ -825,6 +825,10 @@
                                                     Command="{Binding DataContext.CopySshPublicKeyCommand,
                                                               RelativeSource={RelativeSource AncestorType=UserControl}}"
                                                     Margin="0,0,8,0"/>
+                                            <Button Content="Open GitHub keys page"
+                                                    Command="{Binding DataContext.OpenGitHubKeysPageCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                    Margin="0,0,8,0"/>
                                             <Button Content="Regenerate keypair"
                                                     Style="{StaticResource DangerButton}"
                                                     Command="{Binding DataContext.RegenerateSshKeyCommand,

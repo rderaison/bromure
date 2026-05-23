@@ -225,6 +225,28 @@ public sealed partial class ProfilesViewModel : ObservableObject
         catch { /* Clipboard can briefly throw; user can retry. */ }
     }
 
+    /// <summary>Audit 09 §A4 — "Open GitHub keys page" launcher
+    /// matching the macOS link button. Opens the URL in the host's
+    /// default browser; the user pastes the public key there.</summary>
+    [RelayCommand]
+    private void OpenGitHubKeysPage()
+    {
+        OpenUrlInBrowser("https://github.com/settings/keys");
+    }
+
+    private static void OpenUrlInBrowser(string url)
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = url,
+                UseShellExecute = true,
+            });
+        }
+        catch { /* Best-effort — Windows shell can refuse to dispatch URLs in some sessions. */ }
+    }
+
     /// <summary>Audit 09 §A7 — clear the user's previous accept/decline
     /// decision for Claude OAuth-token swap so the prompt fires again
     /// on the next clean access-token observed for this profile.</summary>
