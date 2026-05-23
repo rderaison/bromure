@@ -103,6 +103,24 @@
                         </ItemsControl>
                     </Border>
                 </Popup>
+                <!-- Audit 10 §4.1: trace inspector quick-jump. Surfaces
+                     the main window's Trace pane so the user can
+                     correlate session activity with intercepted
+                     exchanges without hunting through the menu. -->
+                <Button x:Name="TraceButton"
+                        Click="OnTraceButtonClick"
+                        VerticalAlignment="Center"
+                        Margin="0,0,8,0"
+                        Padding="8,4"
+                        Background="#22FFFFFF"
+                        BorderBrush="#33FFFFFF"
+                        BorderThickness="1"
+                        Foreground="#E6EDF3"
+                        FontSize="11"
+                        Cursor="Hand"
+                        ToolTip="Open trace inspector">
+                    <TextBlock Text="🔍 Trace"/>
+                </Button>
                 <!-- Audit 10 §4.1: IP chip. Shows the guest's current
                      LAN IP; click copies to clipboard (handy for
                      ssh / scp into the VM from another host shell).

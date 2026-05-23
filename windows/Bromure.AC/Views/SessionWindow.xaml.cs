@@ -111,6 +111,23 @@ public partial class SessionWindow : Window
         IpChip.Visibility = Visibility.Visible;
     }
 
+    private void OnTraceButtonClick(object sender, RoutedEventArgs e)
+    {
+        // Audit 10 §4.1 — bring the main window's Trace Inspector
+        // pane forward. The session window can't host the trace view
+        // itself (which is bound to the cross-profile store), so we
+        // surface the existing pane on the picker window.
+        var main = System.Windows.Application.Current?.MainWindow;
+        if (main is null) return;
+        if (main.WindowState == WindowState.Minimized) main.WindowState = WindowState.Normal;
+        main.Show();
+        main.Activate();
+        if (main.DataContext is Bromure.AC.ViewModels.ShellViewModel shell)
+        {
+            shell.GoToNavigation("TraceInspector");
+        }
+    }
+
     private void OnIpChipClick(object sender, RoutedEventArgs e)
     {
         var ip = _vm?.VmGuestIpAddress;
