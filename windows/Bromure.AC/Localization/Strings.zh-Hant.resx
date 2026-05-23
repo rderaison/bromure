@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+
+  <data name="MenuFile"><value>檔案(_F)</value></data>
+  <data name="MenuFileNewSession"><value>新增工作階段(_N)</value></data>
+  <data name="MenuFileRebuildBase"><value>重新建置基礎映像…(_R)</value></data>
+  <data name="MenuFileCloseWindow"><value>關閉視窗(_C)</value></data>
+  <data name="MenuFileExit"><value>結束(_X)</value></data>
+
+  <data name="MenuEdit"><value>編輯(_E)</value></data>
+  <data name="MenuEditCut"><value>剪下(_T)</value></data>
+  <data name="MenuEditCopy"><value>複製(_C)</value></data>
+  <data name="MenuEditPaste"><value>貼上(_P)</value></data>
+  <data name="MenuEditSelectAll"><value>全選(_A)</value></data>
+
+  <data name="MenuView"><value>檢視(_V)</value></data>
+  <data name="MenuViewSessions"><value>工作階段(_S)</value></data>
+  <data name="MenuViewProfiles"><value>設定檔(_P)</value></data>
+  <data name="MenuViewTrace"><value>追蹤檢查器(_T)</value></data>
+  <data name="MenuViewApprovals"><value>核准(_A)</value></data>
+  <data name="MenuViewPreferences"><value>偏好設定…(_P)</value></data>
+
+  <data name="MenuHelp"><value>說明(_H)</value></data>
+  <data name="MenuHelpDocs"><value>文件(_D)</value></data>
+  <data name="MenuHelpUpdates"><value>檢查更新…(_U)</value></data>
+  <data name="MenuHelpAbout"><value>關於 Bromure…(_A)</value></data>
+</root>

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+
+  <data name="MenuFile"><value>ファイル(_F)</value></data>
+  <data name="MenuFileNewSession"><value>新しいセッション(_N)</value></data>
+  <data name="MenuFileRebuildBase"><value>ベースイメージを再構築…(_R)</value></data>
+  <data name="MenuFileCloseWindow"><value>ウィンドウを閉じる(_C)</value></data>
+  <data name="MenuFileExit"><value>終了(_X)</value></data>
+
+  <data name="MenuEdit"><value>編集(_E)</value></data>
+  <data name="MenuEditCut"><value>切り取り(_T)</value></data>
+  <data name="MenuEditCopy"><value>コピー(_C)</value></data>
+  <data name="MenuEditPaste"><value>貼り付け(_P)</value></data>
+  <data name="MenuEditSelectAll"><value>すべて選択(_A)</value></data>
+
+  <data name="MenuView"><value>表示(_V)</value></data>
+  <data name="MenuViewSessions"><value>セッション(_S)</value></data>
+  <data name="MenuViewProfiles"><value>プロファイル(_P)</value></data>
+  <data name="MenuViewTrace"><value>トレースインスペクター(_T)</value></data>
+  <data name="MenuViewApprovals"><value>承認(_A)</value></data>
+  <data name="MenuViewPreferences"><value>環境設定…(_P)</value></data>
+
+  <data name="MenuHelp"><value>ヘルプ(_H)</value></data>
+  <data name="MenuHelpDocs"><value>ドキュメント(_D)</value></data>
+  <data name="MenuHelpUpdates"><value>更新を確認…(_U)</value></data>
+  <data name="MenuHelpAbout"><value>Bromureについて…(_A)</value></data>
+</root>

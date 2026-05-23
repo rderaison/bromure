@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+
+  <data name="MenuFile"><value>_File</value></data>
+  <data name="MenuFileNewSession"><value>_New Session</value></data>
+  <data name="MenuFileRebuildBase"><value>_Rebuild Base Image…</value></data>
+  <data name="MenuFileCloseWindow"><value>_Close Window</value></data>
+  <data name="MenuFileExit"><value>E_xit</value></data>
+
+  <data name="MenuEdit"><value>_Edit</value></data>
+  <data name="MenuEditCut"><value>Cu_t</value></data>
+  <data name="MenuEditCopy"><value>_Copy</value></data>
+  <data name="MenuEditPaste"><value>_Paste</value></data>
+  <data name="MenuEditSelectAll"><value>Select _All</value></data>
+
+  <data name="MenuView"><value>_View</value></data>
+  <data name="MenuViewSessions"><value>_Sessions</value></data>
+  <data name="MenuViewProfiles"><value>_Profiles</value></data>
+  <data name="MenuViewTrace"><value>_Trace Inspector</value></data>
+  <data name="MenuViewApprovals"><value>_Approvals</value></data>
+  <data name="MenuViewPreferences"><value>_Preferences…</value></data>
+
+  <data name="MenuHelp"><value>_Help</value></data>
+  <data name="MenuHelpDocs"><value>_Documentation</value></data>
+  <data name="MenuHelpUpdates"><value>Check for _Updates…</value></data>
+  <data name="MenuHelpAbout"><value>_About Bromure…</value></data>
+</root>

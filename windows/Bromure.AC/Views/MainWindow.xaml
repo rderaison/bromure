@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:Bromure.AC.ViewModels"
         xmlns:views="clr-namespace:Bromure.AC.Views"
+        xmlns:loc="clr-namespace:Bromure.AC.Localization"
         Title="Bromure Agentic Coding"
         Height="780" Width="1180"
         Icon="/BromureAC.ico"
@@ -39,19 +40,19 @@
     <DockPanel>
         <Menu DockPanel.Dock="Top" Background="{StaticResource PanelBackground}"
               Foreground="{StaticResource TextPrimary}">
-            <MenuItem Header="_File">
-                <MenuItem Header="_New Session" InputGestureText="Ctrl+N"
+            <MenuItem Header="{x:Static loc:Strings.MenuFile}">
+                <MenuItem Header="{x:Static loc:Strings.MenuFileNewSession}" InputGestureText="Ctrl+N"
                           Command="{Binding NewSessionCommand}"/>
                 <Separator/>
                 <!-- Audit 10 §0.5: explicit Rebuild Base Image entry
                      point. Navigates to Settings where the build/
                      rebuild button lives. -->
-                <MenuItem Header="_Rebuild Base Image…"
+                <MenuItem Header="{x:Static loc:Strings.MenuFileRebuildBase}"
                           Command="{Binding GoToNavigationCommand}" CommandParameter="Settings"/>
                 <Separator/>
-                <MenuItem Header="_Close Window" InputGestureText="Ctrl+W"
+                <MenuItem Header="{x:Static loc:Strings.MenuFileCloseWindow}" InputGestureText="Ctrl+W"
                           Command="{x:Static SystemCommands.CloseWindowCommand}"/>
-                <MenuItem Header="E_xit"
+                <MenuItem Header="{x:Static loc:Strings.MenuFileExit}"
                           Command="{x:Static SystemCommands.CloseWindowCommand}"/>
             </MenuItem>
             <!-- Edit menu — standard routed commands. Each MenuItem
@@ -60,41 +61,41 @@
                  need this for muscle-memory Ctrl+C/V/X/A to work, but
                  having the menu makes the affordance discoverable and
                  matches every other Windows app. Audit §8 follow-up. -->
-            <MenuItem Header="_Edit">
-                <MenuItem Header="Cu_t" InputGestureText="Ctrl+X"
+            <MenuItem Header="{x:Static loc:Strings.MenuEdit}">
+                <MenuItem Header="{x:Static loc:Strings.MenuEditCut}" InputGestureText="Ctrl+X"
                           Command="ApplicationCommands.Cut"/>
-                <MenuItem Header="_Copy" InputGestureText="Ctrl+C"
+                <MenuItem Header="{x:Static loc:Strings.MenuEditCopy}" InputGestureText="Ctrl+C"
                           Command="ApplicationCommands.Copy"/>
-                <MenuItem Header="_Paste" InputGestureText="Ctrl+V"
+                <MenuItem Header="{x:Static loc:Strings.MenuEditPaste}" InputGestureText="Ctrl+V"
                           Command="ApplicationCommands.Paste"/>
                 <Separator/>
-                <MenuItem Header="Select _All" InputGestureText="Ctrl+A"
+                <MenuItem Header="{x:Static loc:Strings.MenuEditSelectAll}" InputGestureText="Ctrl+A"
                           Command="ApplicationCommands.SelectAll"/>
             </MenuItem>
-            <MenuItem Header="_View">
-                <MenuItem Header="_Sessions" InputGestureText="Ctrl+1"
+            <MenuItem Header="{x:Static loc:Strings.MenuView}">
+                <MenuItem Header="{x:Static loc:Strings.MenuViewSessions}" InputGestureText="Ctrl+1"
                           Command="{Binding GoToNavigationCommand}" CommandParameter="Sessions"/>
-                <MenuItem Header="_Profiles" InputGestureText="Ctrl+2"
+                <MenuItem Header="{x:Static loc:Strings.MenuViewProfiles}" InputGestureText="Ctrl+2"
                           Command="{Binding GoToNavigationCommand}" CommandParameter="Profiles"/>
                 <Separator/>
-                <MenuItem Header="_Trace Inspector" InputGestureText="Ctrl+Shift+I"
+                <MenuItem Header="{x:Static loc:Strings.MenuViewTrace}" InputGestureText="Ctrl+Shift+I"
                           Command="{Binding GoToNavigationCommand}" CommandParameter="TraceInspector"/>
-                <MenuItem Header="_Approvals"
+                <MenuItem Header="{x:Static loc:Strings.MenuViewApprovals}"
                           Command="{Binding GoToNavigationCommand}" CommandParameter="Approvals"/>
                 <Separator/>
-                <MenuItem Header="_Preferences…" InputGestureText="Ctrl+,"
+                <MenuItem Header="{x:Static loc:Strings.MenuViewPreferences}" InputGestureText="Ctrl+,"
                           Command="{Binding GoToNavigationCommand}" CommandParameter="Settings"/>
             </MenuItem>
-            <MenuItem Header="_Help">
-                <MenuItem Header="_Documentation" InputGestureText="F1"
+            <MenuItem Header="{x:Static loc:Strings.MenuHelp}">
+                <MenuItem Header="{x:Static loc:Strings.MenuHelpDocs}" InputGestureText="F1"
                           Command="{Binding OpenDocumentationCommand}"/>
                 <!-- Audit 08 — Check for Updates. Interactive
                      check via HttpAppUpdater; shows a MessageBox
                      whether or not an update is available. -->
-                <MenuItem Header="Check for _Updates…"
+                <MenuItem Header="{x:Static loc:Strings.MenuHelpUpdates}"
                           Click="OnCheckForUpdatesClick"/>
                 <Separator/>
-                <MenuItem Header="_About Bromure…"
+                <MenuItem Header="{x:Static loc:Strings.MenuHelpAbout}"
                           Command="{Binding ShowAboutCommand}"/>
             </MenuItem>
         </Menu>
