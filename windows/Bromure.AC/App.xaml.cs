@@ -12,6 +12,7 @@ namespace Bromure.AC;
 public partial class App : Application
 {
     public static AppServices Services { get; private set; } = null!;
+    public static HttpAppUpdater? Updater { get; private set; }
     private SingleInstanceGuard? _instanceGuard;
 
     protected override void OnStartup(StartupEventArgs e)
@@ -84,6 +85,24 @@ public partial class App : Application
             }
         }
         catch { /* PATH-mutation is best-effort, never fail launch */ }
+
+        // Audit 08 — auto-update check. Fires a non-blocking GET
+        // against the appcast manifest a few seconds after launch
+        // (delay so it doesn't fight the welcome / session boot path
+        // for HTTP fan-out). The URL is settings-driven; users on
+        // dev builds can clear it to opt out.
+        try
+        {
+            var appcast = Services.Settings.Get<string>("appcastUrl")
+                          ?? "https://bromure.io/api/version/ac-windows";
+            var version = System.Reflection.Assembly.GetEntryAssembly()?
+                .GetName().Version?.ToString() ?? "0.0.0";
+            Updater = new HttpAppUpdater();
+            Updater.Initialize(appcast, "Bromure", "Bromure AC", version);
+            _ = Task.Delay(TimeSpan.FromSeconds(8))
+                .ContinueWith(_ => Updater.CheckSilently());
+        }
+        catch { /* never fail launch over the update check */ }
     }
 
     protected override void OnExit(ExitEventArgs e)

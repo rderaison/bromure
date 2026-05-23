@@ -88,6 +88,11 @@
             <MenuItem Header="_Help">
                 <MenuItem Header="_Documentation" InputGestureText="F1"
                           Command="{Binding OpenDocumentationCommand}"/>
+                <!-- Audit 08 — Check for Updates. Interactive
+                     check via HttpAppUpdater; shows a MessageBox
+                     whether or not an update is available. -->
+                <MenuItem Header="Check for _Updates…"
+                          Click="OnCheckForUpdatesClick"/>
                 <Separator/>
                 <MenuItem Header="_About Bromure…"
                           Command="{Binding ShowAboutCommand}"/>

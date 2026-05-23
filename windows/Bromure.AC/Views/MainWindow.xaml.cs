@@ -13,6 +13,11 @@ public partial class MainWindow : Window
         DataContext = new ShellViewModel(App.Services);
     }
 
+    private void OnCheckForUpdatesClick(object sender, RoutedEventArgs e)
+    {
+        App.Updater?.CheckInteractively();
+    }
+
     /// <summary>Intercept the close request so we can warn the user
     /// before terminating running VMs or aborting an in-flight image
     /// bake. Audit 08 §1.3 (HIGH) + §1.10 (MEDIUM): previous
