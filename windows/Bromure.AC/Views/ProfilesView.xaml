@@ -262,6 +262,80 @@
                                           Margin="0,4"/>
                             </Grid>
 
+                            <!-- Audit 09 §A2 — additional tools. macOS lets the
+                                 user enable Claude AND Codex (and any future
+                                 tool) on the same profile with independent
+                                 auth modes. Each ToolSpec rows binds straight
+                                 against an entry in AdditionalTools. -->
+                            <Border Background="{StaticResource PanelBackground}" CornerRadius="6"
+                                    Padding="20" Margin="0,12,0,0">
+                                <StackPanel>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="Additional tools" FontSize="14" FontWeight="SemiBold"
+                                                   VerticalAlignment="Center"/>
+                                        <Button Content="+ Add"
+                                                Margin="12,0,0,0" Padding="10,2"
+                                                Command="{Binding DataContext.AddAdditionalToolCommand,
+                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                    </StackPanel>
+                                    <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                               TextWrapping="Wrap" Margin="0,8,0,0">
+                                        Enables a second (or third) agent CLI alongside the primary tool.
+                                        Each tool has its own auth mode + key.
+                                    </TextBlock>
+                                    <ItemsControl ItemsSource="{Binding AdditionalTools}" Margin="0,12,0,0">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border Background="{StaticResource PanelElevated}"
+                                                        BorderBrush="{StaticResource BorderBrush}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="4" Padding="12" Margin="0,0,0,8">
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="140"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                        </Grid.RowDefinitions>
+                                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Tool"
+                                                                   Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                        <ComboBox Grid.Row="0" Grid.Column="1" Margin="0,2"
+                                                                  ItemsSource="{Binding DataContext.ToolOptions,
+                                                                                RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                  SelectedItem="{Binding Tool}"/>
+                                                        <Button Grid.Row="0" Grid.Column="2"
+                                                                Content="Remove"
+                                                                Style="{StaticResource DangerButton}"
+                                                                Margin="8,0,0,0" Padding="10,2"
+                                                                Command="{Binding DataContext.RemoveAdditionalToolCommand,
+                                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                CommandParameter="{Binding}"/>
+                                                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Auth mode"
+                                                                   Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                        <ComboBox Grid.Row="1" Grid.Column="1" Margin="0,2"
+                                                                  ItemsSource="{Binding DataContext.AuthModeOptions,
+                                                                                RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                  SelectedItem="{Binding AuthMode}"/>
+                                                        <TextBlock Grid.Row="2" Grid.Column="0" Text="API key"
+                                                                   Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
+                                                        <PasswordBox Grid.Row="2" Grid.Column="1" Margin="0,2"
+                                                                     cmn:PasswordBoxBinding.Password="{Binding ApiKey, Mode=TwoWay}"/>
+                                                        <CheckBox Grid.Row="3" Grid.Column="1" Margin="0,8,0,0"
+                                                                  Content="Prompt before each use"
+                                                                  IsChecked="{Binding RequireApproval}"/>
+                                                    </Grid>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </Border>
+
                             <Border Background="{StaticResource PanelBackground}" CornerRadius="6"
                                     Padding="20" Margin="0,12,0,0">
                                 <StackPanel>

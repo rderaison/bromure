@@ -87,6 +87,7 @@ public sealed partial class ProfilesViewModel : ObservableObject
         RemoveEnvCommand    = new SimpleRelayCommand<EnvironmentVariable>(e => RemoveAndSave(p => p.EnvironmentVariables.Remove(e)));
         RemoveFolderCommand = new SimpleRelayCommand<string>(f => RemoveAndSave(p => p.FolderPaths.Remove(f)));
         RemoveMcpCommand    = new SimpleRelayCommand<McpServer>(m => RemoveAndSave(p => p.McpServers.Remove(m)));
+        RemoveAdditionalToolCommand = new SimpleRelayCommand<ToolSpec>(t => RemoveAndSave(p => p.AdditionalTools.Remove(t)));
         Reload();
     }
 
@@ -233,6 +234,26 @@ public sealed partial class ProfilesViewModel : ObservableObject
     {
         OpenUrlInBrowser("https://github.com/settings/keys");
     }
+
+    /// <summary>Audit 09 §A2 — add an extra agent tool to the profile.
+    /// Defaults to whichever tool the primary slot isn't using so the
+    /// "Add" button does something useful on first click.</summary>
+    [RelayCommand]
+    private void AddAdditionalTool()
+    {
+        if (Selected is null) return;
+        var nextTool = Selected.Tool == AgentTool.Claude ? AgentTool.Codex : AgentTool.Claude;
+        Selected.AdditionalTools.Add(new ToolSpec
+        {
+            Tool = nextTool,
+            AuthMode = AuthMode.Token,
+        });
+        _store.Save(Selected);
+    }
+
+    /// <summary>Audit 09 §A2 — drop an additional tool. Bound from the
+    /// per-row Remove button in the editor.</summary>
+    public SimpleRelayCommand<ToolSpec> RemoveAdditionalToolCommand { get; }
 
     /// <summary>Audit 09 §A4 — "Open IAM credentials page" launcher
     /// matching the macOS link button. Drops the user in the AWS
