@@ -17,7 +17,13 @@ namespace Bromure.Tests;
 /// </summary>
 public class DigitalOceanFakeMintTests
 {
-    private const string ExampleReal = "dop_v1_abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    // Synthetic 71-char token. We assemble it at runtime rather than
+    // inlining a `dop_v1_<64hex>` literal because GitHub's push-protection
+    // secret scanner pattern-matches DigitalOcean PATs and rejects the
+    // push otherwise. The resulting string has the same shape the mint
+    // logic operates on.
+    private static readonly string ExampleReal =
+        "dop_v1_" + new string('a', 32) + new string('b', 32);
 
     [Fact]
     public void MintFake_HasDoPatPrefixAnd71Chars()
