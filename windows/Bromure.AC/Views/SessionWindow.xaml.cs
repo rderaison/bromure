@@ -86,6 +86,32 @@ public partial class SessionWindow : Window
             $"[{DateTime.Now:HH:mm:ss.fff}] {msg}\n"); } catch { }
     }
 
+    /// <summary>3-button prompt asking what to do when the user
+    /// closes the window with profile.CloseAction = Ask. Returns
+    /// true → suspend, false → shutdown. Cancel resets _shuttingDown
+    /// to false so the caller knows to abort the close entirely.</summary>
+    private bool AskCloseAction()
+    {
+        var result = System.Windows.MessageBox.Show(
+            this,
+            "Suspend this session so it resumes on next launch, " +
+            "or shut down and discard its state?",
+            "Close session",
+            System.Windows.MessageBoxButton.YesNoCancel,
+            System.Windows.MessageBoxImage.Question,
+            System.Windows.MessageBoxResult.Yes);
+        switch (result)
+        {
+            case System.Windows.MessageBoxResult.Yes:
+                return true;   // suspend
+            case System.Windows.MessageBoxResult.No:
+                return false;  // shutdown
+            default:
+                _shuttingDown = false;
+                return false;
+        }
+    }
+
     private async void OnClosing(object? sender, CancelEventArgs e)
     {
         CloseLog($"OnClosing fired (shuttingDown={_shuttingDown}, _vm null? {_vm is null}, " +
@@ -103,9 +129,28 @@ public partial class SessionWindow : Window
         var tabsJsonPath = Path.Combine(sessionRoot, "tabs.json");
         try
         {
+            // Audit 09 §A1 — close behavior driven by profile.CloseAction.
+            // Last-tab-cascade always shuts down (no point suspending a
+            // 0-tab VM). Otherwise: Suspend / Shutdown / Ask the user.
+            bool suspend;
             if (_lastTabCascade || _tabs.Count == 0)
             {
-                CloseLog("OnClosing: terminate path — last-tab cascade or no tabs");
+                suspend = false;
+            }
+            else
+            {
+                suspend = vm.CloseAction switch
+                {
+                    Bromure.AC.Core.Model.CloseAction.Suspend => true,
+                    Bromure.AC.Core.Model.CloseAction.Shutdown => false,
+                    _ => AskCloseAction(),
+                };
+                // AskCloseAction returns false-and-cancels via _shuttingDown reset.
+                if (_shuttingDown == false) { e.Cancel = true; return; }
+            }
+            if (!suspend)
+            {
+                CloseLog("OnClosing: terminate path — last-tab cascade, no tabs, or profile.CloseAction=Shutdown");
                 try { File.Delete(Path.Combine(sessionRoot, "saved-state.bin")); } catch { }
                 try { File.Delete(tabsJsonPath); } catch { }
                 await vm.ShutdownAsync().ConfigureAwait(true);

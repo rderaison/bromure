@@ -104,6 +104,14 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
     /// stubs, etc.). Used by the tabbed SessionWindow to tint each
     /// tab — same per-profile colour identification macOS shows in
     /// its window-tab accents.</summary>
+    /// <summary>Profile-configured behavior when the session window's
+    /// close button is clicked. SessionWindow.OnClosing reads this to
+    /// branch between Suspend (write saved-state, restore on next
+    /// launch), Shutdown (cleanly terminate the VM, drop saved state),
+    /// and Ask (3-button prompt). Audit 09 §A1 + audit 10 §4.1.</summary>
+    public Bromure.AC.Core.Model.CloseAction CloseAction
+        => _activeProfile?.CloseAction ?? Bromure.AC.Core.Model.CloseAction.Ask;
+
     public Bromure.AC.Core.Model.ProfileColor ProfileColor =>
         _activeProfile?.Color ?? Bromure.AC.Core.Model.ProfileColor.Blue;
 
@@ -353,6 +361,17 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
                 networkSwitch = bp.BridgedInterfaceID;
             }
 
+            // Profile-driven RAM. macOS-parity: 0 = "engine picks a
+            // sensible default that scales to host"; positive = user
+            // override. Clamp to [2, 64] GiB so a typo in the editor
+            // can't request a 1 TiB guest (HCS would surface a vague
+            // E_OUTOFMEMORY from vmcompute at start time, painful to
+            // diagnose).
+            int memoryGb = _activeProfile?.MemoryGB ?? 0;
+            if (memoryGb <= 0) memoryGb = Bromure.SandboxEngine.Hcs.HostMemoryProbe.DefaultGuestMemoryGB();
+            else if (memoryGb < 2) memoryGb = 2;
+            else if (memoryGb > 64) memoryGb = 64;
+
             var cfg = new HcsSessionConfig
             {
                 BaseVhdxPath = _artefacts.BaseVhdxPath,
@@ -363,6 +382,7 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
                 SavedStateFilePath = hasSavedState ? savedStatePath : null,
                 NetworkMacAddressOverride = stableMac,
                 NetworkSwitchName = networkSwitch ?? "Default Switch",
+                MemoryMB = (uint)memoryGb * 1024,
                 // Bypass UEFI/GRUB and boot the kernel directly from
                 // the artefacts dir. Same kernel + initrd content as
                 // the UEFI path, just skips the firmware. UEFI boot
@@ -460,6 +480,21 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
                 _ = Bromure.AC.Display.GuestCommand.SendAsync(
                     VmRuntimeId,
                     "(rdate -n -s pool.ntp.org &) >/dev/null 2>&1",
+                    ct);
+            }
+            // Audit 10 §3.7 — key-repeat per profile. The guest's X
+            // session uses xset default rates (250 ms delay / 30 Hz);
+            // a user who's tuned their host's keyboard to 200/40 wants
+            // the same in the VM. Fire xset over the cmd-server once
+            // RuntimeId resolves — X is up by then on the production
+            // boot path. Sub-second cmd; failure (X not yet up) is
+            // best-effort and tolerable.
+            if (_activeProfile is { KeyRepeatDelayMs: int delay, KeyRepeatRateHz: int rate }
+                && delay > 0 && rate > 0)
+            {
+                _ = Bromure.AC.Display.GuestCommand.SendAsync(
+                    VmRuntimeId,
+                    $"DISPLAY=:1 xset r rate {delay} {rate} >/dev/null 2>&1",
                     ct);
             }
             // Audit 07 §4 — bind this profile to the VM that's hosting
