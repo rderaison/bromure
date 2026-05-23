@@ -340,6 +340,19 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
             var stableMac = _engine.MacBindings.GetOrCreate(ProfileId);
             BootLog($"Stable MAC for profile: {stableMac}");
 
+            // Bridged-mode profiles bind to a user-named external
+            // Hyper-V switch (typed into the profile editor's "Bridged
+            // interface ID" field). NAT uses Default Switch — that's
+            // HcsSessionConfig's built-in default, so we only override
+            // when the profile asks for it. Empty/missing interface ID
+            // falls back to NAT silently rather than refusing to boot.
+            string? networkSwitch = null;
+            if (_activeProfile is { NetworkMode: Bromure.AC.Core.Model.NetworkMode.Bridged } bp
+                && !string.IsNullOrWhiteSpace(bp.BridgedInterfaceID))
+            {
+                networkSwitch = bp.BridgedInterfaceID;
+            }
+
             var cfg = new HcsSessionConfig
             {
                 BaseVhdxPath = _artefacts.BaseVhdxPath,
@@ -349,6 +362,7 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
                 InstallPath = installPath,
                 SavedStateFilePath = hasSavedState ? savedStatePath : null,
                 NetworkMacAddressOverride = stableMac,
+                NetworkSwitchName = networkSwitch ?? "Default Switch",
                 // Bypass UEFI/GRUB and boot the kernel directly from
                 // the artefacts dir. Same kernel + initrd content as
                 // the UEFI path, just skips the firmware. UEFI boot
@@ -430,6 +444,38 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
             VmRdpTcpBridgePort = _session.RdpTcpBridgePort;
             VmGuestIpAddress = _session.GuestIpAddress;
             SubscribeToGuestTitle();
+            // Audit 10 §2.9 — resume timekeeping fix. On hibernate
+            // resume the guest's RTC has drifted by however long the
+            // host was off / suspended; journal timestamps, TLS-cert
+            // chain validation, and `kubectl` token-expiry math all
+            // misbehave. macOS touches `.resume-signal` in the meta
+            // share + a systemd path unit fires rdate. Our meta share
+            // is a read-only ISO so the path-watcher can't trigger;
+            // drive the same `rdate` over the bromure-cmd-server
+            // hvsocket instead. Fire-and-forget — the sh process
+            // backgrounds rdate itself so the cmd-server's wait()
+            // doesn't block on the network round-trip.
+            if (WasResumedFromSavedState)
+            {
+                _ = Bromure.AC.Display.GuestCommand.SendAsync(
+                    VmRuntimeId,
+                    "(rdate -n -s pool.ntp.org &) >/dev/null 2>&1",
+                    ct);
+            }
+            // Audit 07 §4 — bind this profile to the VM that's hosting
+            // its session so the SubscriptionTokenCoordinator can route
+            // bridge state by source VM ID, then fire-and-forget the
+            // autoSeed of stored Claude/Codex tokens. Best-effort: if
+            // the agent never dials in (image missing the helper) the
+            // await inside AutoSeed* hits the session's cancellation
+            // budget and the user just re-logs.
+            if (_engine.SubscriptionCoord is { } coord && _activeProfile is { } seedProfile)
+            {
+                coord.RegisterClaude(ProfileId, VmRuntimeId);
+                coord.RegisterCodex(ProfileId, VmRuntimeId);
+                _ = coord.AutoSeedClaudeAsync(ProfileId, VmRuntimeId, seedProfile, ct);
+                _ = coord.AutoSeedCodexAsync(ProfileId, VmRuntimeId, seedProfile, ct);
+            }
             // Perf #2: overlay producer was already pre-registered
             // in the OnRuntimeIdResolved hook above. No need to
             // re-register here.
@@ -574,6 +620,8 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
             try { Bromure.AC.Display.GuestEventServer.Instance.SubscribeAlive(VmRuntimeId, null); } catch { }
             try { Bromure.AC.Display.GuestEventServer.Instance.RegisterOverlay(VmRuntimeId, null); } catch { }
         }
+        try { _engine.SubscriptionCoord?.UnregisterClaude(ProfileId); } catch { }
+        try { _engine.SubscriptionCoord?.UnregisterCodex(ProfileId); } catch { }
         if (_session is not null)
         {
             try { await _session.DisposeAsync().ConfigureAwait(false); } catch { }
@@ -629,6 +677,8 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
             try { Bromure.AC.Display.GuestEventServer.Instance.SubscribeAlive(VmRuntimeId, null); } catch { }
             try { Bromure.AC.Display.GuestEventServer.Instance.RegisterOverlay(VmRuntimeId, null); } catch { }
         }
+        try { _engine.SubscriptionCoord?.UnregisterClaude(ProfileId); } catch { }
+        try { _engine.SubscriptionCoord?.UnregisterCodex(ProfileId); } catch { }
         if (_outbox is not null)
         {
             try { _outbox.Dispose(); } catch { }

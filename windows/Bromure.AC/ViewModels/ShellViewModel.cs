@@ -231,7 +231,10 @@ public sealed partial class ShellViewModel : ObservableObject
         // ACAppDelegate wiring. Without this the host's detection
         // hooks fire but nothing acts on them.
         var subscriptionPrompt = new Bromure.AC.Consent.SubscriptionConsentPrompt(profileStore);
-        var subscriptionCoord = new Bromure.AC.Mitm.Engine.SubscriptionTokenCoordinator(_engine.Swapper, subscriptionPrompt);
+        var subscriptionCoord = new Bromure.AC.Mitm.Engine.SubscriptionTokenCoordinator(
+            _engine.Swapper, subscriptionPrompt,
+            _engine.ClaudeTokenBridge, _engine.CodexTokenBridge);
+        _engine.SubscriptionCoord = subscriptionCoord;
         _engine.SubscriptionTokenSeen = (profileId, realToken) =>
         {
             _ = subscriptionCoord.HandleCleanClaudeAccessTokenAsync(

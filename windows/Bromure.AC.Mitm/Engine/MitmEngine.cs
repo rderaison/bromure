@@ -97,6 +97,16 @@ public sealed class MitmEngine : IAsyncDisposable
     /// <summary>Fires after a successful /oauth/token response rewrite.</summary>
     public Action<Guid, OAuthRotationProvider, Bromure.AC.Mitm.OAuth.StoredOAuthTokens>? OAuthRotated { get; set; }
 
+    // Audit 07 §4 — multi-VM subscription token plumbing. The
+    // SubscriptionTokenBridge / CodexTokenBridge instances are
+    // process-wide singletons that multiplex by source VM ID; the
+    // coordinator is wired by the shell after construction (it needs
+    // an ISubscriptionConsentPrompt which is UI-specific).
+    public Bromure.SandboxEngine.Vsock.VsockBridge VsockBridge { get; private set; } = null!;
+    public Bromure.SandboxEngine.Vsock.SubscriptionTokenBridge ClaudeTokenBridge { get; private set; } = null!;
+    public Bromure.SandboxEngine.Vsock.CodexTokenBridge CodexTokenBridge { get; private set; } = null!;
+    public SubscriptionTokenCoordinator? SubscriptionCoord { get; set; }
+
     /// <summary>
     /// Cloud event sink. The proxy emits one
     /// <c>credential.token_swap</c> event per fake → real
@@ -187,6 +197,16 @@ public sealed class MitmEngine : IAsyncDisposable
         // the host; the resigner intercepts on the wire.
         _awsCredsHvSocket = new AwsCredentialHvSocketListener(AwsCreds, AwsCredsVsockPort, _log);
         await _awsCredsHvSocket.StartAsync(ct).ConfigureAwait(false);
+
+        // Audit 07 §4 — subscription token bridges. Process-wide
+        // singletons; ports 8446 (Claude) + 8447 (Codex). Each
+        // multiplexes accepted connections by source VM ID so
+        // concurrent sessions don't fight over a single connection.
+        VsockBridge = new Bromure.SandboxEngine.Vsock.VsockBridge(_log);
+        ClaudeTokenBridge = new Bromure.SandboxEngine.Vsock.SubscriptionTokenBridge(_log);
+        CodexTokenBridge = new Bromure.SandboxEngine.Vsock.CodexTokenBridge(_log);
+        ClaudeTokenBridge.RegisterOn(VsockBridge);
+        CodexTokenBridge.RegisterOn(VsockBridge);
     }
 
     private SshAgentHvSocketListener? _sshHvSocket;

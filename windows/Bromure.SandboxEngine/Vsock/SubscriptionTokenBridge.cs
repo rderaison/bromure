@@ -1,4 +1,5 @@
 // macos-source: Sources/AgentCoding/SubscriptionTokenBridge.swift @ 7ef3f5dcd1e3
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
@@ -18,6 +19,15 @@ namespace Bromure.SandboxEngine.Vsock;
 ///   <item><c>write(access, refresh)</c> — overwrites both with brm-prefixed fakes.</item>
 /// </list>
 ///
+/// <b>Multi-VM multiplexing.</b> When several sessions run
+/// concurrently, the host accepts connections from each VM on the
+/// same port 8446 — the AF_HYPERV peer GUID is the routing key.
+/// State per VM lives in a <see cref="ConcurrentDictionary{TKey,TValue}"/>,
+/// and the public API takes a <c>vmId</c> on every call. The macOS
+/// port uses one bridge per VZVirtioSocketDevice (intrinsically
+/// per-VM); on Windows HCS has a single hvsocket listener per port,
+/// so multiplexing has to live here.
+///
 /// <b>Security invariant.</b> The host NEVER sends real cleartext token
 /// values to the VM. Only fakes flow host→VM. Only reals flow VM→host.
 /// There is no RPC for "host hands me a real token." Same as macOS.
@@ -27,18 +37,12 @@ public sealed class SubscriptionTokenBridge : IAsyncDisposable
     public const uint Port = 8446;
 
     private readonly ILogger _log;
-    private readonly object _gate = new();
-    private Stream? _connection;
-    private TaskCompletionSource<bool>? _connected;
-    private long _idSeq;
-    private readonly Dictionary<long, TaskCompletionSource<JsonObject>> _pending = new();
-
-    public bool IsConnected
-    {
-        get { lock (_gate) return _connection is not null; }
-    }
+    private readonly ConcurrentDictionary<Guid, VmState> _byVm = new();
 
     public SubscriptionTokenBridge(ILogger? log = null) => _log = log ?? NullLogger.Instance;
+
+    public bool IsConnected(Guid vmId)
+        => _byVm.TryGetValue(vmId, out var s) && s.IsConnected;
 
     /// <summary>Register on <paramref name="bridge"/>. Idempotent on the bridge side.</summary>
     public void RegisterOn(VsockBridge bridge)
@@ -46,13 +50,16 @@ public sealed class SubscriptionTokenBridge : IAsyncDisposable
         bridge.Listen(Port, HandleConnectionAsync);
     }
 
-    private async Task HandleConnectionAsync(Stream conn, CancellationToken ct)
+    private VmState GetOrAdd(Guid vmId) => _byVm.GetOrAdd(vmId, _ => new VmState());
+
+    private async Task HandleConnectionAsync(Stream conn, Guid sourceVmId, CancellationToken ct)
     {
-        lock (_gate)
+        var state = GetOrAdd(sourceVmId);
+        lock (state.Gate)
         {
-            _connection = conn;
-            _connected?.TrySetResult(true);
-            _connected = null;
+            state.Connection = conn;
+            state.Connected?.TrySetResult(true);
+            state.Connected = null;
         }
         try
         {
@@ -64,7 +71,7 @@ public sealed class SubscriptionTokenBridge : IAsyncDisposable
                 try { response = JsonNode.Parse(line) as JsonObject; }
                 catch (JsonException)
                 {
-                    _log.LogWarning("Discarding malformed JSON from agent: {Line}", line);
+                    _log.LogWarning("Discarding malformed JSON from agent (vm={Vm}): {Line}", sourceVmId, line);
                     continue;
                 }
                 if (response is null) continue;
@@ -72,7 +79,7 @@ public sealed class SubscriptionTokenBridge : IAsyncDisposable
                 if (response["id"]?.GetValue<long>() is long id)
                 {
                     TaskCompletionSource<JsonObject>? tcs;
-                    lock (_gate) _pending.Remove(id, out tcs);
+                    lock (state.Gate) state.Pending.Remove(id, out tcs);
                     tcs?.TrySetResult(response);
                 }
             }
@@ -80,29 +87,30 @@ public sealed class SubscriptionTokenBridge : IAsyncDisposable
         catch (IOException) { }
         finally
         {
-            lock (_gate)
+            lock (state.Gate)
             {
-                _connection = null;
-                foreach (var p in _pending.Values) p.TrySetException(new BridgeNotConnectedException());
-                _pending.Clear();
+                state.Connection = null;
+                foreach (var p in state.Pending.Values) p.TrySetException(new BridgeNotConnectedException());
+                state.Pending.Clear();
             }
         }
     }
 
-    /// <summary>Wait until the agent dials in (matches the macOS bridge's behavior).</summary>
-    public Task WaitConnectedAsync(CancellationToken ct = default)
+    /// <summary>Wait until the agent on <paramref name="vmId"/> dials in.</summary>
+    public Task WaitConnectedAsync(Guid vmId, CancellationToken ct = default)
     {
-        lock (_gate)
+        var state = GetOrAdd(vmId);
+        lock (state.Gate)
         {
-            if (_connection is not null) return Task.CompletedTask;
-            _connected ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            return _connected.Task.WaitAsync(ct);
+            if (state.Connection is not null) return Task.CompletedTask;
+            state.Connected ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            return state.Connected.Task.WaitAsync(ct);
         }
     }
 
-    public async Task<Tokens?> ReadAsync(CancellationToken ct = default)
+    public async Task<Tokens?> ReadAsync(Guid vmId, CancellationToken ct = default)
     {
-        var response = await RpcAsync(new JsonObject { ["op"] = "read" }, ct).ConfigureAwait(false);
+        var response = await RpcAsync(vmId, new JsonObject { ["op"] = "read" }, ct).ConfigureAwait(false);
         if (response["ok"]?.GetValue<bool>() != true)
         {
             throw new AgentRejectedException(
@@ -114,9 +122,9 @@ public sealed class SubscriptionTokenBridge : IAsyncDisposable
         return new Tokens(access, refresh);
     }
 
-    public async Task WriteAsync(string access, string refresh, CancellationToken ct = default)
+    public async Task WriteAsync(Guid vmId, string access, string refresh, CancellationToken ct = default)
     {
-        var response = await RpcAsync(new JsonObject
+        var response = await RpcAsync(vmId, new JsonObject
         {
             ["op"] = "write",
             ["access"] = access,
@@ -129,23 +137,44 @@ public sealed class SubscriptionTokenBridge : IAsyncDisposable
         }
     }
 
-    private async Task<JsonObject> RpcAsync(JsonObject payload, CancellationToken ct)
+    /// <summary>Forget the VM's state (call on session teardown). The
+    /// agent's connection, if still open, gets dropped on the next
+    /// IO; pending RPCs fail with BridgeNotConnectedException so
+    /// callers awaiting on a torn-down session don't hang.</summary>
+    public void Forget(Guid vmId)
     {
+        if (_byVm.TryRemove(vmId, out var state))
+        {
+            lock (state.Gate)
+            {
+                state.Connection = null;
+                foreach (var p in state.Pending.Values)
+                {
+                    p.TrySetException(new BridgeNotConnectedException());
+                }
+                state.Pending.Clear();
+            }
+        }
+    }
+
+    private async Task<JsonObject> RpcAsync(Guid vmId, JsonObject payload, CancellationToken ct)
+    {
+        var state = GetOrAdd(vmId);
         Stream conn;
         long id;
         TaskCompletionSource<JsonObject> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (_gate)
+        lock (state.Gate)
         {
-            if (_connection is null) throw new BridgeNotConnectedException();
-            conn = _connection;
-            id = ++_idSeq;
-            _pending[id] = tcs;
+            if (state.Connection is null) throw new BridgeNotConnectedException();
+            conn = state.Connection;
+            id = ++state.IdSeq;
+            state.Pending[id] = tcs;
         }
         payload["id"] = id;
         await JsonLine.WriteAsync(conn, payload.ToJsonString(), ct).ConfigureAwait(false);
         using var reg = ct.Register(() =>
         {
-            lock (_gate) _pending.Remove(id);
+            lock (state.Gate) state.Pending.Remove(id);
             tcs.TrySetCanceled(ct);
         });
         return await tcs.Task.ConfigureAwait(false);
@@ -153,16 +182,34 @@ public sealed class SubscriptionTokenBridge : IAsyncDisposable
 
     public ValueTask DisposeAsync()
     {
-        lock (_gate)
+        foreach (var (_, state) in _byVm)
         {
-            foreach (var p in _pending.Values)
+            lock (state.Gate)
             {
-                p.TrySetException(new BridgeNotConnectedException());
+                foreach (var p in state.Pending.Values)
+                {
+                    p.TrySetException(new BridgeNotConnectedException());
+                }
+                state.Pending.Clear();
+                state.Connection = null;
             }
-            _pending.Clear();
-            _connection = null;
         }
+        _byVm.Clear();
         return ValueTask.CompletedTask;
+    }
+
+    private sealed class VmState
+    {
+        public readonly object Gate = new();
+        public Stream? Connection;
+        public TaskCompletionSource<bool>? Connected;
+        public long IdSeq;
+        public readonly Dictionary<long, TaskCompletionSource<JsonObject>> Pending = new();
+
+        public bool IsConnected
+        {
+            get { lock (Gate) return Connection is not null; }
+        }
     }
 
     public sealed record Tokens(string Access, string Refresh);

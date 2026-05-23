@@ -302,7 +302,11 @@ public sealed partial class SessionRowViewModel : ObservableObject
         var sessionRoot = _sessionRootProvider(Profile.Id);
         Directory.CreateDirectory(sessionRoot);
         WarmVm? warm = null;
-        var pool = _warmPoolProvider();
+        // The warm pool's VMs were created against the Default Switch
+        // (NAT). A Bridged-mode profile needs its adapter on the
+        // user-named external switch, so we can't adopt a NAT-warm VM
+        // for it. Cold-boot path only — slightly slower, but correct.
+        var pool = Profile.NetworkMode == NetworkMode.Nat ? _warmPoolProvider() : null;
         if (pool is not null)
         {
             try
@@ -374,9 +378,12 @@ public sealed partial class SessionRowViewModel : ObservableObject
         IsLaunching = true;
         // Try to grab a pre-created warm VM. 250 ms is enough when the
         // pool's already topped up; failure → null and we fall back to
-        // a cold create inside StartAsync.
+        // a cold create inside StartAsync. Skip the pool entirely for
+        // Bridged-mode profiles — warm VMs live on the Default Switch
+        // (NAT), so a Bridged profile would silently land on the wrong
+        // network if it adopted one.
         WarmVm? warm = null;
-        var pool = _warmPoolProvider();
+        var pool = Profile.NetworkMode == NetworkMode.Nat ? _warmPoolProvider() : null;
         if (pool is not null)
         {
             try

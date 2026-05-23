@@ -25,8 +25,9 @@ public class TokenBridgeTests
         await using var bridge = new VsockBridge();
         var sub = new SubscriptionTokenBridge();
         sub.RegisterOn(bridge);
+        var vmId = Guid.NewGuid();
 
-        var agentTask = RunFakeAgentAsync(bridge, SubscriptionTokenBridge.Port,
+        var agentTask = RunFakeAgentAsync(bridge, SubscriptionTokenBridge.Port, vmId,
             async (request, writer, ct) =>
             {
                 request["op"]?.GetValue<string>().Should().Be("read");
@@ -40,8 +41,8 @@ public class TokenBridgeTests
                 }, ct);
             });
 
-        await sub.WaitConnectedAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
-        var tokens = await sub.ReadAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+        await sub.WaitConnectedAsync(vmId, new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+        var tokens = await sub.ReadAsync(vmId, new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
         tokens.Should().NotBeNull();
         tokens!.Access.Should().Be("sk-ant-real-access-token");
         tokens.Refresh.Should().Be("sk-ant-real-refresh-token");
@@ -55,10 +56,11 @@ public class TokenBridgeTests
         await using var bridge = new VsockBridge();
         var sub = new SubscriptionTokenBridge();
         sub.RegisterOn(bridge);
+        var vmId = Guid.NewGuid();
 
         string? capturedAccess = null;
         string? capturedRefresh = null;
-        var agentTask = RunFakeAgentAsync(bridge, SubscriptionTokenBridge.Port,
+        var agentTask = RunFakeAgentAsync(bridge, SubscriptionTokenBridge.Port, vmId,
             async (request, writer, ct) =>
             {
                 request["op"]?.GetValue<string>().Should().Be("write");
@@ -71,8 +73,9 @@ public class TokenBridgeTests
                 }, ct);
             });
 
-        await sub.WaitConnectedAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+        await sub.WaitConnectedAsync(vmId, new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
         await sub.WriteAsync(
+            vmId,
             "sk-ant-oat01-brm-fake-access",
             "sk-ant-ort01-brm-fake-refresh",
             new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
@@ -88,8 +91,9 @@ public class TokenBridgeTests
         await using var bridge = new VsockBridge();
         var sub = new SubscriptionTokenBridge();
         sub.RegisterOn(bridge);
+        var vmId = Guid.NewGuid();
 
-        var agentTask = RunFakeAgentAsync(bridge, SubscriptionTokenBridge.Port,
+        var agentTask = RunFakeAgentAsync(bridge, SubscriptionTokenBridge.Port, vmId,
             async (request, writer, ct) =>
             {
                 await WriteLineAsync(writer, new JsonObject
@@ -100,9 +104,9 @@ public class TokenBridgeTests
                 }, ct);
             });
 
-        await sub.WaitConnectedAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+        await sub.WaitConnectedAsync(vmId, new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
         var ex = await Record.ExceptionAsync(() =>
-            sub.ReadAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token));
+            sub.ReadAsync(vmId, new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token));
         ex.Should().NotBeNull();
         ex!.Message.Should().Contain("no credentials");
 
@@ -115,8 +119,9 @@ public class TokenBridgeTests
         await using var bridge = new VsockBridge();
         var codex = new CodexTokenBridge();
         codex.RegisterOn(bridge);
+        var vmId = Guid.NewGuid();
 
-        var agentTask = RunFakeAgentAsync(bridge, CodexTokenBridge.Port,
+        var agentTask = RunFakeAgentAsync(bridge, CodexTokenBridge.Port, vmId,
             async (request, writer, ct) =>
             {
                 request["op"]?.GetValue<string>().Should().Be("read");
@@ -130,8 +135,8 @@ public class TokenBridgeTests
                 }, ct);
             });
 
-        await codex.WaitConnectedAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
-        var tokens = await codex.ReadAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+        await codex.WaitConnectedAsync(vmId, new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+        var tokens = await codex.ReadAsync(vmId, new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
         tokens.Should().NotBeNull();
         tokens!.Access.Should().Be("eyJ-access");
         tokens.Refresh.Should().Be("rt-refresh");
@@ -146,7 +151,7 @@ public class TokenBridgeTests
     /// ping-pong on the other end mimicking the in-VM Python agent.
     /// </summary>
     private static async Task RunFakeAgentAsync(
-        VsockBridge bridge, uint port,
+        VsockBridge bridge, uint port, Guid sourceVmId,
         Func<JsonObject, Stream, CancellationToken, Task> handler)
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -166,7 +171,7 @@ public class TokenBridgeTests
         // Run the bridge handler on the bridgeSide; the test
         // continues to drive the agentSide.
         using var ctsLifetime = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        _ = Task.Run(() => bridge.TestInvokeAsync(port, bridgeSide, ctsLifetime.Token));
+        _ = Task.Run(() => bridge.TestInvokeAsync(port, bridgeSide, sourceVmId, ctsLifetime.Token));
 
         // Read one request, hand it to the test handler, write
         // back the response.

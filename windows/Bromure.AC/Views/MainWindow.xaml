@@ -48,6 +48,23 @@
                 <MenuItem Header="E_xit"
                           Command="{x:Static SystemCommands.CloseWindowCommand}"/>
             </MenuItem>
+            <!-- Edit menu — standard routed commands. Each MenuItem
+                 picks up enabled-state from the focused input control
+                 (TextBox / PasswordBox / DataGrid…). Users don't strictly
+                 need this for muscle-memory Ctrl+C/V/X/A to work, but
+                 having the menu makes the affordance discoverable and
+                 matches every other Windows app. Audit §8 follow-up. -->
+            <MenuItem Header="_Edit">
+                <MenuItem Header="Cu_t" InputGestureText="Ctrl+X"
+                          Command="ApplicationCommands.Cut"/>
+                <MenuItem Header="_Copy" InputGestureText="Ctrl+C"
+                          Command="ApplicationCommands.Copy"/>
+                <MenuItem Header="_Paste" InputGestureText="Ctrl+V"
+                          Command="ApplicationCommands.Paste"/>
+                <Separator/>
+                <MenuItem Header="Select _All" InputGestureText="Ctrl+A"
+                          Command="ApplicationCommands.SelectAll"/>
+            </MenuItem>
             <MenuItem Header="_View">
                 <MenuItem Header="_Sessions" InputGestureText="Ctrl+1"
                           Command="{Binding GoToNavigationCommand}" CommandParameter="Sessions"/>

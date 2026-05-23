@@ -41,11 +41,13 @@ public sealed class VsockBridge : IAsyncDisposable
     /// <summary>
     /// Register a per-port handler. <paramref name="onConnection"/> is invoked
     /// for every accepted guest connection on <paramref name="port"/>.
-    ///
-    /// The returned <see cref="Stream"/> in <paramref name="onConnection"/>
-    /// is full-duplex: the bridge handles connect/accept and routing.
+    /// The handler receives the connection stream + the source VM's
+    /// AF_HYPERV peer GUID (extracted from the accepted peer address)
+    /// so a single host listener can multiplex connections from
+    /// multiple concurrent guest VMs — required for the subscription
+    /// token bridge once more than one session can run at a time.
     /// </summary>
-    public void Listen(uint port, Func<Stream, CancellationToken, Task> onConnection)
+    public void Listen(uint port, Func<Stream, Guid, CancellationToken, Task> onConnection)
     {
         lock (_gate)
         {
@@ -93,12 +95,13 @@ public sealed class VsockBridge : IAsyncDisposable
     /// <summary>
     /// Test seam: invoke the registered handler on
     /// <paramref name="port"/> with an arbitrary bidirectional
-    /// stream, bypassing the AF_HYPERV transport. Used by the token
-    /// bridge tests since xunit can't open an AF_HYPERV listener and
-    /// nothing dials AF_VSOCK CID_HOST on the other side without a
-    /// real VM. Production callers never use this.
+    /// stream and a synthetic source VM ID, bypassing the AF_HYPERV
+    /// transport. Used by the token bridge tests since xunit can't
+    /// open an AF_HYPERV listener and nothing dials AF_VSOCK CID_HOST
+    /// on the other side without a real VM. Production callers never
+    /// use this.
     /// </summary>
-    internal async Task TestInvokeAsync(uint port, Stream stream, CancellationToken ct)
+    internal async Task TestInvokeAsync(uint port, Stream stream, Guid sourceVmId, CancellationToken ct)
     {
         PortListener? listener;
         lock (_gate)
@@ -106,7 +109,7 @@ public sealed class VsockBridge : IAsyncDisposable
             _listeners.TryGetValue(port, out listener);
         }
         if (listener is null) throw new InvalidOperationException($"No listener for port {port}");
-        await listener.InvokeHandlerAsync(stream, ct).ConfigureAwait(false);
+        await listener.InvokeHandlerAsync(stream, sourceVmId, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -119,13 +122,13 @@ public sealed class VsockBridge : IAsyncDisposable
     private sealed class PortListener : IAsyncDisposable
     {
         private readonly uint _port;
-        private readonly Func<Stream, CancellationToken, Task> _handler;
+        private readonly Func<Stream, Guid, CancellationToken, Task> _handler;
         private readonly CancellationTokenSource _cts = new();
         private readonly ILogger _log;
         private Socket? _listener;
         private Task? _acceptLoop;
 
-        public PortListener(uint port, Func<Stream, CancellationToken, Task> handler, ILogger log)
+        public PortListener(uint port, Func<Stream, Guid, CancellationToken, Task> handler, ILogger log)
         {
             _port = port;
             _handler = handler;
@@ -162,13 +165,14 @@ public sealed class VsockBridge : IAsyncDisposable
                     continue;
                 }
 
+                var sourceVmId = ExtractSourceVmId(peer);
                 _ = Task.Run(async () =>
                 {
                     Stream? stream = null;
                     try
                     {
                         stream = new NetworkStream(peer, ownsSocket: false);
-                        await _handler(stream, ct).ConfigureAwait(false);
+                        await _handler(stream, sourceVmId, ct).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
@@ -184,8 +188,27 @@ public sealed class VsockBridge : IAsyncDisposable
         }
 
         /// <summary>Test-only direct handler invocation.</summary>
-        internal Task InvokeHandlerAsync(Stream stream, CancellationToken ct)
-            => _handler(stream, ct);
+        internal Task InvokeHandlerAsync(Stream stream, Guid sourceVmId, CancellationToken ct)
+            => _handler(stream, sourceVmId, ct);
+
+        /// <summary>Decode the AF_HYPERV peer's source VM ID from the
+        /// accepted socket's RemoteEndPoint. The address layout for
+        /// AF_HYPERV starts with a u16 family + u16 reserved + a 16-byte
+        /// VM GUID at offset 4 (see HvSocketApi.BuildSocketAddress).
+        /// Returns Guid.Empty if extraction fails — callers treat that
+        /// as "single-VM mode" and accept any peer.</summary>
+        private static Guid ExtractSourceVmId(Socket peer)
+        {
+            try
+            {
+                var sa = peer.RemoteEndPoint?.Serialize();
+                if (sa is null || sa.Size < 20) return Guid.Empty;
+                var raw = new byte[16];
+                for (int i = 0; i < 16; i++) raw[i] = sa[4 + i];
+                return new Guid(raw);
+            }
+            catch { return Guid.Empty; }
+        }
 
         public async ValueTask DisposeAsync()
         {

@@ -221,8 +221,12 @@ public class SessionHomeBuilderTests
         var p = new Profile();
         var files = SessionHomeBuilder.Build(p).Keys.OrderBy(k => k).ToArray();
         // Baseline + per-session profile-id marker (consumed by the
-        // in-VM bromure-aws-credentials helper).
-        files.Should().Equal(
+        // in-VM bromure-aws-credentials helper). `.bromure-tz` is
+        // conditional on the host's TZ having an IANA mapping —
+        // CI hosts always do, but we treat it as optional here so
+        // the test doesn't break on a custom-zone host.
+        var withoutTz = files.Where(f => f != ".bromure-tz").ToArray();
+        withoutTz.Should().Equal(
             ".bash_profile",
             ".bashrc",
             ".bromure-profile-id",
