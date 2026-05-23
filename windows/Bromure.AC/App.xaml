@@ -125,6 +125,7 @@
             <cmn:InverseBoolToVisibilityConverter x:Key="InverseBoolToVis"/>
             <cmn:EnumToVisibilityConverter x:Key="EnumToVis"/>
             <cmn:StringToVisibilityConverter x:Key="StringToVis"/>
+            <cmn:McpOAuthStatusConverter x:Key="McpOAuthStatusConverter"/>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

@@ -88,6 +88,15 @@ public sealed partial class ProfilesViewModel : ObservableObject
         RemoveFolderCommand = new SimpleRelayCommand<string>(f => RemoveAndSave(p => p.FolderPaths.Remove(f)));
         RemoveMcpCommand    = new SimpleRelayCommand<McpServer>(m => RemoveAndSave(p => p.McpServers.Remove(m)));
         RemoveAdditionalToolCommand = new SimpleRelayCommand<ToolSpec>(t => RemoveAndSave(p => p.AdditionalTools.Remove(t)));
+        AuthorizeMcpCommand = new SimpleRelayCommand<McpServer>(s => _ = AuthorizeMcpAsync(s));
+        RevokeMcpOAuthCommand = new SimpleRelayCommand<McpServer>(s =>
+        {
+            if (s is null || Selected is null) return;
+            s.OAuthState = null;
+            s.BearerToken = "";
+            _store.Save(Selected);
+            OnPropertyChanged(nameof(Selected));
+        });
         Reload();
     }
 
@@ -254,6 +263,56 @@ public sealed partial class ProfilesViewModel : ObservableObject
     /// <summary>Audit 09 §A2 — drop an additional tool. Bound from the
     /// per-row Remove button in the editor.</summary>
     public SimpleRelayCommand<ToolSpec> RemoveAdditionalToolCommand { get; }
+
+    /// <summary>Audit 09 §A6 — drive the MCP OAuth flow for an HTTP
+    /// server row. Opens the user's default browser to the
+    /// authorization endpoint, listens on a loopback port for the
+    /// callback, exchanges the code, and stashes the resulting state
+    /// on the server. Best-effort: parse errors surface via a
+    /// MessageBox so the user knows whether the click "did anything".</summary>
+    public SimpleRelayCommand<McpServer> AuthorizeMcpCommand { get; }
+    private async Task AuthorizeMcpAsync(McpServer? srv)
+    {
+        if (srv is null || string.IsNullOrWhiteSpace(srv.Url)) return;
+        try
+        {
+            var broker = new Bromure.AC.Mitm.OAuth.McpOAuthBroker();
+            var result = await broker.AuthorizeServerAsync(srv.Url, srv.OAuthState)
+                .ConfigureAwait(true);
+            srv.OAuthState = new Bromure.AC.Core.Model.McpOAuthState
+            {
+                ClientId = result.ClientId,
+                ClientSecret = result.ClientSecret,
+                AuthorizationEndpoint = result.AuthorizationEndpoint,
+                TokenEndpoint = result.TokenEndpoint,
+                RegistrationEndpoint = result.RegistrationEndpoint,
+                AccessToken = result.AccessToken,
+                RefreshToken = result.RefreshToken,
+                ExpiresAt = result.ExpiresIn is { } secs
+                    ? DateTimeOffset.UtcNow.AddSeconds(secs)
+                    : null,
+                AuthorizedAt = DateTimeOffset.UtcNow,
+                CallbackPort = result.CallbackPort,
+            };
+            srv.BearerToken = result.AccessToken;
+            if (Selected is not null) _store.Save(Selected);
+            OnPropertyChanged(nameof(Selected));
+        }
+        catch (Exception ex)
+        {
+            System.Windows.MessageBox.Show(
+                $"OAuth authorization failed:\n\n{ex.Message}",
+                "Authorize MCP server",
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Error);
+        }
+    }
+
+    /// <summary>Audit 09 §A6 — clear an MCP server's stored OAuth state
+    /// so the next session boots with an unauthorized server. The
+    /// bearer token is also cleared since it was issued by the just-
+    /// dropped flow.</summary>
+    public SimpleRelayCommand<McpServer> RevokeMcpOAuthCommand { get; }
 
     /// <summary>Audit 09 §A4 — "Open IAM credentials page" launcher
     /// matching the macOS link button. Drops the user in the AWS

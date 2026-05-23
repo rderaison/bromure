@@ -1192,7 +1192,34 @@
                                                                Margin="0,6,0,2"/>
                                                     <TextBox FontFamily="Consolas"
                                                              Text="{Binding BearerToken, UpdateSourceTrigger=PropertyChanged}"/>
+                                                    <!-- Audit 09 §A6: OAuth authorize / revoke. -->
+                                                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                                        <Button Content="Authorize…"
+                                                                Command="{Binding DataContext.AuthorizeMcpCommand,
+                                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                CommandParameter="{Binding}"
+                                                                Margin="0,0,8,0"/>
+                                                        <Button Content="Revoke"
+                                                                Style="{StaticResource DangerButton}"
+                                                                Command="{Binding DataContext.RevokeMcpOAuthCommand,
+                                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                CommandParameter="{Binding}"/>
+                                                    </StackPanel>
+                                                    <TextBlock FontSize="10"
+                                                               Foreground="{StaticResource TextSecondary}"
+                                                               Margin="0,6,0,0"
+                                                               TextWrapping="Wrap"
+                                                               Text="{Binding OAuthState, Converter={StaticResource McpOAuthStatusConverter}}"/>
                                                 </StackPanel>
+                                                <!-- Audit 09 §A6: raw JSON override. -->
+                                                <Expander Header="Raw JSON override" Margin="0,8,0,0">
+                                                    <TextBox FontFamily="Consolas" FontSize="11"
+                                                             AcceptsReturn="True"
+                                                             VerticalScrollBarVisibility="Auto"
+                                                             MinHeight="60" MaxHeight="200"
+                                                             Text="{Binding RawJson, UpdateSourceTrigger=PropertyChanged}"
+                                                             ToolTip="When non-empty, replaces the structured config above. Useful for OAuth blocks and custom MCP shapes."/>
+                                                </Expander>
                                             </StackPanel>
                                         </Border>
                                     </DataTemplate>
