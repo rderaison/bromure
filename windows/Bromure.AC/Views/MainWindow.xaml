@@ -43,6 +43,12 @@
                 <MenuItem Header="_New Session" InputGestureText="Ctrl+N"
                           Command="{Binding NewSessionCommand}"/>
                 <Separator/>
+                <!-- Audit 10 §0.5: explicit Rebuild Base Image entry
+                     point. Navigates to Settings where the build/
+                     rebuild button lives. -->
+                <MenuItem Header="_Rebuild Base Image…"
+                          Command="{Binding GoToNavigationCommand}" CommandParameter="Settings"/>
+                <Separator/>
                 <MenuItem Header="_Close Window" InputGestureText="Ctrl+W"
                           Command="{x:Static SystemCommands.CloseWindowCommand}"/>
                 <MenuItem Header="E_xit"

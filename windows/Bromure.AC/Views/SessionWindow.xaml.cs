@@ -59,6 +59,20 @@ public partial class SessionWindow : Window
         InputBindings.Add(new KeyBinding(
             new RelayCommand(_ => AppendTab()),
             new KeyGesture(Key.T, ModifierKeys.Control)));
+        // Audit 10 §4.4 — Ctrl+1..9 switches tabs by index. Matches
+        // macOS's `performKeyEquivalent` + every other terminal app on
+        // Windows (Windows Terminal, kitty, alacritty). Out-of-range
+        // gesture is a no-op rather than an error.
+        for (int i = 1; i <= 9; i++)
+        {
+            int idx = i - 1;
+            InputBindings.Add(new KeyBinding(
+                new RelayCommand(_ =>
+                {
+                    if (idx < _tabs.Count) SetActiveTab(_tabs[idx]);
+                }),
+                new KeyGesture(Key.D0 + i, ModifierKeys.Control)));
+        }
         StateChanged += (_, _) => UpdateMaxGlyph();
         // Window-level fallback so modifier keys (Shift, Alt) ALWAYS
         // reach the VNC channel even if WPF parked keyboard focus on
