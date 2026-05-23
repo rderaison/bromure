@@ -111,6 +111,11 @@ public partial class SessionWindow : Window
         IpChip.Visibility = Visibility.Visible;
     }
 
+    private void OnRebootClick(object sender, RoutedEventArgs e)
+    {
+        _vm?.RebootCommand?.Execute(null);
+    }
+
     private void OnTraceButtonClick(object sender, RoutedEventArgs e)
     {
         // Audit 10 §4.1 — bring the main window's Trace Inspector

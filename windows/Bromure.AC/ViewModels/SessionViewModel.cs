@@ -615,6 +615,31 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
         VmStatus = "Stopped";
     }
 
+    /// <summary>Audit 10 §4.1 — guest reboot. Fires `systemctl reboot`
+    /// over bromure-cmd-server. The HCS compute system stays alive;
+    /// only the Linux kernel reinits. Title-pusher reconnects, VNC
+    /// briefly drops then comes back. Fire-and-forget — there's no
+    /// useful "rebooted!" signal to await on.</summary>
+    [RelayCommand]
+    public void Reboot()
+    {
+        if (VmRuntimeId == Guid.Empty || !IsRunning) return;
+        var choice = System.Windows.MessageBox.Show(
+            "Reboot this VM?\n\n" +
+            "All running processes in the guest will be terminated. " +
+            "Open tabs survive — kittys are respawned after the guest comes back up.",
+            "Reboot session",
+            System.Windows.MessageBoxButton.YesNo,
+            System.Windows.MessageBoxImage.Question,
+            System.Windows.MessageBoxResult.No);
+        if (choice != System.Windows.MessageBoxResult.Yes) return;
+        _ = Bromure.AC.Display.GuestCommand.SendAsync(
+            VmRuntimeId,
+            "sudo systemctl reboot >/dev/null 2>&1",
+            CancellationToken.None);
+        VmStatus = "Rebooting…";
+    }
+
     /// <summary>Suspend the VM: dump CPU+RAM+device state to
     /// &lt;SessionRoot&gt;/saved-state.bin and tear down the MITM
     /// proxy + RDP bridge. The per-session VHDX stays in place; the

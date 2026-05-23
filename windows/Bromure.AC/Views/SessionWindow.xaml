@@ -103,6 +103,22 @@
                         </ItemsControl>
                     </Border>
                 </Popup>
+                <!-- Audit 10 §4.1: reboot button. Confirmation dialog
+                     before firing systemctl reboot inside the guest. -->
+                <Button x:Name="RebootButton"
+                        Click="OnRebootClick"
+                        VerticalAlignment="Center"
+                        Margin="0,0,8,0"
+                        Padding="8,4"
+                        Background="#22FFFFFF"
+                        BorderBrush="#33FFFFFF"
+                        BorderThickness="1"
+                        Foreground="#E6EDF3"
+                        FontSize="11"
+                        Cursor="Hand"
+                        ToolTip="Reboot the guest VM">
+                    <TextBlock Text="🔄 Reboot"/>
+                </Button>
                 <!-- Audit 10 §4.1: trace inspector quick-jump. Surfaces
                      the main window's Trace pane so the user can
                      correlate session activity with intercepted
