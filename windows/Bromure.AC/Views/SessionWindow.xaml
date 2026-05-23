@@ -59,6 +59,25 @@
                         Orientation="Horizontal"
                         VerticalAlignment="Top"
                         shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                <!-- Audit 10 §4.1: IP chip. Shows the guest's current
+                     LAN IP; click copies to clipboard (handy for
+                     ssh / scp into the VM from another host shell).
+                     Hidden until VmGuestIpAddress resolves; updated
+                     live by the host's IP-refresh listener. -->
+                <Button x:Name="IpChip"
+                        Click="OnIpChipClick"
+                        Visibility="Collapsed"
+                        VerticalAlignment="Center"
+                        Margin="0,0,12,0"
+                        Padding="10,4"
+                        Background="#22FFFFFF"
+                        BorderBrush="#33FFFFFF"
+                        BorderThickness="1"
+                        Foreground="#E6EDF3"
+                        FontFamily="Cascadia Code, Consolas, monospace"
+                        FontSize="11"
+                        Cursor="Hand"
+                        ToolTip="Click to copy guest IP"/>
                 <Button x:Name="MinButton"
                         Click="OnMinClick"
                         Content="&#xE921;"

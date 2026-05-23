@@ -100,6 +100,25 @@ public partial class SessionWindow : Window
             $"[{DateTime.Now:HH:mm:ss.fff}] {msg}\n"); } catch { }
     }
 
+    private void RefreshIpChip(string? ip)
+    {
+        if (string.IsNullOrWhiteSpace(ip))
+        {
+            IpChip.Visibility = Visibility.Collapsed;
+            return;
+        }
+        IpChip.Content = ip;
+        IpChip.Visibility = Visibility.Visible;
+    }
+
+    private void OnIpChipClick(object sender, RoutedEventArgs e)
+    {
+        var ip = _vm?.VmGuestIpAddress;
+        if (string.IsNullOrWhiteSpace(ip)) return;
+        try { System.Windows.Clipboard.SetText(ip); }
+        catch { /* clipboard can transiently fail (locked by another process) */ }
+    }
+
     /// <summary>3-button prompt asking what to do when the user
     /// closes the window with profile.CloseAction = Ask. Returns
     /// true → suspend, false → shutdown. Cancel resets _shuttingDown
@@ -365,6 +384,17 @@ public partial class SessionWindow : Window
             _vnc = BuildVncControl(vm);
             ActiveContent.Content = _vnc;
             SubscribeAliveRoster(vm);
+            // Audit 10 §4.1 — IP chip. Pull the initial value and
+            // subscribe to live changes (guest pushes ip|<addr> every
+            // ~5s via title-pusher).
+            RefreshIpChip(vm.VmGuestIpAddress);
+            vm.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(SessionViewModel.VmGuestIpAddress))
+                {
+                    Dispatcher.InvokeAsync(() => RefreshIpChip(vm.VmGuestIpAddress));
+                }
+            };
         }
         if (firstAdoption)
         {
