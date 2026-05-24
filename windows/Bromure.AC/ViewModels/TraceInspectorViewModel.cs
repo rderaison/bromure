@@ -22,6 +22,11 @@ public sealed partial class TraceInspectorViewModel : ObservableObject
 
     public ObservableCollection<TraceRowViewModel> Rows { get; } = new();
     [ObservableProperty] private string _filter = "";
+    /// <summary>Method substring filter (GET, POST, etc.). Empty = all.</summary>
+    [ObservableProperty] private string _methodFilter = "";
+    /// <summary>Status-code filter. "2xx"/"3xx"/"4xx"/"5xx" match by hundreds;
+    /// numeric value matches exact. Empty = all.</summary>
+    [ObservableProperty] private string _statusFilter = "";
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SelectedRequestBody))]
     [NotifyPropertyChangedFor(nameof(SelectedResponseBody))]
@@ -72,14 +77,37 @@ public sealed partial class TraceInspectorViewModel : ObservableObject
         Rows.Clear();
         foreach (var r in recent)
         {
-            if (!string.IsNullOrEmpty(Filter)
-                && !r.Host.Contains(Filter, StringComparison.OrdinalIgnoreCase)
-                && !r.Path.Contains(Filter, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
+            if (!MatchesHostPath(r) || !MatchesMethod(r) || !MatchesStatus(r)) continue;
             Rows.Add(new TraceRowViewModel(r));
         }
+    }
+
+    private bool MatchesHostPath(Bromure.AC.Mitm.Trace.TraceRecord r)
+        => string.IsNullOrEmpty(Filter)
+           || r.Host.Contains(Filter, StringComparison.OrdinalIgnoreCase)
+           || r.Path.Contains(Filter, StringComparison.OrdinalIgnoreCase);
+
+    private bool MatchesMethod(Bromure.AC.Mitm.Trace.TraceRecord r)
+        => string.IsNullOrEmpty(MethodFilter)
+           || r.Method.Equals(MethodFilter, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Status filter parser: empty matches all; a bare number
+    /// matches the exact status; "Nxx" matches the hundreds-bucket
+    /// (e.g. "4xx" matches 400-499). Anything else is treated as a
+    /// no-match so a typo doesn't silently surface every row.</summary>
+    private bool MatchesStatus(Bromure.AC.Mitm.Trace.TraceRecord r)
+    {
+        if (string.IsNullOrEmpty(StatusFilter)) return true;
+        var s = StatusFilter.Trim();
+        if (int.TryParse(s, out var exact)) return r.StatusCode == exact;
+        if (s.Length == 3 && (s[1] == 'x' || s[1] == 'X')
+                          && (s[2] == 'x' || s[2] == 'X')
+                          && char.IsDigit(s[0]))
+        {
+            var bucket = (s[0] - '0') * 100;
+            return r.StatusCode >= bucket && r.StatusCode < bucket + 100;
+        }
+        return false;
     }
 
     [RelayCommand]

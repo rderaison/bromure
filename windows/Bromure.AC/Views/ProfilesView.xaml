@@ -40,9 +40,12 @@
                                     <ColumnDefinition Width="Auto"/>
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
+                                <!-- Audit 09 §A1: the dot reflects the profile's
+                                     chosen color, matching the editor swatch +
+                                     SessionsView pill. Previously always blue. -->
                                 <Border Grid.Column="0" Width="10" Height="10"
                                         CornerRadius="5"
-                                        Background="{StaticResource AccentBrush}"
+                                        Background="{Binding Color, Converter={StaticResource ProfileColorToBrush}}"
                                         Margin="0,2,8,0" VerticalAlignment="Top"/>
                                 <StackPanel Grid.Column="1">
                                     <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
@@ -219,11 +222,27 @@
 
                                 <TextBlock Grid.Row="1" Grid.Column="0" Text="Accent colour"
                                            Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
+                                <!-- Audit 09 §A1: macOS shows a filled gradient
+                                     circle next to each color name. WPF needs a
+                                     DataTemplate to render the swatch alongside
+                                     the label. -->
                                 <ComboBox Grid.Row="1" Grid.Column="1"
                                           ItemsSource="{Binding DataContext.ColorOptions,
                                                        RelativeSource={RelativeSource AncestorType=UserControl}}"
                                           SelectedItem="{Binding Color}"
-                                          Margin="0,4"/>
+                                          Margin="0,4">
+                                    <ComboBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="12" Height="12"
+                                                         Fill="{Binding Converter={StaticResource ProfileColorToBrush}}"
+                                                         Margin="0,0,8,0"
+                                                         VerticalAlignment="Center"/>
+                                                <TextBlock Text="{Binding}" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ComboBox.ItemTemplate>
+                                </ComboBox>
 
                                 <TextBlock Grid.Row="2" Grid.Column="0" Text="Primary tool"
                                            Foreground="{StaticResource TextSecondary}" Margin="0,8"/>
@@ -717,8 +736,31 @@
                                                                      Margin="0,2"/>
                                                             <TextBlock Grid.Row="1" Grid.Column="0" Text="Value (real)"
                                                                        Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
-                                                            <PasswordBox Grid.Row="1" Grid.Column="1" Margin="0,2"
-                                                                         cmn:PasswordBoxBinding.Password="{Binding Value, Mode=TwoWay}"/>
+                                                            <!-- Audit 09 §A4: a small "eye" toggle lets the user
+                                                                 verify what's in the field without copy-pasting.
+                                                                 Per-row UI state via ElementName binding; not
+                                                                 persisted to the model. -->
+                                                            <Grid Grid.Row="1" Grid.Column="1" Margin="0,2">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="Auto"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <PasswordBox Grid.Column="0"
+                                                                             cmn:PasswordBoxBinding.Password="{Binding Value, Mode=TwoWay}"
+                                                                             Visibility="{Binding IsChecked, ElementName=RevealValue,
+                                                                                          Converter={StaticResource InverseBoolToVis}}"/>
+                                                                <TextBox Grid.Column="0"
+                                                                         Text="{Binding Value, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                         FontFamily="Consolas"
+                                                                         Visibility="{Binding IsChecked, ElementName=RevealValue,
+                                                                                      Converter={StaticResource BoolToVis}}"/>
+                                                                <ToggleButton Grid.Column="1" x:Name="RevealValue"
+                                                                              Content="👁"
+                                                                              Margin="6,0,0,0" Padding="6,2"
+                                                                              ToolTip="Reveal / hide value"
+                                                                              Background="Transparent"
+                                                                              BorderThickness="0"/>
+                                                            </Grid>
                                                             <TextBlock Grid.Row="2" Grid.Column="0" Text="Env var"
                                                                        Foreground="{StaticResource TextSecondary}" Margin="0,4"/>
                                                             <TextBox Grid.Row="2" Grid.Column="1" FontFamily="Consolas"
@@ -1170,6 +1212,19 @@
                                                                Margin="0,4,0,2"/>
                                                     <TextBox FontFamily="Consolas"
                                                              Text="{Binding Command, UpdateSourceTrigger=PropertyChanged}"/>
+                                                    <!-- Audit 09 §A6: arguments list. macOS lets the user
+                                                         add positional args one at a time; we follow the
+                                                         same pattern via an editable line-per-arg list. -->
+                                                    <TextBlock Text="Arguments (one per line)" FontSize="10"
+                                                               Foreground="{StaticResource TextSecondary}"
+                                                               Margin="0,6,0,2"/>
+                                                    <TextBox FontFamily="Consolas" FontSize="11"
+                                                             AcceptsReturn="True"
+                                                             VerticalScrollBarVisibility="Auto"
+                                                             MinHeight="50" MaxHeight="120"
+                                                             Text="{Binding Arguments,
+                                                                    Converter={StaticResource StringListConverter},
+                                                                    UpdateSourceTrigger=LostFocus}"/>
                                                 </StackPanel>
                                                 <!-- HTTP: url + bearer env var -->
                                                 <StackPanel Visibility="{Binding Transport,
@@ -1211,6 +1266,19 @@
                                                                TextWrapping="Wrap"
                                                                Text="{Binding OAuthState, Converter={StaticResource McpOAuthStatusConverter}}"/>
                                                 </StackPanel>
+                                                <!-- Audit 09 §A6: per-server environment list. macOS exposes
+                                                     a Name=Value editor; we use a NAME=VALUE-per-line text box
+                                                     for compactness. Empty lines are dropped on save. -->
+                                                <Expander Header="Environment variables" Margin="0,8,0,0">
+                                                    <TextBox FontFamily="Consolas" FontSize="11"
+                                                             AcceptsReturn="True"
+                                                             VerticalScrollBarVisibility="Auto"
+                                                             MinHeight="50" MaxHeight="160"
+                                                             Text="{Binding Environment,
+                                                                    Converter={StaticResource McpEnvLinesConverter},
+                                                                    UpdateSourceTrigger=LostFocus}"
+                                                             ToolTip="One NAME=VALUE pair per line. Values containing '=' keep the rest of the line as-is."/>
+                                                </Expander>
                                                 <!-- Audit 09 §A6: raw JSON override. -->
                                                 <Expander Header="Raw JSON override" Margin="0,8,0,0">
                                                     <TextBox FontFamily="Consolas" FontSize="11"

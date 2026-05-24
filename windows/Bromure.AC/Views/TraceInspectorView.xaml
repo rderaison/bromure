@@ -23,6 +23,8 @@
         <Grid Grid.Row="1" Margin="0,16,0,16">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="100"/>
+                <ColumnDefinition Width="100"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBox Grid.Column="0" Padding="8,6" Margin="0,0,8,0"
@@ -31,7 +33,21 @@
                      BorderThickness="1" BorderBrush="#33FFFFFF"
                      Text="{Binding Filter, UpdateSourceTrigger=PropertyChanged}"
                      ToolTip="Filter by host or path"/>
-            <Button Grid.Column="1" Content="Refresh" Padding="14,6"
+            <!-- Audit 09: method + status filters alongside the host/path
+                 substring filter. Status accepts 200, 4xx, etc. -->
+            <TextBox Grid.Column="1" Padding="8,6" Margin="0,0,8,0"
+                     Background="{StaticResource PanelBackground}"
+                     Foreground="{StaticResource TextPrimary}"
+                     BorderThickness="1" BorderBrush="#33FFFFFF"
+                     Text="{Binding MethodFilter, UpdateSourceTrigger=PropertyChanged}"
+                     ToolTip="Method (GET, POST…)"/>
+            <TextBox Grid.Column="2" Padding="8,6" Margin="0,0,8,0"
+                     Background="{StaticResource PanelBackground}"
+                     Foreground="{StaticResource TextPrimary}"
+                     BorderThickness="1" BorderBrush="#33FFFFFF"
+                     Text="{Binding StatusFilter, UpdateSourceTrigger=PropertyChanged}"
+                     ToolTip="Status (200, 4xx, 5xx)"/>
+            <Button Grid.Column="3" Content="Refresh" Padding="14,6"
                     Background="{StaticResource AccentBrush}"
                     Foreground="{StaticResource TextPrimary}"
                     BorderThickness="0" Cursor="Hand"

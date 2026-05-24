@@ -126,6 +126,9 @@
             <cmn:EnumToVisibilityConverter x:Key="EnumToVis"/>
             <cmn:StringToVisibilityConverter x:Key="StringToVis"/>
             <cmn:McpOAuthStatusConverter x:Key="McpOAuthStatusConverter"/>
+            <cmn:ProfileColorToBrushConverter x:Key="ProfileColorToBrush"/>
+            <cmn:StringListConverter x:Key="StringListConverter"/>
+            <cmn:McpEnvLinesConverter x:Key="McpEnvLinesConverter"/>
         </ResourceDictionary>
     </Application.Resources>
 </Application>
