@@ -3,6 +3,7 @@ using Bromure.AC.Core.Ssh;
 using Bromure.AC.Mitm.Consent;
 using Bromure.AC.Mitm.Engine;
 using Bromure.AC.Mitm.Aws;
+using Bromure.AC.Mitm.Ssh;
 using Bromure.Platform;
 using FluentAssertions;
 using Xunit;
@@ -61,7 +62,8 @@ public class MitmEngineBindingsTests
 
         var loaded = engine.SshAgent.KeysFor(profile.Id);
         loaded.Should().HaveCount(1);
-        loaded[0].Seed.Length.Should().Be(32);
+        loaded[0].Should().BeOfType<Ed25519AgentKey>();
+        ((Ed25519AgentKey)loaded[0]).Seed.Length.Should().Be(32);
         loaded[0].PublicKey.Length.Should().Be(32);
         loaded[0].Comment.Should().StartWith("bromure-ac-");
     }
@@ -94,7 +96,8 @@ public class MitmEngineBindingsTests
         loaded.Should().HaveCount(1);
         loaded[0].Comment.Should().Be("imported-test");
         loaded[0].RequireApproval.Should().BeTrue();
-        loaded[0].Seed.Should().Equal(seed);
+        loaded[0].Should().BeOfType<Ed25519AgentKey>();
+        ((Ed25519AgentKey)loaded[0]).Seed.Should().Equal(seed);
         loaded[0].PublicKey.Should().Equal(pub);
     }
 

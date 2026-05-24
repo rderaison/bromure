@@ -301,7 +301,7 @@ public sealed class MitmEngine : IAsyncDisposable
             {
                 var seed = raw.AsSpan(0, 32).ToArray();
                 var pub = raw.AsSpan(32, 32).ToArray();
-                keys.Add(new AgentKey(
+                keys.Add(new Ed25519AgentKey(
                     Comment: "bromure-ac-" + profile.Id.ToString("N")[..8],
                     PublicKey: pub,
                     Seed: seed,
@@ -313,19 +313,37 @@ public sealed class MitmEngine : IAsyncDisposable
         {
             if (string.IsNullOrWhiteSpace(imported.PrivateKeyPem)) continue;
             // Imported keys carry their private material inline (PEM).
-            // OpenSshKeyFormat.ParseEd25519PrivatePem decodes the raw
-            // SSH-private-key wrapper; we then layer the per-key
-            // consent + approval metadata on top.
+            // Try ed25519 first; fall back to RSA. Either decoder
+            // returns null on shape mismatch so the trial-and-error
+            // is cheap.
             try
             {
-                var parsed = OpenSshKeyFormat.ParseEd25519PrivatePem(imported.PrivateKeyPem);
-                if (parsed is null) continue;
-                keys.Add(new AgentKey(
-                    Comment: string.IsNullOrEmpty(imported.Label) ? imported.Comment : imported.Label,
-                    PublicKey: parsed.Value.PublicKey,
-                    Seed: parsed.Value.Seed,
-                    RequireApproval: imported.RequireApproval,
-                    ConsentCredentialId: $"imported/{imported.Id:D}"));
+                var comment = string.IsNullOrEmpty(imported.Label) ? imported.Comment : imported.Label;
+                var consent = $"imported/{imported.Id:D}";
+                var ed = OpenSshKeyFormat.ParseEd25519PrivatePem(imported.PrivateKeyPem);
+                if (ed is not null)
+                {
+                    keys.Add(new Ed25519AgentKey(
+                        Comment: comment,
+                        PublicKey: ed.Value.PublicKey,
+                        Seed: ed.Value.Seed,
+                        RequireApproval: imported.RequireApproval,
+                        ConsentCredentialId: consent));
+                    continue;
+                }
+                var rsa = OpenSshKeyFormat.ParseRsaPrivatePem(imported.PrivateKeyPem);
+                if (rsa is not null)
+                {
+                    keys.Add(new RsaAgentKey(
+                        Comment: comment,
+                        PublicKey: rsa.Value.PublicBlob,
+                        Parameters: rsa.Value.Parameters,
+                        RequireApproval: imported.RequireApproval,
+                        ConsentCredentialId: consent));
+                    continue;
+                }
+                _log.LogDebug("Imported SSH key {Id} ({Label}) is not a supported PEM shape (ed25519 / RSA)",
+                    imported.Id, imported.Label);
             }
             catch (Exception ex)
             {
@@ -352,9 +370,7 @@ public sealed class MitmEngine : IAsyncDisposable
         // OTHER active profiles' keys. Use the per-profile atomic
         // replace so two concurrent sessions both see their own
         // keys via the shared host pipe.
-        PrivateAgent.ReplaceForProfile(
-            profile.Id,
-            keys.Select(k => (k.Seed, k.PublicKey, k.Comment)));
+        PrivateAgent.ReplaceForProfile(profile.Id, keys);
     }
 
     /// <summary>

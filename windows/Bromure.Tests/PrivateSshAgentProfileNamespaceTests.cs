@@ -78,9 +78,9 @@ public class PrivateSshAgentProfileNamespaceTests
 
         // Re-bind profile A with a different keyset (e.g. user
         // imported a second SSH key). Profile B should be untouched.
-        agent.ReplaceForProfile(pA, new[]
+        agent.ReplaceForProfile(pA, new AgentKey[]
         {
-            (sA2, pubA2, "A2-new"),
+            new Ed25519AgentKey("A2-new", pubA2, sA2),
         });
         agent.KeyCount.Should().Be(2, "A's old key dropped, A's new key added, B untouched");
     }
@@ -96,7 +96,7 @@ public class PrivateSshAgentProfileNamespaceTests
         agent.AddEd25519(sA, pubA, "A", pA);
         agent.AddEd25519(sB, pubB, "B", pB);
 
-        agent.ReplaceForProfile(pA, Enumerable.Empty<(byte[], byte[], string)>());
+        agent.ReplaceForProfile(pA, Enumerable.Empty<AgentKey>());
         agent.KeyCount.Should().Be(1, "A dropped, B preserved");
     }
 

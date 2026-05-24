@@ -93,7 +93,7 @@ public sealed class SshAgentServer
     {
         // Materialize spans into byte arrays before the first await — ref
         // structs can't cross await suspension points.
-        ParseSignRequest(body.Span, out var publicBlob, out var toSign);
+        ParseSignRequest(body.Span, out var publicBlob, out var toSign, out var flags);
 
         var keys = KeysFor(profileId);
         AgentKey? key = null;
@@ -103,10 +103,8 @@ public sealed class SshAgentServer
         }
         if (key is null)
         {
-            // Could be an imported-only key the user added via the
-            // profile UI. We don't sign those here — the macOS port
-            // forwards to a host-side ssh-agent. On Windows we'd add
-            // an "imported keys" namespace into the agent; pending.
+            // Unknown public key — caller mistakenly forwarded a
+            // SIGN_REQUEST for a key we don't hold.
             return new[] { Op.SSH_AGENT_FAILURE };
         }
 
@@ -119,24 +117,15 @@ public sealed class SshAgentServer
             if (!allowed) return new[] { Op.SSH_AGENT_FAILURE };
         }
 
-        var sig = SignEd25519(key.Seed, toSign);
+        var (sig, sigFormat) = key.Sign(toSign, flags);
         var sigBlob = new MemoryStream();
-        WriteString(sigBlob, "ssh-ed25519");
+        WriteString(sigBlob, sigFormat);
         WriteString(sigBlob, sig);
 
         var output = new MemoryStream();
         output.WriteByte(Op.SSH_AGENT_SIGN_RESPONSE);
         WriteString(output, sigBlob.ToArray());
         return output.ToArray();
-    }
-
-    private static byte[] SignEd25519(byte[] seed, byte[] message)
-    {
-        var keyParams = new Org.BouncyCastle.Crypto.Parameters.Ed25519PrivateKeyParameters(seed, 0);
-        var signer = new Org.BouncyCastle.Crypto.Signers.Ed25519Signer();
-        signer.Init(forSigning: true, keyParams);
-        signer.BlockUpdate(message, 0, message.Length);
-        return signer.GenerateSignature();
     }
 
     private static string FingerprintHex(AgentKey k)
@@ -148,11 +137,17 @@ public sealed class SshAgentServer
         return sb.ToString();
     }
 
-    /// <summary>Pull the SIGN_REQUEST body's two ssh-strings out as byte[].</summary>
-    private static void ParseSignRequest(ReadOnlySpan<byte> input, out byte[] publicBlob, out byte[] data)
+    /// <summary>Pull the SIGN_REQUEST body's two ssh-strings + u32 flags
+    /// out. Flags drive the RSA-SHA2 algorithm selection (RFC 8332).
+    /// Missing flags = 0 (legacy behaviour) — fine since the key's own
+    /// <see cref="AgentKey.Sign"/> picks its default in that case.</summary>
+    private static void ParseSignRequest(ReadOnlySpan<byte> input, out byte[] publicBlob, out byte[] data, out uint flags)
     {
-        publicBlob = ReadString(input, out var rest).ToArray();
-        data = ReadString(rest, out _).ToArray();
+        publicBlob = ReadString(input, out var afterPub).ToArray();
+        data = ReadString(afterPub, out var afterData).ToArray();
+        flags = afterData.Length >= 4
+            ? BinaryPrimitives.ReadUInt32BigEndian(afterData)
+            : 0u;
     }
 
     private static ReadOnlySpan<byte> ReadString(ReadOnlySpan<byte> input, out ReadOnlySpan<byte> rest)

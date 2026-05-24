@@ -81,7 +81,8 @@ public sealed class PrivateSshAgent : IAsyncDisposable
         if (seed.Length != 32 || publicKey.Length != 32) return false;
         var blob = OpenSshKeyFormat.Ed25519PublicBlob(publicKey);
         var key = Convert.ToBase64String(blob);
-        KeysFor(profileId)[key] = new KeyEntry(blob, seed.ToArray(), publicKey.ToArray(), comment);
+        var agentKey = new Ed25519AgentKey(comment, publicKey.ToArray(), seed.ToArray());
+        KeysFor(profileId)[key] = new KeyEntry(blob, agentKey);
         return true;
     }
 
@@ -117,14 +118,16 @@ public sealed class PrivateSshAgent : IAsyncDisposable
     /// <c>ApplyProfileBindingsAsync</c> so the previous session's keys
     /// for this same profile are dropped and the new set installed in
     /// one shot, without a "no keys" window between.</summary>
-    public void ReplaceForProfile(Guid profileId, IEnumerable<(byte[] Seed, byte[] PublicKey, string Comment)> keys)
+    public void ReplaceForProfile(Guid profileId, IEnumerable<AgentKey> keys)
     {
         var fresh = new ConcurrentDictionary<string, KeyEntry>();
-        foreach (var (seed, pub, comment) in keys)
+        foreach (var key in keys)
         {
-            if (seed.Length != 32 || pub.Length != 32) continue;
-            var blob = OpenSshKeyFormat.Ed25519PublicBlob(pub);
-            fresh[Convert.ToBase64String(blob)] = new KeyEntry(blob, seed, pub, comment);
+            var blob = key.PublicKeyBlob;
+            // Defensive: skip empty/degenerate keys so a malformed
+            // import can't poison the keyring.
+            if (blob.Length == 0) continue;
+            fresh[Convert.ToBase64String(blob)] = new KeyEntry(blob, key);
         }
         _keysByProfile[profileId] = fresh;
     }
@@ -240,7 +243,7 @@ public sealed class PrivateSshAgent : IAsyncDisposable
         foreach (var entry in seen.Values)
         {
             WriteSshString(ms, entry.PublicBlob);
-            WriteSshString(ms, System.Text.Encoding.UTF8.GetBytes(entry.Comment));
+            WriteSshString(ms, System.Text.Encoding.UTF8.GetBytes(entry.Key.Comment));
         }
         return ms.ToArray();
     }
@@ -249,8 +252,10 @@ public sealed class PrivateSshAgent : IAsyncDisposable
     {
         // body: ssh-string(public-blob) ssh-string(data) u32(flags)
         var publicBlob = ReadSshString(body, out var rest1);
-        var toSign = ReadSshString(rest1, out _);
-        // flags ignored — we always do raw ed25519.
+        var toSign = ReadSshString(rest1, out var afterData);
+        var flags = afterData.Length >= 4
+            ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(afterData)
+            : 0u;
 
         var key = Convert.ToBase64String(publicBlob);
         KeyEntry? entry = null;
@@ -263,30 +268,19 @@ public sealed class PrivateSshAgent : IAsyncDisposable
             return new[] { SSH_AGENT_FAILURE };
         }
 
-        // ed25519 sign(seed, message). System.Security.Cryptography
-        // doesn't ship ed25519 in BCL; route through BouncyCastle.
-        var sig = SignEd25519(entry.Seed, toSign.ToArray());
+        var (sig, sigFormat) = entry.Key.Sign(toSign.ToArray(), flags);
 
         // Response: SSH_AGENT_SIGN_RESPONSE (14)
         //           ssh-string(signature blob)
-        //   signature blob = ssh-string("ssh-ed25519") ssh-string(sig)
+        //   signature blob = ssh-string(sigFormat) ssh-string(sig)
         var sigBlob = new MemoryStream();
-        WriteSshString(sigBlob, "ssh-ed25519");
+        WriteSshString(sigBlob, sigFormat);
         WriteSshString(sigBlob, sig);
 
         var response = new MemoryStream();
         response.WriteByte(SSH_AGENT_SIGN_RESPONSE);
         WriteSshString(response, sigBlob.ToArray());
         return response.ToArray();
-    }
-
-    private static byte[] SignEd25519(byte[] seed, byte[] message)
-    {
-        var keyParams = new Org.BouncyCastle.Crypto.Parameters.Ed25519PrivateKeyParameters(seed, 0);
-        var signer = new Org.BouncyCastle.Crypto.Signers.Ed25519Signer();
-        signer.Init(forSigning: true, keyParams);
-        signer.BlockUpdate(message, 0, message.Length);
-        return signer.GenerateSignature();
     }
 
     private bool TryAddIdentity(ReadOnlySpan<byte> body)
@@ -375,5 +369,5 @@ public sealed class PrivateSshAgent : IAsyncDisposable
         _cts?.Dispose();
     }
 
-    private sealed record KeyEntry(byte[] PublicBlob, byte[] Seed, byte[] PublicKey, string Comment);
+    private sealed record KeyEntry(byte[] PublicBlob, AgentKey Key);
 }
