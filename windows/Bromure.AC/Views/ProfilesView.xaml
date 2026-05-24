@@ -693,11 +693,26 @@
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>
-                                        <Button Content="Add Git credential" Margin="0,12,0,0"
-                                                HorizontalAlignment="Left"
-                                                Style="{StaticResource AccentButton}"
-                                                Command="{Binding DataContext.AddGitCommand,
-                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                            <Button Content="Add Git credential"
+                                                    Style="{StaticResource AccentButton}"
+                                                    Margin="0,0,8,0"
+                                                    Command="{Binding DataContext.AddGitCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                            <!-- Audit 09 §A4: per-forge "open token page" launchers
+                                                 matching the macOS GitHttpsRow.openTokenPage shortcuts. -->
+                                            <Button Content="Open GitHub tokens"
+                                                    Margin="0,0,8,0"
+                                                    Command="{Binding DataContext.OpenGitHubTokensPageCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                            <Button Content="Open GitLab tokens"
+                                                    Margin="0,0,8,0"
+                                                    Command="{Binding DataContext.OpenGitLabTokensPageCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                            <Button Content="Open Bitbucket tokens"
+                                                    Command="{Binding DataContext.OpenBitbucketTokensPageCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                                        </StackPanel>
                                     </StackPanel>
                                 </Border>
                             </Expander>

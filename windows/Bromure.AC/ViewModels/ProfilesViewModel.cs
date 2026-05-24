@@ -323,6 +323,23 @@ public sealed partial class ProfilesViewModel : ObservableObject
         OpenUrlInBrowser("https://console.aws.amazon.com/iam/home#/security_credentials");
     }
 
+    /// <summary>Audit 09 §A4 — per-forge token-page launchers. macOS
+    /// surfaces these next to each forge's credentials row; we put
+    /// them in a row of three buttons below the credential list so a
+    /// single-tab UI doesn't need per-host icon resolution. The URLs
+    /// are the canonical "create personal access token" pages.</summary>
+    [RelayCommand]
+    private void OpenGitHubTokensPage()
+        => OpenUrlInBrowser("https://github.com/settings/tokens");
+
+    [RelayCommand]
+    private void OpenGitLabTokensPage()
+        => OpenUrlInBrowser("https://gitlab.com/-/user_settings/personal_access_tokens");
+
+    [RelayCommand]
+    private void OpenBitbucketTokensPage()
+        => OpenUrlInBrowser("https://bitbucket.org/account/settings/app-passwords/");
+
     private static void OpenUrlInBrowser(string url)
     {
         try
