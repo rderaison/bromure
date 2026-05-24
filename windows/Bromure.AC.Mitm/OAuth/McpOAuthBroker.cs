@@ -179,11 +179,39 @@ public sealed class McpOAuthBroker
         if (_callbackListener is null) throw new InvalidOperationException("Listener not started");
         using var client = await _callbackListener.AcceptTcpClientAsync(ct).ConfigureAwait(false);
         using var stream = client.GetStream();
+        // Loop until we see the end-of-headers delimiter or hit the
+        // buffer cap. A single ReadAsync can return less than a full
+        // HTTP request line if the browser (or an interception layer
+        // like a corp AV) fragments the TCP stream — the older
+        // single-read code surfaced as flaky OAuth failures with
+        // "Bad request line" errors that needed a manual retry.
         var buf = new byte[8192];
-        var n = await stream.ReadAsync(buf, ct).ConfigureAwait(false);
-        if (n <= 0) throw new InvalidOperationException("Empty callback");
+        var got = 0;
+        while (got < buf.Length)
+        {
+            var n = await stream.ReadAsync(buf.AsMemory(got, buf.Length - got), ct).ConfigureAwait(false);
+            if (n <= 0) break;
+            got += n;
+            var sliceEnd = got;
+            // Found CRLF CRLF — full headers in hand, body (if any) is irrelevant for GET /callback.
+            if (got >= 4)
+            {
+                var foundEnd = false;
+                for (var i = 0; i <= got - 4; i++)
+                {
+                    if (buf[i] == 0x0D && buf[i + 1] == 0x0A
+                        && buf[i + 2] == 0x0D && buf[i + 3] == 0x0A)
+                    {
+                        foundEnd = true; break;
+                    }
+                }
+                if (foundEnd) break;
+            }
+            _ = sliceEnd;
+        }
+        if (got <= 0) throw new InvalidOperationException("Empty callback");
 
-        var raw = Encoding.UTF8.GetString(buf, 0, n);
+        var raw = Encoding.UTF8.GetString(buf, 0, got);
         var firstLine = raw.Split("\r\n", 2)[0];
         var parts = firstLine.Split(' ');
         if (parts.Length < 2) throw new InvalidOperationException("Bad request line");

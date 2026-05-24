@@ -268,6 +268,25 @@ public sealed class PrivateSshAgent : IAsyncDisposable
             return new[] { SSH_AGENT_FAILURE };
         }
 
+        // Audit code-comb #10: any process running as the same user
+        // can open this pipe and request a signature. If the user
+        // marked the key as "require approval", a silent host-side
+        // sign would defeat the documented promise. We don't carry a
+        // ConsentBroker here (no UI thread, no profile dimension on
+        // the wire protocol), so the conservative choice is to refuse
+        // host-side signing for approve-required keys entirely. The
+        // VM-facing SshAgentServer keeps prompting via the existing
+        // consent broker. Users who want host-side use of the same
+        // key can disable RequireApproval in the profile editor.
+        if (entry.Key.RequireApproval)
+        {
+            _log.LogInformation(
+                "PrivateSshAgent refusing host-side sign of approve-required key {Comment}; " +
+                "VM-side signing still works via SshAgentServer's consent prompt",
+                entry.Key.Comment);
+            return new[] { SSH_AGENT_FAILURE };
+        }
+
         var (sig, sigFormat) = entry.Key.Sign(toSign.ToArray(), flags);
 
         // Response: SSH_AGENT_SIGN_RESPONSE (14)

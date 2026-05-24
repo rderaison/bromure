@@ -50,7 +50,11 @@ public sealed class CodexTokenBridge : IAsyncDisposable
                 catch (JsonException) { continue; }
                 if (response is null) continue;
 
-                if (response["id"]?.GetValue<long>() is long id)
+                // Defensive: GetValue<long>() throws on type-mismatch;
+                // catching here keeps the read loop alive against a
+                // misbehaving in-VM agent. See SubscriptionTokenBridge
+                // for the rationale.
+                if (SubscriptionTokenBridge.TryGetLong(response["id"]) is long id)
                 {
                     TaskCompletionSource<JsonObject>? tcs;
                     lock (state.Gate) state.Pending.Remove(id, out tcs);
@@ -84,13 +88,13 @@ public sealed class CodexTokenBridge : IAsyncDisposable
     public async Task<Tokens?> ReadAsync(Guid vmId, CancellationToken ct = default)
     {
         var resp = await RpcAsync(vmId, new JsonObject { ["op"] = "read" }, ct).ConfigureAwait(false);
-        if (resp["ok"]?.GetValue<bool>() != true)
+        if (SubscriptionTokenBridge.TryGetBool(resp["ok"]) != true)
         {
-            throw new AgentRejected(resp["reason"]?.GetValue<string>() ?? "unknown reason");
+            throw new AgentRejected(SubscriptionTokenBridge.TryGetString(resp["reason"]) ?? "unknown reason");
         }
-        var a = resp["access"]?.GetValue<string>();
-        var r = resp["refresh"]?.GetValue<string>();
-        var id = resp["id_token"]?.GetValue<string>();
+        var a = SubscriptionTokenBridge.TryGetString(resp["access"]);
+        var r = SubscriptionTokenBridge.TryGetString(resp["refresh"]);
+        var id = SubscriptionTokenBridge.TryGetString(resp["id_token"]);
         if (a is null || r is null || id is null) return null;
         return new Tokens(a, r, id);
     }
@@ -104,9 +108,9 @@ public sealed class CodexTokenBridge : IAsyncDisposable
             ["refresh"] = refresh,
             ["id_token"] = idToken,
         }, ct).ConfigureAwait(false);
-        if (resp["ok"]?.GetValue<bool>() != true)
+        if (SubscriptionTokenBridge.TryGetBool(resp["ok"]) != true)
         {
-            throw new AgentRejected(resp["reason"]?.GetValue<string>() ?? "unknown reason");
+            throw new AgentRejected(SubscriptionTokenBridge.TryGetString(resp["reason"]) ?? "unknown reason");
         }
     }
 

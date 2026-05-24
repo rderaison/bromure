@@ -59,8 +59,16 @@ public sealed class ExecCredentialPoller : IAsyncDisposable
     {
         if (_running.TryRemove(entryId, out var cts))
         {
+            // Cancel without disposing: LoopAsync is still running on
+            // a background Task and uses this token in Task.Delay /
+            // ct.Register. Disposing the CTS while it's in flight
+            // throws ObjectDisposedException out of those calls,
+            // which the loop's broad catch logs as a warning and
+            // retries — turning the poller into an unkillable CPU
+            // hog. The CTS leaks ~80 bytes per entry; the LoopAsync
+            // task exits naturally once it next observes
+            // IsCancellationRequested.
             try { cts.Cancel(); } catch { }
-            cts.Dispose();
         }
         lock (_gate)
         {
@@ -89,8 +97,9 @@ public sealed class ExecCredentialPoller : IAsyncDisposable
     {
         foreach (var (_, cts) in _running)
         {
+            // See Stop() comment — do NOT dispose the CTS while the
+            // LoopAsync background task may still be observing it.
             try { cts.Cancel(); } catch { }
-            cts.Dispose();
         }
         _running.Clear();
         _entriesByProfile.Clear();

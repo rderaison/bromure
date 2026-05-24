@@ -156,11 +156,16 @@ public sealed class HttpMitmProxy : IAsyncDisposable
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         // Specific non-loopback IP: honour caller's choice verbatim,
-        // single listener. Loopback / Any: bind BOTH IPv4 and IPv6
-        // on the same port so the VM can dial either stack.
+        // single listener. Loopback / Any (v4 OR v6): bind BOTH IPv4
+        // and IPv6 on the same port so the VM can dial either stack.
         // Audit 02 #3 fix: VM dialing [::1]:<port> used to fail.
-        if (!endpoint.Address.Equals(IPAddress.Loopback)
-            && !endpoint.Address.Equals(IPAddress.Any))
+        // The IPv6 sentinels (IPv6Any, IPv6Loopback) also need to
+        // route into the dual-stack branch — equality against the
+        // IPv4 sentinels alone misses them.
+        var addr = endpoint.Address;
+        var isAny = addr.Equals(IPAddress.Any) || addr.Equals(IPAddress.IPv6Any);
+        var isLoopback = IPAddress.IsLoopback(addr);
+        if (!isAny && !isLoopback)
         {
             _listener = new TcpListener(endpoint);
             _listener.Start();
@@ -168,8 +173,8 @@ public sealed class HttpMitmProxy : IAsyncDisposable
             return Task.CompletedTask;
         }
 
-        var v4Addr = endpoint.Address.Equals(IPAddress.Any) ? IPAddress.Any : IPAddress.Loopback;
-        var v6Addr = endpoint.Address.Equals(IPAddress.Any) ? IPAddress.IPv6Any : IPAddress.IPv6Loopback;
+        var v4Addr = isAny ? IPAddress.Any : IPAddress.Loopback;
+        var v6Addr = isAny ? IPAddress.IPv6Any : IPAddress.IPv6Loopback;
         // Bind IPv4 first to get a concrete port number, then bind
         // the IPv6 listener on the same port. (Inverted order can
         // fail if the IPv6 socket grabs DualMode + the kernel binds
@@ -1027,7 +1032,12 @@ public sealed class HttpMitmProxy : IAsyncDisposable
         var headerStr = Encoding.ASCII.GetString(headerBuf, 0, headerEnd);
         var contentLength = ParseContentLength(headerStr);
         var bodyAlready = got - headerEnd;
-        var bodyTotal = Math.Max(0, contentLength);
+        // Cap the allocation so an in-VM caller can't send
+        // `Content-Length: 2147483647` and OOM the host process. 64 MiB
+        // is well above any legitimate MCP / agent payload + matches
+        // the MaxFrameBytes cap used by the TLS frame plumbing.
+        const int MaxBodyBytes = 64 * 1024 * 1024;
+        var bodyTotal = Math.Max(0, Math.Min(contentLength, MaxBodyBytes));
         var output = new byte[headerEnd + bodyTotal];
         Buffer.BlockCopy(headerBuf, 0, output, 0, headerEnd);
         if (bodyAlready > 0)

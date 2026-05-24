@@ -53,7 +53,14 @@ public sealed class HvSocketTcpBridge : IAsyncDisposable
             try { tcp = await _listener.AcceptTcpClientAsync(ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { return; }
             catch (ObjectDisposedException) { return; }
-            _ = Task.Run(() => HandleAsync(tcp, ct), ct);
+            // Don't pass ct as Task.Run's second arg — if the token is
+            // already cancelled by the time Task.Run is reached, the
+            // body NEVER runs and tcp is never disposed (the `using
+            // (tcp)` lives inside HandleAsync). Socket-FD leak per
+            // accept that races dispose; over many session starts +
+            // stops this exhausts ephemeral ports. The body still
+            // observes ct internally for early-exit.
+            _ = Task.Run(() => HandleAsync(tcp, ct));
         }
     }
 

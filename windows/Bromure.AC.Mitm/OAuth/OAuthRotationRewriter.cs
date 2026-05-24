@@ -94,8 +94,14 @@ public static class OAuthRotationRewriter
         catch (JsonException) { return new OAuthRotationResult(raw, null); }
         if (root is not JsonObject json) return new OAuthRotationResult(raw, null);
 
-        var realAccess = json["access_token"]?.GetValue<string>();
-        var realRefresh = json["refresh_token"]?.GetValue<string>();
+        // GetValue<string>() throws InvalidOperationException when the
+        // field exists but isn't a string (number, bool, object). The
+        // outer proxy catch would swallow this + abandon the response,
+        // breaking auth rotation and forcing the user to re-login on
+        // every clean upstream that happens to return a non-string in
+        // one of these fields. Use a defensive accessor.
+        var realAccess = TryGetString(json["access_token"]);
+        var realRefresh = TryGetString(json["refresh_token"]);
         if (realAccess is null || realRefresh is null) return new OAuthRotationResult(raw, null);
         if (!realAccess.StartsWith("sk-ant-oat01-", StringComparison.Ordinal)) return new OAuthRotationResult(raw, null);
         if (!realRefresh.StartsWith("sk-ant-ort01-", StringComparison.Ordinal)) return new OAuthRotationResult(raw, null);
@@ -145,12 +151,12 @@ public static class OAuthRotationRewriter
         catch (JsonException) { return new OAuthRotationResult(raw, null); }
         if (root is not JsonObject json) return new OAuthRotationResult(raw, null);
 
-        var realAccess = json["access_token"]?.GetValue<string>();
-        var realRefresh = json["refresh_token"]?.GetValue<string>();
+        var realAccess = TryGetString(json["access_token"]);
+        var realRefresh = TryGetString(json["refresh_token"]);
         if (realAccess is null || realRefresh is null) return new OAuthRotationResult(raw, null);
         if (!realAccess.StartsWith("eyJ", StringComparison.Ordinal)) return new OAuthRotationResult(raw, null);
         if (SubscriptionFakeMint.IsJwtFake(realAccess)) return new OAuthRotationResult(raw, null);
-        var realId = json["id_token"]?.GetValue<string>();
+        var realId = TryGetString(json["id_token"]);
 
         var saltAccess = Encoding.UTF8.GetBytes($"codex-oauth-access:{profileId:D}");
         var saltRefresh = Encoding.UTF8.GetBytes($"codex-oauth-refresh:{profileId:D}");
@@ -323,5 +329,16 @@ public static class OAuthRotationRewriter
             if (ok) return i;
         }
         return -1;
+    }
+
+    /// <summary>Defensive JsonNode→string accessor. Returns null on
+    /// type-mismatch instead of throwing InvalidOperationException,
+    /// which the proxy's outer catch would otherwise swallow and
+    /// abandon the connection on.</summary>
+    private static string? TryGetString(JsonNode? n)
+    {
+        if (n is null) return null;
+        try { return n.AsValue().TryGetValue<string>(out var v) ? v : null; }
+        catch (InvalidOperationException) { return null; }
     }
 }

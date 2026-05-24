@@ -76,7 +76,11 @@ public sealed class SubscriptionTokenBridge : IAsyncDisposable
                 }
                 if (response is null) continue;
 
-                if (response["id"]?.GetValue<long>() is long id)
+                // Defensive: GetValue<long>() throws InvalidOperationException
+                // when the field isn't a JSON number (string, float, object).
+                // A bad agent message must NOT kill the read loop — that
+                // would hang every pending RPC and silently break autoseed.
+                if (TryGetLong(response["id"]) is long id)
                 {
                     TaskCompletionSource<JsonObject>? tcs;
                     lock (state.Gate) state.Pending.Remove(id, out tcs);
@@ -111,15 +115,39 @@ public sealed class SubscriptionTokenBridge : IAsyncDisposable
     public async Task<Tokens?> ReadAsync(Guid vmId, CancellationToken ct = default)
     {
         var response = await RpcAsync(vmId, new JsonObject { ["op"] = "read" }, ct).ConfigureAwait(false);
-        if (response["ok"]?.GetValue<bool>() != true)
+        if (TryGetBool(response["ok"]) != true)
         {
             throw new AgentRejectedException(
-                response["reason"]?.GetValue<string>() ?? "unknown reason");
+                TryGetString(response["reason"]) ?? "unknown reason");
         }
-        var access = response["access"]?.GetValue<string>();
-        var refresh = response["refresh"]?.GetValue<string>();
+        var access = TryGetString(response["access"]);
+        var refresh = TryGetString(response["refresh"]);
         if (access is null || refresh is null) return null;
         return new Tokens(access, refresh);
+    }
+
+    // Defensive JsonNode accessors. JsonNode.GetValue<T>() throws
+    // InvalidOperationException when the underlying value isn't the
+    // requested type; in this codebase that crashes the read loop and
+    // hangs every pending RPC. These helpers return null on type
+    // mismatch so callers can decide whether the message is usable.
+    internal static long? TryGetLong(JsonNode? n)
+    {
+        if (n is null) return null;
+        try { return n.AsValue().TryGetValue<long>(out var v) ? v : null; }
+        catch (InvalidOperationException) { return null; }
+    }
+    internal static bool? TryGetBool(JsonNode? n)
+    {
+        if (n is null) return null;
+        try { return n.AsValue().TryGetValue<bool>(out var v) ? v : null; }
+        catch (InvalidOperationException) { return null; }
+    }
+    internal static string? TryGetString(JsonNode? n)
+    {
+        if (n is null) return null;
+        try { return n.AsValue().TryGetValue<string>(out var v) ? v : null; }
+        catch (InvalidOperationException) { return null; }
     }
 
     public async Task WriteAsync(Guid vmId, string access, string refresh, CancellationToken ct = default)
@@ -130,10 +158,10 @@ public sealed class SubscriptionTokenBridge : IAsyncDisposable
             ["access"] = access,
             ["refresh"] = refresh,
         }, ct).ConfigureAwait(false);
-        if (response["ok"]?.GetValue<bool>() != true)
+        if (TryGetBool(response["ok"]) != true)
         {
             throw new AgentRejectedException(
-                response["reason"]?.GetValue<string>() ?? "unknown reason");
+                TryGetString(response["reason"]) ?? "unknown reason");
         }
     }
 

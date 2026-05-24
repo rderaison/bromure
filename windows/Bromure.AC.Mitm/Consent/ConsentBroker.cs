@@ -115,8 +115,33 @@ public sealed class ConsentBroker : IConsentBroker
             return await ourTcs.Task.ConfigureAwait(false);
         }
 
-        var decision = await _presenter.AskAsync(profileName, credentialDisplayName, scopeHint, ct)
-            .ConfigureAwait(false);
+        Decision decision;
+        try
+        {
+            decision = await _presenter.AskAsync(profileName, credentialDisplayName, scopeHint, ct)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // Presenter exploded (dispatcher failure, OOM, …). We're
+            // the driver — every coalesced waiter in _pending[key] is
+            // blocked on us. If we just bubble the exception, _pending
+            // never gets cleaned + waiters hang forever, AND every
+            // FUTURE caller for this key adds itself to the same
+            // orphaned waiters list = cascading deadlock of every
+            // swap / sign on this credential.
+            List<TaskCompletionSource<bool>> waiters;
+            lock (_gate)
+            {
+                _pending.TryGetValue(key, out waiters!);
+                _pending.Remove(key);
+            }
+            if (waiters is not null)
+            {
+                foreach (var w in waiters) w.TrySetResult(false);
+            }
+            throw;
+        }
 
         bool allow;
         var stamp = DateTimeOffset.UtcNow;

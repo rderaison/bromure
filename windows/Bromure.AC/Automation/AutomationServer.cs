@@ -207,8 +207,14 @@ public sealed class AutomationServer : IDisposable
             // regardless of binary content. Failure path: cat exits
             // non-zero and base64 yields an empty string; we surface
             // the stderr in the response.
-            var quotedPath = path.Replace("'", "'\\''");
-            var b64Cmd = $"sh -c \"base64 -w 0 '{quotedPath}' 2>&1 || true\"";
+            //
+            // Path is sent base64 to the guest then decoded into $p so
+            // a malicious caller can't shell-inject via backticks /
+            // $() / "" in the path (the cmd-server runs the line
+            // through /bin/sh -c, which evaluates substitutions
+            // inside double quotes). All base64 bytes are shell-safe.
+            var pathB64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(path));
+            var b64Cmd = $"sh -c 'p=$(printf %s \"{pathB64}\" | base64 -d); base64 -w 0 -- \"$p\" 2>&1 || true'";
             var b64 = (await OnExecInSession(sid, b64Cmd).ConfigureAwait(false)).Trim();
             byte[] bytes;
             try { bytes = Convert.FromBase64String(b64); }
@@ -252,9 +258,13 @@ public sealed class AutomationServer : IDisposable
                 Respond(ctx, 400, new JsonObject { ["error"] = "'content_base64' is not valid base64" });
                 return;
             }
-            var quotedPath = path.Replace("'", "'\\''");
+            // Same injection-safe pattern as read_file above: path is
+            // base64-encoded by the host, decoded inside single-quoted
+            // shell so backticks / $() / "" in the path can't escape.
+            var pathB64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(path));
             var writeCmd =
-                $"sh -c \"echo '{contentB64}' | base64 -d > '{quotedPath}.tmp' && mv '{quotedPath}.tmp' '{quotedPath}' && echo OK\"";
+                $"sh -c 'p=$(printf %s \"{pathB64}\" | base64 -d); " +
+                $"printf %s \"{contentB64}\" | base64 -d > \"$p.tmp\" && mv \"$p.tmp\" \"$p\" && echo OK'";
             var writeOut = (await OnExecInSession(sid, writeCmd).ConfigureAwait(false)).Trim();
             if (!writeOut.EndsWith("OK"))
             {

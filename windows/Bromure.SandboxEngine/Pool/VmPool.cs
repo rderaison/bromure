@@ -87,11 +87,27 @@ public sealed class VmPool<T> : IAsyncDisposable where T : class, IAsyncDisposab
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
+        // Wait for any in-flight warming task to complete so its
+        // post-cancel `_warm.Enqueue(vm)` (between the ct check + the
+        // enqueue) doesn't drop a fresh VM into the queue after we've
+        // already drained. Bounded wait — if a factory is genuinely
+        // stuck we time out rather than block dispose forever.
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
+        while (Interlocked.CompareExchange(ref _warming, 0, 0) > 0
+               && DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(50).ConfigureAwait(false);
+        }
+        // Drain after the wait so we catch anything the in-flight task
+        // enqueued post-cancel-check.
         while (_warm.TryDequeue(out var vm))
         {
             try { await vm.DisposeAsync().ConfigureAwait(false); } catch { }
         }
         _cts.Dispose();
+        // _slots may have pending awaiters from concurrent ClaimAsync —
+        // they get ObjectDisposedException, which the claim path's
+        // outer try/catch maps to "no warm vm available". Acceptable.
         _slots.Dispose();
     }
 }

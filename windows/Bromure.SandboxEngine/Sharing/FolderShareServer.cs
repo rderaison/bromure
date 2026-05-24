@@ -138,7 +138,13 @@ public sealed class FolderShareServer : IAsyncDisposable
         var configBody = new StringBuilder()
             .AppendLine("# bromure-ac per-session sshd config")
             .AppendLine($"Port {port}")
-            .AppendLine("ListenAddress 0.0.0.0   # QEMU slirp's 10.0.2.2 → host reaches us via 127.0.0.1 binding too; 0.0.0.0 covers both")
+            // Bind loopback-only. QEMU's slirp NAT routes guest packets
+            // for 10.0.2.2 onto the host's loopback interface, so a
+            // 127.0.0.1 listener still serves the guest. 0.0.0.0 would
+            // also accept LAN connections, which we don't want — the
+            // per-session host key is fresh, but every additional
+            // attack-surface byte is one we shouldn't ship.
+            .AppendLine("ListenAddress 127.0.0.1")
             .AppendLine($"HostKey {Msys2Path.From(hostKey)}")
             .AppendLine($"AuthorizedKeysFile {Msys2Path.From(authorized)}")
             .AppendLine("PasswordAuthentication no")

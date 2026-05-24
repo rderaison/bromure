@@ -341,17 +341,29 @@ public sealed class TokenSwapper
     /// <summary>
     /// Patch the Content-Length header in a CRLF-delimited HTTP header
     /// block. Idempotent — adds a header when none was present.
+    /// Strips <c>Transfer-Encoding</c> in the same pass: per RFC 9112
+    /// §6.3 a request must carry exactly one of TE or CL, never both;
+    /// after we materialise the full body in memory + swap, Content-
+    /// Length is the right framing (request smuggling otherwise).
     /// </summary>
     internal static string ReplaceContentLength(string headerStr, int newLength)
     {
         var lines = headerStr.Split("\r\n").ToList();
         var saw = false;
-        for (var i = 0; i < lines.Count; i++)
+        for (var i = lines.Count - 1; i >= 0; i--)
         {
             if (lines[i].StartsWith("content-length:", StringComparison.OrdinalIgnoreCase))
             {
                 lines[i] = "Content-Length: " + newLength;
                 saw = true;
+            }
+            else if (lines[i].StartsWith("transfer-encoding:", StringComparison.OrdinalIgnoreCase))
+            {
+                // Strip — we've reassembled the body, so chunked
+                // framing is gone. Leaving TE: chunked while inserting
+                // CL is the canonical request-smuggling shape upstreams
+                // reject (or worse, route ambiguously).
+                lines.RemoveAt(i);
             }
         }
         if (!saw)

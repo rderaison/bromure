@@ -27,6 +27,12 @@ public sealed partial class InitProgressViewModel : ObservableObject
     private const int MaxLines = 100;
     private readonly List<string> _lines = new();
     private string _trailing = "";
+    // AppendLog can be called from background continuations of awaited
+    // bake tasks (ShellViewModel's Progress.AppendLog reporter). List<T>
+    // mutations from multiple threads can corrupt internal state +
+    // throw IndexOutOfRangeException mid-bake. Single gate around the
+    // log buffer state + the Reset clear keeps that safe.
+    private readonly object _logGate = new();
 
     public void Reset()
     {
@@ -35,8 +41,11 @@ public sealed partial class InitProgressViewModel : ObservableObject
         Error = null;
         IsRunning = true;
         Progress = 0.0;
-        _lines.Clear();
-        _trailing = "";
+        lock (_logGate)
+        {
+            _lines.Clear();
+            _trailing = "";
+        }
     }
 
     /// <summary>Move the bar to at least <paramref name="value"/>; never regress.</summary>
@@ -51,21 +60,26 @@ public sealed partial class InitProgressViewModel : ObservableObject
         // Normalise CRLF / CR to LF — installer serial consoles often
         // emit CR. Same fix the macOS port applies.
         var normalized = chunk.Replace("\r\n", "\n").Replace('\r', '\n');
-        var buf = _trailing + normalized;
-        _trailing = "";
-        var newlineIdx = buf.IndexOf('\n');
-        while (newlineIdx >= 0)
+        string rendered;
+        lock (_logGate)
         {
-            _lines.Add(buf[..newlineIdx]);
-            buf = buf[(newlineIdx + 1)..];
-            newlineIdx = buf.IndexOf('\n');
-        }
-        _trailing = buf;
-        if (_lines.Count > MaxLines) _lines.RemoveRange(0, _lines.Count - MaxLines);
+            var buf = _trailing + normalized;
+            _trailing = "";
+            var newlineIdx = buf.IndexOf('\n');
+            while (newlineIdx >= 0)
+            {
+                _lines.Add(buf[..newlineIdx]);
+                buf = buf[(newlineIdx + 1)..];
+                newlineIdx = buf.IndexOf('\n');
+            }
+            _trailing = buf;
+            if (_lines.Count > MaxLines) _lines.RemoveRange(0, _lines.Count - MaxLines);
 
-        var sb = new StringBuilder(_lines.Sum(l => l.Length + 1) + _trailing.Length);
-        foreach (var line in _lines) sb.Append(line).Append('\n');
-        sb.Append(_trailing);
-        ConsoleLog = sb.ToString();
+            var sb = new StringBuilder(_lines.Sum(l => l.Length + 1) + _trailing.Length);
+            foreach (var line in _lines) sb.Append(line).Append('\n');
+            sb.Append(_trailing);
+            rendered = sb.ToString();
+        }
+        ConsoleLog = rendered;
     }
 }
