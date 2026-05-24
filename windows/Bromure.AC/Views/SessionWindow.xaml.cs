@@ -26,6 +26,10 @@ namespace Bromure.AC.Views;
 public partial class SessionWindow : Window
 {
     private static SessionWindow? _instance;
+    /// <summary>The currently-open session window, if any. Read by
+    /// MainWindow's Window menu so it can raise the SessionWindow
+    /// from the picker. Null when no session is open.</summary>
+    public static SessionWindow? CurrentInstance => _instance;
 
     public static System.Action<System.Guid>? NewSessionRequested { get; set; }
 
@@ -139,6 +143,29 @@ public partial class SessionWindow : Window
         if (string.IsNullOrWhiteSpace(ip)) return;
         try { System.Windows.Clipboard.SetText(ip); }
         catch { /* clipboard can transiently fail (locked by another process) */ }
+    }
+
+    private void RefreshStreamingDot(SessionViewModel vm)
+    {
+        // Audit 10 §4.1. Read enrollment lazily — App.Services has the
+        // paths + secret store needed to instantiate EnrollmentStore.
+        // The session window doesn't own a long-lived store; this
+        // method runs once at adopt time and the dot doesn't refresh
+        // mid-session (enrollment + private-mode toggles are restart-
+        // bound for the session anyway).
+        try
+        {
+            var s = App.Services;
+            var enrollment = new Bromure.AC.Core.Enrollment.EnrollmentStore(s.Paths, s.Secrets);
+            var enrolled = enrollment.IsEnrolled;
+            StreamingDot.Visibility = (enrolled && vm.IsTraceUploadEligible)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
+        catch
+        {
+            StreamingDot.Visibility = Visibility.Collapsed;
+        }
     }
 
     private void RefreshSharesButton(SessionViewModel vm)
@@ -448,6 +475,7 @@ public partial class SessionWindow : Window
             // is fixed for the lifetime of the session).
             RefreshIpChip(vm.VmGuestIpAddress);
             RefreshSharesButton(vm);
+            RefreshStreamingDot(vm);
             vm.PropertyChanged += (_, e) =>
             {
                 if (e.PropertyName == nameof(SessionViewModel.VmGuestIpAddress))

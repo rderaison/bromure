@@ -103,6 +103,17 @@
                         </ItemsControl>
                     </Border>
                 </Popup>
+                <!-- Audit 10 §4.1: streaming indicator. Red dot when
+                     enrolled in the cloud AND the profile is not in
+                     private mode (i.e. traces upload). Hidden by
+                     default; AdoptVmAndOpenFirstTab toggles it. -->
+                <Ellipse x:Name="StreamingDot"
+                         Width="8" Height="8"
+                         Fill="#FF3B30"
+                         Margin="0,0,10,0"
+                         VerticalAlignment="Center"
+                         Visibility="Collapsed"
+                         ToolTip="Streaming session traces to bromure.io"/>
                 <!-- Audit 10 §4.1: reboot button. Confirmation dialog
                      before firing systemctl reboot inside the guest. -->
                 <Button x:Name="RebootButton"

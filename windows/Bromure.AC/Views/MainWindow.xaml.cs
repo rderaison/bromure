@@ -18,6 +18,61 @@ public partial class MainWindow : Window
         App.Updater?.CheckInteractively();
     }
 
+    private void OnMinimizeMainWindow(object sender, RoutedEventArgs e)
+        => WindowState = WindowState.Minimized;
+
+    private void OnBringMainToFront(object sender, RoutedEventArgs e)
+    {
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+        Focus();
+    }
+
+    /// <summary>Audit 08 — Window menu populated on open. Rebuild the
+    /// session-row entries each time so closed sessions disappear and
+    /// fresh ones show up without us subscribing to collection
+    /// changes. Removes any MenuItem we appended last time before
+    /// re-adding.</summary>
+    private void OnWindowMenuOpened(object sender, RoutedEventArgs e)
+    {
+        var menu = (System.Windows.Controls.MenuItem)sender;
+        var keep = new HashSet<object?> { menu.Items[0], menu.Items[1], WindowMenuSeparator, WindowMenuEmpty };
+        for (var i = menu.Items.Count - 1; i >= 0; i--)
+        {
+            if (!keep.Contains(menu.Items[i])) menu.Items.RemoveAt(i);
+        }
+
+        var running = (DataContext is ShellViewModel vm)
+            ? vm.SessionsPane.Rows.Where(r => r.IsRunning).ToArray()
+            : Array.Empty<SessionRowViewModel>();
+        WindowMenuEmpty.Visibility = running.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var row in running)
+        {
+            var item = new System.Windows.Controls.MenuItem
+            {
+                Header = row.Profile.Name,
+                Tag = row,
+            };
+            item.Click += OnRaiseSessionWindow;
+            menu.Items.Add(item);
+        }
+    }
+
+    private void OnRaiseSessionWindow(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.MenuItem mi && mi.Tag is SessionRowViewModel)
+        {
+            // SessionWindow holds a single static _instance — bring it
+            // to the front. (When we expand to multi-window-per-session
+            // each row will need a dedicated window reference.)
+            var sw = Views.SessionWindow.CurrentInstance;
+            if (sw is null) return;
+            if (sw.WindowState == WindowState.Minimized) sw.WindowState = WindowState.Normal;
+            sw.Show();
+            sw.Activate();
+        }
+    }
+
     /// <summary>Intercept the close request so we can warn the user
     /// before terminating running VMs or aborting an in-flight image
     /// bake. Audit 08 §1.3 (HIGH) + §1.10 (MEDIUM): previous

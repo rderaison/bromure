@@ -119,6 +119,12 @@ public sealed partial class SessionViewModel : ObservableObject, IAsyncDisposabl
     public IReadOnlyList<string> SharedFolderHostPaths
         => _activeProfile?.FolderPaths ?? (IReadOnlyList<string>)Array.Empty<string>();
 
+    /// <summary>True when traces from this session ARE being uploaded
+    /// to the cloud (i.e. the profile is NOT in private mode). The
+    /// session window title bar shows a small red dot when this and
+    /// enrollment together resolve "uploads are live". Audit 10 §4.1.</summary>
+    public bool IsTraceUploadEligible => _activeProfile is { PrivateMode: false };
+
     public Bromure.AC.Core.Model.ProfileColor ProfileColor =>
         _activeProfile?.Color ?? Bromure.AC.Core.Model.ProfileColor.Blue;
 

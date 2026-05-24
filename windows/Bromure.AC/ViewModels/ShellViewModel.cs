@@ -58,6 +58,30 @@ public sealed partial class ShellViewModel : ObservableObject
     [ObservableProperty] private SessionViewModel? _session;
     [ObservableProperty] private string _imageInfoLine = "";
 
+    /// <summary>Window title that reflects the number of running
+    /// sessions, e.g. "Bromure Agentic Coding — 3 running". Surfaced
+    /// in the title bar + taskbar hover preview so the user can see
+    /// at-a-glance whether anything is live. Audit 08 §4.11 taskbar
+    /// badge proxy. Updated lazily via TouchTitle() after session
+    /// state changes.</summary>
+    [ObservableProperty] private string _windowTitle = "Bromure Agentic Coding";
+
+    /// <summary>Recompute <see cref="WindowTitle"/> from the current
+    /// running-row count. Called from SessionsPane.Rows changes and
+    /// after IsRunning toggles on any row.</summary>
+    public void TouchTitle()
+    {
+        var running = SessionsPane?.Rows.Count(r => r.IsRunning) ?? 0;
+        WindowTitle = running > 0
+            ? $"Bromure Agentic Coding — {running} running"
+            : "Bromure Agentic Coding";
+    }
+
+    private void OnSessionRowChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(SessionRowViewModel.IsRunning)) TouchTitle();
+    }
+
     // UX #2 — Hyper-V enable flow. Set by HyperVPreflight at startup
     // when the OS is missing the Microsoft-Hyper-V feature. The
     // welcome view binds to these to surface a Copy button + an
@@ -325,6 +349,39 @@ public sealed partial class ShellViewModel : ObservableObject
             installedBaseVersionProvider: installedBaseVersion);
 
         _selectedNavigation = Navigation[0];
+
+        // Audit 08 §4.11 — taskbar-badge proxy via window title. Hook
+        // up the running-count tracker once SessionsPane is built so
+        // the title reflects "N running" without polling.
+        SessionsPane.Rows.CollectionChanged += (_, e) =>
+        {
+            if (e.NewItems is not null)
+            {
+                foreach (var r in e.NewItems)
+                {
+                    if (r is SessionRowViewModel row)
+                    {
+                        row.PropertyChanged += OnSessionRowChanged;
+                    }
+                }
+            }
+            if (e.OldItems is not null)
+            {
+                foreach (var r in e.OldItems)
+                {
+                    if (r is SessionRowViewModel row)
+                    {
+                        row.PropertyChanged -= OnSessionRowChanged;
+                    }
+                }
+            }
+            TouchTitle();
+        };
+        foreach (var row in SessionsPane.Rows)
+        {
+            row.PropertyChanged += OnSessionRowChanged;
+        }
+        TouchTitle();
 
         UpdateImageInfoLine();
         // Pre-flight: bail fast if the full Microsoft-Hyper-V feature

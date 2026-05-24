@@ -4,7 +4,7 @@
         xmlns:vm="clr-namespace:Bromure.AC.ViewModels"
         xmlns:views="clr-namespace:Bromure.AC.Views"
         xmlns:loc="clr-namespace:Bromure.AC.Localization"
-        Title="Bromure Agentic Coding"
+        Title="{Binding WindowTitle, FallbackValue='Bromure Agentic Coding'}"
         Height="780" Width="1180"
         Icon="/BromureAC.ico"
         Background="{StaticResource ChromeBackground}"
@@ -28,6 +28,11 @@
         <KeyBinding Key="I" Modifiers="Control+Shift"
                     Command="{Binding GoToNavigationCommand}" CommandParameter="TraceInspector"/>
         <KeyBinding Key="F1" Command="{Binding OpenDocumentationCommand}"/>
+        <!-- Audit 08 — Ctrl+M minimizes (matches the new Window menu
+             accelerator). Routes through MinimizeWindowCommand so any
+             attached behavior fires uniformly. -->
+        <KeyBinding Key="M" Modifiers="Control"
+                    Command="{x:Static SystemCommands.MinimizeWindowCommand}"/>
     </Window.InputBindings>
     <!--
         Two layers of overlay-by-Visibility (no ContentTemplateSelector).
@@ -85,6 +90,21 @@
                 <Separator/>
                 <MenuItem Header="{x:Static loc:Strings.MenuViewPreferences}" InputGestureText="Ctrl+,"
                           Command="{Binding GoToNavigationCommand}" CommandParameter="Settings"/>
+            </MenuItem>
+            <!-- Audit 08 — Window menu. Lists running sessions so a
+                 hidden / minimized SessionWindow can be raised from
+                 the picker. Items rebuilt on submenu open so the
+                 list stays current without observable plumbing. -->
+            <MenuItem Header="_Window" SubmenuOpened="OnWindowMenuOpened">
+                <MenuItem Header="_Minimize" InputGestureText="Ctrl+M"
+                          Click="OnMinimizeMainWindow"/>
+                <MenuItem Header="_Bring Picker to Front"
+                          Click="OnBringMainToFront"/>
+                <Separator x:Name="WindowMenuSeparator"/>
+                <!-- Per-session items appended in OnWindowMenuOpened.
+                     A placeholder communicates the "no sessions" state. -->
+                <MenuItem x:Name="WindowMenuEmpty" Header="(no running sessions)"
+                          IsEnabled="False"/>
             </MenuItem>
             <MenuItem Header="{x:Static loc:Strings.MenuHelp}">
                 <MenuItem Header="{x:Static loc:Strings.MenuHelpDocs}" InputGestureText="F1"
