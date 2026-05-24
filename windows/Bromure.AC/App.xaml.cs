@@ -40,6 +40,18 @@ public partial class App : Application
         var settings = new JsonSettingsStore(System.IO.Path.Combine(paths.AppDataRoot, "settings.json"));
         var secrets = new WindowsSecretStore(paths);
         Services = new AppServices(paths, settings, secrets);
+
+        // Audit 01 §1 / §10 §13 — wire the vault crypto gateway BEFORE
+        // any profile.json is read. The EncryptedStringConverter
+        // (Bromure.AC.Core) reaches into the vault via these delegates
+        // to wrap/unwrap secret fields at-rest, without taking a
+        // project reference on Bromure.AC.Mitm. Any profile read
+        // happening before this line treats encrypted fields as
+        // opaque empty strings — which is why the bind has to come
+        // before ShellViewModel construction.
+        var vault = new Bromure.AC.Mitm.Vault.SecretsVault(secrets);
+        Bromure.AC.Core.Vault.SecretsCryptoGateway.Encrypt = p => vault.Encrypt(p);
+        Bromure.AC.Core.Vault.SecretsCryptoGateway.Decrypt = p => vault.Decrypt(p);
         // Bring the guest-event vsock listeners up at app launch so
         // they're ALWAYS ready before any VM boots. Otherwise the
         // guest's bromure-overlay-fetch.service (which runs early in

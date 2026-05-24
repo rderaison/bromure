@@ -1,6 +1,7 @@
 // macos-source: Sources/AgentCoding/Profile.swift @ 5feff2fd78b5
 using System.Collections.ObjectModel;
 using System.Text.Json.Serialization;
+using Bromure.AC.Core.Vault;
 
 namespace Bromure.AC.Core.Model;
 
@@ -26,9 +27,13 @@ public sealed class Profile
     public AuthMode AuthMode { get; set; } = AuthMode.Token;
 
     /// <summary>
-    /// Plaintext API token. Only stored on disk inside the profile dir.
-    /// Phase B+ moves this to <see cref="Bromure.Platform.ISecretStore"/>.
+    /// Primary-tool API token. Encrypted at rest via the
+    /// <see cref="EncryptedStringConverter"/> when the host has wired
+    /// the vault gateway; the on-disk value carries a "vault:v1:"
+    /// prefix in profile.json. Legacy plaintext from pre-vault saves
+    /// round-trips on first read and gets re-encrypted on next save.
     /// </summary>
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string? ApiKey { get; set; }
     public bool ApiKeyRequiresApproval { get; set; }
 
@@ -76,6 +81,7 @@ public sealed class Profile
     /// SSO/static-keys block when AWS isn't configured.
     /// </summary>
     public AwsCredentialsConfig Aws { get; set; } = new();
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string? DigitalOceanToken { get; set; }
     public bool DigitalOceanRequiresApproval { get; set; }
 
@@ -200,6 +206,7 @@ public sealed class ToolSpec
 {
     public AgentTool Tool { get; set; }
     public AuthMode AuthMode { get; set; } = AuthMode.Token;
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string? ApiKey { get; set; }
     public bool RequireApproval { get; set; }
 }

@@ -1,6 +1,7 @@
 // macos-source: Sources/AgentCoding/Profile.swift @ 5feff2fd78b5  (MCPServer / MCPOAuthState)
 using System.Collections.ObjectModel;
 using System.Text.Json.Serialization;
+using Bromure.AC.Core.Vault;
 
 namespace Bromure.AC.Core.Model;
 
@@ -29,9 +30,10 @@ public sealed class McpServer
     /// token. When set, the proxy swaps a fake value here on the wire.</summary>
     public string BearerTokenEnvVar { get; set; } = "";
 
-    /// <summary>Plaintext bearer (or last OAuth-issued access_token). Held
-    /// inline for parity with how ApiKey is stored on the Windows port
-    /// today. Phase B+ moves both to <see cref="Bromure.Platform.ISecretStore"/>.</summary>
+    /// <summary>Bearer (or last OAuth-issued access_token). Encrypted at
+    /// rest via the vault converter — same wire shape macOS uses for
+    /// its keychain-backed slot.</summary>
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string BearerToken { get; set; } = "";
 
     public bool Enabled { get; set; } = true;
@@ -91,11 +93,14 @@ public enum McpTransport
 public sealed class McpOAuthState
 {
     public string ClientId { get; set; } = "";
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string? ClientSecret { get; set; }
     public string AuthorizationEndpoint { get; set; } = "";
     public string TokenEndpoint { get; set; } = "";
     public string? RegistrationEndpoint { get; set; }
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string AccessToken { get; set; } = "";
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string? RefreshToken { get; set; }
     public DateTimeOffset? ExpiresAt { get; set; }
     public DateTimeOffset AuthorizedAt { get; set; } = DateTimeOffset.UtcNow;

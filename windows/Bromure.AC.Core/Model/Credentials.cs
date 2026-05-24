@@ -1,3 +1,6 @@
+using System.Text.Json.Serialization;
+using Bromure.AC.Core.Vault;
+
 namespace Bromure.AC.Core.Model;
 
 /// <summary>
@@ -12,6 +15,7 @@ public sealed class GitHttpsCredential
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Host { get; set; } = "";
     public string Username { get; set; } = "";
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string Token { get; set; } = "";
     public bool RequireApproval { get; set; }
 
@@ -30,6 +34,7 @@ public sealed class ManualToken
     /// Display name shown in the Approvals window.
     public string Name { get; set; } = "";
     /// Cleartext value (the "real").
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string Value { get; set; } = "";
     /// Optional env var name to export inside the VM (the fake).
     public string EnvVarName { get; set; } = "";
@@ -47,6 +52,7 @@ public sealed class DockerRegistryCredential
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Host { get; set; } = "";
     public string Username { get; set; } = "";
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string Password { get; set; } = "";
     public bool RequireApproval { get; set; }
 
@@ -66,7 +72,9 @@ public sealed class AwsCredentialsConfig
     public string SsoProfile { get; set; } = "";
     /// Static-keys mode: explicit AKID / secret / session token.
     public string AccessKeyId { get; set; } = "";
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string SecretAccessKey { get; set; } = "";
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string SessionToken { get; set; } = "";
     /// Default region used in ~/.aws/config and AWS_DEFAULT_REGION env.
     public string Region { get; set; } = "";
@@ -89,6 +97,10 @@ public sealed class EnvironmentVariable
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = "";
+    // Encrypted at rest even when IsSecret=false — env vars routinely
+    // carry tokens (AWS_*, GITHUB_TOKEN, …) regardless of the "secret"
+    // checkbox the user remembered to tick.
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string Value { get; set; } = "";
     /// True when the editor's "treat as secret" toggle is on — the value
     /// is masked in the UI and excluded from screenshots.
@@ -120,7 +132,9 @@ public sealed class ImportedSshKey
     public Guid Id { get; set; } = Guid.NewGuid();
     /// Display label for the Approvals UI.
     public string Label { get; set; } = "";
-    /// PEM-encoded private key (OpenSSH format).
+    /// PEM-encoded private key (OpenSSH format). Audit 05 §3.2 — was
+    /// plaintext on disk before the vault wiring; encrypted now.
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string PrivateKeyPem { get; set; } = "";
     public string Comment { get; set; } = "";
     public bool RequireApproval { get; set; }
@@ -134,8 +148,11 @@ public sealed class ImportedSshKey
 
 public sealed class StoredOAuthTokens
 {
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string AccessToken { get; set; } = "";
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string RefreshToken { get; set; } = "";
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string? IdToken { get; set; }
 
     /// <summary>Wall-clock UTC at which these tokens were captured.

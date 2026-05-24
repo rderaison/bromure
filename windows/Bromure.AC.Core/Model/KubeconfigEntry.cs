@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Bromure.AC.Core.Vault;
 
 namespace Bromure.AC.Core.Model;
 
@@ -45,12 +46,14 @@ public abstract class KubeAuth { }
 
 public sealed class KubeBearerToken : KubeAuth
 {
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string Token { get; set; } = "";
 }
 
 public sealed class KubeClientCert : KubeAuth
 {
     public string Cert { get; set; } = "";
+    [JsonConverter(typeof(EncryptedStringConverter))]
     public string Key { get; set; } = "";
 }
 
