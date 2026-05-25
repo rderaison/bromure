@@ -67,27 +67,42 @@
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
-            <!-- Header strip -->
+            <!-- Header strip. Profile-color chip + name + summary chip
+                 row sit above a 1px tinted divider. The chip + divider
+                 use the profile's chosen color so the editor feels
+                 "owned by" this profile — same identity cue the picker
+                 + session pill carry. -->
             <Border Grid.Row="0" Background="{StaticResource PanelBackground}"
                     BorderBrush="#22000000" BorderThickness="0,0,0,1"
-                    Padding="32,18">
+                    Padding="32,20">
                 <Grid>
                     <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <StackPanel Grid.Column="0">
+                    <!-- Color chip — bigger than the picker dot, same
+                         identity cue. Saturated fill, soft outline. -->
+                    <Border Grid.Column="0" Width="36" Height="36" CornerRadius="10"
+                            Background="{Binding Selected.Color,
+                                         Converter={StaticResource ProfileColorToBrush}}"
+                            VerticalAlignment="Center"
+                            Margin="0,0,16,0"/>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
                         <TextBlock Text="{Binding Selected.Name, FallbackValue='—'}"
-                                   FontSize="20" FontWeight="SemiBold"/>
-                        <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11">
-                            <Run Text="{Binding Selected.Tool, Mode=OneWay}"/>
-                            <Run Text=" · "/>
-                            <Run Text="{Binding Selected.AuthMode, Mode=OneWay}"/>
-                            <Run Text=" · trace "/>
-                            <Run Text="{Binding Selected.TraceLevel, Mode=OneWay}"/>
-                        </TextBlock>
+                                   FontSize="22" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="12">
+                                <Run Text="{Binding Selected.Tool, Mode=OneWay}"/>
+                                <Run Text=" · "/>
+                                <Run Text="{Binding Selected.AuthMode, Mode=OneWay}"/>
+                                <Run Text=" · trace "/>
+                                <Run Text="{Binding Selected.TraceLevel, Mode=OneWay}"/>
+                            </TextBlock>
+                        </StackPanel>
                     </StackPanel>
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                         <!-- Cancel reverts in-memory edits to the
                              on-disk state. Save persists. The Delete
                              affordance moved to the per-row context
@@ -120,51 +135,85 @@
                     <!-- Category-list tab item. Tag carries the Segoe
                          Fluent Icons glyph (rendered with the same
                          font the sessions sidebar uses). Selected
-                         state paints an accent background + accent
-                         text, matching Windows Settings. -->
+                         state paints an accent-tinted background + a
+                         left bar in the accent color, matching macOS
+                         System Settings + Windows Settings rows. -->
                     <Style TargetType="TabItem">
                         <Setter Property="Background" Value="Transparent"/>
                         <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
-                        <Setter Property="Padding" Value="14,10"/>
+                        <Setter Property="Padding" Value="12,9"/>
                         <Setter Property="Cursor" Value="Hand"/>
-                        <Setter Property="Margin" Value="6,2"/>
+                        <Setter Property="Margin" Value="8,1"/>
                         <Setter Property="HorizontalAlignment" Value="Stretch"/>
                         <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                         <Setter Property="Template">
                             <Setter.Value>
                                 <ControlTemplate TargetType="TabItem">
-                                    <Border x:Name="row"
-                                            Background="{TemplateBinding Background}"
-                                            CornerRadius="8"
-                                            Padding="{TemplateBinding Padding}">
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="{TemplateBinding Tag}"
-                                                       FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                                                       FontSize="16"
-                                                       Foreground="{DynamicResource AccentBrush}"
-                                                       Width="24"
-                                                       TextAlignment="Center"
-                                                       VerticalAlignment="Center"/>
-                                            <ContentPresenter ContentSource="Header"
-                                                              VerticalAlignment="Center"
-                                                              Margin="10,0,0,0"
-                                                              RecognizesAccessKey="True"
-                                                              TextElement.FontSize="{DynamicResource FontSizeBody}"
-                                                              TextElement.Foreground="{TemplateBinding Foreground}"/>
-                                        </StackPanel>
-                                    </Border>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="3"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <!-- Selected-state accent bar on the left
+                                             (4px tall pill, like macOS Sequoia). -->
+                                        <Border x:Name="indicator"
+                                                Grid.Column="0"
+                                                Background="Transparent"
+                                                CornerRadius="2"
+                                                Margin="0,8"/>
+                                        <Border x:Name="row"
+                                                Grid.Column="1"
+                                                Background="{TemplateBinding Background}"
+                                                CornerRadius="7"
+                                                Padding="{TemplateBinding Padding}"
+                                                Margin="2,0,0,0">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Border x:Name="iconBox"
+                                                        Width="26" Height="26"
+                                                        CornerRadius="6"
+                                                        Background="{DynamicResource AccentDimBrush}"
+                                                        VerticalAlignment="Center">
+                                                    <TextBlock x:Name="iconGlyph"
+                                                               Text="{TemplateBinding Tag}"
+                                                               FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                                               FontSize="14"
+                                                               Foreground="{DynamicResource AccentBrush}"
+                                                               TextAlignment="Center"
+                                                               VerticalAlignment="Center"
+                                                               HorizontalAlignment="Center"/>
+                                                </Border>
+                                                <ContentPresenter ContentSource="Header"
+                                                                  VerticalAlignment="Center"
+                                                                  Margin="12,0,0,0"
+                                                                  RecognizesAccessKey="True"
+                                                                  TextElement.FontSize="{DynamicResource FontSizeBody}"
+                                                                  TextElement.FontWeight="Medium"
+                                                                  TextElement.Foreground="{TemplateBinding Foreground}"/>
+                                            </StackPanel>
+                                        </Border>
+                                    </Grid>
                                     <ControlTemplate.Triggers>
                                         <Trigger Property="IsMouseOver" Value="True">
                                             <Setter TargetName="row" Property="Background" Value="{DynamicResource HoverBrush}"/>
                                         </Trigger>
                                         <Trigger Property="IsSelected" Value="True">
                                             <Setter TargetName="row" Property="Background" Value="{DynamicResource AccentDimBrush}"/>
-                                            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+                                            <Setter TargetName="iconBox" Property="Background" Value="{DynamicResource AccentBrush}"/>
+                                            <Setter TargetName="iconGlyph" Property="Foreground" Value="#FFFFFF"/>
+                                            <Setter TargetName="indicator" Property="Background" Value="{DynamicResource AccentBrush}"/>
                                         </Trigger>
                                     </ControlTemplate.Triggers>
                                 </ControlTemplate>
                             </Setter.Value>
                         </Setter>
+                    </Style>
+                    <!-- Icon is white-on-accent when selected so the
+                         glyph reads cleanly against the accent fill.
+                         Done via a per-trigger setter on the inner
+                         TextBlock; binding to the iconBox state
+                         keeps the rule local to this template. -->
+                    <Style TargetType="TextBlock" x:Key="TabIconText">
+                        <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
                     </Style>
                 </TabControl.Resources>
                 <TabControl.Template>
@@ -178,11 +227,20 @@
                                     Background="{DynamicResource PanelElevated}"
                                     BorderBrush="{DynamicResource BorderBrush}"
                                     BorderThickness="0,0,1,0">
-                                <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                              HorizontalScrollBarVisibility="Disabled"
-                                              Padding="0,16">
-                                    <TabPanel IsItemsHost="True" Background="Transparent"/>
-                                </ScrollViewer>
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Top"
+                                               Text="Settings"
+                                               FontSize="11"
+                                               FontWeight="SemiBold"
+                                               Foreground="{DynamicResource TextSecondary}"
+                                               Margin="20,16,16,8"
+                                               TextOptions.TextRenderingMode="ClearType"/>
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled"
+                                                  Padding="0,0,0,16">
+                                        <TabPanel IsItemsHost="True" Background="Transparent"/>
+                                    </ScrollViewer>
+                                </DockPanel>
                             </Border>
                             <Border Grid.Column="1"
                                     Background="{DynamicResource PanelBackground}"
@@ -196,10 +254,23 @@
                 <!-- ================================================
                      GENERAL TAB
                      ================================================ -->
-                <TabItem Header="General" Tag="">
+                <!-- Segoe Fluent Icons glyphs in Tag drive the
+                     per-category icon (rendered by the TabItem
+                     template above). Codepoints chosen to match
+                     macOS System Settings semantically: settings
+                     gear, folder, key, code, chip, brush, plug. -->
+                <TabItem Header="General" Tag="&#xE713;">
                     <ScrollViewer>
-                        <StackPanel MaxWidth="640">
-                            <Grid Margin="0,0,0,14">
+                        <StackPanel MaxWidth="640" HorizontalAlignment="Left">
+                            <TextBlock Text="General" FontSize="22" FontWeight="SemiBold"
+                                       Margin="0,0,0,4"/>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="12"
+                                       TextWrapping="Wrap" Margin="0,0,0,18">
+                                Identity, primary agent, and tracing behavior for this profile.
+                            </TextBlock>
+                            <Border Background="{StaticResource PanelBackground}" CornerRadius="8"
+                                    Padding="20,16" Margin="0,0,0,14">
+                            <Grid Margin="0,0,0,0">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="180"/>
                                     <ColumnDefinition Width="*"/>
@@ -280,6 +351,7 @@
                                           SelectedItem="{Binding TraceLevel}"
                                           Margin="0,4"/>
                             </Grid>
+                            </Border>
 
                             <!-- Audit 09 §A2 — additional tools. macOS lets the
                                  user enable Claude AND Codex (and any future
@@ -421,11 +493,13 @@
                 <!-- ================================================
                      FOLDERS TAB
                      ================================================ -->
-                <TabItem Header="Folders" Tag="">
+                <TabItem Header="Folders" Tag="&#xE8B7;">
                     <ScrollViewer>
-                        <StackPanel>
-                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
-                                       TextWrapping="Wrap" Margin="0,0,0,12">
+                        <StackPanel MaxWidth="640" HorizontalAlignment="Left">
+                            <TextBlock Text="Folders" FontSize="22" FontWeight="SemiBold"
+                                       Margin="0,0,0,4"/>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="12"
+                                       TextWrapping="Wrap" Margin="0,0,0,18">
                                 Each folder mounts at /home/ubuntu/&lt;basename&gt; in the guest.
                                 Capped at 8 (the base image's fstab pre-allocation).
                             </TextBlock>
@@ -465,9 +539,16 @@
                 <!-- ================================================
                      CREDENTIALS TAB — accordion of credential types
                      ================================================ -->
-                <TabItem Header="Credentials" Tag="">
+                <TabItem Header="Credentials" Tag="&#xE192;">
                     <ScrollViewer>
-                        <StackPanel>
+                        <StackPanel MaxWidth="700" HorizontalAlignment="Left">
+                            <TextBlock Text="Credentials" FontSize="22" FontWeight="SemiBold"
+                                       Margin="0,0,0,4"/>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="12"
+                                       TextWrapping="Wrap" Margin="0,0,0,18">
+                                Tokens, keys, and credentials this profile uses. The proxy substitutes
+                                fakes on the wire so real values never leave the host.
+                            </TextBlock>
                             <!-- AWS ............................................. -->
                             <Expander Header="AWS" IsExpanded="True" Margin="0,0,0,8">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
@@ -1031,11 +1112,13 @@
                 <!-- ================================================
                      ENVIRONMENT TAB
                      ================================================ -->
-                <TabItem Header="Environment" Tag="">
+                <TabItem Header="Environment" Tag="&#xE943;">
                     <ScrollViewer>
-                        <StackPanel>
-                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
-                                       TextWrapping="Wrap" Margin="0,0,0,12">
+                        <StackPanel MaxWidth="700" HorizontalAlignment="Left">
+                            <TextBlock Text="Environment" FontSize="22" FontWeight="SemiBold"
+                                       Margin="0,0,0,4"/>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="12"
+                                       TextWrapping="Wrap" Margin="0,0,0,18">
                                 Plain environment variables exported into the guest at session
                                 launch. Mark "Secret" for values that should be masked in the UI
                                 and excluded from screenshots.
@@ -1083,41 +1166,69 @@
                 <!-- ================================================
                      RESOURCES TAB — memory, network, close action
                      ================================================ -->
-                <TabItem Header="Resources" Tag="">
+                <TabItem Header="Resources" Tag="&#xE950;">
                     <ScrollViewer>
-                        <StackPanel>
-                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
-                                       TextWrapping="Wrap" Margin="0,0,0,12">
+                        <StackPanel MaxWidth="640" HorizontalAlignment="Left">
+                            <TextBlock Text="Resources" FontSize="22" FontWeight="SemiBold"
+                                       Margin="0,0,0,4"/>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="12"
+                                       TextWrapping="Wrap" Margin="0,0,0,18">
                                 VM resources baked at boot. Changing these requires restarting
                                 the session — the app will prompt to reboot.
                             </TextBlock>
 
-                            <TextBlock Text="Memory (GiB)" FontWeight="SemiBold" Margin="0,4,0,4"/>
-                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="10"
-                                       Margin="0,0,0,4">0 = let the engine pick a default that scales to the host.</TextBlock>
-                            <TextBox Width="120" HorizontalAlignment="Left"
-                                     Text="{Binding MemoryGB, UpdateSourceTrigger=PropertyChanged}"/>
+                            <Border Background="{StaticResource PanelBackground}" CornerRadius="8"
+                                    Padding="20,16">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="180"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
 
-                            <TextBlock Text="Network mode" FontWeight="SemiBold" Margin="0,16,0,4"/>
-                            <ComboBox Width="220" HorizontalAlignment="Left"
-                                      ItemsSource="{Binding DataContext.NetworkModeOptions,
-                                                    RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                      SelectedItem="{Binding NetworkMode}"/>
-                            <TextBlock Text="Bridged interface ID (when NetworkMode = Bridged)"
-                                       FontSize="10" Foreground="{StaticResource TextSecondary}"
-                                       Margin="0,8,0,4"/>
-                            <TextBox Width="320" HorizontalAlignment="Left"
-                                     Text="{Binding BridgedInterfaceID, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Memory (GiB)"
+                                               VerticalAlignment="Center" Margin="0,6"/>
+                                    <StackPanel Grid.Row="0" Grid.Column="1" Margin="0,6">
+                                        <TextBox Text="{Binding MemoryGB, UpdateSourceTrigger=PropertyChanged}"/>
+                                        <TextBlock FontSize="11" Foreground="{StaticResource TextSecondary}"
+                                                   Margin="0,4,0,0"
+                                                   Text="0 = engine picks a default that scales to the host."/>
+                                    </StackPanel>
 
-                            <TextBlock Text="When closing the session window" FontWeight="SemiBold" Margin="0,16,0,4"/>
-                            <ComboBox Width="220" HorizontalAlignment="Left"
-                                      ItemsSource="{Binding DataContext.CloseActionOptions,
-                                                    RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                      SelectedItem="{Binding CloseAction}"/>
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Network mode"
+                                               VerticalAlignment="Center" Margin="0,6"/>
+                                    <ComboBox Grid.Row="1" Grid.Column="1" Margin="0,6"
+                                              ItemsSource="{Binding DataContext.NetworkModeOptions,
+                                                            RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                              SelectedItem="{Binding NetworkMode}"/>
 
-                            <TextBlock Text="Notes" FontWeight="SemiBold" Margin="0,16,0,4"/>
-                            <TextBox MinHeight="60" AcceptsReturn="True" TextWrapping="Wrap"
-                                     Text="{Binding Comments, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Bridged interface ID"
+                                               VerticalAlignment="Center" Margin="0,6"/>
+                                    <TextBox Grid.Row="2" Grid.Column="1" Margin="0,6"
+                                             ToolTip="Used when NetworkMode = Bridged."
+                                             Text="{Binding BridgedInterfaceID, UpdateSourceTrigger=PropertyChanged}"/>
+
+                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Close action"
+                                               VerticalAlignment="Center" Margin="0,6"/>
+                                    <ComboBox Grid.Row="3" Grid.Column="1" Margin="0,6"
+                                              ToolTip="What happens when the session window's close button is clicked."
+                                              ItemsSource="{Binding DataContext.CloseActionOptions,
+                                                            RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                              SelectedItem="{Binding CloseAction}"/>
+
+                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Notes"
+                                               VerticalAlignment="Top" Margin="0,10"/>
+                                    <TextBox Grid.Row="4" Grid.Column="1" Margin="0,6"
+                                             MinHeight="72" AcceptsReturn="True" TextWrapping="Wrap"
+                                             Text="{Binding Comments, UpdateSourceTrigger=PropertyChanged}"/>
+                                </Grid>
+                            </Border>
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
@@ -1125,48 +1236,133 @@
                 <!-- ================================================
                      APPEARANCE TAB — cursor, opacity, font, colors
                      ================================================ -->
-                <TabItem Header="Appearance" Tag="">
+                <TabItem Header="Appearance" Tag="&#xE790;">
                     <ScrollViewer>
-                        <StackPanel>
-                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
-                                       TextWrapping="Wrap" Margin="0,0,0,12">
-                                Terminal + window cosmetics. Empty custom fields fall through to
-                                the host terminal's defaults when "Inherit from host terminal" is on.
+                        <StackPanel MaxWidth="640" HorizontalAlignment="Left">
+                            <TextBlock Text="Appearance" FontSize="22" FontWeight="SemiBold"
+                                       Margin="0,0,0,4"/>
+                            <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="12"
+                                       TextWrapping="Wrap" Margin="0,0,0,18">
+                                Terminal + window cosmetics. Empty fields fall through to the host
+                                terminal's defaults when "Inherit from host terminal" is on.
                             </TextBlock>
 
-                            <CheckBox Content="Inherit colors / font from host terminal"
-                                      IsChecked="{Binding UseTerminalAppDefaults}"
-                                      Margin="0,0,0,12"/>
+                            <!-- Group: Inheritance -->
+                            <Border Background="{StaticResource PanelBackground}" CornerRadius="8"
+                                    Padding="20,16" Margin="0,0,0,12">
+                                <CheckBox Content="Inherit colors / font from host terminal"
+                                          IsChecked="{Binding UseTerminalAppDefaults}"/>
+                            </Border>
 
-                            <TextBlock Text="Cursor shape" FontWeight="SemiBold" Margin="0,4,0,4"/>
-                            <ComboBox Width="220" HorizontalAlignment="Left"
-                                      ItemsSource="{Binding DataContext.CursorShapeOptions,
-                                                    RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                      SelectedItem="{Binding CursorShape}"/>
+                            <!-- Group: Terminal — uniform label-column / control-column grid
+                                 keeps every input aligned at the same x. -->
+                            <TextBlock Text="Terminal" FontWeight="SemiBold" Margin="4,8,0,6"
+                                       Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                            <Border Background="{StaticResource PanelBackground}" CornerRadius="8"
+                                    Padding="20,16">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="180"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
 
-                            <TextBlock Text="Window opacity (0.3 – 1.0)" FontWeight="SemiBold" Margin="0,16,0,4"/>
-                            <TextBox Width="120" HorizontalAlignment="Left"
-                                     Text="{Binding WindowOpacity, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Cursor shape"
+                                               VerticalAlignment="Center" Margin="0,6"/>
+                                    <ComboBox Grid.Row="0" Grid.Column="1" Margin="0,6"
+                                              ItemsSource="{Binding DataContext.CursorShapeOptions,
+                                                            RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                              SelectedItem="{Binding CursorShape}"/>
 
-                            <TextBlock Text="Custom font family (kitty)" FontWeight="SemiBold" Margin="0,16,0,4"/>
-                            <TextBox Width="320" HorizontalAlignment="Left"
-                                     Text="{Binding CustomFontFamily, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Font family"
+                                               VerticalAlignment="Center" Margin="0,6"/>
+                                    <TextBox Grid.Row="1" Grid.Column="1" Margin="0,6"
+                                             Text="{Binding CustomFontFamily, UpdateSourceTrigger=PropertyChanged}"/>
 
-                            <TextBlock Text="Custom font size" FontWeight="SemiBold" Margin="0,12,0,4"/>
-                            <TextBox Width="120" HorizontalAlignment="Left"
-                                     Text="{Binding CustomFontSize, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Font size"
+                                               VerticalAlignment="Center" Margin="0,6"/>
+                                    <TextBox Grid.Row="2" Grid.Column="1" Margin="0,6"
+                                             Text="{Binding CustomFontSize, UpdateSourceTrigger=PropertyChanged}"/>
 
-                            <TextBlock Text="Background hex (#RRGGBB)" FontWeight="SemiBold" Margin="0,16,0,4"/>
-                            <TextBox Width="200" HorizontalAlignment="Left" FontFamily="Consolas"
-                                     Text="{Binding CustomBackgroundHex, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Background"
+                                               VerticalAlignment="Center" Margin="0,6"/>
+                                    <Grid Grid.Row="3" Grid.Column="1" Margin="0,6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Width="24" Height="24" CornerRadius="4"
+                                                Background="{Binding CustomBackgroundHex,
+                                                             Converter={StaticResource HexToBrushConverter},
+                                                             FallbackValue=#1F1F22}"
+                                                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                                                Margin="0,0,8,0" VerticalAlignment="Center"/>
+                                        <TextBox Grid.Column="1" FontFamily="Consolas"
+                                                 Text="{Binding CustomBackgroundHex, UpdateSourceTrigger=PropertyChanged}"/>
+                                    </Grid>
 
-                            <TextBlock Text="Foreground hex (#RRGGBB)" FontWeight="SemiBold" Margin="0,12,0,4"/>
-                            <TextBox Width="200" HorizontalAlignment="Left" FontFamily="Consolas"
-                                     Text="{Binding CustomForegroundHex, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Foreground"
+                                               VerticalAlignment="Center" Margin="0,6"/>
+                                    <Grid Grid.Row="4" Grid.Column="1" Margin="0,6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Width="24" Height="24" CornerRadius="4"
+                                                Background="{Binding CustomForegroundHex,
+                                                             Converter={StaticResource HexToBrushConverter},
+                                                             FallbackValue=#FFFFFF}"
+                                                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                                                Margin="0,0,8,0" VerticalAlignment="Center"/>
+                                        <TextBox Grid.Column="1" FontFamily="Consolas"
+                                                 Text="{Binding CustomForegroundHex, UpdateSourceTrigger=PropertyChanged}"/>
+                                    </Grid>
 
-                            <TextBlock Text="Keyboard layout override (e.g. fr, ch:fr)" FontWeight="SemiBold" Margin="0,16,0,4"/>
-                            <TextBox Width="220" HorizontalAlignment="Left"
-                                     Text="{Binding KeyboardLayoutOverride, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <TextBlock Grid.Row="5" Grid.Column="0" Text="Keyboard layout"
+                                               VerticalAlignment="Center" Margin="0,6"/>
+                                    <TextBox Grid.Row="5" Grid.Column="1" Margin="0,6"
+                                             ToolTip="XKB layout (e.g. fr, ch:fr). Empty = host default."
+                                             Text="{Binding KeyboardLayoutOverride, UpdateSourceTrigger=PropertyChanged}"/>
+                                </Grid>
+                            </Border>
+
+                            <!-- Group: Window -->
+                            <TextBlock Text="Window" FontWeight="SemiBold" Margin="4,20,0,6"
+                                       Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                            <Border Background="{StaticResource PanelBackground}" CornerRadius="8"
+                                    Padding="20,16">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="180"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Opacity"
+                                               VerticalAlignment="Center" Margin="0,6"/>
+                                    <Grid Grid.Column="1" Margin="0,6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Slider Grid.Column="0" Minimum="0.3" Maximum="1.0"
+                                                TickFrequency="0.05" IsSnapToTickEnabled="True"
+                                                Value="{Binding WindowOpacity}"
+                                                VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="1" Margin="12,0,0,0"
+                                                   VerticalAlignment="Center"
+                                                   MinWidth="36"
+                                                   TextAlignment="Right"
+                                                   FontFamily="Consolas"
+                                                   Text="{Binding WindowOpacity, StringFormat={}{0:F2}}"/>
+                                    </Grid>
+                                </Grid>
+                            </Border>
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
@@ -1178,9 +1374,11 @@
                      Windows port had model + builder + broker but no
                      UI surface. This tab adds parity.
                      ================================================ -->
-                <TabItem Header="MCP servers" Tag="">
+                <TabItem Header="MCP servers" Tag="&#xE839;">
                     <ScrollViewer>
-                        <StackPanel>
+                        <StackPanel MaxWidth="700" HorizontalAlignment="Left">
+                            <TextBlock Text="MCP servers" FontSize="22" FontWeight="SemiBold"
+                                       Margin="0,0,0,4"/>
                             <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
                                        TextWrapping="Wrap" Margin="0,0,0,12">
                                 Model Context Protocol servers wired into Claude Code / Codex.

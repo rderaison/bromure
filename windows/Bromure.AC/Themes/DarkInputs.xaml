@@ -345,6 +345,68 @@
         </Setter>
     </Style>
 
+    <!-- Slider — used in the Appearance pane's opacity control.
+         WPF's default is thick + dated; this is a thin accent-coloured
+         track with a circular thumb. Single-direction (no tick marks)
+         so it reads cleanly inline with the other input controls. -->
+    <Style x:Key="SliderThumbStyle" TargetType="Thumb">
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Thumb">
+                    <Grid>
+                        <Ellipse Width="18" Height="18" Fill="#FFFFFF"
+                                 Stroke="{DynamicResource AccentBrush}"
+                                 StrokeThickness="1.5"/>
+                        <Ellipse Width="8" Height="8"
+                                 Fill="{DynamicResource AccentBrush}"/>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style TargetType="Slider">
+        <Setter Property="MinHeight" Value="24"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Slider">
+                    <Grid VerticalAlignment="Center">
+                        <Border Height="4" CornerRadius="2"
+                                Background="{StaticResource InputBorderBrush}"/>
+                        <Track x:Name="PART_Track">
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton Background="Transparent" BorderThickness="0"
+                                              Command="Slider.DecreaseLarge"
+                                              Focusable="False">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Border Height="4" CornerRadius="2,0,0,2"
+                                                    Background="{DynamicResource AccentBrush}"/>
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.DecreaseRepeatButton>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton Background="Transparent" BorderThickness="0"
+                                              Command="Slider.IncreaseLarge"
+                                              Focusable="False">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Border Background="Transparent"/>
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.IncreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb Style="{StaticResource SliderThumbStyle}"/>
+                            </Track.Thumb>
+                        </Track>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- TabControl + TabItem -->
     <Style TargetType="TabControl">
         <Setter Property="Background" Value="Transparent"/>

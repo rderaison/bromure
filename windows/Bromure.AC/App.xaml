@@ -129,6 +129,7 @@
             <cmn:ProfileColorToBrushConverter x:Key="ProfileColorToBrush"/>
             <cmn:StringListConverter x:Key="StringListConverter"/>
             <cmn:McpEnvLinesConverter x:Key="McpEnvLinesConverter"/>
+            <cmn:HexToBrushConverter x:Key="HexToBrushConverter"/>
         </ResourceDictionary>
     </Application.Resources>
 </Application>
