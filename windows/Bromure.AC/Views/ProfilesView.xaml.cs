@@ -80,13 +80,19 @@ public partial class ProfilesView : UserControl
             Title = fieldTag == "bg" ? "Pick background color" : "Pick foreground color",
         };
         if (picker.ShowDialog() != true || picker.PickedHex is null) return;
-        switch (fieldTag)
+        // Write through the TextBox rather than the model directly:
+        // Profile doesn't implement INotifyPropertyChanged on its
+        // leaf string fields, so a direct model assignment doesn't
+        // re-paint the editor's bound controls. The TextBox's two-way
+        // binding (UpdateSourceTrigger=PropertyChanged) forwards the
+        // value into the model + the swatch button's binding
+        // converter re-runs on the same property change. Both halves
+        // of the UI stay in sync without manual BindingExpression
+        // refreshes.
+        var target = fieldTag == "bg" ? BgHexBox : FgHexBox;
+        if (target is not null)
         {
-            case "bg": vm.Selected.CustomBackgroundHex = picker.PickedHex; break;
-            case "fg": vm.Selected.CustomForegroundHex = picker.PickedHex; break;
+            target.Text = picker.PickedHex;
         }
-        // Re-render the editor so the swatch + text input pick up the
-        // new value (Profile doesn't implement INPC on every leaf).
-        vm.NotifySelectedChanged();
     }
 }

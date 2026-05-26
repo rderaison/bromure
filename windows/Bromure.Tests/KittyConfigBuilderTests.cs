@@ -42,7 +42,11 @@ public class KittyConfigBuilderTests
         conf.Should().Contain("background        #102030");
         conf.Should().Contain("foreground        #FAFBFC");
         conf.Should().Contain("cursor_shape      beam");
-        conf.Should().Contain("background_opacity 0.85");
+        // background_opacity is force-clamped to 1.0 regardless of
+        // Profile.WindowOpacity until the guest image ships a
+        // compositor — Xvnc without one renders < 1.0 opacity as a
+        // fully black framebuffer.
+        conf.Should().Contain("background_opacity 1.00");
     }
 
     [Fact]

@@ -1316,7 +1316,7 @@
                                                 ToolTip="Pick a color"
                                                 Tag="bg"
                                                 Click="OnPickColorClick"/>
-                                        <TextBox Grid.Column="1" FontFamily="Consolas"
+                                        <TextBox Grid.Column="1" x:Name="BgHexBox" FontFamily="Consolas"
                                                  Text="{Binding CustomBackgroundHex, UpdateSourceTrigger=PropertyChanged}"/>
                                     </Grid>
 
@@ -1338,7 +1338,7 @@
                                                 ToolTip="Pick a color"
                                                 Tag="fg"
                                                 Click="OnPickColorClick"/>
-                                        <TextBox Grid.Column="1" FontFamily="Consolas"
+                                        <TextBox Grid.Column="1" x:Name="FgHexBox" FontFamily="Consolas"
                                                  Text="{Binding CustomForegroundHex, UpdateSourceTrigger=PropertyChanged}"/>
                                     </Grid>
 
@@ -1350,36 +1350,15 @@
                                 </Grid>
                             </Border>
 
-                            <!-- Group: Window -->
-                            <TextBlock Text="Window" FontWeight="SemiBold" Margin="4,20,0,6"
-                                       Foreground="{StaticResource TextSecondary}" FontSize="11"/>
-                            <Border Background="{StaticResource PanelBackground}" CornerRadius="8"
-                                    Padding="20,16">
-                                <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="180"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Grid.Column="0" Text="Opacity"
-                                               VerticalAlignment="Center" Margin="0,6"/>
-                                    <Grid Grid.Column="1" Margin="0,6">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <Slider Grid.Column="0" Minimum="0.3" Maximum="1.0"
-                                                TickFrequency="0.05" IsSnapToTickEnabled="True"
-                                                Value="{Binding WindowOpacity}"
-                                                VerticalAlignment="Center"/>
-                                        <TextBlock Grid.Column="1" Margin="12,0,0,0"
-                                                   VerticalAlignment="Center"
-                                                   MinWidth="36"
-                                                   TextAlignment="Right"
-                                                   FontFamily="Consolas"
-                                                   Text="{Binding WindowOpacity, StringFormat={}{0:F2}}"/>
-                                    </Grid>
-                                </Grid>
-                            </Border>
+                            <!-- Group: Window. Opacity slider was here
+                                 previously; removed because Xvnc has no
+                                 X compositor and kitty's
+                                 background_opacity < 1.0 renders the
+                                 framebuffer fully black under that
+                                 setup. Profile.WindowOpacity stays in
+                                 the model for forward-compat (we'll
+                                 wire a compositor into the guest image
+                                 later) but the UI doesn't expose it. -->
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
