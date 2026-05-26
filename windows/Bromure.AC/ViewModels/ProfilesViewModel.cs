@@ -235,6 +235,13 @@ public sealed partial class ProfilesViewModel : ObservableObject
         catch { /* Clipboard can briefly throw; user can retry. */ }
     }
 
+    /// <summary>Force a Selected-changed notification so consumers
+    /// pick up direct mutations to leaf fields (Profile is a plain
+    /// class without INPC on every property). Used by the color
+    /// picker after the dialog writes a new hex back. Cheap — the
+    /// editor view already re-reads the whole subtree on this notify.</summary>
+    public void NotifySelectedChanged() => OnPropertyChanged(nameof(Selected));
+
     /// <summary>Audit 09 §A4 — "Open GitHub keys page" launcher
     /// matching the macOS link button. Opens the URL in the host's
     /// default browser; the user pastes the public key there.</summary>

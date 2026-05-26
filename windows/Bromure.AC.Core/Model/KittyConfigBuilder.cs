@@ -44,6 +44,19 @@ public static class KittyConfigBuilder
         var foreground = !useDefaults
             ? NormalizeHex(profile?.CustomForegroundHex) ?? DefaultForeground
             : DefaultForeground;
+        // Safety net: if the user picked the same colour for fg + bg
+        // (easy to do when one of them is empty + the other resolves
+        // to the same default, or when both were typed manually), the
+        // terminal renders text invisibly. Force fg back to the
+        // default in that case so the user sees something instead of
+        // a black framebuffer they can't explain.
+        var bgPreview = !useDefaults
+            ? NormalizeHex(profile?.CustomBackgroundHex) ?? "#1B1F2A"
+            : "#1B1F2A";
+        if (string.Equals(foreground, bgPreview, StringComparison.OrdinalIgnoreCase))
+        {
+            foreground = DefaultForeground;
+        }
         var cursorShape = (profile?.CursorShape ?? CursorShape.Block) switch
         {
             CursorShape.Beam => "beam",

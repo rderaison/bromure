@@ -1298,12 +1298,24 @@
                                             <ColumnDefinition Width="Auto"/>
                                             <ColumnDefinition Width="*"/>
                                         </Grid.ColumnDefinitions>
-                                        <Border Grid.Column="0" Width="24" Height="24" CornerRadius="4"
+                                        <!-- Audit code-comb follow-up: a click-to-pick
+                                             swatch instead of a static Border. Text
+                                             input alone let users set fg=bg and end
+                                             up with an invisible terminal. The
+                                             button opens the system color dialog;
+                                             text input stays for power-users who
+                                             want to paste a hex directly. -->
+                                        <Button Grid.Column="0" Width="28" Height="28"
+                                                Margin="0,0,8,0" VerticalAlignment="Center"
+                                                Padding="0" BorderThickness="1"
+                                                BorderBrush="{StaticResource BorderBrush}"
                                                 Background="{Binding CustomBackgroundHex,
                                                              Converter={StaticResource HexToBrushConverter},
                                                              FallbackValue=#1F1F22}"
-                                                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
-                                                Margin="0,0,8,0" VerticalAlignment="Center"/>
+                                                Cursor="Hand"
+                                                ToolTip="Pick a color"
+                                                Tag="bg"
+                                                Click="OnPickColorClick"/>
                                         <TextBox Grid.Column="1" FontFamily="Consolas"
                                                  Text="{Binding CustomBackgroundHex, UpdateSourceTrigger=PropertyChanged}"/>
                                     </Grid>
@@ -1315,12 +1327,17 @@
                                             <ColumnDefinition Width="Auto"/>
                                             <ColumnDefinition Width="*"/>
                                         </Grid.ColumnDefinitions>
-                                        <Border Grid.Column="0" Width="24" Height="24" CornerRadius="4"
+                                        <Button Grid.Column="0" Width="28" Height="28"
+                                                Margin="0,0,8,0" VerticalAlignment="Center"
+                                                Padding="0" BorderThickness="1"
+                                                BorderBrush="{StaticResource BorderBrush}"
                                                 Background="{Binding CustomForegroundHex,
                                                              Converter={StaticResource HexToBrushConverter},
                                                              FallbackValue=#FFFFFF}"
-                                                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
-                                                Margin="0,0,8,0" VerticalAlignment="Center"/>
+                                                Cursor="Hand"
+                                                ToolTip="Pick a color"
+                                                Tag="fg"
+                                                Click="OnPickColorClick"/>
                                         <TextBox Grid.Column="1" FontFamily="Consolas"
                                                  Text="{Binding CustomForegroundHex, UpdateSourceTrigger=PropertyChanged}"/>
                                     </Grid>

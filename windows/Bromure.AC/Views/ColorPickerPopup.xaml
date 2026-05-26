@@ -1,0 +1,48 @@
+<Window x:Class="Bromure.AC.Views.ColorPickerPopup"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Pick a color"
+        Width="360" Height="380"
+        WindowStyle="ToolWindow"
+        ResizeMode="NoResize"
+        Background="{StaticResource ChromeBackground}"
+        Foreground="{StaticResource TextPrimary}"
+        WindowStartupLocation="CenterOwner">
+    <DockPanel Margin="18">
+        <TextBlock DockPanel.Dock="Top" Text="Presets" FontWeight="SemiBold"
+                   Foreground="{StaticResource TextSecondary}" FontSize="11"
+                   Margin="0,0,0,8"/>
+        <!-- Curated palette: a balanced terminal background/foreground
+             grid (dark + light + a chromatic row). Click a swatch to
+             commit. -->
+        <UniformGrid DockPanel.Dock="Top" Columns="7" Rows="2" Margin="0,0,0,16"
+                     x:Name="PresetGrid"/>
+        <TextBlock DockPanel.Dock="Top" Text="Or paste a hex"
+                   FontWeight="SemiBold"
+                   Foreground="{StaticResource TextSecondary}" FontSize="11"
+                   Margin="0,0,0,4"/>
+        <Grid DockPanel.Dock="Top" Margin="0,0,0,14">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border Grid.Column="0" x:Name="LivePreview"
+                    Width="32" Height="32" CornerRadius="4"
+                    Background="#212734"
+                    BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                    Margin="0,0,8,0"/>
+            <TextBox Grid.Column="1" x:Name="HexBox" FontFamily="Consolas"
+                     VerticalContentAlignment="Center"
+                     TextChanged="OnHexTextChanged"/>
+        </Grid>
+        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal"
+                    HorizontalAlignment="Right">
+            <Button Content="Cancel" Padding="14,6" Margin="0,0,8,0"
+                    Click="OnCancelClick"/>
+            <Button Content="Use this color" Padding="14,6"
+                    Style="{StaticResource AccentButton}"
+                    Click="OnAcceptClick"/>
+        </StackPanel>
+        <Border/>
+    </DockPanel>
+</Window>
