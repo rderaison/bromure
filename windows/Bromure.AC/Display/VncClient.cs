@@ -198,32 +198,62 @@ public sealed class VncClient : IAsyncDisposable
             1,        // CopyRect — cheap blit
             -223,     // DesktopSize (server-driven resize notify)
             -308,     // ExtendedDesktopSize (client-driven resize)
-            // UX #4 rolled back: ContinuousUpdates (pseudo-encoding
-            // -313) is intentionally NOT advertised. The earlier
-            // attempt at "negotiate then EnableContinuousUpdates +
-            // skip per-frame requests" produced black framebuffers
-            // because TigerVNC/Xvnc only push on change under that
-            // extension. The follow-up patch re-issued per-frame
-            // requests anyway, which made the EnableContinuousUpdates
-            // message redundant + occasionally tripped server-side
-            // edge cases (different message ordering depending on
-            // Xvnc version). With ContinuousUpdates off, the request/
-            // update polling cycle is the original RFC 6143 shape
-            // every viewer + every server agrees on.
+            // UX #4 — ContinuousUpdates pseudo-encoding (-313). The
+            // diagnostic log proved that REMOVING this regressed both
+            // directions of data flow: VNC handshake completed but no
+            // FramebufferUpdate responses arrived AND keyboard events
+            // never reached the guest. Bake-baked Xvnc apparently
+            // requires negotiating this pseudo-encoding to put the
+            // session into the right state. We keep the per-frame
+            // request loop in RunLoopAsync as the actual driver of
+            // updates — the EnableContinuousUpdates message below is
+            // what wakes the server up.
+            -313,     // ContinuousUpdates
         }, ct).ConfigureAwait(false);
 
-        // 8) Initial full framebuffer request. After this the run
-        // loop re-issues an incremental request after each
-        // FramebufferUpdate response (see RunLoopAsync). RFC 6143
-        // request/update polling — no streaming extension.
+        // 8) Initial full framebuffer request.
         await SendFramebufferUpdateRequestAsync(incremental: false, 0, 0, Width, Height, ct)
             .ConfigureAwait(false);
+
+        // 9) UX #4 — tell the server we want continuous updates. The
+        // run loop still re-issues a per-frame request after each
+        // FramebufferUpdate response (so idle desktops keep their
+        // first frame), but the EnableContinuousUpdates handshake is
+        // what gets this bake's Xvnc to actually respond to our
+        // initial request. Fire-and-forget; if a server doesn't
+        // implement it, the next read either succeeds (no-op) or
+        // fails (the loop's read catches it).
+        try
+        {
+            await SendEnableContinuousUpdatesAsync(enable: true, 0, 0, Width, Height, ct)
+                .ConfigureAwait(false);
+        }
+        catch { /* server didn't grok it; loop's per-frame polling carries us */ }
 
         // Fire Ready AFTER all handshake writes are done. The handler
         // can synchronously kick off another write (SetDesktopSize is
         // the obvious one). Doing this before the last handshake write
         // races for the socket and Xvnc resets the connection.
         Ready?.Invoke();
+    }
+
+    /// <summary>RFC 8332 / OpenSSH-rfb extension: EnableContinuousUpdates
+    /// puts the server into the state where it streams updates within
+    /// the requested rect. Required to wake this bake's Xvnc up after
+    /// the initial FramebufferUpdateRequest — without it, the server
+    /// stays silent and both pixel + input paths appear wedged.</summary>
+    public async Task SendEnableContinuousUpdatesAsync(
+        bool enable, int x, int y, int w, int h, CancellationToken ct = default)
+    {
+        if (_stream is null) return;
+        var msg = new byte[10];
+        msg[0] = 150; // EnableContinuousUpdates
+        msg[1] = (byte)(enable ? 1 : 0);
+        msg[2] = (byte)(x >> 8); msg[3] = (byte)(x & 0xFF);
+        msg[4] = (byte)(y >> 8); msg[5] = (byte)(y & 0xFF);
+        msg[6] = (byte)(w >> 8); msg[7] = (byte)(w & 0xFF);
+        msg[8] = (byte)(h >> 8); msg[9] = (byte)(h & 0xFF);
+        await WriteLockedAsync(msg, ct).ConfigureAwait(false);
     }
 
     // -- Outgoing messages -----------------------------------------------
