@@ -36,6 +36,13 @@ public sealed class VncClient : IAsyncDisposable
     // breaks the RFB framing immediately. A SemaphoreSlim is the
     // standard async-friendly mutex.
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+    // UX #4: ContinuousUpdates streaming was negotiated successfully.
+    // Kept as a debug-only flag (referenced in stderr log) — the
+    // earlier "skip per-frame request when this is true" optimisation
+    // caused a black-screen regression and was reverted.
+#pragma warning disable CS0414 // assigned but never used — kept for future use + diagnostics
+    private bool _continuousUpdates;
+#pragma warning restore CS0414
 
     private async Task WriteLockedAsync(byte[] msg, CancellationToken ct)
     {
@@ -198,62 +205,46 @@ public sealed class VncClient : IAsyncDisposable
             1,        // CopyRect — cheap blit
             -223,     // DesktopSize (server-driven resize notify)
             -308,     // ExtendedDesktopSize (client-driven resize)
-            // UX #4 — ContinuousUpdates pseudo-encoding (-313). The
-            // diagnostic log proved that REMOVING this regressed both
-            // directions of data flow: VNC handshake completed but no
-            // FramebufferUpdate responses arrived AND keyboard events
-            // never reached the guest. Bake-baked Xvnc apparently
-            // requires negotiating this pseudo-encoding to put the
-            // session into the right state. We keep the per-frame
-            // request loop in RunLoopAsync as the actual driver of
-            // updates — the EnableContinuousUpdates message below is
-            // what wakes the server up.
-            -313,     // ContinuousUpdates
+            // UX #4: ContinuousUpdates pseudo-encoding. Including it
+            // in SetEncodings is the negotiation handshake that tells
+            // the server "I'd like to enable streaming"; the actual
+            // enable is the EnableContinuousUpdates message below.
+            // Massive latency win on localhost — eliminates one
+            // round-trip per frame. TigerVNC + Xvnc both implement it.
+            -313,     // ContinuousUpdates (pseudo-encoding 0xfffffec7)
         }, ct).ConfigureAwait(false);
 
-        // 8) Initial full framebuffer request.
+        // 8) Initial full framebuffer request. Once we send the
+        // EnableContinuousUpdates message below, the server starts
+        // streaming updates within the requested rect WITHOUT us
+        // having to re-request after each frame.
         await SendFramebufferUpdateRequestAsync(incremental: false, 0, 0, Width, Height, ct)
             .ConfigureAwait(false);
 
-        // 9) UX #4 — tell the server we want continuous updates. The
-        // run loop still re-issues a per-frame request after each
-        // FramebufferUpdate response (so idle desktops keep their
-        // first frame), but the EnableContinuousUpdates handshake is
-        // what gets this bake's Xvnc to actually respond to our
-        // initial request. Fire-and-forget; if a server doesn't
-        // implement it, the next read either succeeds (no-op) or
-        // fails (the loop's read catches it).
+        // 9) UX #4: turn on streaming for the whole framebuffer. The
+        // server will keep pushing updates as the desktop changes,
+        // without us re-issuing FramebufferUpdateRequest per frame.
+        // If the server doesn't implement the extension, this is a
+        // no-op (Xvnc/TigerVNC handle unknown client messages by
+        // disconnecting — we sniff that via the next reads).
         try
         {
             await SendEnableContinuousUpdatesAsync(enable: true, 0, 0, Width, Height, ct)
                 .ConfigureAwait(false);
+            _continuousUpdates = true;
+            Console.Error.WriteLine("[vnc-client] ContinuousUpdates enabled");
         }
-        catch { /* server didn't grok it; loop's per-frame polling carries us */ }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("[vnc-client] ContinuousUpdates negotiate failed: " + ex.Message);
+            // Stay on per-frame pull mode. Functional but slower.
+        }
 
         // Fire Ready AFTER all handshake writes are done. The handler
         // can synchronously kick off another write (SetDesktopSize is
         // the obvious one). Doing this before the last handshake write
         // races for the socket and Xvnc resets the connection.
         Ready?.Invoke();
-    }
-
-    /// <summary>RFC 8332 / OpenSSH-rfb extension: EnableContinuousUpdates
-    /// puts the server into the state where it streams updates within
-    /// the requested rect. Required to wake this bake's Xvnc up after
-    /// the initial FramebufferUpdateRequest — without it, the server
-    /// stays silent and both pixel + input paths appear wedged.</summary>
-    public async Task SendEnableContinuousUpdatesAsync(
-        bool enable, int x, int y, int w, int h, CancellationToken ct = default)
-    {
-        if (_stream is null) return;
-        var msg = new byte[10];
-        msg[0] = 150; // EnableContinuousUpdates
-        msg[1] = (byte)(enable ? 1 : 0);
-        msg[2] = (byte)(x >> 8); msg[3] = (byte)(x & 0xFF);
-        msg[4] = (byte)(y >> 8); msg[5] = (byte)(y & 0xFF);
-        msg[6] = (byte)(w >> 8); msg[7] = (byte)(w & 0xFF);
-        msg[8] = (byte)(h >> 8); msg[9] = (byte)(h & 0xFF);
-        await WriteLockedAsync(msg, ct).ConfigureAwait(false);
     }
 
     // -- Outgoing messages -----------------------------------------------
@@ -314,7 +305,27 @@ public sealed class VncClient : IAsyncDisposable
         catch { /* loop will catch on read */ }
     }
 
-/// <summary>RFB PointerEvent — buttonMask is a bitfield: bit 0 =
+    /// <summary>UX #4: enable the RFB ContinuousUpdates extension
+    /// (rfbProtocolExtensionContinuousUpdates) — server pushes
+    /// updates within the requested rect without per-frame client
+    /// requests. Message format: u8(150) u8(enable) u16(x) u16(y)
+    /// u16(w) u16(h). Throws on write failure so the caller can fall
+    /// back to per-frame requesting if the server rejected.</summary>
+    public async Task SendEnableContinuousUpdatesAsync(
+        bool enable, int x, int y, int w, int h, CancellationToken ct = default)
+    {
+        if (_stream is null) return;
+        var msg = new byte[10];
+        msg[0] = 150; // EnableContinuousUpdates
+        msg[1] = (byte)(enable ? 1 : 0);
+        msg[2] = (byte)(x >> 8); msg[3] = (byte)(x & 0xFF);
+        msg[4] = (byte)(y >> 8); msg[5] = (byte)(y & 0xFF);
+        msg[6] = (byte)(w >> 8); msg[7] = (byte)(w & 0xFF);
+        msg[8] = (byte)(h >> 8); msg[9] = (byte)(h & 0xFF);
+        await WriteLockedAsync(msg, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>RFB PointerEvent — buttonMask is a bitfield: bit 0 =
     /// left, bit 1 = middle, bit 2 = right, bit 3+4 = wheel up/down.</summary>
     public async Task SendPointerAsync(byte buttonMask, int x, int y, CancellationToken ct = default)
     {
@@ -420,12 +431,18 @@ public sealed class VncClient : IAsyncDisposable
                 {
                     case 0:  // FramebufferUpdate
                         await HandleFramebufferUpdateAsync(stream, ct).ConfigureAwait(false);
-                        // Re-issue an incremental request after every
-                        // frame. RFC 6143 request/update polling — the
-                        // server only sends a FramebufferUpdate when
-                        // we ask, so we have to keep asking. This is
-                        // the canonical RFB shape; no streaming
-                        // extension, no edge cases.
+                        // Always re-issue an incremental request after
+                        // each frame. Earlier UX #4 attempt skipped
+                        // this when ContinuousUpdates was negotiated,
+                        // assuming the server would push on its own —
+                        // but TigerVNC/Xvnc only push WHEN THE FB
+                        // CHANGES under that extension, so an idle
+                        // desktop never sent a first frame and the
+                        // viewer stayed black. The negotiation is
+                        // still useful (lets the server batch + push
+                        // change-driven frames without waiting for
+                        // our next request) but we keep the polling
+                        // request as a guaranteed kickstart.
                         await SendFramebufferUpdateRequestAsync(
                             incremental: true, 0, 0, Width, Height, ct).ConfigureAwait(false);
                         break;
