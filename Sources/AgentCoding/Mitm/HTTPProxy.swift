@@ -21,6 +21,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     let clusterCAs: ClusterCATrustRegistry
     let consent: ConsentBroker
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
+    /// "Guardrails" guard for this profile (host-side destructive-verb removal),
+    /// or nil if disabled. Read on the hot path per request.
+    let guardrailsProvider: @Sendable () -> GuardrailsConfig?
     /// Fired when the proxy sees a clean Anthropic subscription OAuth
     /// access token in an outbound request. The host wires this to
     /// `SubscriptionTokenCoordinator.handleCleanAccessToken` which
@@ -42,6 +45,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
+         guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig? = { nil },
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)? = nil,
          codexTokenSeen: (@Sendable (UUID, String) -> Void)? = nil,
          oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)? = nil) {
@@ -55,6 +59,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         self.clusterCAs = clusterCAs
         self.consent = consent
         self.sessionTraceProvider = sessionTraceProvider
+        self.guardrailsProvider = guardrailsProvider
         self.subscriptionTokenSeen = subscriptionTokenSeen
         self.codexTokenSeen = codexTokenSeen
         self.oauthRotated = oauthRotated
@@ -107,7 +112,42 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // (which can't work inside the VM). Return 404 for all of
         // them so Claude Code treats the server as unauthenticated
         // and the proxy's header injection handles auth transparently.
-        let (_, reqPath) = Self.parseRequestLine(request)
+        let (reqMethod, reqPath) = Self.parseRequestLine(request)
+
+        // Guardrails: host-side destructive-op removal across protocols
+        // (Kubernetes, AWS, DigitalOcean, Docker registries, GitHub/GitLab/
+        // Bitbucket). Enforced here, before a single byte is forwarded, so a
+        // compromised agent in the VM can't bypass it; the agent gets a hard
+        // 403 it can react to. AWS needs the action name from the request, so
+        // we parse X-Amz-Target / the Action= body param only for AWS hosts.
+        if let guardrails = guardrailsProvider() {
+            var amzTarget: String?
+            var formAction: String?
+            if guardrails.aws != .off, GuardrailsConfig.isAWSHost(host) {
+                let headerText: String
+                var bodyPrefix = ""
+                if let sep = request.range(of: Data("\r\n\r\n".utf8)) {
+                    headerText = String(decoding: request[request.startIndex..<sep.lowerBound], as: UTF8.self)
+                    let bEnd = request.index(sep.upperBound, offsetBy: 4096, limitedBy: request.endIndex) ?? request.endIndex
+                    bodyPrefix = String(decoding: request[sep.upperBound..<bEnd], as: UTF8.self)
+                } else {
+                    headerText = String(decoding: request, as: UTF8.self)
+                }
+                amzTarget = Self.headerValue("x-amz-target", inHeaderSection: headerText)
+                formAction = amzTarget == nil ? Self.formActionValue(bodyPrefix) : nil
+            }
+            if let denial = guardrails.deny(host: host, method: reqMethod, path: reqPath,
+                                            amzTarget: amzTarget, formAction: formAction) {
+                FileHandle.standardError.write(Data(
+                    "[mitm] Guardrails blocked \(reqMethod) \(host)\(reqPath) — \(denial.reason)\n".utf8))
+                var resp = "HTTP/1.1 403 Forbidden\r\nContent-Type: \(denial.contentType)\r\n"
+                if let t = denial.amzErrorType { resp += "x-amzn-ErrorType: \(t)\r\n" }
+                resp += "Content-Length: \(denial.body.utf8.count)\r\nConnection: close\r\n\r\n\(denial.body)"
+                try? tls.write(Data(resp.utf8))
+                return
+            }
+        }
+
         let isDiscovery = reqPath.hasPrefix("/.well-known/oauth-authorization-server")
             || reqPath.hasPrefix("/.well-known/oauth-protected-resource")
             || reqPath.hasPrefix("/.well-known/openid-configuration")
@@ -937,6 +977,33 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return (String(parts[0]), String(parts[1]))
     }
 
+    /// Case-insensitive lookup of a header value in a CRLF-delimited header
+    /// section (request line included; we skip it). nil if absent.
+    static func headerValue(_ name: String, inHeaderSection text: String) -> String? {
+        let wanted = name.lowercased()
+        for line in text.components(separatedBy: "\r\n").dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let key = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            if key == wanted {
+                return line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return nil
+    }
+
+    /// Extract the `Action` value from a form-urlencoded AWS query-protocol
+    /// body (e.g. `Action=TerminateInstances&Version=…`). `Action` need not
+    /// be the first field.
+    static func formActionValue(_ body: String) -> String? {
+        for pair in body.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            if kv.count == 2, kv[0] == "Action" {
+                return kv[1].removingPercentEncoding ?? String(kv[1])
+            }
+        }
+        return nil
+    }
+
     /// Pull "HTTP/1.1 200 OK" → 200.
     private static func parseStatusCode(_ raw: Data) -> Int {
         guard let str = String(data: raw.prefix(64), encoding: .ascii),
@@ -1452,6 +1519,61 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
         self.host = host
     }
 
+    /// Accept a server cert that the SSL policy rejected *only* because of
+    /// Apple's 398-day max-validity rule (which can fire on any cert in the
+    /// chain — the long-lived self-signed cluster CA or the API server leaf).
+    ///
+    /// We re-evaluate the same trust (anchors still pinned to the user's
+    /// cluster CA) with a **Basic X.509** policy, which checks chain-to-anchor
+    /// and per-cert temporal validity (expired / not-yet-valid) but does NOT
+    /// apply the SSL-only 398-day span rule. If that passes, the cert really
+    /// does chain to the CA the user pinned for this host and isn't expired.
+    /// Basic X.509 skips hostname binding, so we re-add it ourselves
+    /// (best-effort) against the leaf's SANs — only refusing on a positive
+    /// mismatch, never on a parsing gap.
+    static func acceptPinnedDespiteValidityPeriod(_ trust: SecTrust, host: String) -> Bool {
+        let basic = SecPolicyCreateBasicX509()
+        SecTrustSetPolicies(trust, [basic] as CFArray)
+        var err: CFError?
+        guard SecTrustEvaluateWithError(trust, &err) else { return false }
+        guard let leaf = SecTrustGetCertificateAtIndex(trust, 0) else { return true }
+        return hostnameMatch(leaf, host: host) != .mismatch
+    }
+
+    private enum HostMatch { case match, mismatch, noSANs }
+
+    /// Best-effort hostname/IP match against the leaf cert's SANs. Returns
+    /// `.noSANs` (treated as acceptable) when we can't read SANs, so a parsing
+    /// limitation never blocks a connection that already chained to the pinned
+    /// CA.
+    private static func hostnameMatch(_ cert: SecCertificate, host: String) -> HostMatch {
+        guard let values = SecCertificateCopyValues(
+                cert, [kSecOIDSubjectAltName] as CFArray, nil) as? [CFString: Any],
+              let san = values[kSecOIDSubjectAltName] as? [CFString: Any],
+              let entries = san[kSecPropertyKeyValue] as? [[CFString: Any]] else {
+            return .noSANs
+        }
+        let target = host.lowercased()
+        let targetIsIP = target.allSatisfy { $0.isNumber || $0 == "." || $0 == ":" }
+        var sawAny = false
+        for entry in entries {
+            guard let value = (entry[kSecPropertyKeyValue] as? String)?.lowercased() else { continue }
+            let label = (entry[kSecPropertyKeyLabel] as? String)?.lowercased() ?? ""
+            sawAny = true
+            if targetIsIP {
+                if label.contains("ip"), value == target { return .match }
+            } else if label.contains("dns") || label.contains("name") {
+                if value == target { return .match }
+                if value.hasPrefix("*.") {
+                    let suffix = value.dropFirst(1)            // ".example.com"
+                    if target.hasSuffix(suffix),
+                       !target.dropLast(suffix.count).contains(".") { return .match }
+                }
+            }
+        }
+        return sawAny ? .mismatch : .noSANs
+    }
+
     func urlSession(_ session: URLSession,
                     didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition,
@@ -1523,6 +1645,16 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
             SecTrustSetPolicies(trust, [policy] as CFArray)
             var err: CFError?
             if SecTrustEvaluateWithError(trust, &err) {
+                completionHandler(.useCredential, URLCredential(trust: trust))
+            } else if Self.acceptPinnedDespiteValidityPeriod(trust, host: host) {
+                // The user explicitly pinned this cluster CA, so Apple's
+                // 398-day SSL max-validity policy shouldn't reject the
+                // long-lived self-signed kube-apiserver cert it issued. We
+                // re-checked with a Basic X.509 policy (chain-to-pinned-anchor
+                // + not expired, *without* the SSL-only 398-day rule) plus a
+                // best-effort hostname match, so this isn't a blanket bypass.
+                FileHandle.standardError.write(Data(
+                    "[mitm] \(host): cert chains to the pinned cluster CA (Basic X.509 ok); accepting despite Apple's 398-day SSL max-validity rule\n".utf8))
                 completionHandler(.useCredential, URLCredential(trust: trust))
             } else {
                 let reason = (err as Error?).map { "\($0)" } ?? "unknown"

@@ -291,6 +291,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case environment = "Environment"
     case mcp         = "MCP"
     case tracing     = "Tracing"
+    case guardrails       = "Guardrails"
     case appearance  = "Appearance"
     case resources   = "Resources"
     /// App-wide automation toggles. Only shown when the editor is opened
@@ -309,6 +310,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .environment: "terminal.fill"
         case .mcp:         "network"
         case .tracing:     "doc.text.magnifyingglass"
+        case .guardrails:       "exclamationmark.shield.fill"
         case .appearance:  "paintpalette.fill"
         case .resources:   "memorychip.fill"
         case .automation:  "antenna.radiowaves.left.and.right"
@@ -324,6 +326,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .environment: .teal
         case .mcp:         .blue
         case .tracing:     .red
+        case .guardrails:       .orange
         case .appearance:  .pink
         case .resources:   .gray
         case .automation:  .cyan
@@ -545,6 +548,7 @@ struct ProfileEditorView: View {
         case .environment: environmentSection
         case .mcp:         mcpSection
         case .tracing:     tracingSection
+        case .guardrails:       guardrailsSection
         case .appearance:  appearanceSection
         case .resources:   resourcesSection
         case .automation:  automationSection
@@ -2127,6 +2131,85 @@ struct ProfileEditorView: View {
                 }
                 .buttonStyle(.borderless)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func guardrailRow(_ title: String, systemImage: String,
+                              mode: Binding<GuardrailsPolicy.Mode>, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Label(title, systemImage: systemImage)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Picker("", selection: mode) {
+                    ForEach(GuardrailsPolicy.Mode.allCases, id: \.self) { m in
+                        Text(m.displayName).tag(m)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 200)
+            }
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var guardrailsSection: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Guardrails strips destructive operations from the protocols this agent speaks. It's enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it. Blocked calls return a hard error the agent sees.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                guardrailRow("Kubernetes", systemImage: "shippingbox.fill",
+                             mode: $draft.guardrails.kubernetes,
+                             detail: "\(draft.guardrails.kubernetes.detail) Applies to the kube API servers from this profile's kubeconfigs (e.g. `kubectl delete` fails cleanly).")
+                if draft.kubeconfigs.isEmpty && draft.guardrails.kubernetes != .off {
+                    Label("No kubeconfigs on this profile — add one under Credentials for this to take effect.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Divider()
+                guardrailRow("AWS", systemImage: "cloud.fill", mode: $draft.guardrails.aws,
+                             detail: "\(draft.guardrails.aws.detail) All *.amazonaws.com APIs; classified by action name (Delete*/Terminate* = destructive, Get*/List*/Describe* = read).")
+                Divider()
+                guardrailRow("DigitalOcean", systemImage: "drop.fill", mode: $draft.guardrails.digitalOcean,
+                             detail: "\(draft.guardrails.digitalOcean.detail) api.digitalocean.com — DELETE = destructive.")
+                Divider()
+                guardrailRow("Docker registries", systemImage: "cube.box.fill", mode: $draft.guardrails.docker,
+                             detail: "\(draft.guardrails.docker.detail) Registries you've added under Credentials — pull = read, push = write, delete = destructive.")
+                if draft.dockerRegistries.isEmpty && draft.guardrails.docker != .off {
+                    Label("No registries on this profile — add one under Credentials for this to take effect.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Divider()
+                guardrailRow("GitHub", systemImage: "chevron.left.forwardslash.chevron.right",
+                             mode: $draft.guardrails.github,
+                             detail: "\(draft.guardrails.github.detail) github.com REST API + git over HTTPS; read-only also blocks `git push`.")
+                Divider()
+                guardrailRow("GitLab", systemImage: "chevron.left.forwardslash.chevron.right",
+                             mode: $draft.guardrails.gitlab,
+                             detail: "\(draft.guardrails.gitlab.detail) gitlab.com REST API + git over HTTPS.")
+                Divider()
+                guardrailRow("Bitbucket", systemImage: "chevron.left.forwardslash.chevron.right",
+                             mode: $draft.guardrails.bitbucket,
+                             detail: "\(draft.guardrails.bitbucket.detail) bitbucket.org REST API + git over HTTPS.")
+                Divider()
+                Text("Databases (Postgres, MySQL, CockroachDB, ClickHouse, Mongo) are coming next — same Off / Block destructive / Read-only control.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.bottom, 8)
         }
     }
 

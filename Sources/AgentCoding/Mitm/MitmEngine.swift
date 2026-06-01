@@ -60,6 +60,25 @@ public final class MitmEngine {
         sessionTraces.removeValue(forKey: profileID)
     }
 
+    // Per-profile "Guardrails" guard config (host-side destructive-verb removal).
+    // Lock-protected like sessionTraces so the proxy hot path reads it without
+    // an actor hop.
+    private let guardrailsLock = NSLock()
+    nonisolated(unsafe) private var guardrailsConfigs: [UUID: GuardrailsConfig] = [:]
+
+    public nonisolated func setGuardrailsConfig(_ config: GuardrailsConfig, for profileID: UUID) {
+        guardrailsLock.lock(); defer { guardrailsLock.unlock() }
+        guardrailsConfigs[profileID] = config
+    }
+    public nonisolated func guardrailsConfig(for profileID: UUID) -> GuardrailsConfig? {
+        guardrailsLock.lock(); defer { guardrailsLock.unlock() }
+        return guardrailsConfigs[profileID]
+    }
+    public nonisolated func clearGuardrailsConfig(for profileID: UUID) {
+        guardrailsLock.lock(); defer { guardrailsLock.unlock() }
+        guardrailsConfigs.removeValue(forKey: profileID)
+    }
+
     /// Per-install 32-byte salt for deriving fake tokens from real
     /// ones via HKDF. Generated once, persisted under app support so
     /// a given real key always maps to the same fake on this Mac —
@@ -162,6 +181,9 @@ public final class MitmEngine {
             sessionTraceProvider: { [weak self] in
                 self?.sessionTrace(for: profileID)
             },
+            guardrailsProvider: { [weak self] in
+                self?.guardrailsConfig(for: profileID)
+            },
             subscriptionTokenSeen: tokenHook,
             codexTokenSeen: codexHook,
             oauthRotated: rotatedHook
@@ -177,6 +199,7 @@ public final class MitmEngine {
 
     public func unregister(profileID: UUID) {
         listenerHolders.removeValue(forKey: profileID)
+        clearGuardrailsConfig(for: profileID)
         swapper.clearMap(for: profileID)
         sshAgent.clearKeys(for: profileID)
         sshAgent.clearImportedKeyApprovals(for: profileID)
@@ -217,6 +240,7 @@ private final class ListenerHolder {
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
+         guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig?,
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?,
          codexTokenSeen: (@Sendable (UUID, String) -> Void)?,
          oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?)
@@ -232,6 +256,7 @@ private final class ListenerHolder {
             clusterCAs: clusterCAs,
             consent: consent,
             sessionTraceProvider: sessionTraceProvider,
+            guardrailsProvider: guardrailsProvider,
             subscriptionTokenSeen: subscriptionTokenSeen,
             codexTokenSeen: codexTokenSeen,
             oauthRotated: oauthRotated)
@@ -261,6 +286,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
     let clusterCAs: ClusterCATrustRegistry
     let consent: ConsentBroker
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
+    let guardrailsProvider: @Sendable () -> GuardrailsConfig?
     let subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?
     let codexTokenSeen: (@Sendable (UUID, String) -> Void)?
     let oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?
@@ -272,6 +298,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
+         guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig?,
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?,
          codexTokenSeen: (@Sendable (UUID, String) -> Void)?,
          oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?) {
@@ -284,6 +311,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         self.clusterCAs = clusterCAs
         self.consent = consent
         self.sessionTraceProvider = sessionTraceProvider
+        self.guardrailsProvider = guardrailsProvider
         self.subscriptionTokenSeen = subscriptionTokenSeen
         self.codexTokenSeen = codexTokenSeen
         self.oauthRotated = oauthRotated
@@ -295,6 +323,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
                   from socketDevice: VZVirtioSocketDevice) -> Bool {
         let fd = dup(connection.fileDescriptor)
         let providerCopy = sessionTraceProvider
+        let guardrailsCopy = guardrailsProvider
         let tokenHook = subscriptionTokenSeen
         let codexHook = codexTokenSeen
         let rotatedHook = oauthRotated
@@ -309,6 +338,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             clusterCAs: clusterCAs,
             consent: consent,
             sessionTraceProvider: providerCopy,
+            guardrailsProvider: guardrailsCopy,
             subscriptionTokenSeen: tokenHook,
             codexTokenSeen: codexHook,
             oauthRotated: rotatedHook

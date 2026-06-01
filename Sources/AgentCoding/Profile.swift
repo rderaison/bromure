@@ -832,6 +832,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// real credentials with the proxy for upstream substitution.
     public var kubeconfigs: [KubeconfigEntry]
 
+    /// "Guardrails" guard — strips destructive operations from protocols the agent
+    /// speaks (Kubernetes first), enforced host-side in the MITM.
+    public var guardrails: GuardrailsPolicy
+
     /// DigitalOcean Personal Access Token. Injected as
     /// DIGITALOCEAN_ACCESS_TOKEN env + ~/.config/doctl/config.yaml in
     /// the VM as a fake; proxy swaps to the real value on
@@ -1022,6 +1026,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         defaultClaudeTokens: StoredOAuthTokens? = nil,
         defaultCodexTokens: StoredOAuthTokens? = nil,
         kubeconfigs: [KubeconfigEntry] = [],
+        guardrails: GuardrailsPolicy = GuardrailsPolicy(),
         digitalOceanToken: String = "",
         awsCredentials: AWSCredentials = AWSCredentials(),
         bedrockEnabled: Bool = false,
@@ -1073,6 +1078,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.defaultClaudeTokens = defaultClaudeTokens
         self.defaultCodexTokens = defaultCodexTokens
         self.kubeconfigs = kubeconfigs
+        self.guardrails = guardrails
         self.digitalOceanToken = digitalOceanToken
         self.awsCredentials = awsCredentials
         self.bedrockEnabled = bedrockEnabled
@@ -1128,6 +1134,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case subscriptionTokenSwap
         case codexTokenSwap
         case kubeconfigs
+        case guardrails
         case digitalOceanToken
         case awsCredentials
         case bedrockEnabled, bedrockModelID
@@ -1203,6 +1210,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         codexTokenSwap = try c.decodeIfPresent(SubscriptionTokenSwapState.self,
                                                forKey: .codexTokenSwap) ?? .unset
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
+        guardrails = try c.decodeIfPresent(GuardrailsPolicy.self, forKey: .guardrails) ?? GuardrailsPolicy()
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
         bedrockEnabled = try c.decodeIfPresent(Bool.self, forKey: .bedrockEnabled) ?? false
@@ -1278,6 +1286,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if !kubeconfigs.isEmpty {
             try c.encode(kubeconfigs, forKey: .kubeconfigs)
+        }
+        if guardrails.isActive {
+            try c.encode(guardrails, forKey: .guardrails)
         }
         if !digitalOceanToken.isEmpty {
             try c.encode(digitalOceanToken, forKey: .digitalOceanToken)

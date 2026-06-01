@@ -449,6 +449,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// If `url` is an OAuth authorize URL whose `redirect_uri` is a loopback
     /// callback (`http://127.0.0.1:<port>` or `localhost`), return that port —
     /// the signal to bridge the host's loopback into the guest. Otherwise nil.
+    /// Resolve a profile's Guardrails policy into the runtime config the MITM
+    /// enforces — the kube mode plus the concrete kube API hostnames pulled
+    /// from the profile's kubeconfigs.
+    static func makeGuardrailsConfig(for profile: Profile) -> GuardrailsConfig {
+        let kubeHosts = Set(profile.kubeconfigs.compactMap {
+            URL(string: $0.serverURL)?.host?.lowercased()
+        })
+        // Docker registry hosts the profile has creds for. "docker.io" is a
+        // user-facing alias for the real Hub endpoints, so expand it.
+        var dockerHosts = Set<String>()
+        for reg in profile.dockerRegistries {
+            let h = reg.host.lowercased()
+            if h == "docker.io" || h == "index.docker.io" || h == "registry-1.docker.io" {
+                dockerHosts.formUnion(["docker.io", "index.docker.io",
+                                       "registry-1.docker.io", "auth.docker.io"])
+            } else {
+                dockerHosts.insert(h)
+            }
+        }
+        let g = profile.guardrails
+        return GuardrailsConfig(kubernetes: g.kubernetes, kubeHosts: kubeHosts,
+                                aws: g.aws,
+                                digitalOcean: g.digitalOcean,
+                                docker: g.docker, dockerHosts: dockerHosts,
+                                github: g.github, gitlab: g.gitlab, bitbucket: g.bitbucket)
+    }
+
     static func loopbackCallbackPort(from url: URL) -> UInt16? {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let redirect = comps.queryItems?.first(where: { $0.name == "redirect_uri" })?.value,
@@ -2338,6 +2365,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // VM. Done after start so the socket device is live.
             if let engine = self.mitmEngine, let dev = sandbox.socketDevice {
                 engine.register(socketDevice: dev, profileID: profile.id)
+                engine.setGuardrailsConfig(Self.makeGuardrailsConfig(for: profile), for: profile.id)
             }
             // Keyboard layout bridge — pushes the macOS layout into the
             // guest at boot and follows live changes (or pins an
@@ -3020,6 +3048,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             if let engine = self.mitmEngine, let dev = sandbox.socketDevice {
                 engine.register(socketDevice: dev, profileID: profile.id)
+                engine.setGuardrailsConfig(Self.makeGuardrailsConfig(for: profile), for: profile.id)
             }
             if let dev = sandbox.socketDevice {
                 win.keyboardBridge = KeyboardBridge(
