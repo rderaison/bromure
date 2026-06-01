@@ -26,6 +26,7 @@ extension Profile.Tool {
         switch self {
         case .claude: "sparkles"
         case .codex:  "terminal.fill"
+        case .grok:   "bolt.fill"
         }
     }
 }
@@ -2192,6 +2193,17 @@ struct ProfileEditorView: View {
                     .frame(width: 44)
             }
 
+            // Programming ligatures (off by default).
+            HStack(spacing: 12) {
+                Text("Ligatures").frame(width: 110, alignment: .trailing)
+                Toggle("", isOn: $draft.fontLigatures)
+                    .labelsHidden()
+                Text("Draw \(Text("<=").font(.system(.caption, design: .monospaced))), \(Text("==").font(.system(.caption, design: .monospaced))), \(Text("=>").font(.system(.caption, design: .monospaced))) as combined glyphs")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
             Divider().padding(.vertical, 4)
 
             HStack {
@@ -2209,28 +2221,36 @@ struct ProfileEditorView: View {
         }
     }
 
-    /// All font families on this Mac, sorted. We exclude families whose
-    /// name starts with `.` — those are macOS-internal identifiers
-    /// (`.AppleSystemUIFont`, `.SFCompactRounded`, …) that Linux
-    /// fontconfig can't resolve, so picking one would silently fall back
-    /// in kitty.
+    /// Fixed-width font families on this Mac, sorted. A terminal only makes
+    /// sense in a monospace font, so we keep just the fixed-pitch families.
+    /// We also exclude families whose name starts with `.` — those are
+    /// macOS-internal identifiers (`.AppleSystemUIFontMonospaced`, …) that
+    /// Linux fontconfig can't resolve, so picking one would silently fall
+    /// back in kitty.
     static let allFontFamilies: [String] = {
         NSFontManager.shared.availableFontFamilies
             .filter { !$0.hasPrefix(".") }
+            .filter { NSFont(name: $0, size: 12)?.isFixedPitch ?? false }
             .sorted()
     }()
 
-    /// The list shown in the Picker — always includes the currently-
-    /// selected family (even if it's not in `availableFontFamilies`),
-    /// otherwise the Picker shows blank after Reset-to-Terminal sets a
-    /// font name that isn't a registered family on this Mac.
+    /// Fonts that always exist in the *guest* image even when the host doesn't
+    /// have them registered: JetBrains Mono (installed via apt) and the SF Mono
+    /// families copied from Terminal.app at image-build time ("SF Mono" and
+    /// "SF Mono Terminal"). `NSFont(name:)` returns nil for these on most Macs,
+    /// so they'd never survive the host isFixedPitch filter — add them
+    /// explicitly so they're selectable and resolve in the guest's fontconfig.
+    static let guestBundledFonts = ["JetBrains Mono", "SF Mono", "SF Mono Terminal"]
+
+    /// The list shown in the Picker — host monospace families plus the
+    /// guest-bundled fonts, always including the currently-selected family so
+    /// the Picker never shows blank.
     private var fontFamiliesForPicker: [String] {
+        var set = Set(Self.allFontFamilies)
+        set.formUnion(Self.guestBundledFonts)
         let current = draft.customFontFamily ?? terminalDefaults.fontFamily
-        var families = Self.allFontFamilies
-        if !current.isEmpty && !families.contains(current) {
-            families.insert(current, at: 0)
-        }
-        return families
+        if !current.isEmpty { set.insert(current) }
+        return set.sorted()
     }
 
     private func addFolder() {
@@ -3021,6 +3041,7 @@ private struct ToolConfigCard: View {
         switch tool {
         case .claude: return "Anthropic API key"
         case .codex:  return "OpenAI API key"
+        case .grok:   return "xAI API key"
         }
     }
 }

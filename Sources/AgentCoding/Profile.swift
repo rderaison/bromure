@@ -658,10 +658,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public enum Tool: String, Codable, CaseIterable, Sendable {
         case claude
         case codex
+        case grok
         public var displayName: String {
             switch self {
             case .claude: return "Claude Code"
             case .codex:  return "Codex"
+            case .grok:   return "Grok Build"
             }
         }
         /// Env-var name the in-VM init script writes the API key to when
@@ -670,6 +672,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             switch self {
             case .claude: return "ANTHROPIC_API_KEY"
             case .codex:  return "OPENAI_API_KEY"
+            case .grok:   return "XAI_API_KEY"
             }
         }
     }
@@ -992,6 +995,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var customBackgroundHex: String?
     public var customForegroundHex: String?
 
+    /// Render the font's programming ligatures (e.g. `<=`, `==`, `=>` drawn as
+    /// combined glyphs). Off by default — JetBrains Mono ships ligatures and
+    /// kitty renders them unless we emit `disable_ligatures`.
+    public var fontLigatures: Bool
+
     public var mcpServers: [MCPServer]
 
     public init(
@@ -1037,6 +1045,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         customFontSize: Int? = nil,
         customBackgroundHex: String? = nil,
         customForegroundHex: String? = nil,
+        fontLigatures: Bool = false,
         cursorShape: CursorShape = .block,
         windowOpacity: Double = 0.97,
         keyboardLayoutOverride: String? = nil,
@@ -1092,6 +1101,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.customFontSize = customFontSize
         self.customBackgroundHex = customBackgroundHex
         self.customForegroundHex = customForegroundHex
+        self.fontLigatures = fontLigatures
         self.closeAction = closeAction
         self.mcpServers = mcpServers
     }
@@ -1104,7 +1114,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case createdAt, lastUsedAt, baseImageVersionAtClone, color, comments
         case memoryGB, gitUserName, gitUserEmail
         case useTerminalAppDefaults, customFontFamily, customFontSize
-        case customBackgroundHex, customForegroundHex
+        case customBackgroundHex, customForegroundHex, fontLigatures
         case networkMode, bridgedInterfaceID
         case cursorShape, windowOpacity, keyboardLayoutOverride
         case keyRepeatDelayMs, keyRepeatRateHz
@@ -1161,6 +1171,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         customFontSize         = try c.decodeIfPresent(Int.self, forKey: .customFontSize)
         customBackgroundHex    = try c.decodeIfPresent(String.self, forKey: .customBackgroundHex)
         customForegroundHex    = try c.decodeIfPresent(String.self, forKey: .customForegroundHex)
+        fontLigatures          = try c.decodeIfPresent(Bool.self, forKey: .fontLigatures) ?? false
         networkMode            = try c.decodeIfPresent(NetworkMode.self, forKey: .networkMode) ?? .nat
         bridgedInterfaceID     = try c.decodeIfPresent(String.self, forKey: .bridgedInterfaceID)
         cursorShape            = try c.decodeIfPresent(CursorShape.self, forKey: .cursorShape) ?? .beam
@@ -1228,6 +1239,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encodeIfPresent(customFontSize, forKey: .customFontSize)
         try c.encodeIfPresent(customBackgroundHex, forKey: .customBackgroundHex)
         try c.encodeIfPresent(customForegroundHex, forKey: .customForegroundHex)
+        try c.encode(fontLigatures, forKey: .fontLigatures)
         try c.encode(networkMode, forKey: .networkMode)
         try c.encodeIfPresent(bridgedInterfaceID, forKey: .bridgedInterfaceID)
         try c.encode(cursorShape, forKey: .cursorShape)
@@ -2592,6 +2604,19 @@ public final class ProfileStore {
                 echo "[bromure-ac] install failed (see /tmp/bromure-tool-install.log)"
                 return 1
                 ;;
+            grok)
+                # Grok ships via x.ai's shell installer (not npm). Fallback
+                # only — normally baked into the base image. The installer
+                # drops it under ~/.grok/bin, so add that to PATH.
+                echo "[bromure-ac] grok not found — installing via x.ai…"
+                if curl -fsSL https://x.ai/cli/install.sh | bash >>/tmp/bromure-tool-install.log 2>&1; then
+                    [ -d "$HOME/.grok/bin" ] && export PATH="$HOME/.grok/bin:$PATH"
+                    echo "[bromure-ac] installed grok"
+                    return 0
+                fi
+                echo "[bromure-ac] install failed (see /tmp/bromure-tool-install.log)"
+                return 1
+                ;;
             *)
                 return 1
                 ;;
@@ -2903,6 +2928,18 @@ public final class ProfileStore {
         echo "[xinit] shell-agent pid $!" >> /tmp/xinitrc.log
     fi
 
+    # Loopback-callback relay — listens on vsock 5010 so the host can deliver
+    # an OAuth redirect (127.0.0.1:<port>/callback from the host browser) into
+    # a login CLI's listener inside the VM (grok-cli, gh, gcloud, …).
+    if [ -r /mnt/bromure-meta/loopback-relay-agent.py ]; then
+        # Capture stdout+stderr to the host-readable outbox so a Python error
+        # (missing AF_VSOCK, bind failure, …) is visible without guest access.
+        python3 /mnt/bromure-meta/loopback-relay-agent.py \
+            >> /mnt/bromure-outbox/loopback-relay.out 2>&1 &
+        echo "[xinit] loopback-relay pid $! at $(date +%T)" >> /mnt/bromure-outbox/loopback-relay.out
+        echo "[xinit] loopback-relay pid $!" >> /tmp/xinitrc.log
+    fi
+
     # Natural scrolling is handled at the kitty level via
     # wheel_scroll_multiplier / touch_scroll_multiplier in the
     # generated kitty.conf — see TerminalAppDefaults.scrollDirectionStanza.
@@ -3064,6 +3101,7 @@ public final class ProfileStore {
     spawn_kitty() {
         local id="$1"
         local closed_file="$INBOX/closed-${id}.txt"
+        local diag_file="$INBOX/diag-${id}.txt"
         local kitty_log="/tmp/kitty-${id}.log"
         local kitty_conf="$HOME/.config/kitty/kitty.conf"
         log "spawn id=$id conf=$kitty_conf closed=$closed_file"
@@ -3071,11 +3109,32 @@ public final class ProfileStore {
             # --config forces this exact file — without it kitty has
             # been observed picking up a stale system /etc/xdg/kitty
             # one in some environments, ignoring the per-profile values.
+            local start end dur
+            start=$(date +%s)
             kitty --config "$kitty_conf" --start-as=fullscreen \
                   --class "bromure-${id}" \
                   >"$kitty_log" 2>&1
             rc=$?
-            echo "$(date +%T) [agent] kitty rc=$rc id=$id" >> "$LOG"
+            end=$(date +%s)
+            dur=$((end - start))
+            echo "$(date +%T) [agent] kitty rc=$rc id=$id dur=${dur}s" >> "$LOG"
+            # Diagnostics for "session started then bailed right away": when
+            # kitty exits non-zero or lives <3s, capture why (exit code, how
+            # long it ran, kitty version, $DISPLAY, and the tail of its own
+            # log) into diag-<id>.txt so the host can surface it without
+            # needing debug-shell access. Written atomically before the
+            # closed marker so the host has the reason in hand when it reaps
+            # the pill.
+            if [ "$rc" -ne 0 ] || [ "$dur" -lt 3 ]; then
+                {
+                    echo "rc=$rc"
+                    echo "duration_s=$dur"
+                    echo "kitty_version=$(kitty --version 2>&1 | head -1)"
+                    echo "display=${DISPLAY:-<unset>}"
+                    echo "--- tail of $kitty_log ---"
+                    tail -n 40 "$kitty_log" 2>/dev/null
+                } > "$diag_file.tmp" 2>/dev/null && mv -f "$diag_file.tmp" "$diag_file" 2>/dev/null
+            fi
             printf 'closed\n' > "$closed_file"
             wrc=$?
             echo "$(date +%T) [agent] wrote $closed_file rc=$wrc exists=$([ -e "$closed_file" ] && echo yes || echo no)" >> "$LOG"

@@ -122,6 +122,7 @@ extension TerminalAppDefaults {
 
         font_family \(style.fontFamily)
         font_size \(size)
+        \(profile.fontLigatures ? "# Font ligatures enabled for this profile." : "disable_ligatures always")
         background \(style.backgroundHex)
         foreground \(style.foregroundHex)
         cursor_shape \(profile.cursorShape.rawValue)

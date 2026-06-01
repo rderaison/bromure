@@ -34,6 +34,9 @@ public struct SessionTokenPlan: Sendable {
         case anthropicAPIKey
         /// OPENAI_API_KEY env var — Codex reads this.
         case openaiAPIKey
+        /// XAI_API_KEY env var — Grok Build reads this. Swapped on the wire
+        /// to api.x.ai (OpenAI-style `Authorization: Bearer`).
+        case xaiAPIKey
         /// HTTPS git credential. Materialized in ~/.git-credentials and
         /// the gh / glab configs.
         case gitHTTPS(host: String, username: String)
@@ -94,6 +97,13 @@ public struct SessionTokenPlan: Sendable {
         return nil
     }
 
+    public func fakeForXAI() -> String? {
+        for e in entries {
+            if case .xaiAPIKey = e.purpose { return e.fakeValue }
+        }
+        return nil
+    }
+
     /// Fake to embed into ~/.git-credentials for the matching host.
     public func fakeForGitHTTPS(host: String, username: String) -> String? {
         for e in entries {
@@ -109,6 +119,7 @@ public struct SessionTokenPlan: Sendable {
         switch purpose {
         case .anthropicAPIKey:        return "anthropic.com"
         case .openaiAPIKey:           return "openai.com"
+        case .xaiAPIKey:              return "x.ai"
         case .gitHTTPS(let host, _):  return host
         case .manual(_, _, let host): return host.isEmpty ? nil : host
         case .digitalOcean:           return "digitalocean.com"
@@ -236,6 +247,18 @@ public extension Profile {
                     fakeValue: SessionTokenPlan.deriveFake(prefix: "sk-brm-",
                                                            real: real, salt: salt),
                     purpose: .openaiAPIKey,
+                    consentCredentialID: consentID,
+                    consentDisplayName: displayName))
+            case .grok:
+                // xAI keys are `xai-…`; keep the prefix so grok-cli accepts
+                // the fake's shape. The swap rule (purpose .xaiAPIKey →
+                // host x.ai) replaces it with the real key on requests to
+                // api.x.ai, so the VM only ever holds the fake.
+                entries.append(.init(
+                    realValue: real,
+                    fakeValue: SessionTokenPlan.deriveFake(prefix: "xai-brm-",
+                                                           real: real, salt: salt),
+                    purpose: .xaiAPIKey,
                     consentCredentialID: consentID,
                     consentDisplayName: displayName))
             }

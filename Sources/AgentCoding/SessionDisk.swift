@@ -57,6 +57,11 @@ public final class SessionDisk {
         /// runs with BROMURE_DEBUG_CLAUDE; xinitrc no-ops otherwise.
         /// Powers `POST /sessions/{id}/exec` in AutomationServer.
         public let shellAgentURL: URL?
+        /// Loopback-callback relay. Vsock 5010 (guest listens, host
+        /// connects). Lets the host reach a 127.0.0.1:<port> listener the
+        /// guest opened — used to deliver OAuth redirect callbacks (grok-cli,
+        /// gh, gcloud, …) back into the in-VM CLI. nil = no AC bundle.
+        public let loopbackRelayAgentURL: URL?
         public init(caCertificatePEM: String,
                     bridgeScriptURL: URL,
                     keyboardAgentURL: URL? = nil,
@@ -64,7 +69,8 @@ public final class SessionDisk {
                     awsCredsHelperURL: URL? = nil,
                     claudeTokenAgentURL: URL? = nil,
                     codexTokenAgentURL: URL? = nil,
-                    shellAgentURL: URL? = nil) {
+                    shellAgentURL: URL? = nil,
+                    loopbackRelayAgentURL: URL? = nil) {
             self.caCertificatePEM = caCertificatePEM
             self.bridgeScriptURL = bridgeScriptURL
             self.keyboardAgentURL = keyboardAgentURL
@@ -73,6 +79,7 @@ public final class SessionDisk {
             self.claudeTokenAgentURL = claudeTokenAgentURL
             self.codexTokenAgentURL = codexTokenAgentURL
             self.shellAgentURL = shellAgentURL
+            self.loopbackRelayAgentURL = loopbackRelayAgentURL
         }
     }
 
@@ -322,6 +329,8 @@ public final class SessionDisk {
                 value = tokenPlan?.fakeForAnthropic() ?? real
             case .codex:
                 value = tokenPlan?.fakeForOpenAI() ?? real
+            case .grok:
+                value = tokenPlan?.fakeForXAI() ?? real
             }
             lines.append("export \(spec.tool.apiKeyEnvVar)=\(shellQuote(value))")
         }
@@ -410,6 +419,15 @@ public final class SessionDisk {
                 try fm.setAttributes(
                     [.posixPermissions: NSNumber(value: 0o755)],
                     ofItemAtPath: cxDest.path)
+            }
+
+            if let lrURL = assets.loopbackRelayAgentURL {
+                let lrDest = tmp.appendingPathComponent("loopback-relay-agent.py")
+                try? fm.removeItem(at: lrDest)
+                try fm.copyItem(at: lrURL, to: lrDest)
+                try fm.setAttributes(
+                    [.posixPermissions: NSNumber(value: 0o755)],
+                    ofItemAtPath: lrDest.path)
             }
 
             if let shURL = assets.shellAgentURL {

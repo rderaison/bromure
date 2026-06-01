@@ -21,6 +21,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// the given tab UUID has exited. Wire this to remove the tab pill.
     public var onTabClosed: ((UUID) -> Void)?
 
+    /// Called when a kitty exited non-zero or bailed within ~3s of spawning,
+    /// with a diagnostic blob (exit code, runtime, kitty version, $DISPLAY,
+    /// and the tail of that kitty's log). Wire this to log/surface why a
+    /// session "started then vanished".
+    public var onTabDiag: ((UUID, String) -> Void)?
+
     /// Called every ~1.5s with the set of UUIDs of every kitty
     /// currently running in the guest. The host reconciles its tab
     /// model against this so a pill whose kitty died without sending
@@ -409,6 +415,20 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                                 .split(whereSeparator: \.isNewline)
                                 .compactMap { UUID(uuidString: String($0)) })
                             self?.onTabRoster?(alive)
+                            continue
+                        }
+                        // diag-<uuid>.txt — guest agent's reason a kitty
+                        // exited non-zero or bailed within ~3s (exit code +
+                        // log tail). Surface it, then consume.
+                        if name.hasPrefix("diag-") {
+                            let body = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            try? fm.removeItem(at: entry)
+                            let uuidPart = name
+                                .replacingOccurrences(of: "diag-", with: "")
+                                .replacingOccurrences(of: ".txt", with: "")
+                            if let uuid = UUID(uuidString: uuidPart), !body.isEmpty {
+                                self?.onTabDiag?(uuid, body)
+                            }
                             continue
                         }
                         // closed-<uuid>.txt — guest agent reports a tab's

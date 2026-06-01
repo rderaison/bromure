@@ -42,7 +42,7 @@ public final class UbuntuImageManager {
     /// Bumped to 31 (with explicit approval) to bake in the cloud
     /// CLIs needed for the Credentials → Cloud sections to work
     /// out of the box: kubectl, doctl, awscli v2, gcloud, az.
-    public static let imageVersion = "100"
+    public static let imageVersion = "101"
 
     /// Ubuntu LTS release we target. Update when a new LTS lands.
     public static let ubuntuRelease = "noble"
@@ -345,6 +345,22 @@ public final class UbuntuImageManager {
                 directory: VZSharedDirectory(url: userFontsURL, readOnly: true)
             )
             shares.append(userFontsFS)
+        }
+
+        // Terminal.app bundles SF Mono (including "SF Mono Terminal"), which is
+        // NOT in the system/user font directories above — it lives inside the
+        // app bundle. Share it too so those families actually render in the
+        // guest's kitty when a profile picks them.
+        let terminalFontDirs = [
+            "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts",
+            "/Applications/Utilities/Terminal.app/Contents/Resources/Fonts",
+        ]
+        if let termFonts = terminalFontDirs.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            let termFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "macos-terminal-fonts")
+            termFontsFS.share = VZSingleDirectoryShare(
+                directory: VZSharedDirectory(url: URL(fileURLWithPath: termFonts), readOnly: true)
+            )
+            shares.append(termFontsFS)
         }
         config.directorySharingDevices = shares
 

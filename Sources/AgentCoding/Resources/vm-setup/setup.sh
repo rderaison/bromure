@@ -358,6 +358,26 @@ step "npm install -g @anthropic-ai/claude-code (via socket)" \
 step "npm install -g @openai/codex (via socket)" \
     retry socket_npm install -g --silent @openai/codex
 
+# Grok CLI (x.ai). Not published on npm — installed via x.ai's official
+# shell installer (so it can't go through the socket.dev npm wrapper above).
+# The installer drops it under ~/.grok/bin, which here (root, chroot) means
+# /root/.grok/bin. The guest runs the agent as the unprivileged `ubuntu`
+# user, which can't read /root, and /home/ubuntu is overlaid by a host mount
+# at runtime — so the per-user install dir is unreachable. Relocate the whole
+# install to a world-readable global path and put the binary on PATH, the way
+# claude/codex land in /usr/local via npm -g. grok keeps its runtime state in
+# the user's own ~/.grok at runtime; this only relocates the binary/libs.
+step "install grok CLI (x.ai)" \
+    retry sh -c 'curl -fsSL https://x.ai/cli/install.sh | bash'
+if [ -d /root/.grok ]; then
+    rm -rf /opt/grok
+    mv /root/.grok /opt/grok
+    chmod -R a+rX /opt/grok
+    ln -sf /opt/grok/bin/grok /usr/local/bin/grok
+    echo "  relocated grok to /opt/grok; linked /usr/local/bin/grok"
+fi
+command -v grok >/dev/null 2>&1 && echo "  grok present on PATH" || echo "  WARNING: grok not on PATH after install"
+
 # ---------------------------------------------------------------------------
 # wezterm — latest GitHub release deb
 # ---------------------------------------------------------------------------
@@ -601,6 +621,15 @@ printf '%s\n' "$URL" > "$F"
 EOO
 chmod +x /usr/local/bin/bromure-open
 
+# xdg-open / $BROWSER shim. CLIs that "open a browser" (the `open` npm
+# package used by agent OAuth logins like grok-cli call `xdg-open <url>`;
+# others honour $BROWSER) otherwise hit nothing inside the VM — the login
+# "claims to open a browser" but nothing appears. Route both to the host.
+ln -sf /usr/local/bin/bromure-open /usr/local/bin/xdg-open
+mkdir -p /etc/profile.d
+printf 'export BROWSER=/usr/local/bin/bromure-open\n' > /etc/profile.d/bromure-browser.sh
+chmod +x /etc/profile.d/bromure-browser.sh
+
 # ---------------------------------------------------------------------------
 # Auto-login on tty1 → startx → wezterm fullscreen, no WM.
 # ---------------------------------------------------------------------------
@@ -801,7 +830,7 @@ CHROOT_EOF
 # ---------------------------------------------------------------------------
 
 log "copying macOS fonts into base image"
-mkdir -p /tmp/macfonts-sys /tmp/macfonts-usr
+mkdir -p /tmp/macfonts-sys /tmp/macfonts-usr /tmp/macfonts-term
 modprobe virtiofs 2>/dev/null || true
 if mount -t virtiofs macos-fonts /tmp/macfonts-sys 2>/dev/null; then
     mkdir -p /mnt/usr/share/fonts/macos
@@ -814,7 +843,15 @@ if mount -t virtiofs macos-user-fonts /tmp/macfonts-usr 2>/dev/null; then
     cp -a /tmp/macfonts-usr/. /mnt/usr/share/fonts/macos-user/ 2>/dev/null || true
     umount /tmp/macfonts-usr
 fi
-rmdir /tmp/macfonts-sys /tmp/macfonts-usr 2>/dev/null || true
+# Terminal.app's bundled SF Mono (incl. "SF Mono Terminal"). Tag is only
+# present when the host found the Terminal.app Fonts dir, so the mount is
+# best-effort. Land it alongside the system fonts so fontconfig indexes it.
+if mount -t virtiofs macos-terminal-fonts /tmp/macfonts-term 2>/dev/null; then
+    mkdir -p /mnt/usr/share/fonts/macos
+    cp -a /tmp/macfonts-term/. /mnt/usr/share/fonts/macos/ 2>/dev/null || true
+    umount /tmp/macfonts-term
+fi
+rmdir /tmp/macfonts-sys /tmp/macfonts-usr /tmp/macfonts-term 2>/dev/null || true
 
 # /proc /sys /dev are still bound from the chroot phase — fc-cache just
 # needs them to read /etc/fonts/conf.d/* normally.

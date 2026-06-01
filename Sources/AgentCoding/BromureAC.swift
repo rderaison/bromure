@@ -434,6 +434,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                              withExtension: "py")
     }()
 
+    /// Loopback-callback relay (vsock 5010). Shipped in the meta share and
+    /// started from xinitrc; lets OAuth logins inside the VM receive their
+    /// 127.0.0.1 redirect callback from the host browser.
+    private lazy var loopbackRelayAgentURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/loopback-relay-agent",
+                             withExtension: "py")
+    }()
+
+    /// Live host→guest loopback forwarders, one per detected OAuth login.
+    /// They auto-expire (5 min); we also prune stopped ones on each new login.
+    private var loopbackForwarders: [LoopbackCallbackForwarder] = []
+
+    /// If `url` is an OAuth authorize URL whose `redirect_uri` is a loopback
+    /// callback (`http://127.0.0.1:<port>` or `localhost`), return that port —
+    /// the signal to bridge the host's loopback into the guest. Otherwise nil.
+    static func loopbackCallbackPort(from url: URL) -> UInt16? {
+        guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let redirect = comps.queryItems?.first(where: { $0.name == "redirect_uri" })?.value,
+              let rc = URLComponents(string: redirect),
+              let host = rc.host?.lowercased(),
+              host == "127.0.0.1" || host == "localhost",
+              let port = rc.port, port > 0, port <= 65_535 else {
+            return nil
+        }
+        return UInt16(port)
+    }
+
     /// Per-profile shell bridges, populated when the user enables
     /// BROMURE_DEBUG_CLAUDE and a session is launched. The
     /// AutomationServer's `onGetShellConnection` callback reads from
@@ -2258,7 +2285,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     awsCredsHelperURL: awsCredsHelperURL,
                     claudeTokenAgentURL: claudeTokenAgentURL,
                     codexTokenAgentURL: codexTokenAgentURL,
-                    shellAgentURL: debugShellURL)
+                    shellAgentURL: debugShellURL,
+                    loopbackRelayAgentURL: loopbackRelayAgentURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
             // True only when the resumed snapshot's kittys are still
@@ -2883,9 +2911,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
         }
-        sandbox.onURLOpen = { url in NSWorkspace.shared.open(url) }
+        sandbox.onURLOpen = { [weak self, weak sandbox] url in
+            Task { @MainActor in
+                // If this is an OAuth login URL whose redirect_uri points at a
+                // guest loopback port, stand up a forwarder so the host
+                // browser's callback reaches the in-VM CLI before we open it.
+                if let self, let sandbox,
+                   let port = Self.loopbackCallbackPort(from: url),
+                   let dev = sandbox.socketDevice,
+                   let fwd = LoopbackCallbackForwarder(port: port, socketDevice: dev) {
+                    self.loopbackForwarders.removeAll { !$0.isRunning }
+                    self.loopbackForwarders.append(fwd)
+                    FileHandle.standardError.write(Data(
+                        "[ac] loopback callback forwarder up on 127.0.0.1:\(port) → guest\n".utf8))
+                }
+                NSWorkspace.shared.open(url)
+            }
+        }
         sandbox.onTabClosed = { [weak win] id in
             Task { @MainActor in win?.handleTabClosedFromGuest(id: id) }
+        }
+        sandbox.onTabDiag = { id, diag in
+            // Surface why a kitty bailed right after spawning. Prefixed and
+            // indented so it stands out in the `bromure-ac` serial/stderr log.
+            let indented = diag.split(separator: "\n", omittingEmptySubsequences: false)
+                .map { "    \($0)" }.joined(separator: "\n")
+            FileHandle.standardError.write(Data(
+                "[ac] tab \(id.uuidString) bailed — kitty diagnostics:\n\(indented)\n".utf8))
         }
         sandbox.onTabRoster = { [weak win] alive in
             Task { @MainActor in win?.reconcileTabRoster(alive: alive) }
@@ -2951,7 +3003,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     awsCredsHelperURL: awsCredsHelperURL,
                     claudeTokenAgentURL: claudeTokenAgentURL,
                     codexTokenAgentURL: codexTokenAgentURL,
-                    shellAgentURL: debugShellURL)
+                    shellAgentURL: debugShellURL,
+                    loopbackRelayAgentURL: loopbackRelayAgentURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager,
                                           sessionDisk: sessionDisk)
