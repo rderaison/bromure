@@ -202,7 +202,7 @@ public static class HcsSessionSpike
 
         // Stop the VM (HCS terminate). The child VHDX survives in
         // the install dir because we do NOT call DisposeAsync.
-        var aliveSec = launchMstsc ? 300 : 60;
+        var aliveSec = launchMstsc ? 300 : 900;
         Console.Error.WriteLine($"[hcs-session] keeping VM up for {aliveSec} s — close the mstsc window or Ctrl-C to terminate early");
         await Task.Delay(aliveSec * 1000).ConfigureAwait(false);
         Console.Error.WriteLine("[hcs-session] terminating VM (preserving child VHDX) …");

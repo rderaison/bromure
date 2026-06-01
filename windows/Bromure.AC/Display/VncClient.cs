@@ -36,13 +36,10 @@ public sealed class VncClient : IAsyncDisposable
     // breaks the RFB framing immediately. A SemaphoreSlim is the
     // standard async-friendly mutex.
     private readonly SemaphoreSlim _writeLock = new(1, 1);
-    // UX #4: ContinuousUpdates streaming was negotiated successfully.
-    // Kept as a debug-only flag (referenced in stderr log) — the
-    // earlier "skip per-frame request when this is true" optimisation
-    // caused a black-screen regression and was reverted.
-#pragma warning disable CS0414 // assigned but never used — kept for future use + diagnostics
-    private bool _continuousUpdates;
-#pragma warning restore CS0414
+    // ContinuousUpdates (RFB pseudo-encoding -313 + message 150) was
+    // tried as a latency optimisation; the bake's TigerVNC 1.13.1
+    // wedges entirely if it's advertised, so we don't carry the flag.
+    // RunLoopAsync's per-frame polling is what drives updates.
 
     private async Task WriteLockedAsync(byte[] msg, CancellationToken ct)
     {
@@ -205,40 +202,25 @@ public sealed class VncClient : IAsyncDisposable
             1,        // CopyRect — cheap blit
             -223,     // DesktopSize (server-driven resize notify)
             -308,     // ExtendedDesktopSize (client-driven resize)
-            // UX #4: ContinuousUpdates pseudo-encoding. Including it
-            // in SetEncodings is the negotiation handshake that tells
-            // the server "I'd like to enable streaming"; the actual
-            // enable is the EnableContinuousUpdates message below.
-            // Massive latency win on localhost — eliminates one
-            // round-trip per frame. TigerVNC + Xvnc both implement it.
-            -313,     // ContinuousUpdates (pseudo-encoding 0xfffffec7)
+            // -313 (ContinuousUpdates) is intentionally NOT advertised.
+            // The bake's TigerVNC 1.13.1 has a regression where, when
+            // -313 is negotiated AND we send EnableContinuousUpdates,
+            // the server stops sending FramebufferUpdate responses
+            // entirely (Xvnc logs "Framebuffer updates: 0" per
+            // connection). Empirically reproduced by direct-TCP probe
+            // against Xvnc with and without -313 in the encoding set;
+            // without it, the standard FBUR/FBU polling loop works.
+            // We rely on RunLoopAsync re-issuing an incremental FBUR
+            // after every FBU response — that's the actual driver of
+            // updates.
         }, ct).ConfigureAwait(false);
 
-        // 8) Initial full framebuffer request. Once we send the
-        // EnableContinuousUpdates message below, the server starts
-        // streaming updates within the requested rect WITHOUT us
-        // having to re-request after each frame.
+        // 8) Initial full framebuffer request. RunLoopAsync's case 0
+        // handler re-issues an incremental request after every
+        // FramebufferUpdate response, so the server keeps sending
+        // updates as the desktop changes.
         await SendFramebufferUpdateRequestAsync(incremental: false, 0, 0, Width, Height, ct)
             .ConfigureAwait(false);
-
-        // 9) UX #4: turn on streaming for the whole framebuffer. The
-        // server will keep pushing updates as the desktop changes,
-        // without us re-issuing FramebufferUpdateRequest per frame.
-        // If the server doesn't implement the extension, this is a
-        // no-op (Xvnc/TigerVNC handle unknown client messages by
-        // disconnecting — we sniff that via the next reads).
-        try
-        {
-            await SendEnableContinuousUpdatesAsync(enable: true, 0, 0, Width, Height, ct)
-                .ConfigureAwait(false);
-            _continuousUpdates = true;
-            Console.Error.WriteLine("[vnc-client] ContinuousUpdates enabled");
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine("[vnc-client] ContinuousUpdates negotiate failed: " + ex.Message);
-            // Stay on per-frame pull mode. Functional but slower.
-        }
 
         // Fire Ready AFTER all handshake writes are done. The handler
         // can synchronously kick off another write (SetDesktopSize is

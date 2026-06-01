@@ -147,6 +147,32 @@ internal static class Program
         });
         root.AddCommand(e2eCmd);
 
+        // `vm-probe` subcommand: dial bromure-cmd-server on hvsocket
+        // port 9226 and run a shell line inside the guest. Used to
+        // introspect a running session's state (Xvnc status, X log,
+        // process list, etc.) without going through BromureAC's UI.
+        var probeCmd = new Command("vm-probe",
+            "Dial cmd-server inside a running session VM and run an arbitrary shell command. Prints stdout/stderr.");
+        var probeVmIdArg = new Argument<string>("vmid",
+            "VM RuntimeId (GUID) — e.g. from `Get-VM` or hcsdiag list");
+        var probeCmdArg = new Argument<string>("command",
+            "Shell command to run inside the guest (will be wrapped in /bin/sh -c)");
+        probeCmd.AddArgument(probeVmIdArg);
+        probeCmd.AddArgument(probeCmdArg);
+        probeCmd.SetHandler(async ctx =>
+        {
+            var vmid = ctx.ParseResult.GetValueForArgument(probeVmIdArg);
+            var cmd = ctx.ParseResult.GetValueForArgument(probeCmdArg);
+            if (!Guid.TryParse(vmid, out var rid))
+            {
+                Console.Error.WriteLine($"could not parse '{vmid}' as a GUID");
+                exitCode = 2;
+                return;
+            }
+            exitCode = await VmProbeSpike.RunAsync(rid, cmd, CancellationToken.None).ConfigureAwait(false);
+        });
+        root.AddCommand(probeCmd);
+
         // `bake-hcs` subcommand: drive VmBaker headlessly to produce
         // bromure-base.vhdx + matching kernel/initrd. The in-process
         // bake driver is a follow-up; for now this surfaces the
