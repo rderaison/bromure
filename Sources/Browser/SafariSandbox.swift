@@ -1601,8 +1601,11 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sessions.removeAll { $0 === session }
         retiredSessions.append(session)
 
-        // Open a new one
-        _ = await automationCreateSession(profileName: profile.name, profileID: profile.id.uuidString, url: nil)
+        // Open a new one via the normal user path. NOT automationCreateSession:
+        // that returns early unless the profile opts into automation
+        // (`allowAutomation`), which would silently leave the user with no
+        // window after the teardown above.
+        openNewBrowser(with: profile)
     }
 
     // MARK: - App Lifecycle
