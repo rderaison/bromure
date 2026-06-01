@@ -1,3 +1,4 @@
+using Bromure.AC.Core.Imports;
 using Bromure.AC.Core.Model;
 using FluentAssertions;
 using Xunit;
@@ -12,13 +13,23 @@ namespace Bromure.Tests;
 /// </summary>
 public class KittyConfigBuilderTests
 {
+    /// <summary>Deterministic test stand-in for whatever Windows
+    /// Terminal happens to be configured to on the CI / dev machine.
+    /// macOS-canonical values, so tests pin macOS parity. Production
+    /// reads the user's real Windows Terminal prefs at build time.</summary>
+    private static readonly TerminalDefaults Td = new(
+        FontFamily: "JetBrains Mono",
+        FontSize: 28,
+        BackgroundHex: KittyConfigBuilder.DefaultBackground,
+        ForegroundHex: KittyConfigBuilder.DefaultForeground);
+
     [Fact]
     public void DefaultProfile_UsesHardcodedDefaults()
     {
-        var conf = KittyConfigBuilder.Build(new Profile { Color = ProfileColor.Blue });
+        var conf = KittyConfigBuilder.Build(new Profile { Color = ProfileColor.Blue }, Td);
         conf.Should().Contain($"font_family       {KittyConfigBuilder.DefaultFontFamily}");
         conf.Should().Contain($"font_size         {KittyConfigBuilder.DefaultFontSize}");
-        conf.Should().Contain("background        #1B1F2A");
+        conf.Should().Contain($"background        {KittyConfigBuilder.DefaultBackground}");
         conf.Should().Contain($"foreground        {KittyConfigBuilder.DefaultForeground}");
         conf.Should().Contain("cursor_shape      block");
     }
@@ -36,7 +47,7 @@ public class KittyConfigBuilderTests
             CursorShape = CursorShape.Beam,
             WindowOpacity = 0.85,
         };
-        var conf = KittyConfigBuilder.Build(p);
+        var conf = KittyConfigBuilder.Build(p, Td);
         conf.Should().Contain("font_family       Cascadia Code");
         conf.Should().Contain("font_size         18");
         conf.Should().Contain("background        #102030");
@@ -61,7 +72,7 @@ public class KittyConfigBuilderTests
             CustomFontFamily = "Comic Sans",
             CustomBackgroundHex = "#FF0000",
         };
-        var conf = KittyConfigBuilder.Build(p);
+        var conf = KittyConfigBuilder.Build(p, Td);
         conf.Should().NotContain("Comic Sans");
         conf.Should().NotContain("#FF0000");
         conf.Should().Contain(KittyConfigBuilder.DefaultFontFamily);
@@ -80,9 +91,9 @@ public class KittyConfigBuilderTests
             CustomBackgroundHex = "",
             CustomForegroundHex = null,
         };
-        var conf = KittyConfigBuilder.Build(p);
+        var conf = KittyConfigBuilder.Build(p, Td);
         conf.Should().Contain($"font_family       {KittyConfigBuilder.DefaultFontFamily}");
-        conf.Should().Contain("background        #1B1F2A");
+        conf.Should().Contain($"background        {KittyConfigBuilder.DefaultBackground}");
         conf.Should().Contain($"foreground        {KittyConfigBuilder.DefaultForeground}");
     }
 
@@ -127,7 +138,7 @@ public class KittyConfigBuilderTests
         // garbage value lands in the JSON (manual edit, older format),
         // we shouldn't crash kitty by writing background_opacity 5.0.
         var p = new Profile { UseTerminalAppDefaults = false, WindowOpacity = 0.0 };
-        KittyConfigBuilder.Build(p).Should().Contain("background_opacity 1.00");
+        KittyConfigBuilder.Build(p, Td).Should().Contain("background_opacity 1.00");
 
         var p2 = new Profile { UseTerminalAppDefaults = false, WindowOpacity = 7.5 };
         KittyConfigBuilder.Build(p2).Should().Contain("background_opacity 1.00");

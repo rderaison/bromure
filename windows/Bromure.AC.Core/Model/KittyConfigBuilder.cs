@@ -1,4 +1,6 @@
 // macos-source: Sources/AgentCoding/TerminalAppDefaults.swift @ 7e499111f7db
+using Bromure.AC.Core.Imports;
+
 namespace Bromure.AC.Core.Model;
 
 /// <summary>
@@ -23,27 +25,45 @@ public static class KittyConfigBuilder
     /// product run high-DPI laptops.
     public const int DefaultFontSize = 28;
     public const string DefaultFontFamily = "JetBrains Mono";
+    // macOS canonical defaults from TerminalAppDefaults.swift:
+    //   - background: Profile.seedAppearance() hardcodes "#212734"
+    //   - foreground: TerminalAppDefaults.fallback.foregroundHex = "#c9d1d9"
+    //   - font family / cursor: matches below
+    // Keep Windows in lockstep so a user moving between platforms
+    // sees the same dark-slate terminal.
+    // Stored uppercase so they match NormalizeHex's output and round-trip
+    // cleanly into the kitty.conf — keeps tests' "contains" assertions
+    // matching the literal text we emit.
     public const string DefaultBackground = "#212734";
-    public const string DefaultForeground = "#E6E8EB";
+    public const string DefaultForeground = "#C9D1D9";
     public const string DefaultCursorShape = "block";
 
-    public static string Build(Profile? profile)
+    public static string Build(Profile? profile, TerminalDefaults? terminalDefaults = null)
     {
-        // Per-profile appearance overrides. macOS Profile.swift:989
-        // "use terminal app defaults" toggle means "treat customFont*
-        // as not-set if true"; an empty Custom* string also falls
-        // back. NormalizeHex defends against the user typing "FF0000"
-        // (no leading #) or whitespace from a paste.
+        // macOS-parity resolveStyle:
+        //   customX ?? terminalDefaults.X
+        // — falls back to the user's host terminal prefs (Terminal.app
+        // on macOS via TerminalAppDefaults.load(); Windows Terminal on
+        // Windows via TerminalDefaults.Load() from
+        // %LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_*\LocalState\settings.json).
+        // The hardcoded constants are only the LAST resort if the host
+        // terminal isn't installed / prefs unreadable.
+        //
+        // UseTerminalAppDefaults toggle: when true (the default), the
+        // Custom* fields on Profile are display-only — we go straight
+        // to terminalDefaults regardless of what's in customForeground/
+        // customBackground. Matches macOS Profile.swift:989.
+        var td = terminalDefaults ?? TerminalDefaults.Load();
         var useDefaults = profile?.UseTerminalAppDefaults ?? true;
         var fontFamily = !useDefaults && !string.IsNullOrWhiteSpace(profile?.CustomFontFamily)
             ? profile!.CustomFontFamily!
-            : DefaultFontFamily;
+            : (string.IsNullOrWhiteSpace(td.FontFamily) ? DefaultFontFamily : td.FontFamily);
         var fontSize = !useDefaults && profile?.CustomFontSize is int cf && cf > 0
             ? cf
-            : DefaultFontSize;
+            : (td.FontSize > 0 ? td.FontSize : DefaultFontSize);
         var foreground = !useDefaults
-            ? NormalizeHex(profile?.CustomForegroundHex) ?? DefaultForeground
-            : DefaultForeground;
+            ? NormalizeHex(profile?.CustomForegroundHex) ?? NormalizeHex(td.ForegroundHex) ?? DefaultForeground
+            : NormalizeHex(td.ForegroundHex) ?? DefaultForeground;
         // Safety net: if the user picked the same colour for fg + bg
         // (easy to do when one of them is empty + the other resolves
         // to the same default, or when both were typed manually), the
@@ -51,8 +71,8 @@ public static class KittyConfigBuilder
         // default in that case so the user sees something instead of
         // a black framebuffer they can't explain.
         var bgPreview = !useDefaults
-            ? NormalizeHex(profile?.CustomBackgroundHex) ?? "#1B1F2A"
-            : "#1B1F2A";
+            ? NormalizeHex(profile?.CustomBackgroundHex) ?? NormalizeHex(td.BackgroundHex) ?? DefaultBackground
+            : NormalizeHex(td.BackgroundHex) ?? DefaultBackground;
         if (string.Equals(foreground, bgPreview, StringComparison.OrdinalIgnoreCase))
         {
             foreground = DefaultForeground;
@@ -72,9 +92,7 @@ public static class KittyConfigBuilder
         // neutral dark slate so colour text stays legible UNLESS the
         // user picks a custom one.
         var (accent, accentDim) = AccentForProfile(profile?.Color ?? ProfileColor.Blue);
-        var background = !useDefaults
-            ? NormalizeHex(profile?.CustomBackgroundHex) ?? "#1B1F2A"
-            : "#1B1F2A";
+        var background = bgPreview;
         var tabBg = accentDim;
         var tabActiveBg = accent;
         var cursorColor = accent;

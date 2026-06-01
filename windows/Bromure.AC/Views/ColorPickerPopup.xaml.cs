@@ -23,12 +23,12 @@ public partial class ColorPickerPopup : Window
     /// can't accidentally land on fg=bg by clicking adjacent swatches.</summary>
     private static readonly string[] Presets =
     {
-        // Row 1 — backgrounds: pitch black, slate, gunmetal, navy,
-        // forest, plum, retro amber-on-black background.
-        "#000000", "#1B1F2A", "#212734", "#0E1A2B", "#0F2A1A", "#291B33", "#2B1B0E",
-        // Row 2 — foregrounds + accents: bone, silver, lime, cyan,
-        // amber, magenta, red.
-        "#E6E8EB", "#C7C7CC", "#A0E078", "#7CC0E0", "#FFC857", "#E069B0", "#FF5050",
+        // Row 1 — backgrounds: pitch black, github-dark, slate (the
+        // macOS canonical default), navy, forest, plum, retro amber.
+        "#000000", "#0d1117", "#212734", "#0E1A2B", "#0F2A1A", "#291B33", "#2B1B0E",
+        // Row 2 — foregrounds + accents: bone (macOS canonical
+        // foreground), silver, lime, cyan, amber, magenta, red.
+        "#c9d1d9", "#C7C7CC", "#A0E078", "#7CC0E0", "#FFC857", "#E069B0", "#FF5050",
     };
 
     public ColorPickerPopup()
