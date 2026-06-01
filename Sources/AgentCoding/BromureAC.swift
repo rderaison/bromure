@@ -468,12 +468,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 dockerHosts.insert(h)
             }
         }
+        // HTTPS-database guardrails: each configured endpoint contributes its
+        // engine + (user-specified) host + per-endpoint mode.
+        let databases = profile.httpDatabases.compactMap { db -> GuardrailsConfig.DBGuardrail? in
+            let host = db.host.lowercased().trimmingCharacters(in: .whitespaces)
+            guard !host.isEmpty, db.guardrail != .off else { return nil }
+            return GuardrailsConfig.DBGuardrail(engine: db.engine, host: host, mode: db.guardrail)
+        }
         let g = profile.guardrails
         return GuardrailsConfig(kubernetes: g.kubernetes, kubeHosts: kubeHosts,
                                 aws: g.aws,
                                 digitalOcean: g.digitalOcean,
                                 docker: g.docker, dockerHosts: dockerHosts,
-                                github: g.github, gitlab: g.gitlab, bitbucket: g.bitbucket)
+                                github: g.github, gitlab: g.gitlab, bitbucket: g.bitbucket,
+                                databases: databases)
     }
 
     static func loopbackCallbackPort(from url: URL) -> UInt16? {

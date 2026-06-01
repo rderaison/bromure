@@ -136,8 +136,22 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 amzTarget = Self.headerValue("x-amz-target", inHeaderSection: headerText)
                 formAction = amzTarget == nil ? Self.formActionValue(bodyPrefix) : nil
             }
+            // ClickHouse carries the verb in the SQL — pull it from the URL
+            // `query=` param and/or the request body (param leads, since
+            // `POST /?query=INSERT…` puts the statement there and data in body).
+            var dbQuery: String?
+            if guardrails.dbNeedsQuery(host: host) {
+                var sql = Self.urlQueryParam("query", inPath: reqPath) ?? ""
+                if let sep = request.range(of: Data("\r\n\r\n".utf8)) {
+                    let bEnd = request.index(sep.upperBound, offsetBy: 8192, limitedBy: request.endIndex) ?? request.endIndex
+                    let body = String(decoding: request[sep.upperBound..<bEnd], as: UTF8.self)
+                    if !body.isEmpty { sql += (sql.isEmpty ? "" : "\n") + body }
+                }
+                dbQuery = sql
+            }
             if let denial = guardrails.deny(host: host, method: reqMethod, path: reqPath,
-                                            amzTarget: amzTarget, formAction: formAction) {
+                                            amzTarget: amzTarget, formAction: formAction,
+                                            dbQuery: dbQuery) {
                 FileHandle.standardError.write(Data(
                     "[mitm] Guardrails blocked \(reqMethod) \(host)\(reqPath) — \(denial.reason)\n".utf8))
                 var resp = "HTTP/1.1 403 Forbidden\r\nContent-Type: \(denial.contentType)\r\n"
@@ -1000,6 +1014,21 @@ final class HTTPMitmConnection: @unchecked Sendable {
             if kv.count == 2, kv[0] == "Action" {
                 return kv[1].removingPercentEncoding ?? String(kv[1])
             }
+        }
+        return nil
+    }
+
+    /// Extract a query-string parameter from a request path
+    /// (`/?query=SELECT+1&database=x` → "SELECT 1"). Percent- and
+    /// `+`-decoded. nil if the path has no query string or no such key.
+    static func urlQueryParam(_ name: String, inPath path: String) -> String? {
+        guard let q = path.firstIndex(of: "?") else { return nil }
+        let query = path[path.index(after: q)...]
+        for pair in query.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            guard kv.count == 2, kv[0] == name else { continue }
+            let plusDecoded = kv[1].replacingOccurrences(of: "+", with: " ")
+            return plusDecoded.removingPercentEncoding ?? plusDecoded
         }
         return nil
     }

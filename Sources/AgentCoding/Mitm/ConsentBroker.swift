@@ -299,4 +299,5 @@ public enum ConsentCredentialID {
     public static func manualToken(_ id: UUID) -> String          { "manual:" + id.uuidString }
     public static func dockerRegistry(_ id: UUID) -> String       { "docker:" + id.uuidString }
     public static func kubeconfig(_ id: UUID) -> String           { "kube:" + id.uuidString }
+    public static func httpDatabase(_ id: UUID) -> String         { "db:" + id.uuidString }
 }

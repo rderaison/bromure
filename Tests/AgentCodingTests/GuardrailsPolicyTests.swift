@@ -183,3 +183,138 @@ struct GuardrailsMoreTests {
         #expect(!deny(c, "bitbucket.org", "DELETE", "/2.0/repos/x"))
     }
 }
+
+@Suite("Guardrails — HTTPS databases")
+struct GuardrailsDatabaseTests {
+    func cfg(_ engine: HTTPDatabaseEndpoint.Engine, _ host: String,
+             _ mode: GuardrailsPolicy.Mode) -> GuardrailsConfig {
+        GuardrailsConfig(kubernetes: .off, kubeHosts: [],
+                         databases: [.init(engine: engine, host: host, mode: mode)])
+    }
+    func deny(_ c: GuardrailsConfig, _ host: String, _ method: String,
+              _ path: String, _ query: String? = nil) -> Bool {
+        c.deny(host: host, method: method, path: path,
+               amzTarget: nil, formAction: nil, dbQuery: query) != nil
+    }
+
+    // MARK: Mongo Data API (path-based)
+
+    @Test("Mongo classifies by action segment")
+    func mongoClassify() {
+        #expect(GuardrailsConfig.classifyMongoDataAPI(path: "/app/x/endpoint/data/v1/action/find").0 == .read)
+        #expect(GuardrailsConfig.classifyMongoDataAPI(path: "/action/aggregate").0 == .read)
+        #expect(GuardrailsConfig.classifyMongoDataAPI(path: "/action/deleteMany").0 == .destructive)
+        #expect(GuardrailsConfig.classifyMongoDataAPI(path: "/action/deleteOne?x=1").0 == .destructive)
+        #expect(GuardrailsConfig.classifyMongoDataAPI(path: "/action/updateOne").0 == .otherWrite)
+        #expect(GuardrailsConfig.classifyMongoDataAPI(path: "/action/insertMany").0 == .otherWrite)
+    }
+
+    @Test("Mongo modes + host scope")
+    func mongoModes() {
+        let h = "data.mongodb-api.com"
+        let ro = cfg(.mongoDataAPI, h, .readOnly)
+        #expect(deny(ro, h, "POST", "/action/insertOne"))      // write blocked
+        #expect(deny(ro, h, "POST", "/action/deleteOne"))      // destructive blocked
+        #expect(!deny(ro, h, "POST", "/action/find"))          // read allowed
+        let dest = cfg(.mongoDataAPI, h, .destructive)
+        #expect(deny(dest, h, "POST", "/action/deleteMany"))   // destructive blocked
+        #expect(!deny(dest, h, "POST", "/action/insertOne"))   // write allowed
+        // Unconfigured host untouched.
+        #expect(!deny(dest, "other.example.com", "POST", "/action/deleteMany"))
+    }
+
+    // MARK: ClickHouse (SQL keyword)
+
+    @Test("ClickHouse classifies leading SQL keyword")
+    func chClassify() {
+        func k(_ s: String) -> GuardrailsConfig.AWSKind? {
+            GuardrailsConfig.classifyClickHouseSQL(s)?.0
+        }
+        #expect(k("SELECT 1") == .read)
+        #expect(k("  select * from t") == .read)
+        #expect(k("-- c\nSELECT 1") == .read)
+        #expect(k("/* c */ SHOW TABLES") == .read)
+        #expect(k("WITH x AS (SELECT 1) SELECT * FROM x") == .read)
+        #expect(k("DROP TABLE t") == .destructive)
+        #expect(k("TRUNCATE TABLE t") == .destructive)
+        #expect(k("DELETE FROM t WHERE x=1") == .destructive)
+        #expect(k("ALTER TABLE t DELETE WHERE x=1") == .destructive)
+        #expect(k("ALTER TABLE t ADD COLUMN c Int32") == .otherWrite)
+        #expect(k("INSERT INTO t VALUES (1)") == .otherWrite)
+        #expect(k("CREATE TABLE t (x Int32)") == .otherWrite)
+        #expect(k("") == nil)
+    }
+
+    @Test("ClickHouse URL query-param extraction (proxy-side)")
+    func chUrlExtraction() {
+        // The proxy lifts the SQL out of the URL into dbQuery.
+        #expect(HTTPMitmConnection.urlQueryParam("query", inPath: "/?query=SELECT+1") == "SELECT 1")
+        #expect(HTTPMitmConnection.urlQueryParam("query", inPath: "/?query=DROP%20TABLE%20t&database=x") == "DROP TABLE t")
+        #expect(HTTPMitmConnection.urlQueryParam("query", inPath: "/") == nil)
+        #expect(HTTPMitmConnection.urlQueryParam("query", inPath: "/?database=x") == nil)
+    }
+
+    @Test("ClickHouse mode via extracted SQL")
+    func chModes() {
+        let h = "ch.example.com"
+        let ro = cfg(.clickHouse, h, .readOnly)
+        // SQL the proxy extracted (URL param or body) → dbQuery.
+        #expect(!deny(ro, h, "GET", "/?query=SELECT+1", "SELECT 1"))
+        #expect(deny(ro, h, "POST", "/", "INSERT INTO t VALUES (1)"))
+        #expect(deny(ro, h, "POST", "/", "DROP TABLE t"))
+        #expect(!deny(ro, h, "POST", "/", "SELECT * FROM t"))
+        let dest = cfg(.clickHouse, h, .destructive)
+        #expect(deny(dest, h, "POST", "/", "TRUNCATE TABLE t"))
+        #expect(!deny(dest, h, "POST", "/", "INSERT INTO t VALUES (1)"))
+        // Read-only with no visible SQL blocks (can't prove a read).
+        #expect(deny(ro, h, "POST", "/", nil))
+        // Destructive with no visible SQL errs open.
+        #expect(!deny(dest, h, "POST", "/", nil))
+    }
+
+    // MARK: Elasticsearch (method + path)
+
+    @Test("Elasticsearch classifies method + path")
+    func esClassify() {
+        func k(_ m: String, _ p: String) -> GuardrailsConfig.AWSKind {
+            GuardrailsConfig.classifyElasticsearch(method: m, path: p).0
+        }
+        #expect(k("GET", "/idx/_search") == .read)
+        #expect(k("POST", "/idx/_search") == .read)
+        #expect(k("POST", "/_msearch") == .read)
+        #expect(k("DELETE", "/idx") == .destructive)
+        #expect(k("POST", "/idx/_delete_by_query") == .destructive)
+        #expect(k("PUT", "/idx/_doc/1") == .otherWrite)
+        #expect(k("POST", "/_bulk") == .otherWrite)
+    }
+
+    @Test("Elasticsearch modes")
+    func esModes() {
+        let h = "es.example.com"
+        let ro = cfg(.elasticsearch, h, .readOnly)
+        #expect(!deny(ro, h, "POST", "/idx/_search"))    // read allowed
+        #expect(deny(ro, h, "POST", "/_bulk"))           // write blocked
+        #expect(deny(ro, h, "DELETE", "/idx"))           // destructive blocked
+        let dest = cfg(.elasticsearch, h, .destructive)
+        #expect(deny(dest, h, "DELETE", "/idx"))
+        #expect(deny(dest, h, "POST", "/idx/_delete_by_query"))
+        #expect(!deny(dest, h, "POST", "/_bulk"))        // write allowed
+    }
+
+    @Test("dbNeedsQuery only for ClickHouse hosts")
+    func needsQuery() {
+        let ch = cfg(.clickHouse, "ch.example.com", .readOnly)
+        #expect(ch.dbNeedsQuery(host: "ch.example.com"))
+        #expect(!ch.dbNeedsQuery(host: "other.com"))
+        let mongo = cfg(.mongoDataAPI, "m.example.com", .readOnly)
+        #expect(!mongo.dbNeedsQuery(host: "m.example.com"))
+    }
+
+    @Test("Off never blocks; isActive reflects databases")
+    func offAndActive() {
+        let off = cfg(.clickHouse, "ch.example.com", .off)
+        #expect(!deny(off, "ch.example.com", "POST", "/", "DROP TABLE t"))
+        #expect(!off.isActive)
+        #expect(cfg(.clickHouse, "ch.example.com", .readOnly).isActive)
+    }
+}

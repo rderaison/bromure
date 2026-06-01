@@ -56,6 +56,14 @@ public struct SessionTokenPlan: Sendable {
         /// a fake is injected into the MCP config and the MITM proxy
         /// swaps it for the real value on the wire.
         case mcpBearer(serverName: String, envVarName: String, host: String)
+        /// HTTPS-database secret (Mongo Data API / ClickHouse / Elastic).
+        /// The fake is injected under the user-named `envVars`; the swap
+        /// rewrites it to the real value on requests to `host`. `isPrimary`
+        /// marks the raw-secret entry (the one whose fake is exported as an
+        /// env var) vs. an auxiliary blob entry (Basic auth base64) that is
+        /// swapped on the wire only.
+        case httpDatabase(host: String, endpointID: String,
+                          envVars: [String], isPrimary: Bool)
     }
 
     public var entries: [Entry]
@@ -74,12 +82,20 @@ public struct SessionTokenPlan: Sendable {
                 fake: e.fakeValue,
                 real: e.realValue,
                 host: hostScope(for: e.purpose),
+                // Database creds can ride in the JSON/SQL body (Mongo Data API
+                // payloads, ClickHouse POST bodies), so sweep the body too.
+                body: bodyScan(for: e.purpose),
                 consentCredentialID: e.consentCredentialID,
                 consentDisplayName: e.consentCredentialID != nil
                     ? e.consentDisplayName : nil
             )
         }
         return TokenMap(entries: mapped)
+    }
+
+    private func bodyScan(for purpose: Purpose) -> Bool {
+        if case .httpDatabase = purpose { return true }
+        return false
     }
 
     /// Look up a fake token to use in place of a tool's real API key.
@@ -125,7 +141,21 @@ public struct SessionTokenPlan: Sendable {
         case .digitalOcean:           return "digitalocean.com"
         case .dockerRegistry(let host, _): return host
         case .mcpBearer(_, _, let host): return host.isEmpty ? nil : host
+        case .httpDatabase(let host, _, _, _): return host.isEmpty ? nil : host
         }
+    }
+
+    /// `[(envVar, fake)]` for every database endpoint's primary secret, so
+    /// SessionDisk can export the fakes under the user-named variables.
+    public var httpDatabaseEnvExports: [(String, String)] {
+        var out: [(String, String)] = []
+        for e in entries {
+            if case .httpDatabase(_, _, let envVars, let isPrimary) = e.purpose,
+               isPrimary {
+                for v in envVars where !v.isEmpty { out.append((v, e.fakeValue)) }
+            }
+        }
+        return out
     }
 
     /// Look up the fake base64 auth blob for a given (host, username)
@@ -410,6 +440,43 @@ public extension Profile {
                 purpose: .gitHTTPS(host: cred.host, username: cred.username),
                 consentCredentialID: credConsentID,
                 consentDisplayName: "git token (\(cred.username)@\(cred.host))"))
+        }
+
+        for db in httpDatabases where db.isUsable {
+            let realSecret = db.secret.trimmingCharacters(in: .whitespacesAndNewlines)
+            if realSecret.isEmpty { continue }
+            let host = db.host.lowercased().trimmingCharacters(in: .whitespaces)
+            let fakeSecret = SessionTokenPlan.deriveFake(
+                prefix: "brm-db-", real: realSecret, salt: salt,
+                targetLength: max(32, realSecret.count))
+            let dbConsentID: String? = db.requireApproval
+                ? ConsentCredentialID.httpDatabase(db.id) : nil
+            let dbDisplay = db.name.isEmpty
+                ? "\(db.engine.displayName) (\(db.host))"
+                : "“\(db.name)” (\(db.engine.displayName))"
+            // Primary: raw secret → injected under the user-named env vars and
+            // swapped wherever the fake appears (header / query param / body).
+            entries.append(.init(
+                realValue: realSecret,
+                fakeValue: fakeSecret,
+                purpose: .httpDatabase(host: host, endpointID: db.id.uuidString,
+                                       envVars: db.envVars, isPrimary: true),
+                consentCredentialID: dbConsentID,
+                consentDisplayName: dbDisplay))
+            // Basic auth also rides as `Authorization: Basic base64(user:secret)`
+            // — the naked-secret swap can't see through base64, so add the
+            // encoded blob pair (no env export; isPrimary=false).
+            if db.auth == .basic {
+                let realB64 = Data("\(db.username):\(realSecret)".utf8).base64EncodedString()
+                let fakeB64 = Data("\(db.username):\(fakeSecret)".utf8).base64EncodedString()
+                entries.append(.init(
+                    realValue: realB64,
+                    fakeValue: fakeB64,
+                    purpose: .httpDatabase(host: host, endpointID: db.id.uuidString,
+                                           envVars: [], isPrimary: false),
+                    consentCredentialID: dbConsentID,
+                    consentDisplayName: dbDisplay))
+            }
         }
 
         return SessionTokenPlan(entries: entries)

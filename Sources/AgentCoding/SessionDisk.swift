@@ -341,6 +341,11 @@ public final class SessionDisk {
             for (envName, fake) in plan.manualEnvExports {
                 lines.append("export \(envName)=\(shellQuote(fake))")
             }
+            // HTTPS-database secrets: inject the fake under the user-named
+            // env var(s); the host swaps it to the real value on the wire.
+            for (envName, fake) in plan.httpDatabaseEnvExports {
+                lines.append("export \(envName)=\(shellQuote(fake))")
+            }
             // MCP bearer tokens — Claude Code reads bearerTokenEnvVar
             // from the system environment for HTTP servers, not from
             // the config's env block.

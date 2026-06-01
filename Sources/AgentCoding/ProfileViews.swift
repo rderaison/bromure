@@ -944,6 +944,33 @@ struct ProfileEditorView: View {
             }
 
             credentialsDisclosure(
+                key: "mongo",
+                title: NSLocalizedString("MongoDB", comment: ""),
+                symbol: "leaf.fill",
+                count: databaseCount(.mongoDataAPI)
+            ) {
+                databaseSubsection(.mongoDataAPI)
+            }
+
+            credentialsDisclosure(
+                key: "clickhouse",
+                title: NSLocalizedString("ClickHouse", comment: ""),
+                symbol: "bolt.horizontal.fill",
+                count: databaseCount(.clickHouse)
+            ) {
+                databaseSubsection(.clickHouse)
+            }
+
+            credentialsDisclosure(
+                key: "elastic",
+                title: NSLocalizedString("Elasticsearch", comment: ""),
+                symbol: "magnifyingglass",
+                count: databaseCount(.elasticsearch)
+            ) {
+                databaseSubsection(.elasticsearch)
+            }
+
+            credentialsDisclosure(
                 key: "other",
                 title: NSLocalizedString("Other API keys", comment: ""),
                 symbol: "key.horizontal.fill",
@@ -952,6 +979,10 @@ struct ProfileEditorView: View {
                 otherTokensSubsection
             }
         }
+    }
+
+    private func databaseCount(_ engine: HTTPDatabaseEndpoint.Engine) -> Int {
+        draft.httpDatabases.filter { $0.engine == engine && $0.isUsable }.count
     }
 
     // MARK: - Disclosure helper
@@ -1463,6 +1494,69 @@ struct ProfileEditorView: View {
     private func addDockerRegistry(host: String) {
         draft.dockerRegistries.append(
             DockerRegistryCredential(host: host, username: "", password: ""))
+    }
+
+    // MARK: - HTTPS databases (Mongo Data API / ClickHouse / Elasticsearch)
+
+    private func databaseBlurb(_ engine: HTTPDatabaseEndpoint.Engine) -> String {
+        switch engine {
+        case .mongoDataAPI:
+            return "MongoDB Atlas Data API endpoints. The real API key never enters the VM — bromure injects a fake under your env var(s) and swaps it for the real key on requests to the endpoint host. Set the Guardrails mode (Off / Block destructive / Read-only) under the Guardrails panel: deleteOne/deleteMany are destructive, insert/update are writes, find/aggregate are reads."
+        case .clickHouse:
+            return "ClickHouse HTTP-interface endpoints (self-hosted or Cloud). The real credential stays on the host; a fake rides in the VM. Guardrails classify the SQL: DROP/TRUNCATE/DELETE (and ALTER…DELETE) are destructive, INSERT/CREATE are writes, SELECT/SHOW are reads."
+        case .elasticsearch:
+            return "Elasticsearch endpoints. The real credential stays on the host. Guardrails classify by method + path: DELETE and _delete_by_query are destructive, _search/_count/_msearch are reads, _bulk/index/_update are writes."
+        }
+    }
+
+    @ViewBuilder
+    private func databaseSubsection(_ engine: HTTPDatabaseEndpoint.Engine) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(databaseBlurb(engine))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            let matching = draft.httpDatabases.filter { $0.engine == engine }
+            if matching.isEmpty {
+                Text("No endpoints configured.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.vertical, 4)
+            } else {
+                ForEach(matching) { db in
+                    if let idx = draft.httpDatabases.firstIndex(where: { $0.id == db.id }) {
+                        DatabaseEndpointRow(
+                            endpoint: $draft.httpDatabases[idx],
+                            onRemove: { draft.httpDatabases.removeAll { $0.id == db.id } }
+                        )
+                        Divider()
+                    }
+                }
+            }
+
+            HStack {
+                Button {
+                    addDatabase(engine: engine)
+                } label: {
+                    Label(NSLocalizedString("Add", comment: ""), systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+                Spacer()
+            }
+        }
+    }
+
+    private func addDatabase(engine: HTTPDatabaseEndpoint.Engine) {
+        // Sensible per-engine defaults for the auth shape.
+        let auth: HTTPDatabaseEndpoint.AuthKind
+        switch engine {
+        case .mongoDataAPI:  auth = .apiKey   // Mongo Data API: `api-key` header
+        case .clickHouse:    auth = .basic    // ClickHouse: HTTP Basic (user/pass)
+        case .elasticsearch: auth = .basic    // Elastic: Basic or ApiKey
+        }
+        draft.httpDatabases.append(
+            HTTPDatabaseEndpoint(engine: engine, auth: auth))
     }
 
     /// Open-panel + parse a Docker config.json. For each entry under
@@ -2204,12 +2298,61 @@ struct ProfileEditorView: View {
                              mode: $draft.guardrails.bitbucket,
                              detail: "\(draft.guardrails.bitbucket.detail) bitbucket.org REST API + git over HTTPS.")
                 Divider()
-                Text("Databases (Postgres, MySQL, CockroachDB, ClickHouse, Mongo) are coming next — same Off / Block destructive / Read-only control.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                databaseGuardrails
             }
             .padding(.bottom, 8)
+        }
+    }
+
+    private func databaseEngineSymbol(_ engine: HTTPDatabaseEndpoint.Engine) -> String {
+        switch engine {
+        case .mongoDataAPI:  return "leaf.fill"
+        case .clickHouse:    return "bolt.horizontal.fill"
+        case .elasticsearch: return "magnifyingglass"
+        }
+    }
+    private func databaseEngineDetail(_ engine: HTTPDatabaseEndpoint.Engine) -> String {
+        switch engine {
+        case .mongoDataAPI:
+            return "deleteOne/deleteMany = destructive; insert/update/replace = write; find/aggregate = read."
+        case .clickHouse:
+            return "DROP/TRUNCATE/DELETE and ALTER…DELETE = destructive; INSERT/CREATE = write; SELECT/SHOW = read."
+        case .elasticsearch:
+            return "DELETE + _delete_by_query = destructive; _search/_count/_msearch = read; _bulk/index/_update = write."
+        }
+    }
+
+    @ViewBuilder
+    private var databaseGuardrails: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Databases")
+                .font(.subheadline.weight(.semibold))
+            if draft.httpDatabases.isEmpty {
+                Text("No database endpoints configured. Add MongoDB, ClickHouse, or Elasticsearch endpoints under Credentials to guard them here.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ForEach(draft.httpDatabases) { db in
+                    if let idx = draft.httpDatabases.firstIndex(where: { $0.id == db.id }) {
+                        let label = db.name.isEmpty
+                            ? "\(db.engine.displayName) — \(db.host.isEmpty ? "(no host)" : db.host)"
+                            : "\(db.name) (\(db.engine.displayName))"
+                        guardrailRow(label,
+                                     systemImage: databaseEngineSymbol(db.engine),
+                                     mode: $draft.httpDatabases[idx].guardrail,
+                                     detail: "\(db.guardrail.detail) \(databaseEngineDetail(db.engine))")
+                        if db.host.trimmingCharacters(in: .whitespaces).isEmpty
+                            && db.guardrail != .off {
+                            Label("Set this endpoint's host under Credentials for the guard to take effect.",
+                                  systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption).foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Divider()
+                    }
+                }
+            }
         }
     }
 
@@ -3427,6 +3570,120 @@ private struct HTTPSCredentialRow: View {
         return h == "github.com" || h.hasSuffix(".github.com")
             || h == "gitlab.com" || h.hasPrefix("gitlab.")
             || h == "bitbucket.org"
+    }
+}
+
+// MARK: - HTTPS database endpoint row
+
+private struct DatabaseEndpointRow: View {
+    @Binding var endpoint: HTTPDatabaseEndpoint
+    var onRemove: () -> Void
+
+    @State private var revealSecret: Bool = false
+
+    private var envVarsText: Binding<String> {
+        Binding(
+            get: { endpoint.envVars.joined(separator: ", ") },
+            set: { raw in
+                endpoint.envVars = raw
+                    .split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\n" || $0 == "\t" })
+                    .map(String.init)
+            }
+        )
+    }
+
+    private var hostPrompt: String {
+        switch endpoint.engine {
+        case .mongoDataAPI:  return "data.mongodb-api.com"
+        case .clickHouse:    return "myhost.clickhouse.cloud:8443 or self-hosted host"
+        case .elasticsearch: return "my-deployment.es.io"
+        }
+    }
+    private var secretPrompt: String {
+        switch endpoint.auth {
+        case .basic:  return "password"
+        case .apiKey: return "API key"
+        case .bearer: return "bearer token"
+        }
+    }
+    private var envVarPrompt: String {
+        switch endpoint.engine {
+        case .mongoDataAPI:  return "MONGODB_API_KEY"
+        case .clickHouse:    return "CLICKHOUSE_PASSWORD"
+        case .elasticsearch: return "ELASTIC_PASSWORD"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                TextField("Name (optional)", text: $endpoint.name,
+                          prompt: Text("Production cluster"))
+                    .textFieldStyle(.roundedBorder)
+                Button(action: onRemove) {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .help(NSLocalizedString("Remove this endpoint", comment: ""))
+            }
+            TextField("Host", text: $endpoint.host, prompt: Text(hostPrompt))
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+                .help(NSLocalizedString(
+                    "The hostname the agent connects to (no scheme). Both the credential swap and Guardrails scope to this host, so self-hosted instances work.",
+                    comment: ""))
+
+            Picker("Auth", selection: $endpoint.auth) {
+                ForEach(HTTPDatabaseEndpoint.AuthKind.allCases, id: \.self) { a in
+                    Text(a.displayName).tag(a)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if endpoint.auth == .basic {
+                TextField("Username", text: $endpoint.username, prompt: Text("default"))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+            }
+
+            HStack(spacing: 6) {
+                ZStack {
+                    if revealSecret {
+                        TextField("Secret", text: $endpoint.secret, prompt: Text(secretPrompt))
+                            .textFieldStyle(.roundedBorder)
+                    } else {
+                        SecureField("Secret", text: $endpoint.secret, prompt: Text("•••• ••••"))
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+                Button {
+                    revealSecret.toggle()
+                } label: {
+                    Image(systemName: revealSecret ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.borderless)
+                .help(revealSecret
+                      ? NSLocalizedString("Hide secret", comment: "")
+                      : NSLocalizedString("Show secret", comment: ""))
+            }
+
+            TextField("Env var(s)", text: envVarsText, prompt: Text(envVarPrompt))
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+                .help(NSLocalizedString(
+                    "Environment variable(s) the fake secret is exported under in the VM (comma-separated for more than one). Reference these from your code / connection string.",
+                    comment: ""))
+
+            Toggle(isOn: $endpoint.requireApproval) {
+                Text(NSLocalizedString("Require approval to use", comment: ""))
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+        }
+        .padding(8)
+        .background(Color(nsColor: .textBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: 6))
     }
 }
 

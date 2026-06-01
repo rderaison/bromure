@@ -119,13 +119,29 @@ public struct GuardrailsConfig: Sendable {
     public let gitlab: GuardrailsPolicy.Mode
     public let bitbucket: GuardrailsPolicy.Mode
 
+    /// One resolved HTTPS-database guardrail: which engine the host speaks and
+    /// the mode to apply. Host is lowercased and exact (user-specified, so
+    /// self-hosted instances work without a wildcard list).
+    public struct DBGuardrail: Sendable {
+        public let engine: HTTPDatabaseEndpoint.Engine
+        public let host: String
+        public let mode: GuardrailsPolicy.Mode
+        public init(engine: HTTPDatabaseEndpoint.Engine, host: String,
+                    mode: GuardrailsPolicy.Mode) {
+            self.engine = engine; self.host = host.lowercased(); self.mode = mode
+        }
+    }
+    /// Per-endpoint database guardrails (Mongo Data API / ClickHouse / Elastic).
+    public let databases: [DBGuardrail]
+
     public init(kubernetes: GuardrailsPolicy.Mode, kubeHosts: Set<String>,
                 aws: GuardrailsPolicy.Mode = .off,
                 digitalOcean: GuardrailsPolicy.Mode = .off,
                 docker: GuardrailsPolicy.Mode = .off, dockerHosts: Set<String> = [],
                 github: GuardrailsPolicy.Mode = .off,
                 gitlab: GuardrailsPolicy.Mode = .off,
-                bitbucket: GuardrailsPolicy.Mode = .off) {
+                bitbucket: GuardrailsPolicy.Mode = .off,
+                databases: [DBGuardrail] = []) {
         self.kubernetes = kubernetes
         self.kubeHosts = kubeHosts
         self.aws = aws
@@ -135,12 +151,24 @@ public struct GuardrailsConfig: Sendable {
         self.github = github
         self.gitlab = gitlab
         self.bitbucket = bitbucket
+        self.databases = databases
     }
 
     public var isActive: Bool {
         (kubernetes != .off && !kubeHosts.isEmpty) || aws != .off
             || digitalOcean != .off || (docker != .off && !dockerHosts.isEmpty)
             || github != .off || gitlab != .off || bitbucket != .off
+            || databases.contains { $0.mode != .off }
+    }
+
+    /// Whether any configured database endpoint needs the request body / query
+    /// parameter inspected (only ClickHouse, whose verb lives in the SQL text).
+    /// Lets the proxy skip the body read for Mongo/Elastic.
+    public func dbNeedsQuery(host: String) -> Bool {
+        let h = host.lowercased()
+        return databases.contains {
+            $0.mode != .off && $0.engine == .clickHouse && $0.host == h
+        }
     }
 
     /// Whether a Kubernetes API request to `host` with `method` should be
@@ -308,6 +336,154 @@ public struct GuardrailsConfig: Sendable {
         return Self.methodBlockReason(mode: mode, method: method, label: label)
     }
 
+    // MARK: - HTTPS databases (Mongo Data API / ClickHouse / Elasticsearch)
+
+    /// Reuse the read/destructive/otherWrite trichotomy. `readOnly` blocks
+    /// anything not `.read`; `destructive` blocks only `.destructive`.
+    static func kindBlockReason(mode: GuardrailsPolicy.Mode, kind: AWSKind,
+                                label: String, what: String) -> String? {
+        switch mode {
+        case .off:
+            return nil
+        case .readOnly:
+            if kind == .read { return nil }
+            return "\(label) is read-only — \(what) blocked by Bromure Guardrails"
+        case .destructive:
+            if kind == .destructive {
+                return "\(label) \(what) blocked by Bromure Guardrails"
+            }
+            return nil
+        }
+    }
+
+    /// MongoDB Atlas Data API: the operation is the trailing path segment under
+    /// `/action/` (find, insertOne, updateMany, deleteMany, …).
+    static func classifyMongoDataAPI(path: String) -> (AWSKind, String) {
+        let noQuery = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        let action = (noQuery.split(separator: "/").last.map(String.init) ?? "").lowercased()
+        switch action {
+        case "find", "findone", "aggregate":
+            return (.read, action)
+        case "deleteone", "deletemany":
+            return (.destructive, action)
+        case "":
+            return (.otherWrite, "request")
+        default:
+            return (.otherWrite, action)   // insertOne/Many, updateOne/Many, replaceOne
+        }
+    }
+
+    /// ClickHouse HTTP interface: the verb lives in the SQL text (URL `query=`
+    /// param or request body). Classify by the leading keyword. Returns nil
+    /// when no SQL was visible — the caller decides (read-only still blocks the
+    /// request as a non-read; destructive errs open since it can't confirm).
+    static func classifyClickHouseSQL(_ sql: String) -> (AWSKind, String)? {
+        // Strip leading line (`-- …`) and block (`/* … */`) comments + space.
+        var s = Substring(sql)
+        while true {
+            let t = s.drop(while: { $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r" })
+            if t.hasPrefix("--") {
+                if let nl = t.firstIndex(of: "\n") { s = t[t.index(after: nl)...] }
+                else { return nil }
+            } else if t.hasPrefix("/*") {
+                if let end = t.range(of: "*/") { s = t[end.upperBound...] }
+                else { return nil }
+            } else { s = t; break }
+        }
+        var kw = ""
+        for ch in s {
+            if ch.isLetter { kw.append(ch) }
+            else if kw.isEmpty && ch == "(" { continue }   // leading "(SELECT …)"
+            else { break }
+        }
+        if kw.isEmpty { return nil }
+        let k = kw.uppercased()
+        let upper = sql.uppercased()
+        switch k {
+        case "SELECT", "SHOW", "DESCRIBE", "DESC", "EXISTS", "EXPLAIN",
+             "WITH", "CHECK", "USE", "VALUES":
+            return (.read, k.lowercased())
+        case "DROP", "TRUNCATE", "DELETE":
+            return (.destructive, k.lowercased())
+        case "ALTER":
+            // ClickHouse mutations: `ALTER TABLE … DELETE/DROP/CLEAR …`.
+            if upper.contains(" DELETE") || upper.contains("DROP COLUMN")
+                || upper.contains("DROP PARTITION") || upper.contains("CLEAR COLUMN")
+                || upper.contains("CLEAR INDEX") {
+                return (.destructive, "alter…delete")
+            }
+            return (.otherWrite, "alter")
+        default:
+            return (.otherWrite, k.lowercased())   // INSERT/CREATE/RENAME/OPTIMIZE/SET…
+        }
+    }
+
+    /// Elasticsearch: method + path. DELETE (and `_delete_by_query`) destroy;
+    /// the search/read endpoints are reads even over POST; everything else
+    /// (index/_bulk/_update/mappings) is a write.
+    static func classifyElasticsearch(method: String, path: String) -> (AWSKind, String) {
+        let m = method.uppercased()
+        let p = (path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path).lowercased()
+        if p.contains("_delete_by_query") { return (.destructive, "_delete_by_query") }
+        if m == "DELETE" { return (.destructive, "DELETE \(p)") }
+        if m == "GET" || m == "HEAD" || m == "OPTIONS" { return (.read, "\(m) \(p)") }
+        let readEndpoints = ["_search", "_msearch", "_count", "_mget", "_field_caps",
+                             "_sql", "_explain", "_validate", "_terms_enum", "_eql",
+                             "_pit", "_render", "_analyze", "/scroll"]
+        for e in readEndpoints where p.contains(e) { return (.read, "\(m) \(p)") }
+        return (.otherWrite, "\(m) \(p)")   // _bulk, _update, index, mappings…
+    }
+
+    private func mongoErrorBody(_ reason: String) -> String {
+        "{\"error\":\"\(reason.replacingOccurrences(of: "\"", with: "'"))\"}"
+    }
+    private func elasticErrorBody(_ reason: String) -> String {
+        let escaped = reason.replacingOccurrences(of: "\"", with: "'")
+        return "{\"error\":{\"type\":\"security_exception\",\"reason\":\"\(escaped)\"},\"status\":403}"
+    }
+
+    /// Decide a database request. `query` is the ClickHouse SQL (URL param or
+    /// body) the proxy extracted; nil/empty for Mongo & Elastic. Returns a
+    /// `Denial` or nil to forward.
+    func dbDenial(host: String, method: String, path: String, query: String?) -> Denial? {
+        let h = host.lowercased()
+        for db in databases where db.mode != .off && db.host == h {
+            switch db.engine {
+            case .mongoDataAPI:
+                let (kind, what) = Self.classifyMongoDataAPI(path: path)
+                if let reason = Self.kindBlockReason(mode: db.mode, kind: kind,
+                                                     label: "MongoDB", what: what) {
+                    return Denial(reason: reason, body: mongoErrorBody(reason),
+                                  contentType: "application/json", amzErrorType: nil)
+                }
+            case .clickHouse:
+                let sql = query ?? ""
+                let classified = Self.classifyClickHouseSQL(sql)
+                let kind: AWSKind
+                let what: String
+                if let c = classified { kind = c.0; what = c.1 }
+                else {
+                    // No SQL visible: read-only blocks (can't prove it's a read),
+                    // destructive errs open.
+                    kind = .otherWrite; what = "query"
+                }
+                if let reason = Self.kindBlockReason(mode: db.mode, kind: kind,
+                                                     label: "ClickHouse", what: what) {
+                    return Denial(reason: reason, body: reason,
+                                  contentType: "text/plain; charset=UTF-8", amzErrorType: nil)
+                }
+            case .elasticsearch:
+                let (kind, what) = Self.classifyElasticsearch(method: method, path: path)
+                if let reason = Self.kindBlockReason(mode: db.mode, kind: kind,
+                                                     label: "Elasticsearch", what: what) {
+                    return Denial(reason: reason, body: elasticErrorBody(reason),
+                                  contentType: "application/json", amzErrorType: nil)
+                }
+            }
+        }
+        return nil
+    }
+
     // MARK: - Unified entry point
 
     /// A blocked request: the reason plus the ready-to-send 403 body and its
@@ -330,8 +506,12 @@ public struct GuardrailsConfig: Sendable {
     /// `Denial` (the caller sends a 403) or nil to forward. `amzTarget` /
     /// `formAction` need only be supplied for AWS hosts.
     public func deny(host: String, method: String, path: String,
-                     amzTarget: String?, formAction: String?) -> Denial? {
+                     amzTarget: String?, formAction: String?,
+                     dbQuery: String? = nil) -> Denial? {
         let h = host.lowercased()
+        if let denial = dbDenial(host: h, method: method, path: path, query: dbQuery) {
+            return denial
+        }
         if let reason = kubeBlockReason(host: h, method: method) {
             return Denial(reason: reason, body: Self.kubeForbiddenBody(reason: reason),
                           contentType: "application/json", amzErrorType: nil)

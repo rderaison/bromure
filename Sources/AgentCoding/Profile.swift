@@ -377,6 +377,99 @@ public struct DockerRegistryCredential: Codable, Equatable, Sendable, Identifiab
     }
 }
 
+/// An HTTPS-accessible database the agent talks to over the MITM (Mongo Atlas
+/// Data API, ClickHouse HTTP interface, Elasticsearch). Carries both the
+/// credential (swapped fake→real on the wire, like docker/git creds) and the
+/// per-endpoint Guardrails mode (the host + engine drive the classifier).
+public struct HTTPDatabaseEndpoint: Codable, Equatable, Sendable, Identifiable {
+    public enum Engine: String, Codable, CaseIterable, Sendable {
+        case mongoDataAPI, clickHouse, elasticsearch
+        public var displayName: String {
+            switch self {
+            case .mongoDataAPI:  return "MongoDB (Data API)"
+            case .clickHouse:    return "ClickHouse"
+            case .elasticsearch: return "Elasticsearch"
+            }
+        }
+    }
+    /// How the real secret is presented on the wire — drives which swap
+    /// entries we mint. All are raw-string swaps except `basic`, which also
+    /// needs the base64(user:pass) blob swapped.
+    public enum AuthKind: String, Codable, CaseIterable, Sendable {
+        case basic     // Authorization: Basic base64(user:secret)  (+ raw secret)
+        case apiKey    // a header / param carrying the raw secret (Mongo api-key, X-ClickHouse-Key, …)
+        case bearer    // Authorization: Bearer <secret> / ApiKey <secret>
+        public var displayName: String {
+            switch self {
+            case .basic:  return "Username + password"
+            case .apiKey: return "API key"
+            case .bearer: return "Bearer token"
+            }
+        }
+    }
+
+    public var id: UUID
+    public var name: String
+    public var engine: Engine
+    /// Bare host (no scheme/port) the endpoint lives on — user-specified, so
+    /// self-hosted instances work. Both the swap and the guardrail scope to it.
+    public var host: String
+    public var auth: AuthKind
+    public var username: String       // basic only
+    /// Real secret (password / API key / bearer). Stored in profile.json; a
+    /// fake is what ever reaches the VM.
+    public var secret: String
+    /// Env var name(s) the fake secret is injected under (user-named, like
+    /// manual tokens) so the agent can reference it.
+    public var envVars: [String]
+    /// Guardrails mode for this endpoint (Off / Block destructive / Read-only).
+    public var guardrail: GuardrailsPolicy.Mode
+    public var requireApproval: Bool
+
+    public init(id: UUID = UUID(), name: String = "", engine: Engine = .clickHouse,
+                host: String = "", auth: AuthKind = .basic, username: String = "",
+                secret: String = "", envVars: [String] = [],
+                guardrail: GuardrailsPolicy.Mode = .off, requireApproval: Bool = false) {
+        self.id = id; self.name = name; self.engine = engine; self.host = host
+        self.auth = auth; self.username = username; self.secret = secret
+        self.envVars = envVars; self.guardrail = guardrail; self.requireApproval = requireApproval
+    }
+
+    public var isUsable: Bool {
+        !host.trimmingCharacters(in: .whitespaces).isEmpty && !secret.isEmpty
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, engine, host, auth, username, secret, envVars, guardrail, requireApproval
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        engine = try c.decodeIfPresent(Engine.self, forKey: .engine) ?? .clickHouse
+        host = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
+        auth = try c.decodeIfPresent(AuthKind.self, forKey: .auth) ?? .basic
+        username = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
+        secret = try c.decodeIfPresent(String.self, forKey: .secret) ?? ""
+        envVars = try c.decodeIfPresent([String].self, forKey: .envVars) ?? []
+        guardrail = try c.decodeIfPresent(GuardrailsPolicy.Mode.self, forKey: .guardrail) ?? .off
+        requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(engine, forKey: .engine)
+        try c.encode(host, forKey: .host)
+        try c.encode(auth, forKey: .auth)
+        if !username.isEmpty { try c.encode(username, forKey: .username) }
+        try c.encode(secret, forKey: .secret)
+        if !envVars.isEmpty { try c.encode(envVars, forKey: .envVars) }
+        if guardrail != .off { try c.encode(guardrail, forKey: .guardrail) }
+        if requireApproval { try c.encode(true, forKey: .requireApproval) }
+    }
+}
+
 /// AWS API credentials for `aws` CLI / SDKs inside the VM.
 ///
 /// Unlike the simple Bearer-token APIs (DigitalOcean, OpenAI, etc.)
@@ -862,6 +955,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// request hits the matching registry host.
     public var dockerRegistries: [DockerRegistryCredential]
 
+    /// HTTPS-accessible databases (Mongo Data API, ClickHouse, Elasticsearch).
+    /// Each carries a fake-swapped credential plus a per-endpoint Guardrails
+    /// mode so destructive queries can be blocked on the host.
+    public var httpDatabases: [HTTPDatabaseEndpoint]
+
     /// Gate the primary tool's API key behind a consent prompt. See
     /// `ConsentBroker`. Default false.
     public var apiKeyRequiresApproval: Bool
@@ -1032,6 +1130,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         bedrockEnabled: Bool = false,
         bedrockModelID: String = "",
         dockerRegistries: [DockerRegistryCredential] = [],
+        httpDatabases: [HTTPDatabaseEndpoint] = [],
         apiKeyRequiresApproval: Bool = false,
         digitalOceanTokenRequiresApproval: Bool = false,
         sshKeyRequiresApproval: Bool = false,
@@ -1084,6 +1183,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.bedrockEnabled = bedrockEnabled
         self.bedrockModelID = bedrockModelID
         self.dockerRegistries = dockerRegistries
+        self.httpDatabases = httpDatabases
         self.apiKeyRequiresApproval = apiKeyRequiresApproval
         self.digitalOceanTokenRequiresApproval = digitalOceanTokenRequiresApproval
         self.sshKeyRequiresApproval = sshKeyRequiresApproval
@@ -1139,6 +1239,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case awsCredentials
         case bedrockEnabled, bedrockModelID
         case dockerRegistries
+        case httpDatabases
         case apiKeyRequiresApproval
         case digitalOceanTokenRequiresApproval
         case sshKeyRequiresApproval
@@ -1216,6 +1317,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         bedrockEnabled = try c.decodeIfPresent(Bool.self, forKey: .bedrockEnabled) ?? false
         bedrockModelID = try c.decodeIfPresent(String.self, forKey: .bedrockModelID) ?? ""
         dockerRegistries = try c.decodeIfPresent([DockerRegistryCredential].self, forKey: .dockerRegistries) ?? []
+        httpDatabases = try c.decodeIfPresent([HTTPDatabaseEndpoint].self, forKey: .httpDatabases) ?? []
         apiKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .apiKeyRequiresApproval) ?? false
         digitalOceanTokenRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .digitalOceanTokenRequiresApproval) ?? false
         sshKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .sshKeyRequiresApproval) ?? false
@@ -1303,6 +1405,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if !bedrockModelID.isEmpty { try c.encode(bedrockModelID, forKey: .bedrockModelID) }
         if !dockerRegistries.isEmpty {
             try c.encode(dockerRegistries, forKey: .dockerRegistries)
+        }
+        if !httpDatabases.isEmpty {
+            try c.encode(httpDatabases, forKey: .httpDatabases)
         }
         if apiKeyRequiresApproval { try c.encode(true, forKey: .apiKeyRequiresApproval) }
         if digitalOceanTokenRequiresApproval {
@@ -1405,6 +1510,9 @@ struct ProfileSecrets: Codable {
     /// older `secrets.enc` blobs (written before this field existed)
     /// keep decoding cleanly.
     var dockerRegistryPasswords: [String: String]?
+    /// HTTPS-database real secrets. Keyed by HTTPDatabaseEndpoint.id.uuidString.
+    /// Optional for forward-compat with older `secrets.enc` blobs.
+    var httpDatabaseSecrets: [String: String]?
     /// Real OAuth bearer pairs for the subscription-token swap path.
     /// When set, new sessions for this profile auto-seed the VM's
     /// credentials file with proxy-side fakes derived from these
@@ -1491,6 +1599,14 @@ struct ProfileSecrets: Codable {
             }
         }
 
+        for (i, db) in profile.httpDatabases.enumerated() {
+            if !db.secret.isEmpty {
+                if s.httpDatabaseSecrets == nil { s.httpDatabaseSecrets = [:] }
+                s.httpDatabaseSecrets?[db.id.uuidString] = db.secret
+                profile.httpDatabases[i].secret = ""
+            }
+        }
+
         if let t = profile.defaultClaudeTokens {
             s.defaultClaudeTokens = t
             profile.defaultClaudeTokens = nil
@@ -1548,6 +1664,13 @@ struct ProfileSecrets: Codable {
             for (i, reg) in profile.dockerRegistries.enumerated() {
                 if let p = map[reg.id.uuidString] {
                     profile.dockerRegistries[i].password = p
+                }
+            }
+        }
+        if let map = httpDatabaseSecrets {
+            for (i, db) in profile.httpDatabases.enumerated() {
+                if let sec = map[db.id.uuidString] {
+                    profile.httpDatabases[i].secret = sec
                 }
             }
         }
@@ -1852,6 +1975,9 @@ public final class ProfileStore {
         }
         if !profile.awsCredentials.secretAccessKey.isEmpty
             || !profile.awsCredentials.sessionToken.isEmpty {
+            return true
+        }
+        if profile.httpDatabases.contains(where: { !$0.secret.isEmpty }) {
             return true
         }
         return false
