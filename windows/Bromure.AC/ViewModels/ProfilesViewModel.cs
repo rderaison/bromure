@@ -67,6 +67,102 @@ public sealed partial class ProfilesViewModel : ObservableObject
     public IReadOnlyList<CloseAction> CloseActionOptions { get; } = Enum.GetValues<CloseAction>();
     public IReadOnlyList<CursorShape> CursorShapeOptions { get; } = Enum.GetValues<CursorShape>();
 
+    /// <summary>System-installed MONOSPACED font families,
+    /// alphabetised. Filtered via glyph-advance equality on a
+    /// representative narrow/wide pair (.iM versus M) — kitty is a
+    /// terminal, so showing the user Calibri or Marlett is just noise
+    /// they'll have to scroll past. SessionHomeBuilder
+    /// (TryDropRequestedFont) copies the user's pick into the guest's
+    /// ~/.fonts at session boot so whichever family they choose
+    /// actually renders in kitty.</summary>
+    public IReadOnlyList<string> FontFamilyOptions { get; } = BuildMonospaceFontList();
+
+    private static IReadOnlyList<string> BuildMonospaceFontList()
+    {
+        var result = new List<string>();
+        foreach (var family in System.Windows.Media.Fonts.SystemFontFamilies)
+        {
+            var name = family.Source;
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            if (!IsMonospace(family)) continue;
+            result.Add(name);
+        }
+        result.Sort(StringComparer.OrdinalIgnoreCase);
+        // Pin JetBrains Mono first when present — it's the canonical
+        // bake-installed font and the default that SeedAppearance writes
+        // into a fresh profile. Surfacing it at the top of the
+        // alphabetical list saves the user a scroll.
+        var canonical = KittyConfigBuilder.DefaultFontFamily;
+        var idx = result.FindIndex(s => string.Equals(s, canonical, StringComparison.OrdinalIgnoreCase));
+        if (idx > 0) { result.RemoveAt(idx); result.Insert(0, canonical); }
+        return result;
+    }
+
+    /// <summary>Heuristic monospace check: compare the glyph-advance
+    /// widths of a thin character ('i') and a wide character ('M') in
+    /// the family's regular typeface. Equal advances ⇒ fixed-pitch.
+    /// Falls back to false on any error (font has no Regular face,
+    /// glyph table missing, etc.) — better to under-show than to dump
+    /// the entire system font list on the user.</summary>
+    private static bool IsMonospace(System.Windows.Media.FontFamily family)
+    {
+        try
+        {
+            var typeface = new System.Windows.Media.Typeface(
+                family,
+                System.Windows.FontStyles.Normal,
+                System.Windows.FontWeights.Normal,
+                System.Windows.FontStretches.Normal);
+            if (!typeface.TryGetGlyphTypeface(out var gt) || gt is null) return false;
+            if (!gt.CharacterToGlyphMap.TryGetValue('i', out var iGlyph)) return false;
+            if (!gt.CharacterToGlyphMap.TryGetValue('M', out var mGlyph)) return false;
+            return System.Math.Abs(gt.AdvanceWidths[iGlyph] - gt.AdvanceWidths[mGlyph]) < 0.0001;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Discrete font-size choices for the appearance dropdown.
+    /// Spans 8 → 32 pt in the same band the macOS port's Stepper allows.</summary>
+    public IReadOnlyList<int> FontSizeOptions { get; } =
+        new[] { 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32 };
+
+    /// <summary>Curated XKB keyboard-layout list, direct port of macOS
+    /// <c>VMConfig.commonKeyboardLayouts</c>. <c>Value=null</c> on the
+    /// first entry means "use host layout (live-synced)"; the binding
+    /// round-trips that to <c>Profile.KeyboardLayoutOverride</c>.</summary>
+    public IReadOnlyList<KeyboardLayoutOption> KeyboardLayoutOptions { get; } = new KeyboardLayoutOption[]
+    {
+        new("Auto (host layout)",  null),
+        new("US (QWERTY)",         "us"),
+        new("US (Dvorak)",         "us(dvorak)"),
+        new("US (Colemak)",        "us(colemak)"),
+        new("British",             "gb"),
+        new("French (AZERTY)",     "fr"),
+        new("German (QWERTZ)",     "de"),
+        new("Spanish",             "es"),
+        new("Italian",             "it"),
+        new("Portuguese",          "pt"),
+        new("Brazilian",           "br"),
+        new("Belgian",             "be"),
+        new("Dutch",               "nl"),
+        new("Swedish",             "se"),
+        new("Norwegian",           "no"),
+        new("Danish",              "dk"),
+        new("Finnish",             "fi"),
+        new("Swiss French",        "ch(fr)"),
+        new("Swiss German",        "ch(de)"),
+        new("Canadian French",     "ca(fr)"),
+        new("Czech",                "cz"),
+        new("Polish",              "pl"),
+        new("Russian",             "ru"),
+        new("Turkish",             "tr"),
+        new("Japanese",            "jp"),
+        new("Korean",              "kr"),
+        new("Arabic",              "ara"),
+        new("Hebrew",              "il"),
+        new("Irish",               "ie"),
+    };
+
     public ProfilesViewModel(ProfileStore store, IAppPaths? paths = null,
         Func<Guid, bool>? isProfileRunning = null,
         Action<Profile, IReadOnlyList<RestartRequiringChanges.Kind>>? onRestartRequired = null)
@@ -154,6 +250,12 @@ public sealed partial class ProfilesViewModel : ObservableObject
         // their profiles authenticate. They can still hit
         // "Regenerate" in the editor to opt into a unique key.
         if (_paths is not null) ProfileSshKey.EnsureExists(_paths, p, defaultKey: _defaultSshKey);
+        // macOS-parity seedAppearance: fill Custom* with the canonical
+        // dark-slate background + the user's host-terminal foreground so
+        // the very first launch lands on a readable terminal instead of
+        // inheriting whatever low-contrast dark-on-dark scheme the user
+        // happens to have themed Windows Terminal with.
+        KittyConfigBuilder.SeedAppearance(p);
         _store.Save(p);
         Profiles.Add(p);
         Selected = p;
@@ -733,3 +835,8 @@ public sealed partial class ProfilesViewModel : ObservableObject
             Selected, _store, _isProfileRunning, _onRestartRequired);
     }
 }
+
+/// <summary>Display-label + XKB-value pair for the keyboard-layout
+/// dropdown. <see cref="Value"/> is <c>null</c> for "Auto (host layout)";
+/// otherwise it's the string the guest's <c>setxkbmap</c> consumes.</summary>
+public sealed record KeyboardLayoutOption(string Label, string? Value);

@@ -17,13 +17,14 @@ namespace Bromure.AC.Core.Model;
 /// </summary>
 public static class KittyConfigBuilder
 {
-    /// Default font size. We render Xvnc 1:1 into a WPF window that
-    /// has the same physical pixel size as the host monitor (no DPI
-    /// upscale), so the framebuffer pixel grid IS the user's screen
-    /// grid. macOS uses 14 × Retina scale (2) = 28 for its retina
-    /// 2x displays; we match that since most Windows users on this
-    /// product run high-DPI laptops.
-    public const int DefaultFontSize = 28;
+    /// Default font size in points. Matches Windows Terminal's stock
+    /// 14pt — same physical readability the user gets in their
+    /// daily-driver shell. macOS Terminal.app's default is 14 too,
+    /// rendered at Retina ×2; on Windows the Xvnc framebuffer is 1:1
+    /// with the WPF window pixels (no compositor upscale), so 14pt
+    /// stays in the comfortable-to-read band on both standard 1080p
+    /// monitors and high-DPI laptops.
+    public const int DefaultFontSize = 14;
     public const string DefaultFontFamily = "JetBrains Mono";
     // macOS canonical defaults from TerminalAppDefaults.swift:
     //   - background: Profile.seedAppearance() hardcodes "#212734"
@@ -41,38 +42,53 @@ public static class KittyConfigBuilder
     public static string Build(Profile? profile, TerminalDefaults? terminalDefaults = null)
     {
         // macOS-parity resolveStyle:
-        //   customX ?? terminalDefaults.X
-        // — falls back to the user's host terminal prefs (Terminal.app
-        // on macOS via TerminalAppDefaults.load(); Windows Terminal on
-        // Windows via TerminalDefaults.Load() from
-        // %LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_*\LocalState\settings.json).
-        // The hardcoded constants are only the LAST resort if the host
-        // terminal isn't installed / prefs unreadable.
+        //   customX ?? terminalDefaults.X ?? hardcodedDefault
+        // The UseTerminalAppDefaults flag is intentionally NOT consulted
+        // — macOS keeps it on disk for backward compat but ignores it
+        // in resolveStyle (Profile.swift:1311), because older profiles
+        // that flipped it true had their Custom fields silently dropped
+        // and the resulting "fall through to whatever the user's
+        // terminal looks like" produced unreadable terminals when the
+        // user themed their daily-driver dark. We match: a Profile's
+        // Custom* fields ALWAYS win when set; null falls through to the
+        // host terminal's prefs; the hardcoded constants are the last
+        // resort if the host terminal isn't installed / unreadable.
         //
-        // UseTerminalAppDefaults toggle: when true (the default), the
-        // Custom* fields on Profile are display-only — we go straight
-        // to terminalDefaults regardless of what's in customForeground/
-        // customBackground. Matches macOS Profile.swift:989.
+        // Reads from Terminal.app on macOS via TerminalAppDefaults.load();
+        // Windows Terminal on Windows via TerminalDefaults.Load() from
+        // %LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_*\LocalState\settings.json.
         var td = terminalDefaults ?? TerminalDefaults.Load();
-        var useDefaults = profile?.UseTerminalAppDefaults ?? true;
-        var fontFamily = !useDefaults && !string.IsNullOrWhiteSpace(profile?.CustomFontFamily)
+        // Font family DOES NOT fall through to td.FontFamily — that's
+        // a deliberate divergence from macOS resolveStyle. macOS reads
+        // Terminal.app's font face, which is reliably monospaced (users
+        // don't pick Times for a shell). Windows Terminal's `face` JSON
+        // is just whatever string is in settings.json; we've seen real
+        // user configs that pin a proportional system font there, and
+        // routing that straight into kitty produces an unreadable
+        // terminal (proportional metrics + no glyph file copied into
+        // the guest ⇒ fontconfig fallback with broken cell math).
+        // Profile.CustomFontFamily comes from a host-side mono filter
+        // (ProfilesViewModel.FontFamilyOptions) when set, and otherwise
+        // we land on DefaultFontFamily which is baked into the guest.
+        var fontFamily = !string.IsNullOrWhiteSpace(profile?.CustomFontFamily)
             ? profile!.CustomFontFamily!
-            : (string.IsNullOrWhiteSpace(td.FontFamily) ? DefaultFontFamily : td.FontFamily);
-        var fontSize = !useDefaults && profile?.CustomFontSize is int cf && cf > 0
+            : DefaultFontFamily;
+        var fontSize = profile?.CustomFontSize is int cf && cf > 0
             ? cf
             : (td.FontSize > 0 ? td.FontSize : DefaultFontSize);
-        var foreground = !useDefaults
-            ? NormalizeHex(profile?.CustomForegroundHex) ?? NormalizeHex(td.ForegroundHex) ?? DefaultForeground
-            : NormalizeHex(td.ForegroundHex) ?? DefaultForeground;
-        // Safety net: if the user picked the same colour for fg + bg
-        // (easy to do when one of them is empty + the other resolves
-        // to the same default, or when both were typed manually), the
-        // terminal renders text invisibly. Force fg back to the
-        // default in that case so the user sees something instead of
-        // a black framebuffer they can't explain.
-        var bgPreview = !useDefaults
-            ? NormalizeHex(profile?.CustomBackgroundHex) ?? NormalizeHex(td.BackgroundHex) ?? DefaultBackground
-            : NormalizeHex(td.BackgroundHex) ?? DefaultBackground;
+        var foreground = NormalizeHex(profile?.CustomForegroundHex)
+            ?? NormalizeHex(td.ForegroundHex)
+            ?? DefaultForeground;
+        var bgPreview = NormalizeHex(profile?.CustomBackgroundHex)
+            ?? NormalizeHex(td.BackgroundHex)
+            ?? DefaultBackground;
+        // Safety net: if fg and bg resolve to the same colour (easy to
+        // do when one is empty and the other resolves to the same
+        // default, or when the user's terminal scheme happens to use
+        // identical fg/bg, or when both were typed manually), the
+        // terminal renders text invisibly. Force fg back to the default
+        // so the user sees something instead of a black framebuffer
+        // they can't explain.
         if (string.Equals(foreground, bgPreview, StringComparison.OrdinalIgnoreCase))
         {
             foreground = DefaultForeground;
@@ -170,6 +186,35 @@ public static class KittyConfigBuilder
         allow_remote_control yes
         listen_on             unix:@bromure-kitty
         """;
+    }
+
+    /// <summary>
+    /// Port of macOS <c>Profile.seedAppearance(from:)</c>
+    /// (TerminalAppDefaults.swift:236). Run ONCE at new-profile creation
+    /// to fill the Custom* fields with sensible starting values so the
+    /// editor opens on something useful AND the first launch lands on a
+    /// readable terminal (without it, brand-new profiles inherit
+    /// whatever the user's Windows Terminal happens to be — which is
+    /// often a low-contrast dark-on-dark scheme that renders as a black
+    /// kitty window).
+    ///
+    /// <para>Idempotent on each field — only fills when null/empty,
+    /// preserves anything the user already typed. Background is hard-
+    /// coded to the canonical Bromure dark slate (#212734); foreground
+    /// is sourced from the host terminal so colour-themed users
+    /// inherit their text colour.</para>
+    /// </summary>
+    public static void SeedAppearance(Profile profile, TerminalDefaults? terminalDefaults = null)
+    {
+        var td = terminalDefaults ?? TerminalDefaults.Load();
+        if (string.IsNullOrWhiteSpace(profile.CustomFontFamily))
+            profile.CustomFontFamily = DefaultFontFamily;
+        if (profile.CustomFontSize is null or 0)
+            profile.CustomFontSize = DefaultFontSize;
+        if (string.IsNullOrWhiteSpace(profile.CustomBackgroundHex))
+            profile.CustomBackgroundHex = DefaultBackground;
+        if (string.IsNullOrWhiteSpace(profile.CustomForegroundHex))
+            profile.CustomForegroundHex = NormalizeHex(td.ForegroundHex) ?? DefaultForeground;
     }
 
     /// <summary>Strip leading/trailing whitespace, prepend `#` if

@@ -60,12 +60,9 @@ public partial class MainWindow : Window
 
     private void OnRaiseSessionWindow(object sender, RoutedEventArgs e)
     {
-        if (sender is System.Windows.Controls.MenuItem mi && mi.Tag is SessionRowViewModel)
+        if (sender is System.Windows.Controls.MenuItem mi && mi.Tag is SessionRowViewModel row)
         {
-            // SessionWindow holds a single static _instance — bring it
-            // to the front. (When we expand to multi-window-per-session
-            // each row will need a dedicated window reference.)
-            var sw = Views.SessionWindow.CurrentInstance;
+            var sw = Views.SessionWindow.ForProfile(row.Profile.Id);
             if (sw is null) return;
             if (sw.WindowState == WindowState.Minimized) sw.WindowState = WindowState.Normal;
             sw.Show();

@@ -18,8 +18,8 @@ public class KittyConfigBuilderTests
     /// macOS-canonical values, so tests pin macOS parity. Production
     /// reads the user's real Windows Terminal prefs at build time.</summary>
     private static readonly TerminalDefaults Td = new(
-        FontFamily: "JetBrains Mono",
-        FontSize: 28,
+        FontFamily: KittyConfigBuilder.DefaultFontFamily,
+        FontSize: KittyConfigBuilder.DefaultFontSize,
         BackgroundHex: KittyConfigBuilder.DefaultBackground,
         ForegroundHex: KittyConfigBuilder.DefaultForeground);
 
@@ -61,21 +61,23 @@ public class KittyConfigBuilderTests
     }
 
     [Fact]
-    public void UseTerminalAppDefaultsTrue_IgnoresCustomFields()
+    public void UseTerminalAppDefaultsFlag_IsLegacyNoOp()
     {
-        // macOS contract: when the "Inherit from host terminal"
-        // checkbox is on, the Custom* fields are display-only — the
-        // generated config goes back to bake-time defaults.
+        // macOS contract (TerminalAppDefaults.swift:1311): the flag is
+        // kept on disk for backward compat but resolveStyle no longer
+        // consults it. Reason: older profiles that had it true silently
+        // dropped their Custom* fields, which produced unreadable
+        // terminals when the user themed their daily-driver terminal.
+        // Custom* always wins now, regardless of this flag.
         var p = new Profile
         {
             UseTerminalAppDefaults = true,
-            CustomFontFamily = "Comic Sans",
-            CustomBackgroundHex = "#FF0000",
+            CustomFontFamily = "Cascadia Code",
+            CustomBackgroundHex = "#102030",
         };
         var conf = KittyConfigBuilder.Build(p, Td);
-        conf.Should().NotContain("Comic Sans");
-        conf.Should().NotContain("#FF0000");
-        conf.Should().Contain(KittyConfigBuilder.DefaultFontFamily);
+        conf.Should().Contain("font_family       Cascadia Code");
+        conf.Should().Contain("background        #102030");
     }
 
     [Fact]
@@ -95,6 +97,33 @@ public class KittyConfigBuilderTests
         conf.Should().Contain($"font_family       {KittyConfigBuilder.DefaultFontFamily}");
         conf.Should().Contain($"background        {KittyConfigBuilder.DefaultBackground}");
         conf.Should().Contain($"foreground        {KittyConfigBuilder.DefaultForeground}");
+    }
+
+    [Fact]
+    public void SeedAppearance_FillsBlankFieldsWithMacosCanonicalDefaults()
+    {
+        // Direct port of macOS Profile.seedAppearance contract: bg
+        // hard-coded to the dark-slate canonical, fg sourced from the
+        // host terminal so colour-themed users carry their text colour
+        // over. Should NOT overwrite anything the user already typed.
+        var pristine = new Profile();
+        KittyConfigBuilder.SeedAppearance(pristine, Td);
+        pristine.CustomFontFamily.Should().Be(KittyConfigBuilder.DefaultFontFamily);
+        pristine.CustomFontSize.Should().Be(KittyConfigBuilder.DefaultFontSize);
+        pristine.CustomBackgroundHex.Should().Be(KittyConfigBuilder.DefaultBackground);
+        pristine.CustomForegroundHex.Should().Be(KittyConfigBuilder.DefaultForeground);
+
+        var preset = new Profile
+        {
+            CustomFontFamily = "Cascadia Code",
+            CustomBackgroundHex = "#102030",
+        };
+        KittyConfigBuilder.SeedAppearance(preset, Td);
+        preset.CustomFontFamily.Should().Be("Cascadia Code");
+        preset.CustomBackgroundHex.Should().Be("#102030");
+        // Unset fields still get filled.
+        preset.CustomFontSize.Should().Be(KittyConfigBuilder.DefaultFontSize);
+        preset.CustomForegroundHex.Should().Be(KittyConfigBuilder.DefaultForeground);
     }
 
     [Theory]

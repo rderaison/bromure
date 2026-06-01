@@ -130,6 +130,7 @@
             <cmn:StringListConverter x:Key="StringListConverter"/>
             <cmn:McpEnvLinesConverter x:Key="McpEnvLinesConverter"/>
             <cmn:HexToBrushConverter x:Key="HexToBrushConverter"/>
+            <cmn:HasContentConverter x:Key="HasContent"/>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

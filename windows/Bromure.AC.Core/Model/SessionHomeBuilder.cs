@@ -500,10 +500,15 @@ public static class SessionHomeBuilder
         """;
 
     /// <summary>Drop the requested font family (if any) from the
-    /// user's installed-fonts dir into the home overlay. Best-effort:
-    /// matches by case-insensitive substring against the font file
-    /// name. If we can't find it or the profile doesn't pin a family,
-    /// we leave fontconfig to its own defaults inside the guest.</summary>
+    /// host's font dirs into the home overlay. Walks BOTH the
+    /// user-installed dir (<c>%LOCALAPPDATA%\Microsoft\Windows\Fonts</c>)
+    /// AND the system dir (<c>C:\Windows\Fonts</c>) — a user who picks
+    /// Cascadia Code from the appearance dropdown has it in the
+    /// per-user dir, but a user who picks Consolas (or, on a corp
+    /// laptop, Roboto Mono installed by IT) has it system-wide.
+    /// Best-effort: matches by case-insensitive substring against the
+    /// font file name. If we can't find it or the profile doesn't pin
+    /// a family, fontconfig's defaults inside the guest take over.</summary>
     private static void TryDropRequestedFont(Profile? profile, Dictionary<string, byte[]> files)
     {
         try
@@ -511,34 +516,40 @@ public static class SessionHomeBuilder
             if (profile is null) return;
             var family = profile.CustomFontFamily?.Trim();
             if (string.IsNullOrEmpty(family)) return;
-            // %LOCALAPPDATA%\Microsoft\Windows\Fonts is the user-installed
-            // fonts dir; readable without elevation. The system dir at
-            // C:\Windows\Fonts is technically accessible but full of
-            // unrelated UI fonts and adds size without value.
-            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            if (string.IsNullOrEmpty(localAppData)) return;
-            var fontsDir = System.IO.Path.Combine(localAppData, "Microsoft", "Windows", "Fonts");
-            if (!Directory.Exists(fontsDir)) return;
-            // Case-insensitive contains is forgiving: "JetBrains Mono"
-            // matches "JetBrainsMono-Regular.ttf" / "JetBrainsMonoNL-
-            // Bold.ttf". We push every variant we find so kitty's
-            // weight/style requests resolve.
             var simplified = new string(family.Where(char.IsLetterOrDigit).ToArray());
             if (simplified.Length < 3) return;  // refuse "Co" / "JB" — too noisy
-            foreach (var path in Directory.EnumerateFiles(fontsDir))
+            var dirs = new List<string>(2);
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (!string.IsNullOrEmpty(localAppData))
             {
-                var ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
-                if (ext != ".ttf" && ext != ".otf") continue;
-                var fileName = System.IO.Path.GetFileNameWithoutExtension(path);
-                var fileSimplified = new string(fileName.Where(char.IsLetterOrDigit).ToArray());
-                if (!fileSimplified.Contains(simplified, StringComparison.OrdinalIgnoreCase)) continue;
-                try
+                dirs.Add(System.IO.Path.Combine(localAppData, "Microsoft", "Windows", "Fonts"));
+            }
+            var systemFonts = Environment.GetFolderPath(Environment.SpecialFolder.Fonts);
+            if (!string.IsNullOrEmpty(systemFonts)) dirs.Add(systemFonts);
+            foreach (var fontsDir in dirs)
+            {
+                if (!Directory.Exists(fontsDir)) continue;
+                // Case-insensitive contains is forgiving: "JetBrains Mono"
+                // matches "JetBrainsMono-Regular.ttf" / "JetBrainsMonoNL-
+                // Bold.ttf". We push every variant we find so kitty's
+                // weight/style requests resolve.
+                foreach (var path in Directory.EnumerateFiles(fontsDir))
                 {
-                    var bytes = File.ReadAllBytes(path);
-                    if (bytes.Length > 8 * 1024 * 1024) continue;  // skip outliers >8MiB
-                    files[".fonts/" + System.IO.Path.GetFileName(path)] = bytes;
+                    var ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+                    if (ext != ".ttf" && ext != ".otf") continue;
+                    var fileName = System.IO.Path.GetFileNameWithoutExtension(path);
+                    var fileSimplified = new string(fileName.Where(char.IsLetterOrDigit).ToArray());
+                    if (!fileSimplified.Contains(simplified, StringComparison.OrdinalIgnoreCase)) continue;
+                    var entryKey = ".fonts/" + System.IO.Path.GetFileName(path);
+                    if (files.ContainsKey(entryKey)) continue;  // per-user wins ties
+                    try
+                    {
+                        var bytes = File.ReadAllBytes(path);
+                        if (bytes.Length > 8 * 1024 * 1024) continue;  // skip outliers >8MiB
+                        files[entryKey] = bytes;
+                    }
+                    catch (IOException) { /* in-use, skip */ }
                 }
-                catch (IOException) { /* in-use, skip */ }
             }
         }
         catch { /* never break session boot over fonts */ }

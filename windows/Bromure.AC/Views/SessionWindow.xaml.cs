@@ -15,21 +15,37 @@ using Bromure.AC.ViewModels;
 namespace Bromure.AC.Views;
 
 /// <summary>
-/// Singleton multi-tab session window. Mirrors the macOS
-/// <c>TabbedSessionWindow</c>: ONE VM per profile-launch, ONE shared
+/// Per-profile multi-tab session window. Mirrors the macOS
+/// <c>TabbedSessionWindow</c>: ONE WINDOW PER PROFILE
+/// (BromureAC.swift:285 <c>profileWindows: [Profile.ID:
+/// TabbedSessionWindow]</c>), ONE VM behind that window, ONE shared
 /// <see cref="VncControl"/>, tabs are kitty PROCESSES inside that VM
 /// (identified by <c>--class bromure-&lt;UUID&gt;</c>). The host drives
 /// spawn / raise / close over the vsock command channel; the guest's
 /// openbox <c>&lt;fullscreen/&gt;</c> rule keeps whichever kitty has
 /// focus visible.
+///
+/// <para>Multi-profile parallelism: every profile launch creates (or
+/// reuses) its OWN SessionWindow instance, keyed by profile id. The
+/// user can run profile-A and profile-B concurrently and gets two
+/// independent VMs, two independent windows, two independent tab
+/// strips — matching the macOS UX.</para>
 /// </summary>
 public partial class SessionWindow : Window
 {
-    private static SessionWindow? _instance;
-    /// <summary>The currently-open session window, if any. Read by
-    /// MainWindow's Window menu so it can raise the SessionWindow
-    /// from the picker. Null when no session is open.</summary>
-    public static SessionWindow? CurrentInstance => _instance;
+    private static readonly Dictionary<Guid, SessionWindow> _instances = new();
+
+    /// <summary>Profile this window is dedicated to. Set on first
+    /// adoption (boot-view or first-tab) and never changes — closing
+    /// the window destroys the instance.</summary>
+    private Guid _profileId;
+
+    /// <summary>The session window dedicated to <paramref name="profileId"/>,
+    /// if any is currently open. Used by MainWindow's Window menu so
+    /// clicking a profile row in the picker raises that profile's
+    /// window. Returns null when nothing is open for the profile.</summary>
+    public static SessionWindow? ForProfile(Guid profileId)
+        => _instances.TryGetValue(profileId, out var win) ? win : null;
 
     public static System.Action<System.Guid>? NewSessionRequested { get; set; }
 
@@ -56,7 +72,15 @@ public partial class SessionWindow : Window
     {
         InitializeComponent();
         Closing += OnClosing;
-        Closed += (_, _) => { if (ReferenceEquals(_instance, this)) _instance = null; };
+        Closed += (_, _) =>
+        {
+            if (_profileId != Guid.Empty
+                && _instances.TryGetValue(_profileId, out var current)
+                && ReferenceEquals(current, this))
+            {
+                _instances.Remove(_profileId);
+            }
+        };
         InputBindings.Add(new KeyBinding(
             new RelayCommand(_ => CloseActiveTab()),
             new KeyGesture(Key.W, ModifierKeys.Control)));
@@ -335,13 +359,9 @@ public partial class SessionWindow : Window
     /// spawn-kitty to the guest just like macOS does.</summary>
     public static void AddTab(SessionViewModel vm)
     {
-        if (_instance is null || !_instance.IsLoaded)
-        {
-            _instance = new SessionWindow();
-            _instance.Show();
-        }
-        _instance.AdoptVmAndOpenFirstTab(vm);
-        _instance.Activate();
+        var win = AcquireFor(vm.ProfileId);
+        win.AdoptVmAndOpenFirstTab(vm);
+        win.Activate();
     }
 
     /// <summary>Perf #3 — pop a placeholder "Booting…" window
@@ -352,13 +372,27 @@ public partial class SessionWindow : Window
     /// behaviour: window appears on click, doesn't wait for boot.</summary>
     public static void ShowBootingView(SessionViewModel sv)
     {
-        if (_instance is null || !_instance.IsLoaded)
+        var win = AcquireFor(sv.ProfileId);
+        win.AttachBootingView(sv);
+        win.Activate();
+    }
+
+    /// <summary>Look up (or create) the SessionWindow for the given
+    /// profile. The first call for a profile mints a new window and
+    /// records it in <see cref="_instances"/>; subsequent calls return
+    /// the existing window so additional-tab adds land in the right
+    /// place. Stale entries (window was closed but somehow still in
+    /// the dict) get replaced.</summary>
+    private static SessionWindow AcquireFor(Guid profileId)
+    {
+        if (_instances.TryGetValue(profileId, out var existing) && existing.IsLoaded)
         {
-            _instance = new SessionWindow();
-            _instance.Show();
+            return existing;
         }
-        _instance.AttachBootingView(sv);
-        _instance.Activate();
+        var win = new SessionWindow { _profileId = profileId };
+        _instances[profileId] = win;
+        win.Show();
+        return win;
     }
 
     private void AttachBootingView(SessionViewModel sv)

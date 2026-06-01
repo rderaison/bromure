@@ -550,7 +550,8 @@
                                 fakes on the wire so real values never leave the host.
                             </TextBlock>
                             <!-- AWS ............................................. -->
-                            <Expander Header="AWS" IsExpanded="True" Margin="0,0,0,8">
+                            <Expander Header="AWS" Margin="0,0,0,8"
+                                      IsExpanded="{Binding Aws.IsUsable, Mode=OneTime, Converter={StaticResource HasContent}}">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
                                     <StackPanel DataContext="{Binding Aws}">
                                         <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
@@ -624,7 +625,8 @@
                             </Expander>
 
                             <!-- AWS Bedrock (audit 09 §A2) ....................... -->
-                            <Expander Header="AWS Bedrock" Margin="0,8,0,8">
+                            <Expander Header="AWS Bedrock" Margin="0,8,0,8"
+                                      IsExpanded="{Binding BedrockEnabled, Mode=OneTime, Converter={StaticResource HasContent}}">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
                                     <StackPanel>
                                         <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
@@ -656,7 +658,8 @@
                             </Expander>
 
                             <!-- DigitalOcean access token (audit 09 §A4) ........ -->
-                            <Expander Header="DigitalOcean" Margin="0,8,0,8">
+                            <Expander Header="DigitalOcean" Margin="0,8,0,8"
+                                      IsExpanded="{Binding DigitalOceanToken, Mode=OneTime, Converter={StaticResource HasContent}}">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
                                     <StackPanel>
                                         <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
@@ -688,7 +691,8 @@
                             </Expander>
 
                             <!-- Git identity (audit 09 §A4) ...................... -->
-                            <Expander Header="Git identity" Margin="0,8,0,8" IsExpanded="True">
+                            <Expander Header="Git identity" Margin="0,8,0,8"
+                                      IsExpanded="{Binding GitUserName, Mode=OneTime, Converter={StaticResource HasContent}}">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
                                     <StackPanel>
                                         <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
@@ -720,7 +724,8 @@
                             </Expander>
 
                             <!-- Git HTTPS ........................................ -->
-                            <Expander Header="Git HTTPS credentials" Margin="0,8,0,8">
+                            <Expander Header="Git HTTPS credentials" Margin="0,8,0,8"
+                                      IsExpanded="{Binding GitHttpsCredentials.Count, Mode=OneTime, Converter={StaticResource HasContent}}">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
                                     <StackPanel>
                                         <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
@@ -799,7 +804,8 @@
                             </Expander>
 
                             <!-- Manual tokens .................................... -->
-                            <Expander Header="Manual tokens" Margin="0,8,0,8">
+                            <Expander Header="Manual tokens" Margin="0,8,0,8"
+                                      IsExpanded="{Binding ManualTokens.Count, Mode=OneTime, Converter={StaticResource HasContent}}">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
                                     <StackPanel>
                                         <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
@@ -891,7 +897,8 @@
                             </Expander>
 
                             <!-- Docker registries ................................ -->
-                            <Expander Header="Docker registries" Margin="0,8,0,8">
+                            <Expander Header="Docker registries" Margin="0,8,0,8"
+                                      IsExpanded="{Binding DockerRegistries.Count, Mode=OneTime, Converter={StaticResource HasContent}}">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
                                     <StackPanel>
                                         <ItemsControl ItemsSource="{Binding DockerRegistries}">
@@ -949,7 +956,8 @@
                             </Expander>
 
                             <!-- Kubeconfigs ...................................... -->
-                            <Expander Header="Kubeconfigs" Margin="0,8,0,8">
+                            <Expander Header="Kubeconfigs" Margin="0,8,0,8"
+                                      IsExpanded="{Binding Kubeconfigs.Count, Mode=OneTime, Converter={StaticResource HasContent}}">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
                                     <StackPanel>
                                         <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
@@ -1021,7 +1029,8 @@
                             </Expander>
 
                             <!-- Profile SSH key (auto-generated) ................. -->
-                            <Expander Header="Profile SSH key" IsExpanded="True" Margin="0,8,0,8">
+                            <Expander Header="Profile SSH key" Margin="0,8,0,8"
+                                      IsExpanded="{Binding SshPublicKey, Mode=OneTime, Converter={StaticResource HasContent}}">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
                                     <StackPanel>
                                         <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
@@ -1058,7 +1067,8 @@
                             </Expander>
 
                             <!-- Imported SSH keys ................................ -->
-                            <Expander Header="Imported SSH keys" Margin="0,8,0,8">
+                            <Expander Header="Imported SSH keys" Margin="0,8,0,8"
+                                      IsExpanded="{Binding ImportedSshKeys.Count, Mode=OneTime, Converter={StaticResource HasContent}}">
                                 <Border Background="{StaticResource PanelBackground}" CornerRadius="6" Padding="16">
                                     <StackPanel>
                                         <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11"
@@ -1120,37 +1130,32 @@
                             <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="12"
                                        TextWrapping="Wrap" Margin="0,0,0,18">
                                 Plain environment variables exported into the guest at session
-                                launch. Mark "Secret" for values that should be masked in the UI
-                                and excluded from screenshots.
+                                launch.
                             </TextBlock>
                             <ItemsControl ItemsSource="{Binding EnvironmentVariables}">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
-                                        <Border Background="{StaticResource PanelBackground}"
-                                                CornerRadius="4" Padding="12" Margin="0,4">
-                                            <Grid>
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="200"/>
-                                                    <ColumnDefinition Width="*"/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                </Grid.ColumnDefinitions>
-                                                <TextBox Grid.Column="0" FontFamily="Consolas"
-                                                         Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
-                                                         Margin="0,0,8,0"/>
-                                                <TextBox Grid.Column="1"
-                                                         Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}"
-                                                         Margin="0,0,8,0"/>
-                                                <CheckBox Grid.Column="2" Content="Secret"
-                                                          IsChecked="{Binding IsSecret}"
-                                                          VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                                <Button Grid.Column="3" Content="Remove"
-                                                        Style="{StaticResource DangerButton}"
-                                                        Command="{Binding DataContext.RemoveEnvCommand,
-                                                                  RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                        CommandParameter="{Binding}"/>
-                                            </Grid>
-                                        </Border>
+                                        <Grid Margin="0,3">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="140"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBox Grid.Column="0" FontFamily="Consolas"
+                                                     VerticalAlignment="Center"
+                                                     Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                                                     Margin="0,0,8,0"/>
+                                            <TextBox Grid.Column="1"
+                                                     VerticalAlignment="Center"
+                                                     Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}"
+                                                     Margin="0,0,8,0"/>
+                                            <Button Grid.Column="2" Content="Remove"
+                                                    VerticalAlignment="Center"
+                                                    Style="{StaticResource DangerButton}"
+                                                    Command="{Binding DataContext.RemoveEnvCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                    CommandParameter="{Binding}"/>
+                                        </Grid>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
@@ -1243,16 +1248,10 @@
                                        Margin="0,0,0,4"/>
                             <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="12"
                                        TextWrapping="Wrap" Margin="0,0,0,18">
-                                Terminal + window cosmetics. Empty fields fall through to the host
-                                terminal's defaults when "Inherit from host terminal" is on.
+                                Terminal + window cosmetics. Empty fields fall through to your
+                                Windows Terminal defaults; the last-resort fallback is JetBrains
+                                Mono 14 on a dark slate background.
                             </TextBlock>
-
-                            <!-- Group: Inheritance -->
-                            <Border Background="{StaticResource PanelBackground}" CornerRadius="8"
-                                    Padding="20,16" Margin="0,0,0,12">
-                                <CheckBox Content="Inherit colors / font from host terminal"
-                                          IsChecked="{Binding UseTerminalAppDefaults}"/>
-                            </Border>
 
                             <!-- Group: Terminal — uniform label-column / control-column grid
                                  keeps every input aligned at the same x. -->
@@ -1283,13 +1282,18 @@
 
                                     <TextBlock Grid.Row="1" Grid.Column="0" Text="Font family"
                                                VerticalAlignment="Center" Margin="0,6"/>
-                                    <TextBox Grid.Row="1" Grid.Column="1" Margin="0,6"
-                                             Text="{Binding CustomFontFamily, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <ComboBox Grid.Row="1" Grid.Column="1" Margin="0,6"
+                                              IsEditable="False"
+                                              ItemsSource="{Binding DataContext.FontFamilyOptions,
+                                                            RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                              SelectedItem="{Binding CustomFontFamily}"/>
 
                                     <TextBlock Grid.Row="2" Grid.Column="0" Text="Font size"
                                                VerticalAlignment="Center" Margin="0,6"/>
-                                    <TextBox Grid.Row="2" Grid.Column="1" Margin="0,6"
-                                             Text="{Binding CustomFontSize, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <ComboBox Grid.Row="2" Grid.Column="1" Margin="0,6"
+                                              ItemsSource="{Binding DataContext.FontSizeOptions,
+                                                            RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                              SelectedItem="{Binding CustomFontSize}"/>
 
                                     <TextBlock Grid.Row="3" Grid.Column="0" Text="Background"
                                                VerticalAlignment="Center" Margin="0,6"/>
@@ -1344,9 +1348,13 @@
 
                                     <TextBlock Grid.Row="5" Grid.Column="0" Text="Keyboard layout"
                                                VerticalAlignment="Center" Margin="0,6"/>
-                                    <TextBox Grid.Row="5" Grid.Column="1" Margin="0,6"
-                                             ToolTip="XKB layout (e.g. fr, ch:fr). Empty = host default."
-                                             Text="{Binding KeyboardLayoutOverride, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <ComboBox Grid.Row="5" Grid.Column="1" Margin="0,6"
+                                              ToolTip="XKB layout. Auto live-syncs from the host."
+                                              ItemsSource="{Binding DataContext.KeyboardLayoutOptions,
+                                                            RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                              DisplayMemberPath="Label"
+                                              SelectedValuePath="Value"
+                                              SelectedValue="{Binding KeyboardLayoutOverride}"/>
                                 </Grid>
                             </Border>
 
