@@ -32,11 +32,19 @@ fi
 # build; without this, `tell application … to get app state` can fail with
 # "The variable state is not defined. (-2753)" until a reboot. Kill any
 # running instance first — a live process keeps serving stale terminology.
+#
+# Unregister (-u) then re-register (-f): -u evicts the bundle's cached
+# dictionary so -f reloads it fresh. (macOS 26's lsregister dropped the
+# old `-kill` switch; -u/-f is the non-reboot equivalent for one bundle.)
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 if [ -x "$LSREGISTER" ]; then
     pkill -x bromure-ac 2>/dev/null || true
     sleep 1
+    "$LSREGISTER" -u "$APP_BUNDLE" 2>/dev/null || true
     "$LSREGISTER" -f "$APP_BUNDLE" && echo "Re-registered $APP_NAME with LaunchServices."
+    # Let LaunchServices propagate the new registration before the first
+    # osascript call compiles `tell application …` and fetches terminology.
+    sleep 5
 fi
 
 # Editor sidebar entries that the AppleScript bridge accepts. Order
