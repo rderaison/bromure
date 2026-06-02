@@ -1185,7 +1185,50 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.initProgress.stop()
                 self.initProgress.isRunning = false
                 self.initProgress.error = error.localizedDescription
+                // The bake's NAT path can't be repaired mid-flight — we
+                // need to tear it down, kickstart vmnet, and start over.
+                // Same UX as the session-side network-healer prompt.
+                if case UbuntuImageError.noGuestNetwork = error {
+                    await self.presentBakeNetworkHealerPrompt(force: force)
+                }
             }
+        }
+    }
+
+    @MainActor
+    private func presentBakeNetworkHealerPrompt(force: Bool) async {
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString(
+            "Network Issue During Base-Image Build", comment: "")
+        alert.informativeText = NSLocalizedString(
+            "The installer VM didn't get a network address from macOS's shared networking (vmnet). The base-image build needs internet access to download packages.",
+            comment: ""
+        ) + "\n\n" + NSLocalizedString(
+            "Bromure can restart the macOS networking daemons and try the build again. You'll be asked for your password.",
+            comment: ""
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("Repair and Retry", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            let ok = await NetworkHealer.shared.repair(.both)
+            guard ok else {
+                let failed = NSAlert()
+                failed.messageText = NSLocalizedString(
+                    "Network Repair Cancelled", comment: "")
+                failed.informativeText = NSLocalizedString(
+                    "The repair was cancelled or failed. Try again from the menu.",
+                    comment: "")
+                failed.alertStyle = .warning
+                failed.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+                failed.runModal()
+                return
+            }
+            startInit(force: force)
+        default:
+            return
         }
     }
 

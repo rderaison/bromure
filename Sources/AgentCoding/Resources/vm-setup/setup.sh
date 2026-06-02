@@ -48,8 +48,14 @@ log "preparing alpine bootstrap toolchain"
 . /etc/os-release 2>/dev/null || true
 ALPINE_VER="${VERSION_ID:-3.22}"
 ALPINE_VER_SHORT=$(echo "$ALPINE_VER" | cut -d. -f1,2)
+# HTTP (not HTTPS) — matches the host's alpine_repo cmdline. Some
+# VPN / corporate MITM setups break apk-tools' OpenSSL 3.x handshake
+# with `unexpected eof while reading`; apk verifies every package's
+# RSA signature regardless of transport, so HTTP doesn't weaken
+# integrity. See UbuntuImageManager.swift for the corresponding /init
+# cmdline override.
 if ! grep -q '/community' /etc/apk/repositories; then
-    echo "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER_SHORT}/community" \
+    echo "http://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER_SHORT}/community" \
         >> /etc/apk/repositories
 fi
 
