@@ -161,10 +161,16 @@ ff02::1         ip6-allnodes
 ff02::2         ip6-allrouters
 EOH
 
-# Stash the build-time scale so the chroot can read it back without us
-# having to interpolate every variable through the heredoc.
+# Stash build-time vars so the chroot can read them back without us
+# having to interpolate through a quoted heredoc. ALPINE_REPO_BASE is
+# also our HTTP→HTTPS proxy base; the chroot uses it as http(s)_proxy
+# so npm / curl / apt route through the host's URLSession upstream,
+# bypassing whatever VPN-side TLS quirk breaks guest libraries.
 mkdir -p /mnt/tmp
-echo "DISPLAY_SCALE=$DISPLAY_SCALE" > /mnt/tmp/bromure-build.env
+{
+    echo "DISPLAY_SCALE=$DISPLAY_SCALE"
+    echo "BROMURE_PROXY=$ALPINE_REPO_BASE"
+} > /mnt/tmp/bromure-build.env
 
 # Resolv: cloud-init isn't running here; copy the installer's resolv.conf.
 # Runtime systemd-resolved will replace this on first boot.
@@ -202,6 +208,38 @@ export DEBIAN_PRIORITY=critical
 # Bring in build-time vars (DISPLAY_SCALE etc.) stashed by outer setup.sh.
 . /tmp/bromure-build.env
 KITTY_FONT_SIZE=$((14 * DISPLAY_SCALE))
+
+# Route guest HTTP(S) through the host's HTTP→HTTPS proxy. The host's
+# URLSession (Apple's TLS) handles the VPN cleanly where guest TLS
+# stacks (Node, apt-https, curl) sometimes hang. apt and curl read
+# both lowercase and uppercase forms; export all four so wget /
+# npm / Python / etc. all pick it up.
+#
+# Ubuntu's apt mirrors are plain HTTP and the bake's network reaches
+# them directly without VPN-TLS issues, so we exclude them from the
+# proxy. Going through the proxy would still work (it'd HTTPS-promote
+# upstream) but adds latency for hundreds of MB of .deb downloads.
+if [ -n "$BROMURE_PROXY" ]; then
+    export http_proxy="$BROMURE_PROXY"
+    export https_proxy="$BROMURE_PROXY"
+    export HTTP_PROXY="$BROMURE_PROXY"
+    export HTTPS_PROXY="$BROMURE_PROXY"
+    export no_proxy="localhost,127.0.0.1,::1,ports.ubuntu.com,archive.ubuntu.com,security.ubuntu.com"
+    export NO_PROXY="$no_proxy"
+    # apt's libapt: env vars work in current apt but the explicit
+    # config file is defensive AND lets us pin per-host DIRECT
+    # bypass for Ubuntu mirrors (apt doesn't honour no_proxy as
+    # consistently as curl/wget — per-host `Proxy DIRECT` is the
+    # documented escape hatch).
+    mkdir -p /etc/apt/apt.conf.d
+    cat > /etc/apt/apt.conf.d/99-bromure-proxy <<APTCONF
+Acquire::http::Proxy "$BROMURE_PROXY";
+Acquire::https::Proxy "$BROMURE_PROXY";
+Acquire::http::Proxy::ports.ubuntu.com DIRECT;
+Acquire::http::Proxy::archive.ubuntu.com DIRECT;
+Acquire::http::Proxy::security.ubuntu.com DIRECT;
+APTCONF
+fi
 
 log() { printf '[ac-chroot] %s (t+%ss)\n' "$*" "$SECONDS"; }
 fail() { printf 'SANDBOX_SETUP_FAILED: %s\n' "$*"; exit 1; }

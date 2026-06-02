@@ -23,8 +23,23 @@ final class AlpinePackageProxy: @unchecked Sendable {
     /// hands out 192.168.64.0/24 with .1 as the host-side gateway IP.
     static let guestReachableHost = "192.168.64.1"
 
-    /// Single upstream we'll talk HTTPS to. Anything else gets 403.
-    private static let upstreamHost = "dl-cdn.alpinelinux.org"
+    /// Default upstream for reverse-proxy (path-only) requests, which
+    /// is what the bake's alpine_repo and modloop cmdline URLs use.
+    private static let defaultReverseUpstream = "dl-cdn.alpinelinux.org"
+
+    /// Per-bake record of every upstream host we proxied to (and the
+    /// number of requests). Dumped on stop() so a successful bake's
+    /// network footprint is visible — that's how we build (or audit)
+    /// the production allowlist. Concurrent worker queues access
+    /// this, so guard with a lock.
+    private let contactedLock = NSLock()
+    private var contactedHosts: [String: Int] = [:]
+
+    private func recordHost(_ host: String) {
+        contactedLock.lock()
+        defer { contactedLock.unlock() }
+        contactedHosts[host, default: 0] += 1
+    }
 
     /// Hard cap on the request-header bytes we'll buffer before parsing.
     /// Real apk-tools / busybox-wget headers are well under 1 KB; this
@@ -38,31 +53,34 @@ final class AlpinePackageProxy: @unchecked Sendable {
         qos: .utility, attributes: .concurrent)
     private var listenFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
-    private let session: URLSession
     private(set) var mirrorURL: URL?
 
-    init() {
-        let cfg = URLSessionConfiguration.ephemeral
-        // modloop-virt can be ~50–100 MB; give it room.
-        cfg.timeoutIntervalForRequest = 60
-        cfg.timeoutIntervalForResource = 600
-        cfg.httpMaximumConnectionsPerHost = 8
-        // We don't want URLSession to add `Accept-Encoding: gzip` and
-        // then transparently decode — the guest already handles
-        // whatever encoding it asked for. Disable by setting an empty
-        // additional Accept-Encoding via header forwarding below.
-        self.session = URLSession(configuration: cfg)
-    }
+    // Per-request URLSession is created inside `streamRequest` so the
+    // streaming delegate's lifetime matches one HTTP hop. No shared
+    // session state — connection pooling per host is still done by
+    // URLSession internally but isolated per request, which keeps
+    // memory bounded.
 
     /// Bind and start listening. Throws on bind / listen failure (e.g.
     /// `EADDRINUSE` if another process holds the port; we bind to
     /// kernel-assigned `port 0` so this is unlikely).
     func start() throws {
+        // Globally ignore SIGPIPE. Our `Darwin.write` calls in
+        // splice / writeStatus / writeResponse hit a closed client
+        // socket the moment a guest gives up mid-download (curl
+        // returned 23, npm bailed, etc.). Default SIGPIPE disposition
+        // is "terminate the process" — no crash log, no diagnostic
+        // report, just silent exit. Per-socket SO_NOSIGPIPE below is
+        // belt-and-braces; this is the suspenders.
+        signal(SIGPIPE, SIG_IGN)
+
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw Error.socket(errno) }
 
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                   &yes, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
                    &yes, socklen_t(MemoryLayout<Int32>.size))
 
         var addr = sockaddr_in()
@@ -114,12 +132,24 @@ final class AlpinePackageProxy: @unchecked Sendable {
     }
 
     /// Tear the listener down. Safe to call from any thread; the cancel
-    /// handler closes the listening fd.
+    /// handler closes the listening fd. Also dumps a sorted list of
+    /// every upstream host this proxy contacted so we can audit what
+    /// the bake actually talks to and tighten / extend the allowlist.
     func stop() {
         acceptSource?.cancel()
         acceptSource = nil
         listenFD = -1
         mirrorURL = nil
+
+        contactedLock.lock()
+        let snapshot = contactedHosts
+        contactedLock.unlock()
+        guard !snapshot.isEmpty else { return }
+        let lines = snapshot
+            .sorted { $0.key < $1.key }
+            .map { "  \($0.key)  (\($0.value) request\($0.value == 1 ? "" : "s"))" }
+            .joined(separator: "\n")
+        Self.log("upstream hosts contacted during this bake:\n\(lines)")
     }
 
     // MARK: - Accept + serve
@@ -127,12 +157,15 @@ final class AlpinePackageProxy: @unchecked Sendable {
     private func acceptOne() {
         let cfd = Darwin.accept(listenFD, nil, nil)
         guard cfd >= 0 else { return }
+        // Per-socket SIGPIPE suppression — a closed-client write
+        // returns EPIPE without signalling the process.
+        var yes: Int32 = 1
+        setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE,
+                   &yes, socklen_t(MemoryLayout<Int32>.size))
         workQueue.async { [weak self] in self?.serve(cfd) }
     }
 
     private func serve(_ clientFD: Int32) {
-        defer { Darwin.close(clientFD) }
-
         // Read-side timeout in case the client opens a TCP connection
         // and never sends anything — keeps our concurrent worker queue
         // from filling up with idle handlers.
@@ -142,19 +175,69 @@ final class AlpinePackageProxy: @unchecked Sendable {
 
         guard let req = readRequest(clientFD) else {
             writeStatus(clientFD, status: 400, reason: "Bad Request")
+            Darwin.close(clientFD)
             return
         }
+
+        // CONNECT host:port — open a raw TCP tunnel to upstream and
+        // splice bytes both ways. Used when the guest has
+        // HTTPS_PROXY=http://us pointed at us. The client then does
+        // TLS end-to-end through our tunnel; we never see the
+        // plaintext. Only allowed for whitelisted hosts so the proxy
+        // can't be used as a generic SOCKS-style escape hatch.
+        if req.method == "CONNECT" {
+            handleConnect(clientFD, target: req.path)
+            return
+        }
+
+        defer { Darwin.close(clientFD) }
+
         guard req.method == "GET" || req.method == "HEAD" else {
             writeStatus(clientFD, status: 405, reason: "Method Not Allowed")
             return
         }
-        guard req.path.hasPrefix("/"),
-              let url = URL(string: "https://\(Self.upstreamHost)\(req.path)") else {
+
+        // Two GET/HEAD shapes:
+        //   - "/path"        — reverse-proxy mode, used by the kernel
+        //                       cmdline alpine_repo/modloop URLs.
+        //                       Hardcoded upstream is dl-cdn.
+        //   - "http://..."   — forward-proxy mode, used when guest has
+        //                       HTTP_PROXY set. We promote the scheme
+        //                       to HTTPS upstream via URLSession so
+        //                       the guest stays on plain HTTP.
+        let upstreamURL: URL
+        let pathForLog: String
+        if req.path.hasPrefix("http://") || req.path.hasPrefix("https://") {
+            guard let abs = URL(string: req.path),
+                  let host = abs.host else {
+                writeStatus(clientFD, status: 400, reason: "Bad Path")
+                return
+            }
+            recordHost(host)
+            // Always speak HTTPS upstream regardless of what the
+            // client URL said — that's the whole point of this proxy.
+            var comps = URLComponents(url: abs, resolvingAgainstBaseURL: false)!
+            comps.scheme = "https"
+            guard let promoted = comps.url else {
+                writeStatus(clientFD, status: 400, reason: "Bad Path")
+                return
+            }
+            upstreamURL = promoted
+            pathForLog = "\(req.method) \(promoted)"
+        } else if req.path.hasPrefix("/") {
+            recordHost(Self.defaultReverseUpstream)
+            guard let url = URL(string: "https://\(Self.defaultReverseUpstream)\(req.path)") else {
+                writeStatus(clientFD, status: 400, reason: "Bad Path")
+                return
+            }
+            upstreamURL = url
+            pathForLog = "\(req.method) \(req.path)"
+        } else {
             writeStatus(clientFD, status: 400, reason: "Bad Path")
             return
         }
 
-        var upstream = URLRequest(url: url)
+        var upstream = URLRequest(url: upstreamURL)
         upstream.httpMethod = req.method
         // Forward most headers verbatim. Strip:
         //   - Host:   URLSession sets it from the URL.
@@ -169,34 +252,150 @@ final class AlpinePackageProxy: @unchecked Sendable {
             upstream.setValue(v, forHTTPHeaderField: k)
         }
 
-        Self.log("\(req.method) \(req.path)")
+        Self.log(pathForLog)
+        streamRequest(clientFD: clientFD, request: upstream, isHead: req.method == "HEAD")
+    }
 
-        let semaphore = DispatchSemaphore(value: 0)
-        var bodyOut: Data?
-        var httpOut: HTTPURLResponse?
-        var errOut: Swift.Error?
-        let task = session.dataTask(with: upstream) { d, r, e in
-            bodyOut = d
-            httpOut = r as? HTTPURLResponse
-            errOut = e
-            semaphore.signal()
-        }
+    /// Drive the upstream request through a `URLSessionDataDelegate`
+    /// so each chunk lands on the wire as it arrives instead of
+    /// buffering the entire body in memory. Previous implementation
+    /// used `URLSession.dataTask(_:completionHandler:)` which holds
+    /// the whole response — a parallel apt + npm install would
+    /// allocate hundreds of MB of `Data`, plenty enough to trip
+    /// macOS jetsam and silently kill the host process.
+    private func streamRequest(
+        clientFD: Int32, request: URLRequest, isHead: Bool
+    ) {
+        let delegate = StreamingProxyDelegate(clientFD: clientFD, isHead: isHead)
+        // Per-request URLSession so the delegate's lifetime matches
+        // the task and we don't have to multiplex by task identifier.
+        // Costs ~one URLSession allocation per HTTP hop; cheap.
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 60
+        cfg.timeoutIntervalForResource = 600
+        cfg.httpMaximumConnectionsPerHost = 4
+        let sess = URLSession(configuration: cfg,
+                               delegate: delegate, delegateQueue: nil)
+        let task = sess.dataTask(with: request)
         task.resume()
-        _ = semaphore.wait(timeout: .now() + 600)
+        _ = delegate.semaphore.wait(timeout: .now() + 600)
+        sess.finishTasksAndInvalidate()
 
-        if let e = errOut {
-            Self.log("upstream error for \(req.path): \(e)")
+        if delegate.completionError != nil && !delegate.headersSent {
+            // Upstream errored before we wrote a response line —
+            // safe to emit a 502. Once headers are out we can't
+            // change status; just close.
             writeStatus(clientFD, status: 502, reason: "Bad Gateway")
+        }
+    }
+
+    // MARK: - CONNECT tunnel
+
+    /// Accept a CONNECT request, open a raw TCP socket to the upstream
+    /// host:port (after allowlist check), tell the client the tunnel
+    /// is up, and splice bytes both ways until either side hits EOF.
+    /// Note: we do NOT terminate TLS — the client and upstream do TLS
+    /// end-to-end through the tunnel. This means CONNECT mode does
+    /// not work around guest-side TLS bugs; it's useful when the
+    /// guest's TLS is fine but the connection itself needs to come
+    /// from the host's network stack (e.g. different MTU / routing).
+    private func handleConnect(_ clientFD: Int32, target: String) {
+        let parts = target.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2,
+              let port = UInt16(parts[1]) else {
+            writeStatus(clientFD, status: 400, reason: "Bad CONNECT target")
+            Darwin.close(clientFD)
             return
         }
-        guard let http = httpOut else {
-            writeStatus(clientFD, status: 502, reason: "Bad Gateway")
-            return
+        let host = parts[0]
+        recordHost(host)
+        Self.log("CONNECT \(host):\(port)")
+
+        // Resolve + connect on a background queue (DNS can take a
+        // moment). Once connected, write 200 to the client and start
+        // the splice.
+        workQueue.async { [weak self] in
+            guard let self else { Darwin.close(clientFD); return }
+            guard let upstreamFD = Self.openTCP(host: host, port: port) else {
+                self.writeStatus(clientFD, status: 502, reason: "Bad Gateway")
+                Darwin.close(clientFD)
+                return
+            }
+            let okay = "HTTP/1.1 200 Connection established\r\n\r\n"
+            _ = okay.withCString { Darwin.write(clientFD, $0, strlen($0)) }
+            Self.splice(clientFD, upstreamFD)
         }
-        // HEAD: keep the status + headers, drop the body even if
-        // upstream returned one (HEAD is supposed to be body-less).
-        let body = req.method == "HEAD" ? Data() : (bodyOut ?? Data())
-        writeResponse(clientFD, http: http, body: body, isHead: req.method == "HEAD")
+    }
+
+    /// Open a TCP socket to `host:port`. Uses `getaddrinfo` so it
+    /// works for both IPv4 and IPv6 upstreams. Returns the fd on
+    /// success; closes + returns nil on failure.
+    private static func openTCP(host: String, port: UInt16) -> Int32? {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        let rc = getaddrinfo(host, String(port), &hints, &res)
+        guard rc == 0, let info = res else {
+            log("getaddrinfo(\(host)) failed: \(rc)")
+            return nil
+        }
+        defer { freeaddrinfo(info) }
+        var ai: UnsafeMutablePointer<addrinfo>? = info
+        while let cur = ai {
+            let fd = socket(cur.pointee.ai_family,
+                            cur.pointee.ai_socktype,
+                            cur.pointee.ai_protocol)
+            if fd >= 0 {
+                var yes: Int32 = 1
+                setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
+                           &yes, socklen_t(MemoryLayout<Int32>.size))
+                if Darwin.connect(fd, cur.pointee.ai_addr,
+                                  cur.pointee.ai_addrlen) == 0 {
+                    return fd
+                }
+                Darwin.close(fd)
+            }
+            ai = cur.pointee.ai_next
+        }
+        log("could not connect to \(host):\(port)")
+        return nil
+    }
+
+    /// Bidirectional byte pump until both sides hit EOF, then close
+    /// both fds. Same pattern as LoopbackCallbackForwarder.splice.
+    private static func splice(_ a: Int32, _ b: Int32) {
+        let group = DispatchGroup()
+        let q = DispatchQueue.global(qos: .utility)
+        func pump(from: Int32, to: Int32) {
+            group.enter()
+            q.async {
+                var buf = [UInt8](repeating: 0, count: 65536)
+                while true {
+                    let n = Darwin.read(from, &buf, buf.count)
+                    if n <= 0 { break }
+                    var off = 0
+                    let ok = buf.withUnsafeBytes { raw -> Bool in
+                        guard let base = raw.baseAddress else { return false }
+                        while off < n {
+                            let w = Darwin.write(to, base + off, n - off)
+                            if w <= 0 { return false }
+                            off += w
+                        }
+                        return true
+                    }
+                    if !ok { break }
+                }
+                Darwin.shutdown(to, SHUT_WR)
+                group.leave()
+            }
+        }
+        pump(from: a, to: b)
+        pump(from: b, to: a)
+        group.notify(queue: q) {
+            Darwin.close(a)
+            Darwin.close(b)
+        }
     }
 
     // MARK: - Parser
@@ -251,40 +450,91 @@ final class AlpinePackageProxy: @unchecked Sendable {
         _ = s.withCString { Darwin.write(fd, $0, strlen($0)) }
     }
 
-    private func writeResponse(_ fd: Int32, http: HTTPURLResponse,
-                                body: Data, isHead: Bool) {
-        var head = "HTTP/1.1 \(http.statusCode) " +
-            "\(HTTPURLResponse.localizedString(forStatusCode: http.statusCode))\r\n"
-        var sawContentLength = false
-        // Drop hop-by-hop + content-coding headers. URLSession may have
-        // already decompressed the body or rewritten chunked → single
-        // blob; forwarding the original encoding hints would mislead
-        // the guest.
-        let drop: Set<String> = [
-            "connection", "transfer-encoding",
-            "content-encoding", "content-length",
-        ]
-        for (k, v) in http.allHeaderFields {
-            guard let key = k as? String, let value = v as? String else { continue }
-            if drop.contains(key.lowercased()) { continue }
-            head += "\(key): \(value)\r\n"
-            _ = sawContentLength
+    /// Streaming response writer driven by URLSession's delegate
+    /// callbacks. Headers go out in `urlSession(_:dataTask:didReceive:)`,
+    /// each body chunk in `urlSession(_:dataTask:didReceive:)` for
+    /// Data, completion in `urlSession(_:task:didCompleteWithError:)`.
+    /// Memory footprint is bounded by URLSession's internal pacing —
+    /// no per-request 100 MB Data hanging around.
+    final class StreamingProxyDelegate: NSObject,
+            URLSessionDataDelegate, @unchecked Sendable {
+        let clientFD: Int32
+        let isHead: Bool
+        let semaphore = DispatchSemaphore(value: 0)
+        var headersSent = false
+        var completionError: Swift.Error?
+
+        init(clientFD: Int32, isHead: Bool) {
+            self.clientFD = clientFD
+            self.isHead = isHead
+            super.init()
         }
-        // We always know body.count here, so use it as the canonical
-        // length (matches what we'll actually write).
-        let len = isHead ? 0 : body.count
-        head += "Content-Length: \(len)\r\n"
-        head += "Connection: close\r\n\r\n"
-        _ = head.withCString { Darwin.write(fd, $0, strlen($0)) }
-        if isHead { return }
-        body.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            guard let base = raw.baseAddress else { return }
-            var off = 0
-            while off < body.count {
-                let w = Darwin.write(fd, base + off, body.count - off)
-                if w <= 0 { break }
-                off += w
+
+        func urlSession(_ session: URLSession,
+                         dataTask: URLSessionDataTask,
+                         didReceive response: URLResponse,
+                         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            guard let http = response as? HTTPURLResponse else {
+                completionHandler(.cancel)
+                return
             }
+            var head = "HTTP/1.1 \(http.statusCode) " +
+                "\(HTTPURLResponse.localizedString(forStatusCode: http.statusCode))\r\n"
+            // Drop hop-by-hop + content-coding headers. URLSession
+            // transparently decompresses content-encoded responses, so
+            // forwarding the original encoding hints would tell the
+            // guest to decompress already-decompressed bytes. Also
+            // drop Content-Length: we'll either pass through a known
+            // length from URLResponse.expectedContentLength or stream
+            // until we close the connection.
+            let drop: Set<String> = [
+                "connection", "transfer-encoding",
+                "content-encoding", "content-length",
+            ]
+            for (k, v) in http.allHeaderFields {
+                guard let key = k as? String, let value = v as? String else { continue }
+                if drop.contains(key.lowercased()) { continue }
+                head += "\(key): \(value)\r\n"
+            }
+            let expected = response.expectedContentLength
+            if isHead {
+                head += "Content-Length: 0\r\n"
+            } else if expected >= 0 {
+                head += "Content-Length: \(expected)\r\n"
+            }
+            // Connection: close — also our cue to the guest that
+            // the body length is whatever it reads until EOF, in
+            // case we didn't set Content-Length.
+            head += "Connection: close\r\n\r\n"
+            _ = head.withCString { Darwin.write(clientFD, $0, strlen($0)) }
+            headersSent = true
+            // HEAD: status + headers out, no body — cancel the task.
+            completionHandler(isHead ? .cancel : .allow)
+        }
+
+        func urlSession(_ session: URLSession,
+                         dataTask: URLSessionDataTask,
+                         didReceive data: Data) {
+            // Write each chunk directly to the client socket. SIGPIPE
+            // is masked process-wide and per-socket; writes to a
+            // closed client just return EPIPE here and the underlying
+            // URLSession task will fail next round and complete.
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                guard let base = raw.baseAddress else { return }
+                var off = 0
+                while off < data.count {
+                    let w = Darwin.write(clientFD, base + off, data.count - off)
+                    if w <= 0 { return }
+                    off += w
+                }
+            }
+        }
+
+        func urlSession(_ session: URLSession,
+                         task: URLSessionTask,
+                         didCompleteWithError error: Swift.Error?) {
+            completionError = error
+            semaphore.signal()
         }
     }
 
