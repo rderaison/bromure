@@ -61,6 +61,29 @@ if ! grep -q '/community' /etc/apk/repositories; then
         >> /etc/apk/repositories
 fi
 
+# Route every outer-shell HTTP(S) call (debootstrap → wget, the
+# nlplug-related curl invocations, etc.) through the same host proxy.
+# Without this, debootstrap fetches Ubuntu packages from
+# ports.ubuntu.com directly and we lose proxy visibility + uniform
+# VPN handling for that ~150 MB chunk of the bake.
+#
+# The proxy host MUST be in no_proxy. apk's repo URL also points at
+# the proxy (192.168.64.1:PORT/alpine/...); if HTTP_PROXY routes
+# *that* through itself, apk sends an absolute-URL request and we
+# loop forever (forward-proxy code promotes to HTTPS and dials
+# 192.168.64.1:PORT/... which we don't speak TLS for).
+if [ -n "$ALPINE_REPO_BASE" ] && [ "$ALPINE_REPO_BASE" != "http://dl-cdn.alpinelinux.org" ]; then
+    export http_proxy="$ALPINE_REPO_BASE"
+    export https_proxy="$ALPINE_REPO_BASE"
+    export HTTP_PROXY="$ALPINE_REPO_BASE"
+    export HTTPS_PROXY="$ALPINE_REPO_BASE"
+    # Extract host from http://host:port — strip scheme, then port.
+    _host_port="${ALPINE_REPO_BASE##*://}"
+    _proxy_host="${_host_port%%:*}"
+    export no_proxy="localhost,127.0.0.1,::1,$_proxy_host"
+    export NO_PROXY="$no_proxy"
+fi
+
 retry apk update
 # GNU tar + xz + zstd: debootstrap's dpkg-deb extractor shells out to tar,
 # and BusyBox tar fails on some Ubuntu .deb data tarballs (xattrs, etc.).
@@ -209,35 +232,40 @@ export DEBIAN_PRIORITY=critical
 . /tmp/bromure-build.env
 KITTY_FONT_SIZE=$((14 * DISPLAY_SCALE))
 
-# Route guest HTTP(S) through the host's HTTP→HTTPS proxy. The host's
-# URLSession (Apple's TLS) handles the VPN cleanly where guest TLS
-# stacks (Node, apt-https, curl) sometimes hang. apt and curl read
-# both lowercase and uppercase forms; export all four so wget /
-# npm / Python / etc. all pick it up.
+# Route every guest HTTP(S) request through the host's proxy. The
+# host's URLSession (Apple's TLS) handles VPN MITM cleanly where
+# guest TLS stacks (Node, apt-https, curl) sometimes hang.
 #
-# Ubuntu's apt mirrors are plain HTTP and the bake's network reaches
-# them directly without VPN-TLS issues, so we exclude them from the
-# proxy. Going through the proxy would still work (it'd HTTPS-promote
-# upstream) but adds latency for hundreds of MB of .deb downloads.
+# All of it goes through — Ubuntu mirrors included. The proxy's
+# forward-proxy mode promotes upstream HTTP requests to HTTPS via
+# URLSession, and Canonical's mirrors support HTTPS, so this works
+# uniformly. The benefit is one source of truth for every package
+# the bake fetches (logged via the proxy's recordHost / stop()
+# summary) and a single network-handling code path. The cost is
+# proxy overhead on .deb downloads, which is acceptable for a
+# one-time bake.
 if [ -n "$BROMURE_PROXY" ]; then
     export http_proxy="$BROMURE_PROXY"
     export https_proxy="$BROMURE_PROXY"
     export HTTP_PROXY="$BROMURE_PROXY"
     export HTTPS_PROXY="$BROMURE_PROXY"
-    export no_proxy="localhost,127.0.0.1,::1,ports.ubuntu.com,archive.ubuntu.com,security.ubuntu.com"
+    # Loopback + proxy host bypass. The proxy host MUST be here, or
+    # tools whose URL points at the proxy itself try to route the
+    # request *through* the proxy, the proxy promotes it to HTTPS
+    # against itself, and we hang. apk's repo URL is exactly this.
+    _host_port="${BROMURE_PROXY##*://}"
+    _proxy_host="${_host_port%%:*}"
+    export no_proxy="localhost,127.0.0.1,::1,$_proxy_host"
     export NO_PROXY="$no_proxy"
-    # apt's libapt: env vars work in current apt but the explicit
-    # config file is defensive AND lets us pin per-host DIRECT
-    # bypass for Ubuntu mirrors (apt doesn't honour no_proxy as
-    # consistently as curl/wget — per-host `Proxy DIRECT` is the
-    # documented escape hatch).
+    # apt's libapt also reads this config file (env vars usually
+    # work in current apt but the explicit config is defensive +
+    # gives a visible record of the override).
     mkdir -p /etc/apt/apt.conf.d
     cat > /etc/apt/apt.conf.d/99-bromure-proxy <<APTCONF
 Acquire::http::Proxy "$BROMURE_PROXY";
 Acquire::https::Proxy "$BROMURE_PROXY";
-Acquire::http::Proxy::ports.ubuntu.com DIRECT;
-Acquire::http::Proxy::archive.ubuntu.com DIRECT;
-Acquire::http::Proxy::security.ubuntu.com DIRECT;
+Acquire::http::Proxy::$_proxy_host DIRECT;
+Acquire::https::Proxy::$_proxy_host DIRECT;
 APTCONF
 fi
 
