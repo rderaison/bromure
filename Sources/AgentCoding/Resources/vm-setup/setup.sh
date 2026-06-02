@@ -48,14 +48,16 @@ log "preparing alpine bootstrap toolchain"
 . /etc/os-release 2>/dev/null || true
 ALPINE_VER="${VERSION_ID:-3.22}"
 ALPINE_VER_SHORT=$(echo "$ALPINE_VER" | cut -d. -f1,2)
-# HTTP (not HTTPS) — matches the host's alpine_repo cmdline. Some
-# VPN / corporate MITM setups break apk-tools' OpenSSL 3.x handshake
-# with `unexpected eof while reading`; apk verifies every package's
-# RSA signature regardless of transport, so HTTP doesn't weaken
-# integrity. See UbuntuImageManager.swift for the corresponding /init
-# cmdline override.
+# Community repo URL must match the main repo's host — the host runs
+# an HTTP→HTTPS proxy (AlpinePackageProxy) and exports its base URL
+# via ALPINE_REPO_BASE so apk's repo and our community line both go
+# through the same channel. If the proxy isn't running (env unset)
+# fall back to plain HTTP at the CDN. Either way, apk verifies every
+# package's RSA signature against keys in alpine-keys, so HTTP-vs-
+# HTTPS only affects transport — not integrity.
+: "${ALPINE_REPO_BASE:=http://dl-cdn.alpinelinux.org}"
 if ! grep -q '/community' /etc/apk/repositories; then
-    echo "http://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER_SHORT}/community" \
+    echo "${ALPINE_REPO_BASE}/alpine/v${ALPINE_VER_SHORT}/community" \
         >> /etc/apk/repositories
 fi
 
@@ -173,6 +175,15 @@ cp /etc/resolv.conf /mnt/etc/resolv.conf
 # Phase-2 logic lives in this heredoc. setup.sh stays a single file so the
 # host only has to share one script via virtiofs.
 # ---------------------------------------------------------------------------
+
+# Alpine's installer environment doesn't always have devpts mounted
+# at /dev/pts (the directory may not even exist on /dev which is a
+# bare devtmpfs from our rdinit shim). Without /dev/pts on the host,
+# `mount --bind /dev /mnt/dev` brings a /dev view that lacks a pts
+# directory and the follow-up `mount --bind /dev/pts /mnt/dev/pts`
+# fails with "mount point does not exist". Materialise it first.
+[ -d /dev/pts ] || mkdir /dev/pts
+mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts
 
 mount --bind /dev      /mnt/dev
 mount --bind /dev/pts  /mnt/dev/pts

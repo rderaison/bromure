@@ -301,6 +301,22 @@ public final class UbuntuImageManager {
         config.cpuCount = Self.installerCPUs
         config.memorySize = Self.installerMemoryBytes
 
+        // Start the HTTP→HTTPS proxy for Alpine packages. Guest TLS
+        // stacks (apk-tools' OpenSSL, busybox-wget) are unreliable
+        // over some VPN / MITM setups; the host's URLSession uses
+        // Apple's TLS which handles them fine. Bind first so the URL
+        // is known when we build the kernel cmdline; if the bind
+        // fails (extremely rare with port=0) we fall back to direct
+        // HTTP, which still beats HTTPS on these VPNs.
+        let proxy = AlpinePackageProxy()
+        do { try proxy.start() } catch {
+            FileHandle.standardError.write(Data(
+                "[bake] Alpine package proxy failed to start (\(error)) — falling back to direct HTTP\n".utf8))
+        }
+        defer { proxy.stop() }
+        let alpineRepoBase = proxy.mirrorURL?.absoluteString
+            ?? "http://dl-cdn.alpinelinux.org"
+
         // Build (or refresh) the shimmed initrd so the MTU clamp runs
         // BEFORE Alpine's /init does its modloop / apkovl / APKINDEX
         // fetches. The Linux kernel natively supports concatenated
@@ -328,21 +344,16 @@ public final class UbuntuImageManager {
             // no ip= on the cmdline, Alpine's /init sees the network
             // is already up and skips its own DHCP step.
             "rdinit=/init.bromure",
-            // HTTP — not HTTPS — on purpose. Some VPN / corporate
-            // MITM setups break apk-tools' OpenSSL 3.x handshake
-            // (strict `unexpected eof while reading` even though the
-            // CDN works for nlplug-findfs's HTTPS modloop pull).
-            // apk verifies every package's RSA signature regardless
-            // of transport, so HTTP doesn't weaken integrity.
-            "alpine_repo=http://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main",
-            // HTTP — for the same VPN/OpenSSL reason apk's repo is on
-            // HTTP. Alpine's OpenRC modloop service uses busybox-wget
-            // to re-verify / refetch the modloop file in the new
-            // rootfs; busybox-wget's TLS stack hangs the same way
-            // apk-tools' did. Integrity is preserved: modloop is
-            // RSA-signed and the .pub key we already have in
-            // /var/cache/misc/ verifies it independently of transport.
-            "modloop=http://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/releases/aarch64/netboot-\(Self.alpineRelease)/modloop-virt",
+            // Plain HTTP through our in-process proxy. Guest's apk /
+            // wget speak HTTP; the proxy speaks HTTPS upstream via
+            // URLSession. Integrity is preserved at the apk layer
+            // (RSA-signed packages + signed APKINDEX, keys in
+            // alpine-keys which ships in our app bundle).
+            "alpine_repo=\(alpineRepoBase)/alpine/v\(Self.alpineVersion)/main",
+            // Same proxy handles the modloop fetch (both Alpine's
+            // initramfs nlplug-findfs and the in-rootfs modloop
+            // OpenRC service hit it).
+            "modloop=\(alpineRepoBase)/alpine/v\(Self.alpineVersion)/releases/aarch64/netboot-\(Self.alpineRelease)/modloop-virt",
             "modules=loop,squashfs,virtio-net,virtio-blk,virtiofs",
             // Disable ARM Scalable Matrix Extension. Same option the
             // installed image's GRUB cmdline uses — without it some
@@ -560,7 +571,10 @@ public final class UbuntuImageManager {
 
                 progress("Running setup.sh (apt + npm)…")
                 let scale = Self.detectDisplayScale()
-                send("sh /tmp/setup/setup.sh \(scale)\n")
+                // Pass the Alpine mirror URL (our proxy if it's up,
+                // else direct CDN) so setup.sh appends the community
+                // repo via the same channel apk's main repo uses.
+                send("ALPINE_REPO_BASE='\(alpineRepoBase)' sh /tmp/setup/setup.sh \(scale)\n")
                 try await buffer.wait(
                     for: "SANDBOX_SETUP_DONE",
                     timeout: 30 * 60,
