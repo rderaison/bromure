@@ -336,3 +336,29 @@
 "Soft reboot" = "Redémarrage progressif";
 "Hard reboot" = "Redémarrage forcé";
 "Soft reboot gracefully halts the VM (filesystems flush, services stop) and boots a fresh one in this window. Hard reboot tears down the VM immediately and starts a fresh one." = "Le redémarrage progressif arrête proprement la VM (vidage des systèmes de fichiers, arrêt des services) et en démarre une nouvelle dans cette fenêtre. Le redémarrage forcé détruit la VM immédiatement et en démarre une nouvelle.";
+
+/* Guardrails */
+"Guardrails" = "Garde-fous";
+"Guardrails strips destructive operations from the protocols this agent speaks. It's enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it. Blocked calls return a hard error the agent sees." = "Les garde-fous retirent les opérations destructrices des protocoles que parle cet agent. L'application se fait côté hôte — dans le proxy — afin qu'un agent défaillant ou compromis dans la VM ne puisse pas les contourner. Les appels bloqués renvoient une erreur ferme que l'agent voit.";
+"Databases" = "Bases de données";
+"No database endpoints configured. Add MongoDB, ClickHouse, or Elasticsearch endpoints under Credentials to guard them here." = "Aucun point de terminaison de base de données configuré. Ajoutez des points de terminaison MongoDB, ClickHouse ou Elasticsearch sous Identifiants pour les protéger ici.";
+"No kubeconfigs on this profile — add one under Credentials for this to take effect." = "Aucun kubeconfig sur ce profil — ajoutez-en un sous Identifiants pour que cela prenne effet.";
+"No registries on this profile — add one under Credentials for this to take effect." = "Aucun registre sur ce profil — ajoutez-en un sous Identifiants pour que cela prenne effet.";
+"Set this endpoint's host under Credentials for the guard to take effect." = "Définissez l'hôte de ce point de terminaison sous Identifiants pour que la protection prenne effet.";
+"Off" = "Désactivé";
+"Block destructive" = "Bloquer les destructions";
+"Read-only" = "Lecture seule";
+"No filtering." = "Aucun filtrage.";
+"Block deletes/drops; allow creates and updates." = "Bloque les suppressions/drops ; autorise les créations et mises à jour.";
+"Block every change; reads only." = "Bloque toute modification ; lecture seule.";
+"Applies to the kube API servers from this profile's kubeconfigs (e.g. `kubectl delete` fails cleanly)." = "S'applique aux serveurs d'API kube issus des kubeconfigs de ce profil (p. ex. `kubectl delete` échoue proprement).";
+"All *.amazonaws.com APIs; classified by action name (Delete*/Terminate* = destructive, Get*/List*/Describe* = read)." = "Toutes les API *.amazonaws.com ; classées par nom d'action (Delete*/Terminate* = destructif, Get*/List*/Describe* = lecture).";
+"api.digitalocean.com — DELETE = destructive." = "api.digitalocean.com — DELETE = destructif.";
+"Registries you've added under Credentials — pull = read, push = write, delete = destructive." = "Les registres que vous avez ajoutés sous Identifiants — pull = lecture, push = écriture, delete = destructif.";
+"github.com REST API + git over HTTPS; read-only also blocks `git push`." = "API REST github.com + git via HTTPS ; le mode lecture seule bloque aussi `git push`.";
+"gitlab.com REST API + git over HTTPS." = "API REST gitlab.com + git via HTTPS.";
+"bitbucket.org REST API + git over HTTPS." = "API REST bitbucket.org + git via HTTPS.";
+"Docker registries" = "Registres Docker";
+"deleteOne/deleteMany = destructive; insert/update/replace = write; find/aggregate = read." = "deleteOne/deleteMany = destructif ; insert/update/replace = écriture ; find/aggregate = lecture.";
+"DROP/TRUNCATE/DELETE and ALTER…DELETE = destructive; INSERT/CREATE = write; SELECT/SHOW = read." = "DROP/TRUNCATE/DELETE et ALTER…DELETE = destructif ; INSERT/CREATE = écriture ; SELECT/SHOW = lecture.";
+"DELETE + _delete_by_query = destructive; _search/_count/_msearch = read; _bulk/index/_update = write." = "DELETE + _delete_by_query = destructif ; _search/_count/_msearch = lecture ; _bulk/index/_update = écriture.";

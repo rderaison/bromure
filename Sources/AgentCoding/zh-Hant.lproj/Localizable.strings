@@ -336,3 +336,29 @@
 "Soft reboot" = "軟重啟";
 "Hard reboot" = "硬重啟";
 "Soft reboot gracefully halts the VM (filesystems flush, services stop) and boots a fresh one in this window. Hard reboot tears down the VM immediately and starts a fresh one." = "軟重啟會正常關閉虛擬機（清空檔案系統、停止服務），並在此視窗中啟動一個全新的虛擬機。硬重啟會立即銷毀虛擬機並啟動一個新的。";
+
+/* Guardrails */
+"Guardrails" = "防護欄";
+"Guardrails strips destructive operations from the protocols this agent speaks. It's enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it. Blocked calls return a hard error the agent sees." = "防護欄會從此代理所使用的協定中移除破壞性操作。它在主機端（代理程式內部）強制執行，因此 VM 中行為異常或遭入侵的代理無法繞過。被封鎖的呼叫會向代理回傳一個明確的錯誤。";
+"Databases" = "資料庫";
+"No database endpoints configured. Add MongoDB, ClickHouse, or Elasticsearch endpoints under Credentials to guard them here." = "未設定資料庫端點。請在「憑證」中新增 MongoDB、ClickHouse 或 Elasticsearch 端點以在此處加以防護。";
+"No kubeconfigs on this profile — add one under Credentials for this to take effect." = "此設定檔沒有 kubeconfig — 請在「憑證」中新增一個以使其生效。";
+"No registries on this profile — add one under Credentials for this to take effect." = "此設定檔沒有映像倉庫 — 請在「憑證」中新增一個以使其生效。";
+"Set this endpoint's host under Credentials for the guard to take effect." = "請在「憑證」中設定此端點的主機，以使防護生效。";
+"Off" = "關閉";
+"Block destructive" = "封鎖破壞性操作";
+"Read-only" = "唯讀";
+"No filtering." = "不過濾。";
+"Block deletes/drops; allow creates and updates." = "封鎖刪除/drop；允許建立和更新。";
+"Block every change; reads only." = "封鎖所有變更；僅允許讀取。";
+"Applies to the kube API servers from this profile's kubeconfigs (e.g. `kubectl delete` fails cleanly)." = "適用於此設定檔 kubeconfig 中的 kube API 伺服器（例如 `kubectl delete` 會乾淨地失敗）。";
+"All *.amazonaws.com APIs; classified by action name (Delete*/Terminate* = destructive, Get*/List*/Describe* = read)." = "所有 *.amazonaws.com API；依操作名稱分類（Delete*/Terminate* = 破壞性，Get*/List*/Describe* = 讀取）。";
+"api.digitalocean.com — DELETE = destructive." = "api.digitalocean.com — DELETE = 破壞性。";
+"Registries you've added under Credentials — pull = read, push = write, delete = destructive." = "你在「憑證」中新增的映像倉庫 — pull = 讀取，push = 寫入，delete = 破壞性。";
+"github.com REST API + git over HTTPS; read-only also blocks `git push`." = "github.com REST API 與透過 HTTPS 的 git；唯讀模式還會封鎖 `git push`。";
+"gitlab.com REST API + git over HTTPS." = "gitlab.com REST API 與透過 HTTPS 的 git。";
+"bitbucket.org REST API + git over HTTPS." = "bitbucket.org REST API 與透過 HTTPS 的 git。";
+"Docker registries" = "Docker 映像倉庫";
+"deleteOne/deleteMany = destructive; insert/update/replace = write; find/aggregate = read." = "deleteOne/deleteMany = 破壞性；insert/update/replace = 寫入；find/aggregate = 讀取。";
+"DROP/TRUNCATE/DELETE and ALTER…DELETE = destructive; INSERT/CREATE = write; SELECT/SHOW = read." = "DROP/TRUNCATE/DELETE 和 ALTER…DELETE = 破壞性；INSERT/CREATE = 寫入；SELECT/SHOW = 讀取。";
+"DELETE + _delete_by_query = destructive; _search/_count/_msearch = read; _bulk/index/_update = write." = "DELETE + _delete_by_query = 破壞性；_search/_count/_msearch = 讀取；_bulk/index/_update = 寫入。";

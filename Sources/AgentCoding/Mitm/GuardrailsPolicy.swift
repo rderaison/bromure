@@ -21,19 +21,22 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         /// Block every mutation — the agent can only read.
         case readOnly
 
+        // Localized at the source: these are rendered via `Text(String)` /
+        // `Picker`, which SwiftUI shows verbatim — so the String must already
+        // be in the user's language by the time it leaves here.
         public var displayName: String {
             switch self {
-            case .off:         return "Off"
-            case .destructive: return "Block destructive"
-            case .readOnly:    return "Read-only"
+            case .off:         return NSLocalizedString("Off", comment: "")
+            case .destructive: return NSLocalizedString("Block destructive", comment: "")
+            case .readOnly:    return NSLocalizedString("Read-only", comment: "")
             }
         }
 
         public var detail: String {
             switch self {
-            case .off:         return "No filtering."
-            case .destructive: return "Block deletes/drops; allow creates and updates."
-            case .readOnly:    return "Block every change; reads only."
+            case .off:         return NSLocalizedString("No filtering.", comment: "")
+            case .destructive: return NSLocalizedString("Block deletes/drops; allow creates and updates.", comment: "")
+            case .readOnly:    return NSLocalizedString("Block every change; reads only.", comment: "")
             }
         }
     }

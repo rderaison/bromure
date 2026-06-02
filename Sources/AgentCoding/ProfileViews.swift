@@ -2263,7 +2263,7 @@ struct ProfileEditorView: View {
 
                 guardrailRow("Kubernetes", systemImage: "shippingbox.fill",
                              mode: $draft.guardrails.kubernetes,
-                             detail: "\(draft.guardrails.kubernetes.detail) Applies to the kube API servers from this profile's kubeconfigs (e.g. `kubectl delete` fails cleanly).")
+                             detail: "\(draft.guardrails.kubernetes.detail) \(NSLocalizedString("Applies to the kube API servers from this profile's kubeconfigs (e.g. `kubectl delete` fails cleanly).", comment: ""))")
                 if draft.kubeconfigs.isEmpty && draft.guardrails.kubernetes != .off {
                     Label("No kubeconfigs on this profile — add one under Credentials for this to take effect.",
                           systemImage: "exclamationmark.triangle.fill")
@@ -2272,13 +2272,13 @@ struct ProfileEditorView: View {
                 }
                 Divider()
                 guardrailRow("AWS", systemImage: "cloud.fill", mode: $draft.guardrails.aws,
-                             detail: "\(draft.guardrails.aws.detail) All *.amazonaws.com APIs; classified by action name (Delete*/Terminate* = destructive, Get*/List*/Describe* = read).")
+                             detail: "\(draft.guardrails.aws.detail) \(NSLocalizedString("All *.amazonaws.com APIs; classified by action name (Delete*/Terminate* = destructive, Get*/List*/Describe* = read).", comment: ""))")
                 Divider()
                 guardrailRow("DigitalOcean", systemImage: "drop.fill", mode: $draft.guardrails.digitalOcean,
-                             detail: "\(draft.guardrails.digitalOcean.detail) api.digitalocean.com — DELETE = destructive.")
+                             detail: "\(draft.guardrails.digitalOcean.detail) \(NSLocalizedString("api.digitalocean.com — DELETE = destructive.", comment: ""))")
                 Divider()
-                guardrailRow("Docker registries", systemImage: "cube.box.fill", mode: $draft.guardrails.docker,
-                             detail: "\(draft.guardrails.docker.detail) Registries you've added under Credentials — pull = read, push = write, delete = destructive.")
+                guardrailRow(NSLocalizedString("Docker registries", comment: ""), systemImage: "cube.box.fill", mode: $draft.guardrails.docker,
+                             detail: "\(draft.guardrails.docker.detail) \(NSLocalizedString("Registries you've added under Credentials — pull = read, push = write, delete = destructive.", comment: ""))")
                 if draft.dockerRegistries.isEmpty && draft.guardrails.docker != .off {
                     Label("No registries on this profile — add one under Credentials for this to take effect.",
                           systemImage: "exclamationmark.triangle.fill")
@@ -2288,15 +2288,15 @@ struct ProfileEditorView: View {
                 Divider()
                 guardrailRow("GitHub", systemImage: "chevron.left.forwardslash.chevron.right",
                              mode: $draft.guardrails.github,
-                             detail: "\(draft.guardrails.github.detail) github.com REST API + git over HTTPS; read-only also blocks `git push`.")
+                             detail: "\(draft.guardrails.github.detail) \(NSLocalizedString("github.com REST API + git over HTTPS; read-only also blocks `git push`.", comment: ""))")
                 Divider()
                 guardrailRow("GitLab", systemImage: "chevron.left.forwardslash.chevron.right",
                              mode: $draft.guardrails.gitlab,
-                             detail: "\(draft.guardrails.gitlab.detail) gitlab.com REST API + git over HTTPS.")
+                             detail: "\(draft.guardrails.gitlab.detail) \(NSLocalizedString("gitlab.com REST API + git over HTTPS.", comment: ""))")
                 Divider()
                 guardrailRow("Bitbucket", systemImage: "chevron.left.forwardslash.chevron.right",
                              mode: $draft.guardrails.bitbucket,
-                             detail: "\(draft.guardrails.bitbucket.detail) bitbucket.org REST API + git over HTTPS.")
+                             detail: "\(draft.guardrails.bitbucket.detail) \(NSLocalizedString("bitbucket.org REST API + git over HTTPS.", comment: ""))")
                 Divider()
                 databaseGuardrails
             }
@@ -2314,11 +2314,11 @@ struct ProfileEditorView: View {
     private func databaseEngineDetail(_ engine: HTTPDatabaseEndpoint.Engine) -> String {
         switch engine {
         case .mongoDataAPI:
-            return "deleteOne/deleteMany = destructive; insert/update/replace = write; find/aggregate = read."
+            return NSLocalizedString("deleteOne/deleteMany = destructive; insert/update/replace = write; find/aggregate = read.", comment: "")
         case .clickHouse:
-            return "DROP/TRUNCATE/DELETE and ALTER…DELETE = destructive; INSERT/CREATE = write; SELECT/SHOW = read."
+            return NSLocalizedString("DROP/TRUNCATE/DELETE and ALTER…DELETE = destructive; INSERT/CREATE = write; SELECT/SHOW = read.", comment: "")
         case .elasticsearch:
-            return "DELETE + _delete_by_query = destructive; _search/_count/_msearch = read; _bulk/index/_update = write."
+            return NSLocalizedString("DELETE + _delete_by_query = destructive; _search/_count/_msearch = read; _bulk/index/_update = write.", comment: "")
         }
     }
 

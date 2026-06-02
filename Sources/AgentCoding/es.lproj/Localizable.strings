@@ -336,3 +336,29 @@
 "Soft reboot" = "Reinicio suave";
 "Hard reboot" = "Reinicio forzado";
 "Soft reboot gracefully halts the VM (filesystems flush, services stop) and boots a fresh one in this window. Hard reboot tears down the VM immediately and starts a fresh one." = "El reinicio suave detiene la VM de forma ordenada (se vacían los sistemas de archivos, se detienen los servicios) y arranca una nueva en esta ventana. El reinicio forzado destruye la VM de inmediato e inicia una nueva.";
+
+/* Guardrails */
+"Guardrails" = "Salvaguardas";
+"Guardrails strips destructive operations from the protocols this agent speaks. It's enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it. Blocked calls return a hard error the agent sees." = "Las salvaguardas eliminan las operaciones destructivas de los protocolos que habla este agente. Se aplican en el host —dentro del proxy— para que un agente que funcione mal o esté comprometido en la VM no pueda eludirlas. Las llamadas bloqueadas devuelven un error rotundo que el agente ve.";
+"Databases" = "Bases de datos";
+"No database endpoints configured. Add MongoDB, ClickHouse, or Elasticsearch endpoints under Credentials to guard them here." = "No hay puntos de conexión de base de datos configurados. Agrega puntos de conexión de MongoDB, ClickHouse o Elasticsearch en Credenciales para protegerlos aquí.";
+"No kubeconfigs on this profile — add one under Credentials for this to take effect." = "No hay kubeconfigs en este perfil: agrega uno en Credenciales para que tenga efecto.";
+"No registries on this profile — add one under Credentials for this to take effect." = "No hay registros en este perfil: agrega uno en Credenciales para que tenga efecto.";
+"Set this endpoint's host under Credentials for the guard to take effect." = "Define el host de este punto de conexión en Credenciales para que la protección tenga efecto.";
+"Off" = "Desactivado";
+"Block destructive" = "Bloquear destructivas";
+"Read-only" = "Solo lectura";
+"No filtering." = "Sin filtrado.";
+"Block deletes/drops; allow creates and updates." = "Bloquea eliminaciones/drops; permite creaciones y actualizaciones.";
+"Block every change; reads only." = "Bloquea todos los cambios; solo lectura.";
+"Applies to the kube API servers from this profile's kubeconfigs (e.g. `kubectl delete` fails cleanly)." = "Se aplica a los servidores de la API de kube de los kubeconfigs de este perfil (p. ej., `kubectl delete` falla limpiamente).";
+"All *.amazonaws.com APIs; classified by action name (Delete*/Terminate* = destructive, Get*/List*/Describe* = read)." = "Todas las API *.amazonaws.com; clasificadas por nombre de acción (Delete*/Terminate* = destructivo, Get*/List*/Describe* = lectura).";
+"api.digitalocean.com — DELETE = destructive." = "api.digitalocean.com — DELETE = destructivo.";
+"Registries you've added under Credentials — pull = read, push = write, delete = destructive." = "Los registros que agregaste en Credenciales: pull = lectura, push = escritura, delete = destructivo.";
+"github.com REST API + git over HTTPS; read-only also blocks `git push`." = "API REST de github.com + git sobre HTTPS; el modo solo lectura también bloquea `git push`.";
+"gitlab.com REST API + git over HTTPS." = "API REST de gitlab.com + git sobre HTTPS.";
+"bitbucket.org REST API + git over HTTPS." = "API REST de bitbucket.org + git sobre HTTPS.";
+"Docker registries" = "Registros de Docker";
+"deleteOne/deleteMany = destructive; insert/update/replace = write; find/aggregate = read." = "deleteOne/deleteMany = destructivo; insert/update/replace = escritura; find/aggregate = lectura.";
+"DROP/TRUNCATE/DELETE and ALTER…DELETE = destructive; INSERT/CREATE = write; SELECT/SHOW = read." = "DROP/TRUNCATE/DELETE y ALTER…DELETE = destructivo; INSERT/CREATE = escritura; SELECT/SHOW = lectura.";
+"DELETE + _delete_by_query = destructive; _search/_count/_msearch = read; _bulk/index/_update = write." = "DELETE + _delete_by_query = destructivo; _search/_count/_msearch = lectura; _bulk/index/_update = escritura.";

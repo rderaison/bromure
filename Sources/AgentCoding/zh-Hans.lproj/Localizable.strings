@@ -336,3 +336,29 @@
 "Soft reboot" = "软重启";
 "Hard reboot" = "硬重启";
 "Soft reboot gracefully halts the VM (filesystems flush, services stop) and boots a fresh one in this window. Hard reboot tears down the VM immediately and starts a fresh one." = "软重启会正常关闭虚拟机（刷新文件系统、停止服务），并在此窗口中启动一个全新的虚拟机。硬重启会立即销毁虚拟机并启动一个新的。";
+
+/* Guardrails */
+"Guardrails" = "防护栏";
+"Guardrails strips destructive operations from the protocols this agent speaks. It's enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it. Blocked calls return a hard error the agent sees." = "防护栏会从该智能体所使用的协议中剥离破坏性操作。它在主机端（代理内部）强制执行，因此 VM 中行为异常或被入侵的智能体无法绕过。被阻止的调用会向智能体返回一个明确的错误。";
+"Databases" = "数据库";
+"No database endpoints configured. Add MongoDB, ClickHouse, or Elasticsearch endpoints under Credentials to guard them here." = "未配置数据库端点。请在“凭据”中添加 MongoDB、ClickHouse 或 Elasticsearch 端点以在此处加以防护。";
+"No kubeconfigs on this profile — add one under Credentials for this to take effect." = "此配置文件没有 kubeconfig — 请在“凭据”中添加一个以使其生效。";
+"No registries on this profile — add one under Credentials for this to take effect." = "此配置文件没有镜像仓库 — 请在“凭据”中添加一个以使其生效。";
+"Set this endpoint's host under Credentials for the guard to take effect." = "请在“凭据”中设置此端点的主机，以使防护生效。";
+"Off" = "关闭";
+"Block destructive" = "阻止破坏性操作";
+"Read-only" = "只读";
+"No filtering." = "不过滤。";
+"Block deletes/drops; allow creates and updates." = "阻止删除/drop；允许创建和更新。";
+"Block every change; reads only." = "阻止所有更改；仅允许读取。";
+"Applies to the kube API servers from this profile's kubeconfigs (e.g. `kubectl delete` fails cleanly)." = "适用于此配置文件 kubeconfig 中的 kube API 服务器（例如 `kubectl delete` 会干净地失败）。";
+"All *.amazonaws.com APIs; classified by action name (Delete*/Terminate* = destructive, Get*/List*/Describe* = read)." = "所有 *.amazonaws.com API；按操作名称分类（Delete*/Terminate* = 破坏性，Get*/List*/Describe* = 读取）。";
+"api.digitalocean.com — DELETE = destructive." = "api.digitalocean.com — DELETE = 破坏性。";
+"Registries you've added under Credentials — pull = read, push = write, delete = destructive." = "你在“凭据”中添加的镜像仓库 — pull = 读取，push = 写入，delete = 破坏性。";
+"github.com REST API + git over HTTPS; read-only also blocks `git push`." = "github.com REST API 与基于 HTTPS 的 git；只读模式还会阻止 `git push`。";
+"gitlab.com REST API + git over HTTPS." = "gitlab.com REST API 与基于 HTTPS 的 git。";
+"bitbucket.org REST API + git over HTTPS." = "bitbucket.org REST API 与基于 HTTPS 的 git。";
+"Docker registries" = "Docker 镜像仓库";
+"deleteOne/deleteMany = destructive; insert/update/replace = write; find/aggregate = read." = "deleteOne/deleteMany = 破坏性；insert/update/replace = 写入；find/aggregate = 读取。";
+"DROP/TRUNCATE/DELETE and ALTER…DELETE = destructive; INSERT/CREATE = write; SELECT/SHOW = read." = "DROP/TRUNCATE/DELETE 和 ALTER…DELETE = 破坏性；INSERT/CREATE = 写入；SELECT/SHOW = 读取。";
+"DELETE + _delete_by_query = destructive; _search/_count/_msearch = read; _bulk/index/_update = write." = "DELETE + _delete_by_query = 破坏性；_search/_count/_msearch = 读取；_bulk/index/_update = 写入。";
