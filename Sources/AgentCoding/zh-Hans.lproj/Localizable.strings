@@ -330,3 +330,9 @@
 "Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now." = "端口与绑定地址将在下次启动服务器时生效。将开关关闭再打开即可立即应用。";
 "MCP client configuration" = "MCP 客户端配置";
 "Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):" = "将此添加到 `~/.config/claude-code/.mcp.json`（或您 MCP 客户端的对应文件）：";
+
+/* Reboot */
+"Reboot “%@”?" = "重新启动“%@”？";
+"Soft reboot" = "软重启";
+"Hard reboot" = "硬重启";
+"Soft reboot gracefully halts the VM (filesystems flush, services stop) and boots a fresh one in this window. Hard reboot tears down the VM immediately and starts a fresh one." = "软重启会正常关闭虚拟机（刷新文件系统、停止服务），并在此窗口中启动一个全新的虚拟机。硬重启会立即销毁虚拟机并启动一个新的。";

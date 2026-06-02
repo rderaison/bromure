@@ -330,3 +330,9 @@
 "Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now." = "連接埠與繫結位址會在伺服器下次啟動時生效。將開關關閉再開啟即可立即套用。";
 "MCP client configuration" = "MCP 用戶端設定";
 "Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):" = "請將此加入到 `~/.config/claude-code/.mcp.json`（或您 MCP 用戶端的對應檔案）：";
+
+/* Reboot */
+"Reboot “%@”?" = "重新啟動「%@」？";
+"Soft reboot" = "軟重啟";
+"Hard reboot" = "硬重啟";
+"Soft reboot gracefully halts the VM (filesystems flush, services stop) and boots a fresh one in this window. Hard reboot tears down the VM immediately and starts a fresh one." = "軟重啟會正常關閉虛擬機（清空檔案系統、停止服務），並在此視窗中啟動一個全新的虛擬機。硬重啟會立即銷毀虛擬機並啟動一個新的。";

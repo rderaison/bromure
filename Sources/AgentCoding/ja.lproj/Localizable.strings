@@ -330,3 +330,9 @@
 "Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now." = "ポートとバインドアドレスは次回サーバー起動時に反映されます。スイッチをオフにしてからオンに戻すと即座に適用されます。";
 "MCP client configuration" = "MCP クライアント設定";
 "Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):" = "これを `~/.config/claude-code/.mcp.json`（または MCP クライアントの相当ファイル）に追加してください:";
+
+/* Reboot */
+"Reboot “%@”?" = "「%@」を再起動しますか？";
+"Soft reboot" = "ソフト再起動";
+"Hard reboot" = "ハード再起動";
+"Soft reboot gracefully halts the VM (filesystems flush, services stop) and boots a fresh one in this window. Hard reboot tears down the VM immediately and starts a fresh one." = "ソフト再起動は VM を正常に停止し（ファイルシステムをフラッシュし、サービスを停止）、このウィンドウで新しい VM を起動します。ハード再起動は VM を即座に破棄し、新しい VM を起動します。";

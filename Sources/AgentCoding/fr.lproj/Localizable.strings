@@ -330,3 +330,9 @@
 "Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now." = "Le port et l'adresse d'écoute prennent effet au prochain démarrage du serveur. Désactiver puis réactiver l'interrupteur les applique tout de suite.";
 "MCP client configuration" = "Configuration du client MCP";
 "Add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):" = "Ajoutez ceci dans `~/.config/claude-code/.mcp.json` (ou l'équivalent chez votre client MCP) :";
+
+/* Reboot */
+"Reboot “%@”?" = "Redémarrer « %@ » ?";
+"Soft reboot" = "Redémarrage progressif";
+"Hard reboot" = "Redémarrage forcé";
+"Soft reboot gracefully halts the VM (filesystems flush, services stop) and boots a fresh one in this window. Hard reboot tears down the VM immediately and starts a fresh one." = "Le redémarrage progressif arrête proprement la VM (vidage des systèmes de fichiers, arrêt des services) et en démarre une nouvelle dans cette fenêtre. Le redémarrage forcé détruit la VM immédiatement et en démarre une nouvelle.";
