@@ -1565,7 +1565,11 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
         SecTrustSetPolicies(trust, [basic] as CFArray)
         var err: CFError?
         guard SecTrustEvaluateWithError(trust, &err) else { return false }
-        guard let leaf = SecTrustGetCertificateAtIndex(trust, 0) else { return true }
+        // Index 0 of the evaluated chain is the leaf. (SecTrustGetCertificateAtIndex
+        // was deprecated in macOS 12; SecTrustCopyCertificateChain is the
+        // replacement and returns the full chain leaf-first.)
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              let leaf = chain.first else { return true }
         return hostnameMatch(leaf, host: host) != .mismatch
     }
 

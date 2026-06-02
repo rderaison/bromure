@@ -88,7 +88,7 @@ final class LoopbackCallbackForwarder {
     private func acceptOne() {
         let cfd = Darwin.accept(listenFD, nil, nil)
         guard cfd >= 0 else { return }
-        guard let dev = socketDevice else { Darwin.close(cfd); return }
+        guard socketDevice != nil else { Darwin.close(cfd); return }
         let target = port
 
         // Don't bridge to the guest until the browser actually sends its
@@ -110,7 +110,13 @@ final class LoopbackCallbackForwarder {
                 return
             }
             let head = Array(firstBuf[0..<n])
-            DispatchQueue.main.async {
+            // Re-acquire the socket device on the main thread rather than
+            // capturing it in this @Sendable background closure: VZ types
+            // aren't Sendable, and VZ calls must happen on the main thread
+            // anyway. `self` is @MainActor (so Sendable); the device may have
+            // gone away while we were reading, hence the re-check.
+            DispatchQueue.main.async { [weak self] in
+                guard let dev = self?.socketDevice else { Darwin.close(cfd); return }
                 Self.log("browser sent \(n)B on 127.0.0.1:\(target); dialing guest relay (vsock \(Self.relayVsockPort))")
                 dev.connect(toPort: Self.relayVsockPort) { result in
                     switch result {
