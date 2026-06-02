@@ -39,6 +39,9 @@ Choose which coding agents are available in this profile and how they authentica
 | **Claude Code — Auth** | Authentication method for Claude Code: **API token** (paste an `ANTHROPIC_API_KEY` — injected as an env var, never written into the VM directly), **Subscription (interactive login)** (run `claude login` once inside the VM), or **Bedrock (AWS)** (use your AWS credentials via the Bedrock runtime — requires AWS credentials configured in the Credentials tab). |
 | **Codex** | Enable or disable the OpenAI Codex agent for this profile. Toggle on to configure authentication. |
 | **Codex — Auth** | Authentication method for Codex: **API token** (paste an `OPENAI_API_KEY`) or **Subscription (interactive login)** (run `codex login` once inside the VM). |
+| **Grok Build** | Enable or disable the Grok Build (xAI) agent for this profile. Toggle on to configure. |
+| **Grok Build — Auth** | Authentication method for Grok Build: **API token** (paste an `XAI_API_KEY` — injected as an env var; the proxy swaps the fake `xai-brm-…` key back to the real value on requests to `api.x.ai`, so the real key never enters the VM) or **Subscription (interactive login)** (run `grok login` once inside the VM). Bedrock is not available for Grok Build. |
+| **Grok Build — Require approval to use** | (Token mode only.) When enabled, every fake→real swap of the xAI API key shows a host-side consent dialog before the key is forwarded. Off by default. |
 
 ---
 
@@ -80,6 +83,9 @@ Secrets and identities injected into the VM at session start. All real values st
 | **AWS — Require approval to use** | When enabled, every host-side SigV4 signing call (one per AWS API request) shows a consent prompt until a time-bounded grant covers it. |
 | **Container Registries** | Expandable section. Per-registry HTTP Basic auth for `docker pull` / `docker push`. Supports Docker Hub, GHCR, GitLab Container Registry, Quay, and arbitrary private registries. A fake `base64("<user>:<derived>")` is written to `~/.docker/config.json` in the VM; the proxy substitutes the real value on the wire. Can be populated by importing an existing `~/.docker/config.json`. |
 | **Other API keys** | Expandable section. Manual token-swap rules for any API beyond the auto-handled ones (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean, Kubernetes). Each entry mints a fresh fake (`brm_…`) exported as a named env var inside the VM; the proxy swaps it back to the real value on outbound requests to the optionally-specified host. |
+| **MongoDB** | Expandable section. MongoDB Atlas Data API endpoints. Each entry specifies a display name, the bare hostname of the endpoint, authentication kind (**API key**, **Bearer token**, or **Username + password**), and one or more env var names under which the fake credential is exported into the VM. The real secret stays on the host; the proxy swaps it on outbound requests to the specified host. A per-endpoint Guardrails mode (Off / Block destructive / Read-only) can also be set here and is enforced in the proxy — `deleteOne`/`deleteMany` = destructive, `find`/`aggregate` = read. |
+| **ClickHouse** | Expandable section. ClickHouse HTTP interface endpoints. Each entry specifies a host, authentication kind, env var names, and an optional Guardrails mode. The proxy intercepts requests to the host and substitutes the real credential on the wire. Guardrails classify SQL by leading keyword: `DROP`/`TRUNCATE`/`DELETE` = destructive; `INSERT`/`CREATE` = write; `SELECT`/`SHOW` = read. |
+| **Elasticsearch** | Expandable section. Elasticsearch endpoints. Each entry specifies a host, authentication kind, env var names, and an optional Guardrails mode. Guardrails classify by HTTP method and path: `DELETE` and `_delete_by_query` = destructive; `_search`/`_count`/`_msearch` = read; `_bulk`/index/`_update` = write. |
 
 ---
 
@@ -130,6 +136,25 @@ Controls how the MITM proxy records traffic for this profile. Higher levels writ
 
 ---
 
+## Guardrails
+
+Host-side policy engine that strips destructive operations from the protocols the agent speaks. Enforcement happens inside the MITM proxy on the host, so a misbehaving or compromised agent in the VM cannot bypass it — blocked calls return a hard 403 error that the agent sees as a normal API failure.
+
+Each resource supports three modes: **Off** (no filtering — default), **Block destructive** (block deletes/drops/terminates; allow creates and updates), or **Read-only** (block every mutation; reads only).
+
+| Setting | Description |
+|---|---|
+| **Kubernetes** | Guardrail mode for the Kubernetes API servers configured in this profile's kubeconfigs. HTTP method-based: `DELETE` = destructive (includes `deletecollection`); all writes are blocked in read-only mode. A warning is shown if no kubeconfigs are configured. |
+| **AWS** | Guardrail mode for all `*.amazonaws.com` APIs. Classified by action name extracted from the `X-Amz-Target` header (JSON-protocol services like DynamoDB/Lambda) or the `Action=` form parameter (query-protocol services like EC2/IAM/SQS); falls back to HTTP method for S3 and REST-style requests. `Delete*`/`Terminate*`/`Remove*`/`Purge*`/`Destroy*` = destructive; `Get*`/`List*`/`Describe*` = read. |
+| **DigitalOcean** | Guardrail mode for `api.digitalocean.com` and `*.digitalocean.com`. HTTP method-based: `DELETE` = destructive; `GET`/`HEAD` = read. |
+| **Docker registries** | Guardrail mode for the container registries configured in this profile's Credentials. HTTP method-based against the registry's hostname: `DELETE` = destructive (tag/manifest deletion); `GET`/`HEAD` = read (pull); `PUT`/`POST` = write (push). A warning is shown if no registries are configured. |
+| **GitHub** | Guardrail mode for `github.com` REST API and git over HTTPS. Method-based for REST; git push (`git-receive-pack`) is treated as a write and blocked in read-only mode; git fetch (`git-upload-pack`) is always allowed. |
+| **GitLab** | Guardrail mode for `gitlab.com` REST API and git over HTTPS. Same classification logic as GitHub. |
+| **Bitbucket** | Guardrail mode for `bitbucket.org` REST API and git over HTTPS. Same classification logic as GitHub. |
+| **Databases** | Per-endpoint Guardrails mode for each HTTPS database endpoint configured under Credentials (MongoDB, ClickHouse, Elasticsearch). Shown here as individual rows, one per endpoint. Modes and classification rules match those described in the Credentials section for each engine. A prompt is shown if the endpoint's host is not yet set. |
+
+---
+
 ## Appearance
 
 <p align="center">
@@ -145,6 +170,7 @@ Visual appearance of the kitty terminal window. Defaults are seeded from your ma
 | **Colors — Background** | Terminal background color, as a color picker swatch. |
 | **Colors — Text** | Terminal foreground (text) color, as a color picker swatch. |
 | **Opacity** | Combined window and terminal opacity, from 30% to 100%. Applied as both kitty's `background_opacity` (requires a compositor in the VM) and the macOS window's `alphaValue` (always effective — produces a see-through-to-the-desktop effect). Default is 97%. |
+| **Ligatures** | When enabled, the terminal renders programming ligatures — multi-character sequences such as `<=`, `==`, and `=>` are drawn as single combined glyphs. Disabled by default (kitty's `disable_ligatures always` is active unless this is turned on). Only visible with fonts that include ligature tables, such as JetBrains Mono or Fira Code. |
 | **Reset to Terminal.app** | Restores all appearance fields to the values read from your macOS Terminal.app default profile at app startup. |
 
 ---
