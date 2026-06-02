@@ -2681,6 +2681,32 @@ public final class ProfileStore {
         set +a
     fi
 
+    # Live env refresh. When the user edits env vars / credentials /
+    # guardrails on a *running* session, the host rewrites proxy.env +
+    # api_key.env in place and bumps /mnt/bromure-meta/env.generation
+    # rather than rebooting the VM. This PROMPT_COMMAND hook re-sources
+    # both files the next time any shell draws a prompt after the counter
+    # changes, so freshly typed commands (and their children) see the new
+    # values. A long-running foreground agent keeps its launch-time env
+    # until it exits — Unix environments are frozen at exec.
+    _bromure_env_gen() { cat /mnt/bromure-meta/env.generation 2>/dev/null || echo 0; }
+    _BROMURE_ENV_GEN="$(_bromure_env_gen)"
+    _bromure_reload_env() {
+        local _cur
+        _cur="$(_bromure_env_gen)"
+        [ "$_cur" = "$_BROMURE_ENV_GEN" ] && return
+        _BROMURE_ENV_GEN="$_cur"
+        set -a
+        [ -r /mnt/bromure-meta/proxy.env ] && . /mnt/bromure-meta/proxy.env
+        [ -r /mnt/bromure-meta/api_key.env ] && . /mnt/bromure-meta/api_key.env
+        set +a
+        printf '\\033[2m[bromure-ac] environment refreshed\\033[0m\\n'
+    }
+    case "${PROMPT_COMMAND:-}" in
+        *_bromure_reload_env*) ;;
+        *) PROMPT_COMMAND="_bromure_reload_env${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+    esac
+
     # MCP server configs from the profile. The host generates both
     # Claude Code and Codex formats; we install whichever matches
     # the active tool.

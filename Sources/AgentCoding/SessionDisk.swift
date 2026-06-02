@@ -12,7 +12,12 @@ import SandboxEngine
 /// It carries the API key (api_key.env), the profile's SSH keys, and an
 /// init script the guest sources on login.
 public final class SessionDisk {
-    public let profile: Profile
+    /// The profile this session was launched with. Mutable so a live
+    /// refresh (env-var / credential / guardrail edit on a running
+    /// session) can swap in the edited profile and re-emit the meta
+    /// share without a reboot. The `id` never changes, so all
+    /// path/MAC derivations stay stable across a refresh.
+    public private(set) var profile: Profile
     private let store: ProfileStore
     private let baseDiskURL: URL
     private let fm = FileManager.default
@@ -507,6 +512,15 @@ public final class SessionDisk {
                 "export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
                 "export CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt",
                 "export GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
+                // pip vendors its own certifi and ignores SSL_CERT_FILE /
+                // REQUESTS_CA_BUNDLE — PIP_CERT is the only env knob it reads.
+                "export PIP_CERT=/etc/ssl/certs/ca-certificates.crt",
+                // curl links the system bundle already, but a statically
+                // built curl (or one in a stripped env) honors this instead.
+                "export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
+                // Deno + AWS CLI each ignore SSL_CERT_FILE and read their own.
+                "export DENO_CERT=/etc/ssl/certs/ca-certificates.crt",
+                "export AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
                 // No private key in the VM — use the host-bridged agent.
                 "export SSH_AUTH_SOCK=/tmp/bromure-agent.sock",
             ]
@@ -653,8 +667,55 @@ public final class SessionDisk {
             )
         }
 
+        // env.generation — the counter the guest's .bashrc PROMPT_COMMAND
+        // polls to know when to re-source the env files. Only *initialize*
+        // it here (1 on a fresh boot, where the wipe removed it; left as-is
+        // on resume so resumed shells don't see a phantom bump). The
+        // explicit live-refresh path is what increments it.
+        ensureEnvGeneration(in: tmp)
+
         self.metadataDirectory = tmp
         return tmp
+    }
+
+    /// Create `env.generation` with a starting value of 1 if it's missing.
+    /// Never overwrites an existing counter — a resume preserves the dir,
+    /// and rewriting would falsely signal a refresh to resumed shells.
+    private func ensureEnvGeneration(in dir: URL) {
+        let url = dir.appendingPathComponent("env.generation")
+        guard !fm.fileExists(atPath: url.path) else { return }
+        try? "1\n".write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Read the current `env.generation` value (0 if absent/garbage) and
+    /// write back `value + 1`. Strictly increasing regardless of the wall
+    /// clock, so two refreshes never collide on the same token.
+    private func bumpEnvGeneration(in dir: URL) {
+        let url = dir.appendingPathComponent("env.generation")
+        let current = (try? String(contentsOf: url, encoding: .utf8))
+            .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
+        try? "\(current + 1)\n".write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Re-emit the metadata share for a *running* session after an env-var,
+    /// credential, or guardrail edit — no reboot. Swaps in the edited
+    /// profile + freshly-minted token plan, rewrites api_key.env / proxy.env
+    /// / MCP configs into the stable share directory (without wiping it, so
+    /// the guest's virtiofs mount stays valid), and bumps env.generation so
+    /// in-VM shells re-source on their next prompt.
+    ///
+    /// The already-running agent process keeps its launch-time environment
+    /// (Unix env is frozen at exec); only new shells and newly-spawned
+    /// child processes pick up the change.
+    @MainActor
+    public func refreshMetadataShare(profile newProfile: Profile,
+                                     tokenPlan newPlan: SessionTokenPlan?) throws {
+        precondition(newProfile.id == profile.id,
+                     "refreshMetadataShare must keep the same profile id")
+        self.profile = newProfile
+        self.tokenPlan = newPlan
+        let dir = try prepareMetadataShare(forRestore: true)
+        bumpEnvGeneration(in: dir)
     }
 
     /// Serialize MCP servers into Claude Code's ~/.claude.json format.

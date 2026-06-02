@@ -1791,6 +1791,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if editing != nil, let win = profileWindows[profile.id] {
             let runningProfile = win.profile
             win.applyLiveProfileUpdates(profile)
+            // Push env vars, credentials (wire-swap map + guest-side
+            // credential files), and guardrail policy into the running
+            // MITM engine + live shares — no reboot for these. Only things
+            // genuinely baked into the booted VM (memory, mounts, the
+            // auto-launched tool, sshd/kube/SSO wiring) fall through to the
+            // restart prompt below.
+            applyLiveSessionRefresh(from: runningProfile, to: profile,
+                                    terminalDefaults: terminalDefaults, window: win)
             let restartItems = restartRequiringChanges(from: runningProfile, to: profile)
             if !restartItems.isEmpty {
                 promptRestartForChanges(items: restartItems, window: win)
@@ -1832,7 +1840,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .sharedFolders:
             return NSLocalizedString("Shared folders", comment: "")
         case .primaryTool:
-            return NSLocalizedString("Primary tool / auth mode / API key", comment: "")
+            return NSLocalizedString("Primary tool / auth mode", comment: "")
         case .additionalTools:
             return NSLocalizedString("Additional tools", comment: "")
         case .sshPublicKey:
@@ -1882,28 +1890,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             changes.append(.networking)
         }
         if old.folderPaths != new.folderPaths { changes.append(.sharedFolders) }
-        if old.tool != new.tool
-            || old.authMode != new.authMode
-            || old.apiKey != new.apiKey {
+        // Note: a plain API-key change is NOT here — it's applied live
+        // (api_key.env + swap map). Only switching the tool itself or its
+        // auth mode needs a restart, since that re-runs the agent
+        // auto-launch and the token/subscription wiring.
+        if old.tool != new.tool || old.authMode != new.authMode {
             changes.append(.primaryTool)
         }
         if old.additionalTools != new.additionalTools { changes.append(.additionalTools) }
         if old.sshPublicKey != new.sshPublicKey { changes.append(.sshPublicKey) }
-        if old.gitHTTPSCredentials != new.gitHTTPSCredentials {
-            changes.append(.httpsGitCredentials)
-        }
-        if old.manualTokens != new.manualTokens { changes.append(.manualTokens) }
         if old.importedSSHKeys != new.importedSSHKeys { changes.append(.importedSSHKeys) }
-        if old.environmentVariables != new.environmentVariables {
-            changes.append(.environmentVariables)
-        }
+        // Applied live by applyLiveSessionRefresh — no restart needed:
+        //   env vars, guardrails (incl. per-endpoint HTTPS-database modes),
+        //   the primary API key, manual tokens, HTTPS git credentials,
+        //   DigitalOcean PAT, container-registry creds, and git identity.
+        // All of these are header/env/file credentials that re-read live
+        // off the meta + home virtiofs shares and the swap map.
         if old.traceLevel != new.traceLevel { changes.append(.traceLevel) }
+        // Kube + AWS keep their prompt: the engine-side client-identity /
+        // cluster-CA / exec-poller and AWS-SSO refresh-loop wiring is only
+        // set up on cold boot, even though their config files refresh live.
         if old.kubeconfigs != new.kubeconfigs { changes.append(.kubernetes) }
-        if old.digitalOceanToken != new.digitalOceanToken { changes.append(.digitalOcean) }
         if old.awsCredentials != new.awsCredentials { changes.append(.awsCredentials) }
-        if old.dockerRegistries != new.dockerRegistries {
-            changes.append(.containerRegistries)
-        }
         if old.apiKeyRequiresApproval != new.apiKeyRequiresApproval
             || old.digitalOceanTokenRequiresApproval != new.digitalOceanTokenRequiresApproval
             || old.sshKeyRequiresApproval != new.sshKeyRequiresApproval {
@@ -1922,11 +1930,119 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             || old.customForegroundHex != new.customForegroundHex {
             changes.append(.terminalAppearance)
         }
-        if old.gitUserName != new.gitUserName
-            || old.gitUserEmail != new.gitUserEmail {
-            changes.append(.gitIdentity)
-        }
+        // Git identity (~/.gitconfig) is rewritten live into the home share.
         return changes.map { restartLabel(for: $0) }
+    }
+
+    /// True if an edit touches anything the live refresh re-emits: env
+    /// vars, guardrail policy, or any credential (which moves the token
+    /// swap map and/or the api_key.env / proxy.env content). Cosmetic
+    /// edits (name, color, opacity) return false so the guest doesn't
+    /// print a spurious "environment refreshed" line.
+    private func sessionRefreshAffectingChange(from old: Profile, to new: Profile) -> Bool {
+        old.environmentVariables != new.environmentVariables
+            || old.guardrails != new.guardrails
+            || old.httpDatabases != new.httpDatabases
+            || old.tool != new.tool
+            || old.authMode != new.authMode
+            || old.apiKey != new.apiKey
+            || old.additionalTools != new.additionalTools
+            || old.manualTokens != new.manualTokens
+            || old.gitHTTPSCredentials != new.gitHTTPSCredentials
+            || old.digitalOceanToken != new.digitalOceanToken
+            || old.dockerRegistries != new.dockerRegistries
+            || old.awsCredentials != new.awsCredentials
+            || old.kubeconfigs != new.kubeconfigs
+            || old.mcpServers != new.mcpServers
+            || old.gitUserName != new.gitUserName
+            || old.gitUserEmail != new.gitUserEmail
+    }
+
+    /// Apply env-var / credential / guardrail edits to a running session
+    /// in place — no reboot. Three live surfaces are refreshed:
+    ///
+    ///   1. **Guardrail policy** — read live per request, so an
+    ///      off→read-only flip lands on the next proxied call.
+    ///   2. **The token swap map** — re-minted fakes are a pure function
+    ///      of (real value, install salt), so unchanged credentials keep
+    ///      the exact fake the running agent already holds; changed/added
+    ///      ones get fresh entries.
+    ///   3. **Guest-side files** — `proxy.env` / `api_key.env` / MCP
+    ///      configs in the meta share *and* the credential files in the
+    ///      `bromure-home` virtiofs share (`~/.git-credentials`, docker /
+    ///      gh / glab / doctl / aws / kube configs, `~/.gitconfig`). Both
+    ///      shares are live-mounted, and the in-VM tools re-read them per
+    ///      command, so a `git push` / `docker pull` uses the new value
+    ///      immediately. `env.generation` is bumped so open shells
+    ///      re-source the env on their next prompt.
+    ///
+    /// Remaining caveat: the already-running *foreground agent* keeps its
+    /// launch-time process environment (Unix env is frozen at exec) until
+    /// it restarts, and the engine-side wiring for a handful of credential
+    /// types — the kube client-identity / cluster-CA / exec-poller setup,
+    /// the AWS-SSO refresh loop, and the ssh-agent key load — is only done
+    /// on cold boot. Those categories keep their restart prompt; env vars
+    /// and the common file/header credentials do not.
+    private func applyLiveSessionRefresh(from old: Profile, to new: Profile,
+                                         terminalDefaults: TerminalAppDefaults,
+                                         window win: TabbedSessionWindow) {
+        guard sessionRefreshAffectingChange(from: old, to: new) else { return }
+
+        // Guardrail config is consulted live on every proxied request —
+        // update it unconditionally so a mode change lands even when no
+        // credential moved.
+        mitmEngine?.setGuardrailsConfig(Self.makeGuardrailsConfig(for: new), for: new.id)
+
+        var profile = new
+        populateMCPBearerTokens(in: &profile)
+        let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
+        let plan = profile.makeTokenPlan(salt: salt)
+
+        var kubeYAML: String?
+        if let engine = mitmEngine {
+            // Full map = profile plan + kubeconfig bearer/exec swaps, the
+            // same composition the launch path builds.
+            var fresh = plan.tokenMap()
+            let kubeMat = KubeconfigMaterializer().materialize(
+                profile: profile, bromureCAPEM: engine.ca.certificatePEM)
+            kubeYAML = kubeMat.yaml
+            for swap in kubeMat.bearerSwaps {
+                fresh.entries.append(TokenMap.Entry(
+                    fake: swap.fakeToken, real: swap.realToken, host: swap.host,
+                    consentCredentialID: swap.consentCredentialID,
+                    consentDisplayName: swap.consentDisplayName))
+            }
+            // Merge rather than replace. A *changed* credential mints a new
+            // fake, but the still-running agent's process env holds the
+            // OLD one; preserving the old entries (whose fakes aren't
+            // reissued) lets in-flight work finish on the old value instead
+            // of erroring, while new shells pick up the new fake. Same
+            // additive pattern the subscription / OAuth coordinators use.
+            let freshFakes = Set(fresh.entries.map(\.fake))
+            let preserved = engine.swapper.entries(for: profile.id)
+                .filter { !freshFakes.contains($0.fake) }
+            engine.swapper.setMap(TokenMap(entries: fresh.entries + preserved),
+                                  for: profile.id)
+        }
+
+        // Rewrite the guest-side credential files into the live home share
+        // with fakes. This also overwrites any real-token copy the
+        // plan-less editor-save `prepareHomeDirectory` (above) just wrote
+        // there, closing that window for a running session.
+        try? store.prepareHomeDirectory(for: profile,
+                                        terminalDefaults: terminalDefaults,
+                                        tokenPlan: plan,
+                                        kubeconfigYAML: kubeYAML)
+
+        // Rewrite api_key.env / proxy.env / MCP configs into the stable
+        // meta-share dir and bump env.generation for the guest's
+        // PROMPT_COMMAND hook.
+        do {
+            try win.sandbox?.sessionDisk?.refreshMetadataShare(
+                profile: profile, tokenPlan: plan)
+        } catch {
+            NSLog("[bromure-ac] live env refresh failed: \(error)")
+        }
     }
 
     /// Sheet a non-modal alert against the running session window,
