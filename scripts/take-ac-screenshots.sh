@@ -26,6 +26,19 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
+# Re-register the freshly-built bundle with LaunchServices so AppleScript
+# resolves THIS build's scripting definition (BromureAC.sdef). Rebuilding
+# the .app in place leaves macOS's terminology cache pointing at the prior
+# build; without this, `tell application … to get app state` can fail with
+# "The variable state is not defined. (-2753)" until a reboot. Kill any
+# running instance first — a live process keeps serving stale terminology.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+if [ -x "$LSREGISTER" ]; then
+    pkill -x bromure-ac 2>/dev/null || true
+    sleep 1
+    "$LSREGISTER" -f "$APP_BUNDLE" && echo "Re-registered $APP_NAME with LaunchServices."
+fi
+
 # Editor sidebar entries that the AppleScript bridge accepts. Order
 # matches the on-screen sidebar so the loop reads top-to-bottom.
 CATEGORIES=(general agent folders credentials environment mcp tracing appearance resources)
