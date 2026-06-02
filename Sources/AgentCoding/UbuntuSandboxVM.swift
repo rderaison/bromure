@@ -371,17 +371,55 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         self?.onIPUpdate?(ip)
                     }
                 }
+                // Bound how much guest-driven URL relay work happens
+                // per poll tick. A compromised guest could otherwise
+                // flood the outbox with url-*.txt files and use the
+                // host's default browser as a spam cannon. The cap
+                // resets every poll iteration, so legitimate OAuth
+                // URLs are only delayed (~ticks-to-drain), never
+                // dropped.
+                let maxURLsPerTick = 8
+                // Real OAuth URLs are well under 4 KB. Anything larger
+                // is either junk or an attempt to flood the host's
+                // memory + URL parser with a huge body.
+                let maxURLFileSize = 8 * 1024
+                var urlsProcessedThisTick = 0
                 if let entries = try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil) {
                     for entry in entries where entry.pathExtension == "txt" {
                         let name = entry.lastPathComponent
                         // url-*.txt — guest's bromure-open relayed a URL.
                         if name.hasPrefix("url-") {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8))?
-                                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            // Hit the per-tick cap: leave the file on
+                            // disk so the next tick can pick it up
+                            // (rather than dropping a legitimate URL
+                            // that lost a race with a flood).
+                            if urlsProcessedThisTick >= maxURLsPerTick {
+                                continue
+                            }
+                            urlsProcessedThisTick += 1
+                            let size = (try? entry.resourceValues(
+                                forKeys: [.fileSizeKey]).fileSize) ?? 0
+                            let raw: String
+                            if size > 0, size <= maxURLFileSize,
+                               let body = try? String(contentsOf: entry, encoding: .utf8) {
+                                raw = body.trimmingCharacters(in: .whitespacesAndNewlines)
+                            } else {
+                                // Empty / oversize / unreadable —
+                                // consume + drop so it can't recur.
+                                raw = ""
+                            }
                             try? fm.removeItem(at: entry)
+                            // mailto: is intentionally NOT here.
+                            // Historically Mail.app / Outlook /
+                            // Thunderbird have leaked local file paths
+                            // via mailto:?attach= parameters
+                            // (CVE-2020-9922 and friends). CLIs that
+                            // call xdg-open / $BROWSER for login are
+                            // always http(s); we don't lose anything
+                            // real by dropping it.
                             guard let url = URL(string: raw),
                                   let scheme = url.scheme?.lowercased(),
-                                  ["http", "https", "mailto"].contains(scheme) else {
+                                  ["http", "https"].contains(scheme) else {
                                 continue
                             }
                             self?.onURLOpen?(url)
