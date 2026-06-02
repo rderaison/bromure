@@ -11,7 +11,7 @@
 #     can drive the app via System Events and screencapture can read the
 #     editor window's pixels.
 
-set -euo pipefail
+set -euxo pipefail
 
 APP_NAME="Bromure Agentic Coding"
 APP_BUNDLE="$(pwd)/.build/arm64-apple-macosx/release/${APP_NAME}.app"
