@@ -1007,6 +1007,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             enrollmentWindow = nil
             return
         }
+        if let key = fileBrowserWindows.first(where: { $0.value === win })?.key {
+            fileBrowserWindows[key] = nil
+            return
+        }
         if let session = win as? TabbedSessionWindow {
             // Stop the single shared VM. All in-VM kittys die with it.
             // The profile's `closeAction` (resolved in windowShouldClose
@@ -1245,6 +1249,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var credentialApprovalsWindow: NSWindow?
     private var enrollmentWindow: NSWindow?
     private var preferencesWindow: NSWindow?
+    /// File-browser panels, one per profile (keyed by profile id) so each
+    /// session window gets its own, reused on subsequent clicks.
+    private var fileBrowserWindows: [UUID: NSWindow] = [:]
 
     /// Wired to the "Trace Inspector…" menu item (⇧⌘I).
     /// Opens the inspector with no profile pre-filter.
@@ -1416,6 +1423,59 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         win.isReleasedWhenClosed = false
         win.makeKeyAndOrderFront(nil)
         traceInspectorWindow = win
+    }
+
+    /// Open (or re-focus) a Finder-like browser over this profile's VM
+    /// filesystem. The guest's /home/ubuntu and any shared folders are
+    /// host directories mounted via virtiofs, so the panel just reads
+    /// and writes them directly — dragging a file out copies it to the
+    /// Mac, dropping one in drops it into the VM.
+    func openFileBrowser(for window: TabbedSessionWindow) {
+        let profile = window.profile
+        if let win = fileBrowserWindows[profile.id] {
+            win.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let home = store.homeDirectory(for: profile)
+        // The home dir is created during session prep; make sure it
+        // exists in case the browser is opened very early in boot.
+        try? FileManager.default.createDirectory(
+            at: home, withIntermediateDirectories: true)
+
+        var locations: [FileBrowserLocation] = [
+            FileBrowserLocation(
+                name: NSLocalizedString("Home", comment: ""),
+                url: home,
+                guestPath: "/home/ubuntu",
+                symbol: "house")
+        ]
+        // Shared folders are symlinked to ~/<basename> inside the guest
+        // on first boot — surface them as their guest-side path.
+        for path in profile.folderPaths.prefix(8) {
+            let base = (path as NSString).lastPathComponent
+            locations.append(FileBrowserLocation(
+                name: base,
+                url: URL(fileURLWithPath: path),
+                guestPath: "/home/ubuntu/\(base)",
+                symbol: "folder"))
+        }
+
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 480),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false)
+        win.title = String(
+            format: NSLocalizedString("Files — %@", comment: "file browser title"),
+            profile.name)
+        win.center()
+        win.animationBehavior = .none
+        win.contentView = NSHostingView(rootView: FileBrowserView(
+            model: FileBrowserModel(locations: locations)))
+        win.delegate = self
+        win.isReleasedWhenClosed = false
+        win.makeKeyAndOrderFront(nil)
+        fileBrowserWindows[profile.id] = win
     }
 
     @objc func openPreferencesAction(_ sender: Any?) {

@@ -230,6 +230,10 @@ final class TabbedSessionWindow: NSWindow {
             onReboot: { [weak self] in
                 guard let self else { return }
                 self.acDelegate?.requestReboot(for: self)
+            },
+            onFiles: { [weak self] in
+                guard let self else { return }
+                self.acDelegate?.openFileBrowser(for: self)
             })
         toolbarChromeDelegate = delegate
 
@@ -468,6 +472,7 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
     let onNew:    () -> Void
     let onInspectTrace: () -> Void
     let onReboot: () -> Void
+    let onFiles:  () -> Void
 
     init(model: TabsModel,
          sharedFolderPaths: [String],
@@ -475,7 +480,8 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
          onClose:  @escaping (Int) -> Void,
          onNew:    @escaping () -> Void,
          onInspectTrace: @escaping () -> Void,
-         onReboot: @escaping () -> Void) {
+         onReboot: @escaping () -> Void,
+         onFiles:  @escaping () -> Void) {
         self.model = model
         self.sharedFolderPaths = sharedFolderPaths
         self.onSelect = onSelect
@@ -483,6 +489,7 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
         self.onNew = onNew
         self.onInspectTrace = onInspectTrace
         self.onReboot = onReboot
+        self.onFiles = onFiles
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -508,7 +515,8 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
             onClose:  onClose,
             onNew:    onNew,
             onInspectTrace: onInspectTrace,
-            onReboot: onReboot
+            onReboot: onReboot,
+            onFiles:  onFiles
         ))
         host.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(host)
@@ -547,6 +555,7 @@ private struct TabsBar: View {
     let onNew:    () -> Void
     let onInspectTrace: () -> Void
     let onReboot: () -> Void
+    let onFiles:  () -> Void
 
     @State private var foldersPopoverShown = false
 
@@ -613,6 +622,17 @@ private struct TabsBar: View {
                     SharedFoldersList(paths: sharedFolderPaths)
                 }
             }
+
+            // File browser — Finder-like panel over the guest's
+            // /home/ubuntu (and shared folders), for dragging files in
+            // and out of the VM.
+            Button(action: onFiles) {
+                Image(systemName: "externaldrive")
+                    .frame(width: 24, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .help(NSLocalizedString("Browse files in the VM (drag to copy in/out)",
+                                     comment: ""))
 
             // Reboot — opens a confirm dialog (soft via `sudo reboot`
             // inside the guest, hard via `vm.stop()` on the host).
