@@ -3385,7 +3385,15 @@ public final class ProfileStore {
                     spawn-kitty)  spawn_kitty "$arg" ;;
                     raise-kitty)  raise_kitty "$arg" ;;
                     close-kitty)  close_kitty "$arg" ;;
-                    soft-reboot)  log "soft-reboot triggered"; sudo reboot ;;
+                    # Halt, don't `reboot`. A guest-issued `sudo reboot`
+                    # restarts the VM *in place* — VZ never fires
+                    # guestDidStop, so the host's onStopped → relaunchVM
+                    # chain never runs and the rebooted guest is never
+                    # told to spawn a kitty (black screen). `poweroff`
+                    # halts the VM, which DOES fire guestDidStop; the host
+                    # then builds a fresh VM in the same window. Net effect
+                    # is a graceful restart, which is what the user asked.
+                    soft-reboot)  log "soft-reboot triggered (halt → host relaunch)"; sync; sudo poweroff ;;
                     *)            log "unknown action '$action'" ;;
                 esac
             done

@@ -3051,10 +3051,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     enum CompromiseAction { case shutdown, saveForInvestigation, continueAnyway }
 
-    /// Reboot dialog: soft (`sudo reboot` inside the guest) or hard
-    /// (host-side `vm.stop()`). Both clear the saved RAM snapshot
-    /// first so the post-stop relaunch path is a clean fresh boot,
-    /// not a restore that would put us right back where we were.
+    /// Reboot dialog: soft (graceful guest halt via `poweroff` — NOT
+    /// `reboot`, which restarts the VM in place without VZ ever firing
+    /// guestDidStop, leaving the relaunch path dead) or hard (host-side
+    /// `vm.stop()`). Both clear the saved RAM snapshot first so the
+    /// post-stop relaunch is a clean fresh boot, not a restore that
+    /// would put us right back where we were.
     @MainActor
     func requestReboot(for window: TabbedSessionWindow) {
         let alert = NSAlert()
@@ -3062,7 +3064,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             format: NSLocalizedString("Reboot “%@”?", comment: ""),
             window.profile.name)
         alert.informativeText = NSLocalizedString(
-            "Soft reboot runs `sudo reboot` inside the VM (graceful — filesystems flush, services stop). Hard reboot tears down the VM immediately and starts a fresh one.",
+            "Soft reboot gracefully halts the VM (filesystems flush, services stop) and boots a fresh one in this window. Hard reboot tears down the VM immediately and starts a fresh one.",
             comment: "")
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Soft reboot", comment: ""))
@@ -3185,13 +3187,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         Task { @MainActor in
             // Brief settle before reusing the per-profile shared dirs
-            // (meta-share, outbox). The old VZ virtiofs daemon needs
-            // a moment to release its handles after the previous VM
-            // stopped; without this delay, the wipe-and-recreate in
-            // prepareMetadataShare/prepareOutboxDirectory has been
-            // observed to leave the new VM's first kitty wedged on
-            // a black screen — the cmd-spawn-kitty file lands in a
-            // directory the new agent doesn't see yet.
+            // (meta-share, outbox) while the old VZ virtiofs daemon
+            // releases its handles after the previous VM stopped. The
+            // black-screen wedge this used to guard against — the
+            // cmd-spawn-kitty file landing in a directory the new
+            // agent couldn't see — is now fixed at the source:
+            // prepareMetadataShare/prepareOutboxDirectory clear their
+            // contents in place instead of removing+recreating the
+            // directory, so the inode the daemon holds never changes.
+            // This delay is kept only as cheap defense-in-depth.
             try? await Task.sleep(for: .milliseconds(500))
 
             var profile = profile

@@ -361,6 +361,12 @@ final class TabbedSessionWindow: NSWindow {
     /// Idempotent: if the tab was already removed by an explicit ⌘W,
     /// this no-ops.
     func handleTabClosedFromGuest(id: UUID) {
+        // Same reboot guard as `reconcileTabRoster`: during a reboot the
+        // guest's kittys exit as it shuts down and emit closed-* events.
+        // Acting on them would remove the pills and close the window —
+        // turning the reboot into a shutdown. The relaunch rebuilds the
+        // tabs, so just ignore guest-side closes until then.
+        if rebootRequested { return }
         guard let idx = model.tabs.firstIndex(where: { $0.id == id }) else { return }
         model.tabs.remove(at: idx)
         pendingSpawns.removeAll { $0.id == id }
@@ -392,6 +398,13 @@ final class TabbedSessionWindow: NSWindow {
     /// freshly-added tab before the agent has had a chance to launch
     /// kitty and the title loop has ticked once.
     func reconcileTabRoster(alive: Set<UUID>) {
+        // A reboot in flight is tearing the guest down on purpose: its
+        // kittys are dying and the roster drains toward empty. Ignore
+        // it — `relaunchVM` rebuilds the tab set on the fresh VM once
+        // `onStopped` fires. Without this guard the empty roster reaps
+        // the last pill, closes the window, and the "soft reboot"
+        // silently becomes a shutdown.
+        if rebootRequested { return }
         let now = Date()
         // A pending spawn graduates as soon as the roster confirms it
         // OR when the deadline lapses — after that, the roster's

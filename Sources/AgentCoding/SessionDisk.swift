@@ -303,21 +303,26 @@ public final class SessionDisk {
     /// matches across launches when the profile is set to suspend on
     /// close.
     ///
-    /// `forRestore` toggles whether to wipe the directory before
-    /// rewriting. On fresh boot we wipe so stale files from older
-    /// versions can't leak in. On restore we preserve the directory
-    /// inode — recreating it has been observed to confuse the
-    /// resumed guest's virtiofs cache, so file writes from
-    /// already-running guest processes (the kitty wrapper subshell,
-    /// for instance) silently land somewhere the host can't see them.
+    /// `forRestore` toggles whether stale files are cleared before
+    /// rewriting. On fresh boot we clear them so files from older
+    /// versions can't leak in; on restore we keep them, since the
+    /// resumed guest's already-running processes may reference them.
+    ///
+    /// Either way the directory itself is preserved — never
+    /// removed+recreated. Swapping the inode confuses virtiofs: an
+    /// already-running guest (restore) or the just-stopped VM's
+    /// still-draining virtiofs daemon (reboot) keeps pointing at the
+    /// old node, so host writes silently land where the guest can't
+    /// see them — wedging the post-reboot kitty on a black screen.
+    /// See `clearContents`.
     @MainActor
     public func prepareMetadataShare(forRestore: Bool = false) throws -> URL {
         let tmp = store.profileDirectory(for: profile)
             .appendingPathComponent("meta-share", isDirectory: true)
-        if !forRestore {
-            try? fm.removeItem(at: tmp)
-        }
         try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        if !forRestore {
+            clearContents(of: tmp)
+        }
 
         // api_key.env — sourced by .bashrc inside the guest. Exports
         // the env var for every enabled tool in token mode. The values
@@ -902,23 +907,39 @@ public final class SessionDisk {
     /// the guest's `ubuntu` user (UID 1000) can write to it regardless of
     /// how virtiofs maps host UID 501.
     ///
-    /// Same stable-path rationale as `prepareMetadataShare()`. On
-    /// restore we keep the existing directory in place — the guest has
-    /// in-flight processes (e.g. the kitty wrapper subshell) that
-    /// captured the directory's inode when state was saved, and
-    /// removing+recreating it on the host has been observed to make
-    /// later writes from those processes invisible until the guest
-    /// re-stat()s the path.
+    /// Same stable-path + inode-preservation rationale as
+    /// `prepareMetadataShare()`: the directory is reused in place and
+    /// only its contents are cleared (on fresh boot / reboot), never
+    /// removed+recreated. See `clearContents` for the inode-swap race
+    /// this avoids — on the reboot relaunch the just-stopped VM's
+    /// virtiofs daemon is still releasing its handles, and swapping
+    /// the inode out from under it left the new guest's first kitty
+    /// wedged on a black screen until a second reboot.
     public func prepareOutboxDirectory(forRestore: Bool = false) throws -> URL {
         let tmp = store.profileDirectory(for: profile)
             .appendingPathComponent("outbox", isDirectory: true)
-        if !forRestore {
-            try? fm.removeItem(at: tmp)
-        }
         try fm.createDirectory(at: tmp, withIntermediateDirectories: true,
                                attributes: [.posixPermissions: NSNumber(value: 0o777)])
+        if !forRestore {
+            clearContents(of: tmp)
+        }
         outboxDirectory = tmp
         return tmp
+    }
+
+    /// Empty a directory in place without removing the directory
+    /// itself, preserving its inode. Removing+recreating swaps the
+    /// inode, which races a still-draining virtiofs daemon (a resumed
+    /// guest's live processes, or the just-stopped VM's daemon on a
+    /// reboot relaunch): host writes can land in a node the guest's
+    /// mount no longer sees. Clearing contents gives the same
+    /// "no stale files" guarantee a wipe did, without the swap.
+    private func clearContents(of dir: URL) {
+        guard let entries = try? fm.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil) else { return }
+        for entry in entries {
+            try? fm.removeItem(at: entry)
+        }
     }
 
     private func makeWelcomeMessage() -> String {
