@@ -42,7 +42,7 @@ public final class UbuntuImageManager {
     /// Bumped to 31 (with explicit approval) to bake in the cloud
     /// CLIs needed for the Credentials → Cloud sections to work
     /// out of the box: kubectl, doctl, awscli v2, gcloud, az.
-    public static let imageVersion = "101"
+    public static let imageVersion = "200"
 
     /// Ubuntu LTS release we target. Update when a new LTS lands.
     public static let ubuntuRelease = "noble"
