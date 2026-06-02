@@ -362,3 +362,6 @@
 "deleteOne/deleteMany = destructive; insert/update/replace = write; find/aggregate = read." = "deleteOne/deleteMany = destrutivo; insert/update/replace = escrita; find/aggregate = leitura.";
 "DROP/TRUNCATE/DELETE and ALTER…DELETE = destructive; INSERT/CREATE = write; SELECT/SHOW = read." = "DROP/TRUNCATE/DELETE e ALTER…DELETE = destrutivo; INSERT/CREATE = escrita; SELECT/SHOW = leitura.";
 "DELETE + _delete_by_query = destructive; _search/_count/_msearch = read; _bulk/index/_update = write." = "DELETE + _delete_by_query = destrutivo; _search/_count/_msearch = leitura; _bulk/index/_update = escrita.";
+
+/* Tracing category */
+"Tracing" = "Rastreamento";

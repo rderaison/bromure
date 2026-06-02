@@ -362,3 +362,6 @@
 "deleteOne/deleteMany = destructive; insert/update/replace = write; find/aggregate = read." = "deleteOne/deleteMany = 破坏性；insert/update/replace = 写入；find/aggregate = 读取。";
 "DROP/TRUNCATE/DELETE and ALTER…DELETE = destructive; INSERT/CREATE = write; SELECT/SHOW = read." = "DROP/TRUNCATE/DELETE 和 ALTER…DELETE = 破坏性；INSERT/CREATE = 写入；SELECT/SHOW = 读取。";
 "DELETE + _delete_by_query = destructive; _search/_count/_msearch = read; _bulk/index/_update = write." = "DELETE + _delete_by_query = 破坏性；_search/_count/_msearch = 读取；_bulk/index/_update = 写入。";
+
+/* Tracing category */
+"Tracing" = "跟踪";

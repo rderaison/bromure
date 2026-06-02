@@ -362,3 +362,6 @@
 "deleteOne/deleteMany = destructive; insert/update/replace = write; find/aggregate = read." = "deleteOne/deleteMany = 破壊的、insert/update/replace = 書き込み、find/aggregate = 読み取り。";
 "DROP/TRUNCATE/DELETE and ALTER…DELETE = destructive; INSERT/CREATE = write; SELECT/SHOW = read." = "DROP/TRUNCATE/DELETE および ALTER…DELETE = 破壊的、INSERT/CREATE = 書き込み、SELECT/SHOW = 読み取り。";
 "DELETE + _delete_by_query = destructive; _search/_count/_msearch = read; _bulk/index/_update = write." = "DELETE + _delete_by_query = 破壊的、_search/_count/_msearch = 読み取り、_bulk/index/_update = 書き込み。";
+
+/* Tracing category */
+"Tracing" = "トレース";
