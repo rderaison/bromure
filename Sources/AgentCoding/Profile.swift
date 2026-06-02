@@ -3,7 +3,18 @@ import Foundation
 /// Preset accent colors for visual identification in the profile picker.
 public enum ProfileColor: String, Codable, CaseIterable, Equatable, Sendable {
     case blue, red, green, orange, purple, pink, teal, gray
-    public var label: String { rawValue.capitalized }
+    public var label: String {
+        switch self {
+        case .blue:   return NSLocalizedString("Blue", comment: "Profile color name")
+        case .red:    return NSLocalizedString("Red", comment: "Profile color name")
+        case .green:  return NSLocalizedString("Green", comment: "Profile color name")
+        case .orange: return NSLocalizedString("Orange", comment: "Profile color name")
+        case .purple: return NSLocalizedString("Purple", comment: "Profile color name")
+        case .pink:   return NSLocalizedString("Pink", comment: "Profile color name")
+        case .teal:   return NSLocalizedString("Teal", comment: "Profile color name")
+        case .gray:   return NSLocalizedString("Gray", comment: "Profile color name")
+        }
+    }
 }
 
 /// One Kubernetes context (cluster + auth) the user pointed bromure

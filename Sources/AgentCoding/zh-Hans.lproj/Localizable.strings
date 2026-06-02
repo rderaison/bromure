@@ -365,3 +365,18 @@
 
 /* Tracing category */
 "Tracing" = "跟踪";
+
+/* Profile color names (General settings → Color picker) */
+"Blue" = "蓝色";
+"Red" = "红色";
+"Green" = "绿色";
+"Orange" = "橙色";
+"Purple" = "紫色";
+"Pink" = "粉色";
+"Teal" = "蓝绿色";
+"Gray" = "灰色";
+
+/* App quit confirmation alert (⌘Q with running VMs) */
+"Quit Bromure Agentic Coding?" = "退出 Bromure Agentic Coding？";
+"%d VM(s) currently running (%@) will be closed according to each profile's close action." = "%d 个正在运行的 VM (%@) 将根据每个配置文件的关闭操作而关闭。";
+"Quit" = "退出";

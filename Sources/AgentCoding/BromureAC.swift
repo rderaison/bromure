@@ -58,28 +58,27 @@ struct Init: ParsableCommand {
         abstract: "Build the Ubuntu base image (one-time, ~10 min)."
     )
 
-    @Flag(name: .long, help: "Force rebuild even if a base image already exists.")
-    var force: Bool = false
-
     func run() throws {
         let imageManager = try makeImageManager()
         // The build path keeps the existing image usable until the
         // new one is ready (writes go to .partial files, then atomic
-        // swap), so we don't pre-delete the version stamp.
+        // swap), so we don't pre-delete the version stamp. `init` is
+        // an explicit user verb — if they typed it, they want the
+        // image rebuilt — so always pass force=true. The earlier
+        // `--force` flag was redundant.
         // Pump the main RunLoop while an async Task does the actual build.
         // We can't `semaphore.wait()` here because `runInstaller` is
         // @MainActor — a sync block of the main thread starves the main
         // actor's executor and the install hangs at the first MainActor hop.
         // Driving the RunLoop instead lets MainActor continuations run.
         var result: Result<Void, Error>?
-        let forceFlag = force
         Task {
             do {
                 try await imageManager.createBaseImage(
                     progress: { msg in
                         FileHandle.standardError.write(Data("[init] \(msg)\n".utf8))
                     },
-                    force: forceFlag
+                    force: true
                 )
                 result = .success(())
             } catch {
@@ -301,6 +300,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// is gone and the autorelease pool over-releases on the next tick.
     private var installTask: Task<Void, Never>?
     private var ssoRefreshTasks: [UUID: Task<Void, Never>] = [:]
+
+    /// Strong references to the dispatch sources catching abnormal-
+    /// exit signals. Without retaining these the sources deallocate
+    /// and we silently drop back to the default disposition (= die).
+    private var cleanupSignalSources: [DispatchSourceSignal] = []
 
     /// Optional HTTP automation server. Started in applicationDidFinishLaunching
     /// when `automation.enabled` (UserDefaults) is true. Defaults to OFF —
@@ -593,6 +597,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.refreshStreamingState()
         }
 
+        // Wire signal handlers BEFORE the MITM engine spawns its
+        // ssh-agent — otherwise an unlucky signal between spawn and
+        // handler install would orphan the child. SIGKILL and jetsam
+        // are uncatchable; PrivateSSHAgent.reapOrphans() at the next
+        // launch handles those.
+        installCleanupSignalHandlers()
+
         // Force-init the MITM engine so the CA is ready before any
         // session opens (the lazy var would defer this to first launch,
         // adding a perceptible pause on the first session and racing
@@ -861,6 +872,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// ⌘Q (and Quit menu) confirmation. Skip the prompt if no VMs are
     /// running — quitting an idle app should be friction-free.
+    ///
+    /// With running VMs we return `.terminateLater` and drive an
+    /// async drain (clean ACPI poweroff with a force-stop watchdog)
+    /// before replying. AppKit holds the termination until we call
+    /// `NSApp.reply(toApplicationShouldTerminate:)`. This is the
+    /// documented async-shutdown pattern and it fixes the
+    /// "NSActivity was ended multiple times" warning Foundation
+    /// emits when VZ's framework teardown races our in-flight
+    /// `vm.stop()` callbacks: drained-first means VZ ends its
+    /// internal activity exactly once, in order.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let runningSessions = profileWindows.values.filter {
             $0.sandbox?.vm?.state == .running
@@ -872,13 +893,110 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let names = runningSessions.map { $0.profile.name }.joined(separator: ", ")
         alert.informativeText = String(
             format: NSLocalizedString(
-                "%d VM(s) currently running (%@) will shut down and any running processes will be stopped.",
+                "%d VM(s) currently running (%@) will be closed according to each profile's close action.",
                 comment: ""),
             runningSessions.count, names)
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Quit", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return .terminateCancel
+        }
+
+        Task { @MainActor in
+            await self.drainRunningVMs()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    /// Stop every running session's VM in parallel, with a 15 s
+    /// per-VM ACPI window then a hard `vm.stop()` if the guest
+    /// didn't actually power off. We mark each session with
+    /// `pendingCloseAction = .shutdown` so the subsequent
+    /// `windowWillClose` (fired by AppKit while terminating) sees
+    /// `vm.state == .stopped` and skips its own stop branch —
+    /// no double-stop, no double-end of VZ's NSActivity.
+    @MainActor
+    private func drainRunningVMs() async {
+        let sessions = profileWindows.values.filter {
+            $0.sandbox?.vm?.state == .running
+        }
+        await withTaskGroup(of: Void.self) { group in
+            for session in sessions {
+                group.addTask { @MainActor in
+                    await self.drainSession(session)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func drainSession(_ session: TabbedSessionWindow) async {
+        guard let sandbox = session.sandbox,
+              let vm = sandbox.vm,
+              vm.state == .running else { return }
+        let name = session.profile.name
+
+        // Honour the profile's close action. `.ask` falls through to
+        // `.suspend` — app quit isn't the right moment to throw a
+        // per-VM modal at the user; suspend keeps their state and
+        // they can decide at next launch.
+        let resolvedAction: Profile.CloseAction =
+            (session.profile.closeAction == .ask) ? .suspend : session.profile.closeAction
+
+        switch resolvedAction {
+        case .suspend:
+            // Tab state has to be snapshotted BEFORE pause so the
+            // model can't drift mid-save (same reasoning as the
+            // per-window suspend path).
+            sandbox.sessionDisk?.saveTabs(session.snapshotTabs())
+            session.pendingCloseAction = .suspend
+            do {
+                try await sandbox.suspend()
+                FileHandle.standardError.write(Data(
+                    "[ac] suspended '\(name)' on quit\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[ac] suspend on '\(name)' failed (\(error)) — wiping snapshot + forcing stop\n".utf8))
+                sandbox.sessionDisk?.clearSavedState()
+                await Self.forceStop(vm)
+            }
+        case .shutdown:
+            session.pendingCloseAction = .shutdown
+            sandbox.sessionDisk?.clearSavedState()
+            do {
+                try vm.requestStop()
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[ac] requestStop on '\(name)' failed (\(error)) — forcing\n".utf8))
+                await Self.forceStop(vm)
+                return
+            }
+            // ACPI poweroff usually completes in 2-5 s. Allow up to
+            // 15 s before the watchdog forces it.
+            let deadline = Date().addingTimeInterval(15)
+            while vm.state == .running && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            if vm.state == .running {
+                FileHandle.standardError.write(Data(
+                    "[ac] '\(name)' didn't poweroff in 15 s — forcing stop\n".utf8))
+                await Self.forceStop(vm)
+            } else {
+                FileHandle.standardError.write(Data(
+                    "[ac] '\(name)' powered off cleanly\n".utf8))
+            }
+        case .ask:
+            // Unreachable — collapsed to .suspend above.
+            break
+        }
+    }
+
+    private static func forceStop(_ vm: VZVirtualMachine) async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            vm.stop { _ in cont.resume() }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -886,6 +1004,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // small (it's idle and tiny) but worth tidying up at least
         // for the clean-quit path.
         mitmEngine?.privateAgent.terminate()
+    }
+
+    /// Catch the catchable abnormal-termination signals so we still
+    /// run ssh-agent cleanup before dying. Without this, anything
+    /// other than a user-initiated ⌘Q (which goes through
+    /// `applicationWillTerminate`) — a SIGTERM from `kill`, a Ctrl-C
+    /// in the terminal launching us, a `pkill`, an enclosing
+    /// `launchctl` stop — orphans `/usr/bin/ssh-agent` because the
+    /// default disposition just exits the process.
+    ///
+    /// SIGKILL and macOS jetsam (low-memory kill) are uncatchable;
+    /// `PrivateSSHAgent.reapOrphans()` at the next launch is the
+    /// safety net for those.
+    private func installCleanupSignalHandlers() {
+        let catchable: [Int32] = [SIGTERM, SIGINT, SIGHUP]
+        for sig in catchable {
+            // `signal(sig, SIG_IGN)` first so the default
+            // disposition doesn't kill us in the window between this
+            // function returning and the dispatch source activating
+            // (or in case the source is somehow released early).
+            signal(sig, SIG_IGN)
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            src.setEventHandler { [weak self] in
+                FileHandle.standardError.write(Data(
+                    "[bromure-ac] caught signal \(sig); terminating ssh-agent + exiting\n".utf8))
+                self?.mitmEngine?.privateAgent.terminate()
+                // Exit with a non-zero code so callers can distinguish
+                // signal-driven shutdown from a clean ⌘Q.
+                exit(128 + sig)
+            }
+            src.activate()
+            cleanupSignalSources.append(src)
+        }
     }
 
     /// Vetoable close. For VM session windows we always confirm, because

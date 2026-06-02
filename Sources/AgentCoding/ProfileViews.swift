@@ -585,10 +585,12 @@ struct ProfileEditorView: View {
             // the template's name is forced to "Defaults" on save and
             // shouldn't be user-editable here.
             if draft.id != ProfileStore.templateID {
-                TextField("Name", text: $draft.name)
+                TextField(NSLocalizedString("Name", comment: "Profile name field label"),
+                          text: $draft.name)
             }
 
-            Picker("Color", selection: $draft.color) {
+            Picker(NSLocalizedString("Color", comment: "Profile color picker label"),
+                   selection: $draft.color) {
                 ForEach(ProfileColor.allCases, id: \.self) { c in
                     HStack {
                         Circle().fill(c.swiftUIColor.gradient).frame(width: 12, height: 12)
@@ -606,7 +608,8 @@ struct ProfileEditorView: View {
 
             closeActionPicker
 
-            TextField("Notes (optional)", text: $draft.comments, axis: .vertical)
+            TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
+                      text: $draft.comments, axis: .vertical)
                 .lineLimit(2...6)
         }
         .formStyle(.grouped)

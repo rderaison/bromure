@@ -365,3 +365,18 @@
 
 /* Tracing category */
 "Tracing" = "Traçage";
+
+/* Profile color names (General settings → Color picker) */
+"Blue" = "Bleu";
+"Red" = "Rouge";
+"Green" = "Vert";
+"Orange" = "Orange";
+"Purple" = "Violet";
+"Pink" = "Rose";
+"Teal" = "Sarcelle";
+"Gray" = "Gris";
+
+/* App quit confirmation alert (⌘Q with running VMs) */
+"Quit Bromure Agentic Coding?" = "Quitter Bromure Agentic Coding ?";
+"%d VM(s) currently running (%@) will be closed according to each profile's close action." = "%d VM en cours d’exécution (%@) seront fermées conformément à l’action de fermeture de chaque profil.";
+"Quit" = "Quitter";
