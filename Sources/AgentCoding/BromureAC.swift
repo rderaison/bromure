@@ -2246,6 +2246,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // update it unconditionally so a mode change lands even when no
         // credential moved.
         mitmEngine?.setGuardrailsConfig(Self.makeGuardrailsConfig(for: new), for: new.id)
+        // Supply-chain policy follows the same live-update rule.
+        mitmEngine?.setSupplyChainPolicy(new.supplyChain, for: new.id)
 
         var profile = new
         populateMCPBearerTokens(in: &profile)
@@ -2552,6 +2554,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // on <scope> from profile <name>?"
             let gBroker = engine.guardrailsBroker
             Task.detached { await gBroker.setProfileName(nameCopy, for: pidCopy) }
+            // And for the supply-chain prompts.
+            let scBroker = engine.supplyChainBroker
+            Task.detached { await scBroker.setProfileName(nameCopy, for: pidCopy) }
             let agentKeys = loadAgentKeys(for: profile)
             engine.sshAgent.setKeys(agentKeys, for: profile.id)
             // AWS creds: pushed to the host-side server. The guest's
@@ -2748,6 +2753,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if let engine = self.mitmEngine, let dev = sandbox.socketDevice {
                 engine.register(socketDevice: dev, profileID: profile.id)
                 engine.setGuardrailsConfig(Self.makeGuardrailsConfig(for: profile), for: profile.id)
+                engine.setSupplyChainPolicy(profile.supplyChain, for: profile.id)
             }
             // Keyboard layout bridge — pushes the macOS layout into the
             // guest at boot and follows live changes (or pins an
@@ -3435,6 +3441,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if let engine = self.mitmEngine, let dev = sandbox.socketDevice {
                 engine.register(socketDevice: dev, profileID: profile.id)
                 engine.setGuardrailsConfig(Self.makeGuardrailsConfig(for: profile), for: profile.id)
+                engine.setSupplyChainPolicy(profile.supplyChain, for: profile.id)
             }
             if let dev = sandbox.socketDevice {
                 win.keyboardBridge = KeyboardBridge(

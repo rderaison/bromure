@@ -388,3 +388,9 @@
 "Allow write on “%@” from profile “%@”?" = "Autoriser une écriture sur « %@ » depuis le profil « %@ » ?";
 "Allow for 15 minutes" = "Autoriser pendant 15 minutes";
 "Allow once" = "Autoriser une seule fois";
+
+/* Supply Chain Security category */
+"Supply Chain Security" = "Sécurité de la chaîne d’approvisionnement";
+"Pass through %@ from profile “%@”?" = "Laisser passer %@ depuis le profil « %@ » ?";
+"Get an API key" = "Obtenir une clé API";
+"Add entry" = "Ajouter";

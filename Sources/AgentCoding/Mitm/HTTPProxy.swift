@@ -24,10 +24,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// shape as `consent` but scoped to write-on-X grants instead of
     /// per-credential grants.
     let guardrailsBroker: GuardrailsConsentBroker
+    /// Consent broker for supply-chain prompts (lockfile-pinned
+    /// bypass, per-package overrides).
+    let supplyChainBroker: SupplyChainConsentBroker
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
     /// "Guardrails" guard for this profile (host-side destructive-verb removal),
     /// or nil if disabled. Read on the hot path per request.
     let guardrailsProvider: @Sendable () -> GuardrailsConfig?
+    /// Supply-chain policy for this profile (age gate, OSV /
+    /// socket.dev lookups, install-script stripping). Read on
+    /// every registry intercept.
+    let supplyChainProvider: @Sendable () -> SupplyChainPolicy?
     /// Fired when the proxy sees a clean Anthropic subscription OAuth
     /// access token in an outbound request. The host wires this to
     /// `SubscriptionTokenCoordinator.handleCleanAccessToken` which
@@ -49,8 +56,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
          guardrailsBroker: GuardrailsConsentBroker,
+         supplyChainBroker: SupplyChainConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig? = { nil },
+         supplyChainProvider: @escaping @Sendable () -> SupplyChainPolicy? = { nil },
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)? = nil,
          codexTokenSeen: (@Sendable (UUID, String) -> Void)? = nil,
          oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)? = nil) {
@@ -64,8 +73,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
         self.clusterCAs = clusterCAs
         self.consent = consent
         self.guardrailsBroker = guardrailsBroker
+        self.supplyChainBroker = supplyChainBroker
         self.sessionTraceProvider = sessionTraceProvider
         self.guardrailsProvider = guardrailsProvider
+        self.supplyChainProvider = supplyChainProvider
         self.subscriptionTokenSeen = subscriptionTokenSeen
         self.codexTokenSeen = codexTokenSeen
         self.oauthRotated = oauthRotated
@@ -417,6 +428,84 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // now in exchange for the CLI staying logged in). Re-enable by
         // uncommenting the if/else below.
         //
+        // Supply-chain interception. Sits between the guardrails
+        // block (above) and the OAuth-rotation rewriter (below) so
+        // it shares the same per-request URLSession the rest of the
+        // proxy uses. Only fires when a policy is configured AND the
+        // request URL matches a known package-registry pattern.
+        // Anything else falls through to the normal upstream relay.
+        if let policy = supplyChainProvider(), policy.isActive,
+           let kind = SupplyChainRegistry.classify(host: host, path: reqPath) {
+            switch kind {
+            case .metadata(let ecosystem, let pkg):
+                // Age-gate the metadata JSON. npm gets full
+                // treatment; other ecosystems are still classified
+                // but their transforms are not implemented yet —
+                // we'd still want the request to flow upstream
+                // (the URL-recogniser was the wedge), so fall
+                // through to relay if there's no transform.
+                if ecosystem == .npm,
+                   (policy.ageGateEnabled || policy.stripInstallScripts) {
+                    let cutoff = Date().addingTimeInterval(-Double(policy.ageGateDays) * 86400)
+                    let allowlisted = policy.ageGateAllows(ecosystem: ecosystem.rawValue, name: pkg)
+                    let stripIntegrity = policy.stripInstallScripts
+                        && !policy.scriptStripAllows(ecosystem: ecosystem.rawValue, name: pkg)
+                    let relay = try await relayUpstreamBuffered(
+                        rawRequest: toForward, host: host, port: port,
+                        session: session, tls: tls,
+                        rewrite: { raw in
+                            NPMRegistryTransforms.filterMetadata(
+                                rawResponse: raw,
+                                packageName: pkg,
+                                allowedAfter: cutoff,
+                                allowlistedPackage: allowlisted,
+                                stripIntegrity: stripIntegrity)
+                        })
+                    let elapsed = Date().timeIntervalSince(t0) * 1000
+                    await emitTrace(host: host, port: port,
+                                    preSwapRequest: request,
+                                    upstreamResponse: relay.buffer,
+                                    upstreamWireBytes: relay.wireBytes,
+                                    responseTruncated: relay.truncatedForTrace,
+                                    swaps: swap.swaps,
+                                    leaks: leaks,
+                                    latencyMs: elapsed)
+                    return
+                }
+            case .artifact(let ecosystem, let pkg, _):
+                // Tarball: rewrite if it's npm + strip is on + the
+                // package isn't on the per-package allowlist.
+                if ecosystem == .npm,
+                   policy.stripInstallScripts,
+                   !policy.scriptStripAllows(ecosystem: ecosystem.rawValue, name: pkg) {
+                    let relay = try await relayUpstreamBuffered(
+                        rawRequest: toForward, host: host, port: port,
+                        session: session, tls: tls,
+                        rewrite: { raw in
+                            let (out, didStrip) = NPMRegistryTransforms
+                                .stripScriptsFromTarball(rawResponse: raw)
+                            if didStrip {
+                                FileHandle.standardError.write(Data(
+                                    "[supply-chain] stripped install scripts from \(pkg)\n".utf8))
+                            }
+                            return out
+                        })
+                    let elapsed = Date().timeIntervalSince(t0) * 1000
+                    await emitTrace(host: host, port: port,
+                                    preSwapRequest: request,
+                                    upstreamResponse: relay.buffer,
+                                    upstreamWireBytes: relay.wireBytes,
+                                    responseTruncated: relay.truncatedForTrace,
+                                    swaps: swap.swaps,
+                                    leaks: leaks,
+                                    latencyMs: elapsed)
+                    return
+                }
+            case .passthrough:
+                break   // recognised but nothing to transform
+            }
+        }
+
         // let (_, refreshPath) = Self.parseRequestLine(toForward)
         // let oauthProvider = OAuthRotationRewriter.provider(
         //     for: host, path: refreshPath)

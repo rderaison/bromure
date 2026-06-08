@@ -22,6 +22,9 @@ public final class MitmEngine {
     /// broker but uses a different decision set (Allow once / 15 min /
     /// session / Don't allow) tailored to "should this write fire?".
     public let guardrailsBroker: GuardrailsConsentBroker
+    /// Per-profile, per-scope consent for supply-chain policy
+    /// prompts (lockfile-pinned bypass, per-package overrides).
+    public let supplyChainBroker: SupplyChainConsentBroker
     public let traceStore: TraceStore
     /// Per-profile, per-host SecIdentity table for upstream client-cert
     /// auth (Kubernetes API servers, internal mTLS APIs, etc.). The
@@ -84,6 +87,25 @@ public final class MitmEngine {
         guardrailsConfigs.removeValue(forKey: profileID)
     }
 
+    // Same shape for supply-chain policy. Looked up per-request
+    // on the proxy hot path; lock-guarded so the host can update
+    // it live (profile editor save) without an actor hop.
+    private let supplyChainLock = NSLock()
+    nonisolated(unsafe) private var supplyChainPolicies: [UUID: SupplyChainPolicy] = [:]
+
+    public nonisolated func setSupplyChainPolicy(_ policy: SupplyChainPolicy, for profileID: UUID) {
+        supplyChainLock.lock(); defer { supplyChainLock.unlock() }
+        supplyChainPolicies[profileID] = policy
+    }
+    public nonisolated func supplyChainPolicy(for profileID: UUID) -> SupplyChainPolicy? {
+        supplyChainLock.lock(); defer { supplyChainLock.unlock() }
+        return supplyChainPolicies[profileID]
+    }
+    public nonisolated func clearSupplyChainPolicy(for profileID: UUID) {
+        supplyChainLock.lock(); defer { supplyChainLock.unlock() }
+        supplyChainPolicies.removeValue(forKey: profileID)
+    }
+
     /// Per-install 32-byte salt for deriving fake tokens from real
     /// ones via HKDF. Generated once, persisted under app support so
     /// a given real key always maps to the same fake on this Mac —
@@ -134,6 +156,7 @@ public final class MitmEngine {
         let broker = ConsentBroker()
         self.consent = broker
         self.guardrailsBroker = GuardrailsConsentBroker()
+        self.supplyChainBroker = SupplyChainConsentBroker()
         self.swapper = TokenSwapper(consent: broker)
         self.sshAgent = SSHAgentServer(consent: broker)
         self.awsCreds = AWSCredentialServer(consent: broker)
@@ -181,6 +204,7 @@ public final class MitmEngine {
             clusterCAs: clusterCAs,
             consent: consent,
             guardrailsBroker: guardrailsBroker,
+            supplyChainBroker: supplyChainBroker,
             // The provider runs from a detached Task on the proxy's
             // hot path. `sessionTrace(for:)` is now nonisolated +
             // lock-protected so this is just a hash lookup behind a
@@ -190,6 +214,9 @@ public final class MitmEngine {
             },
             guardrailsProvider: { [weak self] in
                 self?.guardrailsConfig(for: profileID)
+            },
+            supplyChainProvider: { [weak self] in
+                self?.supplyChainPolicy(for: profileID)
             },
             subscriptionTokenSeen: tokenHook,
             codexTokenSeen: codexHook,
@@ -207,6 +234,7 @@ public final class MitmEngine {
     public func unregister(profileID: UUID) {
         listenerHolders.removeValue(forKey: profileID)
         clearGuardrailsConfig(for: profileID)
+        clearSupplyChainPolicy(for: profileID)
         swapper.clearMap(for: profileID)
         sshAgent.clearKeys(for: profileID)
         sshAgent.clearImportedKeyApprovals(for: profileID)
@@ -227,6 +255,9 @@ public final class MitmEngine {
         let gBroker = guardrailsBroker
         Task.detached { await gBroker.revokeAll(profileID: profileID) }
         Task.detached { await gBroker.clearProfileName(for: profileID) }
+        let scBroker = supplyChainBroker
+        Task.detached { await scBroker.revokeAll(profileID: profileID) }
+        Task.detached { await scBroker.clearProfileName(for: profileID) }
     }
 }
 
@@ -253,8 +284,10 @@ private final class ListenerHolder {
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
          guardrailsBroker: GuardrailsConsentBroker,
+         supplyChainBroker: SupplyChainConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig?,
+         supplyChainProvider: @escaping @Sendable () -> SupplyChainPolicy?,
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?,
          codexTokenSeen: (@Sendable (UUID, String) -> Void)?,
          oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?)
@@ -270,8 +303,10 @@ private final class ListenerHolder {
             clusterCAs: clusterCAs,
             consent: consent,
             guardrailsBroker: guardrailsBroker,
+            supplyChainBroker: supplyChainBroker,
             sessionTraceProvider: sessionTraceProvider,
             guardrailsProvider: guardrailsProvider,
+            supplyChainProvider: supplyChainProvider,
             subscriptionTokenSeen: subscriptionTokenSeen,
             codexTokenSeen: codexTokenSeen,
             oauthRotated: oauthRotated)
@@ -301,8 +336,10 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
     let clusterCAs: ClusterCATrustRegistry
     let consent: ConsentBroker
     let guardrailsBroker: GuardrailsConsentBroker
+    let supplyChainBroker: SupplyChainConsentBroker
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
     let guardrailsProvider: @Sendable () -> GuardrailsConfig?
+    let supplyChainProvider: @Sendable () -> SupplyChainPolicy?
     let subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?
     let codexTokenSeen: (@Sendable (UUID, String) -> Void)?
     let oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?
@@ -314,8 +351,10 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
          guardrailsBroker: GuardrailsConsentBroker,
+         supplyChainBroker: SupplyChainConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig?,
+         supplyChainProvider: @escaping @Sendable () -> SupplyChainPolicy?,
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?,
          codexTokenSeen: (@Sendable (UUID, String) -> Void)?,
          oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?) {
@@ -328,8 +367,10 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         self.clusterCAs = clusterCAs
         self.consent = consent
         self.guardrailsBroker = guardrailsBroker
+        self.supplyChainBroker = supplyChainBroker
         self.sessionTraceProvider = sessionTraceProvider
         self.guardrailsProvider = guardrailsProvider
+        self.supplyChainProvider = supplyChainProvider
         self.subscriptionTokenSeen = subscriptionTokenSeen
         self.codexTokenSeen = codexTokenSeen
         self.oauthRotated = oauthRotated
@@ -345,6 +386,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         let tokenHook = subscriptionTokenSeen
         let codexHook = codexTokenSeen
         let rotatedHook = oauthRotated
+        let supplyChainCopy = supplyChainProvider
         let conn = HTTPMitmConnection(
             fd: fd,
             profileID: profileID,
@@ -356,8 +398,10 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             clusterCAs: clusterCAs,
             consent: consent,
             guardrailsBroker: guardrailsBroker,
+            supplyChainBroker: supplyChainBroker,
             sessionTraceProvider: providerCopy,
             guardrailsProvider: guardrailsCopy,
+            supplyChainProvider: supplyChainCopy,
             subscriptionTokenSeen: tokenHook,
             codexTokenSeen: codexHook,
             oauthRotated: rotatedHook

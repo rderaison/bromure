@@ -942,6 +942,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// speaks (Kubernetes first), enforced host-side in the MITM.
     public var guardrails: GuardrailsPolicy
 
+    /// Supply-chain security policy — age-gate package installs,
+    /// look up OSV / socket.dev for known-bad versions, strip
+    /// install scripts. Enforced host-side in the MITM; the in-VM
+    /// `.npmrc` / `pip.conf` can only further restrict, never loosen.
+    public var supplyChain: SupplyChainPolicy
+
     /// DigitalOcean Personal Access Token. Injected as
     /// DIGITALOCEAN_ACCESS_TOKEN env + ~/.config/doctl/config.yaml in
     /// the VM as a fake; proxy swaps to the real value on
@@ -1138,6 +1144,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         defaultCodexTokens: StoredOAuthTokens? = nil,
         kubeconfigs: [KubeconfigEntry] = [],
         guardrails: GuardrailsPolicy = GuardrailsPolicy(),
+        supplyChain: SupplyChainPolicy = SupplyChainPolicy(),
         digitalOceanToken: String = "",
         awsCredentials: AWSCredentials = AWSCredentials(),
         bedrockEnabled: Bool = false,
@@ -1191,6 +1198,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.defaultCodexTokens = defaultCodexTokens
         self.kubeconfigs = kubeconfigs
         self.guardrails = guardrails
+        self.supplyChain = supplyChain
         self.digitalOceanToken = digitalOceanToken
         self.awsCredentials = awsCredentials
         self.bedrockEnabled = bedrockEnabled
@@ -1248,6 +1256,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case codexTokenSwap
         case kubeconfigs
         case guardrails
+        case supplyChain
         case digitalOceanToken
         case awsCredentials
         case bedrockEnabled, bedrockModelID
@@ -1325,6 +1334,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                                                forKey: .codexTokenSwap) ?? .unset
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         guardrails = try c.decodeIfPresent(GuardrailsPolicy.self, forKey: .guardrails) ?? GuardrailsPolicy()
+        supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
         bedrockEnabled = try c.decodeIfPresent(Bool.self, forKey: .bedrockEnabled) ?? false
@@ -1405,6 +1415,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if guardrails.isActive {
             try c.encode(guardrails, forKey: .guardrails)
         }
+        // Encode supply-chain unconditionally: its empty/default form
+        // already represents "all defaults" via the inner encode()
+        // which only emits non-default fields. This means a profile
+        // with all-default supply chain (the new-profile state) gets
+        // an empty `supplyChain: {}` blob, but adding any non-default
+        // toggle gets persisted automatically.
+        try c.encode(supplyChain, forKey: .supplyChain)
         if !digitalOceanToken.isEmpty {
             try c.encode(digitalOceanToken, forKey: .digitalOceanToken)
         }

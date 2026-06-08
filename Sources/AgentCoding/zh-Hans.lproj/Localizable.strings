@@ -388,3 +388,9 @@
 "Allow write on “%@” from profile “%@”?" = "允许配置文件“%@”对“%@”执行一次写入？";
 "Allow for 15 minutes" = "允许 15 分钟";
 "Allow once" = "仅允许一次";
+
+/* Supply Chain Security category */
+"Supply Chain Security" = "供应链安全";
+"Pass through %@ from profile “%@”?" = "允许来自配置文件“%@”的 %@ 通过？";
+"Get an API key" = "获取 API 密钥";
+"Add entry" = "添加条目";

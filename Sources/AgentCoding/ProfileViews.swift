@@ -292,6 +292,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case mcp         = "MCP"
     case tracing     = "Tracing"
     case guardrails       = "Guardrails"
+    case supplyChain      = "Supply Chain Security"
     case appearance  = "Appearance"
     case resources   = "Resources"
     /// App-wide automation toggles. Only shown when the editor is opened
@@ -311,6 +312,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .mcp:         "network"
         case .tracing:     "doc.text.magnifyingglass"
         case .guardrails:       "exclamationmark.shield.fill"
+        case .supplyChain:      "shippingbox.fill"
         case .appearance:  "paintpalette.fill"
         case .resources:   "memorychip.fill"
         case .automation:  "antenna.radiowaves.left.and.right"
@@ -327,6 +329,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .mcp:         .blue
         case .tracing:     .red
         case .guardrails:       .orange
+        case .supplyChain:      .yellow
         case .appearance:  .pink
         case .resources:   .gray
         case .automation:  .cyan
@@ -549,6 +552,7 @@ struct ProfileEditorView: View {
         case .mcp:         mcpSection
         case .tracing:     tracingSection
         case .guardrails:       guardrailsSection
+        case .supplyChain:      supplyChainSection
         case .appearance:  appearanceSection
         case .resources:   resourcesSection
         case .automation:  automationSection
@@ -2356,6 +2360,169 @@ struct ProfileEditorView: View {
                     }
                 }
             }
+        }
+    }
+
+    // MARK: - Supply Chain Security section
+
+    @ViewBuilder
+    private var supplyChainSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go modules, Packagist) through the host MITM and applies these policies before the agent sees the response. The in-VM `.npmrc` / `pip.conf` can only further restrict these settings — they cannot loosen them. Use the per-package allowlists for surgical overrides.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            GroupBox(label: Label(NSLocalizedString("Age gate", comment: ""),
+                                  systemImage: "calendar")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle(NSLocalizedString("Refuse packages younger than the cutoff", comment: ""),
+                           isOn: $draft.supplyChain.ageGateEnabled)
+                    HStack {
+                        Text(NSLocalizedString("Minimum age:", comment: ""))
+                        Stepper(value: $draft.supplyChain.ageGateDays, in: 0...90) {
+                            Text(String(format: NSLocalizedString("%d days", comment: ""),
+                                        draft.supplyChain.ageGateDays))
+                                .frame(minWidth: 80, alignment: .leading)
+                        }
+                        .disabled(!draft.supplyChain.ageGateEnabled)
+                    }
+                    Text("Floating refs (`latest`, semver ranges) silently resolve to the newest version older than the cutoff. Pinned references to too-fresh versions get a 451 with a clear Bromure error.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    allowlistEditor(
+                        title: NSLocalizedString("Exempt packages (format: `npm:axios` or just `axios`)", comment: ""),
+                        list: $draft.supplyChain.ageGateAllowlist)
+                }
+                .padding(8)
+            }
+
+            GroupBox(label: Label(NSLocalizedString("OSV vulnerability check", comment: ""),
+                                  systemImage: "ladybug")) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(NSLocalizedString("Look up packages on api.osv.dev (free, no key required)", comment: ""),
+                           isOn: $draft.supplyChain.osvEnabled)
+                    Picker(NSLocalizedString("Block at severity:", comment: ""),
+                           selection: $draft.supplyChain.osvSeverity) {
+                        ForEach(SupplyChainPolicy.Severity.allCases, id: \.self) { s in
+                            Text(s.displayName).tag(s)
+                        }
+                    }
+                    .disabled(!draft.supplyChain.osvEnabled)
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 280)
+                    Text("Aggregates GitHub Advisory Database + PyPI advisories + Go's database + RubySec etc. Off by default — a low-severity CVE in a transitive subpackage shouldn't interrupt a workflow.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+            }
+
+            GroupBox(label: Label("socket.dev",
+                                  systemImage: "checkmark.shield")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(NSLocalizedString("API key:", comment: ""))
+                        SecureField("", text: $draft.supplyChain.socketAPIKey)
+                            .textFieldStyle(.roundedBorder)
+                        Link(destination: URL(string: "https://socket.dev/dashboard/settings/api-tokens")!) {
+                            HStack(spacing: 2) {
+                                Text(NSLocalizedString("Get an API key", comment: ""))
+                                Image(systemName: "arrow.up.forward.square")
+                            }
+                            .font(.caption)
+                        }
+                    }
+                    Text("The key is stored host-side only — Bromure never exports it into the VM. Calls go directly to api.socket.dev from the host's MITM proxy.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Divider().padding(.vertical, 4)
+                    Toggle(NSLocalizedString("Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)", comment: ""),
+                           isOn: $draft.supplyChain.socketBlockCompromised)
+                        .disabled(draft.supplyChain.socketAPIKey.isEmpty)
+                    Toggle(NSLocalizedString("Block packages with known CVEs", comment: ""),
+                           isOn: $draft.supplyChain.socketBlockCVE)
+                        .disabled(draft.supplyChain.socketAPIKey.isEmpty)
+                    Picker(NSLocalizedString("CVE block threshold:", comment: ""),
+                           selection: $draft.supplyChain.socketCVESeverity) {
+                        ForEach(SupplyChainPolicy.Severity.allCases, id: \.self) { s in
+                            Text(s.displayName).tag(s)
+                        }
+                    }
+                    .disabled(!draft.supplyChain.socketBlockCVE || draft.supplyChain.socketAPIKey.isEmpty)
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 280)
+                }
+                .padding(8)
+            }
+
+            GroupBox(label: Label(NSLocalizedString("Install scripts", comment: ""),
+                                  systemImage: "scroll")) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(NSLocalizedString("Strip preinstall / install / postinstall / prepare from npm tarballs on the fly", comment: ""),
+                           isOn: $draft.supplyChain.stripInstallScripts)
+                    Text("Bromure rewrites the tarball, removes the script keys from `package.json`, and updates the registry metadata hash so npm's verification still passes for unpinned installs. Some packages (binding compilers — better-sqlite3, node-canvas, …) legitimately need install scripts; add them to the allowlist below.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    allowlistEditor(
+                        title: NSLocalizedString("Allow install scripts for (format: `npm:better-sqlite3`)", comment: ""),
+                        list: $draft.supplyChain.stripAllowlist)
+                }
+                .padding(8)
+            }
+
+            GroupBox(label: Label(NSLocalizedString("Lockfile-pinned installs", comment: ""),
+                                  systemImage: "lock.fill")) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(NSLocalizedString("Prompt before passing lockfile-pinned tarballs through unmodified (`npm ci`, `pip --require-hashes`)", comment: ""),
+                           isOn: $draft.supplyChain.lockfilePrompt)
+                    Text("These installs use cryptographic integrity hashes baked into a lockfile — Bromure can't rewrite them without breaking verification. When this is on, the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow); the entire batch follows the decision.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+            }
+        }
+        .padding(16)
+    }
+
+    /// Compact list-editor reused for the per-package allowlists.
+    /// One entry per row, "+/-" buttons, no header chrome — keeps the
+    /// settings panel from drowning in nested groups.
+    @ViewBuilder
+    private func allowlistEditor(title: String, list: Binding<[String]>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption.weight(.medium))
+            ForEach(Array(list.wrappedValue.enumerated()), id: \.offset) { (idx, value) in
+                HStack {
+                    TextField("", text: Binding(
+                        get: { list.wrappedValue[idx] },
+                        set: { list.wrappedValue[idx] = $0 }))
+                        .textFieldStyle(.roundedBorder)
+                    Button(action: {
+                        var copy = list.wrappedValue
+                        copy.remove(at: idx)
+                        list.wrappedValue = copy
+                    }) {
+                        Image(systemName: "minus.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+                }
+            }
+            Button(action: {
+                list.wrappedValue.append("")
+            }) {
+                Label(NSLocalizedString("Add entry", comment: ""),
+                      systemImage: "plus.circle")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
     }
 

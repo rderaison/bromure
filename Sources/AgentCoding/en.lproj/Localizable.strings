@@ -389,3 +389,9 @@
 "Allow write on “%@” from profile “%@”?" = "Allow write on “%@” from profile “%@”?";
 "Allow for 15 minutes" = "Allow for 15 minutes";
 "Allow once" = "Allow once";
+
+/* Supply Chain Security category */
+"Supply Chain Security" = "Supply Chain Security";
+"Pass through %@ from profile “%@”?" = "Pass through %@ from profile “%@”?";
+"Get an API key" = "Get an API key";
+"Add entry" = "Add entry";

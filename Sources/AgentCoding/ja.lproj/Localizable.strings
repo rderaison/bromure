@@ -388,3 +388,9 @@
 "Allow write on “%@” from profile “%@”?" = "プロファイル「%@」から「%@」への書き込みを許可しますか？";
 "Allow for 15 minutes" = "15 分間許可";
 "Allow once" = "今回のみ許可";
+
+/* Supply Chain Security category */
+"Supply Chain Security" = "サプライチェーン セキュリティ";
+"Pass through %@ from profile “%@”?" = "プロファイル「%@」から %@ を通過させますか？";
+"Get an API key" = "API キーを取得";
+"Add entry" = "エントリを追加";
