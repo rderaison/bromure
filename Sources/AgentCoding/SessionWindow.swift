@@ -344,23 +344,15 @@ final class TabbedSessionWindow: NSWindow {
         pendingSpawns.removeAll { $0.id == tab.id }
         acDelegate?.requestCloseTab(id: tab.id, in: self)
         if model.tabs.isEmpty {
-            // Last-tab ⌘W — honour the profile's closeAction without
-            // routing through performClose/windowShouldClose. The
-            // previous performClose() variant fired the regular
-            // pipeline but the `.shutdown` branch popped a
-            // confirmation that swallowed the keystroke unless the
-            // user clicked through, which read as "⌘W doesn't work".
-            // ⌘W on the last tab is an explicit "I'm done with this
-            // session" — skip the dialog and just close per the
-            // profile's setting (matching the `.ask` dialog's default
-            // button for .ask profiles).
-            switch profile.closeAction {
-            case .suspend, .ask:
-                pendingCloseAction = .suspend
-            case .shutdown:
-                pendingCloseAction = .shutdown
-            }
-            close()
+            // Last-tab ⌘W: defer to the regular performClose pipeline
+            // so `windowShouldClose → decideSessionClose` reads the
+            // profile's `closeAction`. `close()` would bypass that
+            // check and force shutdown regardless of the profile's
+            // setting — which silently demoted .suspend profiles to
+            // .shutdown on every ⌘W. The xinitrc kitty-respawn loop
+            // already handles the "empty X session" case the prior
+            // shutdown-only behaviour was guarding against.
+            performClose(nil)
             return
         }
         let newIndex = max(0, min(index - 1, model.tabs.count - 1))
