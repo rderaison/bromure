@@ -2368,6 +2368,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// Send one `vm.disk_reset` event to the workspace backend so admins
+    /// can correlate "this install was reset" with the supply-chain
+    /// timeline that precedes / follows it. `BACEventEmitter` already
+    /// no-ops when the Mac isn't enrolled or the profile is in private
+    /// mode, so this is safe to call unconditionally.
+    private func emitDiskResetEvent(profile: Profile, reason: String) {
+        var data: [String: AnyJSON] = [
+            "reason": .string(reason),
+        ]
+        if let v = profile.baseImageVersionAtClone {
+            data["base_image_version_at_clone"] = .string(v)
+        }
+        if let v = readCurrentBaseVersion() {
+            data["base_image_version_current"] = .string(v)
+        }
+        BACEventEmitter.shared.emitDetached(
+            profileID: profile.id,
+            eventType: "vm.disk_reset",
+            eventData: data)
+    }
+
     private func resetProfile(_ profile: Profile) {
         if profileWindows[profile.id] != nil {
             showRunningRefusal(profile: profile, what: "system disk")
@@ -2391,6 +2412,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         do {
             try store.resetDisk(for: profile)
+            emitDiskResetEvent(profile: profile, reason: "user_requested")
         } catch {
             showError(error, message: "Couldn't reset the disk.")
         }
@@ -2505,6 +2527,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             switch alert.runModal() {
             case .alertFirstButtonReturn:
                 try? store.resetDisk(for: profile)
+                emitDiskResetEvent(profile: profile, reason: "base_image_drift")
             case .alertThirdButtonReturn:
                 return
             default:
@@ -3028,6 +3051,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             profile: profile, store: store,
             baseDiskURL: imageManager.baseDiskURL)
         session.wipeForCompromise()
+        emitDiskResetEvent(profile: profile, reason: "compromised")
         // Re-render so the badge disappears immediately. (`launch`
         // continues right after this, but the picker behind the
         // session window will reflect the change once focus returns.)
