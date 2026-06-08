@@ -465,6 +465,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     && !policy.scriptStripAllows(ecosystem: ecosystem.rawValue, name: pkg)
                 let ageOn = policy.ageGateEnabled
                 let cache = publishTimeCache
+                // Outcome for the enterprise event stream. "rewritten"
+                // when the transform actually pipelined the body
+                // through; "allowed" on the early-passthrough (e.g.
+                // allowlisted + nothing to strip).
+                let metaOutcome: String =
+                    (allowlisted && !stripIntegrity) ? "allowed" : "rewritten"
+                defer {
+                    emitSupplyChainFetch(profileID: self.profileID,
+                        ecosystem: ecosystem.rawValue,
+                        package: pkg, version: nil,
+                        kind: "metadata", outcome: metaOutcome)
+                }
                 let relay = try await relayUpstreamBuffered(
                     rawRequest: toForward, host: host, port: port,
                     session: session, tls: tls,
@@ -571,6 +583,24 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 SupplyChainLog.shared.record(
                     "[supply-chain] inspecting \(ecosystem.rawValue)/\(pkg)@\(version)")
 
+                // Enterprise event stream — one `supply_chain.fetch`
+                // event per artifact request, regardless of outcome.
+                // Each 451 / strip path below mutates these state
+                // vars before returning; the defer captures whatever
+                // ended up set. Default is "allowed" for the
+                // fall-through (no policy fired, package passes).
+                var scOutcome = "allowed"
+                var scReasonKind: String? = nil
+                var scReason: String? = nil
+                let scProfileID = self.profileID
+                defer {
+                    emitSupplyChainFetch(profileID: scProfileID,
+                        ecosystem: ecosystem.rawValue,
+                        package: pkg, version: version,
+                        kind: "artifact", outcome: scOutcome,
+                        reasonKind: scReasonKind, reason: scReason)
+                }
+
                 // Three pre-flight checks before forward. Each may
                 // 451-block; none of them touch the upstream until
                 // we decide to forward.
@@ -594,6 +624,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
                     SupplyChainLog.shared.record(
                         "[supply-chain] age-gate 451: \(pkg)@\(version) — \(ageDesc) old, requires \(policy.ageGateDays)d")
+                    scOutcome = "blocked"
+                    scReasonKind = "age_gate"
+                    scReason = reason
                     return
                 }
 
@@ -612,6 +645,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
                         SupplyChainLog.shared.record(
                             "[supply-chain] OSV 451: \(pkg)@\(version) → \(v.id)")
+                        scOutcome = "blocked"
+                        scReasonKind = "osv"
+                        scReason = reason
                         return
                     }
                 }
@@ -628,6 +664,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
                         SupplyChainLog.shared.record(
                             "[supply-chain] socket.dev compromised 451: \(pkg)@\(version) → \(bad.type) [\(bad.severity.rawValue)]")
+                        scOutcome = "blocked"
+                        scReasonKind = "socket_compromised"
+                        scReason = reason
                         return
                     }
                     if policy.socketBlockCVE {
@@ -640,6 +679,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                             try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
                             SupplyChainLog.shared.record(
                                 "[supply-chain] socket.dev CVE 451: \(pkg)@\(version) → \(v.type) [\(v.severity.rawValue)]")
+                            scOutcome = "blocked"
+                            scReasonKind = "socket_cve"
+                            scReason = reason
                             return
                         }
                     }
@@ -670,6 +712,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
                         SupplyChainLog.shared.record(
                             "[supply-chain] lockfile-pinned 451: \(pkg)@\(version) — user denied bypass")
+                        scOutcome = "blocked"
+                        scReasonKind = "lockfile_denied"
+                        scReason = reason
                         return
                     }
                 }
@@ -680,6 +725,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 if ecosystem == .npm,
                    policy.stripInstallScripts,
                    !policy.scriptStripAllows(ecosystem: ecosystem.rawValue, name: pkg) {
+                    var didStripFlag = false
                     let relay = try await relayUpstreamBuffered(
                         rawRequest: toForward, host: host, port: port,
                         session: session, tls: tls,
@@ -687,6 +733,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                             let (out, didStrip) = NPMRegistryTransforms
                                 .stripScriptsFromTarball(rawResponse: raw)
                             if didStrip {
+                                didStripFlag = true
                                 SupplyChainLog.shared.record(
                                     "[supply-chain] stripped install scripts from \(pkg)@\(version)")
                             }
@@ -701,6 +748,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                     swaps: swap.swaps,
                                     leaks: leaks,
                                     latencyMs: elapsed)
+                    if didStripFlag {
+                        scOutcome = "stripped"
+                        scReasonKind = "scripts_stripped"
+                    }
                     return
                 }
 
@@ -1742,6 +1793,38 @@ private func inflateData(_ data: Data, format: DeflateFormat) -> Data? {
         return out
     }
     return result
+}
+
+/// Fire-and-forget supply-chain event to the workspace backend. Emits
+/// one `supply_chain.fetch` row per package fetch the MITM intercepts.
+/// `BACEventEmitter.shared.emitDetached` already gates on enrollment
+/// (no install identity → no-op) and per-profile private mode, so this
+/// is safe to call from every supply-chain branch unconditionally.
+///
+/// Event shape consumed by `ac_events.event_data`:
+///   { ecosystem, package, version?, kind, outcome,
+///     reason_kind?, reason? }
+private func emitSupplyChainFetch(profileID: UUID,
+                                   ecosystem: String,
+                                   package: String,
+                                   version: String?,
+                                   kind: String,
+                                   outcome: String,
+                                   reasonKind: String? = nil,
+                                   reason: String? = nil) {
+    var data: [String: AnyJSON] = [
+        "ecosystem": .string(ecosystem),
+        "package": .string(package),
+        "kind": .string(kind),
+        "outcome": .string(outcome),
+    ]
+    if let version { data["version"] = .string(version) }
+    if let reasonKind { data["reason_kind"] = .string(reasonKind) }
+    if let reason { data["reason"] = .string(reason) }
+    BACEventEmitter.shared.emitDetached(
+        profileID: profileID,
+        eventType: "supply_chain.fetch",
+        eventData: data)
 }
 
 @available(macOS, deprecated: 10.15)
