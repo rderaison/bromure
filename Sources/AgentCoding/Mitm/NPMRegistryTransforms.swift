@@ -38,7 +38,8 @@ public enum NPMRegistryTransforms {
                                        packageName: String,
                                        allowedAfter cutoff: Date,
                                        allowlistedPackage: Bool,
-                                       stripIntegrity: Bool) -> Data {
+                                       stripIntegrity: Bool,
+                                       publishTimes: inout [(String, Date)]) -> Data {
         guard let parts = splitHTTPResponse(rawResponse) else { return rawResponse }
         let (head, body) = parts
 
@@ -53,19 +54,22 @@ public enum NPMRegistryTransforms {
         }
         var manifest = json
 
-        // 1. Identify versions to drop.
+        // 1. Identify versions to drop. Also record every per-version
+        //    timestamp so the artifact-fetch backstop can look them
+        //    up without re-fetching metadata.
         let timeMap = (manifest["time"] as? [String: String]) ?? [:]
         var droppedVersions = Set<String>()
-        if !allowlistedPackage {
-            let iso = ISO8601DateFormatter()
-            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            let isoNoFraction = ISO8601DateFormatter()
-            isoNoFraction.formatOptions = [.withInternetDateTime]
-            for (version, dateStr) in timeMap {
-                if version == "created" || version == "modified" { continue }
-                let date = iso.date(from: dateStr) ?? isoNoFraction.date(from: dateStr)
-                guard let d = date else { continue }
-                if d > cutoff { droppedVersions.insert(version) }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoNoFraction = ISO8601DateFormatter()
+        isoNoFraction.formatOptions = [.withInternetDateTime]
+        for (version, dateStr) in timeMap {
+            if version == "created" || version == "modified" { continue }
+            let date = iso.date(from: dateStr) ?? isoNoFraction.date(from: dateStr)
+            guard let d = date else { continue }
+            publishTimes.append((version, d))
+            if !allowlistedPackage && d > cutoff {
+                droppedVersions.insert(version)
             }
         }
 

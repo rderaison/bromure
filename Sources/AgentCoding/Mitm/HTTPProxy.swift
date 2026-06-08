@@ -27,6 +27,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Consent broker for supply-chain prompts (lockfile-pinned
     /// bypass, per-package overrides).
     let supplyChainBroker: SupplyChainConsentBroker
+    /// OSV (osv.dev) client + socket.dev client. Shared
+    /// process-wide; cache lookups so the artifact-fetch hot path
+    /// is cheap for repeat installs of the same (pkg, version).
+    let osvClient: OSVClient
+    let socketClient: SocketDevClient
+    /// Publish-time backstop. Populated by metadata transforms,
+    /// consulted at artifact-fetch time to detect "the agent has
+    /// cached metadata from before our age gate was on and is
+    /// fetching a too-fresh version directly".
+    let publishTimeCache: PublishTimeCache
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
     /// "Guardrails" guard for this profile (host-side destructive-verb removal),
     /// or nil if disabled. Read on the hot path per request.
@@ -57,6 +67,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
          consent: ConsentBroker,
          guardrailsBroker: GuardrailsConsentBroker,
          supplyChainBroker: SupplyChainConsentBroker,
+         osvClient: OSVClient,
+         socketClient: SocketDevClient,
+         publishTimeCache: PublishTimeCache,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig? = { nil },
          supplyChainProvider: @escaping @Sendable () -> SupplyChainPolicy? = { nil },
@@ -74,6 +87,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
         self.consent = consent
         self.guardrailsBroker = guardrailsBroker
         self.supplyChainBroker = supplyChainBroker
+        self.osvClient = osvClient
+        self.socketClient = socketClient
+        self.publishTimeCache = publishTimeCache
         self.sessionTraceProvider = sessionTraceProvider
         self.guardrailsProvider = guardrailsProvider
         self.supplyChainProvider = supplyChainProvider
@@ -431,50 +447,220 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // Supply-chain interception. Sits between the guardrails
         // block (above) and the OAuth-rotation rewriter (below) so
         // it shares the same per-request URLSession the rest of the
-        // proxy uses. Only fires when a policy is configured AND the
-        // request URL matches a known package-registry pattern.
-        // Anything else falls through to the normal upstream relay.
+        // proxy uses.
         if let policy = supplyChainProvider(), policy.isActive,
            let kind = SupplyChainRegistry.classify(host: host, path: reqPath) {
+            let cutoff = Date().addingTimeInterval(-Double(policy.ageGateDays) * 86400)
             switch kind {
             case .metadata(let ecosystem, let pkg):
-                // Age-gate the metadata JSON. npm gets full
-                // treatment; other ecosystems are still classified
-                // but their transforms are not implemented yet —
-                // we'd still want the request to flow upstream
-                // (the URL-recogniser was the wedge), so fall
-                // through to relay if there's no transform.
-                if ecosystem == .npm,
-                   (policy.ageGateEnabled || policy.stripInstallScripts) {
-                    let cutoff = Date().addingTimeInterval(-Double(policy.ageGateDays) * 86400)
-                    let allowlisted = policy.ageGateAllows(ecosystem: ecosystem.rawValue, name: pkg)
-                    let stripIntegrity = policy.stripInstallScripts
-                        && !policy.scriptStripAllows(ecosystem: ecosystem.rawValue, name: pkg)
-                    let relay = try await relayUpstreamBuffered(
-                        rawRequest: toForward, host: host, port: port,
-                        session: session, tls: tls,
-                        rewrite: { raw in
-                            NPMRegistryTransforms.filterMetadata(
+                // Age-gate the metadata JSON per-ecosystem. The
+                // matched transform also records every per-version
+                // publish time into PublishTimeCache so the
+                // artifact-fetch backstop has data without
+                // re-fetching.
+                let allowlisted = policy.ageGateAllows(ecosystem: ecosystem.rawValue, name: pkg)
+                let stripIntegrity = ecosystem == .npm
+                    && policy.stripInstallScripts
+                    && !policy.scriptStripAllows(ecosystem: ecosystem.rawValue, name: pkg)
+                let ageOn = policy.ageGateEnabled
+                let cache = publishTimeCache
+                let relay = try await relayUpstreamBuffered(
+                    rawRequest: toForward, host: host, port: port,
+                    session: session, tls: tls,
+                    rewrite: { raw in
+                        switch ecosystem {
+                        case .npm:
+                            var times: [(String, Date)] = []
+                            let out = NPMRegistryTransforms.filterMetadata(
                                 rawResponse: raw,
                                 packageName: pkg,
-                                allowedAfter: cutoff,
-                                allowlistedPackage: allowlisted,
-                                stripIntegrity: stripIntegrity)
-                        })
-                    let elapsed = Date().timeIntervalSince(t0) * 1000
-                    await emitTrace(host: host, port: port,
-                                    preSwapRequest: request,
-                                    upstreamResponse: relay.buffer,
-                                    upstreamWireBytes: relay.wireBytes,
-                                    responseTruncated: relay.truncatedForTrace,
-                                    swaps: swap.swaps,
-                                    leaks: leaks,
-                                    latencyMs: elapsed)
+                                allowedAfter: ageOn ? cutoff : .distantPast,
+                                allowlistedPackage: allowlisted || !ageOn,
+                                stripIntegrity: stripIntegrity,
+                                publishTimes: &times)
+                            if !times.isEmpty {
+                                Task.detached { await cache.record(
+                                    ecosystem: ecosystem.rawValue,
+                                    name: pkg, versions: times) }
+                            }
+                            return out
+                        case .pypi, .cargo, .rubygems, .packagist:
+                            // These four record publish times +
+                            // age-gate via async ecosystem-specific
+                            // transforms. The transforms are async
+                            // because they record into the cache
+                            // actor inline (one fewer round-trip
+                            // than detaching).
+                            //
+                            // Wrap into a blocking semaphore — we're
+                            // already on a per-request task, this is
+                            // fine to block here.
+                            let sem = DispatchSemaphore(value: 0)
+                            var result: Data = raw
+                            Task {
+                                if !ageOn && !stripIntegrity {
+                                    result = raw   // policy disabled; passthrough
+                                    sem.signal(); return
+                                }
+                                let allowed = ageOn ? cutoff : .distantPast
+                                switch ecosystem {
+                                case .pypi:
+                                    result = await EcosystemTransforms.filterPyPIJSON(
+                                        rawResponse: raw,
+                                        packageName: pkg,
+                                        allowedAfter: allowed,
+                                        allowlistedPackage: allowlisted || !ageOn,
+                                        publishTimeCache: cache)
+                                case .cargo:
+                                    result = await EcosystemTransforms.filterCargoAPI(
+                                        rawResponse: raw,
+                                        packageName: pkg,
+                                        allowedAfter: allowed,
+                                        allowlistedPackage: allowlisted || !ageOn,
+                                        publishTimeCache: cache)
+                                case .rubygems:
+                                    result = await EcosystemTransforms.filterRubyGems(
+                                        rawResponse: raw,
+                                        packageName: pkg,
+                                        allowedAfter: allowed,
+                                        allowlistedPackage: allowlisted || !ageOn,
+                                        publishTimeCache: cache)
+                                case .packagist:
+                                    result = await EcosystemTransforms.filterPackagist(
+                                        rawResponse: raw,
+                                        packageName: pkg,
+                                        allowedAfter: allowed,
+                                        allowlistedPackage: allowlisted || !ageOn,
+                                        publishTimeCache: cache)
+                                default:
+                                    result = raw
+                                }
+                                sem.signal()
+                            }
+                            sem.wait()
+                            return result
+                        default:
+                            // Maven / NuGet / Go modules don't ship
+                            // per-version timestamps in their
+                            // standard metadata response shapes —
+                            // we'd need per-version sub-fetches.
+                            // Passthrough for now; OSV/socket.dev
+                            // still apply at artifact-fetch time.
+                            return raw
+                        }
+                    })
+                let elapsed = Date().timeIntervalSince(t0) * 1000
+                await emitTrace(host: host, port: port,
+                                preSwapRequest: request,
+                                upstreamResponse: relay.buffer,
+                                upstreamWireBytes: relay.wireBytes,
+                                responseTruncated: relay.truncatedForTrace,
+                                swaps: swap.swaps,
+                                leaks: leaks,
+                                latencyMs: elapsed)
+                return
+
+            case .artifact(let ecosystem, let pkg, let version):
+                // Three pre-flight checks before forward. Each may
+                // 451-block; none of them touch the upstream until
+                // we decide to forward.
+
+                // 1. Publish-time backstop. Catches "agent has
+                //    cached metadata from before age gate was on
+                //    and is fetching a too-fresh version directly".
+                if policy.ageGateEnabled,
+                   !policy.ageGateAllows(ecosystem: ecosystem.rawValue, name: pkg),
+                   let pub = await publishTimeCache.publishedAt(
+                        ecosystem: ecosystem.rawValue, name: pkg, version: version),
+                   pub > cutoff {
+                    let age = Date().timeIntervalSince(pub)
+                    let ageDesc: String
+                    if age < 3600 { ageDesc = "\(Int(age / 60)) minutes" }
+                    else if age < 86400 { ageDesc = "\(Int(age / 3600)) hours" }
+                    else { ageDesc = String(format: "%.1f days", age / 86400) }
+                    let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
+                        "published \(ageDesc) ago — " +
+                        "policy requires \(policy.ageGateDays) days minimum"
+                    try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
+                    FileHandle.standardError.write(Data(
+                        "[supply-chain] age-gate 451: \(pkg)@\(version)\n".utf8))
                     return
                 }
-            case .artifact(let ecosystem, let pkg, _):
-                // Tarball: rewrite if it's npm + strip is on + the
-                // package isn't on the per-package allowlist.
+
+                // 2. OSV check (free, no key, off by default).
+                if policy.osvEnabled,
+                   let result = await osvClient.check(
+                        ecosystem: ecosystem.rawValue, name: pkg, version: version) {
+                    let blocking = result.vulnerabilities.filter {
+                        $0.severity.rank >= OSVClient.Severity(rawValue: policy.osvSeverity.rawValue)!.rank
+                    }
+                    if let v = blocking.first {
+                        let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
+                            "has \(blocking.count) vulnerabilit\(blocking.count == 1 ? "y" : "ies") " +
+                            "at \(policy.osvSeverity.displayName.lowercased()): " +
+                            "\(v.id) — \(v.summary)"
+                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
+                        FileHandle.standardError.write(Data(
+                            "[supply-chain] OSV 451: \(pkg)@\(version) → \(v.id)\n".utf8))
+                        return
+                    }
+                }
+
+                // 3. socket.dev check (BYO key).
+                if policy.socketActive,
+                   let result = await socketClient.check(
+                        ecosystem: ecosystem.rawValue, name: pkg, version: version,
+                        apiKey: policy.socketAPIKey) {
+                    if policy.socketBlockCompromised, let bad = result.compromised.first {
+                        let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
+                            "flagged by socket.dev: \(bad.type) — \(bad.summary)"
+                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
+                        FileHandle.standardError.write(Data(
+                            "[supply-chain] socket.dev compromised 451: \(pkg)@\(version) → \(bad.type)\n".utf8))
+                        return
+                    }
+                    if policy.socketBlockCVE {
+                        let threshold = SocketDevClient.Severity.from(string: policy.socketCVESeverity.rawValue)
+                        let bad = result.vulnerabilities.first { $0.severity.rank >= threshold.rank }
+                        if let v = bad {
+                            let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
+                                "has known CVE per socket.dev (\(v.severity.rawValue)): " +
+                                "\(v.type) — \(v.summary)"
+                            try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
+                            FileHandle.standardError.write(Data(
+                                "[supply-chain] socket.dev CVE 451: \(pkg)@\(version) → \(v.type)\n".utf8))
+                            return
+                        }
+                    }
+                }
+
+                // 4. Lockfile-pinned bypass prompt — for npm,
+                //    look for the `npm-command: ci` header the
+                //    npm client sets on `npm ci` traffic. If the
+                //    prompt is on, ask once per (profile, ecosystem)
+                //    burst; pass through if allowed.
+                if ecosystem == .npm, policy.lockfilePrompt,
+                   Self.headerValue("npm-command", inHeaderSection: String(
+                        decoding: request.prefix(min(request.count, 4096)),
+                        as: UTF8.self))?.lowercased() == "ci" {
+                    let scope = "lockfile:npm"
+                    let broker = supplyChainBroker
+                    let allowed = await broker.consent(
+                        profileID: profileID,
+                        scope: scope,
+                        scopeDisplayName: "npm ci (lockfile-pinned install)",
+                        detail: "An agent is running `npm ci` — package tarballs come pre-pinned with cryptographic integrity hashes, so Bromure can't strip install scripts or age-filter them without breaking npm's verification.\n\nPass these tarballs through unmodified?")
+                    if !allowed {
+                        let reason = "\(ecosystem.rawValue) lockfile-pinned install (`npm ci`) " +
+                            "blocked — user denied bypass via Bromure consent prompt"
+                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
+                        return
+                    }
+                }
+
+                // 5. npm tarball script-strip (the only artifact
+                //    transform — everything else just forwards
+                //    unmodified after the pre-flight checks pass).
                 if ecosystem == .npm,
                    policy.stripInstallScripts,
                    !policy.scriptStripAllows(ecosystem: ecosystem.rawValue, name: pkg) {
@@ -486,7 +672,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                 .stripScriptsFromTarball(rawResponse: raw)
                             if didStrip {
                                 FileHandle.standardError.write(Data(
-                                    "[supply-chain] stripped install scripts from \(pkg)\n".utf8))
+                                    "[supply-chain] stripped install scripts from \(pkg)@\(version)\n".utf8))
                             }
                             return out
                         })
@@ -501,8 +687,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                     latencyMs: elapsed)
                     return
                 }
+
             case .passthrough:
-                break   // recognised but nothing to transform
+                break
             }
         }
 

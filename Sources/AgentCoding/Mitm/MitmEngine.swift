@@ -25,6 +25,17 @@ public final class MitmEngine {
     /// Per-profile, per-scope consent for supply-chain policy
     /// prompts (lockfile-pinned bypass, per-package overrides).
     public let supplyChainBroker: SupplyChainConsentBroker
+    /// Process-wide OSV (osv.dev) client. Caches lookups across all
+    /// profiles so a popular package + version answered once is
+    /// cheap thereafter.
+    public let osvClient: OSVClient
+    /// Same for socket.dev. The API key is per-profile, so calls
+    /// look it up off the SupplyChainPolicy at request time.
+    public let socketClient: SocketDevClient
+    /// `(ecosystem, name, version) → publishedAt` map populated as
+    /// metadata responses flow through. Used by the artifact-fetch
+    /// backstop (don't allow pinned-too-fresh tarball requests).
+    public let publishTimeCache: PublishTimeCache
     public let traceStore: TraceStore
     /// Per-profile, per-host SecIdentity table for upstream client-cert
     /// auth (Kubernetes API servers, internal mTLS APIs, etc.). The
@@ -157,6 +168,9 @@ public final class MitmEngine {
         self.consent = broker
         self.guardrailsBroker = GuardrailsConsentBroker()
         self.supplyChainBroker = SupplyChainConsentBroker()
+        self.osvClient = OSVClient()
+        self.socketClient = SocketDevClient()
+        self.publishTimeCache = PublishTimeCache()
         self.swapper = TokenSwapper(consent: broker)
         self.sshAgent = SSHAgentServer(consent: broker)
         self.awsCreds = AWSCredentialServer(consent: broker)
@@ -205,6 +219,9 @@ public final class MitmEngine {
             consent: consent,
             guardrailsBroker: guardrailsBroker,
             supplyChainBroker: supplyChainBroker,
+            osvClient: osvClient,
+            socketClient: socketClient,
+            publishTimeCache: publishTimeCache,
             // The provider runs from a detached Task on the proxy's
             // hot path. `sessionTrace(for:)` is now nonisolated +
             // lock-protected so this is just a hash lookup behind a
@@ -285,6 +302,9 @@ private final class ListenerHolder {
          consent: ConsentBroker,
          guardrailsBroker: GuardrailsConsentBroker,
          supplyChainBroker: SupplyChainConsentBroker,
+         osvClient: OSVClient,
+         socketClient: SocketDevClient,
+         publishTimeCache: PublishTimeCache,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig?,
          supplyChainProvider: @escaping @Sendable () -> SupplyChainPolicy?,
@@ -304,6 +324,9 @@ private final class ListenerHolder {
             consent: consent,
             guardrailsBroker: guardrailsBroker,
             supplyChainBroker: supplyChainBroker,
+            osvClient: osvClient,
+            socketClient: socketClient,
+            publishTimeCache: publishTimeCache,
             sessionTraceProvider: sessionTraceProvider,
             guardrailsProvider: guardrailsProvider,
             supplyChainProvider: supplyChainProvider,
@@ -337,6 +360,9 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
     let consent: ConsentBroker
     let guardrailsBroker: GuardrailsConsentBroker
     let supplyChainBroker: SupplyChainConsentBroker
+    let osvClient: OSVClient
+    let socketClient: SocketDevClient
+    let publishTimeCache: PublishTimeCache
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
     let guardrailsProvider: @Sendable () -> GuardrailsConfig?
     let supplyChainProvider: @Sendable () -> SupplyChainPolicy?
@@ -352,6 +378,9 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
          consent: ConsentBroker,
          guardrailsBroker: GuardrailsConsentBroker,
          supplyChainBroker: SupplyChainConsentBroker,
+         osvClient: OSVClient,
+         socketClient: SocketDevClient,
+         publishTimeCache: PublishTimeCache,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig?,
          supplyChainProvider: @escaping @Sendable () -> SupplyChainPolicy?,
@@ -368,6 +397,9 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         self.consent = consent
         self.guardrailsBroker = guardrailsBroker
         self.supplyChainBroker = supplyChainBroker
+        self.osvClient = osvClient
+        self.socketClient = socketClient
+        self.publishTimeCache = publishTimeCache
         self.sessionTraceProvider = sessionTraceProvider
         self.guardrailsProvider = guardrailsProvider
         self.supplyChainProvider = supplyChainProvider
@@ -399,6 +431,9 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             consent: consent,
             guardrailsBroker: guardrailsBroker,
             supplyChainBroker: supplyChainBroker,
+            osvClient: osvClient,
+            socketClient: socketClient,
+            publishTimeCache: publishTimeCache,
             sessionTraceProvider: providerCopy,
             guardrailsProvider: guardrailsCopy,
             supplyChainProvider: supplyChainCopy,
