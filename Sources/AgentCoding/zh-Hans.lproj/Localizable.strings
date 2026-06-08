@@ -430,6 +430,10 @@
 "Prompt before passing lockfile-pinned tarballs through unmodified (`npm ci`, `pip --require-hashes`)" = "原样放行由 lockfile 锁定的压缩包前先询问（`npm ci`、`pip --require-hashes`）";
 "These installs use cryptographic integrity hashes baked into a lockfile — Bromure can't rewrite them without breaking verification. When this is on, the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow); the entire batch follows the decision." = "这类安装依赖锁定文件中预先固化的加密完整性哈希——Bromure 无法在不破坏校验的情况下重写它们。启用此选项时，一批锁定拉取中的第一个会弹出主机端对话框（允许一次 / 15 分钟 / 整段会话 / 不允许）；整批拉取将沿用该决定。";
 
+/* Supply Chain consent prompt — npm ci bypass */
+"npm ci (lockfile-pinned install)" = "npm ci（由 lockfile 锁定的安装）";
+"An agent is running `npm ci` — package tarballs come pre-pinned with cryptographic integrity hashes, so Bromure can't strip install scripts or age-filter them without breaking npm's verification.\n\nPass these tarballs through unmodified?" = "代理正在运行 `npm ci`——这些压缩包已被锁定文件附上加密完整性哈希，因此 Bromure 无法在不破坏 npm 校验的情况下剥离安装脚本或按发布时长过滤。\n\n原样放行这些压缩包吗？";
+
 /* Severity threshold (OSV + socket.dev CVE) */
 "Low and above" = "低及以上";
 "Medium and above" = "中及以上";

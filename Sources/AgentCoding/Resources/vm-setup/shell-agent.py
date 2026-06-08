@@ -75,10 +75,26 @@ def handle_connection(vsock_sock, replenish_fn):
         timeout = req.get("timeout", 30)
         workdir = req.get("workdir")
 
+        # Source /mnt/bromure-meta/proxy.env before running so the
+        # command sees HTTPS_PROXY + the per-language CA bundle
+        # paths. .bashrc only sources proxy.env for interactive
+        # shells (the `case $- in *i*) return` guard); the shell
+        # subprocess.run() spawns below is non-interactive, so
+        # without this prefix curl / pip / npm bypass the MITM
+        # proxy entirely. That's what the section-10 e2e tests
+        # were hitting — the supply-chain branch in HTTPProxy.swift
+        # never saw the test traffic.
+        wrapped = (
+            "if [ -r /mnt/bromure-meta/proxy.env ]; then "
+            "set -a; . /mnt/bromure-meta/proxy.env; set +a; "
+            "fi; "
+            + cmd
+        )
+
         # Execute command
         try:
             result = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True,
+                wrapped, shell=True, capture_output=True, text=True,
                 timeout=timeout, cwd=workdir
             )
             response = {

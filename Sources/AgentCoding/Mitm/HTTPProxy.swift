@@ -659,8 +659,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     let allowed = await broker.consent(
                         profileID: profileID,
                         scope: scope,
-                        scopeDisplayName: "npm ci (lockfile-pinned install)",
-                        detail: "An agent is running `npm ci` — package tarballs come pre-pinned with cryptographic integrity hashes, so Bromure can't strip install scripts or age-filter them without breaking npm's verification.\n\nPass these tarballs through unmodified?")
+                        scopeDisplayName: NSLocalizedString(
+                            "npm ci (lockfile-pinned install)", comment: ""),
+                        detail: NSLocalizedString(
+                            "An agent is running `npm ci` — package tarballs come pre-pinned with cryptographic integrity hashes, so Bromure can't strip install scripts or age-filter them without breaking npm's verification.\n\nPass these tarballs through unmodified?",
+                            comment: ""))
                     if !allowed {
                         let reason = "\(ecosystem.rawValue) lockfile-pinned install (`npm ci`) " +
                             "blocked — user denied bypass via Bromure consent prompt"

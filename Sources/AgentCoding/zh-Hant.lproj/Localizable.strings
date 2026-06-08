@@ -430,6 +430,10 @@
 "Prompt before passing lockfile-pinned tarballs through unmodified (`npm ci`, `pip --require-hashes`)" = "原樣放行由 lockfile 固定的壓縮檔之前先詢問（`npm ci`、`pip --require-hashes`）";
 "These installs use cryptographic integrity hashes baked into a lockfile — Bromure can't rewrite them without breaking verification. When this is on, the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow); the entire batch follows the decision." = "這類安裝採用 lockfile 內預先寫死的密碼學完整性雜湊——Bromure 無法在不破壞驗證的情況下改寫它們。啟用此選項時，一批次中第一個固定下載會彈出主機端對話框（允許一次 / 15 分鐘 / 整個工作階段 / 不允許）；整批會沿用該決定。";
 
+/* Supply Chain consent prompt — npm ci bypass */
+"npm ci (lockfile-pinned install)" = "npm ci（由 lockfile 固定的安裝）";
+"An agent is running `npm ci` — package tarballs come pre-pinned with cryptographic integrity hashes, so Bromure can't strip install scripts or age-filter them without breaking npm's verification.\n\nPass these tarballs through unmodified?" = "代理正在執行 `npm ci`——這些壓縮檔已被 lockfile 預先附上密碼學完整性雜湊，因此 Bromure 無法在不破壞 npm 驗證的情況下移除安裝指令稿或依發佈時間過濾。\n\n原樣放行這些壓縮檔嗎？";
+
 /* Severity threshold (OSV + socket.dev CVE) */
 "Low and above" = "低及以上";
 "Medium and above" = "中及以上";

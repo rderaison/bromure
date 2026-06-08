@@ -430,6 +430,10 @@
 "Prompt before passing lockfile-pinned tarballs through unmodified (`npm ci`, `pip --require-hashes`)" = "Preguntar antes de dejar pasar sin modificar los tarballs fijados por lockfile (`npm ci`, `pip --require-hashes`)";
 "These installs use cryptographic integrity hashes baked into a lockfile — Bromure can't rewrite them without breaking verification. When this is on, the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow); the entire batch follows the decision." = "Estas instalaciones usan hashes criptográficos de integridad fijados en un lockfile; Bromure no puede reescribirlos sin romper la verificación. Cuando esta opción está activa, la primera descarga fijada de una serie abre un diálogo en el host (Permitir una vez / 15 min / para la sesión / No permitir); el resto de la serie sigue la decisión.";
 
+/* Supply Chain consent prompt — npm ci bypass */
+"npm ci (lockfile-pinned install)" = "npm ci (instalación fijada por lockfile)";
+"An agent is running `npm ci` — package tarballs come pre-pinned with cryptographic integrity hashes, so Bromure can't strip install scripts or age-filter them without breaking npm's verification.\n\nPass these tarballs through unmodified?" = "Un agente está ejecutando `npm ci` — los tarballs llegan ya fijados con hashes criptográficos de integridad, por lo que Bromure no puede eliminar sus scripts de instalación ni filtrarlos por edad sin romper la verificación de npm.\n\n¿Permitir el paso de estos tarballs sin modificarlos?";
+
 /* Severity threshold (OSV + socket.dev CVE) */
 "Low and above" = "Bajo y superior";
 "Medium and above" = "Medio y superior";
