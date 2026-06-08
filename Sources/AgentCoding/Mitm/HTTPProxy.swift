@@ -613,10 +613,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         apiKey: policy.socketAPIKey) {
                     if policy.socketBlockCompromised, let bad = result.compromised.first {
                         let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
-                            "flagged by socket.dev: \(bad.type) — \(bad.summary)"
+                            "flagged by socket.dev (\(bad.severity.rawValue)): " +
+                            "\(bad.type) — \(bad.summary)"
                         try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
                         FileHandle.standardError.write(Data(
-                            "[supply-chain] socket.dev compromised 451: \(pkg)@\(version) → \(bad.type)\n".utf8))
+                            "[supply-chain] socket.dev compromised 451: \(pkg)@\(version) → \(bad.type) [\(bad.severity.rawValue)]\n".utf8))
                         return
                     }
                     if policy.socketBlockCVE {

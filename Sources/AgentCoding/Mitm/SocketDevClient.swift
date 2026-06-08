@@ -79,21 +79,46 @@ public actor SocketDevClient {
         }
     }
 
-    /// Issue-type prefixes / names that socket.dev classifies as
-    /// "supplyChainRisk" — the agents (or their dependencies)
-    /// behaving in ways that smell like an attack. Anything in this
-    /// list with any severity triggers the "block compromised"
-    /// toggle.
-    private static let supplyChainTypes: Set<String> = [
-        "malware", "shellAccess", "telemetry",
-        "installScripts", "suspiciousString", "typeSquatting",
-        "didYouMean", "obfuscatedFile", "obfuscatedRequire",
-        "networkAccess", "filesystemAccess", "envVars",
-        "criticalCVE", "unusualHTTPS", "unstableOwnership",
-        "newAuthor", "deprecated", "knownMalware",
-        "compromisedSSHKey", "suspiciousStarActivity",
-        "potentialVulnerability", "hasNativeCode",
+    /// socket.dev issue types that we treat as definitively
+    /// malicious — block on any severity. These are the named
+    /// "this thing is bad" signals, not quality/attribute metadata.
+    private static let alwaysBlockTypes: Set<String> = [
+        "malware",
+        "knownMalware",
+        "gptMalware",
+        "troll",
+        "compromisedSSHKey",
     ]
+
+    /// socket.dev issue types that smell like an attack but also
+    /// fire on legitimate packages at low/middle severity. We block
+    /// only when socket.dev itself rates them high or critical.
+    /// Example: `installScripts` fires on every package with a
+    /// postinstall hook (severity low/middle); a *suspicious*
+    /// postinstall is rated high.
+    private static let highSeverityBlockTypes: Set<String> = [
+        "obfuscatedFile",
+        "obfuscatedRequire",
+        "suspiciousString",
+        "installScripts",
+        "gptSecurity",
+        "typeSquatting",
+        "didYouMean",
+        "shellAccess",
+        "unusualHTTPS",
+        "criticalCVE",
+    ]
+
+    /// Issue types we deliberately do NOT treat as compromise
+    /// signals, even though socket.dev classifies them under
+    /// "supplyChainRisk". Listed for documentation; the loop below
+    /// drops anything not in the two sets above.
+    ///   newAuthor, envVars, networkAccess, filesystemAccess,
+    ///   telemetry, unstableOwnership, newAuthor, deprecated,
+    ///   suspiciousStarActivity, hasNativeCode,
+    ///   potentialVulnerability
+    /// These describe what a package does or who publishes it —
+    /// signal for human review, not a programmatic block.
 
     /// Issue-type prefixes that socket.dev classifies as known CVE.
     private static let cveTypes: Set<String> = [
@@ -129,16 +154,38 @@ public actor SocketDevClient {
         let basic = "\(apiKey):".data(using: .utf8)!.base64EncodedString()
         req.setValue("Basic \(basic)", forHTTPHeaderField: "Authorization")
 
-        guard let (data, resp) = try? await session.data(for: req),
-              let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+        FileHandle.standardError.write(Data(
+            "[socket.dev] →  GET \(urlStr)\n".utf8))
+        let response: (Data, URLResponse)
+        do {
+            response = try await session.data(for: req)
+        } catch {
             FileHandle.standardError.write(Data(
-                "[socket.dev] check failed for \(ecosystem)/\(name)@\(version)\n".utf8))
+                "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — network error: \(error.localizedDescription)\n".utf8))
+            return nil
+        }
+        let (data, resp) = response
+        let http = resp as? HTTPURLResponse
+        let status = http?.statusCode ?? 0
+        if status != 200 {
+            // Surface auth errors etc. explicitly so a typo'd API
+            // key doesn't fail silently. socket.dev returns JSON
+            // error bodies for auth failures; include the first
+            // 200 bytes of the body for the user to copy.
+            let bodyPreview = String(data: data.prefix(200), encoding: .utf8) ?? ""
+            FileHandle.standardError.write(Data(
+                "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — HTTP \(status): \(bodyPreview)\n".utf8))
+            return nil
+        }
+        guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            FileHandle.standardError.write(Data(
+                "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — couldn't parse response JSON\n".utf8))
             return nil
         }
 
         var compromised: [Issue] = []
         var vulns: [Issue] = []
+        let highBar = Severity.high.rank
         for entry in arr {
             let type = (entry["type"] as? String) ?? ""
             let summary = ((entry["value"] as? [String: Any])?["description"] as? String)
@@ -147,14 +194,28 @@ public actor SocketDevClient {
                 ?? "unknown"
             let severity = Severity.from(string: sevStr)
             let issue = Issue(type: type, severity: severity, summary: summary)
+            // CVE bucket: anything in cveTypes OR a string match on
+            // "cve" — the CVE check applies its own severity gate.
             if Self.cveTypes.contains(type) || type.lowercased().contains("cve") {
                 vulns.append(issue)
-            } else if Self.supplyChainTypes.contains(type) {
+                continue
+            }
+            // Compromise bucket: only fires for actual attack-shaped
+            // types. Quality/attribute signals (newAuthor, envVars,
+            // networkAccess, filesystemAccess, …) deliberately don't
+            // count, since they describe what most legitimate
+            // packages do.
+            if Self.alwaysBlockTypes.contains(type) {
+                compromised.append(issue)
+            } else if Self.highSeverityBlockTypes.contains(type),
+                      severity.rank >= highBar {
                 compromised.append(issue)
             }
         }
 
         let result = CheckResult(compromised: compromised, vulnerabilities: vulns)
+        FileHandle.standardError.write(Data(
+            "[socket.dev] ✓  \(ecosystem)/\(name)@\(version) — \(compromised.count) compromise, \(vulns.count) CVE\n".utf8))
         cache[key] = result
         if cache.count > Self.cacheCap {
             let toDrop = cache.count - Self.cacheCap

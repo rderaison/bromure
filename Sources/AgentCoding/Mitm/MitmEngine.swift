@@ -105,8 +105,31 @@ public final class MitmEngine {
     nonisolated(unsafe) private var supplyChainPolicies: [UUID: SupplyChainPolicy] = [:]
 
     public nonisolated func setSupplyChainPolicy(_ policy: SupplyChainPolicy, for profileID: UUID) {
-        supplyChainLock.lock(); defer { supplyChainLock.unlock() }
+        supplyChainLock.lock()
+        let prior = supplyChainPolicies[profileID]
         supplyChainPolicies[profileID] = policy
+        supplyChainLock.unlock()
+        // Emit a one-line summary every time the proxy sees a *new*
+        // or *changed* policy, so the user has a visible confirmation
+        // in the log that their toggles actually landed. Cheap; only
+        // fires on session start and live profile saves.
+        if prior != policy {
+            var bits: [String] = []
+            if policy.ageGateEnabled { bits.append("age-gate=\(policy.ageGateDays)d") }
+            if policy.osvEnabled { bits.append("osv=\(policy.osvSeverity.rawValue)") }
+            if policy.socketActive {
+                var sk: [String] = []
+                if policy.socketBlockCompromised { sk.append("compromised") }
+                if policy.socketBlockCVE { sk.append("cve=\(policy.socketCVESeverity.rawValue)") }
+                bits.append("socket.dev=\(sk.joined(separator: "+"))")
+            } else if !policy.socketAPIKey.isEmpty {
+                bits.append("socket.dev=key-set-but-no-toggle")
+            }
+            if policy.stripInstallScripts { bits.append("strip-scripts") }
+            let summary = bits.isEmpty ? "off" : bits.joined(separator: " ")
+            FileHandle.standardError.write(Data(
+                "[supply-chain] policy engaged for \(profileID.uuidString.prefix(8)): \(summary)\n".utf8))
+        }
     }
     public nonisolated func supplyChainPolicy(for profileID: UUID) -> SupplyChainPolicy? {
         supplyChainLock.lock(); defer { supplyChainLock.unlock() }
