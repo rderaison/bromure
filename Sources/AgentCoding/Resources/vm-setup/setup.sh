@@ -902,6 +902,12 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 rm -f /tmp/nodesource.sh /tmp/bromure-build.env
 
+# The bake-time proxy config points at the host's MITM listener
+# (192.168.64.1:<port>) which only exists while we're baking. Leaving
+# it in the final image would make every `apt update` in the user's
+# VM try to talk to a port that isn't there.
+rm -f /etc/apt/apt.conf.d/99-bromure-proxy
+
 log "chroot phase complete"
 CHROOT_EOF
 
