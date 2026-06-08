@@ -1,4 +1,5 @@
 import Foundation
+import Compression
 @preconcurrency import Virtualization
 
 /// One MITM connection's lifetime: read CONNECT, send 200, terminate
@@ -1590,16 +1591,7 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
         let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
         switch name.lowercased() {
         case "host", "content-length", "connection", "transfer-encoding",
-             "proxy-connection", "keep-alive", "te", "upgrade",
-             // Drop the client's Accept-Encoding so URLSession adds
-             // its own — Apple's docs: "If you set a value for
-             // Accept-Encoding, the system doesn't decompress the
-             // data." Forwarding curl's gzip/deflate/br turns off
-             // URLSession's auto-decompression, the body comes back
-             // compressed, and the supply-chain JSON transforms
-             // fail to parse it (returning the raw response without
-             // the X-Bromure-Rewritten marker).
-             "accept-encoding":
+             "proxy-connection", "keep-alive", "te", "upgrade":
             continue
         default:
             req.setValue(value, forHTTPHeaderField: name)
@@ -1611,8 +1603,23 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
         "proxy-connection", "keep-alive", "te", "trailer",
         "upgrade", "proxy-authenticate", "proxy-authorization",
     ]
-    let (data, resp) = try await session.data(for: req)
+    let (rawData, resp) = try await session.data(for: req)
     let http = (resp as? HTTPURLResponse)
+    // URLSession only auto-decompresses when *we* didn't set
+    // Accept-Encoding. Since we forward the client's request
+    // headers verbatim (including its Accept-Encoding), URLSession
+    // hands us the compressed body untouched. Decompress here so
+    // downstream transforms (filterMetadata, filterPyPIJSON, …)
+    // always see plain bytes — and the client gets a body that
+    // matches the Content-Encoding-less head we emit.
+    var data = rawData
+    if let http,
+       let enc = http.value(forHTTPHeaderField: "Content-Encoding")?.lowercased(),
+       enc == "gzip" || enc == "deflate" || enc == "br" {
+        if let inflated = decompressBody(rawData, encoding: enc) {
+            data = inflated
+        }
+    }
     var head = "HTTP/1.1 \(http?.statusCode ?? 200) "
     head += HTTPURLResponse.localizedString(
         forStatusCode: http?.statusCode ?? 200).capitalized
@@ -1630,6 +1637,108 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
     var out = Data(head.utf8)
     out.append(data)
     return out
+}
+
+/// Decompress an HTTP response body whose `Content-Encoding` is
+/// gzip / deflate / br. Returns nil on any error so the caller can
+/// fall back to forwarding the raw bytes (still safer than letting
+/// downstream transforms run on undecoded data).
+private func decompressBody(_ data: Data, encoding: String) -> Data? {
+    switch encoding {
+    case "gzip":
+        return gunzipData(data)
+    case "deflate":
+        // Some servers send raw deflate, others zlib-wrapped.
+        // Try zlib first (the more common shape), then raw deflate.
+        return inflateData(data, format: .zlib)
+            ?? inflateData(data, format: .raw)
+    case "br":
+        // Brotli isn't supported by Compression.framework on macOS;
+        // bail and let the caller forward the compressed payload as
+        // a last resort. The 3 hosts we tag against (npm/PyPI/CDN)
+        // honour gzip when offered, so this branch is rarely hit.
+        return nil
+    default:
+        return nil
+    }
+}
+
+private enum DeflateFormat { case zlib, raw }
+
+private func gunzipData(_ data: Data) -> Data? {
+    // gzip wrapper: 10-byte header (with optional FEXTRA/FNAME/FCOMMENT
+    // sections), raw deflate payload, 8-byte trailer. Strip the
+    // wrapper and feed raw deflate to Compression.framework.
+    guard data.count > 18,
+          data[0] == 0x1f, data[1] == 0x8b, data[2] == 0x08 else { return nil }
+    var offset = 10
+    let flags = data[3]
+    if flags & 0x04 != 0 {
+        guard offset + 2 <= data.count else { return nil }
+        let xlen = Int(data[offset]) | (Int(data[offset + 1]) << 8)
+        offset += 2 + xlen
+    }
+    if flags & 0x08 != 0 {
+        while offset < data.count, data[offset] != 0 { offset += 1 }
+        offset += 1
+    }
+    if flags & 0x10 != 0 {
+        while offset < data.count, data[offset] != 0 { offset += 1 }
+        offset += 1
+    }
+    if flags & 0x02 != 0 { offset += 2 }
+    guard offset < data.count - 8 else { return nil }
+    let payload = data.subdata(in: offset..<(data.count - 8))
+    return inflateData(payload, format: .raw)
+}
+
+private func inflateData(_ data: Data, format: DeflateFormat) -> Data? {
+    // Compression.framework streaming inflate. Output capped at
+    // 64 MiB — npm/PyPI metadata never exceeds a few MB; this guards
+    // against a pathological compression bomb.
+    let algorithm: compression_algorithm
+    switch format {
+    case .raw: algorithm = COMPRESSION_ZLIB   // .zlib is "raw deflate" in Apple-speak
+    case .zlib:
+        // zlib has a 2-byte header + 4-byte adler trailer. Strip
+        // them and feed the raw deflate.
+        guard data.count > 6 else { return nil }
+        let stripped = data.subdata(in: 2..<(data.count - 4))
+        return inflateData(stripped, format: .raw)
+    }
+    let chunkSize = 64 * 1024
+    let outCap = 64 * 1024 * 1024
+    var out = Data()
+    let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
+    defer { stream.deallocate() }
+    var status = compression_stream_init(stream, COMPRESSION_STREAM_DECODE, algorithm)
+    guard status == COMPRESSION_STATUS_OK else { return nil }
+    defer { compression_stream_destroy(stream) }
+    let dstBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: chunkSize)
+    defer { dstBuf.deallocate() }
+    let result: Data? = data.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Data? in
+        guard let srcBase = src.baseAddress else { return nil }
+        stream.pointee.src_ptr = srcBase.assumingMemoryBound(to: UInt8.self)
+        stream.pointee.src_size = data.count
+        stream.pointee.dst_ptr = dstBuf
+        stream.pointee.dst_size = chunkSize
+        repeat {
+            status = compression_stream_process(stream,
+                                                Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+            switch status {
+            case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
+                let produced = chunkSize - stream.pointee.dst_size
+                out.append(dstBuf, count: produced)
+                if out.count > outCap { return nil }
+                stream.pointee.dst_ptr = dstBuf
+                stream.pointee.dst_size = chunkSize
+            default:
+                return nil
+            }
+        } while status != COMPRESSION_STATUS_END
+        return out
+    }
+    return result
 }
 
 @available(macOS, deprecated: 10.15)
