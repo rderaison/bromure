@@ -887,20 +887,20 @@ async function main() {
         `OSV should default off, got ${sc.osvEnabled}`
       );
       assert(
-        sc.socketBlockCompromised !== false,
-        "socketBlockCompromised should default true"
+        sc.socketBlockCompromised === undefined || sc.socketBlockCompromised === false,
+        "socketBlockCompromised should default off"
       );
       assert(
         sc.socketBlockCVE === undefined || sc.socketBlockCVE === false,
         "socketBlockCVE should default off"
       );
       assert(
-        sc.stripInstallScripts !== false,
-        "stripInstallScripts should default true"
+        sc.stripInstallScripts === undefined || sc.stripInstallScripts === false,
+        "stripInstallScripts should default off"
       );
       assert(
-        sc.lockfilePrompt !== false,
-        "lockfilePrompt should default true"
+        sc.lockfilePrompt === undefined || sc.lockfilePrompt === false,
+        "lockfilePrompt should default off"
       );
     } finally {
       deleteProfile(id);
@@ -1026,11 +1026,11 @@ async function main() {
         "ageGateEnabled was mutated unexpectedly"
       );
       assert(
-        sc.stripInstallScripts !== false,
+        sc.stripInstallScripts === undefined || sc.stripInstallScripts === false,
         "stripInstallScripts was mutated unexpectedly"
       );
       assert(
-        sc.lockfilePrompt !== false,
+        sc.lockfilePrompt === undefined || sc.lockfilePrompt === false,
         "lockfilePrompt was mutated unexpectedly"
       );
     } finally {

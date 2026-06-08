@@ -17,20 +17,21 @@ import Foundation
 ///      benefit from being interrupted by a low-severity XSS in
 ///      a transitive subpackage).
 ///   3. **socket.dev "compromised package" check** (BYO API key).
-///      Default ON when key is configured. Catches typosquats,
-///      malware flags, suspicious install scripts.
+///      Default OFF. Catches typosquats, malware flags, suspicious
+///      install scripts.
 ///   4. **socket.dev "known CVE" check** (same API key, distinct
 ///      filter on their `vulnerability` issue bucket). Default OFF
 ///      — same reasoning as OSV.
 ///   5. **Install-script stripping** — rewrites tarballs to remove
 ///      preinstall / install / postinstall / prepare hooks. Per-
 ///      package allowlist for genuine binding compilers
-///      (better-sqlite3, node-canvas, etc.). Default ON.
+///      (better-sqlite3, node-canvas, etc.). Default OFF.
 ///   6. **Lockfile-pinned (npm ci / pip --require-hashes) bypass
 ///      prompt** — when the client fetches a tarball with integrity
 ///      pinned by a lockfile, we can't rewrite without breaking
-///      hash verification. Default behaviour: pass through unmodified
-///      but ask the user once per burst (via SupplyChainConsentBroker).
+///      hash verification. Default OFF: pass through unmodified.
+///      When on, asks the user once per burst (via
+///      SupplyChainConsentBroker) before passing through.
 ///
 /// All policy decisions are enforced at the MITM proxy: the in-VM
 /// `.npmrc` / `pip.conf` can only *further* restrict what the proxy
@@ -89,8 +90,7 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
     public var socketAPIKey: String
     /// Block on `supplyChainRisk` issues (rogue postinstall, malware
     /// flag, typosquatting, telemetry, suspicious network access).
-    /// Default ON — these are unambiguous attack indicators that
-    /// rarely have legitimate use.
+    /// Default OFF — only the age gate is on out of the box.
     public var socketBlockCompromised: Bool
     /// Block on `vulnerability` issues (known CVEs). Default OFF —
     /// otherwise a low-severity XSS in a transitive subpackage
@@ -111,21 +111,18 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
 
     // MARK: - Lockfile-pinned bypass prompt
 
-    /// When true (default), lockfile-pinned tarball fetches (which
-    /// we can't safely rewrite) trigger a `SupplyChainConsentBroker`
-    /// prompt before being passed through. Set false to silently
-    /// pass them — only sensible if the user trusts all their
-    /// lockfiles already.
+    /// When true, lockfile-pinned tarball fetches (which we can't
+    /// safely rewrite) trigger a `SupplyChainConsentBroker` prompt
+    /// before being passed through. Default false: silently pass
+    /// them through.
     public var lockfilePrompt: Bool
 
     // MARK: - Default / init
 
     /// All defaults baked in. Used both as the empty constructor
     /// (for Codable's "field missing → defaults" path) AND as the
-    /// new-profile default — unlike `GuardrailsPolicy`, supply-chain
-    /// defaults aren't off-everywhere, because most users want age
-    /// gating + script stripping + the broker-prompted lockfile path
-    /// to be on from day one.
+    /// new-profile default. Only the age gate (2-day cooldown) is on
+    /// out of the box; every other layer is opt-in.
     public init(
         ageGateEnabled: Bool = true,
         ageGateDays: Int = 2,
@@ -133,12 +130,12 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         osvEnabled: Bool = false,
         osvSeverity: Severity = .high,
         socketAPIKey: String = "",
-        socketBlockCompromised: Bool = true,
+        socketBlockCompromised: Bool = false,
         socketBlockCVE: Bool = false,
         socketCVESeverity: Severity = .high,
-        stripInstallScripts: Bool = true,
+        stripInstallScripts: Bool = false,
         stripAllowlist: [String] = [],
-        lockfilePrompt: Bool = true
+        lockfilePrompt: Bool = false
     ) {
         self.ageGateEnabled = ageGateEnabled
         self.ageGateDays = ageGateDays
@@ -215,12 +212,12 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         osvEnabled            = try c.decodeIfPresent(Bool.self, forKey: .osvEnabled) ?? false
         osvSeverity           = try c.decodeIfPresent(Severity.self, forKey: .osvSeverity) ?? .high
         socketAPIKey          = try c.decodeIfPresent(String.self, forKey: .socketAPIKey) ?? ""
-        socketBlockCompromised = try c.decodeIfPresent(Bool.self, forKey: .socketBlockCompromised) ?? true
+        socketBlockCompromised = try c.decodeIfPresent(Bool.self, forKey: .socketBlockCompromised) ?? false
         socketBlockCVE        = try c.decodeIfPresent(Bool.self, forKey: .socketBlockCVE) ?? false
         socketCVESeverity     = try c.decodeIfPresent(Severity.self, forKey: .socketCVESeverity) ?? .high
-        stripInstallScripts   = try c.decodeIfPresent(Bool.self, forKey: .stripInstallScripts) ?? true
+        stripInstallScripts   = try c.decodeIfPresent(Bool.self, forKey: .stripInstallScripts) ?? false
         stripAllowlist        = try c.decodeIfPresent([String].self, forKey: .stripAllowlist) ?? []
-        lockfilePrompt        = try c.decodeIfPresent(Bool.self, forKey: .lockfilePrompt) ?? true
+        lockfilePrompt        = try c.decodeIfPresent(Bool.self, forKey: .lockfilePrompt) ?? false
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -234,11 +231,11 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         if osvEnabled != false      { try c.encode(osvEnabled, forKey: .osvEnabled) }
         if osvSeverity != .high     { try c.encode(osvSeverity, forKey: .osvSeverity) }
         if !socketAPIKey.isEmpty    { try c.encode(socketAPIKey, forKey: .socketAPIKey) }
-        if socketBlockCompromised != true { try c.encode(socketBlockCompromised, forKey: .socketBlockCompromised) }
+        if socketBlockCompromised != false { try c.encode(socketBlockCompromised, forKey: .socketBlockCompromised) }
         if socketBlockCVE != false  { try c.encode(socketBlockCVE, forKey: .socketBlockCVE) }
         if socketCVESeverity != .high { try c.encode(socketCVESeverity, forKey: .socketCVESeverity) }
-        if stripInstallScripts != true { try c.encode(stripInstallScripts, forKey: .stripInstallScripts) }
+        if stripInstallScripts != false { try c.encode(stripInstallScripts, forKey: .stripInstallScripts) }
         if !stripAllowlist.isEmpty  { try c.encode(stripAllowlist, forKey: .stripAllowlist) }
-        if lockfilePrompt != true   { try c.encode(lockfilePrompt, forKey: .lockfilePrompt) }
+        if lockfilePrompt != false   { try c.encode(lockfilePrompt, forKey: .lockfilePrompt) }
     }
 }
