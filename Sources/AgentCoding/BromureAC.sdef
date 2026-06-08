@@ -59,7 +59,7 @@
             <result type="text" description="'ok'"/>
         </command>
 
-        <command name="select editor category" code="BrAcSlCt" description="Switch the editor sidebar to the given category. Names: general, agent, folders, credentials, environment, mcp, tracing, appearance, resources.">
+        <command name="select editor category" code="BrAcSlCt" description="Switch the editor sidebar to the given category. Names (spaces and case ignored): general, agent, folders, credentials, environment, mcp, tracing, guardrails, supplychain, appearance, resources.">
             <cocoa class="BromureACSelectEditorCategoryCommand"/>
             <direct-parameter type="text" description="Category key"/>
             <result type="text" description="'ok' or 'error: …'"/>

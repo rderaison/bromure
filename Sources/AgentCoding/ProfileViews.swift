@@ -532,10 +532,16 @@ struct ProfileEditorView: View {
             for: .bromureACSelectEditorCategory)) { note in
             // ScriptCommands lower-cases the category name before
             // posting; EditorCategory rawValues are title-cased
-            // (e.g. "General", "MCP"). Match case-insensitively so
-            // the AppleScript bridge picks the right tab.
-            if let raw = (note.object as? String)?.lowercased(),
-               let cat = EditorCategory.allCases.first(where: { $0.rawValue.lowercased() == raw }) {
+            // (e.g. "General", "MCP"). Match case-insensitively, and
+            // ignore spaces so a single-word key like "supplychain"
+            // resolves to "Supply Chain" — the screenshot script uses
+            // space-less keys to keep them out of output filenames.
+            if let raw = (note.object as? String)?
+                .lowercased()
+                .replacingOccurrences(of: " ", with: ""),
+               let cat = EditorCategory.allCases.first(where: {
+                   $0.rawValue.lowercased().replacingOccurrences(of: " ", with: "") == raw
+               }) {
                 selectedCategory = cat
             }
         }

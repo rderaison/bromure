@@ -49,7 +49,7 @@ fi
 
 # Editor sidebar entries that the AppleScript bridge accepts. Order
 # matches the on-screen sidebar so the loop reads top-to-bottom.
-CATEGORIES=(general agent folders credentials environment mcp tracing guardrails appearance resources)
+CATEGORIES=(general agent folders credentials environment mcp tracing guardrails supplychain appearance resources)
 
 # (locale-code  filename-suffix). Locale codes are what
 # `defaults write -AppleLanguages` understands; suffix is what gets
