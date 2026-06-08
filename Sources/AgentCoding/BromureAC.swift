@@ -236,6 +236,12 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                    keyEquivalent: "")
     approvalsItem.target = delegate
     windowMenu.addItem(approvalsItem)
+
+    let supplyChainLogItem = NSMenuItem(title: L("Supply Chain Log…"),
+                                        action: #selector(ACAppDelegate.openSupplyChainLogAction(_:)),
+                                        keyEquivalent: "")
+    supplyChainLogItem.target = delegate
+    windowMenu.addItem(supplyChainLogItem)
     // The bromure.io Enrollment item is added to the *app* menu (next
     // to Check for Updates…) rather than here — see
     // `ACAppDelegate.installEnrollmentMenuItem(into:)`, called from
@@ -1149,6 +1155,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if win === credentialApprovalsWindow {
             credentialApprovalsWindow = nil
+            return
+        }
+        if win === supplyChainLogWindow {
+            supplyChainLogWindow = nil
+            return
         }
         if win === traceInspectorWindow {
             traceInspectorWindow = nil
@@ -1443,6 +1454,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var credentialApprovalsWindow: NSWindow?
     private var enrollmentWindow: NSWindow?
     private var preferencesWindow: NSWindow?
+    private var supplyChainLogWindow: NSWindow?
     /// File-browser panels, one per profile (keyed by profile id) so each
     /// session window gets its own, reused on subsequent clicks.
     private var fileBrowserWindows: [UUID: NSWindow] = [:]
@@ -1480,6 +1492,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             onClose: { [weak self] in self?.credentialApprovalsWindow = nil }))
         win.makeKeyAndOrderFront(nil)
         credentialApprovalsWindow = win
+    }
+
+    /// Window menu → "Supply Chain Log…". A live `tail -f` of every
+    /// supply-chain event the MITM proxy emits (socket.dev checks,
+    /// OSV checks, age-gate / install-script / 451 actions). One
+    /// window app-wide; reopening brings it forward.
+    @objc func openSupplyChainLogAction(_ sender: Any?) {
+        if let win = supplyChainLogWindow {
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 460),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false)
+        win.title = NSLocalizedString("Supply Chain Log", comment: "")
+        win.center()
+        win.delegate = self
+        win.isReleasedWhenClosed = false
+        win.contentView = NSHostingView(rootView: SupplyChainLogView(
+            onClose: { [weak self] in self?.supplyChainLogWindow = nil }))
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        supplyChainLogWindow = win
     }
 
     /// Window menu → "Enroll in bromure.io…" / "bromure.io Enrollment".

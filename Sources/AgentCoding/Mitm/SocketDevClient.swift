@@ -154,14 +154,13 @@ public actor SocketDevClient {
         let basic = "\(apiKey):".data(using: .utf8)!.base64EncodedString()
         req.setValue("Basic \(basic)", forHTTPHeaderField: "Authorization")
 
-        FileHandle.standardError.write(Data(
-            "[socket.dev] →  GET \(urlStr)\n".utf8))
+        SupplyChainLog.shared.record("[socket.dev] →  GET \(urlStr)")
         let response: (Data, URLResponse)
         do {
             response = try await session.data(for: req)
         } catch {
-            FileHandle.standardError.write(Data(
-                "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — network error: \(error.localizedDescription)\n".utf8))
+            SupplyChainLog.shared.record(
+                "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — network error: \(error.localizedDescription)")
             return nil
         }
         let (data, resp) = response
@@ -173,13 +172,13 @@ public actor SocketDevClient {
             // error bodies for auth failures; include the first
             // 200 bytes of the body for the user to copy.
             let bodyPreview = String(data: data.prefix(200), encoding: .utf8) ?? ""
-            FileHandle.standardError.write(Data(
-                "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — HTTP \(status): \(bodyPreview)\n".utf8))
+            SupplyChainLog.shared.record(
+                "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — HTTP \(status): \(bodyPreview)")
             return nil
         }
         guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            FileHandle.standardError.write(Data(
-                "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — couldn't parse response JSON\n".utf8))
+            SupplyChainLog.shared.record(
+                "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — couldn't parse response JSON")
             return nil
         }
 
@@ -214,8 +213,8 @@ public actor SocketDevClient {
         }
 
         let result = CheckResult(compromised: compromised, vulnerabilities: vulns)
-        FileHandle.standardError.write(Data(
-            "[socket.dev] ✓  \(ecosystem)/\(name)@\(version) — \(compromised.count) compromise, \(vulns.count) CVE\n".utf8))
+        SupplyChainLog.shared.record(
+            "[socket.dev] ✓  \(ecosystem)/\(name)@\(version) — \(compromised.count) compromise, \(vulns.count) CVE")
         cache[key] = result
         if cache.count > Self.cacheCap {
             let toDrop = cache.count - Self.cacheCap

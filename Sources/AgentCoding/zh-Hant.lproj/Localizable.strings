@@ -389,8 +389,59 @@
 "Allow for 15 minutes" = "允許 15 分鐘";
 "Allow once" = "僅允許一次";
 
-/* Supply Chain Security category */
-"Supply Chain Security" = "供應鏈安全";
+/* Supply Chain category */
+"Supply Chain" = "供應鏈";
 "Pass through %@ from profile “%@”?" = "允許來自設定檔「%@」的 %@ 通過？";
 "Get an API key" = "取得 API 金鑰";
 "Add entry" = "新增項目";
+
+/* Supply Chain panel — intro */
+"Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go modules, Packagist) through the host MITM and applies these policies before the agent sees the response. The in-VM `.npmrc` / `pip.conf` can only further restrict these settings — they cannot loosen them. Use the per-package allowlists for surgical overrides." = "Bromure 透過主機端 MITM 掃描每次套件下載（npm、PyPI、Cargo、RubyGems、Maven、NuGet、Go modules、Packagist），並在代理看到回應之前套用這些政策。VM 內的 `.npmrc` / `pip.conf` 只能再進一步收緊這些設定，無法放寬。若需個別例外，請使用各套件的白名單。";
+
+/* Supply Chain panel — age gate */
+"Age gate" = "發佈時間過濾";
+"Refuse packages younger than the cutoff" = "拒絕比門檻更新的套件";
+"Minimum age:" = "最短發佈時間：";
+"%d days" = "%d 天";
+"Floating refs (`latest`, semver ranges) silently resolve to the newest version older than the cutoff. Pinned references to too-fresh versions get a 451 with a clear Bromure error." = "浮動參照（`latest`、semver 範圍）會被無聲地解析為門檻之前最新的版本。固定參照若指向過新的版本，會收到帶有明確 Bromure 錯誤訊息的 451 回應。";
+"Exempt packages (format: `npm:axios` or just `axios`)" = "豁免套件（格式：`npm:axios` 或直接 `axios`）";
+
+/* Supply Chain panel — OSV */
+"OSV vulnerability check" = "OSV 漏洞檢查";
+"Look up packages on api.osv.dev (free, no key required)" = "在 api.osv.dev 上查詢套件（免費，不需金鑰）";
+"Block at severity:" = "封鎖嚴重等級：";
+"Aggregates GitHub Advisory Database + PyPI advisories + Go's database + RubySec etc. Off by default — a low-severity CVE in a transitive subpackage shouldn't interrupt a workflow." = "彙整 GitHub Advisory Database、PyPI advisories、Go 資料庫、RubySec 等。預設關閉——傳遞相依中的低嚴重度 CVE 不應中斷工作流程。";
+
+/* Supply Chain panel — socket.dev */
+"API key:" = "API 金鑰：";
+"The key is stored host-side only — Bromure never exports it into the VM. Calls go directly to api.socket.dev from the host's MITM proxy." = "金鑰僅儲存於主機端——Bromure 不會將其匯出到 VM。請求由主機 MITM 代理直接送往 api.socket.dev。";
+"Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)" = "封鎖已遭入侵的套件（惡意安裝指令稿、被標記為惡意程式、域名仿冒、可疑遙測）";
+"Block packages with known CVEs" = "封鎖具有已知 CVE 的套件";
+"CVE block threshold:" = "CVE 封鎖門檻：";
+
+/* Supply Chain panel — install scripts */
+"Install scripts" = "安裝指令稿";
+"Strip preinstall / install / postinstall / prepare from npm tarballs on the fly" = "即時從 npm 壓縮檔中移除 preinstall / install / postinstall / prepare";
+"Bromure rewrites the tarball, removes the script keys from `package.json`, and updates the registry metadata hash so npm's verification still passes for unpinned installs. Some packages (binding compilers — better-sqlite3, node-canvas, …) legitimately need install scripts; add them to the allowlist below." = "Bromure 會改寫壓縮檔，從 `package.json` 中移除指令稿欄位，並更新註冊伺服器的中繼資料雜湊，使未固定的安裝仍能通過 npm 的驗證。部分套件（綁定編譯器——better-sqlite3、node-canvas 等）的確需要安裝指令稿；請將它們加入下方的白名單。";
+"Allow install scripts for (format: `npm:better-sqlite3`)" = "允許執行安裝指令稿（格式：`npm:better-sqlite3`）";
+
+/* Supply Chain panel — lockfile */
+"Lockfile-pinned installs" = "由 lockfile 固定的安裝";
+"Prompt before passing lockfile-pinned tarballs through unmodified (`npm ci`, `pip --require-hashes`)" = "原樣放行由 lockfile 固定的壓縮檔之前先詢問（`npm ci`、`pip --require-hashes`）";
+"These installs use cryptographic integrity hashes baked into a lockfile — Bromure can't rewrite them without breaking verification. When this is on, the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow); the entire batch follows the decision." = "這類安裝採用 lockfile 內預先寫死的密碼學完整性雜湊——Bromure 無法在不破壞驗證的情況下改寫它們。啟用此選項時，一批次中第一個固定下載會彈出主機端對話框（允許一次 / 15 分鐘 / 整個工作階段 / 不允許）；整批會沿用該決定。";
+
+/* Severity threshold (OSV + socket.dev CVE) */
+"Low and above" = "低及以上";
+"Medium and above" = "中及以上";
+"High and above" = "高及以上";
+"Critical only" = "僅嚴重";
+
+/* Supply Chain Log window (Window menu) */
+"Supply Chain Log…" = "供應鏈紀錄…";
+"Supply Chain Log" = "供應鏈紀錄";
+"Filter…" = "篩選…";
+"Auto-scroll" = "自動捲動";
+"Clear" = "清除";
+"Clear the buffer" = "清除緩衝區";
+"%d entries" = "%d 筆";
+"%d of %d entries" = "%d / %d 筆";

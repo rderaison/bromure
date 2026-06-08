@@ -128,27 +128,27 @@ public actor OSVClient {
         req.setValue("bromure-ac/2.0", forHTTPHeaderField: "User-Agent")
         req.httpBody = bodyData
 
-        FileHandle.standardError.write(Data(
-            "[osv] →  POST \(osvEco)/\(name)@\(version)\n".utf8))
+        SupplyChainLog.shared.record(
+            "[osv] →  POST \(osvEco)/\(name)@\(version)")
         let response: (Data, URLResponse)
         do {
             response = try await session.data(for: req)
         } catch {
-            FileHandle.standardError.write(Data(
-                "[osv] ✗  \(ecosystem)/\(name)@\(version) — network error: \(error.localizedDescription)\n".utf8))
+            SupplyChainLog.shared.record(
+                "[osv] ✗  \(ecosystem)/\(name)@\(version) — network error: \(error.localizedDescription)")
             return nil
         }
         let (data, resp) = response
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if status != 200 {
             let bodyPreview = String(data: data.prefix(200), encoding: .utf8) ?? ""
-            FileHandle.standardError.write(Data(
-                "[osv] ✗  \(ecosystem)/\(name)@\(version) — HTTP \(status): \(bodyPreview)\n".utf8))
+            SupplyChainLog.shared.record(
+                "[osv] ✗  \(ecosystem)/\(name)@\(version) — HTTP \(status): \(bodyPreview)")
             return nil
         }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            FileHandle.standardError.write(Data(
-                "[osv] ✗  \(ecosystem)/\(name)@\(version) — couldn't parse response JSON\n".utf8))
+            SupplyChainLog.shared.record(
+                "[osv] ✗  \(ecosystem)/\(name)@\(version) — couldn't parse response JSON")
             return nil
         }
 
@@ -164,8 +164,8 @@ public actor OSVClient {
         }
 
         let result = CheckResult(vulnerabilities: parsed)
-        FileHandle.standardError.write(Data(
-            "[osv] ✓  \(ecosystem)/\(name)@\(version) — \(parsed.count) vuln\n".utf8))
+        SupplyChainLog.shared.record(
+            "[osv] ✓  \(ecosystem)/\(name)@\(version) — \(parsed.count) vuln")
         cache[key] = result
         if cache.count > Self.cacheCap {
             let toDrop = cache.count - Self.cacheCap

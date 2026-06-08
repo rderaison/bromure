@@ -1050,11 +1050,14 @@ async function main() {
     // succeeds, so the round-trip is the meaningful signal.
     const id = createProfile("ACE2E_SC_Live");
     try {
-      // First: set to age-gate 2 days.
+      // Use only non-default values — the SupplyChainPolicy encoder
+      // omits any field that equals its default (ageGateDays=2 etc.),
+      // so picking the default for a write makes the readback look
+      // "undefined" even though the in-memory state is correct.
       let p = getProfileJSON(id);
-      p.supplyChain = { ageGateDays: 2 };
+      p.supplyChain = { ageGateDays: 7 };
       setProfileJSON(id, p);
-      assertEq(getProfileJSON(id).supplyChain.ageGateDays, 2);
+      assertEq(getProfileJSON(id).supplyChain.ageGateDays, 7);
 
       // Then: bump to 14. Different blob → triggers live refresh.
       p = getProfileJSON(id);

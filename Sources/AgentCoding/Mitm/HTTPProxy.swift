@@ -582,8 +582,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         "published \(ageDesc) ago — " +
                         "policy requires \(policy.ageGateDays) days minimum"
                     try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                    FileHandle.standardError.write(Data(
-                        "[supply-chain] age-gate 451: \(pkg)@\(version)\n".utf8))
+                    SupplyChainLog.shared.record(
+                        "[supply-chain] age-gate 451: \(pkg)@\(version) — \(ageDesc) old, requires \(policy.ageGateDays)d")
                     return
                 }
 
@@ -600,8 +600,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                             "at \(policy.osvSeverity.displayName.lowercased()): " +
                             "\(v.id) — \(v.summary)"
                         try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                        FileHandle.standardError.write(Data(
-                            "[supply-chain] OSV 451: \(pkg)@\(version) → \(v.id)\n".utf8))
+                        SupplyChainLog.shared.record(
+                            "[supply-chain] OSV 451: \(pkg)@\(version) → \(v.id)")
                         return
                     }
                 }
@@ -616,8 +616,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                             "flagged by socket.dev (\(bad.severity.rawValue)): " +
                             "\(bad.type) — \(bad.summary)"
                         try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                        FileHandle.standardError.write(Data(
-                            "[supply-chain] socket.dev compromised 451: \(pkg)@\(version) → \(bad.type) [\(bad.severity.rawValue)]\n".utf8))
+                        SupplyChainLog.shared.record(
+                            "[supply-chain] socket.dev compromised 451: \(pkg)@\(version) → \(bad.type) [\(bad.severity.rawValue)]")
                         return
                     }
                     if policy.socketBlockCVE {
@@ -628,8 +628,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                 "has known CVE per socket.dev (\(v.severity.rawValue)): " +
                                 "\(v.type) — \(v.summary)"
                             try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                            FileHandle.standardError.write(Data(
-                                "[supply-chain] socket.dev CVE 451: \(pkg)@\(version) → \(v.type)\n".utf8))
+                            SupplyChainLog.shared.record(
+                                "[supply-chain] socket.dev CVE 451: \(pkg)@\(version) → \(v.type) [\(v.severity.rawValue)]")
                             return
                         }
                     }
@@ -655,6 +655,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         let reason = "\(ecosystem.rawValue) lockfile-pinned install (`npm ci`) " +
                             "blocked — user denied bypass via Bromure consent prompt"
                         try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
+                        SupplyChainLog.shared.record(
+                            "[supply-chain] lockfile-pinned 451: \(pkg)@\(version) — user denied bypass")
                         return
                     }
                 }
@@ -672,8 +674,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                             let (out, didStrip) = NPMRegistryTransforms
                                 .stripScriptsFromTarball(rawResponse: raw)
                             if didStrip {
-                                FileHandle.standardError.write(Data(
-                                    "[supply-chain] stripped install scripts from \(pkg)@\(version)\n".utf8))
+                                SupplyChainLog.shared.record(
+                                    "[supply-chain] stripped install scripts from \(pkg)@\(version)")
                             }
                             return out
                         })

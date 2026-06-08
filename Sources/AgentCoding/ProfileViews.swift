@@ -292,7 +292,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case mcp         = "MCP"
     case tracing     = "Tracing"
     case guardrails       = "Guardrails"
-    case supplyChain      = "Supply Chain Security"
+    case supplyChain      = "Supply Chain"
     case appearance  = "Appearance"
     case resources   = "Resources"
     /// App-wide automation toggles. Only shown when the editor is opened
@@ -2363,12 +2363,12 @@ struct ProfileEditorView: View {
         }
     }
 
-    // MARK: - Supply Chain Security section
+    // MARK: - Supply Chain section
 
     @ViewBuilder
     private var supplyChainSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go modules, Packagist) through the host MITM and applies these policies before the agent sees the response. The in-VM `.npmrc` / `pip.conf` can only further restrict these settings — they cannot loosen them. Use the per-package allowlists for surgical overrides.")
+            Text(NSLocalizedString("Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go modules, Packagist) through the host MITM and applies these policies before the agent sees the response. The in-VM `.npmrc` / `pip.conf` can only further restrict these settings — they cannot loosen them. Use the per-package allowlists for surgical overrides.", comment: ""))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2387,7 +2387,7 @@ struct ProfileEditorView: View {
                         }
                         .disabled(!draft.supplyChain.ageGateEnabled)
                     }
-                    Text("Floating refs (`latest`, semver ranges) silently resolve to the newest version older than the cutoff. Pinned references to too-fresh versions get a 451 with a clear Bromure error.")
+                    Text(NSLocalizedString("Floating refs (`latest`, semver ranges) silently resolve to the newest version older than the cutoff. Pinned references to too-fresh versions get a 451 with a clear Bromure error.", comment: ""))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2412,7 +2412,7 @@ struct ProfileEditorView: View {
                     .disabled(!draft.supplyChain.osvEnabled)
                     .pickerStyle(.menu)
                     .frame(maxWidth: 280)
-                    Text("Aggregates GitHub Advisory Database + PyPI advisories + Go's database + RubySec etc. Off by default — a low-severity CVE in a transitive subpackage shouldn't interrupt a workflow.")
+                    Text(NSLocalizedString("Aggregates GitHub Advisory Database + PyPI advisories + Go's database + RubySec etc. Off by default — a low-severity CVE in a transitive subpackage shouldn't interrupt a workflow.", comment: ""))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2435,7 +2435,7 @@ struct ProfileEditorView: View {
                             .font(.caption)
                         }
                     }
-                    Text("The key is stored host-side only — Bromure never exports it into the VM. Calls go directly to api.socket.dev from the host's MITM proxy.")
+                    Text(NSLocalizedString("The key is stored host-side only — Bromure never exports it into the VM. Calls go directly to api.socket.dev from the host's MITM proxy.", comment: ""))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2464,7 +2464,7 @@ struct ProfileEditorView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Toggle(NSLocalizedString("Strip preinstall / install / postinstall / prepare from npm tarballs on the fly", comment: ""),
                            isOn: $draft.supplyChain.stripInstallScripts)
-                    Text("Bromure rewrites the tarball, removes the script keys from `package.json`, and updates the registry metadata hash so npm's verification still passes for unpinned installs. Some packages (binding compilers — better-sqlite3, node-canvas, …) legitimately need install scripts; add them to the allowlist below.")
+                    Text(NSLocalizedString("Bromure rewrites the tarball, removes the script keys from `package.json`, and updates the registry metadata hash so npm's verification still passes for unpinned installs. Some packages (binding compilers — better-sqlite3, node-canvas, …) legitimately need install scripts; add them to the allowlist below.", comment: ""))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2480,7 +2480,7 @@ struct ProfileEditorView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Toggle(NSLocalizedString("Prompt before passing lockfile-pinned tarballs through unmodified (`npm ci`, `pip --require-hashes`)", comment: ""),
                            isOn: $draft.supplyChain.lockfilePrompt)
-                    Text("These installs use cryptographic integrity hashes baked into a lockfile — Bromure can't rewrite them without breaking verification. When this is on, the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow); the entire batch follows the decision.")
+                    Text(NSLocalizedString("These installs use cryptographic integrity hashes baked into a lockfile — Bromure can't rewrite them without breaking verification. When this is on, the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow); the entire batch follows the decision.", comment: ""))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

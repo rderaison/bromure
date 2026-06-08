@@ -127,8 +127,8 @@ public final class MitmEngine {
             }
             if policy.stripInstallScripts { bits.append("strip-scripts") }
             let summary = bits.isEmpty ? "off" : bits.joined(separator: " ")
-            FileHandle.standardError.write(Data(
-                "[supply-chain] policy engaged for \(profileID.uuidString.prefix(8)): \(summary)\n".utf8))
+            SupplyChainLog.shared.record(
+                "[supply-chain] policy engaged for \(profileID.uuidString.prefix(8)): \(summary)")
         }
     }
     public nonisolated func supplyChainPolicy(for profileID: UUID) -> SupplyChainPolicy? {

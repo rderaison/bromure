@@ -389,8 +389,59 @@
 "Allow for 15 minutes" = "15 分間許可";
 "Allow once" = "今回のみ許可";
 
-/* Supply Chain Security category */
-"Supply Chain Security" = "サプライチェーン セキュリティ";
+/* Supply Chain category */
+"Supply Chain" = "サプライチェーン";
 "Pass through %@ from profile “%@”?" = "プロファイル「%@」から %@ を通過させますか？";
 "Get an API key" = "API キーを取得";
 "Add entry" = "エントリを追加";
+
+/* Supply Chain panel — intro */
+"Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go modules, Packagist) through the host MITM and applies these policies before the agent sees the response. The in-VM `.npmrc` / `pip.conf` can only further restrict these settings — they cannot loosen them. Use the per-package allowlists for surgical overrides." = "Bromure はあらゆるパッケージ取得（npm、PyPI、Cargo、RubyGems、Maven、NuGet、Go modules、Packagist）をホスト側の MITM 経由でスキャンし、エージェントが応答を受け取る前にこれらのポリシーを適用します。VM 内の `.npmrc` / `pip.conf` はこれらの設定をさらに厳しくすることはできますが、緩めることはできません。個別の例外にはパッケージごとの許可リストを使用してください。";
+
+/* Supply Chain panel — age gate */
+"Age gate" = "公開からの経過時間フィルタ";
+"Refuse packages younger than the cutoff" = "しきい値より新しいパッケージを拒否";
+"Minimum age:" = "最小経過日数：";
+"%d days" = "%d 日";
+"Floating refs (`latest`, semver ranges) silently resolve to the newest version older than the cutoff. Pinned references to too-fresh versions get a 451 with a clear Bromure error." = "可変参照（`latest`、semver 範囲）はしきい値以前で最も新しいバージョンに静かに解決されます。新しすぎるバージョンへの固定参照には、Bromure 由来のエラーが明示された 451 が返されます。";
+"Exempt packages (format: `npm:axios` or just `axios`)" = "除外パッケージ（書式：`npm:axios` または単に `axios`）";
+
+/* Supply Chain panel — OSV */
+"OSV vulnerability check" = "OSV 脆弱性チェック";
+"Look up packages on api.osv.dev (free, no key required)" = "api.osv.dev でパッケージを照会（無料、キー不要）";
+"Block at severity:" = "ブロックする深刻度：";
+"Aggregates GitHub Advisory Database + PyPI advisories + Go's database + RubySec etc. Off by default — a low-severity CVE in a transitive subpackage shouldn't interrupt a workflow." = "GitHub Advisory Database、PyPI のアドバイザリ、Go のデータベース、RubySec などを集約します。既定ではオフです — 推移的なサブパッケージの低深刻度の CVE で作業を中断させるべきではありません。";
+
+/* Supply Chain panel — socket.dev */
+"API key:" = "API キー：";
+"The key is stored host-side only — Bromure never exports it into the VM. Calls go directly to api.socket.dev from the host's MITM proxy." = "キーはホスト側にのみ保存されます — Bromure が VM に書き出すことはありません。リクエストはホストの MITM プロキシから直接 api.socket.dev に送られます。";
+"Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)" = "侵害されたパッケージをブロック（悪意あるインストールスクリプト、マルウェア判定、タイポスクワット、疑わしいテレメトリ）";
+"Block packages with known CVEs" = "既知の CVE を持つパッケージをブロック";
+"CVE block threshold:" = "CVE ブロックのしきい値：";
+
+/* Supply Chain panel — install scripts */
+"Install scripts" = "インストールスクリプト";
+"Strip preinstall / install / postinstall / prepare from npm tarballs on the fly" = "npm tarball から preinstall / install / postinstall / prepare をその場で削除";
+"Bromure rewrites the tarball, removes the script keys from `package.json`, and updates the registry metadata hash so npm's verification still passes for unpinned installs. Some packages (binding compilers — better-sqlite3, node-canvas, …) legitimately need install scripts; add them to the allowlist below." = "Bromure は tarball を書き換え、`package.json` からスクリプト項目を削除し、レジストリのメタデータハッシュを更新するため、固定されていないインストールでも npm の検証は引き続き通ります。一部のパッケージ（ネイティブバインディングをビルドする better-sqlite3、node-canvas など）は本当にインストールスクリプトを必要とします — 下記の許可リストに追加してください。";
+"Allow install scripts for (format: `npm:better-sqlite3`)" = "インストールスクリプトを許可（書式：`npm:better-sqlite3`）";
+
+/* Supply Chain panel — lockfile */
+"Lockfile-pinned installs" = "ロックファイルで固定されたインストール";
+"Prompt before passing lockfile-pinned tarballs through unmodified (`npm ci`, `pip --require-hashes`)" = "ロックファイルで固定された tarball を無加工で通過させる前に確認（`npm ci`、`pip --require-hashes`）";
+"These installs use cryptographic integrity hashes baked into a lockfile — Bromure can't rewrite them without breaking verification. When this is on, the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow); the entire batch follows the decision." = "これらのインストールはロックファイルに組み込まれた暗号学的な完全性ハッシュを使用するため、Bromure は検証を壊さずに書き換えることができません。このオプションが有効な場合、バッチ中の最初の固定リクエストでホスト側のダイアログ（一度だけ許可 / 15 分 / セッション中 / 許可しない）が表示され、そのバッチ全体がその判断に従います。";
+
+/* Severity threshold (OSV + socket.dev CVE) */
+"Low and above" = "低以上";
+"Medium and above" = "中以上";
+"High and above" = "高以上";
+"Critical only" = "致命的のみ";
+
+/* Supply Chain Log window (Window menu) */
+"Supply Chain Log…" = "サプライチェーン ログ…";
+"Supply Chain Log" = "サプライチェーン ログ";
+"Filter…" = "フィルタ…";
+"Auto-scroll" = "自動スクロール";
+"Clear" = "クリア";
+"Clear the buffer" = "バッファをクリア";
+"%d entries" = "%d 件";
+"%d of %d entries" = "%d / %d 件";

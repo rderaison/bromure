@@ -389,8 +389,59 @@
 "Allow for 15 minutes" = "Autoriser pendant 15 minutes";
 "Allow once" = "Autoriser une seule fois";
 
-/* Supply Chain Security category */
-"Supply Chain Security" = "Sécurité de la chaîne d’approvisionnement";
+/* Supply Chain category */
+"Supply Chain" = "Chaîne d’approvisionnement";
 "Pass through %@ from profile “%@”?" = "Laisser passer %@ depuis le profil « %@ » ?";
 "Get an API key" = "Obtenir une clé API";
 "Add entry" = "Ajouter";
+
+/* Supply Chain panel — intro */
+"Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go modules, Packagist) through the host MITM and applies these policies before the agent sees the response. The in-VM `.npmrc` / `pip.conf` can only further restrict these settings — they cannot loosen them. Use the per-package allowlists for surgical overrides." = "Bromure analyse chaque téléchargement de paquet (npm, PyPI, Cargo, RubyGems, Maven, NuGet, modules Go, Packagist) via le MITM côté hôte et applique ces règles avant que l’agent ne voie la réponse. Les fichiers `.npmrc` / `pip.conf` dans la VM peuvent seulement durcir ces réglages — jamais les assouplir. Utilisez les listes d’exception par paquet pour des dérogations ciblées.";
+
+/* Supply Chain panel — age gate */
+"Age gate" = "Filtre d’âge";
+"Refuse packages younger than the cutoff" = "Refuser les paquets plus récents que le seuil";
+"Minimum age:" = "Âge minimum :";
+"%d days" = "%d jours";
+"Floating refs (`latest`, semver ranges) silently resolve to the newest version older than the cutoff. Pinned references to too-fresh versions get a 451 with a clear Bromure error." = "Les références flottantes (`latest`, plages semver) basculent silencieusement vers la version la plus récente antérieure au seuil. Les références épinglées vers des versions trop récentes reçoivent un 451 avec un message Bromure explicite.";
+"Exempt packages (format: `npm:axios` or just `axios`)" = "Paquets exemptés (format : `npm:axios` ou simplement `axios`)";
+
+/* Supply Chain panel — OSV */
+"OSV vulnerability check" = "Vérification des vulnérabilités OSV";
+"Look up packages on api.osv.dev (free, no key required)" = "Interroger api.osv.dev (gratuit, sans clé)";
+"Block at severity:" = "Bloquer à partir de :";
+"Aggregates GitHub Advisory Database + PyPI advisories + Go's database + RubySec etc. Off by default — a low-severity CVE in a transitive subpackage shouldn't interrupt a workflow." = "Agrège la GitHub Advisory Database, les advisories PyPI, la base Go, RubySec, etc. Désactivé par défaut — une CVE de faible sévérité dans un sous-paquet transitif ne devrait pas interrompre un workflow.";
+
+/* Supply Chain panel — socket.dev */
+"API key:" = "Clé API :";
+"The key is stored host-side only — Bromure never exports it into the VM. Calls go directly to api.socket.dev from the host's MITM proxy." = "La clé n’est stockée que côté hôte — Bromure ne l’exporte jamais dans la VM. Les appels partent directement vers api.socket.dev depuis le proxy MITM de l’hôte.";
+"Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)" = "Bloquer les paquets compromis (scripts d’installation malveillants, malwares signalés, typosquats, télémétrie suspecte)";
+"Block packages with known CVEs" = "Bloquer les paquets ayant des CVE connues";
+"CVE block threshold:" = "Seuil de blocage des CVE :";
+
+/* Supply Chain panel — install scripts */
+"Install scripts" = "Scripts d’installation";
+"Strip preinstall / install / postinstall / prepare from npm tarballs on the fly" = "Retirer à la volée preinstall / install / postinstall / prepare des archives npm";
+"Bromure rewrites the tarball, removes the script keys from `package.json`, and updates the registry metadata hash so npm's verification still passes for unpinned installs. Some packages (binding compilers — better-sqlite3, node-canvas, …) legitimately need install scripts; add them to the allowlist below." = "Bromure réécrit l’archive, supprime les clés de scripts dans `package.json` et met à jour l’empreinte de métadonnées du registre, afin que la vérification npm reste valide pour les installations non épinglées. Certains paquets (compilateurs de bindings — better-sqlite3, node-canvas, …) ont légitimement besoin de scripts d’installation ; ajoutez-les à la liste ci-dessous.";
+"Allow install scripts for (format: `npm:better-sqlite3`)" = "Autoriser les scripts d’installation pour (format : `npm:better-sqlite3`)";
+
+/* Supply Chain panel — lockfile */
+"Lockfile-pinned installs" = "Installations épinglées par lockfile";
+"Prompt before passing lockfile-pinned tarballs through unmodified (`npm ci`, `pip --require-hashes`)" = "Demander avant de laisser passer telles quelles les archives épinglées par lockfile (`npm ci`, `pip --require-hashes`)";
+"These installs use cryptographic integrity hashes baked into a lockfile — Bromure can't rewrite them without breaking verification. When this is on, the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow); the entire batch follows the decision." = "Ces installations utilisent des empreintes cryptographiques d’intégrité figées dans un lockfile — Bromure ne peut pas les réécrire sans casser la vérification. Lorsque l’option est activée, le premier téléchargement épinglé d’une rafale ouvre une boîte de dialogue côté hôte (Autoriser une fois / 15 min / pour la session / Refuser) ; toute la rafale suit la décision.";
+
+/* Severity threshold (OSV + socket.dev CVE) */
+"Low and above" = "Faible et au-dessus";
+"Medium and above" = "Moyen et au-dessus";
+"High and above" = "Élevé et au-dessus";
+"Critical only" = "Critique uniquement";
+
+/* Supply Chain Log window (Window menu) */
+"Supply Chain Log…" = "Journal de la chaîne d’approvisionnement…";
+"Supply Chain Log" = "Journal de la chaîne d’approvisionnement";
+"Filter…" = "Filtrer…";
+"Auto-scroll" = "Défilement auto";
+"Clear" = "Effacer";
+"Clear the buffer" = "Effacer le tampon";
+"%d entries" = "%d entrées";
+"%d of %d entries" = "%d sur %d entrées";

@@ -390,8 +390,59 @@
 "Allow for 15 minutes" = "Allow for 15 minutes";
 "Allow once" = "Allow once";
 
-/* Supply Chain Security category */
-"Supply Chain Security" = "Supply Chain Security";
+/* Supply Chain category */
+"Supply Chain" = "Supply Chain";
 "Pass through %@ from profile “%@”?" = "Pass through %@ from profile “%@”?";
 "Get an API key" = "Get an API key";
 "Add entry" = "Add entry";
+
+/* Supply Chain panel — intro */
+"Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go modules, Packagist) through the host MITM and applies these policies before the agent sees the response. The in-VM `.npmrc` / `pip.conf` can only further restrict these settings — they cannot loosen them. Use the per-package allowlists for surgical overrides." = "Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go modules, Packagist) through the host MITM and applies these policies before the agent sees the response. The in-VM `.npmrc` / `pip.conf` can only further restrict these settings — they cannot loosen them. Use the per-package allowlists for surgical overrides.";
+
+/* Supply Chain panel — age gate */
+"Age gate" = "Age gate";
+"Refuse packages younger than the cutoff" = "Refuse packages younger than the cutoff";
+"Minimum age:" = "Minimum age:";
+"%d days" = "%d days";
+"Floating refs (`latest`, semver ranges) silently resolve to the newest version older than the cutoff. Pinned references to too-fresh versions get a 451 with a clear Bromure error." = "Floating refs (`latest`, semver ranges) silently resolve to the newest version older than the cutoff. Pinned references to too-fresh versions get a 451 with a clear Bromure error.";
+"Exempt packages (format: `npm:axios` or just `axios`)" = "Exempt packages (format: `npm:axios` or just `axios`)";
+
+/* Supply Chain panel — OSV */
+"OSV vulnerability check" = "OSV vulnerability check";
+"Look up packages on api.osv.dev (free, no key required)" = "Look up packages on api.osv.dev (free, no key required)";
+"Block at severity:" = "Block at severity:";
+"Aggregates GitHub Advisory Database + PyPI advisories + Go's database + RubySec etc. Off by default — a low-severity CVE in a transitive subpackage shouldn't interrupt a workflow." = "Aggregates GitHub Advisory Database + PyPI advisories + Go's database + RubySec etc. Off by default — a low-severity CVE in a transitive subpackage shouldn't interrupt a workflow.";
+
+/* Supply Chain panel — socket.dev */
+"API key:" = "API key:";
+"The key is stored host-side only — Bromure never exports it into the VM. Calls go directly to api.socket.dev from the host's MITM proxy." = "The key is stored host-side only — Bromure never exports it into the VM. Calls go directly to api.socket.dev from the host's MITM proxy.";
+"Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)" = "Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)";
+"Block packages with known CVEs" = "Block packages with known CVEs";
+"CVE block threshold:" = "CVE block threshold:";
+
+/* Supply Chain panel — install scripts */
+"Install scripts" = "Install scripts";
+"Strip preinstall / install / postinstall / prepare from npm tarballs on the fly" = "Strip preinstall / install / postinstall / prepare from npm tarballs on the fly";
+"Bromure rewrites the tarball, removes the script keys from `package.json`, and updates the registry metadata hash so npm's verification still passes for unpinned installs. Some packages (binding compilers — better-sqlite3, node-canvas, …) legitimately need install scripts; add them to the allowlist below." = "Bromure rewrites the tarball, removes the script keys from `package.json`, and updates the registry metadata hash so npm's verification still passes for unpinned installs. Some packages (binding compilers — better-sqlite3, node-canvas, …) legitimately need install scripts; add them to the allowlist below.";
+"Allow install scripts for (format: `npm:better-sqlite3`)" = "Allow install scripts for (format: `npm:better-sqlite3`)";
+
+/* Supply Chain panel — lockfile */
+"Lockfile-pinned installs" = "Lockfile-pinned installs";
+"Prompt before passing lockfile-pinned tarballs through unmodified (`npm ci`, `pip --require-hashes`)" = "Prompt before passing lockfile-pinned tarballs through unmodified (`npm ci`, `pip --require-hashes`)";
+"These installs use cryptographic integrity hashes baked into a lockfile — Bromure can't rewrite them without breaking verification. When this is on, the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow); the entire batch follows the decision." = "These installs use cryptographic integrity hashes baked into a lockfile — Bromure can't rewrite them without breaking verification. When this is on, the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow); the entire batch follows the decision.";
+
+/* Severity threshold (OSV + socket.dev CVE) */
+"Low and above" = "Low and above";
+"Medium and above" = "Medium and above";
+"High and above" = "High and above";
+"Critical only" = "Critical only";
+
+/* Supply Chain Log window (Window menu) */
+"Supply Chain Log…" = "Supply Chain Log…";
+"Supply Chain Log" = "Supply Chain Log";
+"Filter…" = "Filter…";
+"Auto-scroll" = "Auto-scroll";
+"Clear" = "Clear";
+"Clear the buffer" = "Clear the buffer";
+"%d entries" = "%d entries";
+"%d of %d entries" = "%d of %d entries";
