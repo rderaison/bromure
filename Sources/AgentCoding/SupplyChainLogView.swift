@@ -43,19 +43,25 @@ struct SupplyChainLogView: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 1) {
-                        ForEach(filtered) { entry in
-                            row(entry)
-                                .id(entry.id)
+                    if filtered.isEmpty {
+                        emptyState
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 32)
+                    } else {
+                        LazyVStack(alignment: .leading, spacing: 1) {
+                            ForEach(filtered) { entry in
+                                row(entry)
+                                    .id(entry.id)
+                            }
+                            // Bottom anchor — scroll target when
+                            // auto-scroll is on. Using a stable id
+                            // (the sentinel string) avoids the
+                            // re-render-by-last-id thrash.
+                            Color.clear.frame(height: 1).id("__bottom__")
                         }
-                        // Bottom anchor — scroll target when
-                        // auto-scroll is on. Using a stable id (the
-                        // sentinel string) avoids the
-                        // re-render-by-last-id thrash.
-                        Color.clear.frame(height: 1).id("__bottom__")
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .background(Color(NSColor.textBackgroundColor))
                 .onChange(of: filtered.last?.id) {
@@ -83,6 +89,36 @@ struct SupplyChainLogView: View {
             .padding(.vertical, 6)
         }
         .frame(minWidth: 720, minHeight: 360)
+    }
+
+    @ViewBuilder
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "shippingbox")
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(.secondary)
+            Text(NSLocalizedString("No supply-chain activity yet", comment: ""))
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                bullet(NSLocalizedString("Open a session and run a package install (npm install, pip install, cargo add, …).", comment: ""))
+                bullet(NSLocalizedString("Entries appear here as soon as the MITM proxy intercepts a registry request.", comment: ""))
+                bullet(NSLocalizedString("socket.dev and OSV only fire on artifact downloads (.tgz, .whl, .crate, …) — not on plain metadata fetches. Packages cached in npm/pip's local store don't hit the network at all.", comment: ""))
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: 540, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func bullet(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text("•").foregroundStyle(.secondary)
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     @ViewBuilder

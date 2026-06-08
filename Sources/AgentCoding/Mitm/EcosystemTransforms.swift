@@ -289,7 +289,13 @@ public enum EcosystemTransforms {
                 || lower.hasPrefix("transfer-encoding:")
                 || lower.hasPrefix("content-encoding:")
         }
-        lines.append("X-Bromure-Rewritten: supply-chain")
+        // See NPMRegistryTransforms.rebuildHTTPResponse for rationale —
+        // marker goes right after the status line.
+        if !lines.isEmpty {
+            lines.insert("X-Bromure-Rewritten: supply-chain", at: 1)
+        } else {
+            lines.append("X-Bromure-Rewritten: supply-chain")
+        }
         lines.append("Content-Length: \(newBody.count)")
         var head = lines.joined(separator: "\r\n")
         head += "\r\n\r\n"

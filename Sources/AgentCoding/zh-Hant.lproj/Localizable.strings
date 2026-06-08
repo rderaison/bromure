@@ -445,3 +445,7 @@
 "Clear the buffer" = "清除緩衝區";
 "%d entries" = "%d 筆";
 "%d of %d entries" = "%d / %d 筆";
+"No supply-chain activity yet" = "目前尚無供應鏈活動";
+"Open a session and run a package install (npm install, pip install, cargo add, …)." = "開啟一個工作階段並執行套件安裝（npm install、pip install、cargo add 等）。";
+"Entries appear here as soon as the MITM proxy intercepts a registry request." = "一旦 MITM 代理攔截到套件註冊伺服器的請求，紀錄就會出現在這裡。";
+"socket.dev and OSV only fire on artifact downloads (.tgz, .whl, .crate, …) — not on plain metadata fetches. Packages cached in npm/pip's local store don't hit the network at all." = "socket.dev 與 OSV 僅在下載實際套件檔（.tgz、.whl、.crate 等）時觸發，純粹的中繼資料請求不會觸發。已在 npm/pip 本機快取中的套件根本不會走網路。";

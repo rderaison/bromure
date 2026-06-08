@@ -445,3 +445,7 @@
 "Clear the buffer" = "バッファをクリア";
 "%d entries" = "%d 件";
 "%d of %d entries" = "%d / %d 件";
+"No supply-chain activity yet" = "サプライチェーンの活動はまだありません";
+"Open a session and run a package install (npm install, pip install, cargo add, …)." = "セッションを開いて、パッケージのインストールを実行してください（npm install、pip install、cargo add など）。";
+"Entries appear here as soon as the MITM proxy intercepts a registry request." = "MITM プロキシがレジストリへのリクエストを傍受すると、ここにエントリが表示されます。";
+"socket.dev and OSV only fire on artifact downloads (.tgz, .whl, .crate, …) — not on plain metadata fetches. Packages cached in npm/pip's local store don't hit the network at all." = "socket.dev と OSV は成果物のダウンロード（.tgz、.whl、.crate など）の際にのみ発火し、単なるメタデータ取得では発火しません。npm/pip のローカルキャッシュにあるパッケージはそもそもネットワークに出ません。";

@@ -445,3 +445,7 @@
 "Clear the buffer" = "清空缓冲区";
 "%d entries" = "%d 条";
 "%d of %d entries" = "%d / %d 条";
+"No supply-chain activity yet" = "暂无供应链活动";
+"Open a session and run a package install (npm install, pip install, cargo add, …)." = "打开一个会话并执行软件包安装（npm install、pip install、cargo add 等）。";
+"Entries appear here as soon as the MITM proxy intercepts a registry request." = "一旦 MITM 代理拦截到对软件包注册表的请求，记录就会出现在这里。";
+"socket.dev and OSV only fire on artifact downloads (.tgz, .whl, .crate, …) — not on plain metadata fetches. Packages cached in npm/pip's local store don't hit the network at all." = "socket.dev 与 OSV 只会在下载实际包文件（.tgz、.whl、.crate 等）时触发，普通的元数据请求不会触发。已经在 npm/pip 本地缓存里的包根本不会走网络。";

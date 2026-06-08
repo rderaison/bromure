@@ -1290,8 +1290,14 @@ async function main() {
             // Now try to fetch a specific tarball. With cutoff
             // = 100 years ago, every published version is too
             // fresh → 451.
+            //
+            // Use a curl without -f (--fail) here: -f aborts the
+            // transfer on HTTP errors before `-w` can fire, so we'd
+            // get empty stdout instead of the 451 + body. Plain
+            // `curl -sS` lets the body land in /tmp/t and lets the
+            // %{http_code} write succeed.
             const r = await api("POST", `/sessions/${id}/exec`, {
-              command: `${CURL} -w '%{http_code}' -o /tmp/t https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz; echo; head -c 400 /tmp/t || true`,
+              command: `curl -sS --max-time 30 -w '%{http_code}\\n' -o /tmp/t https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz; head -c 400 /tmp/t || true`,
               timeout: 60,
             });
             assertEq(r._status, 200);

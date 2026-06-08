@@ -56,12 +56,45 @@ public actor SocketDevClient {
     private var cache: [CacheKey: CheckResult] = [:]
     private static let cacheCap = 10_000
 
+    // Cap concurrent in-flight calls to socket.dev. The number is a
+    // balance: too low starves a big install graph (each tarball
+    // waits for a slot, install becomes serial); too high triggers
+    // socket.dev rate-limiting and timeouts. 16 keeps a 50-package
+    // transitive graph moving without overwhelming the API.
+    private static let maxParallel = 16
+    /// Total attempts (initial + retries) on transient network
+    /// errors. Linear backoff between attempts.
+    private static let maxRetries = 5
+    private var inFlight = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    private func acquireSlot() async {
+        while inFlight >= Self.maxParallel {
+            await withCheckedContinuation { c in
+                waiters.append(c)
+            }
+        }
+        inFlight += 1
+    }
+
+    private func releaseSlot() {
+        inFlight -= 1
+        if !waiters.isEmpty {
+            waiters.removeFirst().resume()
+        }
+    }
+
     private let session: URLSession
 
     public init() {
         let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 15
-        cfg.timeoutIntervalForResource = 30
+        // Be generous on timeouts — socket.dev computes analysis
+        // on-demand for less-popular packages on first lookup. A
+        // stuck install is more disruptive than a slow check.
+        cfg.timeoutIntervalForRequest = 30
+        cfg.timeoutIntervalForResource = 60
+        // We self-throttle to maxParallel above, so the URLSession's
+        // per-host cap need not be high. Leave at the default.
         self.session = URLSession(configuration: cfg)
     }
 
@@ -154,13 +187,46 @@ public actor SocketDevClient {
         let basic = "\(apiKey):".data(using: .utf8)!.base64EncodedString()
         req.setValue("Basic \(basic)", forHTTPHeaderField: "Authorization")
 
+        // Throttle: at most maxParallel checks in flight. Cache
+        // hits above don't consume a slot.
+        await acquireSlot()
+        defer { releaseSlot() }
+
         SupplyChainLog.shared.record("[socket.dev] →  GET \(urlStr)")
-        let response: (Data, URLResponse)
-        do {
-            response = try await session.data(for: req)
-        } catch {
+        var response: (Data, URLResponse)?
+        var lastError: Error?
+        for attempt in 1...Self.maxRetries {
+            do {
+                response = try await session.data(for: req)
+                lastError = nil
+                break
+            } catch {
+                lastError = error
+                // Only retry on transient network errors; surface
+                // everything else (bad URL, cancelled, etc.) on the
+                // first try.
+                let urlErr = error as? URLError
+                let retriable: Bool = {
+                    guard let urlErr else { return false }
+                    switch urlErr.code {
+                    case .timedOut, .networkConnectionLost,
+                         .cannotConnectToHost, .dnsLookupFailed,
+                         .resourceUnavailable:
+                        return true
+                    default:
+                        return false
+                    }
+                }()
+                if !retriable || attempt == Self.maxRetries { break }
+                SupplyChainLog.shared.record(
+                    "[socket.dev] ↻  \(ecosystem)/\(name)@\(version) — retry \(attempt)/\(Self.maxRetries - 1) after \(error.localizedDescription)")
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 250_000_000)
+            }
+        }
+        guard let response else {
+            let msg = lastError?.localizedDescription ?? "unknown"
             SupplyChainLog.shared.record(
-                "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — network error: \(error.localizedDescription)")
+                "[socket.dev] ✗  \(ecosystem)/\(name)@\(version) — network error after retries: \(msg)")
             return nil
         }
         let (data, resp) = response

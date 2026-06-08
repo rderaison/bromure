@@ -139,9 +139,15 @@ public enum NPMRegistryTransforms {
         guard let (newTar, didStrip) = rewriteTarStripScripts(unzipped) else {
             return (rawResponse, false)
         }
-        guard didStrip else { return (rawResponse, false) }
-        guard let regz = gzip(newTar) else { return (rawResponse, false) }
-        return (rebuildHTTPResponse(originalHead: head, newBody: regz), true)
+        if didStrip {
+            guard let regz = gzip(newTar) else { return (rawResponse, false) }
+            return (rebuildHTTPResponse(originalHead: head, newBody: regz), true)
+        }
+        // We *inspected* the tarball but found no install scripts to
+        // strip — tag the response so the log window / debugging
+        // sees "proxy considered this package" without paying the
+        // cost of a needless gzip round-trip on the body.
+        return (tagInspected(rawResponse: rawResponse), false)
     }
 
     // MARK: - Tar walker
@@ -323,15 +329,42 @@ public enum NPMRegistryTransforms {
                 || lower.hasPrefix("transfer-encoding:")
                 || lower.hasPrefix("content-encoding:")
         }
-        // Insert an explicit `X-Bromure-Rewritten` marker so debugging
-        // a "wait, why doesn't this match my lockfile hash?" later is
-        // a glance at the response headers.
-        lines.append("X-Bromure-Rewritten: supply-chain")
+        // Insert the marker right after the HTTP/1.1 status line so
+        // it's visible in the first ~100 bytes of any header dump
+        // (npm and PyPI both pile on dozens of CDN / cache headers,
+        // pushing an appended marker past common truncation limits).
+        if !lines.isEmpty {
+            lines.insert("X-Bromure-Rewritten: supply-chain", at: 1)
+        } else {
+            lines.append("X-Bromure-Rewritten: supply-chain")
+        }
         lines.append("Content-Length: \(newBody.count)")
         var head = lines.joined(separator: "\r\n")
         head += "\r\n\r\n"
         var out = Data(head.utf8)
         out.append(newBody)
+        return out
+    }
+
+    /// Inject the `X-Bromure-Rewritten` marker into the response head
+    /// without touching the body. Used when we *inspected* the
+    /// payload but didn't need to rewrite anything (e.g. tarball had
+    /// no install scripts to strip) — re-encoding the body would
+    /// burn CPU for zero behavior change, but the user still wants
+    /// to see "the proxy considered this" in the log window.
+    static func tagInspected(rawResponse: Data) -> Data {
+        guard let parts = splitHTTPResponse(rawResponse) else { return rawResponse }
+        let (head, body) = parts
+        var lines = head.components(separatedBy: "\r\n")
+        if !lines.isEmpty {
+            lines.insert("X-Bromure-Rewritten: supply-chain", at: 1)
+        } else {
+            lines.append("X-Bromure-Rewritten: supply-chain")
+        }
+        var newHead = lines.joined(separator: "\r\n")
+        newHead += "\r\n\r\n"
+        var out = Data(newHead.utf8)
+        out.append(body)
         return out
     }
 

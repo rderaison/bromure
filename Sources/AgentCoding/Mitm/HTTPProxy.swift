@@ -561,6 +561,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 return
 
             case .artifact(let ecosystem, let pkg, let version):
+                // Diagnostic breadcrumb: confirms the proxy actually
+                // saw the fetch. Without this, a clean install of an
+                // older-than-age-gate, OSV-clean, socket.dev-clean
+                // package looks like total proxy silence in the log
+                // window — making it indistinguishable from "my
+                // traffic isn't going through Bromure at all".
+                SupplyChainLog.shared.record(
+                    "[supply-chain] inspecting \(ecosystem.rawValue)/\(pkg)@\(version)")
+
                 // Three pre-flight checks before forward. Each may
                 // 451-block; none of them touch the upstream until
                 // we decide to forward.

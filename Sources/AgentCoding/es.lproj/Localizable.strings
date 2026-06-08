@@ -445,3 +445,7 @@
 "Clear the buffer" = "Vaciar el búfer";
 "%d entries" = "%d entradas";
 "%d of %d entries" = "%d de %d entradas";
+"No supply-chain activity yet" = "Aún sin actividad en la cadena de suministro";
+"Open a session and run a package install (npm install, pip install, cargo add, …)." = "Abra una sesión y ejecute una instalación de paquetes (npm install, pip install, cargo add, …).";
+"Entries appear here as soon as the MITM proxy intercepts a registry request." = "Las entradas aparecen aquí en cuanto el proxy MITM intercepta una solicitud al registro.";
+"socket.dev and OSV only fire on artifact downloads (.tgz, .whl, .crate, …) — not on plain metadata fetches. Packages cached in npm/pip's local store don't hit the network at all." = "socket.dev y OSV solo se activan en descargas de artefactos (.tgz, .whl, .crate, …), no en las consultas de metadatos. Los paquetes ya en la caché local de npm/pip no llegan a la red.";

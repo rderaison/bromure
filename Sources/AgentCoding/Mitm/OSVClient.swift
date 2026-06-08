@@ -82,12 +82,44 @@ public actor OSVClient {
     private var cache: [CacheKey: CheckResult] = [:]
     private static let cacheCap = 10_000
 
+    // Same self-throttle as SocketDevClient: cap parallel API calls
+    // so a big install fan-out doesn't trip OSV's rate limits. 16 is
+    // the balance between throughput on a big install graph and not
+    // overwhelming the API.
+    private static let maxParallel = 16
+    /// Total attempts (initial + retries) on transient network
+    /// errors. Linear backoff between attempts.
+    private static let maxRetries = 5
+    private var inFlight = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    private func acquireSlot() async {
+        while inFlight >= Self.maxParallel {
+            await withCheckedContinuation { c in
+                waiters.append(c)
+            }
+        }
+        inFlight += 1
+    }
+
+    private func releaseSlot() {
+        inFlight -= 1
+        if !waiters.isEmpty {
+            waiters.removeFirst().resume()
+        }
+    }
+
     private let session: URLSession
 
     public init() {
         let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 15
-        cfg.timeoutIntervalForResource = 30
+        // Match SocketDevClient's window — same reasoning, OSV's
+        // per-package POST is generally faster but a big install
+        // fan-out can still trip tighter limits.
+        cfg.timeoutIntervalForRequest = 30
+        cfg.timeoutIntervalForResource = 60
+        // Self-throttling above keeps in-flight calls small; no
+        // need to override the URLSession default.
         self.session = URLSession(configuration: cfg)
     }
 
@@ -128,14 +160,44 @@ public actor OSVClient {
         req.setValue("bromure-ac/2.0", forHTTPHeaderField: "User-Agent")
         req.httpBody = bodyData
 
+        // Throttle: at most maxParallel checks in flight. Cache
+        // hits above don't consume a slot.
+        await acquireSlot()
+        defer { releaseSlot() }
+
         SupplyChainLog.shared.record(
             "[osv] →  POST \(osvEco)/\(name)@\(version)")
-        let response: (Data, URLResponse)
-        do {
-            response = try await session.data(for: req)
-        } catch {
+        var response: (Data, URLResponse)?
+        var lastError: Error?
+        for attempt in 1...Self.maxRetries {
+            do {
+                response = try await session.data(for: req)
+                lastError = nil
+                break
+            } catch {
+                lastError = error
+                let urlErr = error as? URLError
+                let retriable: Bool = {
+                    guard let urlErr else { return false }
+                    switch urlErr.code {
+                    case .timedOut, .networkConnectionLost,
+                         .cannotConnectToHost, .dnsLookupFailed,
+                         .resourceUnavailable:
+                        return true
+                    default:
+                        return false
+                    }
+                }()
+                if !retriable || attempt == Self.maxRetries { break }
+                SupplyChainLog.shared.record(
+                    "[osv] ↻  \(ecosystem)/\(name)@\(version) — retry \(attempt)/\(Self.maxRetries - 1) after \(error.localizedDescription)")
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 250_000_000)
+            }
+        }
+        guard let response else {
+            let msg = lastError?.localizedDescription ?? "unknown"
             SupplyChainLog.shared.record(
-                "[osv] ✗  \(ecosystem)/\(name)@\(version) — network error: \(error.localizedDescription)")
+                "[osv] ✗  \(ecosystem)/\(name)@\(version) — network error after retries: \(msg)")
             return nil
         }
         let (data, resp) = response
