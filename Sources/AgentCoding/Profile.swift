@@ -1136,7 +1136,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         manualTokens: [ManualToken] = [],
         importedSSHKeys: [ImportedSSHKey] = [],
         environmentVariables: [EnvironmentVariable] = [],
-        traceLevel: TraceLevel = .off,
+        // .aiDetails by default for new profiles: captures request +
+        // response bodies for the well-known LLM hosts (Anthropic,
+        // OpenAI, …) so the Trace Inspector has something to show out
+        // of the box. Non-AI traffic stays metadata-only; bodies are
+        // AES-GCM-sealed at rest. Old profiles loaded from disk keep
+        // their stored value (the decoder fallback at TraceLevel.off
+        // preserves prior behaviour for pre-field profiles).
+        traceLevel: TraceLevel = .aiDetails,
         privateMode: Bool = false,
         subscriptionTokenSwap: SubscriptionTokenSwapState = .unset,
         codexTokenSwap: SubscriptionTokenSwapState = .unset,
