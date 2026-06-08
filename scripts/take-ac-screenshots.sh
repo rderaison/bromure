@@ -198,17 +198,29 @@ for entry in "${LOCALES[@]}"; do
     fi
 
     for category in "${CATEGORIES[@]}"; do
-        sel=$(ac_tell "select editor category \"$category\"")
-        if [[ "$sel" == error* ]]; then
-            echo "  $category SKIP (select failed: $sel)" >&2
-            continue
-        fi
-        sleep 0.6
         outfile="$OUTPUT_DIR/editor_${category}_${suffix}.jpg"
-        if capture_editor_window "$outfile"; then
-            printf "  %-12s → %s\n" "$category" "$(basename "$outfile")"
-        else
-            echo "  $category SKIP (capture failed)"
+        # Retry the select+capture a few times: a single AXRaise race or a
+        # transient screencapture miss used to drop one tile silently and
+        # ship a partial grid (e.g. supplychain_en went missing this way).
+        captured=false
+        for attempt in 1 2 3; do
+            sel=$(ac_tell "select editor category \"$category\"")
+            if [[ "$sel" == error* ]]; then
+                echo "  $category select failed (attempt $attempt): $sel" >&2
+                sleep 0.6
+                continue
+            fi
+            sleep 0.6
+            if capture_editor_window "$outfile"; then
+                printf "  %-12s → %s\n" "$category" "$(basename "$outfile")"
+                captured=true
+                break
+            fi
+            echo "  $category capture failed (attempt $attempt), retrying…" >&2
+            sleep 0.6
+        done
+        if ! $captured; then
+            echo "  $category FAILED after 3 attempts ($suffix)" >&2
         fi
     done
 
@@ -226,3 +238,27 @@ echo ""
 echo "=== Done ==="
 count=$(find "$OUTPUT_DIR" -name "editor_*.jpg" -type f | wc -l | tr -d ' ')
 echo "$count screenshots captured under $OUTPUT_DIR/"
+
+# Completeness gate: assert every locale × category tile exists on disk.
+# Scanning the filesystem (rather than trusting an in-run counter) also
+# catches whole-locale skips from the `continue` statements above — e.g.
+# an "app not ready" timeout that aborts a locale before any capture.
+# Without this gate a partial grid commits silently; with it the Jenkins
+# job fails loudly and the bad run can be retried.
+missing=()
+for entry in "${LOCALES[@]}"; do
+    suffix=$(echo "$entry" | awk '{print $2}')
+    for category in "${CATEGORIES[@]}"; do
+        f="$OUTPUT_DIR/editor_${category}_${suffix}.jpg"
+        [ -s "$f" ] || missing+=("$(basename "$f")")
+    done
+done
+
+expected=$(( ${#LOCALES[@]} * ${#CATEGORIES[@]} ))
+if [ ${#missing[@]} -gt 0 ]; then
+    echo "" >&2
+    echo "ERROR: ${#missing[@]} of $expected expected tiles are missing:" >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    exit 1
+fi
+echo "All $expected expected tiles present (${#LOCALES[@]} locales × ${#CATEGORIES[@]} categories)."
