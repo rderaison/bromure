@@ -577,6 +577,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // schedule keeps `last_seen_at` fresh on the admin UI. No-op
         // when not enrolled.
         BACHeartbeat.shared.start()
+        // Per-install egress-IP heartbeat — mirrors the Bromure Web
+        // Chromium extension, ticks every 60s against
+        // analytics.bromure.io/register-ip so install_ips reflects
+        // the Mac's current public IP. Also no-ops when not enrolled.
+        BACIPRegister.shared.start()
         // Same lifecycle for the cloud event uploader: stand it up
         // once, the emitter itself short-circuits when there's no
         // install identity. Credential hooks + the LLM extractor can
@@ -588,8 +593,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Restart so a fresh enrollment kicks off heartbeats
             // immediately, and an unenroll stops them.
             BACHeartbeat.shared.stop()
+            BACIPRegister.shared.stop()
             if BACEnrollmentStore.load() != nil {
                 BACHeartbeat.shared.start()
+                BACIPRegister.shared.start()
                 BACEventEmitter.shared.ensureUploader()
             } else {
                 // Drop any buffered events so the next enrollment

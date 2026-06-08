@@ -184,7 +184,11 @@ public final class BACCloudUploader: @unchecked Sendable {
 /// install's leaf cert via `BACMTLSIdentity`. Server trust is left to
 /// the system default — the analytics service uses an ACME-issued
 /// public cert, so the regular root-store path applies.
-private final class BACMTLSDelegate: NSObject, URLSessionDelegate {
+/// mTLS challenge handler that authenticates as the install. Shared
+/// across `BACCloudUploader` (event ingest) and `BACIPRegister`
+/// (egress IP heartbeat); both target analytics.bromure.io which
+/// trusts the workspace's org-CA-signed leaf.
+internal final class BACMTLSDelegate: NSObject, URLSessionDelegate {
     func urlSession(
         _ session: URLSession,
         didReceive challenge: URLAuthenticationChallenge,

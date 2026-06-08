@@ -397,6 +397,96 @@ public final class BACHeartbeat {
     }
 }
 
+/// Per-install egress-IP heartbeat. Bromure Web has an equivalent
+/// shipped as a Chromium MV3 extension that pings every minute from
+/// inside the browser session (so the recorded IP reflects whatever
+/// VPN / proxy the user routed Chromium through). AC runs the host
+/// itself behind the same network policies the Mac is on, so the host
+/// process pings directly — same endpoint, same mTLS auth, same
+/// `install_ips` table on the server.
+///
+/// Mirrors `BACHeartbeat`'s lifecycle: started once when the app
+/// launches enrolled, restarted on (un)enroll. mTLS handshake fails
+/// silently when not enrolled (no install identity in the keychain).
+@MainActor
+public final class BACIPRegister {
+    private var task: Task<Void, Never>?
+    public static let shared = BACIPRegister()
+    private init() {}
+
+    private static let pingIntervalSec: UInt64 = 60
+    /// `analytics.bromure.io/register-ip` by default. Overridable via
+    /// the same env / UserDefaults knob that controls `/ac-ingest`.
+    public static var endpoint: URL {
+        if let env = ProcessInfo.processInfo.environment["BROMURE_AC_REGISTER_IP_URL"],
+           let url = URL(string: env) { return url }
+        if let s = UserDefaults.standard.string(forKey: "managed.acRegisterIPURL"),
+           let url = URL(string: s) { return url }
+        // Sibling of `defaultAnalyticsURL`'s `/ac-ingest` — same host,
+        // different path. Hard-code the swap so a custom analytics
+        // URL still gets the right register-ip endpoint by default.
+        let ingest = BACEnrollment.defaultAnalyticsURL
+        if let comps = URLComponents(url: ingest, resolvingAgainstBaseURL: false) {
+            var c = comps
+            c.path = "/register-ip"
+            if let url = c.url { return url }
+        }
+        return URL(string: "https://analytics.bromure.io/register-ip")!
+    }
+
+    public func start() {
+        if task != nil { return }
+        task = Task { [weak self] in
+            // Fire one immediately so `install_ips` records the IP
+            // within seconds of a fresh enrollment, then settle into
+            // the periodic cadence.
+            await Self.ping()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.pingIntervalSec * 1_000_000_000)
+                if Task.isCancelled { break }
+                await Self.ping()
+                _ = self
+            }
+        }
+    }
+
+    public func stop() {
+        task?.cancel()
+        task = nil
+    }
+
+    /// One-shot ping. Public so tests / debug menu items can trigger
+    /// it on demand; production fires it from the periodic loop.
+    public static func ping() async {
+        // Hard gate: no install identity → no mTLS to authenticate
+        // with, the request would just be rejected. Skip silently so
+        // unenrolled installs don't spam the analytics edge.
+        guard BACEnrollmentStore.load() != nil,
+              BACEnrollmentStore.loadInstallToken() != nil else { return }
+
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data("{\"schemaVersion\":1}".utf8)
+
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 15
+        let delegate = BACMTLSDelegate()
+        let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        do {
+            let (_, resp) = try await session.data(for: req)
+            if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
+                FileHandle.standardError.write(Data(
+                    "[bac/register-ip] HTTP \(http.statusCode)\n".utf8))
+            }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[bac/register-ip] \(error)\n".utf8))
+        }
+    }
+}
+
 private extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
 }
