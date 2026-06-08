@@ -380,3 +380,11 @@
 "Quit Bromure Agentic Coding?" = "結束 Bromure Agentic Coding？";
 "%d VM(s) currently running (%@) will be closed according to each profile's close action." = "%d 個執行中的 VM (%@) 將根據每個設定檔的關閉動作而關閉。";
 "Quit" = "結束";
+
+/* Guardrails: new prompt-on-write mode */
+"Prompt before write" = "每次寫入前提示";
+"Reads pass through; writes ask you each time." = "讀取請求直接通過；寫入請求每次都會詢問。";
+/* Guardrails consent prompt */
+"Allow write on “%@” from profile “%@”?" = "允許設定檔「%@」對「%@」執行一次寫入？";
+"Allow for 15 minutes" = "允許 15 分鐘";
+"Allow once" = "僅允許一次";

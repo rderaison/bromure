@@ -433,14 +433,16 @@ public struct HTTPDatabaseEndpoint: Codable, Equatable, Sendable, Identifiable {
     /// Env var name(s) the fake secret is injected under (user-named, like
     /// manual tokens) so the agent can reference it.
     public var envVars: [String]
-    /// Guardrails mode for this endpoint (Off / Block destructive / Read-only).
+    /// Guardrails mode for this endpoint. See `GuardrailsPolicy.Mode`
+    /// for the four states (Off / Prompt before write / Block
+    /// destructive / Read-only).
     public var guardrail: GuardrailsPolicy.Mode
     public var requireApproval: Bool
 
     public init(id: UUID = UUID(), name: String = "", engine: Engine = .clickHouse,
                 host: String = "", auth: AuthKind = .basic, username: String = "",
                 secret: String = "", envVars: [String] = [],
-                guardrail: GuardrailsPolicy.Mode = .off, requireApproval: Bool = false) {
+                guardrail: GuardrailsPolicy.Mode = .promptOnWrite, requireApproval: Bool = false) {
         self.id = id; self.name = name; self.engine = engine; self.host = host
         self.auth = auth; self.username = username; self.secret = secret
         self.envVars = envVars; self.guardrail = guardrail; self.requireApproval = requireApproval
@@ -1852,7 +1854,8 @@ public final class ProfileStore {
                 id: Self.templateID,
                 name: "Defaults",
                 tool: .claude,
-                authMode: .subscription)
+                authMode: .subscription,
+                guardrails: GuardrailsPolicy.defaultForNewProfile())
         }
         // Force the canonical id/name so the user can't accidentally
         // shadow a real profile by saving over the template.

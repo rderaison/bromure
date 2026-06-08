@@ -381,3 +381,11 @@
 "Quit Bromure Agentic Coding?" = "Quit Bromure Agentic Coding?";
 "%d VM(s) currently running (%@) will be closed according to each profile's close action." = "%d VM(s) currently running (%@) will be closed according to each profile's close action.";
 "Quit" = "Quit";
+
+/* Guardrails: new prompt-on-write mode */
+"Prompt before write" = "Prompt before write";
+"Reads pass through; writes ask you each time." = "Reads pass through; writes ask you each time.";
+/* Guardrails consent prompt (Allow once / 15 min / session / Don't allow) */
+"Allow write on “%@” from profile “%@”?" = "Allow write on “%@” from profile “%@”?";
+"Allow for 15 minutes" = "Allow for 15 minutes";
+"Allow once" = "Allow once";

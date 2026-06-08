@@ -1504,7 +1504,7 @@ struct ProfileEditorView: View {
     private func databaseBlurb(_ engine: HTTPDatabaseEndpoint.Engine) -> String {
         switch engine {
         case .mongoDataAPI:
-            return "MongoDB Atlas Data API endpoints. The real API key never enters the VM — bromure injects a fake under your env var(s) and swaps it for the real key on requests to the endpoint host. Set the Guardrails mode (Off / Block destructive / Read-only) under the Guardrails panel: deleteOne/deleteMany are destructive, insert/update are writes, find/aggregate are reads."
+            return "MongoDB Atlas Data API endpoints. The real API key never enters the VM — bromure injects a fake under your env var(s) and swaps it for the real key on requests to the endpoint host. Set the Guardrails mode under the Guardrails panel: deleteOne/deleteMany are destructive, insert/update are writes, find/aggregate are reads."
         case .clickHouse:
             return "ClickHouse HTTP-interface endpoints (self-hosted or Cloud). The real credential stays on the host; a fake rides in the VM. Guardrails classify the SQL: DROP/TRUNCATE/DELETE (and ALTER…DELETE) are destructive, INSERT/CREATE are writes, SELECT/SHOW are reads."
         case .elasticsearch:

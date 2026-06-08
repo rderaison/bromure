@@ -17,6 +17,11 @@ public final class MitmEngine {
     /// See `AWSResigner` for the threat model.
     public let awsResigner: AWSResigner
     public let consent: ConsentBroker
+    /// Per-profile, per-scope consent for the `.promptOnWrite`
+    /// guardrails mode. Lives alongside the credential `consent`
+    /// broker but uses a different decision set (Allow once / 15 min /
+    /// session / Don't allow) tailored to "should this write fire?".
+    public let guardrailsBroker: GuardrailsConsentBroker
     public let traceStore: TraceStore
     /// Per-profile, per-host SecIdentity table for upstream client-cert
     /// auth (Kubernetes API servers, internal mTLS APIs, etc.). The
@@ -128,6 +133,7 @@ public final class MitmEngine {
         // server takes a reference to it.
         let broker = ConsentBroker()
         self.consent = broker
+        self.guardrailsBroker = GuardrailsConsentBroker()
         self.swapper = TokenSwapper(consent: broker)
         self.sshAgent = SSHAgentServer(consent: broker)
         self.awsCreds = AWSCredentialServer(consent: broker)
@@ -174,6 +180,7 @@ public final class MitmEngine {
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,
             consent: consent,
+            guardrailsBroker: guardrailsBroker,
             // The provider runs from a detached Task on the proxy's
             // hot path. `sessionTrace(for:)` is now nonisolated +
             // lock-protected so this is just a hash lookup behind a
@@ -214,6 +221,12 @@ public final class MitmEngine {
         let broker = consent
         Task.detached { await broker.revokeAll(profileID: profileID) }
         Task.detached { await broker.clearProfileName(for: profileID) }
+        // Same lifetime rules for guardrails consent: session-scope
+        // "Allow until the session ends" grants must not survive a
+        // window close.
+        let gBroker = guardrailsBroker
+        Task.detached { await gBroker.revokeAll(profileID: profileID) }
+        Task.detached { await gBroker.clearProfileName(for: profileID) }
     }
 }
 
@@ -239,6 +252,7 @@ private final class ListenerHolder {
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
+         guardrailsBroker: GuardrailsConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig?,
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?,
@@ -255,6 +269,7 @@ private final class ListenerHolder {
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,
             consent: consent,
+            guardrailsBroker: guardrailsBroker,
             sessionTraceProvider: sessionTraceProvider,
             guardrailsProvider: guardrailsProvider,
             subscriptionTokenSeen: subscriptionTokenSeen,
@@ -285,6 +300,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
     let clientIdentities: ClientIdentityRegistry
     let clusterCAs: ClusterCATrustRegistry
     let consent: ConsentBroker
+    let guardrailsBroker: GuardrailsConsentBroker
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
     let guardrailsProvider: @Sendable () -> GuardrailsConfig?
     let subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?
@@ -297,6 +313,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
+         guardrailsBroker: GuardrailsConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig?,
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?,
@@ -310,6 +327,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
         self.clientIdentities = clientIdentities
         self.clusterCAs = clusterCAs
         self.consent = consent
+        self.guardrailsBroker = guardrailsBroker
         self.sessionTraceProvider = sessionTraceProvider
         self.guardrailsProvider = guardrailsProvider
         self.subscriptionTokenSeen = subscriptionTokenSeen
@@ -337,6 +355,7 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             clientIdentities: clientIdentities,
             clusterCAs: clusterCAs,
             consent: consent,
+            guardrailsBroker: guardrailsBroker,
             sessionTraceProvider: providerCopy,
             guardrailsProvider: guardrailsCopy,
             subscriptionTokenSeen: tokenHook,

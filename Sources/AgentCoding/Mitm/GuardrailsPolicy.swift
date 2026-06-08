@@ -12,11 +12,21 @@ import Foundation
 /// separate protocol-aware proxy but reuse this same policy/mode model.
 public struct GuardrailsPolicy: Codable, Equatable, Sendable {
     /// How aggressively to filter a protocol's mutating operations.
+    /// The cases are listed in the order they should appear in the
+    /// settings picker (least to most automation, with `.promptOnWrite`
+    /// the default for new profiles).
     public enum Mode: String, Codable, CaseIterable, Sendable {
         /// No filtering — traffic passes through untouched.
         case off
-        /// Block only destructive ops (delete / drop / truncate). Creates and
-        /// updates still go through, so the agent can do normal work.
+        /// Reads pass through; any write (destructive or otherwise)
+        /// triggers a host-side modal asking the user to allow or
+        /// deny *that specific write*. The dialog shows the exact
+        /// query / verb / resource, with timer options (Allow once /
+        /// 15 min / for the session). Default for new profiles.
+        case promptOnWrite
+        /// Block only destructive ops (delete / drop / truncate).
+        /// Creates and updates still go through, so the agent can
+        /// do normal work.
         case destructive
         /// Block every mutation — the agent can only read.
         case readOnly
@@ -26,18 +36,27 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         // be in the user's language by the time it leaves here.
         public var displayName: String {
             switch self {
-            case .off:         return NSLocalizedString("Off", comment: "")
-            case .destructive: return NSLocalizedString("Block destructive", comment: "")
-            case .readOnly:    return NSLocalizedString("Read-only", comment: "")
+            case .off:            return NSLocalizedString("Off", comment: "")
+            case .promptOnWrite:  return NSLocalizedString("Prompt before write", comment: "")
+            case .destructive:    return NSLocalizedString("Block destructive", comment: "")
+            case .readOnly:       return NSLocalizedString("Read-only", comment: "")
             }
         }
 
         public var detail: String {
             switch self {
-            case .off:         return NSLocalizedString("No filtering.", comment: "")
-            case .destructive: return NSLocalizedString("Block deletes/drops; allow creates and updates.", comment: "")
-            case .readOnly:    return NSLocalizedString("Block every change; reads only.", comment: "")
+            case .off:           return NSLocalizedString("No filtering.", comment: "")
+            case .promptOnWrite: return NSLocalizedString("Reads pass through; writes ask you each time.", comment: "")
+            case .destructive:   return NSLocalizedString("Block deletes/drops; allow creates and updates.", comment: "")
+            case .readOnly:      return NSLocalizedString("Block every change; reads only.", comment: "")
             }
+        }
+
+        /// Whether this mode ever needs the host to ask the user
+        /// before forwarding. The HTTPProxy uses this to skip the
+        /// broker hop for modes that decide purely sync.
+        public var needsConsent: Bool {
+            self == .promptOnWrite
         }
     }
 
@@ -67,6 +86,23 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         self.github = github
         self.gitlab = gitlab
         self.bitbucket = bitbucket
+    }
+
+    /// Construction default used when creating a *new* profile.
+    /// Distinct from `GuardrailsPolicy()` (all-off, kept for backward-
+    /// compat decoding of old JSON that omits every field). New
+    /// profiles get prompt-on-write across the board — the safest
+    /// non-blocking default for an agent we don't yet trust.
+    public static func defaultForNewProfile() -> GuardrailsPolicy {
+        GuardrailsPolicy(
+            kubernetes:   .promptOnWrite,
+            aws:          .promptOnWrite,
+            digitalOcean: .promptOnWrite,
+            docker:       .promptOnWrite,
+            github:       .promptOnWrite,
+            gitlab:       .promptOnWrite,
+            bitbucket:    .promptOnWrite
+        )
     }
 
     public var isActive: Bool {
@@ -177,6 +213,10 @@ public struct GuardrailsConfig: Sendable {
     /// Whether a Kubernetes API request to `host` with `method` should be
     /// blocked, and the human-readable reason (surfaced in the 403 the agent
     /// sees). Returns nil to allow.
+    ///
+    /// `.promptOnWrite` mode collapses to "block on any non-read" here —
+    /// the actual prompt happens in the async `deny()` wrapper, which
+    /// uses this as the "would this be blocked?" predicate.
     public func kubeBlockReason(host: String, method: String) -> String? {
         guard kubernetes != .off,
               kubeHosts.contains(host.lowercased()) else { return nil }
@@ -184,9 +224,9 @@ public struct GuardrailsConfig: Sendable {
         switch kubernetes {
         case .off:
             return nil
-        case .readOnly:
+        case .readOnly, .promptOnWrite:
             if ["GET", "HEAD", "OPTIONS"].contains(m) { return nil }
-            return "Kubernetes is read-only — \(m) blocked by Bromure Guardrails"
+            return "Kubernetes \(m) blocked by Bromure Guardrails"
         case .destructive:
             // In the kube REST API, resource destruction is the DELETE verb
             // (single object and deletecollection both use it). Creates/updates
@@ -266,9 +306,9 @@ public struct GuardrailsConfig: Sendable {
         switch aws {
         case .off:
             return nil
-        case .readOnly:
+        case .readOnly, .promptOnWrite:
             if kind == .read { return nil }
-            return "AWS is read-only — \(what) blocked by Bromure Guardrails"
+            return "AWS \(what) blocked by Bromure Guardrails"
         case .destructive:
             if kind == .destructive {
                 return "AWS \(what) blocked by Bromure Guardrails"
@@ -295,9 +335,9 @@ public struct GuardrailsConfig: Sendable {
         switch mode {
         case .off:
             return nil
-        case .readOnly:
+        case .readOnly, .promptOnWrite:
             if ["GET", "HEAD", "OPTIONS"].contains(m) { return nil }
-            return "\(label) is read-only — \(m) blocked by Bromure Guardrails"
+            return "\(label) \(m) blocked by Bromure Guardrails"
         case .destructive:
             if m == "DELETE" { return "\(label) \(m) blocked by Bromure Guardrails" }
             return nil
@@ -331,26 +371,70 @@ public struct GuardrailsConfig: Sendable {
             return nil
         }
         if path.contains("git-receive-pack") {
-            return mode == .readOnly
-                ? "\(label) is read-only — git push blocked by Bromure Guardrails"
+            return (mode == .readOnly || mode == .promptOnWrite)
+                ? "\(label) git push blocked by Bromure Guardrails"
                 : nil
         }
         if path.contains("git-upload-pack") { return nil }   // fetch = read
         return Self.methodBlockReason(mode: mode, method: method, label: label)
     }
 
+    /// The host-side mode that applies to a request to `host`. Used by
+    /// the async `deny()` wrapper to decide whether to consult the
+    /// broker; the sync block-reason helpers already encode this mode
+    /// internally. Returns `.off` if no protocol claims the host.
+    func protocolMode(host: String, method _: String, path _: String)
+            -> (mode: GuardrailsPolicy.Mode, scopeKey: String, scopeLabel: String)? {
+        let h = host.lowercased()
+        if let db = databases.first(where: { $0.mode != .off && $0.host == h }) {
+            let label: String
+            switch db.engine {
+            case .mongoDataAPI:   label = "MongoDB"
+            case .clickHouse:     label = "ClickHouse"
+            case .elasticsearch:  label = "Elasticsearch"
+            }
+            return (db.mode, "db:\(h)", "\(label) \(h)")
+        }
+        if kubernetes != .off, kubeHosts.contains(h) {
+            return (kubernetes, "kube:\(h)", "Kubernetes (\(h))")
+        }
+        if aws != .off, Self.isAWSHost(h) {
+            return (aws, "aws", "AWS")
+        }
+        if digitalOcean != .off, Self.isDigitalOceanHost(h) {
+            return (digitalOcean, "do", "DigitalOcean")
+        }
+        if docker != .off, dockerHosts.contains(h) {
+            return (docker, "docker:\(h)", "Docker registry \(h)")
+        }
+        if github != .off,
+           h == "github.com" || h.hasSuffix(".github.com")
+            || h.hasSuffix("githubusercontent.com") {
+            return (github, "github", "GitHub")
+        }
+        if gitlab != .off, h == "gitlab.com" || h.hasSuffix(".gitlab.com") {
+            return (gitlab, "gitlab", "GitLab")
+        }
+        if bitbucket != .off, h == "bitbucket.org" || h.hasSuffix(".bitbucket.org") {
+            return (bitbucket, "bitbucket", "Bitbucket")
+        }
+        return nil
+    }
+
     // MARK: - HTTPS databases (Mongo Data API / ClickHouse / Elasticsearch)
 
-    /// Reuse the read/destructive/otherWrite trichotomy. `readOnly` blocks
-    /// anything not `.read`; `destructive` blocks only `.destructive`.
+    /// Reuse the read/destructive/otherWrite trichotomy. `readOnly` and
+    /// `promptOnWrite` both block anything not `.read` (the promptOnWrite
+    /// mode lets the async `deny()` wrapper re-admit blocked requests
+    /// via broker consent); `destructive` blocks only `.destructive`.
     static func kindBlockReason(mode: GuardrailsPolicy.Mode, kind: AWSKind,
                                 label: String, what: String) -> String? {
         switch mode {
         case .off:
             return nil
-        case .readOnly:
+        case .readOnly, .promptOnWrite:
             if kind == .read { return nil }
-            return "\(label) is read-only — \(what) blocked by Bromure Guardrails"
+            return "\(label) \(what) blocked by Bromure Guardrails"
         case .destructive:
             if kind == .destructive {
                 return "\(label) \(what) blocked by Bromure Guardrails"
@@ -505,9 +589,60 @@ public struct GuardrailsConfig: Sendable {
         "{\"errors\":[{\"code\":\"DENIED\",\"message\":\"\(reason.replacingOccurrences(of: "\"", with: "'"))\"}]}"
     }
 
+    /// Async wrapper around `deny()` that resolves `.promptOnWrite`
+    /// via the broker before reporting a final decision. For modes
+    /// that decide synchronously (off / destructive / readOnly) this
+    /// is identical to `deny()`; for `.promptOnWrite` it intercepts
+    /// the sync block decision and asks the user instead.
+    ///
+    /// The caller passes the broker, the profile's ID (for grant
+    /// scoping), and a short pre-built operation description (e.g.
+    /// `"DROP TABLE users"`, `"DELETE /api/v1/namespaces/default/pods/foo"`).
+    /// We can't reconstruct the operation description here from
+    /// (host, method, path) alone for ClickHouse — the SQL has
+    /// already been extracted by the caller for `dbQuery`.
+    public func denyAsync(host: String, method: String, path: String,
+                          amzTarget: String?, formAction: String?,
+                          dbQuery: String? = nil,
+                          broker: GuardrailsConsentBroker,
+                          profileID: UUID) async -> Denial? {
+        guard let denial = deny(host: host, method: method, path: path,
+                                amzTarget: amzTarget, formAction: formAction,
+                                dbQuery: dbQuery) else {
+            return nil
+        }
+        // The sync layer block would fire. If the underlying mode for
+        // this host is `.promptOnWrite`, escalate to the broker — on
+        // user approval we let the request through; on denial we
+        // forward the same Denial sync would have produced.
+        guard let route = protocolMode(host: host, method: method, path: path),
+              route.mode == .promptOnWrite else {
+            return denial
+        }
+        // Build an operation description: prefer the actual SQL when
+        // we have it (ClickHouse), otherwise compose verb + path. The
+        // reason string from `deny()` already encodes verb + resource
+        // for REST protocols.
+        let operation: String
+        if let q = dbQuery, !q.isEmpty {
+            operation = q
+        } else {
+            operation = "\(method.uppercased()) \(path)"
+        }
+        let allowed = await broker.consent(profileID: profileID,
+                                            scope: route.scopeKey,
+                                            scopeDisplayName: route.scopeLabel,
+                                            operation: operation)
+        return allowed ? nil : denial
+    }
+
     /// Single host-side decision for every guardrailed protocol. Returns a
     /// `Denial` (the caller sends a 403) or nil to forward. `amzTarget` /
     /// `formAction` need only be supplied for AWS hosts.
+    ///
+    /// `.promptOnWrite` mode collapses to "block any non-read" in this
+    /// sync call — the async `denyAsync()` wrapper is what actually
+    /// asks the user.
     public func deny(host: String, method: String, path: String,
                      amzTarget: String?, formAction: String?,
                      dbQuery: String? = nil) -> Denial? {

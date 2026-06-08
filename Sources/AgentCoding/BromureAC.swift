@@ -2548,6 +2548,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let pidCopy = profile.id
             let nameCopy = profile.name
             Task.detached { await broker.setProfileName(nameCopy, for: pidCopy) }
+            // Same plumbing for the guardrails prompt — "Allow write
+            // on <scope> from profile <name>?"
+            let gBroker = engine.guardrailsBroker
+            Task.detached { await gBroker.setProfileName(nameCopy, for: pidCopy) }
             let agentKeys = loadAgentKeys(for: profile)
             engine.sshAgent.setKeys(agentKeys, for: profile.id)
             // AWS creds: pushed to the host-side server. The guest's

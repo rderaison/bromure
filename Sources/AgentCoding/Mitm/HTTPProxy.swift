@@ -20,6 +20,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
     let clientIdentities: ClientIdentityRegistry
     let clusterCAs: ClusterCATrustRegistry
     let consent: ConsentBroker
+    /// Consent broker for the `.promptOnWrite` guardrails mode. Same
+    /// shape as `consent` but scoped to write-on-X grants instead of
+    /// per-credential grants.
+    let guardrailsBroker: GuardrailsConsentBroker
     let sessionTraceProvider: @Sendable () -> MitmEngine.SessionTrace?
     /// "Guardrails" guard for this profile (host-side destructive-verb removal),
     /// or nil if disabled. Read on the hot path per request.
@@ -44,6 +48,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
          clientIdentities: ClientIdentityRegistry,
          clusterCAs: ClusterCATrustRegistry,
          consent: ConsentBroker,
+         guardrailsBroker: GuardrailsConsentBroker,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig? = { nil },
          subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)? = nil,
@@ -58,6 +63,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         self.clientIdentities = clientIdentities
         self.clusterCAs = clusterCAs
         self.consent = consent
+        self.guardrailsBroker = guardrailsBroker
         self.sessionTraceProvider = sessionTraceProvider
         self.guardrailsProvider = guardrailsProvider
         self.subscriptionTokenSeen = subscriptionTokenSeen
@@ -149,9 +155,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 }
                 dbQuery = sql
             }
-            if let denial = guardrails.deny(host: host, method: reqMethod, path: reqPath,
-                                            amzTarget: amzTarget, formAction: formAction,
-                                            dbQuery: dbQuery) {
+            // Use the async variant so `.promptOnWrite` mode can ask
+            // the user before a sync block fires. Modes that decide
+            // synchronously (off / destructive / readOnly) short-
+            // circuit inside denyAsync and return immediately.
+            if let denial = await guardrails.denyAsync(
+                host: host, method: reqMethod, path: reqPath,
+                amzTarget: amzTarget, formAction: formAction,
+                dbQuery: dbQuery,
+                broker: guardrailsBroker,
+                profileID: profileID) {
                 FileHandle.standardError.write(Data(
                     "[mitm] Guardrails blocked \(reqMethod) \(host)\(reqPath) — \(denial.reason)\n".utf8))
                 var resp = "HTTP/1.1 403 Forbidden\r\nContent-Type: \(denial.contentType)\r\n"
