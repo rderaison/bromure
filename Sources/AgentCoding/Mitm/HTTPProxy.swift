@@ -1590,7 +1590,16 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
         let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
         switch name.lowercased() {
         case "host", "content-length", "connection", "transfer-encoding",
-             "proxy-connection", "keep-alive", "te", "upgrade":
+             "proxy-connection", "keep-alive", "te", "upgrade",
+             // Drop the client's Accept-Encoding so URLSession adds
+             // its own — Apple's docs: "If you set a value for
+             // Accept-Encoding, the system doesn't decompress the
+             // data." Forwarding curl's gzip/deflate/br turns off
+             // URLSession's auto-decompression, the body comes back
+             // compressed, and the supply-chain JSON transforms
+             // fail to parse it (returning the raw response without
+             // the X-Bromure-Rewritten marker).
+             "accept-encoding":
             continue
         default:
             req.setValue(value, forHTTPHeaderField: name)
