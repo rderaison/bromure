@@ -850,14 +850,18 @@ public struct VMConfig {
     }
 
     /// Read the user-configurable VM NIC MTU from UserDefaults
-    /// (`vm.mtu`, default 1400) and clamp to a sane range.
+    /// (`vm.mtu`) and clamp to a sane range. Caller picks the default
+    /// — different products want different floors (browser sessions
+    /// trend short-lived and tolerate 1400; AC's long-lived VPN /
+    /// corp-network installs hit more 1280-ceiling paths and benefit
+    /// from a lower default).
     /// Floor: 576 = RFC 791 IPv4 minimum reassembly buffer (any
     /// smaller value would break common IPv4 traffic). Ceiling: 9000
     /// = jumbo-frame upper bound; VZ NAT doesn't actually do jumbos
     /// but we don't reject the option in case bridged mode finds an
     /// interface that does.
-    public static func resolvedNICMTU() -> Int {
-        let raw = UserDefaults.standard.object(forKey: "vm.mtu") as? Int ?? 1400
+    public static func resolvedNICMTU(default defaultMTU: Int = 1400) -> Int {
+        let raw = UserDefaults.standard.object(forKey: "vm.mtu") as? Int ?? defaultMTU
         return min(9000, max(576, raw))
     }
 

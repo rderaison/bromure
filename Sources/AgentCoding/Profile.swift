@@ -2940,11 +2940,11 @@ public final class ProfileStore {
     # actual host path can be smaller (Wi-Fi, VPN, corp firewall) and
     # PMTUD doesn't always recover — large packets (TLS handshakes,
     # SSH KEX_ECDH_REPLY, npm tarball chunks) blackhole. The host
-    # writes its preferred value to /mnt/bromure-meta/mtu (default 1400,
+    # writes its preferred value to /mnt/bromure-meta/mtu (default 1280,
     # overridable via `defaults write io.bromure.agentic-coding vm.mtu`).
-    MTU=1400
+    MTU=1280
     [ -r /mnt/bromure-meta/mtu ] && MTU=$(tr -dc '0-9' < /mnt/bromure-meta/mtu)
-    [ -z "$MTU" ] && MTU=1400
+    [ -z "$MTU" ] && MTU=1280
     NIC=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
     if [ -n "$NIC" ]; then
         sudo ip link set dev "$NIC" mtu "$MTU" 2>/dev/null || true

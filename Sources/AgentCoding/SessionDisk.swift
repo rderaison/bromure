@@ -604,10 +604,12 @@ public final class SessionDisk {
             atomically: true, encoding: .utf8
         )
 
-        // mtu — clamp for the VM's primary NIC. Default 1400 covers most
-        // VPNs (WireGuard ~1420, IKEv2 ~1400). Override via:
+        // mtu — clamp for the VM's primary NIC. Default 1280 covers most
+        // VPNs (WireGuard ~1420, IKEv2 ~1400) plus the corp-network paths
+        // that push effective PMTU below 1400 (DMVPN, Cisco AnyConnect,
+        // 6-in-4 tunnels). Override via:
         //   defaults write io.bromure.agentic-coding vm.mtu -int <value>
-        let mtu = VMConfig.resolvedNICMTU()
+        let mtu = VMConfig.resolvedNICMTU(default: 1280)
         try "\(mtu)\n".write(
             to: tmp.appendingPathComponent("mtu"),
             atomically: true, encoding: .utf8
