@@ -194,7 +194,7 @@ Three layers stack to make the profile's environment. The bottom layer is shared
 |---|---|
 | **Your home folder** | The per-profile `/home/ubuntu` directory — dotfiles, `.ssh` keys, `npm-global`, `.cargo`, shell history, and anything else the agent writes to home. Shows last-active time and current size. **Erase home…** wipes this layer and resets the home directory to its post-clone state. |
 | **Profile system disk** | A read-write copy of the base OS cloned specifically for this profile. Holds anything installed via `sudo apt install`, edits to `/etc`, `/var`, and system-level config. **Reset to base…** discards all system-level changes and re-clones from the current base image. |
-| **Base OS image** | The shared, immutable base image: Ubuntu Noble + Claude Code + Codex + kitty + gh + glab + fonts. Shared by every profile; read-only at runtime. Shows the current version stamp and build date. Rebuilt via the app menu (takes ~5–10 minutes). |
+| **Base OS image** | The shared, immutable base image: Ubuntu Noble + Node, Claude Code, Codex, kitty, gh, glab, fonts. Shared by every profile; read-only at runtime. Shows the current version stamp and build date. Rebuilt via the app menu (takes ~5–10 minutes). |
 
 ### Memory
 
