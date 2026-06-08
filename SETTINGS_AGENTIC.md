@@ -168,7 +168,7 @@ Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go 
 
 | Setting | Description |
 |---|---|
-| **Age gate — Refuse packages younger than the cutoff** | When enabled, blocks packages newer than the minimum-age cutoff, defending against freshly-published malicious releases. Off by default. |
+| **Age gate — Refuse packages younger than the cutoff** | When enabled, blocks packages newer than the minimum-age cutoff, defending against freshly-published malicious releases. On by default (2-day minimum age). |
 | **Age gate — Minimum age** | The cutoff in days (0–90). Floating refs (`latest`, semver ranges) silently resolve to the newest version older than the cutoff; pinned references to too-fresh versions get a 451 with a clear Bromure error. |
 | **Age gate — Exempt packages** | Per-package allowlist exempted from the age gate. Format: `npm:axios` (ecosystem-qualified) or just `axios` (any ecosystem). |
 | **OSV vulnerability check** | When enabled, looks up packages on api.osv.dev (free, no key required) and blocks those at or above the chosen severity. Aggregates the GitHub Advisory Database, PyPI advisories, Go's database, RubySec, etc. Off by default — a low-severity CVE in a transitive subpackage shouldn't interrupt a workflow. |
