@@ -37,8 +37,11 @@ Choose which coding agents are available in this profile and how they authentica
 | **Claude Code** | Enable or disable the Claude Code agent for this profile. Toggle on to configure. |
 | **Claude Code — Primary** | Mark Claude Code as the primary agent (auto-launched on session start). Click "Primary" on any enabled agent to promote it. |
 | **Claude Code — Auth** | Authentication method for Claude Code: **API token** (paste an `ANTHROPIC_API_KEY` — injected as an env var, never written into the VM directly), **Subscription (interactive login)** (run `claude login` once inside the VM), or **Bedrock (AWS)** (use your AWS credentials via the Bedrock runtime — requires AWS credentials configured in the Credentials tab). |
+| **Claude Code — Require approval to use** | (Token mode only.) When enabled, every fake→real swap of the Anthropic API key shows a host-side consent dialog before the key is forwarded. Off by default. |
+| **Claude Code — Default Model ID** | (Bedrock mode only.) Override the Bedrock model ID Claude Code uses, e.g. `us.anthropic.claude-sonnet-4-6-v1:0`. Leave empty to use Claude Code's built-in default. |
 | **Codex** | Enable or disable the OpenAI Codex agent for this profile. Toggle on to configure authentication. |
 | **Codex — Auth** | Authentication method for Codex: **API token** (paste an `OPENAI_API_KEY`) or **Subscription (interactive login)** (run `codex login` once inside the VM). |
+| **Codex — Require approval to use** | (Token mode only.) When enabled, every fake→real swap of the OpenAI API key shows a host-side consent dialog before the key is forwarded. Off by default. |
 | **Grok Build** | Enable or disable the Grok Build (xAI) agent for this profile. Toggle on to configure. |
 | **Grok Build — Auth** | Authentication method for Grok Build: **API token** (paste an `XAI_API_KEY` — injected as an env var; the proxy swaps the fake `xai-brm-…` key back to the real value on requests to `api.x.ai`, so the real key never enters the VM) or **Subscription (interactive login)** (run `grok login` once inside the VM). Bedrock is not available for Grok Build. |
 | **Grok Build — Require approval to use** | (Token mode only.) When enabled, every fake→real swap of the xAI API key shows a host-side consent dialog before the key is forwarded. Off by default. |
