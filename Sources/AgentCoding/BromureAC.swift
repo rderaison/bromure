@@ -2196,6 +2196,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func sessionRefreshAffectingChange(from old: Profile, to new: Profile) -> Bool {
         old.environmentVariables != new.environmentVariables
             || old.guardrails != new.guardrails
+            || old.supplyChain != new.supplyChain
             || old.httpDatabases != new.httpDatabases
             || old.tool != new.tool
             || old.authMode != new.authMode

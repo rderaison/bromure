@@ -148,6 +148,32 @@ pipeline {
                 }
             }
         }
+
+        stage('9. Supply Chain Security (JSON/live)') {
+            // Plumbing tests — no VM required. Run before section 10
+            // so a failure in the JSON layer surfaces quickly without
+            // burning a full VM-boot cycle on the diagnostic.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^9\\."'
+                }
+            }
+        }
+
+        stage('10. Supply Chain Security (VM-side)') {
+            // End-to-end through a session VM with the proxy active:
+            //   - npm/PyPI metadata rewrites tagged with the
+            //     `X-Bromure-Rewritten` response header,
+            //   - npm tarball script-strip leaves a valid archive,
+            //   - per-package allowlist suppresses rewriting,
+            //   - policy-off → no rewriting,
+            //   - 451 response carries the Bromure attribution body.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^10\\."'
+                }
+            }
+        }
     }
 
     post {
