@@ -344,13 +344,15 @@ final class TabbedSessionWindow: NSWindow {
         pendingSpawns.removeAll { $0.id == tab.id }
         acDelegate?.requestCloseTab(id: tab.id, in: self)
         if model.tabs.isEmpty {
-            // Last-tab ⌘W is "I'm done with this session" — same
-            // intent as Ctrl+D inside kitty. Force shutdown
-            // regardless of profile.closeAction; suspending an empty
-            // X session is wasteful and can leave a snapshot whose
-            // restore goes straight back to a black screen.
-            pendingCloseAction = .shutdown
-            close()
+            // Last-tab ⌘W: defer to the regular performClose pipeline
+            // so `windowShouldClose → decideSessionClose` reads the
+            // profile's `closeAction`. `close()` would bypass that
+            // check and force shutdown regardless of the profile's
+            // setting — which silently demoted .suspend profiles to
+            // .shutdown on every ⌘W. The xinitrc kitty-respawn loop
+            // already handles the "empty X session" case the prior
+            // shutdown-only behaviour was guarding against.
+            performClose(nil)
             return
         }
         let newIndex = max(0, min(index - 1, model.tabs.count - 1))
