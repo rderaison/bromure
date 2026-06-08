@@ -1,6 +1,6 @@
 # Bromure Agentic Coding — Profile Settings Reference
 
-Each profile in Bromure Agentic Coding has its own independent configuration across nine panels, accessed by clicking the gear icon next to a profile in the picker.
+Each profile in Bromure Agentic Coding has its own independent configuration across eleven panels, accessed by clicking the gear icon next to a profile in the picker.
 
 ---
 
@@ -155,6 +155,31 @@ Each resource supports three modes: **Off** (no filtering — default), **Block 
 | **GitLab** | Guardrail mode for `gitlab.com` REST API and git over HTTPS. Same classification logic as GitHub. |
 | **Bitbucket** | Guardrail mode for `bitbucket.org` REST API and git over HTTPS. Same classification logic as GitHub. |
 | **Databases** | Per-endpoint Guardrails mode for each HTTPS database endpoint configured under Credentials (MongoDB, ClickHouse, Elasticsearch). Shown here as individual rows, one per endpoint. Modes and classification rules match those described in the Credentials section for each engine. A prompt is shown if the endpoint's host is not yet set. |
+
+---
+
+## Supply Chain
+
+<p align="center">
+  <img src="Resources/ac/editor_supplychain_en.jpg" width="600" alt="Supply Chain settings panel">
+</p>
+
+Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go modules, Packagist) through the host MITM proxy and applies these policies before the agent sees the response. The in-VM `.npmrc` / `pip.conf` can only further restrict these settings — they cannot loosen them. Use the per-package allowlists for surgical overrides. All severity pickers offer **Low and above**, **Medium and above**, **High and above**, or **Critical only**.
+
+| Setting | Description |
+|---|---|
+| **Age gate — Refuse packages younger than the cutoff** | When enabled, blocks packages newer than the minimum-age cutoff, defending against freshly-published malicious releases. Off by default. |
+| **Age gate — Minimum age** | The cutoff in days (0–90). Floating refs (`latest`, semver ranges) silently resolve to the newest version older than the cutoff; pinned references to too-fresh versions get a 451 with a clear Bromure error. |
+| **Age gate — Exempt packages** | Per-package allowlist exempted from the age gate. Format: `npm:axios` (ecosystem-qualified) or just `axios` (any ecosystem). |
+| **OSV vulnerability check** | When enabled, looks up packages on api.osv.dev (free, no key required) and blocks those at or above the chosen severity. Aggregates the GitHub Advisory Database, PyPI advisories, Go's database, RubySec, etc. Off by default — a low-severity CVE in a transitive subpackage shouldn't interrupt a workflow. |
+| **OSV — Block at severity** | The severity threshold at or above which a package with a known vulnerability is blocked. |
+| **socket.dev — API key** | A socket.dev API token (from socket.dev/dashboard/settings/api-tokens) that unlocks the two socket.dev checks below. Stored host-side only — never exported into the VM; calls go directly to api.socket.dev from the host's MITM proxy. The toggles below are disabled until a key is entered. |
+| **socket.dev — Block compromised packages** | When enabled, blocks packages socket.dev flags as compromised: rogue install scripts, malware, typosquats, or suspicious telemetry. |
+| **socket.dev — Block packages with known CVEs** | When enabled, blocks packages with known CVEs at or above the CVE block threshold. |
+| **socket.dev — CVE block threshold** | The severity threshold for the socket.dev CVE block. Disabled unless "Block packages with known CVEs" is on. |
+| **Install scripts — Strip install scripts** | When enabled, strips `preinstall` / `install` / `postinstall` / `prepare` from npm tarballs on the fly. Bromure rewrites the tarball, removes the script keys from `package.json`, and updates the registry metadata hash so npm's verification still passes for unpinned installs. |
+| **Install scripts — Allowlist** | Packages permitted to keep their install scripts (binding compilers like better-sqlite3 or node-canvas legitimately need them). Format: `npm:better-sqlite3`. |
+| **Lockfile-pinned installs — Prompt before passing through** | When enabled, prompts before passing lockfile-pinned tarballs through unmodified (`npm ci`, `pip --require-hashes`). These use cryptographic integrity hashes baked into a lockfile that Bromure can't rewrite without breaking verification, so the first lockfile-pinned fetch in a batch pops a host dialog (Allow once / 15 min / for the session / Don't allow) and the entire batch follows that decision. |
 
 ---
 
