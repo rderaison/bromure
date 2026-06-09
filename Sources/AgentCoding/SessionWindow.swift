@@ -234,6 +234,10 @@ final class TabbedSessionWindow: NSWindow {
             onFiles: { [weak self] in
                 guard let self else { return }
                 self.acDelegate?.openFileBrowser(for: self)
+            },
+            onEditProfile: { [weak self] in
+                guard let self else { return }
+                self.acDelegate?.openEditorWindow(editing: self.profile)
             })
         toolbarChromeDelegate = delegate
 
@@ -488,6 +492,7 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
     let onInspectTrace: () -> Void
     let onReboot: () -> Void
     let onFiles:  () -> Void
+    let onEditProfile: () -> Void
 
     init(model: TabsModel,
          sharedFolderPaths: [String],
@@ -496,7 +501,8 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
          onNew:    @escaping () -> Void,
          onInspectTrace: @escaping () -> Void,
          onReboot: @escaping () -> Void,
-         onFiles:  @escaping () -> Void) {
+         onFiles:  @escaping () -> Void,
+         onEditProfile: @escaping () -> Void) {
         self.model = model
         self.sharedFolderPaths = sharedFolderPaths
         self.onSelect = onSelect
@@ -505,6 +511,7 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
         self.onInspectTrace = onInspectTrace
         self.onReboot = onReboot
         self.onFiles = onFiles
+        self.onEditProfile = onEditProfile
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -531,7 +538,8 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
             onNew:    onNew,
             onInspectTrace: onInspectTrace,
             onReboot: onReboot,
-            onFiles:  onFiles
+            onFiles:  onFiles,
+            onEditProfile: onEditProfile
         ))
         host.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(host)
@@ -571,6 +579,7 @@ private struct TabsBar: View {
     let onInspectTrace: () -> Void
     let onReboot: () -> Void
     let onFiles:  () -> Void
+    let onEditProfile: () -> Void
 
     @State private var foldersPopoverShown = false
 
@@ -667,6 +676,16 @@ private struct TabsBar: View {
             }
             .buttonStyle(.borderless)
             .help(NSLocalizedString("Inspect this profile's session trace (⇧⌘I)", comment: ""))
+
+            // Settings — opens the profile editor for the running VM's
+            // profile. Edits to host-side settings apply live; settings
+            // baked into the VM image prompt for a restart on save.
+            Button(action: onEditProfile) {
+                Image(systemName: "gearshape")
+                    .frame(width: 24, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .help(NSLocalizedString("Edit this profile's settings", comment: ""))
         }
     }
 }
