@@ -104,14 +104,23 @@ public final class UbuntuImageManager {
             && fm.fileExists(atPath: versionStampURL.path)
     }
 
-    /// True when an image is present but its stamp doesn't match the
-    /// app's bundled `imageVersion`. The app surfaces a non-blocking
-    /// "rebuild?" prompt when this is true.
+    /// True when an image is present but its **major** version is older
+    /// than the app's bundled `imageVersion`. The app surfaces a
+    /// non-blocking "rebuild?" prompt when this is true.
+    ///
+    /// Compares the major component only: a stamp like `200.3` (a manual
+    /// rebuild revision of bundled major `200`) is NOT stale, so the nag
+    /// stays quiet between rebuilds. Per-profile drift detection — which
+    /// fires the reset prompt on `200` → `200.1` — compares the full
+    /// stamp instead (see `BromureAC.startSession`), so the revision
+    /// suffix still reaches existing profiles.
     public var baseImageNeedsUpdate: Bool {
         guard hasBaseImage,
               let stamp = try? String(contentsOf: versionStampURL, encoding: .utf8)
         else { return false }
-        return stamp.trimmingCharacters(in: .whitespacesAndNewlines) != Self.imageVersion
+        let major = Self.majorVersion(
+            of: stamp.trimmingCharacters(in: .whitespacesAndNewlines))
+        return major != Self.imageVersion
     }
 
     /// On-disk version stamp ("31", "32", …) or nil when no image.
@@ -119,6 +128,41 @@ public final class UbuntuImageManager {
         guard let stamp = try? String(contentsOf: versionStampURL, encoding: .utf8)
         else { return nil }
         return stamp.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - Versioning
+
+    /// The major component of a version stamp — everything before the
+    /// first dot. `"200"` → `"200"`, `"200.3"` → `"200"`. Used so the
+    /// stale-image nag tracks the bundled `imageVersion` while ignoring
+    /// the per-rebuild revision suffix.
+    static func majorVersion(of stamp: String) -> String {
+        String(stamp.prefix { $0 != "." })
+    }
+
+    /// The stamp to write for the image we're about to promote.
+    ///
+    /// A rebuild at the same major bumps a dot-revision so existing
+    /// profiles (which recorded the prior stamp at clone time) detect
+    /// drift and get offered a reset: `200` → `200.1` → `200.2` … A
+    /// build whose major differs from what's on disk — the app shipped a
+    /// new `imageVersion`, or there's no prior stamp — writes the bundled
+    /// version fresh, with no revision.
+    static func nextStamp(priorStamp: String?, bundled: String) -> String {
+        guard let prior = priorStamp?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !prior.isEmpty,
+              majorVersion(of: prior) == bundled
+        else { return bundled }
+        // Same major — increment the revision after the first dot. A
+        // bare "200" has revision 0, so the next is "200.1".
+        let rev: Int
+        if let dot = prior.firstIndex(of: "."),
+           let n = Int(prior[prior.index(after: dot)...]) {
+            rev = n
+        } else {
+            rev = 0
+        }
+        return "\(bundled).\(rev + 1)"
     }
 
     // MARK: - Public: build
@@ -159,6 +203,13 @@ public final class UbuntuImageManager {
         // next launch can't satisfy `hasBaseImage` with fragments
         // and panic the kernel trying to boot a half-installed disk.
         let hadCompletePriorImage = hasBaseImage
+
+        // Capture the stamp now, before the build can touch it, so the
+        // promote step can derive the next revision. A rebuild at the
+        // same major bumps `200` → `200.1`; a new major writes fresh.
+        let priorStamp = installedImageVersion
+        let newStamp = Self.nextStamp(priorStamp: priorStamp,
+                                      bundled: Self.imageVersion)
 
         do {
             // 1. Alpine netboot files. Cached across runs.
@@ -206,9 +257,9 @@ public final class UbuntuImageManager {
             try fm.moveItem(at: scratchDisk, to: baseDiskURL)
             try? fm.removeItem(at: efiVarsURL)
             try fm.moveItem(at: scratchEFI, to: efiVarsURL)
-            try Self.imageVersion.write(to: versionStampURL, atomically: true, encoding: .utf8)
+            try newStamp.write(to: versionStampURL, atomically: true, encoding: .utf8)
 
-            progress("Base image ready at \(baseDiskURL.path)")
+            progress("Base image ready at \(baseDiskURL.path) (v\(newStamp))")
         } catch {
             // Always discard scratch files — they're either incomplete
             // installs or unswapped artefacts from a successful build
