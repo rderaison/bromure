@@ -921,9 +921,9 @@ async function main() {
         socketBlockCompromised: true,
         socketBlockCVE: true,
         socketCVESeverity: "critical",
-        stripInstallScripts: false,
+        stripInstallScripts: true,
         stripAllowlist: ["npm:better-sqlite3"],
-        lockfilePrompt: false,
+        lockfilePrompt: true,
       };
       setProfileJSON(id, p);
       const after = getProfileJSON(id);
@@ -939,12 +939,16 @@ async function main() {
       assertEq(sc.socketAPIKey, "test-key-XYZ");
       assertEq(sc.socketBlockCVE, true);
       assertEq(sc.socketCVESeverity, "critical");
-      assertEq(sc.stripInstallScripts, false);
+      // stripInstallScripts and lockfilePrompt default false, so the
+      // encoder omits a false value — assert the genuinely non-default
+      // `true` here to exercise the round-trip (the omit-when-default
+      // behaviour is covered by test 9.1).
+      assertEq(sc.stripInstallScripts, true);
       assert(
         sc.stripAllowlist.includes("npm:better-sqlite3"),
         "stripAllowlist round-trip"
       );
-      assertEq(sc.lockfilePrompt, false);
+      assertEq(sc.lockfilePrompt, true);
     } finally {
       deleteProfile(id);
     }
