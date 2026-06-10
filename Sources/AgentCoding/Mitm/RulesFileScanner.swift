@@ -53,7 +53,7 @@ final class RulesFileScanner: @unchecked Sendable {
     /// Extract instruction-file spans from the system prompt, scan each,
     /// and log any findings. No-op when nothing matches. Cheap (string
     /// scans) — safe to call inline from the trace path.
-    func scanAndLog(systemPrompt: String?, host: String) {
+    func scanAndLog(systemPrompt: String?, host: String, profileID: UUID) {
         guard let systemPrompt, !systemPrompt.isEmpty else { return }
 
         // The whole system prompt is fair game for the hidden-Unicode
@@ -70,7 +70,8 @@ final class RulesFileScanner: @unchecked Sendable {
         // De-dup the global hidden-Unicode hit against the system prompt
         // body so it isn't double-counted per span.
         if !globalFindings.isEmpty, dedupe(systemPrompt) {
-            emit(source: "system-prompt", host: host, findings: globalFindings)
+            emit(source: "system-prompt", host: host, findings: globalFindings,
+                 snippet: systemPrompt, profileID: profileID)
         }
         globalFindings.removeAll()
 
@@ -81,7 +82,8 @@ final class RulesFileScanner: @unchecked Sendable {
             // Dedupe per (source + content) so an unchanged CLAUDE.md is
             // logged once per session, not once per turn.
             guard dedupe(span.source + "\u{1}" + span.content) else { continue }
-            emit(source: span.source, host: host, findings: findings)
+            emit(source: span.source, host: host, findings: findings,
+                 snippet: span.content, profileID: profileID)
         }
     }
 
@@ -122,7 +124,8 @@ final class RulesFileScanner: @unchecked Sendable {
         return seen.insert(h).inserted
     }
 
-    private func emit(source: String, host: String, findings: [Finding]) {
+    private func emit(source: String, host: String, findings: [Finding],
+                      snippet: String, profileID: UUID) {
         let hi = findings.contains { $0.severity == .high }
         let tag = hi ? "FLAG" : "review"
         let summary = findings.map { "\($0.signal)(\($0.severity.rawValue))" }
@@ -130,6 +133,14 @@ final class RulesFileScanner: @unchecked Sendable {
         let line = "[prompt-injection] rules \(tag) source=\(source) signals=[\(summary)]"
         FileHandle.standardError.write(Data((line + "\n").utf8))
         SupplyChainLog.shared.record(line)   // surfaces in the Security Log window
+        // Forward genuine flags (high severity) to bromure.io with the whole
+        // file body. Skip the medium-only "review" entries — they're noise.
+        if hi {
+            PromptInjectionCloudEvent.emit(
+                profileID: profileID, detector: "rules", method: "heuristic",
+                action: "log", host: host, source: source, score: nil,
+                signals: findings.map(\.signal), toolUseId: nil, snippet: snippet)
+        }
         if Self.debug {
             for f in findings {
                 FileHandle.standardError.write(Data(

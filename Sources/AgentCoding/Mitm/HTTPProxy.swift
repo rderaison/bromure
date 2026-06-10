@@ -801,34 +801,46 @@ final class HTTPMitmConnection: @unchecked Sendable {
            pi.onDetection != .log,
            let conv = ConversationParser.parse(host: host, requestBody: toForward,
                                                responseBody: nil) {
-            var flagged: (detector: String, source: String, preview: String)? = nil
+            var flagged: (detector: String, method: String, source: String, preview: String)? = nil
             if pi.detectSourceInjection {
                 let spans = Self.newToolResultSpans(in: conv)
                 if let preview = await PromptInjectionClassifier.shared.detect(spans: spans) {
-                    flagged = ("prompt injection", "tool output", preview)
+                    flagged = ("prompt injection", "model", "tool output", preview)
                 }
             }
             if flagged == nil, pi.detectRulesInjection {
                 // Heuristic scanner first (catches obfuscation the model can't
                 // read); then the ModernBERT semantic pass over the spans.
                 if let hit = RulesFileScanner.shared.detect(systemPrompt: conv.systemPrompt) {
-                    flagged = ("rogue instructions", hit.source, hit.preview)
+                    flagged = ("rogue instructions", "heuristic", hit.source, hit.preview)
                 } else if let preview = await PromptInjectionClassifier.claudeMd.detect(
                             spans: RulesFileScanner.classifierSpans(conv.systemPrompt)) {
-                    flagged = ("rogue instructions", "CLAUDE.md", preview)
+                    flagged = ("rogue instructions", "model", "CLAUDE.md", preview)
                 }
             }
             if let f = flagged {
-                SupplyChainLog.shared.record(
-                    "[prompt-injection] \(pi.onDetection.rawValue): \(f.detector) in \(f.source) → \(host)")
+                let detectorCode = f.detector == "rogue instructions" ? "rules" : "source"
+                let pid = profileID
+                // Record + forward the *resolved outcome* (not just the mode):
+                // block → "blocked"; ask → "allowed"/"blocked" by the user.
+                func record(outcome: String) {
+                    SupplyChainLog.shared.record(
+                        "[prompt-injection] \(outcome): \(f.detector) in \(f.source) → \(host)")
+                    PromptInjectionCloudEvent.emit(
+                        profileID: pid, detector: detectorCode, method: f.method,
+                        action: outcome, host: host, source: f.source, score: nil,
+                        signals: [], toolUseId: nil, snippet: f.preview)
+                }
                 switch pi.onDetection {
                 case .block:
+                    record(outcome: "blocked")
                     try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source))
                     return
                 case .ask:
                     let allow = await Self.promptInjectionBroker.consent(
                         profileID: profileID, detectorName: f.detector,
                         source: f.source, flaggedText: f.preview)
+                    record(outcome: allow ? "allowed" : "blocked")
                     if !allow {
                         try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source))
                         return
@@ -1225,12 +1237,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // response was already relayed, so this adds zero agent latency.
             let piPolicy = Self.promptInjectionPolicyProvider?(profileID)
             if let pi = piPolicy, pi.isActive, pi.onDetection == .log {
+                let pid = profileID
                 if pi.detectSourceInjection {
                     let untrusted = Self.newToolResultSpans(in: conv)
                     if !untrusted.isEmpty {
                         Task.detached(priority: .utility) {
                             await PromptInjectionClassifier.shared.scanAndLog(
-                                spans: untrusted, host: host)
+                                spans: untrusted, host: host, profileID: pid)
                         }
                     }
                 }
@@ -1239,12 +1252,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     // …plus the fine-tuned ModernBERT semantic pass over the same
                     // instruction-file spans.
                     RulesFileScanner.shared.scanAndLog(
-                        systemPrompt: conv.systemPrompt, host: host)
+                        systemPrompt: conv.systemPrompt, host: host, profileID: pid)
                     let ruleSpans = RulesFileScanner.classifierSpans(conv.systemPrompt)
                     if !ruleSpans.isEmpty {
                         Task.detached(priority: .utility) {
                             await PromptInjectionClassifier.claudeMd.scanAndLog(
-                                spans: ruleSpans, host: host)
+                                spans: ruleSpans, host: host, profileID: pid)
                         }
                     }
                 }

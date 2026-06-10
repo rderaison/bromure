@@ -160,7 +160,8 @@ actor PromptInjectionClassifier {
     /// are `(toolUseId, content)` pairs — the freshly-ingested
     /// tool_result blocks for this turn. No-op when the model isn't
     /// installed.
-    func scanAndLog(spans: [(id: String?, content: String)], host: String) async {
+    func scanAndLog(spans: [(id: String?, content: String)], host: String,
+                    profileID: UUID) async {
         guard !spans.isEmpty else { return }
         guard let loaded = await loaded() else { return }
         for span in spans {
@@ -170,6 +171,17 @@ actor PromptInjectionClassifier {
                 let line = "[prompt-injection] \(logLabel) FLAG score=\(String(format: "%.3f", verdict.injectionScore)) toolUse=\(span.id ?? "-") preview=\"\(preview)\""
                 FileHandle.standardError.write(Data((line + "\n").utf8))
                 SupplyChainLog.shared.record(line)   // Security Log window
+                // Forward to bromure.io with the *whole* snippet (managed
+                // installs only). For the rules model, span.id is the cited
+                // file path; for the source model it's the tool_use id.
+                let isRules = (logLabel == "rules")
+                PromptInjectionCloudEvent.emit(
+                    profileID: profileID, detector: logLabel, method: "model",
+                    action: "log", host: host,
+                    source: isRules ? span.id : "tool output",
+                    score: verdict.injectionScore, signals: [],
+                    toolUseId: isRules ? nil : span.id,
+                    snippet: span.content)
             } else if Self.debug {
                 FileHandle.standardError.write(Data(
                     "[mitm/injection] ok host=\(host) score=\(String(format: "%.3f", verdict.injectionScore)) toolUse=\(span.id ?? "-")\n".utf8))
