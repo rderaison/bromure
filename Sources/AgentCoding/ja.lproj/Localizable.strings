@@ -485,3 +485,13 @@
 "Installer timed out." = "インストーラーがタイムアウトしました。";
 "Installer VM didn't get a network address from vmnet." = "インストーラー VM が vmnet からネットワークアドレスを取得できませんでした。";
 "Not enough free disk space at %@ (%llu MB available). Free up space and try again." = "%@ のディスク空き容量が不足しています（%llu MB 利用可能）。空き容量を確保して再試行してください。";
+
+/* Prompt-injection model download dialog */
+"Download" = "ダウンロード";
+"Download the %@ detector model?" = "%@ 検出モデルをダウンロードしますか？";
+"This downloads about %@ from bromure.io and uses roughly that much disk space. The detector starts working once the download finishes." = "bromure.io から約 %@ をダウンロードし、同程度のディスク容量を使用します。ダウンロードが完了すると検出機能が動作します。";
+"Downloading the %@ model…" = "%@ モデルをダウンロード中…";
+"Downloading model" = "モデルをダウンロード中";
+"Couldn't download the detector model" = "検出モデルをダウンロードできませんでした";
+"Source-code prompt-injection" = "ソースコードのプロンプトインジェクション";
+"Rogue-instruction (CLAUDE.md)" = "不正な指示 (CLAUDE.md)";

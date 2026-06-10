@@ -485,3 +485,13 @@
 "Installer timed out." = "安装程序超时。";
 "Installer VM didn't get a network address from vmnet." = "安装程序虚拟机未从 vmnet 获取到网络地址。";
 "Not enough free disk space at %@ (%llu MB available). Free up space and try again." = "%@ 的磁盘可用空间不足（可用 %llu MB）。请释放空间后重试。";
+
+/* Prompt-injection model download dialog */
+"Download" = "下载";
+"Download the %@ detector model?" = "下载 %@ 检测模型？";
+"This downloads about %@ from bromure.io and uses roughly that much disk space. The detector starts working once the download finishes." = "这将从 bromure.io 下载约 %@，并占用大致相同的磁盘空间。下载完成后检测器即开始工作。";
+"Downloading the %@ model…" = "正在下载 %@ 模型…";
+"Downloading model" = "正在下载模型";
+"Couldn't download the detector model" = "无法下载检测模型";
+"Source-code prompt-injection" = "源代码提示注入";
+"Rogue-instruction (CLAUDE.md)" = "恶意指令 (CLAUDE.md)";

@@ -485,3 +485,13 @@
 "Installer timed out." = "Zeitüberschreitung beim Installationsprogramm.";
 "Installer VM didn't get a network address from vmnet." = "Die Installations-VM hat von vmnet keine Netzwerkadresse erhalten.";
 "Not enough free disk space at %@ (%llu MB available). Free up space and try again." = "Nicht genügend freier Speicherplatz unter %@ (%llu MB verfügbar). Geben Sie Speicher frei und versuchen Sie es erneut.";
+
+/* Prompt-injection model download dialog */
+"Download" = "Herunterladen";
+"Download the %@ detector model?" = "Modell für den Detektor %@ herunterladen?";
+"This downloads about %@ from bromure.io and uses roughly that much disk space. The detector starts working once the download finishes." = "Dies lädt etwa %@ von bromure.io herunter und belegt ungefähr ebenso viel Speicherplatz. Der Detektor arbeitet, sobald der Download abgeschlossen ist.";
+"Downloading the %@ model…" = "Modell %@ wird heruntergeladen…";
+"Downloading model" = "Modell wird heruntergeladen";
+"Couldn't download the detector model" = "Detektor-Modell konnte nicht heruntergeladen werden";
+"Source-code prompt-injection" = "Prompt-Injection im Quellcode";
+"Rogue-instruction (CLAUDE.md)" = "schädliche Anweisungen (CLAUDE.md)";

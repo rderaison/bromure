@@ -488,3 +488,13 @@
 "Installer timed out." = "Installer timed out.";
 "Installer VM didn't get a network address from vmnet." = "Installer VM didn't get a network address from vmnet.";
 "Not enough free disk space at %@ (%llu MB available). Free up space and try again." = "Not enough free disk space at %@ (%llu MB available). Free up space and try again.";
+
+/* Prompt-injection model download dialog */
+"Download" = "Download";
+"Download the %@ detector model?" = "Download the %@ detector model?";
+"This downloads about %@ from bromure.io and uses roughly that much disk space. The detector starts working once the download finishes." = "This downloads about %@ from bromure.io and uses roughly that much disk space. The detector starts working once the download finishes.";
+"Downloading the %@ model…" = "Downloading the %@ model…";
+"Downloading model" = "Downloading model";
+"Couldn't download the detector model" = "Couldn't download the detector model";
+"Source-code prompt-injection" = "Source-code prompt-injection";
+"Rogue-instruction (CLAUDE.md)" = "Rogue-instruction (CLAUDE.md)";

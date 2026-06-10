@@ -30,6 +30,31 @@ public enum PromptInjectionModels {
                         ("tokenizer_config.json", 100), ("config.json", 100)]
             }
         }
+
+        /// Human-readable detector name for the download-confirmation prompt.
+        var detectorName: String {
+            switch self {
+            case .promptGuard:
+                return NSLocalizedString("Source-code prompt-injection", comment: "detector name")
+            case .claudeMdGuard:
+                return NSLocalizedString("Rogue-instruction (CLAUDE.md)", comment: "detector name")
+            }
+        }
+
+        /// Approximate total on-disk size of the model + tokenizer assets.
+        /// Used to weight the progress bar and to tell the user up front how
+        /// much disk the download will consume.
+        var approxBytes: Int64 {
+            switch self {
+            case .promptGuard:   return 298_000_000   // ~284 MiB
+            case .claudeMdGuard: return 603_000_000   // ~575 MiB
+            }
+        }
+
+        /// Formatted size string for the confirmation dialog ("284 MB").
+        var approxSizeString: String {
+            ByteCountFormatter.string(fromByteCount: approxBytes, countStyle: .file)
+        }
     }
 
     private static let baseURL = URL(string: "https://dl.bromure.io/llms")!
@@ -73,14 +98,25 @@ public enum PromptInjectionModels {
                                requiredMB: minimumFreeBytes / (1024 * 1024))
         }
         let files = kind.files
-        for (i, f) in files.enumerated() {
+        // Byte-weighted progress: the model.onnx dominates (≈99% of the
+        // bytes), so per-file step progress would freeze the bar for the
+        // whole big download. Report cumulative bytes over the known approx
+        // total instead, for a smooth fill.
+        let total = Double(kind.approxBytes)
+        var completedBytes: Int64 = 0
+        for f in files {
             let dest = dir.appendingPathComponent(f.name)
             if let sz = (try? FileManager.default.attributesOfItem(atPath: dest.path)[.size]) as? Int,
                sz >= f.minBytes {
-                progress(Double(i + 1) / Double(files.count)); continue
+                completedBytes += Int64(sz)
+                progress(min(0.999, Double(completedBytes) / total)); continue
             }
             let url = baseURL.appendingPathComponent("\(kind.dirName)/\(f.name)")
-            let (tmp, resp) = try await URLSession.shared.download(from: url)
+            let base = completedBytes
+            let downloader = ProgressDownloader { written in
+                progress(min(0.999, Double(base + written) / total))
+            }
+            let (tmp, resp) = try await downloader.run(url)
             guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
                 throw Err.http((resp as? HTTPURLResponse)?.statusCode ?? 0, f.name)
             }
@@ -90,8 +126,104 @@ public enum PromptInjectionModels {
                 try FileManager.default.removeItem(at: dest)
             }
             try FileManager.default.moveItem(at: tmp, to: dest)
-            progress(Double(i + 1) / Double(files.count))
+            completedBytes += Int64(sz)
+            progress(min(0.999, Double(completedBytes) / total))
         }
+        progress(1.0)
+    }
+
+    /// Downloads one file on a dedicated `URLSession` so the *session*
+    /// delegate reliably receives `didWriteData` progress callbacks. (The
+    /// per-task delegate on the async `download(from:delegate:)` API does not
+    /// deliver them dependably — without this the bar can sit at 0 and snap to
+    /// 100 only when the download finishes.) Reports cumulative bytes for this
+    /// file as they arrive, moves the finished temp file aside, and returns it
+    /// with the response — mirroring `URLSession.download(from:)` so the
+    /// caller's status/size validation + move-into-place stays unchanged.
+    /// Honors task cancellation (the progress panel's Cancel button).
+    private final class ProgressDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+        private let onBytes: @Sendable (Int64) -> Void
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<(URL, URLResponse), Error>?
+        private var task: URLSessionDownloadTask?
+        private var movedURL: URL?
+        private var moveError: Error?
+
+        init(onBytes: @escaping @Sendable (Int64) -> Void) { self.onBytes = onBytes }
+
+        func run(_ url: URL) async throws -> (URL, URLResponse) {
+            let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+            defer { session.finishTasksAndInvalidate() }
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { cont in
+                    lock.lock()
+                    continuation = cont
+                    let t = session.downloadTask(with: url)
+                    task = t
+                    lock.unlock()
+                    t.resume()
+                }
+            } onCancel: {
+                lock.lock(); let t = task; lock.unlock()
+                t?.cancel()
+            }
+        }
+
+        private func finishOnce(_ result: Result<(URL, URLResponse), Error>) {
+            lock.lock(); let cont = continuation; continuation = nil; lock.unlock()
+            guard let cont else { return }
+            switch result {
+            case .success(let v): cont.resume(returning: v)
+            case .failure(let e): cont.resume(throwing: e)
+            }
+        }
+
+        // Fires repeatedly as bytes arrive — the smooth-progress source.
+        func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask,
+                        didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                        totalBytesExpectedToWrite: Int64) {
+            onBytes(totalBytesWritten)
+        }
+
+        func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask,
+                        didFinishDownloadingTo location: URL) {
+            // The temp file is deleted when this returns — move it now.
+            let dest = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+            do { try FileManager.default.moveItem(at: location, to: dest); movedURL = dest }
+            catch { moveError = error }
+        }
+
+        func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if let error { finishOnce(.failure(error)); return }
+            if let moveError { finishOnce(.failure(moveError)); return }
+            if let moved = movedURL, let resp = task.response {
+                finishOnce(.success((moved, resp)))
+            } else {
+                finishOnce(.failure(URLError(.cannotCreateFile)))
+            }
+        }
+    }
+
+    // MARK: - In-flight de-duplication
+
+    private static let inFlightLock = NSLock()
+    private static var inFlight: Set<String> = []
+
+    /// Claim the download slot for `kind`; returns false if one is already
+    /// running (so the UI flow and the launch-time background fetch don't
+    /// both download the same model). Caller must `releaseInFlight` when done.
+    static func claimInFlight(_ kind: Kind) -> Bool {
+        inFlightLock.lock(); defer { inFlightLock.unlock() }
+        return inFlight.insert(kind.dirName).inserted
+    }
+    static func releaseInFlight(_ kind: Kind) {
+        inFlightLock.lock(); defer { inFlightLock.unlock() }
+        inFlight.remove(kind.dirName)
+    }
+    static func isDownloading(_ kind: Kind) -> Bool {
+        inFlightLock.lock(); defer { inFlightLock.unlock() }
+        return inFlight.contains(kind.dirName)
     }
 
     /// Fire a background download when a detector is enabled but its model is
@@ -99,7 +231,11 @@ public enum PromptInjectionModels {
     /// no-ops). Progress / outcome lands in the Security log.
     public static func ensureInstalledInBackground(_ kind: Kind) {
         guard !isInstalled(kind) else { return }
+        // Don't start a second fetch if the editor's confirm-and-download
+        // flow (or a prior launch) is already pulling this model.
+        guard claimInFlight(kind) else { return }
         Task.detached(priority: .utility) {
+            defer { releaseInFlight(kind) }
             guard !isInstalled(kind) else { return }
             SupplyChainLog.shared.record("[prompt-injection] downloading \(kind.dirName) model from bromure.io…")
             do {

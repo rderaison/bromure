@@ -2387,12 +2387,29 @@ struct ProfileEditorView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle(NSLocalizedString("Detect prompt injection in source code", comment: ""),
                            isOn: $draft.promptInjection.detectSourceInjection)
+                        // Checking the box asks the user to confirm the
+                        // download (and its disk cost), then downloads with a
+                        // progress panel — right away, so the model is ready by
+                        // the time a VM runs. Declining/failing reverts the box,
+                        // since the detector is a no-op without its model.
+                        .onChange(of: draft.promptInjection.detectSourceInjection) { _, isOn in
+                            guard isOn else { return }
+                            PromptInjectionModelDownloader.start(.promptGuard) { ok in
+                                if !ok { draft.promptInjection.detectSourceInjection = false }
+                            }
+                        }
                     Text(NSLocalizedString("Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable.", comment: ""))
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Divider()
                     Toggle(NSLocalizedString("Detect rogue instructions in CLAUDE.md files and similar", comment: ""),
                            isOn: $draft.promptInjection.detectRulesInjection)
+                        .onChange(of: draft.promptInjection.detectRulesInjection) { _, isOn in
+                            guard isOn else { return }
+                            PromptInjectionModelDownloader.start(.claudeMdGuard) { ok in
+                                if !ok { draft.promptInjection.detectRulesInjection = false }
+                            }
+                        }
                     Text(NSLocalizedString("Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable.", comment: ""))
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
