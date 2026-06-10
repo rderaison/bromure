@@ -138,13 +138,25 @@ extension TerminalAppDefaults {
         enable_audio_bell no
         remember_window_size no
 
-        # Render-loop throttling. kitty runs against Mesa llvmpipe inside
+        # Render-loop throttling. kitty renders via Mesa llvmpipe inside
         # the VM (LIBGL_ALWAYS_SOFTWARE=1 in xinitrc), so every frame is
-        # pure CPU. Cap the rate to the X server's refresh and back off
-        # the per-frame floor + PTY-coalesce window so bursty output
-        # (streaming agent responses, build logs) doesn't pin a core.
-        sync_to_monitor yes
-        repaint_delay 16
+        # pure guest CPU — AND every frame kitty presents is scanned out
+        # over virtio-gpu and re-composited by the host VZVirtualMachineView,
+        # so a high frame rate also pins the *host* GPU. An animating agent
+        # TUI (spinner / token counter / input shimmer) produces continuous
+        # damage, so kitty would otherwise repaint at the ~60 FPS floor
+        # forever and hold the host GPU at ~40% on an "idle" session.
+        #
+        # Nothing here needs 60 FPS — it's an agent terminal that mostly
+        # streams text. sync_to_monitor is off (no reliable vblank in the
+        # VM — left on, it just busy-waits) and repaint_delay is set to
+        # 250 ms (~4 FPS). An animating TUI then drives at most ~4 host
+        # composites/sec instead of ~60, which is the bulk of the GPU win
+        # (an idle-but-animating session drops from ~40% to single digits).
+        # Trade-off: keystroke echo can lag up to repaint_delay; lower this
+        # (e.g. 100 = 10 FPS) if typing feels sticky.
+        sync_to_monitor no
+        repaint_delay 250
         input_delay 10
         # Sealed VM — kitty's periodic update check is just a wakeup.
         update_check_interval 0
