@@ -2241,6 +2241,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         old.environmentVariables != new.environmentVariables
             || old.guardrails != new.guardrails
             || old.supplyChain != new.supplyChain
+            || old.promptInjection != new.promptInjection
             || old.httpDatabases != new.httpDatabases
             || old.tool != new.tool
             || old.authMode != new.authMode

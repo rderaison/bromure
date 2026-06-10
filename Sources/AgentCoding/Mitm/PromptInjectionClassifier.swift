@@ -109,6 +109,51 @@ actor PromptInjectionClassifier {
     private static let debug =
         ProcessInfo.processInfo.environment["BROMURE_AC_DEBUG"] == "1"
 
+    /// Pad every window to a single fixed length so the ONNX/CoreML
+    /// session sees one input shape. The CoreML execution provider
+    /// recompiles its model for each *distinct* input shape it runs;
+    /// with variable-length windows that means a GPU recompile on
+    /// nearly every span, which pins the GPU under live agent traffic
+    /// ("50% and never drops"). A constant shape ⇒ one compile, cached.
+    /// Padding is masked out (attention_mask = 0), so the verdict is
+    /// identical to the unpadded run. Set =0 to restore dynamic shapes
+    /// (for A/B measurement only).
+    private static let fixedShape =
+        ProcessInfo.processInfo.environment["BROMURE_INJECTION_FIXED_SHAPE"] != "0"
+
+    // MARK: - Verdict cache
+
+    /// Memoise verdicts by content so byte-identical spans aren't
+    /// re-inferred. This is the load-bearing optimisation: the rules
+    /// detector scans the agent's *system prompt* (CLAUDE.md / AGENTS.md),
+    /// which the CLI resends verbatim on every turn — without this, a busy
+    /// agent re-runs a ~1 s ModernBERT scan of unchanged text on every
+    /// request, so the GPU/ANE never idles. With it, each distinct blob is
+    /// scored once per session and repeats are free.
+    ///
+    /// Keyed by (length, Hasher digest). The digest is seeded with a
+    /// per-process random value, so an attacker can't engineer a benign
+    /// span whose hash collides with a malicious one to dodge detection.
+    private struct CacheKey: Hashable { let count: Int; let digest: Int }
+    private var verdictCache: [CacheKey: Verdict] = [:]
+    private var cacheOrder: [CacheKey] = []
+    private static let cacheLimit = 512
+
+    private func cachedClassify(_ text: String, loaded: Loaded) -> Verdict? {
+        var hasher = Hasher()
+        hasher.combine(text)
+        let key = CacheKey(count: text.count, digest: hasher.finalize())
+        if let hit = verdictCache[key] { return hit }
+        guard let verdict = classify(text, loaded: loaded) else { return nil }
+        verdictCache[key] = verdict
+        cacheOrder.append(key)
+        if cacheOrder.count > Self.cacheLimit {
+            let evict = cacheOrder.removeFirst()
+            verdictCache.removeValue(forKey: evict)
+        }
+        return verdict
+    }
+
     // MARK: - Public API
 
     /// Classify each untrusted span and log any injection hit. Spans
@@ -119,7 +164,7 @@ actor PromptInjectionClassifier {
         guard !spans.isEmpty else { return }
         guard let loaded = await loaded() else { return }
         for span in spans {
-            guard let verdict = classify(span.content, loaded: loaded) else { continue }
+            guard let verdict = cachedClassify(span.content, loaded: loaded) else { continue }
             if verdict.isInjection {
                 let preview = Self.preview(span.content)
                 let line = "[prompt-injection] \(logLabel) FLAG score=\(String(format: "%.3f", verdict.injectionScore)) toolUse=\(span.id ?? "-") preview=\"\(preview)\""
@@ -138,7 +183,7 @@ actor PromptInjectionClassifier {
     func detect(spans: [(id: String?, content: String)]) async -> String? {
         guard !spans.isEmpty, let loaded = await loaded() else { return nil }
         for span in spans {
-            if let v = classify(span.content, loaded: loaded), v.isInjection {
+            if let v = cachedClassify(span.content, loaded: loaded), v.isInjection {
                 return span.content.count > 4000
                     ? String(span.content.prefix(4000)) + "\n…(truncated)" : span.content
             }
@@ -257,10 +302,21 @@ actor PromptInjectionClassifier {
     }
 
     private func runWindow(ids: [Int], loaded: Loaded) -> Double? {
-        let ids64 = ids.map(Int64.init)
+        // Real tokens first, then (optionally) right-pad to a constant
+        // length so CoreML sees one shape and compiles once. The pad
+        // positions carry attention_mask = 0, so a properly-masked
+        // transformer ignores them and the score is unchanged. Pad id 0
+        // is safe precisely because those slots are masked out.
+        let realLen = ids.count
+        var ids64 = ids.map(Int64.init)
+        var mask = [Int64](repeating: 1, count: realLen)
+        if Self.fixedShape, realLen < loaded.maxLength {
+            let pad = loaded.maxLength - realLen
+            ids64 += [Int64](repeating: 0, count: pad)
+            mask += [Int64](repeating: 0, count: pad)
+        }
         let len = ids64.count
         let shape: [NSNumber] = [1, len as NSNumber]
-        let mask = [Int64](repeating: 1, count: len)
         let zeros = [Int64](repeating: 0, count: len)
 
         do {
