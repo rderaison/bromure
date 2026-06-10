@@ -28,6 +28,23 @@ public struct BACInstall: Codable, Equatable, Identifiable {
     public var id: String { installId }
 }
 
+/// Server-side acceptance state of this install, distinct from "is a
+/// row on disk". The leaf cert and bearer token can both go stale while
+/// the install.json still exists, and only the server can tell us:
+///   - `.ok`            — last heartbeat succeeded, not revoked.
+///   - `.tokenRejected` — the bearer token was refused (401/403): it
+///                        expired or the install was reset. Renewal and
+///                        managed uploads can't recover without a fresh
+///                        enrollment code.
+///   - `.revoked`       — the admin revoked this install server-side.
+/// Persisted so the status UI can surface it on launch without waiting
+/// for the first heartbeat.
+public enum BACEnrollmentHealth: String, Codable, Sendable {
+    case ok
+    case tokenRejected
+    case revoked
+}
+
 public enum BACEnrollmentError: Error, LocalizedError {
     case keychainFailure(OSStatus, String)
     case alreadyEnrolled
@@ -87,6 +104,10 @@ public enum BACEnrollmentStore {
         managedDir.appendingPathComponent("leaf.serial")
     }
 
+    private static var healthURL: URL {
+        managedDir.appendingPathComponent("health")
+    }
+
     // MARK: - Install identity
 
     public static func load() -> BACInstall? {
@@ -112,6 +133,7 @@ public enum BACEnrollmentStore {
         try? FileManager.default.removeItem(at: leafCertPemURL)
         try? FileManager.default.removeItem(at: caCertPemURL)
         try? FileManager.default.removeItem(at: leafSerialURL)
+        try? FileManager.default.removeItem(at: healthURL)
         deleteKeychain(account: installTokenKey)
         // Leaf cert keys are stored per-serial so we walk known accounts.
         // (Cheap — there's at most a handful as cert renewal turns over.)
@@ -131,6 +153,23 @@ public enum BACEnrollmentStore {
     public static func loadInstallToken() -> String? {
         guard let data = readKeychain(account: installTokenKey) else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    // MARK: - Server-acceptance health
+
+    public static func storeHealth(_ h: BACEnrollmentHealth) {
+        try? Data(h.rawValue.utf8).write(to: healthURL, options: .atomic)
+    }
+
+    /// Defaults to `.ok` when unwritten — a fresh enrollment is assumed
+    /// good until a heartbeat says otherwise.
+    public static func loadHealth() -> BACEnrollmentHealth {
+        guard let data = try? Data(contentsOf: healthURL),
+              let raw = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              let h = BACEnrollmentHealth(rawValue: raw)
+        else { return .ok }
+        return h
     }
 
     // MARK: - mTLS leaf material
@@ -244,6 +283,75 @@ public final class BACEnrollment {
     /// from `BACEnrollmentStore.load()`.
     public static var onStateChange: (@Sendable @MainActor () -> Void)?
 
+    /// Posted when the server-acceptance health changes (revoked, token
+    /// rejected, or recovered). The status panel subscribes to surface a
+    /// re-enroll banner without polling.
+    public static let healthDidChange =
+        Notification.Name("io.bromure.ac.enrollmentHealthDidChange")
+
+    /// The leaf is renewed when it's missing or within this window of
+    /// expiry. Wide (3 days) so even a Mac that's only opened
+    /// occasionally refreshes well before expiry; a long-absent install
+    /// has an already-expired leaf, which is past the window, so the
+    /// first heartbeat after launch renews it immediately. Renewal is
+    /// bearer-authed, so an expired leaf is fine to replace.
+    public static let leafRenewThreshold: TimeInterval = 72 * 60 * 60
+
+    /// Persist + broadcast a health transition. No-op when unchanged so
+    /// the UI isn't churned on every 10-minute heartbeat.
+    private func recordHealth(_ h: BACEnrollmentHealth) {
+        guard BACEnrollmentStore.loadHealth() != h else { return }
+        BACEnrollmentStore.storeHealth(h)
+        if h != .ok {
+            FileHandle.standardError.write(Data(
+                "[bac/enroll] enrollment health → \(h.rawValue)\n".utf8))
+        }
+        Task { @MainActor in
+            NotificationCenter.default.post(name: Self.healthDidChange, object: nil)
+        }
+    }
+
+    /// Map a client error to a health transition: a 401/403 means the
+    /// bearer token is no longer accepted (expired / install reset), so
+    /// neither renewal nor managed uploads can recover without a fresh
+    /// enrollment. Other errors are transient (offline, 5xx) and leave
+    /// health untouched so a blip doesn't nag the user to re-enroll.
+    private func note(_ error: Error, context: String) {
+        if case let ManagedProfileClientError.httpError(status, _) = error,
+           status == 401 || status == 403 {
+            recordHealth(.tokenRejected)
+        }
+        FileHandle.standardError.write(Data("[bac/\(context)] \(error)\n".utf8))
+    }
+
+    /// Expiry of the stored leaf cert, or nil when absent/unparseable.
+    public func leafExpiry() -> Date? {
+        guard let pem = BACEnrollmentStore.loadLeafCertPem(),
+              let cert = try? Certificate(pemEncoded: pem)
+        else { return nil }
+        return cert.notValidAfter
+    }
+
+    /// Renew the leaf if it's missing or within `leafRenewThreshold` of
+    /// expiry; no-op when it's still comfortably valid. Safe to call on
+    /// every heartbeat tick — once a renewal succeeds the new expiry is
+    /// ~weeks out, so the next tick takes the no-op path. Errors are
+    /// swallowed (logged, and 401/403 flips health to `.tokenRejected`)
+    /// so a failed renewal never tears down the heartbeat loop.
+    public func renewLeafCertIfNeeded(now: Date = Date()) async {
+        guard BACEnrollmentStore.load() != nil,
+              BACEnrollmentStore.loadInstallToken() != nil else { return }
+        if let expiry = leafExpiry(),
+           expiry.timeIntervalSince(now) > Self.leafRenewThreshold {
+            return
+        }
+        do {
+            _ = try await fetchLeafCert()
+        } catch {
+            note(error, context: "renew")
+        }
+    }
+
     @discardableResult
     public func enroll(
         code: String,
@@ -346,6 +454,12 @@ public final class BACEnrollment {
         // New material → drop any cached SecIdentity so subsequent uploads
         // present the freshly-issued leaf.
         BACMTLSIdentity.purge()
+        // A signed CSR proves the bearer token still works, so clear a
+        // stale `.tokenRejected` (e.g. the user hit "Renew certificate"
+        // after the server re-accepted them). Don't override `.revoked`.
+        if BACEnrollmentStore.loadHealth() == .tokenRejected {
+            recordHealth(.ok)
+        }
         return resp.notAfter
     }
 
@@ -356,10 +470,13 @@ public final class BACEnrollment {
               let token = BACEnrollmentStore.loadInstallToken() else { return }
         let client = ManagedProfileClient(serverURL: install.serverURL)
         do {
-            _ = try await client.heartbeat(installId: install.installId, bearer: token)
+            let resp = try await client.heartbeat(installId: install.installId, bearer: token)
+            // The server is the authority on acceptance: `revoked` means
+            // an admin killed this install; a clean response clears any
+            // prior bad state (e.g. the token was reset and re-accepted).
+            recordHealth(resp.revoked ? .revoked : .ok)
         } catch {
-            FileHandle.standardError.write(Data(
-                "[bac/heartbeat] \(error)\n".utf8))
+            note(error, context: "heartbeat")
         }
     }
 }
@@ -378,14 +495,17 @@ public final class BACHeartbeat {
         task = Task { [weak self] in
             // Initial ping right away — surfaces last_seen_at to the admin
             // UI within seconds of a fresh enrollment instead of waiting
-            // for the first interval to elapse.
+            // for the first interval to elapse. The leaf-renewal check
+            // rides along: doing it on launch means an install that's
+            // been closed past its cert's expiry heals on the next open
+            // rather than silently failing managed uploads forever.
             await BACEnrollment.shared.heartbeat()
+            await BACEnrollment.shared.renewLeafCertIfNeeded()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 10 * 60 * 1_000_000_000)
                 if Task.isCancelled { break }
                 await BACEnrollment.shared.heartbeat()
-                // Phase 3b will piggy-back: if the leaf cert is within
-                // some threshold of expiry, attempt fetchLeafCert here.
+                await BACEnrollment.shared.renewLeafCertIfNeeded()
                 _ = self
             }
         }
