@@ -930,9 +930,32 @@ public final class SessionDisk {
                                attributes: [.posixPermissions: NSNumber(value: 0o777)])
         if !forRestore {
             clearContents(of: tmp)
+        } else {
+            // On restore the outbox is intentionally preserved (the resumed
+            // guest's live processes + the just-stopped VM's still-draining
+            // virtiofs daemon — see clearContents). But one-shot guest→host
+            // *event* files (closed-<uuid> / diag-<uuid>) are stale by
+            // definition on a new launch, and restored tabs reuse their
+            // UUIDs — so a leftover closed-* reads as "the user closed this
+            // tab" and powers the VM off right after it resumes. Purge just
+            // those; leave the live roster (tabs-alive.txt) and host commands.
+            purgeStaleEvents(in: tmp)
         }
         outboxDirectory = tmp
         return tmp
+    }
+
+    /// Remove stale one-shot guest→host event files (closed-*, diag-*) left
+    /// in the outbox by a prior session. See `prepareOutboxDirectory`.
+    private func purgeStaleEvents(in dir: URL) {
+        guard let entries = try? fm.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil) else { return }
+        for entry in entries {
+            let name = entry.lastPathComponent
+            if name.hasPrefix("closed-") || name.hasPrefix("diag-") {
+                try? fm.removeItem(at: entry)
+            }
+        }
     }
 
     /// Empty a directory in place without removing the directory

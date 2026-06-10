@@ -124,6 +124,16 @@ final class TabbedSessionWindow: NSWindow {
     private var pendingSpawns: [PendingSpawn] = []
     private static let spawnGraceInterval: TimeInterval = 8
 
+    /// Tab UUIDs the guest has reported alive in a roster at least once
+    /// this session. We only honour a "tab gone" signal (empty roster, or a
+    /// `closed-<uuid>` event) for a tab that has been confirmed alive — so a
+    /// still-booting initial kitty (empty roster while the cold boot is
+    /// still bringing X + kitty up, past the 8s grace) or a stale
+    /// `closed-<uuid>.txt` left in the outbox by a prior suspended session
+    /// (restored tabs reuse the same UUIDs) can't be mistaken for "the user
+    /// closed their last terminal" and power the VM off mid-boot.
+    private var confirmedTabs: Set<UUID> = []
+
     init(profile: Profile, acDelegate: ACAppDelegate) {
         self.profile = profile
         self.acDelegate = acDelegate
@@ -322,6 +332,10 @@ final class TabbedSessionWindow: NSWindow {
         // tab agent's title_loop ticks at least once.
         let deadline = Date().addingTimeInterval(Self.spawnGraceInterval)
         pendingSpawns = model.tabs.map { .init(id: $0.id, deadline: deadline) }
+        // Fresh session: restored tabs are not confirmed until the resumed
+        // guest's roster lists them again. Until then a stale closed-* for a
+        // reused UUID is ignored (see confirmedTabs).
+        confirmedTabs.removeAll()
     }
 
     /// Capture the current tab model into a snapshot for persistence.
@@ -346,6 +360,7 @@ final class TabbedSessionWindow: NSWindow {
         guard model.tabs.indices.contains(index) else { return }
         let tab = model.tabs.remove(at: index)
         pendingSpawns.removeAll { $0.id == tab.id }
+        confirmedTabs.remove(tab.id)
         acDelegate?.requestCloseTab(id: tab.id, in: self)
         if model.tabs.isEmpty {
             // Last-tab ⌘W: defer to the regular performClose pipeline
@@ -373,9 +388,22 @@ final class TabbedSessionWindow: NSWindow {
         // turning the reboot into a shutdown. The relaunch rebuilds the
         // tabs, so just ignore guest-side closes until then.
         if rebootRequested { return }
+        // Never act on a close for a tab the guest hasn't yet confirmed
+        // alive this session. It's either still coming up (initial kitty
+        // mid-boot) or a stale closed-* from a prior suspended session whose
+        // UUID was reused on restore. Honouring it would empty the bar and
+        // power off a perfectly healthy, still-booting VM. (Genuine
+        // guest-side closes always arrive after at least one roster tick
+        // that listed the tab, so this only drops the spurious ones.)
+        guard confirmedTabs.contains(id) else {
+            FileHandle.standardError.write(Data(
+                "[ac] ignoring close for unconfirmed tab \(id.uuidString) (still booting or stale event)\n".utf8))
+            return
+        }
         guard let idx = model.tabs.firstIndex(where: { $0.id == id }) else { return }
         model.tabs.remove(at: idx)
         pendingSpawns.removeAll { $0.id == id }
+        confirmedTabs.remove(id)
         if model.activeIndex >= model.tabs.count {
             model.activeIndex = max(0, model.tabs.count - 1)
         }
@@ -411,6 +439,12 @@ final class TabbedSessionWindow: NSWindow {
         // the last pill, closes the window, and the "soft reboot"
         // silently becomes a shutdown.
         if rebootRequested { return }
+        // Latch: any UUID the roster reports alive is confirmed for the rest
+        // of the session. Only confirmed tabs are eligible to be reaped when
+        // they later go absent — a tab that has never appeared alive is
+        // still booting (or its kitty genuinely never came up), and reaping
+        // it must not be allowed to empty the bar and shut the VM down.
+        confirmedTabs.formUnion(alive)
         let now = Date()
         // A pending spawn graduates as soon as the roster confirms it
         // OR when the deadline lapses — after that, the roster's
@@ -421,7 +455,7 @@ final class TabbedSessionWindow: NSWindow {
         let pending = Set(pendingSpawns.map(\.id))
         let toReap = model.tabs
             .map(\.id)
-            .filter { !alive.contains($0) && !pending.contains($0) }
+            .filter { !alive.contains($0) && !pending.contains($0) && confirmedTabs.contains($0) }
         for id in toReap {
             handleTabClosedFromGuest(id: id)
         }
