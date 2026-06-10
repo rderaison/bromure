@@ -109,17 +109,16 @@ actor PromptInjectionClassifier {
     private static let debug =
         ProcessInfo.processInfo.environment["BROMURE_AC_DEBUG"] == "1"
 
-    /// Pad every window to a single fixed length so the ONNX/CoreML
-    /// session sees one input shape. The CoreML execution provider
-    /// recompiles its model for each *distinct* input shape it runs;
-    /// with variable-length windows that means a GPU recompile on
-    /// nearly every span, which pins the GPU under live agent traffic
-    /// ("50% and never drops"). A constant shape ⇒ one compile, cached.
-    /// Padding is masked out (attention_mask = 0), so the verdict is
-    /// identical to the unpadded run. Set =0 to restore dynamic shapes
-    /// (for A/B measurement only).
+    /// Pad every window to a single fixed length so the session sees one
+    /// input shape. Only useful with the CoreML EP, which recompiles per
+    /// distinct input shape (variable-length windows would pin the GPU
+    /// recompiling). On the default CPU EP dynamic shapes are free and a
+    /// fixed 512 just wastes compute on short windows, so this is off by
+    /// default and opt-in alongside BROMURE_INJECTION_COREML=1. Padding is
+    /// masked out (attention_mask = 0), so the verdict is identical.
     private static let fixedShape =
-        ProcessInfo.processInfo.environment["BROMURE_INJECTION_FIXED_SHAPE"] != "0"
+        ProcessInfo.processInfo.environment["BROMURE_INJECTION_FIXED_SHAPE"] == "1"
+        || ProcessInfo.processInfo.environment["BROMURE_INJECTION_COREML"] == "1"
 
     // MARK: - Verdict cache
 
@@ -258,13 +257,22 @@ actor PromptInjectionClassifier {
             cfg = parsed
         }
 
-        // ONNX session with CoreML EP (Neural Engine). Same setup as
-        // FaceSwapEngine; BROMURE_NO_COREML=1 forces CPU.
+        // ONNX session on the CPU execution provider by default. The CoreML
+        // EP balloons resident memory ~5x (a 288 MB model → ~5 GB; both
+        // detectors → ~9 GB): it partitions a transformer into ~160 subgraphs
+        // and keeps the ORT graph AND the compiled CoreML copies in RAM.
+        // Detection is off the hot path and verdict-cached (each unique span
+        // is scored once per session), so the ANE speed isn't worth that
+        // footprint sitting next to the VM. CPU holds both models in ~2 GB at
+        // identical accuracy. Opt back into CoreML with
+        // BROMURE_INJECTION_COREML=1; BROMURE_NO_COREML still forces CPU.
         let env = try ORTEnv(loggingLevel: .warning)
         let opts = try ORTSessionOptions()
         try opts.setGraphOptimizationLevel(.all)
-        if ORTIsCoreMLExecutionProviderAvailable(),
-           ProcessInfo.processInfo.environment["BROMURE_NO_COREML"] == nil {
+        let useCoreML = ORTIsCoreMLExecutionProviderAvailable()
+            && ProcessInfo.processInfo.environment["BROMURE_INJECTION_COREML"] == "1"
+            && ProcessInfo.processInfo.environment["BROMURE_NO_COREML"] == nil
+        if useCoreML {
             let coreml = ORTCoreMLExecutionProviderOptions()
             coreml.enableOnSubgraphs = true
             try opts.appendCoreMLExecutionProvider(with: coreml)
