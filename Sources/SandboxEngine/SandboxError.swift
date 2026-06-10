@@ -32,8 +32,9 @@ public enum SandboxError: LocalizedError {
         case .networkFilterFailed:
             return "Failed to initialize networking. Please quit and reopen Bromure."
         case .diskFull(let availableMB, let path):
-            return "Not enough disk space to create image at \(path) "
-                + "(\(availableMB) MB available). Free up space and try again."
+            return String(format: NSLocalizedString(
+                "Not enough free disk space at %@ (%llu MB available). Free up space and try again.",
+                comment: "Host disk is nearly full"), path, availableMB)
         case .macPoolExhausted:
             return "Too many browser sessions. Close some windows and try again."
         }

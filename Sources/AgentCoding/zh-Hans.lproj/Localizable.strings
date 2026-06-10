@@ -470,3 +470,18 @@
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“记录但继续”将检测记录到安全日志窗口。“询问我该怎么做”会暂停请求并显示被标记的文本。“阻止”会直接让请求失败。";
 "Possible %@ in “%@”" = "“%@”中可能存在%@";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure 标记了代理即将发送给模型的内容（来自 %@）。请在下方查看——放行还是阻止此请求？";
+
+/* Disk-space + base-image/model-download errors */
+"Not enough disk space to download the prompt-injection model" = "磁盘空间不足，无法下载提示注入检测模型";
+"HTTP %d downloading %@" = "HTTP %d（下载 %@ 时）";
+"%@ too small (%d < %d bytes) — truncated download" = "%@ 太小（%d < %d 字节）— 下载被截断";
+"Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector." = "仅剩 %llu MB 可用空间 — 该模型约需 %llu MB。请释放空间后重新启用检测器。";
+"Download failed (HTTP %d)." = "下载失败（HTTP %d）。";
+"Checksum invalid: %@" = "校验和无效：%@";
+"Could not extract Alpine kernel: %@" = "无法解压 Alpine 内核：%@";
+"%@ exited with status %d." = "%@ 以状态 %d 退出。";
+"Installer reported failure: %@" = "安装程序报告失败：%@";
+"Installer VM stopped before reporting completion." = "安装程序虚拟机在报告完成前已停止。";
+"Installer timed out." = "安装程序超时。";
+"Installer VM didn't get a network address from vmnet." = "安装程序虚拟机未从 vmnet 获取到网络地址。";
+"Not enough free disk space at %@ (%llu MB available). Free up space and try again." = "%@ 的磁盘可用空间不足（可用 %llu MB）。请释放空间后重试。";

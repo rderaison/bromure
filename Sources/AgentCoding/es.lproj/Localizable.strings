@@ -470,3 +470,18 @@
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "«Registrar y continuar» anota las detecciones en la ventana Registro de seguridad. «Preguntarme qué hacer» pausa la solicitud y muestra el texto marcado. «Bloquear» hace fallar la solicitud.";
 "Possible %@ in “%@”" = "Posible %@ en «%@»";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure marcó contenido que el agente está a punto de enviar al modelo (desde %@). Revísalo abajo: ¿permitirlo o bloquear esta solicitud?";
+
+/* Disk-space + base-image/model-download errors */
+"Not enough disk space to download the prompt-injection model" = "No hay suficiente espacio en disco para descargar el modelo de inyección de prompts";
+"HTTP %d downloading %@" = "HTTP %d al descargar %@";
+"%@ too small (%d < %d bytes) — truncated download" = "%@ demasiado pequeño (%d < %d bytes) — descarga truncada";
+"Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector." = "Solo %llu MB libres — el modelo necesita unos %llu MB. Libere espacio y vuelva a activar el detector.";
+"Download failed (HTTP %d)." = "Error de descarga (HTTP %d).";
+"Checksum invalid: %@" = "Suma de comprobación no válida: %@";
+"Could not extract Alpine kernel: %@" = "No se pudo extraer el kernel de Alpine: %@";
+"%@ exited with status %d." = "%@ finalizó con el estado %d.";
+"Installer reported failure: %@" = "El instalador informó un error: %@";
+"Installer VM stopped before reporting completion." = "La VM del instalador se detuvo antes de informar que terminó.";
+"Installer timed out." = "Se agotó el tiempo del instalador.";
+"Installer VM didn't get a network address from vmnet." = "La VM del instalador no obtuvo una dirección de red de vmnet.";
+"Not enough free disk space at %@ (%llu MB available). Free up space and try again." = "Espacio en disco insuficiente en %@ (%llu MB disponibles). Libere espacio e inténtelo de nuevo.";

@@ -385,13 +385,13 @@
 "Prompt before write" = "Vor jedem Schreibzugriff nachfragen";
 "Reads pass through; writes ask you each time." = "Lesezugriffe sind erlaubt; bei jedem Schreibzugriff wird nachgefragt.";
 /* Guardrails consent prompt */
-"Allow write on “%@” from profile “%@”?" = "Schreibzugriff auf „%@" aus Profil „%@" zulassen?";
+"Allow write on “%@” from profile “%@”?" = "Schreibzugriff auf „%@“ aus Profil „%@“ zulassen?";
 "Allow for 15 minutes" = "15 Minuten lang zulassen";
 "Allow once" = "Einmal zulassen";
 
 /* Supply Chain category */
 "Supply Chain" = "Lieferkette";
-"Pass through %@ from profile “%@”?" = "%@ aus Profil „%@" durchlassen?";
+"Pass through %@ from profile “%@”?" = "%@ aus Profil „%@“ durchlassen?";
 "Get an API key" = "API-Schlüssel anfordern";
 "Add entry" = "Eintrag hinzufügen";
 
@@ -470,3 +470,18 @@
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "„Protokollieren und fortfahren“ trägt Erkennungen ins Sicherheitsprotokoll-Fenster ein. „Mich fragen, was zu tun ist“ pausiert die Anfrage und zeigt den markierten Text. „Blockieren“ lässt die Anfrage scheitern.";
 "Possible %@ in “%@”" = "Mögliche %@ in „%@“";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure hat Inhalt markiert, den der Agent gleich an das Modell sendet (von %@). Prüfen Sie ihn unten – durchlassen oder diese Anfrage blockieren?";
+
+/* Disk-space + base-image/model-download errors */
+"Not enough disk space to download the prompt-injection model" = "Nicht genügend Speicherplatz zum Herunterladen des Prompt-Injection-Modells";
+"HTTP %d downloading %@" = "HTTP %d beim Herunterladen von %@";
+"%@ too small (%d < %d bytes) — truncated download" = "%@ zu klein (%d < %d Bytes) — abgebrochener Download";
+"Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector." = "Nur %llu MB frei — das Modell benötigt etwa %llu MB. Geben Sie Speicher frei und aktivieren Sie den Detektor erneut.";
+"Download failed (HTTP %d)." = "Download fehlgeschlagen (HTTP %d).";
+"Checksum invalid: %@" = "Ungültige Prüfsumme: %@";
+"Could not extract Alpine kernel: %@" = "Alpine-Kernel konnte nicht extrahiert werden: %@";
+"%@ exited with status %d." = "%@ wurde mit Status %d beendet.";
+"Installer reported failure: %@" = "Das Installationsprogramm meldete einen Fehler: %@";
+"Installer VM stopped before reporting completion." = "Die Installations-VM wurde beendet, bevor der Abschluss gemeldet wurde.";
+"Installer timed out." = "Zeitüberschreitung beim Installationsprogramm.";
+"Installer VM didn't get a network address from vmnet." = "Die Installations-VM hat von vmnet keine Netzwerkadresse erhalten.";
+"Not enough free disk space at %@ (%llu MB available). Free up space and try again." = "Nicht genügend freier Speicherplatz unter %@ (%llu MB verfügbar). Geben Sie Speicher frei und versuchen Sie es erneut.";

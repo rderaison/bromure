@@ -50,6 +50,11 @@ public final class UbuntuImageManager {
     /// Default size of the raw target disk. Roomy because rust toolchains,
     /// node_modules, model caches and project clones all want space.
     public static let baseDiskBytes: UInt64 = 24 * 1024 * 1024 * 1024  // 24 GB
+    /// Free host space required before starting a base-image build. The
+    /// disk is 24 GB *sparse*; the install's physical footprint is ~6-8 GB,
+    /// so 8 GB is a realistic floor that catches a near-full host without
+    /// demanding the full logical size.
+    public static let minimumBuildFreeBytes: UInt64 = 8 * 1024 * 1024 * 1024  // 8 GB
 
     public static let installerCPUs: Int = 4
     public static let installerMemoryBytes: UInt64 = 4 * 1024 * 1024 * 1024  // 4 GB
@@ -212,6 +217,17 @@ public final class UbuntuImageManager {
                                       bundled: Self.imageVersion)
 
         do {
+            // 0. Fail fast on a near-full host. The install writes the
+            //    Ubuntu rootfs + toolchains (~6-8 GB physical) into the
+            //    sparse disk over ~30 min; if the host runs out of space
+            //    partway, apt/debootstrap retry forever and the user sees
+            //    only an unexplained timeout (the exact bug this guards).
+            //    A preflight turns that into a clear "free up space" message
+            //    before we boot anything; the mid-install monitor in
+            //    runInstaller catches running-out later in the build.
+            try EphemeralDisk.checkDiskSpace(at: storageDir.path,
+                                             minimumFreeBytes: Self.minimumBuildFreeBytes)
+
             // 1. Alpine netboot files. Cached across runs.
             if !fm.fileExists(atPath: alpineKernelURL.path) ||
                !fm.fileExists(atPath: alpineInitrdURL.path) {
@@ -534,6 +550,22 @@ public final class UbuntuImageManager {
             group.addTask {
                 try await Task.sleep(nanoseconds: 45 * 60 * 1_000_000_000)
                 throw UbuntuImageError.installerTimeout
+            }
+            // Watch host free space while the guest writes the rootfs. When
+            // the disk fills, the guest's apt/debootstrap writes fail and
+            // retry, which otherwise surfaces only as the 30-min timeout
+            // above with no explanation. Abort early with a clear diskFull
+            // instead. Polled (every 10s) rather than event-driven — cheap,
+            // and the build is minutes long.
+            group.addTask { [storagePath = storageDir.path] in
+                while true {
+                    try await Task.sleep(nanoseconds: 10 * 1_000_000_000)
+                    if let free = EphemeralDisk.freeBytes(at: storagePath),
+                       free < EphemeralDisk.minimumFreeBytes {
+                        throw SandboxError.diskFull(
+                            availableMB: free / (1024 * 1024), path: storagePath)
+                    }
+                }
             }
             group.addTask { @MainActor in
                 try await vm.start()
@@ -999,21 +1031,29 @@ public enum UbuntuImageError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .downloadFailed(let code):
-            return "Download failed (HTTP \(code))."
+            return String(format: NSLocalizedString("Download failed (HTTP %d).",
+                comment: "Base-image build: a download returned an HTTP error"), code)
         case .checksumInvalid(let why):
-            return "Checksum invalid: \(why)"
+            return String(format: NSLocalizedString("Checksum invalid: %@",
+                comment: "Base-image build: downloaded file failed checksum"), why)
         case .kernelExtractionFailed(let why):
-            return "Could not extract Alpine kernel: \(why)"
+            return String(format: NSLocalizedString("Could not extract Alpine kernel: %@",
+                comment: "Base-image build: kernel extraction failed"), why)
         case .hostCommandFailed(let tool, let code):
-            return "\(tool) exited with status \(code)."
+            return String(format: NSLocalizedString("%@ exited with status %d.",
+                comment: "Base-image build: a host command failed"), tool, code)
         case .installerReportedFailure(let msg):
-            return "Installer reported failure: \(msg)"
+            return String(format: NSLocalizedString("Installer reported failure: %@",
+                comment: "Base-image build: the in-VM installer reported a failure"), msg)
         case .installerStoppedEarly:
-            return "Installer VM stopped before reporting completion."
+            return NSLocalizedString("Installer VM stopped before reporting completion.",
+                comment: "Base-image build: installer VM stopped unexpectedly")
         case .installerTimeout:
-            return "Installer timed out."
+            return NSLocalizedString("Installer timed out.",
+                comment: "Base-image build: installer exceeded its time budget")
         case .noGuestNetwork:
-            return "Installer VM didn't get a network address from vmnet."
+            return NSLocalizedString("Installer VM didn't get a network address from vmnet.",
+                comment: "Base-image build: installer VM has no network")
         }
     }
 }

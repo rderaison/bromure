@@ -470,3 +470,18 @@
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“Registrar e continuar” anota as detecções na janela Registro de segurança. “Perguntar o que fazer” pausa a solicitação e mostra o texto sinalizado. “Bloquear” faz a solicitação falhar.";
 "Possible %@ in “%@”" = "Possível %@ em “%@”";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "O Bromure sinalizou conteúdo que o agente está prestes a enviar ao modelo (de %@). Revise abaixo — permitir ou bloquear esta solicitação?";
+
+/* Disk-space + base-image/model-download errors */
+"Not enough disk space to download the prompt-injection model" = "Espaço em disco insuficiente para baixar o modelo de injeção de prompt";
+"HTTP %d downloading %@" = "HTTP %d ao baixar %@";
+"%@ too small (%d < %d bytes) — truncated download" = "%@ muito pequeno (%d < %d bytes) — download truncado";
+"Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector." = "Apenas %llu MB livres — o modelo precisa de cerca de %llu MB. Libere espaço e reative o detector.";
+"Download failed (HTTP %d)." = "Falha no download (HTTP %d).";
+"Checksum invalid: %@" = "Checksum inválido: %@";
+"Could not extract Alpine kernel: %@" = "Não foi possível extrair o kernel do Alpine: %@";
+"%@ exited with status %d." = "%@ encerrou com o status %d.";
+"Installer reported failure: %@" = "O instalador relatou uma falha: %@";
+"Installer VM stopped before reporting completion." = "A VM do instalador parou antes de relatar a conclusão.";
+"Installer timed out." = "Tempo esgotado do instalador.";
+"Installer VM didn't get a network address from vmnet." = "A VM do instalador não obteve um endereço de rede do vmnet.";
+"Not enough free disk space at %@ (%llu MB available). Free up space and try again." = "Espaço em disco insuficiente em %@ (%llu MB disponíveis). Libere espaço e tente novamente.";

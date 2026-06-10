@@ -470,3 +470,18 @@
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "「記録して続行」は検出をセキュリティログ ウインドウに記録します。「どうするか確認する」はリクエストを一時停止し、該当テキストを表示します。「ブロック」はリクエストを失敗させます。";
 "Possible %@ in “%@”" = "「%@」に %@ の可能性";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "エージェントがモデルに送信しようとしている内容（%@ から）を Bromure が検出しました。下記を確認し、許可するかこのリクエストをブロックしてください。";
+
+/* Disk-space + base-image/model-download errors */
+"Not enough disk space to download the prompt-injection model" = "プロンプトインジェクション検出モデルをダウンロードするためのディスク容量が不足しています";
+"HTTP %d downloading %@" = "HTTP %d（%@ のダウンロード中）";
+"%@ too small (%d < %d bytes) — truncated download" = "%@ が小さすぎます（%d < %d バイト）— ダウンロードが不完全です";
+"Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector." = "空き容量が %llu MB しかありません。モデルには約 %llu MB 必要です。空き容量を確保してから検出機能を再度有効にしてください。";
+"Download failed (HTTP %d)." = "ダウンロードに失敗しました（HTTP %d）。";
+"Checksum invalid: %@" = "チェックサムが無効です：%@";
+"Could not extract Alpine kernel: %@" = "Alpine カーネルを展開できませんでした：%@";
+"%@ exited with status %d." = "%@ がステータス %d で終了しました。";
+"Installer reported failure: %@" = "インストーラーが失敗を報告しました：%@";
+"Installer VM stopped before reporting completion." = "インストーラー VM が完了を報告する前に停止しました。";
+"Installer timed out." = "インストーラーがタイムアウトしました。";
+"Installer VM didn't get a network address from vmnet." = "インストーラー VM が vmnet からネットワークアドレスを取得できませんでした。";
+"Not enough free disk space at %@ (%llu MB available). Free up space and try again." = "%@ のディスク空き容量が不足しています（%llu MB 利用可能）。空き容量を確保して再試行してください。";

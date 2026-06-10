@@ -284,6 +284,12 @@ public final class SessionDisk {
             at: diskURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
+        // The clone starts at ~0 bytes (CoW) but grows as the guest writes,
+        // so a nearly-full host will wedge the session mid-run. Refuse to
+        // launch with a clear message rather than booting into a disk that
+        // can't be written to. Throws SandboxError.diskFull, which the
+        // session-launch site surfaces via showError().
+        try EphemeralDisk.checkDiskSpace(at: diskURL.deletingLastPathComponent().path)
         // clonefile is the APFS CoW primitive. Falls back to copyItem on
         // non-APFS volumes (slow but correct).
         let result = clonefile(baseDiskURL.path, diskURL.path, 0)

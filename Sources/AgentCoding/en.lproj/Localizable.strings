@@ -473,3 +473,18 @@
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright.";
 "Possible %@ in “%@”" = "Possible %@ in “%@”";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?";
+
+/* Disk-space + base-image/model-download errors */
+"Not enough disk space to download the prompt-injection model" = "Not enough disk space to download the prompt-injection model";
+"HTTP %d downloading %@" = "HTTP %d downloading %@";
+"%@ too small (%d < %d bytes) — truncated download" = "%@ too small (%d < %d bytes) — truncated download";
+"Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector." = "Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector.";
+"Download failed (HTTP %d)." = "Download failed (HTTP %d).";
+"Checksum invalid: %@" = "Checksum invalid: %@";
+"Could not extract Alpine kernel: %@" = "Could not extract Alpine kernel: %@";
+"%@ exited with status %d." = "%@ exited with status %d.";
+"Installer reported failure: %@" = "Installer reported failure: %@";
+"Installer VM stopped before reporting completion." = "Installer VM stopped before reporting completion.";
+"Installer timed out." = "Installer timed out.";
+"Installer VM didn't get a network address from vmnet." = "Installer VM didn't get a network address from vmnet.";
+"Not enough free disk space at %@ (%llu MB available). Free up space and try again." = "Not enough free disk space at %@ (%llu MB available). Free up space and try again.";

@@ -470,3 +470,18 @@
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "« Journaliser et continuer » enregistre les détections dans la fenêtre Journal de sécurité. « Me demander quoi faire » met la requête en pause et affiche le texte signalé. « Bloquer » fait échouer la requête.";
 "Possible %@ in “%@”" = "Possible %@ dans « %@ »";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure a signalé du contenu que l'agent s'apprête à envoyer au modèle (depuis %@). Examinez-le ci-dessous — l'autoriser, ou bloquer cette requête ?";
+
+/* Disk-space + base-image/model-download errors */
+"Not enough disk space to download the prompt-injection model" = "Espace disque insuffisant pour télécharger le modèle de détection d'injection";
+"HTTP %d downloading %@" = "HTTP %d lors du téléchargement de %@";
+"%@ too small (%d < %d bytes) — truncated download" = "%@ trop petit (%d < %d octets) — téléchargement tronqué";
+"Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector." = "Seulement %llu Mo libres — le modèle nécessite environ %llu Mo. Libérez de l'espace et réactivez le détecteur.";
+"Download failed (HTTP %d)." = "Échec du téléchargement (HTTP %d).";
+"Checksum invalid: %@" = "Somme de contrôle invalide : %@";
+"Could not extract Alpine kernel: %@" = "Impossible d'extraire le noyau Alpine : %@";
+"%@ exited with status %d." = "%@ s'est terminé avec le statut %d.";
+"Installer reported failure: %@" = "L'installateur a signalé un échec : %@";
+"Installer VM stopped before reporting completion." = "La VM d'installation s'est arrêtée avant de signaler la fin.";
+"Installer timed out." = "L'installateur a expiré.";
+"Installer VM didn't get a network address from vmnet." = "La VM d'installation n'a pas obtenu d'adresse réseau de vmnet.";
+"Not enough free disk space at %@ (%llu MB available). Free up space and try again." = "Espace disque insuffisant à %@ (%llu Mo disponibles). Libérez de l'espace et réessayez.";
