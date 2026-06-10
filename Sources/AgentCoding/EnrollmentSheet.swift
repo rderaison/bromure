@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import SandboxEngine
 
@@ -131,6 +132,7 @@ struct BACEnrollmentSheet: View {
 struct BACEnrollmentStatusView: View {
     @State private var install: BACInstall? = BACEnrollmentStore.load()
     @State private var leafExpiresAt: Date?
+    @State private var health: BACEnrollmentHealth = BACEnrollmentStore.loadHealth()
     @State private var renewing = false
     @State private var renewError: String?
     let onUnenroll: () -> Void
@@ -152,6 +154,17 @@ struct BACEnrollmentStatusView: View {
                 LabeledRow(label: NSLocalizedString("Enrolled", comment: ""),
                            value: install.enrolledAt
                             .formatted(date: .abbreviated, time: .shortened))
+                if let leafExpiresAt {
+                    LabeledRow(label: NSLocalizedString("Certificate", comment: ""),
+                               value: leafExpiresAt > Date()
+                                ? String(format: NSLocalizedString("Valid until %@", comment: "mTLS cert expiry"),
+                                         leafExpiresAt.formatted(date: .abbreviated, time: .shortened))
+                                : NSLocalizedString("Expired — renewing automatically", comment: ""))
+                }
+
+                if health != .ok {
+                    healthBanner
+                }
 
                 if let renewError {
                     Text(renewError)
@@ -194,6 +207,47 @@ struct BACEnrollmentStatusView: View {
         }
         .padding(20)
         .frame(minWidth: 420)
+        .onAppear(perform: refresh)
+        .onReceive(NotificationCenter.default.publisher(for: BACEnrollment.healthDidChange)) { _ in
+            refresh()
+        }
+    }
+
+    /// Re-read everything the panel shows — the heartbeat task mutates
+    /// health and the leaf cert in the background, and a fresh launch
+    /// should reflect a cert that expired while the app was closed.
+    private func refresh() {
+        install = BACEnrollmentStore.load()
+        health = BACEnrollmentStore.loadHealth()
+        leafExpiresAt = BACEnrollment.shared.leafExpiry()
+    }
+
+    @ViewBuilder
+    private var healthBanner: some View {
+        let (text, detail): (String, String) = {
+            switch health {
+            case .revoked:
+                return (NSLocalizedString("Enrollment revoked", comment: ""),
+                        NSLocalizedString("Your administrator revoked this install. Sign out and enroll again with a new code to resume managed mode.", comment: ""))
+            case .tokenRejected:
+                return (NSLocalizedString("Enrollment no longer accepted", comment: ""),
+                        NSLocalizedString("The server rejected this install's credentials — they may have expired or been reset. Sign out and enroll again with a new code.", comment: ""))
+            case .ok:
+                return ("", "")
+            }
+        }()
+        VStack(alignment: .leading, spacing: 4) {
+            Label(text, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout).bold()
+                .foregroundStyle(.orange)
+            Text(detail)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
     }
 
     private func renew() {
