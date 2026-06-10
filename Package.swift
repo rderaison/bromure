@@ -13,6 +13,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.7.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
+        .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.3"),
     ],
     targets: [
         .executableTarget(
@@ -31,6 +32,8 @@ let package = Package(
             dependencies: [
                 "SandboxEngine",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "X509", package: "swift-certificates"),
                 .product(name: "Crypto", package: "swift-crypto"),

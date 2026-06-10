@@ -1164,6 +1164,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 conversation: conv)
             BACDebug.log("[mitm/trace]",
                          "llmextract done host=\(host) took=\(BACDebug.ms(extractT0))")
+
+            // Stage-2 prompt-injection scan over the freshly-ingested
+            // untrusted tool_result spans (the content a rogue repo
+            // would hide instructions in). Detached so it never delays
+            // the trace write; emitTrace already runs after the
+            // response was relayed, so this adds zero agent latency.
+            // No-op unless the local classifier model is installed.
+            let untrusted = Self.newToolResultSpans(in: conv)
+            if !untrusted.isEmpty {
+                Task.detached(priority: .utility) {
+                    await PromptInjectionClassifier.shared.scanAndLog(
+                        spans: untrusted, host: host)
+                }
+            }
         }
         // Audit trail for credential.token_swap: every fake → real
         // substitution that just left the VM. One event per swap so
@@ -1228,6 +1242,28 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         BACDebug.log("[mitm/trace]",
                      "store.record hop->main done host=\(host) took=\(BACDebug.ms(storeT0))")
+    }
+
+    /// Pull the untrusted `tool_result` spans that were freshly added
+    /// this turn. The request re-sends the whole history every turn, so
+    /// we scan only the last message that carries tool_results (the
+    /// newest external ingestion) rather than re-scanning — and
+    /// re-logging — every prior result. Each element is the result's
+    /// `(toolUseId, content)`.
+    private static func newToolResultSpans(
+        in conv: Conversation
+    ) -> [(id: String?, content: String)] {
+        for message in conv.messages.reversed() {
+            var spans: [(id: String?, content: String)] = []
+            for block in message.content {
+                if case let .toolResult(toolUseId, content, _) = block,
+                   !content.isEmpty {
+                    spans.append((id: toolUseId, content: content))
+                }
+            }
+            if !spans.isEmpty { return spans }
+        }
+        return []
     }
 
     /// Rewrite the headers of an HTTP frame so any header on the
