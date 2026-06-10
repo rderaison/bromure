@@ -221,6 +221,20 @@ final class ACAutomationServer {
             state["debugEnabled"] = true
             sendResponse(fd: fd, status: 200, body: state)
 
+        // Run the prompt-injection detectors on supplied text and return a
+        // verdict — a test/introspection hook so the e2e suite can exercise
+        // the real detection code (heuristic scanner + ONNX models) with
+        // known good/bad data, without booting a VM. Gated behind the debug
+        // flag like the other introspection endpoints.
+        case ("POST", "/detect/prompt-injection"):
+            guard debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Debug endpoints require BROMURE_DEBUG_CLAUDE"])
+                return
+            }
+            let text = (bodyJSON["text"] as? String) ?? ""
+            let kind = (bodyJSON["kind"] as? String) ?? "rules"
+            sendResponse(fd: fd, status: 200, body: Self.runDetection(text: text, kind: kind))
+
         // /sessions/{id} and /sessions/{id}/exec
         case (let m, let p) where p.hasPrefix("/sessions/"):
             handleSessionRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)
@@ -228,6 +242,55 @@ final class ACAutomationServer {
         default:
             sendResponse(fd: fd, status: 404, body: ["error": "Not found", "path": path])
         }
+    }
+
+    /// Run the real prompt-injection detectors on `text` and return a verdict.
+    /// `kind == "source"` → PromptGuard (tool_result injection). Otherwise the
+    /// rogue-instruction detectors: the deterministic `RulesFileScanner`
+    /// heuristics (always available) plus the fine-tuned ModernBERT model when
+    /// installed. `modelInstalled` lets the caller distinguish "model said no"
+    /// from "model not downloaded".
+    private static func runDetection(text: String, kind: String) -> [String: Any] {
+        // Box so the semaphore-bridged Task can write the async result without
+        // a concurrent-capture warning on a bare local var.
+        final class Box: @unchecked Sendable { var hit = false }
+
+        if kind == "source" {
+            let installed = PromptInjectionModels.isInstalled(.promptGuard)
+            let box = Box()
+            let sem = DispatchSemaphore(value: 0)
+            Task.detached {
+                box.hit = await PromptInjectionClassifier.shared
+                    .detect(spans: [(id: "test", content: text)]) != nil
+                sem.signal()
+            }
+            sem.wait()
+            return ["detector": "source", "flagged": box.hit, "modelInstalled": installed]
+        }
+
+        // rules: deterministic heuristics + ModernBERT (if installed).
+        let findings = RulesFileScanner.scanHiddenUnicode(text)
+            + RulesFileScanner.scanInstructionContent(text)
+        let heuristicHigh = findings.contains { $0.severity == .high }
+        let installed = PromptInjectionModels.isInstalled(.claudeMdGuard)
+        let box = Box()
+        if installed {
+            let sem = DispatchSemaphore(value: 0)
+            Task.detached {
+                box.hit = await PromptInjectionClassifier.claudeMd
+                    .detect(spans: [(id: "test", content: text)]) != nil
+                sem.signal()
+            }
+            sem.wait()
+        }
+        return [
+            "detector": "rules",
+            "flagged": heuristicHigh || box.hit,
+            "heuristicHigh": heuristicHigh,
+            "signals": findings.map { $0.signal },
+            "modelFlagged": box.hit,
+            "modelInstalled": installed,
+        ]
     }
 
     private func handleSessionRoute(fd: Int32, method: String, path: String, bodyJSON: [String: Any]) {

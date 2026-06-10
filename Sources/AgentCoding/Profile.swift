@@ -948,6 +948,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// `.npmrc` / `pip.conf` can only further restrict, never loosen.
     public var supplyChain: SupplyChainPolicy
 
+    /// Prompt-injection / rogue-instruction detection policy — local
+    /// PromptGuard scan of tool_result content + ModernBERT/heuristic scan
+    /// of CLAUDE.md authority context. Enforced host-side in the MITM.
+    public var promptInjection: PromptInjectionPolicy
+
     /// DigitalOcean Personal Access Token. Injected as
     /// DIGITALOCEAN_ACCESS_TOKEN env + ~/.config/doctl/config.yaml in
     /// the VM as a fake; proxy swaps to the real value on
@@ -1152,6 +1157,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         kubeconfigs: [KubeconfigEntry] = [],
         guardrails: GuardrailsPolicy = GuardrailsPolicy(),
         supplyChain: SupplyChainPolicy = SupplyChainPolicy(),
+        promptInjection: PromptInjectionPolicy = PromptInjectionPolicy(),
         digitalOceanToken: String = "",
         awsCredentials: AWSCredentials = AWSCredentials(),
         bedrockEnabled: Bool = false,
@@ -1206,6 +1212,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.kubeconfigs = kubeconfigs
         self.guardrails = guardrails
         self.supplyChain = supplyChain
+        self.promptInjection = promptInjection
         self.digitalOceanToken = digitalOceanToken
         self.awsCredentials = awsCredentials
         self.bedrockEnabled = bedrockEnabled
@@ -1264,6 +1271,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case kubeconfigs
         case guardrails
         case supplyChain
+        case promptInjection
         case digitalOceanToken
         case awsCredentials
         case bedrockEnabled, bedrockModelID
@@ -1342,6 +1350,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         guardrails = try c.decodeIfPresent(GuardrailsPolicy.self, forKey: .guardrails) ?? GuardrailsPolicy()
         supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
+        promptInjection = try c.decodeIfPresent(PromptInjectionPolicy.self, forKey: .promptInjection) ?? PromptInjectionPolicy()
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
         bedrockEnabled = try c.decodeIfPresent(Bool.self, forKey: .bedrockEnabled) ?? false
@@ -1429,6 +1438,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // an empty `supplyChain: {}` blob, but adding any non-default
         // toggle gets persisted automatically.
         try c.encode(supplyChain, forKey: .supplyChain)
+        try c.encode(promptInjection, forKey: .promptInjection)
         if !digitalOceanToken.isEmpty {
             try c.encode(digitalOceanToken, forKey: .digitalOceanToken)
         }

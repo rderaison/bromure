@@ -453,3 +453,20 @@
 "Open a session and run a package install (npm install, pip install, cargo add, …)." = "セッションを開いて、パッケージのインストールを実行してください（npm install、pip install、cargo add など）。";
 "Entries appear here as soon as the MITM proxy intercepts a registry request." = "MITM プロキシがレジストリへのリクエストを傍受すると、ここにエントリが表示されます。";
 "socket.dev and OSV only fire on artifact downloads (.tgz, .whl, .crate, …) — not on plain metadata fetches. Packages cached in npm/pip's local store don't hit the network at all." = "socket.dev と OSV は成果物のダウンロード（.tgz、.whl、.crate など）の際にのみ発火し、単なるメタデータ取得では発火しません。npm/pip のローカルキャッシュにあるパッケージはそもそもネットワークに出ません。";
+
+"Prompt Injection" = "プロンプトインジェクション";
+"Detectors" = "検出器";
+"Detect prompt injection in source code" = "ソースコード内のプロンプトインジェクションを検出";
+"Detect rogue instructions in CLAUDE.md files and similar" = "CLAUDE.md などの指示ファイル内の不正な指示を検出";
+"When an injection is detected" = "インジェクションが検出されたとき";
+"Log but continue" = "記録して続行";
+"Ask me what to do" = "どうするか確認する";
+"Block unilaterally" = "一律でブロック";
+"Block this request" = "このリクエストをブロック";
+"Allow this request" = "このリクエストを許可";
+"Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure はエージェントの AI トラフィックを端末上で解析し、注入された指示を検出します。データは Mac の外に出ません。各検出器はローカルモデルを使用し、初回有効化時に bromure.io からダウンロードされます。";
+"Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "エージェントが読み込むファイル内容・Web ページ・ツール出力を評価します（Prompt Guard）。悪意あるリポジトリに隠された「以前の指示を無視 / 機密を持ち出す」を検出します。初回有効化時に約 272 MB をダウンロードします。";
+"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "Claude Code・Codex・Grok が権威として読み込む CLAUDE.md・AGENTS.md・GROK.md などの指示／設定ファイルを評価します。初回有効化時に約 571 MB をダウンロードします。";
+"“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "「記録して続行」は検出をセキュリティログ ウインドウに記録します。「どうするか確認する」はリクエストを一時停止し、該当テキストを表示します。「ブロック」はリクエストを失敗させます。";
+"Possible %@ in “%@”" = "「%@」に %@ の可能性";
+"Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "エージェントがモデルに送信しようとしている内容（%@ から）を Bromure が検出しました。下記を確認し、許可するかこのリクエストをブロックしてください。";

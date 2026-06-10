@@ -183,6 +183,24 @@ Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go 
 
 ---
 
+## Prompt Injection
+
+<p align="center">
+  <img src="Resources/ac/editor_promptinjection_en.jpg" width="600" alt="Prompt Injection settings panel">
+</p>
+
+Bromure scans the agent's AI traffic on-device for injected / rogue instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it. Detections surface in the **Security Log** window (Window → Security Log…).
+
+| Setting | Description |
+|---|---|
+| **Detect prompt injection in source code** | When enabled, scores the file contents, web pages, and tool output the agent reads (its `tool_result` blocks) with the local PromptGuard model. Catches "ignore previous instructions / exfiltrate secrets" hidden in a rogue repository. Downloads ~272 MB on first enable. |
+| **Detect rogue instructions in CLAUDE.md files and similar** | When enabled, scores the instruction / settings files Claude Code, Codex, and Grok load as authority (CLAUDE.md, AGENTS.md, GROK.md, and nested / global variants) using a fine-tuned ModernBERT classifier plus a deterministic scanner that catches invisible-Unicode obfuscation (zero-width / bidirectional / Unicode-tag payloads) the model can't read. Downloads ~571 MB on first enable. |
+| **When an injection is detected — Log but continue** | Records each detection to the Security Log window and lets the request proceed. The default. |
+| **When an injection is detected — Ask me what to do** | Pauses the outbound request and shows the flagged text in a dialog; choose to allow it through or block it. |
+| **When an injection is detected — Block unilaterally** | Blocks the request outright before the model sees the content — the agent gets a hard HTTP 451 error. |
+
+---
+
 ## Appearance
 
 <p align="center">

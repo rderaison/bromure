@@ -237,7 +237,7 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     approvalsItem.target = delegate
     windowMenu.addItem(approvalsItem)
 
-    let supplyChainLogItem = NSMenuItem(title: L("Supply Chain Log…"),
+    let supplyChainLogItem = NSMenuItem(title: L("Security Log…"),
                                         action: #selector(ACAppDelegate.openSupplyChainLogAction(_:)),
                                         keyEquivalent: "")
     supplyChainLogItem.target = delegate
@@ -1515,7 +1515,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             contentRect: NSRect(x: 0, y: 0, width: 820, height: 460),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false)
-        win.title = NSLocalizedString("Supply Chain Log", comment: "")
+        win.title = NSLocalizedString("Security Log", comment: "")
         win.center()
         win.delegate = self
         win.isReleasedWhenClosed = false
@@ -2293,6 +2293,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mitmEngine?.setGuardrailsConfig(Self.makeGuardrailsConfig(for: new), for: new.id)
         // Supply-chain policy follows the same live-update rule.
         mitmEngine?.setSupplyChainPolicy(new.supplyChain, for: new.id)
+        // Prompt-injection detection policy — same live-update rule. Enabling
+        // a detector kicks a background model download if it's not installed.
+        mitmEngine?.setPromptInjectionPolicy(new.promptInjection, for: new.id)
+        if new.promptInjection.detectSourceInjection { PromptInjectionModels.ensureInstalledInBackground(.promptGuard) }
+        if new.promptInjection.detectRulesInjection { PromptInjectionModels.ensureInstalledInBackground(.claudeMdGuard) }
 
         var profile = new
         populateMCPBearerTokens(in: &profile)
@@ -2822,6 +2827,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 engine.register(socketDevice: dev, profileID: profile.id)
                 engine.setGuardrailsConfig(Self.makeGuardrailsConfig(for: profile), for: profile.id)
                 engine.setSupplyChainPolicy(profile.supplyChain, for: profile.id)
+                engine.setPromptInjectionPolicy(profile.promptInjection, for: profile.id)
+                if profile.promptInjection.detectSourceInjection { PromptInjectionModels.ensureInstalledInBackground(.promptGuard) }
+                if profile.promptInjection.detectRulesInjection { PromptInjectionModels.ensureInstalledInBackground(.claudeMdGuard) }
             }
             // Keyboard layout bridge — pushes the macOS layout into the
             // guest at boot and follows live changes (or pins an
@@ -3511,6 +3519,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 engine.register(socketDevice: dev, profileID: profile.id)
                 engine.setGuardrailsConfig(Self.makeGuardrailsConfig(for: profile), for: profile.id)
                 engine.setSupplyChainPolicy(profile.supplyChain, for: profile.id)
+                engine.setPromptInjectionPolicy(profile.promptInjection, for: profile.id)
+                if profile.promptInjection.detectSourceInjection { PromptInjectionModels.ensureInstalledInBackground(.promptGuard) }
+                if profile.promptInjection.detectRulesInjection { PromptInjectionModels.ensureInstalledInBackground(.claudeMdGuard) }
             }
             if let dev = sandbox.socketDevice {
                 win.keyboardBridge = KeyboardBridge(

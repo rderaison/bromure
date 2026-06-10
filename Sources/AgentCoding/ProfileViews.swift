@@ -293,6 +293,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case tracing     = "Tracing"
     case guardrails       = "Guardrails"
     case supplyChain      = "Supply Chain"
+    case promptInjection  = "Prompt Injection"
     case appearance  = "Appearance"
     case resources   = "Resources"
     /// App-wide automation toggles. Only shown when the editor is opened
@@ -313,6 +314,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .tracing:     "doc.text.magnifyingglass"
         case .guardrails:       "exclamationmark.shield.fill"
         case .supplyChain:      "shippingbox.fill"
+        case .promptInjection:  "exclamationmark.triangle.fill"
         case .appearance:  "paintpalette.fill"
         case .resources:   "memorychip.fill"
         case .automation:  "antenna.radiowaves.left.and.right"
@@ -330,6 +332,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .tracing:     .red
         case .guardrails:       .orange
         case .supplyChain:      .yellow
+        case .promptInjection:  .red
         case .appearance:  .pink
         case .resources:   .gray
         case .automation:  .cyan
@@ -559,6 +562,7 @@ struct ProfileEditorView: View {
         case .tracing:     tracingSection
         case .guardrails:       guardrailsSection
         case .supplyChain:      supplyChainSection
+        case .promptInjection:  promptInjectionSection
         case .appearance:  appearanceSection
         case .resources:   resourcesSection
         case .automation:  automationSection
@@ -2370,6 +2374,51 @@ struct ProfileEditorView: View {
     }
 
     // MARK: - Supply Chain section
+
+    @ViewBuilder
+    private var promptInjectionSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(NSLocalizedString("Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it.", comment: ""))
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            GroupBox(label: Label(NSLocalizedString("Detectors", comment: ""),
+                                  systemImage: "magnifyingglass")) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle(NSLocalizedString("Detect prompt injection in source code", comment: ""),
+                           isOn: $draft.promptInjection.detectSourceInjection)
+                    Text(NSLocalizedString("Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable.", comment: ""))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Divider()
+                    Toggle(NSLocalizedString("Detect rogue instructions in CLAUDE.md files and similar", comment: ""),
+                           isOn: $draft.promptInjection.detectRulesInjection)
+                    Text(NSLocalizedString("Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable.", comment: ""))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+            }
+
+            GroupBox(label: Label(NSLocalizedString("When an injection is detected", comment: ""),
+                                  systemImage: "exclamationmark.triangle")) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Picker("", selection: $draft.promptInjection.onDetection) {
+                        ForEach(PromptInjectionPolicy.Action.allCases, id: \.self) { a in
+                            Text(a.displayName).tag(a)
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+                    .labelsHidden()
+                    .disabled(!draft.promptInjection.isActive)
+                    Text(NSLocalizedString("“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright.", comment: ""))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+            }
+        }
+    }
 
     @ViewBuilder
     private var supplyChainSection: some View {

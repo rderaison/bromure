@@ -140,6 +140,32 @@ public final class MitmEngine {
         supplyChainPolicies.removeValue(forKey: profileID)
     }
 
+    private let promptInjectionLock = NSLock()
+    nonisolated(unsafe) private var promptInjectionPolicies: [UUID: PromptInjectionPolicy] = [:]
+
+    public nonisolated func setPromptInjectionPolicy(_ policy: PromptInjectionPolicy, for profileID: UUID) {
+        promptInjectionLock.lock()
+        let prior = promptInjectionPolicies[profileID]
+        promptInjectionPolicies[profileID] = policy
+        promptInjectionLock.unlock()
+        if prior != policy {
+            var bits: [String] = []
+            if policy.detectSourceInjection { bits.append("source") }
+            if policy.detectRulesInjection { bits.append("rules") }
+            let what = bits.isEmpty ? "off" : bits.joined(separator: "+") + " → \(policy.onDetection.rawValue)"
+            SupplyChainLog.shared.record(
+                "[prompt-injection] policy engaged for \(profileID.uuidString.prefix(8)): \(what)")
+        }
+    }
+    public nonisolated func promptInjectionPolicy(for profileID: UUID) -> PromptInjectionPolicy? {
+        promptInjectionLock.lock(); defer { promptInjectionLock.unlock() }
+        return promptInjectionPolicies[profileID]
+    }
+    public nonisolated func clearPromptInjectionPolicy(for profileID: UUID) {
+        promptInjectionLock.lock(); defer { promptInjectionLock.unlock() }
+        promptInjectionPolicies.removeValue(forKey: profileID)
+    }
+
     /// Per-install 32-byte salt for deriving fake tokens from real
     /// ones via HKDF. Generated once, persisted under app support so
     /// a given real key always maps to the same fake on this Mac —
@@ -226,6 +252,12 @@ public final class MitmEngine {
     /// session right after `vm.start()` (but before traffic flows).
     /// Releases on `unregister(profileID:)` or VM teardown.
     public func register(socketDevice: VZVirtioSocketDevice, profileID: UUID) {
+        // Wire the proxy's static prompt-injection policy hook to this engine.
+        // Set every register (cheap, idempotent); routes by the profile id the
+        // proxy passes, so one closure serves all connections.
+        HTTPMitmConnection.promptInjectionPolicyProvider = { [weak self] pid in
+            self?.promptInjectionPolicy(for: pid)
+        }
         let tokenHook = self.subscriptionTokenSeen
         let codexHook = self.codexTokenSeen
         let rotatedHook = self.oauthRotated

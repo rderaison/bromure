@@ -59,6 +59,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// preferences template in sync with whatever the upstream just
     /// rotated to. nil = host doesn't care.
     let oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?
+    /// Reads the per-profile prompt-injection policy (source-code / CLAUDE.md
+    /// scanning + log/ask/block action). Set once by `MitmEngine`; nil →
+    /// detection off. Static to avoid threading a closure through every
+    /// listener/delegate layer.
+    nonisolated(unsafe) static var promptInjectionPolicyProvider: (@Sendable (UUID) -> PromptInjectionPolicy?)?
+    /// Process-wide consent broker for the "ask me what to do" action.
+    static let promptInjectionBroker = PromptInjectionConsentBroker()
 
     init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          awsResigner: AWSResigner,
@@ -786,6 +793,52 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //                                     session: session,
         //                                     tls: tls)
         // }
+        // Prompt-injection enforcement (ask / block). Runs pre-forward so we
+        // can stop a poisoned request before the model ever sees it. `log`
+        // mode is handled post-response in emitTrace (zero added latency).
+        // Bounded to AI hosts: the conversation parser returns nil otherwise.
+        if let pi = Self.promptInjectionPolicyProvider?(profileID), pi.isActive,
+           pi.onDetection != .log,
+           let conv = ConversationParser.parse(host: host, requestBody: toForward,
+                                               responseBody: nil) {
+            var flagged: (detector: String, source: String, preview: String)? = nil
+            if pi.detectSourceInjection {
+                let spans = Self.newToolResultSpans(in: conv)
+                if let preview = await PromptInjectionClassifier.shared.detect(spans: spans) {
+                    flagged = ("prompt injection", "tool output", preview)
+                }
+            }
+            if flagged == nil, pi.detectRulesInjection {
+                // Heuristic scanner first (catches obfuscation the model can't
+                // read); then the ModernBERT semantic pass over the spans.
+                if let hit = RulesFileScanner.shared.detect(systemPrompt: conv.systemPrompt) {
+                    flagged = ("rogue instructions", hit.source, hit.preview)
+                } else if let preview = await PromptInjectionClassifier.claudeMd.detect(
+                            spans: RulesFileScanner.classifierSpans(conv.systemPrompt)) {
+                    flagged = ("rogue instructions", "CLAUDE.md", preview)
+                }
+            }
+            if let f = flagged {
+                SupplyChainLog.shared.record(
+                    "[prompt-injection] \(pi.onDetection.rawValue): \(f.detector) in \(f.source) → \(host)")
+                switch pi.onDetection {
+                case .block:
+                    try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source))
+                    return
+                case .ask:
+                    let allow = await Self.promptInjectionBroker.consent(
+                        profileID: profileID, detectorName: f.detector,
+                        source: f.source, flaggedText: f.preview)
+                    if !allow {
+                        try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source))
+                        return
+                    }
+                case .log:
+                    break
+                }
+            }
+        }
+
         let relay = try await relayUpstream(rawRequest: toForward,
                                             host: host, port: port,
                                             session: session,
@@ -1165,17 +1218,35 @@ final class HTTPMitmConnection: @unchecked Sendable {
             BACDebug.log("[mitm/trace]",
                          "llmextract done host=\(host) took=\(BACDebug.ms(extractT0))")
 
-            // Stage-2 prompt-injection scan over the freshly-ingested
-            // untrusted tool_result spans (the content a rogue repo
-            // would hide instructions in). Detached so it never delays
-            // the trace write; emitTrace already runs after the
-            // response was relayed, so this adds zero agent latency.
-            // No-op unless the local classifier model is installed.
-            let untrusted = Self.newToolResultSpans(in: conv)
-            if !untrusted.isEmpty {
-                Task.detached(priority: .utility) {
-                    await PromptInjectionClassifier.shared.scanAndLog(
-                        spans: untrusted, host: host)
+            // Prompt-injection scan — only when the profile enabled it and the
+            // action is "log but continue". ask/block run pre-forward in
+            // handleConnection (they must, to stop the request). Detached so
+            // logging never delays the trace write; emitTrace runs after the
+            // response was already relayed, so this adds zero agent latency.
+            let piPolicy = Self.promptInjectionPolicyProvider?(profileID)
+            if let pi = piPolicy, pi.isActive, pi.onDetection == .log {
+                if pi.detectSourceInjection {
+                    let untrusted = Self.newToolResultSpans(in: conv)
+                    if !untrusted.isEmpty {
+                        Task.detached(priority: .utility) {
+                            await PromptInjectionClassifier.shared.scanAndLog(
+                                spans: untrusted, host: host)
+                        }
+                    }
+                }
+                if pi.detectRulesInjection {
+                    // Deterministic pass (hidden-Unicode + capability heuristics)
+                    // …plus the fine-tuned ModernBERT semantic pass over the same
+                    // instruction-file spans.
+                    RulesFileScanner.shared.scanAndLog(
+                        systemPrompt: conv.systemPrompt, host: host)
+                    let ruleSpans = RulesFileScanner.classifierSpans(conv.systemPrompt)
+                    if !ruleSpans.isEmpty {
+                        Task.detached(priority: .utility) {
+                            await PromptInjectionClassifier.claudeMd.scanAndLog(
+                                spans: ruleSpans, host: host)
+                        }
+                    }
                 }
             }
         }
@@ -1264,6 +1335,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
             if !spans.isEmpty { return spans }
         }
         return []
+    }
+
+    /// 451 response the guest sees when a prompt-injection detection blocks the
+    /// request (block mode, or ask → denied). The agent gets a hard HTTP error
+    /// instead of the model reply; no byte reaches the AI host.
+    private static func injectionBlockResponse(detector: String, source: String) -> Data {
+        let body = "Bromure blocked this request: possible \(detector) detected in \(source).\n"
+        var r = "HTTP/1.1 451 Unavailable For Legal Reasons\r\n"
+        r += "Content-Type: text/plain; charset=utf-8\r\n"
+        r += "Content-Length: \(body.utf8.count)\r\n"
+        r += "Connection: close\r\n\r\n"
+        r += body
+        return Data(r.utf8)
     }
 
     /// Rewrite the headers of an HTTP frame so any header on the

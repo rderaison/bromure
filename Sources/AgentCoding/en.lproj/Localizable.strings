@@ -454,3 +454,22 @@
 "Open a session and run a package install (npm install, pip install, cargo add, …)." = "Open a session and run a package install (npm install, pip install, cargo add, …).";
 "Entries appear here as soon as the MITM proxy intercepts a registry request." = "Entries appear here as soon as the MITM proxy intercepts a registry request.";
 "socket.dev and OSV only fire on artifact downloads (.tgz, .whl, .crate, …) — not on plain metadata fetches. Packages cached in npm/pip's local store don't hit the network at all." = "socket.dev and OSV only fire on artifact downloads (.tgz, .whl, .crate, …) — not on plain metadata fetches. Packages cached in npm/pip's local store don't hit the network at all.";
+"Security Log…" = "Security Log…";
+"Security Log" = "Security Log";
+
+"Prompt Injection" = "Prompt Injection";
+"Detectors" = "Detectors";
+"Detect prompt injection in source code" = "Detect prompt injection in source code";
+"Detect rogue instructions in CLAUDE.md files and similar" = "Detect rogue instructions in CLAUDE.md files and similar";
+"When an injection is detected" = "When an injection is detected";
+"Log but continue" = "Log but continue";
+"Ask me what to do" = "Ask me what to do";
+"Block unilaterally" = "Block unilaterally";
+"Block this request" = "Block this request";
+"Allow this request" = "Allow this request";
+"Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it.";
+"Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable.";
+"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable.";
+"“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright.";
+"Possible %@ in “%@”" = "Possible %@ in “%@”";
+"Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?";

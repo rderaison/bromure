@@ -38,7 +38,18 @@ import Tokenizers
 ///     tokenizer_config.json    — HF tokenizer config (required)
 ///     bromure-injection.json   — optional; see `Config`
 actor PromptInjectionClassifier {
-    static let shared = PromptInjectionClassifier()
+    /// Source-code / tool_result injection (PromptGuard, DeBERTa ONNX).
+    static let shared = PromptInjectionClassifier(modelDirName: "prompt-injection", logLabel: "source")
+    /// Rogue CLAUDE.md / instruction files (our fine-tuned ModernBERT ONNX).
+    static let claudeMd = PromptInjectionClassifier(modelDirName: "claudemd-guard", logLabel: "rules")
+
+    /// Which `…/Models/<dir>/` this instance loads, and the tag it logs under.
+    let modelDirName: String
+    let logLabel: String
+    init(modelDirName: String, logLabel: String) {
+        self.modelDirName = modelDirName
+        self.logLabel = logLabel
+    }
 
     struct Verdict: Sendable {
         /// Probability of the injection class, 0...1.
@@ -58,11 +69,11 @@ actor PromptInjectionClassifier {
 
     // MARK: - Asset locations
 
-    static var modelDirectory: URL {
+    var modelDirectory: URL {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent(
-            "BromureAC/Models/prompt-injection", isDirectory: true)
+            "BromureAC/Models/\(modelDirName)", isDirectory: true)
     }
     private static let modelName = "model.onnx"
     private static let configName = "bromure-injection.json"
@@ -111,13 +122,28 @@ actor PromptInjectionClassifier {
             guard let verdict = classify(span.content, loaded: loaded) else { continue }
             if verdict.isInjection {
                 let preview = Self.preview(span.content)
-                FileHandle.standardError.write(Data(
-                    "[mitm/injection] FLAG host=\(host) score=\(String(format: "%.3f", verdict.injectionScore)) toolUse=\(span.id ?? "-") preview=\"\(preview)\"\n".utf8))
+                let line = "[prompt-injection] \(logLabel) FLAG score=\(String(format: "%.3f", verdict.injectionScore)) toolUse=\(span.id ?? "-") preview=\"\(preview)\""
+                FileHandle.standardError.write(Data((line + "\n").utf8))
+                SupplyChainLog.shared.record(line)   // Security Log window
             } else if Self.debug {
                 FileHandle.standardError.write(Data(
                     "[mitm/injection] ok host=\(host) score=\(String(format: "%.3f", verdict.injectionScore)) toolUse=\(span.id ?? "-")\n".utf8))
             }
         }
+    }
+
+    /// Enforcement variant: returns a preview of the first span scored as
+    /// injection (for the ask/block path), or nil. No-op when the model
+    /// isn't installed.
+    func detect(spans: [(id: String?, content: String)]) async -> String? {
+        guard !spans.isEmpty, let loaded = await loaded() else { return nil }
+        for span in spans {
+            if let v = classify(span.content, loaded: loaded), v.isInjection {
+                return span.content.count > 4000
+                    ? String(span.content.prefix(4000)) + "\n…(truncated)" : span.content
+            }
+        }
+        return nil
     }
 
     // MARK: - Loading
@@ -126,15 +152,15 @@ actor PromptInjectionClassifier {
         if let task = loadTask { return await task.value }
         let task = Task { () -> Loaded? in
             do {
-                let loaded = try await Self.load()
+                let loaded = try await self.load()
                 FileHandle.standardError.write(Data(
-                    "[mitm/injection] classifier ready (maxLen=\(loaded.maxLength), threshold=\(loaded.threshold))\n".utf8))
+                    "[mitm/injection] \(logLabel) classifier ready (maxLen=\(loaded.maxLength), threshold=\(loaded.threshold))\n".utf8))
                 return loaded
             } catch {
                 // One-time, non-alarming note. Absence is the common
                 // case (the model is an opt-in download).
                 FileHandle.standardError.write(Data(
-                    "[mitm/injection] classifier disabled — \(error.localizedDescription). Install a model into \(Self.modelDirectory.path) to enable.\n".utf8))
+                    "[mitm/injection] \(logLabel) classifier disabled — \(error.localizedDescription). Install a model into \(self.modelDirectory.path) to enable.\n".utf8))
                 return nil
             }
         }
@@ -151,12 +177,12 @@ actor PromptInjectionClassifier {
         }
     }
 
-    private static func load() async throws -> Loaded {
+    private func load() async throws -> Loaded {
         let dir = modelDirectory
-        let modelURL = dir.appendingPathComponent(modelName)
+        let modelURL = dir.appendingPathComponent(Self.modelName)
         let fm = FileManager.default
         guard fm.fileExists(atPath: modelURL.path) else {
-            throw LoadError.missingAsset(modelName)
+            throw LoadError.missingAsset(Self.modelName)
         }
         // tokenizer.json / tokenizer_config.json must sit alongside.
         guard fm.fileExists(atPath: dir.appendingPathComponent("tokenizer.json").path) else {
@@ -170,7 +196,7 @@ actor PromptInjectionClassifier {
 
         // Optional bromure-side config (label index / threshold / len).
         var cfg = Config()
-        if let data = try? Data(contentsOf: dir.appendingPathComponent(configName)),
+        if let data = try? Data(contentsOf: dir.appendingPathComponent(Self.configName)),
            let parsed = try? JSONDecoder().decode(Config.self, from: data) {
             cfg = parsed
         }

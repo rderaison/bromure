@@ -453,3 +453,20 @@
 "Open a session and run a package install (npm install, pip install, cargo add, …)." = "Öffnen Sie eine Sitzung und starten Sie eine Paketinstallation (npm install, pip install, cargo add, …).";
 "Entries appear here as soon as the MITM proxy intercepts a registry request." = "Einträge erscheinen hier, sobald der MITM-Proxy eine Registry-Anfrage abfängt.";
 "socket.dev and OSV only fire on artifact downloads (.tgz, .whl, .crate, …) — not on plain metadata fetches. Packages cached in npm/pip's local store don't hit the network at all." = "socket.dev und OSV werden nur bei Artefakt-Downloads ausgelöst (.tgz, .whl, .crate, …), nicht bei reinen Metadaten-Abfragen. Pakete im lokalen Cache von npm/pip gehen gar nicht erst ins Netz.";
+
+"Prompt Injection" = "Prompt-Injection";
+"Detectors" = "Detektoren";
+"Detect prompt injection in source code" = "Prompt-Injection im Quellcode erkennen";
+"Detect rogue instructions in CLAUDE.md files and similar" = "Schädliche Anweisungen in CLAUDE.md-Dateien und ähnlichen erkennen";
+"When an injection is detected" = "Wenn eine Injection erkannt wird";
+"Log but continue" = "Protokollieren und fortfahren";
+"Ask me what to do" = "Mich fragen, was zu tun ist";
+"Block unilaterally" = "Einseitig blockieren";
+"Block this request" = "Diese Anfrage blockieren";
+"Allow this request" = "Diese Anfrage zulassen";
+"Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure scannt den KI-Verkehr des Agenten lokal auf eingeschleuste Anweisungen – nichts verlässt den Mac. Jeder Detektor nutzt ein lokales Modell, das beim ersten Aktivieren von bromure.io heruntergeladen wird.";
+"Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "Bewertet Dateiinhalte, Webseiten und Tool-Ausgaben, die der Agent liest (Prompt Guard). Erkennt „ignoriere vorherige Anweisungen / Geheimnisse exfiltrieren“, versteckt in einem schädlichen Repository. Lädt beim ersten Aktivieren ~272 MB herunter.";
+"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "Bewertet CLAUDE.md, AGENTS.md, GROK.md und die anderen Anweisungs-/Einstellungsdateien, die Claude Code, Codex und Grok als maßgeblich laden. Lädt beim ersten Aktivieren ~571 MB herunter.";
+"“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "„Protokollieren und fortfahren“ trägt Erkennungen ins Sicherheitsprotokoll-Fenster ein. „Mich fragen, was zu tun ist“ pausiert die Anfrage und zeigt den markierten Text. „Blockieren“ lässt die Anfrage scheitern.";
+"Possible %@ in “%@”" = "Mögliche %@ in „%@“";
+"Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure hat Inhalt markiert, den der Agent gleich an das Modell sendet (von %@). Prüfen Sie ihn unten – durchlassen oder diese Anfrage blockieren?";

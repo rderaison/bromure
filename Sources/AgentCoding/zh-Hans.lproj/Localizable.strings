@@ -453,3 +453,20 @@
 "Open a session and run a package install (npm install, pip install, cargo add, …)." = "打开一个会话并执行软件包安装（npm install、pip install、cargo add 等）。";
 "Entries appear here as soon as the MITM proxy intercepts a registry request." = "一旦 MITM 代理拦截到对软件包注册表的请求，记录就会出现在这里。";
 "socket.dev and OSV only fire on artifact downloads (.tgz, .whl, .crate, …) — not on plain metadata fetches. Packages cached in npm/pip's local store don't hit the network at all." = "socket.dev 与 OSV 只会在下载实际包文件（.tgz、.whl、.crate 等）时触发，普通的元数据请求不会触发。已经在 npm/pip 本地缓存里的包根本不会走网络。";
+
+"Prompt Injection" = "提示注入";
+"Detectors" = "检测器";
+"Detect prompt injection in source code" = "检测源代码中的提示注入";
+"Detect rogue instructions in CLAUDE.md files and similar" = "检测 CLAUDE.md 等文件中的恶意指令";
+"When an injection is detected" = "检测到注入时";
+"Log but continue" = "记录但继续";
+"Ask me what to do" = "询问我该怎么做";
+"Block unilaterally" = "直接阻止";
+"Block this request" = "阻止此请求";
+"Allow this request" = "允许此请求";
+"Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure 在本机分析代理的 AI 流量以检测被注入的指令——任何数据都不会离开 Mac。每个检测器使用本地模型，首次启用时从 bromure.io 下载。";
+"Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "对代理读取的文件内容、网页和工具输出进行评分（Prompt Guard），捕捉藏在恶意仓库中的「忽略先前指令 / 窃取机密」。首次启用时下载约 272 MB。";
+"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "对 Claude Code、Codex 和 Grok 作为权威加载的 CLAUDE.md、AGENTS.md、GROK.md 及其他指令 / 设置文件进行评分。首次启用时下载约 571 MB。";
+"“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“记录但继续”将检测记录到安全日志窗口。“询问我该怎么做”会暂停请求并显示被标记的文本。“阻止”会直接让请求失败。";
+"Possible %@ in “%@”" = "“%@”中可能存在%@";
+"Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure 标记了代理即将发送给模型的内容（来自 %@）。请在下方查看——放行还是阻止此请求？";
