@@ -70,7 +70,14 @@ LOCALES=(
 # ----------------------------------------------------------------------
 
 ac_tell() {
-    osascript -e "tell application \"${APP_NAME}\" to $1" 2>&1
+    # `|| true` is load-bearing: this script runs under `set -e`, so without
+    # it a `state=$(ac_tell …)` command substitution that fails (osascript
+    # exits non-zero) aborts the WHOLE run on the spot — which is exactly why
+    # the readiness loop "immediately failed instead of retrying" on the
+    # -2753 "terminology not ready" error right after launch. Callers detect
+    # failures from the returned STRING via ac_response_ok and retry, so
+    # suppressing the exit code here loses nothing and makes the loop work.
+    osascript -e "tell application \"${APP_NAME}\" to $1" 2>&1 || true
 }
 
 # True only when the response is real data — not osascript stderr noise
@@ -130,7 +137,11 @@ capture_editor_window() {
                 end repeat
             end tell
         end tell
-    ' 2>/dev/null)
+    ' 2>/dev/null) || true
+    # (`|| true`: don't let an osascript failure abort the run under set -e.
+    # Empty `rect` is handled below as a capture failure. Currently this runs
+    # set -e-exempt anyway — it's called from an `if` — but this keeps it safe
+    # if that ever changes.)
     if [ -n "$rect" ]; then
         rm -f "$outfile"
         screencapture -x -t jpg -R "$rect" "$outfile" 2>/dev/null
@@ -158,10 +169,23 @@ for entry in "${LOCALES[@]}"; do
 
     "$BIN" -AppleLanguages "($locale)" >/dev/null 2>&1 &
 
-    # Wait for the app to register its scripting interface AND for
-    # NSApp.delegate to be the ACAppDelegate. Before that, every bridge
-    # command returns "error: app not ready" — non-empty, so a naive
-    # `-n "$state"` check would race past the readiness gate.
+    # First gate on the HTTP automation server (port 9223). Its /health is a
+    # plain GET that — unlike AppleScript — doesn't depend on the app's
+    # scripting terminology being loaded, so it's a deterministic "the process
+    # is up" signal. Waiting here first means the AppleScript loop below isn't
+    # spammed with -2753 while the app is still booting.
+    for _ in $(seq 1 60); do
+        sleep 0.5
+        if curl -fsS -m 2 http://127.0.0.1:9223/health >/dev/null 2>&1; then
+            break
+        fi
+    done
+
+    # Then wait for the AppleScript bridge: terminology loaded AND
+    # NSApp.delegate is the ACAppDelegate. Before that, the bridge returns a
+    # -2753 terminology error or an "error: app not ready" string — both
+    # caught by ac_response_ok, so the loop retries (ac_tell swallows the
+    # non-zero exit so `set -e` can't abort us mid-retry).
     ready=false
     for _ in $(seq 1 60); do
         sleep 0.5
