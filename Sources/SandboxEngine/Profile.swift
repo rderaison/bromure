@@ -577,7 +577,9 @@ public struct ProfileSettings: Codable, Equatable {
             blockDownloads: !canDownload,
             enableAutomation: defaults.bool(forKey: "automation.enabled") || nativeChrome,
             nativeChrome: nativeChrome,
-            nativeChromeInset: nativeChrome ? VMConfig.defaultNativeChromeInset : 0,
+            nativeChromeInset: nativeChrome
+                ? VMConfig.defaultNativeChromeInset(forDisplayScale: VMConfig.resolvedDisplayScale())
+                : 0,
             allowPrinting: allowPrinting && nativeChrome,
             testSuite: isTestSuite,
             traceLevel: traceLevel,

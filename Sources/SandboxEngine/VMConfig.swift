@@ -952,13 +952,27 @@ public struct VMConfig {
     /// Default extra kernel boot options.
     public static let defaultExtraKernelOptions = "arm64.nosme"
 
-    /// Default extra rows (device pixels) reserved above the visible content
-    /// when native-chrome mode is on. Approx Chromium tab strip + omnibox
-    /// height at `--force-device-scale-factor=2`. Slight over-estimate so a
-    /// thin sliver of guest chrome never peeks below the clip — empirically
-    /// 172 device px (≈86 CSS) matches Chromium 142's two-row chrome height
-    /// without leaving a visible gap.
-    public static let defaultNativeChromeInset = 172
+    /// Chromium's tab strip + omnibox height in CSS pixels. Slight
+    /// over-estimate so a thin sliver of guest chrome never peeks below the
+    /// clip — empirically 86 CSS px matches Chromium 142's two-row chrome
+    /// height without leaving a visible gap.
+    public static let nativeChromeCSSHeight = 86
+
+    /// Extra rows (device pixels) reserved above the visible content when
+    /// native-chrome mode is on. The guest runs Chromium with
+    /// `--force-device-scale-factor=<scale>`, so its chrome occupies
+    /// `nativeChromeCSSHeight * scale` framebuffer rows (86 at 1x, 172 at 2x).
+    public static func defaultNativeChromeInset(forDisplayScale scale: Int) -> Int {
+        nativeChromeCSSHeight * max(scale, 1)
+    }
+
+    /// The display scale the guest actually runs at: the user's
+    /// `vm.displayScale` override if set, otherwise the detected host scale.
+    /// Must match what VMPool ships to the guest as `displayScale`.
+    public static func resolvedDisplayScale() -> Int {
+        UserDefaults.standard.object(forKey: "vm.displayScale") as? Int
+            ?? detectDisplayScale()
+    }
 
     /// Default storage directory: ~/Library/Application Support/Bromure
     public static var defaultStorageDirectory: URL {

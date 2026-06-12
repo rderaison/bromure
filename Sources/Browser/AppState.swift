@@ -453,8 +453,7 @@ final class AppState: @unchecked Sendable {
 
     /// Current display scale stored in preferences (or auto-detected).
     var currentDisplayScale: Int {
-        UserDefaults.standard.object(forKey: "vm.displayScale") as? Int
-            ?? VMConfig.detectDisplayScale()
+        VMConfig.resolvedDisplayScale()
     }
 
     var diskUsage: String {
