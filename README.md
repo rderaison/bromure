@@ -25,6 +25,8 @@ This repo ships two sibling apps, both built on Apple's [Virtualization.framewor
 
 The same agent threat model — isolation, keeping secrets out of the agent, scoping how those secrets get used, scanning the supply chain, catching prompt injection — run across the tools people reach for, and where each one ends.
 
+A more detailed feature matrix is available at [bromure.io/en/feature-matrix](https://bromure.io/en/feature-matrix).
+
 | Protection | Dev Container<br><sub>VS Code</sub> | nono<br><sub>kernel sandbox</sub> | agent-vault<br><sub>octokraft</sub> | Agent Vault<br><sub>Infisical</sub> | Docker Sandboxes<br><sub>microVM</sub> | **Bromure**<br><sub>Agentic Coding</sub> |
 | --- | --- | --- | --- | --- | --- | --- |
 | **Isolation boundary**<br><sub>Where the blast radius stops</sub> | 🟡 Same container, shared kernel | 🟡 Kernel allow-lists, no own kernel | ❌ Agent runs in place | ❌ Proxy only; agent unboxed | ✅ microVM, its own kernel | ✅ Hardware VM, its own kernel |
