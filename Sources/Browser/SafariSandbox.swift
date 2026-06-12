@@ -1409,6 +1409,28 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return true
         }
 
+        server.onScrollInject = { [weak self] sessionID, dx, dy in
+            guard let self,
+                  let session = self.sessions.first(where: {
+                      $0.id.uuidString.caseInsensitiveCompare(sessionID) == .orderedSame
+                  })
+            else { return false }
+            return MainActor.assumeIsolated {
+                guard let bridge = session.scrollBridge, bridge.isConnected else { return false }
+                bridge.sendScroll(dx: dx, dy: dy)
+                return true
+            }
+        }
+
+        server.onSerialExec = { [weak self] sessionID, command in
+            guard let self,
+                  let session = self.sessions.first(where: {
+                      $0.id.uuidString.caseInsensitiveCompare(sessionID) == .orderedSame
+                  })
+            else { return false }
+            return MainActor.assumeIsolated { session.debugSerialExec(command) }
+        }
+
         server.onGetAppState = { [weak self] in
             guard let self else { return [:] }
             let phase: String
@@ -1755,6 +1777,7 @@ final class BrowserSession {
     private var keyboardBridge: KeyboardBridge?
     private var cjkInputBridge: CJKInputBridge?
     private var gestureBridge: GestureBridge?
+    private(set) var scrollBridge: PrecisionScrollBridge?
     private(set) var autoSuspend: VMAutoSuspend?
     private var traceWindow: NSWindow?
     private var traceRecordButton: NSButton?
@@ -1778,7 +1801,7 @@ final class BrowserSession {
         self.webcamDeviceID = config.webcamDeviceID
         BrowserSession.windowCount += 1
 
-        let vmView = VZVirtualMachineView()
+        let vmView = PrecisionScrollVMView()
         vmView.virtualMachine = warmVM.vm
         // Native-chrome mode wants the macOS-app feel: ⌘-Tab switches apps,
         // ⌘-Q quits Bromure, ⌘-Space opens Spotlight, etc. Letting VZ
@@ -2601,6 +2624,20 @@ final class BrowserSession {
             }
         }
 
+        // Precision scrolling: stream the trackpad's pixel-precise deltas
+        // (momentum included) to the guest's uinput scroll agent as
+        // high-resolution wheel events, instead of letting VZ quantize
+        // every gesture to whole USB wheel clicks. The view falls back to
+        // the USB path until the agent connects — base images without the
+        // agent simply never connect and keep today's behaviour.
+        // Kill switch: defaults write io.bromure.app vm.precisionScroll -bool NO
+        if let dev = linkSocketDevice,
+           UserDefaults.standard.object(forKey: "vm.precisionScroll") as? Bool ?? true {
+            let bridge = MainActor.assumeIsolated { PrecisionScrollBridge(socketDevice: dev) }
+            self.scrollBridge = bridge
+            MainActor.assumeIsolated { vmView.scrollBridge = bridge }
+        }
+
         // Auto-suspend on idle — whether idle actually triggers a suspend is
         // decided by the user's Energy Mode setting, read live each tick so
         // the user can flip modes in Settings without restarting sessions.
@@ -3177,6 +3214,15 @@ final class BrowserSession {
             return false
         }
         return true
+    }
+
+    /// Debug-only root command execution via the hvc0 serial console
+    /// (which auto-logs in as root). Fire-and-forget: output is not
+    /// captured — redirect to a /tmp/bromure file and read it back via
+    /// the shell agent. Exposed through the automation server's
+    /// /sessions/{id}/serial endpoint, gated on BROMURE_DEBUG_CLAUDE.
+    func debugSerialExec(_ cmd: String) -> Bool {
+        serialWrite(cmd)
     }
 
     fileprivate func fullCleanup() async {
@@ -4175,6 +4221,28 @@ final class NativeChromeCropper: NSView {
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         onExit?()
+    }
+}
+
+/// VZVirtualMachineView that diverts precise trackpad scrolling to the
+/// guest's scroll-agent (a uinput high-resolution wheel device) instead
+/// of VZ's USB wheel path, which quantizes every gesture into whole
+/// clicks — the single most VM-feeling artefact of the stock input
+/// stack. Momentum events carry `hasPreciseScrollingDeltas` too, so the
+/// whole native deceleration curve flows through. Falls back to the VZ
+/// path transparently while the bridge isn't connected (old base image,
+/// kill switch) and for devices without precise deltas (physical mouse
+/// wheels), whose clicky deltas the USB path already represents fine.
+final class PrecisionScrollVMView: VZVirtualMachineView {
+    weak var scrollBridge: PrecisionScrollBridge?
+
+    override func scrollWheel(with event: NSEvent) {
+        if let bridge = scrollBridge, bridge.isConnected,
+           event.hasPreciseScrollingDeltas {
+            bridge.sendScroll(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY)
+            return
+        }
+        super.scrollWheel(with: event)
     }
 }
 

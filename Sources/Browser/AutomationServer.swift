@@ -49,6 +49,16 @@ final class AutomationServer {
     /// permissions that AppleScript would require.
     var onWindowCommand: ((_ sessionID: String, _ action: String, _ width: Int, _ height: Int) -> Bool)?
 
+    /// Debug-only: inject a precise scroll delta into a session as if the
+    /// trackpad produced it. Used to calibrate and regression-test the
+    /// precision-scroll pipeline (host points → guest hi-res wheel units).
+    var onScrollInject: ((_ sessionID: String, _ dx: Double, _ dy: Double) -> Bool)?
+
+    /// Debug-only: run a command as root in the guest via the hvc0 serial
+    /// console. Fire-and-forget (no output capture) — diagnostics beyond
+    /// what the chrome-user shell agent can reach.
+    var onSerialExec: ((_ sessionID: String, _ command: String) -> Bool)?
+
     /// Callback to get trace events for a session with optional filters.
     var onGetTrace: ((_ sessionID: String, _ filters: [String: String]) -> [[String: Any]])?
 
@@ -363,6 +373,37 @@ final class AutomationServer {
             let height = bodyJSON["height"] as? Int ?? 0
             let ok = DispatchQueue.main.sync {
                 self.onWindowCommand?(sessionID, action, width, height) ?? false
+            }
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
+
+        // Debug: inject a precise scroll delta (trackpad-equivalent)
+        case ("POST", _) where path.hasSuffix("/scroll") && path.hasPrefix("/sessions/"):
+            guard debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Debug endpoints require BROMURE_DEBUG_CLAUDE"])
+                return
+            }
+            let middle = path.dropFirst("/sessions/".count).dropLast("/scroll".count)
+            let dx = (bodyJSON["dx"] as? Double) ?? (bodyJSON["dx"] as? Int).map(Double.init) ?? 0
+            let dy = (bodyJSON["dy"] as? Double) ?? (bodyJSON["dy"] as? Int).map(Double.init) ?? 0
+            let ok = DispatchQueue.main.sync {
+                self.onScrollInject?(String(middle), dx, dy) ?? false
+            }
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
+
+        // Debug: root command via serial console (fire-and-forget)
+        case ("POST", _) where path.hasSuffix("/serial") && path.hasPrefix("/sessions/"):
+            guard debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Debug endpoints require BROMURE_DEBUG_CLAUDE"])
+                return
+            }
+            let middle = path.dropFirst("/sessions/".count).dropLast("/serial".count)
+            let command = bodyJSON["command"] as? String ?? ""
+            guard !command.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Missing 'command'"])
+                return
+            }
+            let ok = DispatchQueue.main.sync {
+                self.onSerialExec?(String(middle), command) ?? false
             }
             sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
 

@@ -240,6 +240,7 @@ echo 'hvc0::respawn:/bin/login -f root' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/config-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh su -s /bin/sh chrome -c /usr/local/bin/file-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/webcam-agent.py' >> /mnt/etc/inittab
+echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/precision-scroll-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/warp-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/wireguard-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/ikev2-agent.py' >> /mnt/etc/inittab
@@ -267,6 +268,7 @@ install_config configs/cursor-index.theme /mnt/usr/share/icons/default/index.the
 mkdir -p /mnt/etc/X11/xorg.conf.d
 install_config   configs/xorg-10-virtio.conf   /mnt/etc/X11/xorg.conf.d/10-virtio.conf
 install_template configs/xorg-20-keyboard.conf /mnt/etc/X11/xorg.conf.d/20-keyboard.conf
+install_config   configs/xorg-20-bromure-scroll.conf /mnt/etc/X11/xorg.conf.d/20-bromure-scroll.conf
 install_template configs/xorg-30-scrolling.conf /mnt/etc/X11/xorg.conf.d/30-scrolling.conf
 install_config   configs/Xwrapper.conf         /mnt/etc/X11/Xwrapper.config
 
@@ -331,6 +333,7 @@ install_config scripts/file-picker-host.py  /mnt/usr/local/bin/file-picker-host.
 install_config scripts/link-agent.py        /mnt/usr/local/bin/link-agent.py        755
 install_config scripts/mtls-reload-agent.py /mnt/usr/local/bin/mtls-reload-agent.py 755
 install_config scripts/webcam-agent.py      /mnt/usr/local/bin/webcam-agent.py      755
+install_config scripts/precision-scroll-agent.py      /mnt/usr/local/bin/precision-scroll-agent.py      755
 install_config scripts/warp-agent.py        /mnt/usr/local/bin/warp-agent.py        755
 install_config scripts/wireguard-agent.py  /mnt/usr/local/bin/wireguard-agent.py  755
 install_config scripts/ikev2-agent.py     /mnt/usr/local/bin/ikev2-agent.py     755
