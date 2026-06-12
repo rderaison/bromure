@@ -63,7 +63,6 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
 
 struct ProfileSettingsView: View {
     @State var draft: Profile
-    let usedColors: Set<ProfileColor>
     let profileDiskExists: Bool
     let hasActiveSession: Bool
     /// Managed profiles ship in a signed manifest and can't be modified
@@ -80,7 +79,7 @@ struct ProfileSettingsView: View {
     // Initialized from initialCategory via init
     @State private var selectedCategory: SettingsCategory
 
-    init(draft: Profile, usedColors: Set<ProfileColor>, profileDiskExists: Bool,
+    init(draft: Profile, profileDiskExists: Bool,
          hasActiveSession: Bool = false,
          isReadOnly: Bool = false,
          onDeleteProfileDisk: (() -> Void)? = nil, onSave: @escaping (Profile) -> Void,
@@ -88,7 +87,6 @@ struct ProfileSettingsView: View {
          onShowPhishingConsent: ((@escaping () -> Void) -> Void)? = nil,
          initialCategory: SettingsCategory = .general) {
         self._draft = State(initialValue: draft)
-        self.usedColors = usedColors
         self.profileDiskExists = profileDiskExists
         self.hasActiveSession = hasActiveSession
         self.isReadOnly = isReadOnly
@@ -1634,10 +1632,10 @@ struct ProfileSettingsView: View {
 
     // MARK: - Helpers
 
+    /// All preset colors. Several profiles may share one — the color is a
+    /// visual cue, not an identity.
     private var availableColors: [ProfileColor] {
-        ProfileColor.allCases.filter { color in
-            !usedColors.contains(color) || draft.color == color
-        }
+        ProfileColor.allCases
     }
 
     static func loadCertificateAsPEM(from url: URL) throws -> String {

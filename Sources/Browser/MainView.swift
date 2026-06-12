@@ -23,11 +23,11 @@ struct MainView: View {
         return "Managed by \(org). Settings are not editable on this device."
     }
 
-    private func usedColors(excluding profileID: UUID? = nil) -> Set<ProfileColor> {
-        Set(state.profileManager.allProfiles.compactMap { profile in
-            if profile.id == profileID { return nil }
-            return profile.color
-        })
+    /// Colors already assigned to a profile. Only used to suggest a
+    /// distinct default for new profiles — colors are NOT exclusive, any
+    /// number of profiles may share one.
+    private func usedColors() -> Set<ProfileColor> {
+        Set(state.profileManager.allProfiles.compactMap(\.color))
     }
 
     var body: some View {
@@ -259,8 +259,13 @@ struct MainView: View {
             HStack(spacing: 4) {
                 Button {
                     newProfileName = ""
+                    // Colors aren't exclusive, but defaulting to one that
+                    // isn't in use yet keeps profiles distinguishable
+                    // without the user thinking about it. Falls back to
+                    // the first preset once every color is taken.
                     let taken = usedColors()
                     newProfileColor = ProfileColor.allCases.first { !taken.contains($0) }
+                        ?? ProfileColor.allCases.first
                     showNewProfile = true
                 } label: {
                     Image(systemName: "plus")
@@ -361,10 +366,9 @@ struct MainView: View {
                     .frame(width: 240)
 
                 Picker("Color", selection: $newProfileColor) {
-                    let taken = usedColors()
                     Text("None").tag(ProfileColor?.none)
                     Divider()
-                    ForEach(ProfileColor.allCases.filter { !taken.contains($0) }, id: \.self) { color in
+                    ForEach(ProfileColor.allCases, id: \.self) { color in
                         HStack(spacing: 6) {
                             Circle()
                                 .fill(ProfileSettingsView.swiftUIColor(for: color))
@@ -497,7 +501,6 @@ struct MainView: View {
         let isManaged = state.profileManager.isManaged(profile.id)
         let settingsView = ProfileSettingsView(
             draft: profile,
-            usedColors: usedColors(excluding: profile.id),
             profileDiskExists: ProfileDisk.diskExists(
                 at: state.profileManager.profileDiskURL(for: profile.id)
             ),
