@@ -391,7 +391,7 @@ public final class UbuntuImageManager {
         // and `rdinit=` lets us point PID 1 at our shim instead of
         // Alpine's /init. Our shim sets MTU on each ethernet-style
         // sysfs node, then exec's /init to hand control to Alpine.
-        let mtu = VMConfig.resolvedNICMTU(default: 1280)
+        let mtu = VMConfig.resolvedNICMTU()
         try Self.writeShimmedInitrd(
             original: alpineInitrdURL,
             mtu: mtu,
@@ -595,7 +595,7 @@ public final class UbuntuImageManager {
                 // recover, blackholing apt/debootstrap mid-download.
                 // Override via:
                 //   defaults write io.bromure.agentic-coding vm.mtu -int <value>
-                let mtu = VMConfig.resolvedNICMTU(default: 1280)
+                let mtu = VMConfig.resolvedNICMTU()
                 progress("Clamping installer MTU to \(mtu)…")
                 send("[ -n \"$NIC\" ] && ip link set dev \"$NIC\" mtu \(mtu) 2>/dev/null || true\n")
                 try await buffer.wait(for: "localhost:~#", timeout: 10, failures: [])

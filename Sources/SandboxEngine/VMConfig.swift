@@ -850,17 +850,16 @@ public struct VMConfig {
     }
 
     /// Read the user-configurable VM NIC MTU from UserDefaults
-    /// (`vm.mtu`) and clamp to a sane range. Caller picks the default
-    /// — different products want different floors (browser sessions
-    /// trend short-lived and tolerate 1400; AC's long-lived VPN /
-    /// corp-network installs hit more 1280-ceiling paths and benefit
-    /// from a lower default).
+    /// (`vm.mtu`) and clamp to a sane range. Default 1280 = the IPv6
+    /// minimum MTU, the conservative floor that survives every VPN /
+    /// corp-network path we've seen (WireGuard ~1420, IKEv2 ~1400,
+    /// nested tunnels lower still).
     /// Floor: 576 = RFC 791 IPv4 minimum reassembly buffer (any
     /// smaller value would break common IPv4 traffic). Ceiling: 9000
     /// = jumbo-frame upper bound; VZ NAT doesn't actually do jumbos
     /// but we don't reject the option in case bridged mode finds an
     /// interface that does.
-    public static func resolvedNICMTU(default defaultMTU: Int = 1400) -> Int {
+    public static func resolvedNICMTU(default defaultMTU: Int = 1280) -> Int {
         let raw = UserDefaults.standard.object(forKey: "vm.mtu") as? Int ?? defaultMTU
         return min(9000, max(576, raw))
     }

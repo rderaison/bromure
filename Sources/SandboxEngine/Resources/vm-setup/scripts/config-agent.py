@@ -439,7 +439,7 @@ def write_chrome_env(cfg):
     lines.append(f"DISPLAY_SCALE={display_scale}")
 
     # MTU clamp for the primary NIC. Sourced from the host's
-    # `vm.mtu` UserDefaults entry (default 1400). Applied in xinitrc
+    # `vm.mtu` UserDefaults entry (default 1280). Applied in xinitrc
     # before Chrome starts.
     mtu_value = cfg.get("mtu")
     if isinstance(mtu_value, int) and 576 <= mtu_value <= 9000:

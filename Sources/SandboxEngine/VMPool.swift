@@ -454,7 +454,7 @@ public final class VMPool {
         cfg["currentTime"] = Int(Date().timeIntervalSince1970)
         // Per-VM MTU clamp. VPNs (WireGuard ~1420, IKEv2 ~1400) push
         // path MTU below 1500 and PMTUD doesn't always recover. Default
-        // 1400 is safe; override via:
+        // 1280 (IPv6 minimum) is safe; override via:
         //   defaults write io.bromure.app vm.mtu -int <value>
         cfg["mtu"] = VMConfig.resolvedNICMTU()
 

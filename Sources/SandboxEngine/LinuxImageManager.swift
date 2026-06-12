@@ -593,7 +593,8 @@ public final class LinuxImageManager {
 
         // Clamp installer NIC MTU before any apk/wget call. VPN paths
         // (WireGuard ~1420, IKEv2 ~1400) often silently truncate large
-        // TLS frames at MTU 1500. Default 1400 is safe; override via:
+        // TLS frames at MTU 1500. Default 1280 (IPv6 minimum) is safe;
+        // override via:
         //   defaults write io.bromure.app vm.mtu -int <value>
         let installerMTU = VMConfig.resolvedNICMTU()
         progress(.message("Clamping installer MTU to \(installerMTU)..."))
