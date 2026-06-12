@@ -61,6 +61,16 @@ public final class TabBridge: NSObject, @unchecked Sendable {
     private var readSource: DispatchSourceRead?
     private var pending = Data()
 
+    /// Commands issued before the guest's tab-agent has connected. The
+    /// window opens as soon as the VM is claimed, but on a cold boot
+    /// Chromium + tab-agent take a few more seconds to come up — dropping
+    /// commands in that gap made a boot-time ⌘T a silent no-op that left
+    /// the host's focus machinery armed against a tab that never came.
+    /// Buffered and flushed in order on connect. Bounded so a guest that
+    /// never connects can't grow the queue forever.
+    private var queuedCommands: [[String: Any]] = []
+    private static let maxQueuedCommands = 32
+
     /// Published tab list, in guest-reported order. Set on the main actor.
     public private(set) var tabs: [TabInfo] = [] {
         didSet { onTabsChanged?(tabs) }
@@ -103,6 +113,7 @@ public final class TabBridge: NSObject, @unchecked Sendable {
         readSource = nil
         currentConn = nil
         currentFD = -1
+        queuedCommands = []
         socketDevice?.removeSocketListener(forPort: Self.vsockPort)
         tabs = []
     }
@@ -226,6 +237,16 @@ public final class TabBridge: NSObject, @unchecked Sendable {
         }
         src.activate()
         onConnected?()
+
+        // Flush anything the host asked for while the agent was still
+        // booting (⌘T right after the window opened, an early navigate…).
+        // The agent only connects once CDP is up, so these are actionable
+        // the moment they arrive.
+        let queued = queuedCommands
+        queuedCommands = []
+        for cmd in queued {
+            send(cmd)
+        }
     }
 
     private func handleLine(_ data: Data) {
@@ -319,7 +340,10 @@ public final class TabBridge: NSObject, @unchecked Sendable {
 
     private func send(_ obj: [String: Any]) {
         guard currentFD >= 0 else {
-            tbLog("[TabBridge] drop send (no guest): \(obj)")
+            tbLog("[TabBridge] queueing send (no guest yet): \(obj)")
+            if queuedCommands.count < Self.maxQueuedCommands {
+                queuedCommands.append(obj)
+            }
             return
         }
         // Wake the VM if it was auto-suspended — the guest can't read our

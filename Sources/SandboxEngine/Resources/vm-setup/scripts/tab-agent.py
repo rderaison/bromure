@@ -702,6 +702,19 @@ def active_target_id(targets, visibility=None):
     if _is_active_trusted():
         tracked = _get_active()
         if tracked and any(t["id"] == tracked for t in targets):
+            # Enforce, don't just report: if Chromium visibly disagrees
+            # (a boot-time /json/activate can be dropped while the window
+            # manager is still coming up), re-issue the activation. A
+            # blank tab can never flip itself back via the visibility
+            # signal, so without this one dropped activate strands the
+            # user on the wrong tab as soon as trust expires.
+            if visibility and _is_safe_id(tracked):
+                visible = [
+                    t["id"] for t in targets
+                    if visibility.get(t["id"]) == "visible"
+                ]
+                if visible and tracked not in visible:
+                    cdp_simple_post(f"/json/activate/{tracked}")
             return tracked
 
     if visibility:
