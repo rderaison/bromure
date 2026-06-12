@@ -548,21 +548,23 @@ struct VMConfigTests {
         #expect(config.blockDownloads == true)
     }
 
-    @Test("CPU auto-calculation: min 2, max processorCount, scaled by memory")
+    @Test("CPU auto-calculation: half the host cores (2...12), independent of memory")
     func cpuAutoCalc() {
         let cores = ProcessInfo.processInfo.processorCount
+        let expected = max(2, min(cores / 2, 12))
 
-        // 1 GB → max(2, 2) = 2, capped at cores
+        // Memory does NOT influence the vCPU count: video decode and
+        // llvmpipe compositing are pure CPU work, and coupling vCPUs to
+        // memoryGB starved them on low-memory configs (4 vCPUs on a
+        // 24-core host made fullscreen 1080p60 AV1 drop >50% of frames).
         let c1 = VMConfig(memorySize: 1 * 1024 * 1024 * 1024)
-        #expect(c1.cpuCount == min(2, cores))
+        #expect(c1.cpuCount == expected)
 
-        // 4 GB (default) → max(2, 8) = 8, capped at cores
         let c4 = VMConfig(memorySize: 4 * 1024 * 1024 * 1024)
-        #expect(c4.cpuCount == min(8, cores))
+        #expect(c4.cpuCount == expected)
 
-        // 16 GB → max(2, 32) = 32, capped at cores
         let c16 = VMConfig(memorySize: 16 * 1024 * 1024 * 1024)
-        #expect(c16.cpuCount == min(32, cores))
+        #expect(c16.cpuCount == expected)
 
         // Explicit CPU count overrides auto-calc
         let explicit = VMConfig(cpuCount: 3, memorySize: 16 * 1024 * 1024 * 1024)

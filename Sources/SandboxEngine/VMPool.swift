@@ -594,6 +594,18 @@ public final class VMPool {
         // Must stay in sync with the nativeChromeInset baked into VMConfig.
         cfg["displayScale"] = VMConfig.resolvedDisplayScale()
 
+        // Developer perf knobs, applied by config-agent in the guest:
+        //   defaults write io.bromure.app vm.extraChromeFlags -string "--foo --bar"
+        //   defaults write io.bromure.app vm.chromeEnvExtra -string "LP_NUM_THREADS=8"
+        if let extraFlags = UserDefaults.standard.string(forKey: "vm.extraChromeFlags"),
+           !extraFlags.isEmpty {
+            cfg["extraChromeFlags"] = extraFlags
+        }
+        if let envExtra = UserDefaults.standard.string(forKey: "vm.chromeEnvExtra"),
+           !envExtra.isEmpty {
+            cfg["chromeEnvExtra"] = envExtra
+        }
+
         // App version for user-agent suffix
         if let version = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
             cfg["appVersion"] = version

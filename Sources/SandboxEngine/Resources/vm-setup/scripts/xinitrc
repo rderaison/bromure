@@ -92,7 +92,11 @@ fi
 [ "$NATIVE_CHROME" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/tab-agent.py &
 [ "$DEBUG_SHELL" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/shell-agent.py &
 echo "xinitrc: EXTRA_FLAGS=$EXTRA_FLAGS CHROME_URL=$CHROME_URL SWAP_CMD_CTRL=$SWAP_CMD_CTRL" > /dev/hvc0
-export LIBGL_ALWAYS_SOFTWARE=1
+# Mesa software GL (llvmpipe) — VZ's virtio-gpu has no 3D acceleration
+# for Linux guests, and llvmpipe beats Chromium's bundled SwiftShader by
+# ~2x on compositing. NO_LIBGL_SOFTWARE=1 (via vm.chromeEnvExtra) skips
+# this for experiments.
+[ "$NO_LIBGL_SOFTWARE" = "1" ] || export LIBGL_ALWAYS_SOFTWARE=1
 
 
 # Boost Xorg and Chromium to high CPU priority (-10 nice).

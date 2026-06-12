@@ -296,6 +296,12 @@ def write_chrome_env(cfg):
     if cfg.get("smoothScrolling"):
         extra_flags.append("--enable-smooth-scrolling")
 
+    # Host-driven passthrough: `vm.extraChromeFlags` appends raw Chromium
+    # switches. Developer knob for perf A/B testing without an image
+    # rebuild per experiment.
+    if cfg.get("extraChromeFlags"):
+        extra_flags.append(str(cfg["extraChromeFlags"]))
+
     extensions = []
     if cfg.get("phishingGuard"):
         extensions.append("/opt/bromure/extensions/phishing-guard")
@@ -437,6 +443,17 @@ def write_chrome_env(cfg):
     # Display scale: passed at runtime so changing 1x/2x doesn't require image rebuild
     display_scale = cfg.get("displayScale", 2)
     lines.append(f"DISPLAY_SCALE={display_scale}")
+
+    # Host-driven env passthrough (`vm.chromeEnvExtra`): KEY=VALUE pairs
+    # (newline- or semicolon-separated) exported before Chromium starts —
+    # e.g. LP_NUM_THREADS=8 to tune llvmpipe, NO_LIBGL_SOFTWARE=1 to skip
+    # the LIBGL_ALWAYS_SOFTWARE export in xinitrc. Validated to plain
+    # KEY=VALUE with no shell metacharacters since chrome-env is sourced.
+    env_extra = str(cfg.get("chromeEnvExtra") or "")
+    for raw in env_extra.replace(";", "\n").splitlines():
+        raw = raw.strip()
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_.,:/+=-]*$", raw):
+            lines.append(f"export {raw}")
 
     # MTU clamp for the primary NIC. Sourced from the host's
     # `vm.mtu` UserDefaults entry (default 1280). Applied in xinitrc

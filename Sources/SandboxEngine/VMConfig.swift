@@ -335,8 +335,15 @@ public struct VMConfig {
         locale: String? = nil,
         userExtensionIDs: [String] = []
     ) {
-        let memGB = Int(memorySize / (1024 * 1024 * 1024))
-        self.cpuCount = cpuCount ?? min(max(2, memGB * 2), ProcessInfo.processInfo.processorCount)
+        // Default vCPU count scales with HOST cores, never with guest
+        // memory. The VM has no GPU acceleration (VZ virtio-gpu is 2D-only
+        // for Linux guests), so video decode AND llvmpipe compositing are
+        // pure CPU work — tying vCPUs to memoryGB starved exactly that
+        // path (2 GB guests got 4 vCPUs on a 24-core host; fullscreen
+        // video was visibly choppy). Half the host cores, capped at 12,
+        // matches what v1.0.0 shipped and what smooth 1080p60 software
+        // playback needs. Idle vCPUs cost the host ~nothing.
+        self.cpuCount = cpuCount ?? max(2, min(ProcessInfo.processInfo.processorCount / 2, 12))
         self.memorySize = memorySize
         self.displayWidth = displayWidth
         self.displayHeight = displayHeight

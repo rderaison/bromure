@@ -43,6 +43,12 @@ final class AutomationServer {
     /// Callback to get app state (debug only).
     var onGetAppState: (() -> [String: Any])?
 
+    /// Debug-only: drive a session window from automation (fullscreen /
+    /// exit-fullscreen / zoom / resize). Lets perf benchmarks reproduce
+    /// "fullscreen video" deterministically without Accessibility (TCC)
+    /// permissions that AppleScript would require.
+    var onWindowCommand: ((_ sessionID: String, _ action: String, _ width: Int, _ height: Int) -> Bool)?
+
     /// Callback to get trace events for a session with optional filters.
     var onGetTrace: ((_ sessionID: String, _ filters: [String: String]) -> [[String: Any]])?
 
@@ -343,6 +349,22 @@ final class AutomationServer {
                 sendResponse(fd: fd, status: 502, body: ["error": "Shell command execution failed"])
             }
             _ = conn.conn
+
+        // Debug: control a session's macOS window (fullscreen/zoom/resize)
+        case ("POST", _) where path.hasSuffix("/window") && path.hasPrefix("/sessions/"):
+            guard debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Debug endpoints require BROMURE_DEBUG_CLAUDE"])
+                return
+            }
+            let middle = path.dropFirst("/sessions/".count).dropLast("/window".count)
+            let sessionID = String(middle)
+            let action = bodyJSON["action"] as? String ?? ""
+            let width = bodyJSON["width"] as? Int ?? 0
+            let height = bodyJSON["height"] as? Int ?? 0
+            let ok = DispatchQueue.main.sync {
+                self.onWindowCommand?(sessionID, action, width, height) ?? false
+            }
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
 
         // Debug: app state
         case ("GET", "/app/state"):

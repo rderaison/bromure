@@ -1372,6 +1372,43 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
+        server.onWindowCommand = { [weak self] sessionID, action, width, height in
+            guard let self,
+                  let session = self.sessions.first(where: {
+                      $0.id.uuidString.caseInsensitiveCompare(sessionID) == .orderedSame
+                  })
+            else { return false }
+            let window = session.window
+            switch action {
+            case "fullscreen":
+                // toggleFullScreen is silently ignored when the app is in
+                // the background or the window isn't key — activate first
+                // so the benchmark driver doesn't need Accessibility
+                // permissions or AppleScript.
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKeyAndOrderFront(nil)
+                // Defer the toggle a beat: activation hasn't finished
+                // propagating on this very runloop turn, and AppKit
+                // silently ignores toggleFullScreen until it has.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak window] in
+                    guard let window,
+                          !window.styleMask.contains(.fullScreen) else { return }
+                    window.toggleFullScreen(nil)
+                }
+            case "exit-fullscreen":
+                if window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
+            case "zoom":
+                window.zoom(nil)
+            case "resize" where width > 100 && height > 100:
+                var frame = window.frame
+                frame.size = NSSize(width: width, height: height)
+                window.setFrame(frame, display: true)
+            default:
+                return false
+            }
+            return true
+        }
+
         server.onGetAppState = { [weak self] in
             guard let self else { return [:] }
             let phase: String
