@@ -25,15 +25,38 @@ final class NativeTabBarModel {
     /// on the new tab's URL field. Cleared after firing.
     var pendingFocusOnActiveChange: Bool = false
 
+    /// The live AddressField NSTextField, registered by its makeNSView /
+    /// updateNSView. ⌘L and the post-⌘T focus loop use this DIRECT
+    /// reference: searching the window's view hierarchy for the field is
+    /// unreliable (toolbar items live in the titlebar container, and in
+    /// fullscreen AppKit moves them into a separate
+    /// NSToolbarFullScreenWindow entirely). Weak — the pill is recreated
+    /// whenever the active tab changes.
+    @ObservationIgnored weak var addressField: NSTextField?
+
+
+    /// URLs that mean "an empty tab": ⌘T tabs are created on about:blank,
+    /// while Chromium-initiated tabs (and restore-session leftovers) land
+    /// on its new-tab page. Both render as a localized "New Tab" label and
+    /// an empty address field — without this the raw URL leaks into the
+    /// UI as a tab literally named "about:blank" or "newtab" (the host
+    /// component of chrome://newtab/).
+    static func isNewTabURL(_ url: String) -> Bool {
+        url.isEmpty
+            || url == "about:blank"
+            || url.hasPrefix("chrome://newtab")
+            || url.hasPrefix("chrome://new-tab-page")
+    }
 
     /// What to show in the URL field while the active tab is NOT being
     /// edited. Strips the scheme (so "macbidouille.com/news/…" instead
     /// of "https://macbidouille.com/news/…") for a cleaner read, but
     /// keeps the path/query/fragment so two tabs on the same host stay
     /// distinguishable. The full URL with scheme is still swapped in on
-    /// focus for editing/copying.
+    /// focus for editing/copying. New-tab URLs show as empty so the
+    /// field falls back to its placeholder.
     static func displayValue(for tab: TabInfo?) -> String {
-        guard let tab, !tab.url.isEmpty else { return "" }
+        guard let tab, !tab.url.isEmpty, !isNewTabURL(tab.url) else { return "" }
         guard let url = URL(string: tab.url), let host = url.host else {
             return tab.url
         }
@@ -292,11 +315,15 @@ private struct ActiveTabPill: View {
                 centered: true,
                 shouldFocusOnAppear: model.pendingFocusOnActiveChange,
                 onFocusConsumed: { model.pendingFocusOnActiveChange = false },
+                onFieldAvailable: { model.addressField = $0 },
                 onBeginEditing: {
                     // Swap the domain display for the editable full URL,
                     // unless the user is mid-draft (we already preserved
-                    // their typed text in pendingAddress).
+                    // their typed text in pendingAddress). New-tab URLs
+                    // stay empty — nobody wants to delete "about:blank"
+                    // before they can type.
                     if let url = model.activeTab?.url, !url.isEmpty,
+                       !NativeTabBarModel.isNewTabURL(url),
                        model.pendingAddress == NativeTabBarModel.displayValue(for: model.activeTab) {
                         model.pendingAddress = url
                     }
@@ -304,6 +331,11 @@ private struct ActiveTabPill: View {
                 onEndEditing: {
                     // User clicked away without submitting. Revert to the
                     // domain display so the field looks like a label again.
+                    // Skip when editing ended because the active tab changed
+                    // out from under this pill (guest-side switch): setTabs
+                    // has already restored the right draft / display value
+                    // for the new tab, and reverting here would stomp it.
+                    guard model.activeTab?.id == tab.id else { return }
                     model.pendingAddress = NativeTabBarModel.displayValue(for: model.activeTab)
                 },
                 onSubmit: { model.onNavigate?(model.pendingAddress) }
@@ -389,6 +421,13 @@ private struct InactiveTabPill: View {
     }
 
     private var displayTitle: String {
+        if NativeTabBarModel.isNewTabURL(tab.url) {
+            // Chromium's /json reports assorted formatted-URL titles for
+            // empty tabs depending on load state — "about:blank",
+            // "newtab", English "New Tab" — never leak them; an empty
+            // tab is always the localized "New Tab".
+            return String(localized: "New Tab")
+        }
         if !tab.title.isEmpty { return tab.title }
         if let url = URL(string: tab.url), let host = url.host { return host }
         return tab.url.isEmpty ? String(localized: "New Tab") : tab.url
@@ -748,6 +787,9 @@ private struct AddressField: NSViewRepresentable {
     /// Called once the focus request above has been honoured, so the
     /// caller can clear its trigger flag.
     var onFocusConsumed: (() -> Void)?
+    /// Hands the freshly-created NSTextField back to the caller so the
+    /// model can hold a direct (weak) reference for ⌘L / focus forcing.
+    var onFieldAvailable: ((NSTextField) -> Void)?
     var onBeginEditing: (() -> Void)?
     var onEndEditing: (() -> Void)?
     let onSubmit: () -> Void
@@ -775,6 +817,7 @@ private struct AddressField: NSViewRepresentable {
         field.alignment = centered ? .center : .left
         field.target = context.coordinator
         field.action = #selector(Coordinator.submit)
+        onFieldAvailable?(field)
 
         if shouldFocusOnAppear {
             // Stealing focus from the VZVirtualMachineView is more
@@ -830,6 +873,11 @@ private struct AddressField: NSViewRepresentable {
         // and bindings dispatched from delegate callbacks see the current
         // values, not the snapshot taken at makeCoordinator time.
         context.coordinator.parent = self
+
+        // Re-register on every update: when the active tab changes the
+        // pill (and field) are recreated, and the new field must win over
+        // a possibly still-alive predecessor.
+        onFieldAvailable?(nsView)
 
         // Only sync stringValue when the field is NOT being edited. While
         // the user is typing, the field editor is the source of truth:

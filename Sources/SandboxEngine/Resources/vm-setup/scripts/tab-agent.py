@@ -594,13 +594,21 @@ _active_id = None
 _active_lock = threading.Lock()
 _active_trusted_until = 0.0  # monotonic-clock seconds
 _ACTIVE_TRUST_TTL = 0.6      # window after explicit set; ≥ poll interval × 1.5
+# Trust window after explicit tab creation. A fresh about:blank tab can't
+# confirm itself through the visibility signal (non-http(s) URLs aren't
+# evaluable), so once the standard trust expires the only remaining signal
+# is the X11 title match — which can be stale or ambiguous and steal
+# `active` back to the previous tab while the user is already typing in
+# the new tab's address bar. Nothing would ever flip it back (the blank
+# tab never reports 'visible'), so hold the explicit set longer.
+_NEW_TAB_TRUST_TTL = 2.0
 
 
-def _set_active(tid):
+def _set_active(tid, ttl=_ACTIVE_TRUST_TTL):
     global _active_id, _active_trusted_until
     with _active_lock:
         _active_id = tid
-        _active_trusted_until = time.monotonic() + _ACTIVE_TRUST_TTL
+        _active_trusted_until = time.monotonic() + ttl
 
 
 def _get_active():
@@ -626,28 +634,48 @@ def _xdotool_active_window_title():
         ).decode("utf-8", errors="replace").strip()
     except Exception:
         return None
-    return out or None
+    # A bare "Chromium" means the active tab has no title yet (fresh
+    # about:blank, page still loading); matching on it would pick an
+    # arbitrary tab. Let the caller fall through to tracked-id logic.
+    if not out or out.lower() in ("chromium", "chromium-browser"):
+        return None
+    return out
 
 
 def _match_target_by_title(targets, raw_title):
     """Find the target whose title best matches an X11 window title.
     Chromium appends ' - Chromium' (or sometimes a profile suffix); strip
-    that, then do an exact-match pass before a substring fallback."""
+    that, then do an exact-match pass before a substring fallback.
+
+    Titles aren't unique — two ⌘T tabs are both "about:blank" — so when
+    several targets match, prefer the one we already track as active
+    instead of blindly returning the first. Switching to an arbitrary
+    same-titled tab is exactly the active-flap that yanks the host's
+    address bar out from under the user mid-edit."""
     if not raw_title:
         return None
     stripped = raw_title.rsplit(" - ", 1)[0].strip().lower()
+
+    def pick(ids):
+        if not ids:
+            return None
+        tracked = _get_active()
+        return tracked if tracked in ids else ids[0]
+
     # Exact match first.
-    for t in targets:
-        title = (t.get("title") or "").strip()
-        if title and title.lower() == stripped:
-            return t["id"]
+    exact = [
+        t["id"] for t in targets
+        if (t.get("title") or "").strip() and (t.get("title") or "").strip().lower() == stripped
+    ]
+    if exact:
+        return pick(exact)
     # Substring fallback (handles partial titles, e.g. ellipsis truncation).
     lower = raw_title.lower()
-    for t in targets:
-        title = (t.get("title") or "").strip().lower()
-        if title and title in lower:
-            return t["id"]
-    return None
+    subs = [
+        t["id"] for t in targets
+        if (t.get("title") or "").strip() and (t.get("title") or "").strip().lower() in lower
+    ]
+    return pick(subs)
 
 
 def active_target_id(targets, visibility=None):
@@ -803,7 +831,7 @@ def handle_cmd(msg, targets_by_id, link):
         new_tid = create_new_tab(url)
         if not new_tid:
             return
-        _set_active(new_tid)
+        _set_active(new_tid, ttl=_NEW_TAB_TRUST_TTL)
         # Push an immediate upsert so the host UI shows the new tab without
         # waiting for the next 400ms poll, and so any typed URL navigates
         # the new tab instead of the previous one.
@@ -823,7 +851,7 @@ def handle_cmd(msg, targets_by_id, link):
             log(f"navigate: target {tid} not found; falling back to new tab")
             new_tid = create_new_tab(url)
             if new_tid:
-                _set_active(new_tid)
+                _set_active(new_tid, ttl=_NEW_TAB_TRUST_TTL)
             return
         res = cdp_ws_call(t["webSocketDebuggerUrl"], "Page.navigate", {"url": url})
         if res is None:

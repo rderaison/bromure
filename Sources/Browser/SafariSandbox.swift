@@ -769,6 +769,12 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // Edit menu
         let editMenu = NSMenu(title: NSLocalizedString("Edit", comment: ""))
+        // Undo/Redo target the first responder's undo manager (the address
+        // field's editor in native-tabs mode). Selector(("undo:")) because
+        // there's no typed selector for the responder-chain undo action.
+        editMenu.addItem(withTitle: NSLocalizedString("Undo", comment: ""), action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: NSLocalizedString("Redo", comment: ""), action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: NSLocalizedString("Cut", comment: ""), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: NSLocalizedString("Copy", comment: ""), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: NSLocalizedString("Paste", comment: ""), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
@@ -2124,7 +2130,7 @@ final class BrowserSession {
                     window?.makeFirstResponder(nil)
                     bridge?.newTab(url: "about:blank")
                     tabModel?.pendingFocusOnActiveChange = true
-                    Self.forceFocusURLField(window: window)
+                    Self.forceFocusURLField(window: window, model: tabModel)
                 }
                 tabModel.onNavigate = { [weak bridge, weak tabModel] raw in
                     guard let bridge, let tabModel else { return }
@@ -2159,6 +2165,25 @@ final class BrowserSession {
                 // Installed as a local monitor so we only swallow events for
                 // this window.
                 //
+                // Routing, in priority order:
+                //   1. ⌃⌘ chords → AppKit (system territory: ⌃⌘F fullscreen).
+                //   2. ⌘ + non-printing keys (arrows, delete, return, …) →
+                //      pass through; they're line/word editing chords in
+                //      guest text fields and in the address bar.
+                //   3. Host-handled browser shortcuts (⌘T, ⌘W, ⌘L, …,
+                //      ⌥⌘H) → handled here, swallowed.
+                //   4. ⌘H → to the guest (Ctrl+H after the Cmd/Ctrl swap:
+                //      Chromium's History page).
+                //   5. In-page editing / zoom chords (⌘C/V/X/A/Z, ⌘=/-/0) →
+                //      to the guest, or to the address field's editor when
+                //      it has focus.
+                //   6. Anything else ⌘-shaped → offered to the app's main
+                //      menu (⌘N, ⌘O, ⌘D, ⌘M, ⌘, and ⌘Q live there — the
+                //      VZ view would otherwise claim the chord before
+                //      AppKit walks the menu), then swallowed so stray
+                //      shortcuts never reach the VM and trigger Chromium
+                //      UI in the hidden chrome region.
+                //
                 // Structure: inspect primitives (chars, modifier flags, window
                 // identity) synchronously in the monitor block, then fire
                 // side effects on a @MainActor Task. This avoids ever
@@ -2178,22 +2203,71 @@ final class BrowserSession {
                           ObjectIdentifier(eventWindow) == windowID
                     else { return event }
                     guard let key = event.charactersIgnoringModifiers?.lowercased(),
-                          Self.nativeChromeShortcutKeys.contains(key)
+                          !key.isEmpty
                     else { return event }
 
                     // Snapshot modifiers off `event` (non-Sendable) so the
                     // @MainActor Task can route ⌘H vs ⌥⌘H without capturing
-                    // the event itself.
+                    // the event itself. Caps Lock / numeric-pad / function
+                    // flags aren't chord modifiers — without stripping them
+                    // the exact-match comparisons below fail (e.g. every
+                    // shortcut goes dead while Caps Lock is on).
                     let modifiers = event.modifierFlags
                         .intersection(.deviceIndependentFlagsMask)
+                        .subtracting([.capsLock, .numericPad, .function])
 
-                    // ⇧⌘H / ⌃⌘H aren't standard hide shortcuts; let them
-                    // fall through to the guest instead of being silently
-                    // swallowed by the monitor.
-                    if key == "h",
-                       modifiers != [.command],
-                       modifiers != [.command, .option] {
+                    // 1. System chords.
+                    if modifiers.contains(.control) { return event }
+
+                    // 2. Non-printing keys: NSEvent function-key range
+                    // (arrows, Home/End, page up/down, F-keys) plus
+                    // delete, return, tab, escape.
+                    if let scalar = key.unicodeScalars.first,
+                       scalar.value >= 0xF700
+                        || key == "\u{7f}" || key == "\r"
+                        || key == "\t" || key == "\u{1b}" {
                         return event
+                    }
+
+                    // 3. Host-handled shortcuts. Exact-modifier match so
+                    // e.g. ⇧⌘T doesn't trigger the ⌘T handler. "h" is
+                    // host-handled only as ⌥⌘H (Hide Others); plain ⌘H
+                    // forwards to the guest below.
+                    let handled = Self.nativeChromeShortcutKeys.contains(key)
+                        && (key == "h"
+                            ? modifiers == [.command, .option]
+                            : modifiers == [.command])
+
+                    // 4. ⌘H → the guest (Ctrl+H: Chromium's History page).
+                    // Hiding Bromure from a session window moved to the
+                    // menu only; ⌥⌘H (Hide Others) stays host-handled.
+                    if key == "h", modifiers == [.command] {
+                        return event
+                    }
+
+                    // 5. Editing / zoom chords for the guest (⇧ variants
+                    // included: ⇧⌘Z redo, ⇧⌘V paste-without-format,
+                    // ⇧⌘= zoom in).
+                    if !handled,
+                       Self.nativeChromeGuestEditingKeys.contains(key),
+                       modifiers == [.command] || modifiers == [.command, .shift] {
+                        // When the address field is being edited these
+                        // belong to its field editor, not the page — but
+                        // the VZ view claims ⌘+letter chords before AppKit
+                        // walks the Edit menu, so dispatch the menu
+                        // ourselves and swallow on success.
+                        if let window, window.firstResponder is NSTextView,
+                           NSApp.mainMenu?.performKeyEquivalent(with: event) == true {
+                            return nil
+                        }
+                        return event
+                    }
+
+                    // 6. Unhandled ⌘ chord: main menu gets first refusal,
+                    // then it dies here.
+                    if !handled {
+                        _ = NSApp.mainMenu?.performKeyEquivalent(with: event)
+                        return nil
                     }
 
                     Task { @MainActor in
@@ -2209,10 +2283,22 @@ final class BrowserSession {
                             window.makeFirstResponder(nil)
                             bridge.newTab(url: "about:blank")
                             tabModel.pendingFocusOnActiveChange = true
-                            Self.forceFocusURLField(window: window)
+                            Self.forceFocusURLField(window: window, model: tabModel)
                         case "l":
-                            if let field = window.contentView.flatMap(findFirstField) {
-                                window.makeFirstResponder(field)
+                            // Focus the address field and select the URL.
+                            // A one-shot makeFirstResponder isn't enough:
+                            // vmView often refuses to resign on the first
+                            // attempt (see onNewTab), so force-resign and
+                            // run the retrying focus loop. Select-all
+                            // happens in the field's becomeFirstResponder.
+                            if let field = tabModel.addressField,
+                               let editor = field.currentEditor() as? NSTextView,
+                               field.window?.firstResponder === editor {
+                                // Already focused — re-select, Safari-style.
+                                editor.selectAll(nil)
+                            } else {
+                                window.makeFirstResponder(nil)
+                                Self.forceFocusURLField(window: window, model: tabModel)
                             }
                         case "r":
                             if let id = tabModel.activeTab?.id { bridge.reload(id: id) }
@@ -2264,25 +2350,22 @@ final class BrowserSession {
                             tabModel.markActiveLocally(target.id)
                             bridge.activate(id: target.id)
                         case "h":
-                            // VZVirtualMachineView's performKeyEquivalent
-                            // claims ⌘+letter shortcuts before AppKit walks
-                            // the main menu, so the Hide menu items never
-                            // fire when a session window is key. Dispatch
-                            // hide ourselves; the menu items still cover
-                            // launcher/settings windows where no monitor
-                            // is installed.
+                            // Only ⌥⌘H (Hide Others) reaches here — plain
+                            // ⌘H forwards to the guest as Ctrl+H, Chromium's
+                            // History page. VZVirtualMachineView's
+                            // performKeyEquivalent claims ⌘+letter chords
+                            // before AppKit walks the main menu, so we
+                            // dispatch hide-others ourselves; the menu item
+                            // still covers launcher/settings windows where
+                            // no monitor is installed.
                             //
-                            // Defer to the next runloop tick: calling
-                            // NSApp.hide directly from within keyDown
-                            // processing of a session window doesn't
-                            // actually hide — the in-flight event seems
-                            // to race the hide and win.
+                            // Defer to the next runloop tick: calling it
+                            // directly from within keyDown processing of a
+                            // session window doesn't actually hide — the
+                            // in-flight event seems to race the hide and
+                            // win.
                             DispatchQueue.main.async {
-                                if modifiers == [.command, .option] {
-                                    NSApp.hideOtherApplications(nil)
-                                } else {
-                                    NSApp.hide(nil)
-                                }
+                                NSApp.hideOtherApplications(nil)
                             }
                         default:
                             break
@@ -2531,18 +2614,39 @@ final class BrowserSession {
     /// other view holds the responder, force-resigns it and re-claims the
     /// field. Stops once focus is on the field, or after `deadline`.
     @MainActor
-    static func forceFocusURLField(window: NSWindow?, deadline: TimeInterval = 1.0) {
-        guard let window else { return }
+    static func forceFocusURLField(
+        window: NSWindow?,
+        model: NativeTabBarModel? = nil,
+        deadline: TimeInterval = 1.0
+    ) {
         let endTime = CFAbsoluteTimeGetCurrent() + deadline
         func tick() {
             if CFAbsoluteTimeGetCurrent() > endTime { return }
-            guard let field = window.contentView.flatMap(findFirstField) else {
+            // Prefer the model's direct field reference; fall back to a
+            // hierarchy search. The field's OWN window matters: in
+            // fullscreen AppKit hosts the toolbar in a separate
+            // NSToolbarFullScreenWindow, so the session window can't make
+            // the field first responder at all.
+            guard let field = model?.addressField
+                    ?? window.flatMap({ Self.addressField(in: $0) }),
+                  let fieldWindow = field.window
+            else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick() }
                 return
             }
-            if window.firstResponder !== field {
-                _ = window.makeFirstResponder(nil)
-                if !window.makeFirstResponder(field) {
+            // When an NSTextField is focused, the window's firstResponder
+            // is its FIELD EDITOR (a shared NSTextView), never the field
+            // itself. Comparing against `field` alone reads "unfocused"
+            // every tick, so the loop would resign + reclaim focus every
+            // 50 ms — each round ends the user's editing session (reverting
+            // their typed text) and re-runs select-all, fighting their
+            // typing and selection for the whole deadline window.
+            let editor = field.currentEditor()
+            let focused = fieldWindow.firstResponder === field
+                || (editor != nil && fieldWindow.firstResponder === editor)
+            if !focused {
+                _ = fieldWindow.makeFirstResponder(nil)
+                if !fieldWindow.makeFirstResponder(field) {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick() }
                     return
                 }
@@ -2555,24 +2659,46 @@ final class BrowserSession {
         tick()
     }
 
-    /// Keys (with ⌘) that the native-chrome local monitor consumes. Must
-    /// stay in sync with the switch statement in the monitor handler.
-    /// In-page editing shortcuts (⌘C/⌘V/⌘X/⌘A/⌘Z) intentionally aren't here:
-    /// they need to keep flowing to Chromium so selection/copy works on
-    /// the page. ⌘Q quits Bromure via AppKit's standard responder chain
-    /// once `capturesSystemKeys` is off.
+    /// Fallback hierarchy search for the native-tabs address field, used
+    /// only when the model's direct reference isn't available. The field
+    /// lives in an NSToolbarItem, which AppKit mounts in the titlebar
+    /// container — a SIBLING of `contentView` — so the search starts at
+    /// the window's root view. Known to miss in fullscreen, where the
+    /// toolbar moves to its own window; the direct reference covers that.
+    @MainActor
+    static func addressField(in window: NSWindow) -> NSTextField? {
+        guard let root = window.contentView?.superview ?? window.contentView else {
+            return nil
+        }
+        return findFirstField(root)
+    }
+
+    /// Keys (with ⌘) that the native-chrome local monitor handles host-side.
+    /// Must stay in sync with the switch statement in the monitor handler.
+    /// ⌘W is here so we can close the active tab first and only close the
+    /// window when there's a single tab left.
+    /// "h" is here for ⌥⌘H (Hide Others) only: VZVirtualMachineView's
+    /// performKeyEquivalent claims ⌘+letter chords before AppKit walks the
+    /// main menu, so we dispatch hideOtherApplications ourselves. Plain ⌘H
+    /// forwards to the guest (Ctrl+H → Chromium's History page) instead of
+    /// hiding Bromure — see the monitor's routing.
     /// ⌘P is here unconditionally; the handler no-ops when the profile
     /// doesn't allow printing, which suppresses Chromium's hidden print
     /// dialog as a side benefit.
-    /// ⌘W is here so we can close the active tab first and only close the
-    /// window when there's a single tab left.
-    /// ⌘H / ⌥⌘H are here because VZVirtualMachineView's performKeyEquivalent
-    /// claims ⌘+letter chords before AppKit walks the main menu, so the
-    /// Hide menu items never fire when a session window is key — we
-    /// dispatch NSApp.hide / hideOtherApplications ourselves instead.
     static let nativeChromeShortcutKeys: Set<String> = [
         "t", "w", "l", "r", "p", "h", "[", "]",
         "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    ]
+
+    /// ⌘ chords passed through to the guest (which sees them as Ctrl+…
+    /// after the Cmd/Ctrl swap): in-page editing and page zoom. Every
+    /// ⌘ chord that is neither here nor in ``nativeChromeShortcutKeys``
+    /// (nor ⌘P) is swallowed by the monitor before it reaches the VM, so
+    /// stray browser shortcuts (⌘F, ⌘S, ⌘J, …) can't trigger Chromium UI
+    /// that renders invisibly in the clipped-off chrome region.
+    static let nativeChromeGuestEditingKeys: Set<String> = [
+        "c", "v", "x", "a", "z",   // copy / paste / cut / select-all / undo (⇧⌘Z = redo)
+        "=", "-", "+", "0",        // zoom in / out / reset
     ]
 
     /// Turn whatever the user typed in the native address bar into a URL
