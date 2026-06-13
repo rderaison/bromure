@@ -171,27 +171,41 @@ def _ws_recv(sock):
                 raise ConnectionError("ws closed")
             buf += c
         return buf
-    header = read_exact(2)
-    opcode = header[0] & 0x0F
-    masked = bool(header[1] & 0x80)
-    length = header[1] & 0x7F
-    if length == 126:
-        length = struct.unpack(">H", read_exact(2))[0]
-    elif length == 127:
-        length = struct.unpack(">Q", read_exact(8))[0]
-    if masked:
-        mask = read_exact(4)
-        data = bytearray(read_exact(length))
-        for i in range(length):
-            data[i] ^= mask[i % 4]
-    else:
-        data = read_exact(length)
-    if opcode == 0x08:
-        raise ConnectionError("ws closed by peer")
-    if opcode == 0x09:
-        sock.sendall(bytearray([0x8A, 0x80, 0, 0, 0, 0]))
-        return _ws_recv(sock)
-    return data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else data
+
+    # Reassemble a full message across fragmentation. Large CDP replies
+    # (notably Page.printToPDF, whose base64 payload can be hundreds of KB)
+    # are split into a leading frame (FIN=0) plus continuation frames
+    # (opcode 0x00) until a frame with FIN=1. Reading only the first frame
+    # — as this used to — truncated the JSON and silently dropped the reply.
+    chunks = []
+    while True:
+        header = read_exact(2)
+        fin = bool(header[0] & 0x80)
+        opcode = header[0] & 0x0F
+        masked = bool(header[1] & 0x80)
+        length = header[1] & 0x7F
+        if length == 126:
+            length = struct.unpack(">H", read_exact(2))[0]
+        elif length == 127:
+            length = struct.unpack(">Q", read_exact(8))[0]
+        if masked:
+            mask = read_exact(4)
+            data = bytearray(read_exact(length))
+            for i in range(length):
+                data[i] ^= mask[i % 4]
+        else:
+            data = bytes(read_exact(length))
+        if opcode == 0x08:
+            raise ConnectionError("ws closed by peer")
+        if opcode == 0x09:  # ping — pong back, keep reading (may be mid-message)
+            sock.sendall(bytearray([0x8A, 0x80, 0, 0, 0, 0]))
+            continue
+        if opcode == 0x0A:  # pong — ignore
+            continue
+        chunks.append(bytes(data))
+        if fin:
+            break
+    return b"".join(chunks).decode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -316,8 +330,12 @@ def cdp_simple_post(path):
         conn.close()
 
 
-def cdp_ws_call(ws_url, method, params=None):
-    """One-shot WebSocket round-trip to a target. Returns result dict or None."""
+def cdp_ws_call(ws_url, method, params=None, timeout=3):
+    """One-shot WebSocket round-trip to a target. Returns result dict or None.
+
+    `timeout` bounds each socket read; bump it for slow methods like
+    Page.printToPDF, which can take several seconds to rasterise a complex
+    page before the (large) reply starts arriving."""
     try:
         sock = _ws_connect(ws_url)
     except Exception as e:
@@ -328,7 +346,7 @@ def cdp_ws_call(ws_url, method, params=None):
         if params:
             msg["params"] = params
         _ws_send(sock, json.dumps(msg))
-        sock.settimeout(3)
+        sock.settimeout(timeout)
         # Drain until we see our reply (ignore async events).
         for _ in range(40):
             raw = _ws_recv(sock)
@@ -800,12 +818,17 @@ def handle_cmd(msg, targets_by_id, link):
             if t and t.get("webSocketDebuggerUrl"):
                 # `Page.printToPDF` returns the PDF as a base64 string in
                 # the `data` field. We pass it straight through to the
-                # host — nothing touches the guest disk.
+                # host — nothing touches the guest disk. Rendering a real
+                # page is slow and the reply is large, so allow a generous
+                # read timeout (the host gives us 30 s).
                 res = cdp_ws_call(t["webSocketDebuggerUrl"], "Page.printToPDF", {
                     "preferCSSPageSize": True,
-                })
+                }, timeout=25)
                 if res and isinstance(res.get("data"), str):
                     b64 = res["data"]
+                log(f"print: tab {tid} -> {len(b64)} b64 chars")
+            else:
+                log(f"print: no target for id {tid}")
         link.send({"event": "pdf", "request_id": request_id, "data": b64})
     elif cmd == "get_certificate":
         origin = msg.get("origin", "")

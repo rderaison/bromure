@@ -13,6 +13,20 @@ final class NativeTabBarModel {
     var pendingAddress: String = ""
     var editingAddress: Bool = false
 
+    /// The tab currently showing the Safari-style "navigating" affordance
+    /// (a progress fill sweeping across its pill). Set optimistically the
+    /// instant the user hits Enter — before any guest round-trip — so the
+    /// fill masks the delay until Chromium repaints. Cleared in
+    /// ``setTabs(_:)`` when the guest first reports the tab's new URL, or
+    /// by the safety timeout in ``beginNavigating(_:)``.
+    var navigatingTabID: String?
+
+    /// The URL the navigating tab had *before* we issued the navigation.
+    /// We consider the navigation committed (and clear the affordance) once
+    /// the guest reports a URL different from this one. Observation-ignored:
+    /// it's bookkeeping for the clear logic, not something the UI renders.
+    @ObservationIgnored private var navigatingFromURL: String?
+
     /// Per-tab URL drafts so that typing in tab #1's address bar doesn't
     /// stomp on what the user had in tab #0. Keyed by tab id; entries are
     /// dropped when the guest reports a real navigation in that tab (the
@@ -98,6 +112,25 @@ final class NativeTabBarModel {
 
     var activeTab: TabInfo? { tabs.first(where: { $0.active }) }
 
+    /// Begin the optimistic "navigating" affordance for `id`. Records the
+    /// tab's current URL so ``setTabs(_:)`` can tell when the navigation has
+    /// actually committed (the guest reports a different URL), and arms a
+    /// safety timeout so the fill can never get stuck on if the guest never
+    /// echoes back a URL change (same-URL reload, blocked navigation, …).
+    func beginNavigating(_ id: String) {
+        navigatingTabID = id
+        navigatingFromURL = tabs.first(where: { $0.id == id })?.url
+
+        // Safety timeout: if this same navigation is still in flight after
+        // ~6 s, clear it. Capture the id so a newer navigation (different
+        // id, or a re-armed one) isn't cancelled by this stale timer.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+            guard let self, self.navigatingTabID == id else { return }
+            self.navigatingTabID = nil
+            self.navigatingFromURL = nil
+        }
+    }
+
     /// Push a fresh list of tabs from the bridge. Preserves the current
     /// address-bar edit state so we don't stomp on user typing mid-load.
     ///
@@ -125,6 +158,24 @@ final class NativeTabBarModel {
         drafts = drafts.filter { liveIDs.contains($0.key) }
 
         tabs = merged
+
+        // Clear the navigating affordance once the navigation commits. This
+        // must run on EVERY setTabs (placed before the early returns below),
+        // because the guest's URL update for the navigating tab can arrive in
+        // any of the branches that follow. We clear when the tab's URL has
+        // moved off the value it had when navigation began (the guest reports
+        // the new URL right as rendering starts) or the tab is gone.
+        if let navID = navigatingTabID {
+            if let navTab = merged.first(where: { $0.id == navID }) {
+                if navTab.url != navigatingFromURL {
+                    navigatingTabID = nil
+                    navigatingFromURL = nil
+                }
+            } else {
+                navigatingTabID = nil
+                navigatingFromURL = nil
+            }
+        }
 
         let newActiveID = activeTab?.id
 
@@ -353,7 +404,19 @@ private struct ActiveTabPill: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(Capsule().fill(Color(nsColor: .textBackgroundColor)))
+        // White capsule with the Safari-style progress fill layered IN FRONT
+        // of it (but behind the pill's content) via a single ZStack. Two
+        // separate `.background` modifiers wouldn't work: SwiftUI stacks them
+        // back-to-front, so the fill would hide behind the opaque white
+        // capsule. Clipped to the capsule so the sweep never bleeds past the
+        // rounded ends.
+        .background(
+            ZStack {
+                Capsule().fill(Color(nsColor: .textBackgroundColor))
+                TabLoadingBar(active: model.navigatingTabID == tab.id)
+            }
+            .clipShape(Capsule())
+        )
         // Blue stroke only while editing — otherwise no border (the white
         // capsule against the outer grey is contrast enough).
         .overlay(
@@ -363,6 +426,75 @@ private struct ActiveTabPill: View {
                 }
             }
         )
+    }
+}
+
+/// Safari-style loading affordance for the active pill: a translucent
+/// accent-coloured fill that sweeps left→right while a navigation is in
+/// flight. It eases quickly toward ~85% (most of the perceived progress
+/// happens up front, like Safari's bar), parks there until the navigation
+/// commits, then completes to 100% and fades out. The actual "navigation
+/// done" signal is external (``NativeTabBarModel.navigatingTabID`` flipping
+/// off when the guest reports the new URL); this view just animates around
+/// that boolean.
+private struct TabLoadingBar: View {
+    let active: Bool
+    @State private var progress: CGFloat = 0
+    @State private var visible: Bool = false
+
+    var body: some View {
+        GeometryReader { geo in
+            Capsule()
+                .fill(Color.accentColor.opacity(0.28))
+                .frame(width: geo.size.width * progress)
+                .opacity(visible ? 1 : 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        // macOS 14 two-parameter onChange.
+        .onChange(of: active) { _, newValue in
+            if newValue {
+                start()
+            } else if visible {
+                finish()
+            }
+        }
+        .onAppear {
+            // The pill is recreated when the active tab changes, so a tab
+            // that's *already* navigating when this view first mounts needs
+            // to pick the animation up here rather than via onChange.
+            if active { start() }
+        }
+    }
+
+    private func start() {
+        // Snap to a small head start (so the fill is immediately visible),
+        // then ease most of the way across. Stop at 85%: the last 15% is
+        // reserved for `finish()` so completion reads as a deliberate snap
+        // to full rather than the bar happening to reach the end on its own.
+        progress = 0.08
+        visible = true
+        withAnimation(.easeOut(duration: 0.9)) {
+            progress = 0.85
+        }
+    }
+
+    private func finish() {
+        // Navigation committed: drive to 100% quickly, then fade the whole
+        // bar out and reset so the next navigation starts from scratch.
+        withAnimation(.easeOut(duration: 0.2)) {
+            progress = 1.0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            withAnimation(.easeOut(duration: 0.25)) {
+                visible = false
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                // Only reset if a new navigation hasn't re-armed us meanwhile.
+                if !active {
+                    progress = 0
+                }
+            }
+        }
     }
 }
 
@@ -845,6 +977,13 @@ private struct AddressField: NSViewRepresentable {
                     return
                 }
                 if window.makeFirstResponder(field) {
+                    // makeFirstResponder can report success without the
+                    // field editor actually engaging for typing (the field
+                    // lives in a zero-width-reporting toolbar hosting view).
+                    // selectText forces the editor + selection so the cursor
+                    // really lands in the URL bar and the user can type
+                    // immediately after ⌘T.
+                    field.selectText(nil)
                     consumed?()
                     return
                 }

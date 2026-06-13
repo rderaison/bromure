@@ -150,6 +150,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Disable macOS "press and hold" so a held letter key repeats in the
+        // native-tabs URL field instead of popping the accent/diacritic
+        // picker (à á â ã …). With the key-repeat filter now letting repeats
+        // through to the field editor, AppKit would otherwise show that menu
+        // for accent-capable letters. The only native text field in the app
+        // is the address bar, where key repeat is what's wanted; same trick
+        // VS Code / terminals use. Registration domain so we don't persist
+        // anything to the user's prefs.
+        UserDefaults.standard.register(defaults: ["ApplePressAndHoldEnabled": false])
+
         // Sparkle must be started before we wire up the menu so the menu item
         // has a live target. The standard controller begins its first check
         // after SUScheduledCheckInterval; immediate checks come from the menu.
@@ -747,6 +757,17 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                          action: #selector(recreateBaseImageAction(_:)),
                          keyEquivalent: "")
         fileMenu.addItem(NSMenuItem.separator())
+        let printItem = NSMenuItem(
+            title: NSLocalizedString("Print\u{2026}", comment: ""),
+            action: #selector(printAction(_:)),
+            keyEquivalent: "p"
+        )
+        // Explicit target so ⌘P routes here from the native-chrome key
+        // monitor's performKeyEquivalent fallback (and so validateMenuItem
+        // below gates availability on the key window's session).
+        printItem.target = self
+        fileMenu.addItem(printItem)
+        fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: NSLocalizedString("Close Window", comment: ""),
                          action: #selector(NSWindow.performClose(_:)),
                          keyEquivalent: "w")
@@ -815,6 +836,26 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let keyWindow = NSApp.keyWindow,
               let session = sessions.first(where: { $0.window === keyWindow }) else { return }
         session.toggleWarp()
+    }
+
+    @MainActor @objc func printAction(_ sender: Any?) {
+        guard let keyWindow = NSApp.keyWindow,
+              let session = sessions.first(where: { $0.window === keyWindow }) else { return }
+        session.printActiveTab()
+    }
+
+    /// Enable File ▸ Print only when the key window's session can print.
+    /// When it can't, the disabled item means ⌘P fires nothing — and the
+    /// native-chrome monitor still swallows the event, so Chromium's hidden
+    /// print dialog stays suppressed.
+    @MainActor func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(printAction(_:)) {
+            guard let keyWindow = NSApp.keyWindow,
+                  let session = sessions.first(where: { $0.window === keyWindow })
+            else { return false }
+            return session.canPrint
+        }
+        return true
     }
 
     @MainActor @objc func openTraceFileAction(_ sender: Any?) {
@@ -1948,6 +1989,12 @@ final class BrowserSession {
                   let evWin = event.window,
                   ObjectIdentifier(evWin) == windowID
             else { return event }
+            // Only the VM's HID path needs repeats suppressed (the guest
+            // does its own autorepeat). When a native AppKit text control
+            // holds focus — the native-tabs address bar's field editor is
+            // an NSTextView — the repeat belongs to it: swallowing it would
+            // break held-key deletion / arrow navigation in the URL field.
+            if evWin.firstResponder is NSText { return event }
             return nil
         }
 
@@ -2164,7 +2211,19 @@ final class BrowserSession {
                 let bridge = TabBridge(socketDevice: dev)
                 self.tabBridge = bridge
 
-                bridge.onTabsChanged = { [weak tabModel] tabs in
+                // Gate guest input until the tab manager is up (see
+                // PrecisionScrollVMView.inputReady). An early click — before
+                // tab-agent connects and the native tab bar exists — otherwise
+                // wedges the focus machinery. Released on the first tab list,
+                // with a timeout backstop so a stalled tab-agent can't lock the
+                // user out of the VM forever.
+                vmView.inputReady = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak vmView] in
+                    vmView?.inputReady = true
+                }
+
+                bridge.onTabsChanged = { [weak tabModel, weak vmView] tabs in
+                    if !tabs.isEmpty { vmView?.inputReady = true }
                     tabModel?.setTabs(tabs)
                 }
                 // Any host-initiated tab action (URL submit, ⌘T, click, …)
@@ -2188,21 +2247,22 @@ final class BrowserSession {
                     guard let bridge else { return [] }
                     return await bridge.fetchCertificate(origin: origin)
                 }
-                tabModel.onNewTab = { [weak bridge, weak tabModel, weak window] in
+                tabModel.onNewTab = { [weak bridge, weak tabModel, weak window, weak vmView] in
                     // Pre-emptively resign current first responder so
                     // vmView isn't holding focus while the new pill is
-                    // being constructed. ActiveTabPill picks up the flag
-                    // below via shouldFocusOnAppear and self-focuses its
-                    // address field; in addition `forceFocusURLField`
-                    // hammers the field as first responder for ~1 s
-                    // because vmView is sometimes sticky and reclaims
-                    // focus after resigning.
+                    // being constructed. Telling vmView to decline first
+                    // responder keeps it from reclaiming focus once the
+                    // outgoing field is torn down; ActiveTabPill then picks
+                    // up the flag below via shouldFocusOnAppear and
+                    // self-focuses its address field, with forceFocusURLField
+                    // as a backstop.
+                    vmView?.declinesFirstResponder = true
                     window?.makeFirstResponder(nil)
                     bridge?.newTab(url: "about:blank")
                     tabModel?.pendingFocusOnActiveChange = true
                     Self.forceFocusURLField(window: window, model: tabModel)
                 }
-                tabModel.onNavigate = { [weak bridge, weak tabModel] raw in
+                tabModel.onNavigate = { [weak bridge, weak tabModel, weak window, weak vmView] raw in
                     guard let bridge, let tabModel else { return }
                     let url = Self.normalizeNavigation(raw)
                     // Prefer the active tab, then the first tab. Only spawn a
@@ -2210,10 +2270,26 @@ final class BrowserSession {
                     // navigate — e.g. user hit Enter before Chromium had
                     // reported anything.
                     if let id = tabModel.activeTab?.id ?? tabModel.tabs.first?.id {
+                        // Optimistically flag the tab as navigating *before*
+                        // any guest round-trip. There's a visible delay before
+                        // the guest acks the new URL and Chromium repaints;
+                        // lighting up the pill's progress fill the instant the
+                        // user hits Enter is what masks it. beginNavigating
+                        // clears itself when the guest first reports the new
+                        // URL (which lands right as rendering starts), or after
+                        // a safety timeout.
+                        tabModel.beginNavigating(id)
                         bridge.navigate(id: id, url: url)
                     } else {
                         bridge.newTab(url: url)
                     }
+                    // Safari hands keyboard focus back to the page on Enter:
+                    // the URL bar resigns and the content view becomes first
+                    // responder. Clear the decline flag (the focus machinery
+                    // parks it true while grabbing the URL bar) so vmView is
+                    // eligible again, then make it first responder.
+                    vmView?.declinesFirstResponder = false
+                    if let window, let vmView { window.makeFirstResponder(vmView) }
                 }
 
                 let chrome = NativeTabBarChrome(model: tabModel)
@@ -2259,19 +2335,21 @@ final class BrowserSession {
                 // side effects on a @MainActor Task. This avoids ever
                 // capturing the non-Sendable NSEvent across an actor boundary.
                 let windowID = ObjectIdentifier(window)
-                // Printing rides on the tab-agent's CDP connection, which
-                // only exists in native-tabs mode. If somehow the runtime
-                // ends up here without native tabs we'd still want the
-                // toggle to no-op cleanly.
-                let allowPrinting = (profile?.settings.allowPrinting ?? false)
-                    && config.nativeChrome
                 self.nativeChromeKeyMonitor = NSEvent.addLocalMonitorForEvents(
                     matching: .keyDown
-                ) { [weak bridge, weak tabModel, weak window] event in
+                ) { [weak bridge, weak tabModel, weak window, weak vmView] event in
                     guard event.modifierFlags.contains(.command) else { return event }
-                    guard let eventWindow = event.window,
-                          ObjectIdentifier(eventWindow) == windowID
-                    else { return event }
+                    // When the VZ view holds keyboard focus, AppKit can hand us
+                    // the keyDown with a nil (or non-matching) event.window —
+                    // the guest has effectively "captured" the keyboard — which
+                    // would slip ⌘-chords straight through to Chromium. Fall
+                    // back to the key-window identity so we still own the
+                    // shortcut for whichever session window is frontmost.
+                    let belongsHere: Bool = {
+                        if let w = event.window { return ObjectIdentifier(w) == windowID }
+                        return NSApp.keyWindow.map { ObjectIdentifier($0) == windowID } ?? false
+                    }()
+                    guard belongsHere else { return event }
                     guard let key = event.charactersIgnoringModifiers?.lowercased(),
                           !key.isEmpty
                     else { return event }
@@ -2347,9 +2425,13 @@ final class BrowserSession {
                             // See onNewTab above — resigning vmView before
                             // we kick off tab creation prevents the new
                             // address field from racing the VM for focus
-                            // and losing. forceFocusURLField then keeps
-                            // hammering the field for a second in case
-                            // vmView reclaims focus after our resign.
+                            // and losing. Telling vmView to decline first
+                            // responder makes that stick: otherwise it
+                            // reclaims focus the instant the outgoing tab's
+                            // field is torn down, and keystrokes land in the
+                            // guest's hidden omnibox. forceFocusURLField then
+                            // settles focus on the new field.
+                            vmView?.declinesFirstResponder = true
                             window.makeFirstResponder(nil)
                             bridge.newTab(url: "about:blank")
                             tabModel.pendingFocusOnActiveChange = true
@@ -2367,6 +2449,7 @@ final class BrowserSession {
                                 // Already focused — re-select, Safari-style.
                                 editor.selectAll(nil)
                             } else {
+                                vmView?.declinesFirstResponder = true
                                 window.makeFirstResponder(nil)
                                 Self.forceFocusURLField(window: window, model: tabModel)
                             }
@@ -2376,22 +2459,6 @@ final class BrowserSession {
                             if let id = tabModel.activeTab?.id { bridge.back(id: id) }
                         case "]":
                             if let id = tabModel.activeTab?.id { bridge.forward(id: id) }
-                        case "p":
-                            // Always intercept ⌘P to suppress Chromium's
-                            // print dialog (which would render in the
-                            // hidden chrome UI and be invisible to the
-                            // user). When the profile allows printing,
-                            // dispatch the active tab's PDF to macOS's
-                            // standard print pipeline.
-                            guard allowPrinting,
-                                  let id = tabModel.activeTab?.id else { break }
-                            Task { @MainActor [weak bridge] in
-                                guard let bridge,
-                                      let pdf = await bridge.printTab(id: id),
-                                      !pdf.isEmpty
-                                else { return }
-                                Self.runPrintOperation(pdf: pdf)
-                            }
                         case "w":
                             // ⌘W closes the active tab when more than one
                             // is open; on the last tab it falls through to
@@ -2669,13 +2736,68 @@ final class BrowserSession {
         window.delegate = helper
     }
 
+    /// Whether ⌘P / File ▸ Print should be available for this session: the
+    /// profile must allow printing and the native-tabs bridge must be live
+    /// (printing rides on the tab-agent's CDP connection).
+    @MainActor
+    var canPrint: Bool {
+        (profile?.settings.allowPrinting ?? false) && tabBridge != nil
+    }
+
+    /// Render the active tab to PDF in the guest and hand it to macOS's
+    /// print pipeline. No-ops when the profile disallows printing — which
+    /// also keeps Chromium's own (invisible, hidden-chrome) print dialog
+    /// suppressed. The PDF bytes never touch disk on host or guest.
+    @MainActor
+    func printActiveTab() {
+        guard canPrint, let bridge = tabBridge else {
+            NSLog("[Bromure print] aborting: canPrint=\(canPrint) hasBridge=\(tabBridge != nil)")
+            return
+        }
+        // The host's per-tab `active` flag is fed by a 400 ms poll and can
+        // lag a spontaneous focus change, so fall back to the first tab
+        // rather than silently no-op when nothing reads as active.
+        guard let id = nativeTabBar?.model.activeTab?.id
+                ?? nativeTabBar?.model.tabs.first?.id else {
+            NSLog("[Bromure print] aborting: no tab to print (count=\(nativeTabBar?.model.tabs.count ?? -1))")
+            return
+        }
+        NSLog("[Bromure print] requesting PDF for tab \(id)")
+        Task { @MainActor [weak bridge] in
+            guard let bridge else { return }
+            let pdf = await bridge.printTab(id: id)
+            NSLog("[Bromure print] guest returned \(pdf?.count ?? -1) bytes")
+            guard let pdf, !pdf.isEmpty else {
+                Self.showPrintError(NSLocalizedString(
+                    "Couldn't get the page from the browser to print.", comment: ""))
+                return
+            }
+            Self.runPrintOperation(pdf: pdf)
+        }
+    }
+
+    /// Surface a print failure to the user instead of failing silently.
+    @MainActor
+    static func showPrintError(_ message: String) {
+        NSLog("[Bromure print] error: \(message)")
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Print failed", comment: "")
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
     /// Hand the given PDF bytes to macOS's print system. Loads them into
     /// `PDFDocument` and runs the standard print operation (which presents
     /// the system print panel). PDF data stays in RAM — never written to
     /// disk on the host.
     @MainActor
     static func runPrintOperation(pdf: Data) {
-        guard let doc = PDFDocument(data: pdf) else { return }
+        guard let doc = PDFDocument(data: pdf) else {
+            showPrintError(NSLocalizedString(
+                "The page data couldn't be opened for printing.", comment: ""))
+            return
+        }
         let info = NSPrintInfo.shared
         info.horizontalPagination = .automatic
         info.verticalPagination = .automatic
@@ -2683,10 +2805,21 @@ final class BrowserSession {
             for: info,
             scalingMode: .pageScaleNone,
             autoRotate: true
-        ) else { return }
+        ) else {
+            showPrintError(NSLocalizedString(
+                "Couldn't start the print operation.", comment: ""))
+            return
+        }
         op.showsPrintPanel = true
         op.showsProgressPanel = true
-        op.run()
+        // Anchor the print panel to the key window so it can't open as a
+        // detached/background sheet (which can read as "nothing happened").
+        NSLog("[Bromure print] presenting print panel")
+        if let keyWindow = NSApp.keyWindow {
+            op.runModal(for: keyWindow, delegate: nil, didRun: nil, contextInfo: nil)
+        } else {
+            op.run()
+        }
     }
 
     /// Aggressively force the URL field to remain first responder for the
@@ -2730,7 +2863,14 @@ final class BrowserSession {
                 || (editor != nil && fieldWindow.firstResponder === editor)
             if !focused {
                 _ = fieldWindow.makeFirstResponder(nil)
-                if !fieldWindow.makeFirstResponder(field) {
+                if fieldWindow.makeFirstResponder(field) {
+                    // makeFirstResponder can report success without the
+                    // field editor actually engaging for typing (toolbar-
+                    // hosted fields in a zero-width hosting view). selectText
+                    // forces the editor and selects the URL so the user can
+                    // type immediately after ⌘T / ⌘L.
+                    field.selectText(nil)
+                } else {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick() }
                     return
                 }
@@ -2766,11 +2906,12 @@ final class BrowserSession {
     /// main menu, so we dispatch hideOtherApplications ourselves. Plain ⌘H
     /// forwards to the guest (Ctrl+H → Chromium's History page) instead of
     /// hiding Bromure — see the monitor's routing.
-    /// ⌘P is here unconditionally; the handler no-ops when the profile
-    /// doesn't allow printing, which suppresses Chromium's hidden print
-    /// dialog as a side benefit.
+    /// ⌘P is deliberately NOT here: it falls through to the monitor's
+    /// "offer to the main menu" path, which fires the File ▸ Print item
+    /// (macOS print pipeline) and then swallows the event so Chromium's own
+    /// hidden print dialog never opens.
     static let nativeChromeShortcutKeys: Set<String> = [
-        "t", "w", "l", "r", "p", "h", "[", "]",
+        "t", "w", "l", "r", "h", "[", "]",
         "1", "2", "3", "4", "5", "6", "7", "8", "9",
     ]
 
@@ -4264,6 +4405,84 @@ final class NativeChromeCropper: NSView {
 /// wheels), whose clicky deltas the USB path already represents fine.
 final class PrecisionScrollVMView: VZVirtualMachineView {
     weak var scrollBridge: PrecisionScrollBridge?
+
+    /// When true, the view declines first-responder status so the
+    /// native-tabs address bar can win the focus race after ⌘T / ⌘L. The
+    /// VZ view is otherwise sticky: it reclaims first responder the moment
+    /// AppKit re-walks the key-view loop (e.g. when the outgoing tab's
+    /// field is torn down), which strands the user's keystrokes in the
+    /// guest's hidden Chromium omnibox instead of the macOS URL field.
+    /// Refusing the role outright is more reliable than repeatedly
+    /// re-grabbing the field out from under it. Cleared as soon as the
+    /// user clicks back into the page (mouseDown), which is the natural
+    /// signal that they want to interact with the guest again.
+    var declinesFirstResponder = false
+
+    /// Gates ALL pointer/keyboard input to the guest until the native-tabs
+    /// manager (tab-agent + TabBridge) is up. Defaults true (legacy / non-
+    /// native-chrome sessions are never gated); the native-chrome path sets
+    /// it false at session start and flips it true once the first tab list
+    /// arrives. Without this, an early click lands in the guest before the
+    /// tab bar exists — focus/first-responder machinery then has nothing to
+    /// hand off to and the session wedges.
+    var inputReady = true
+
+    override var acceptsFirstResponder: Bool {
+        if declinesFirstResponder || !inputReady { return false }
+        return super.acceptsFirstResponder
+    }
+
+    override func resignFirstResponder() -> Bool {
+        // The base view refuses to resign while the guest holds keyboard
+        // focus (e.g. the user is typing in a page). That veto is exactly
+        // what blocks ⌘T from moving focus to the native URL field: when
+        // the VZ view is the current first responder, `makeFirstResponder`
+        // can't take it away. While we've asked it to decline, run the
+        // base cleanup but force the resignation through so the address
+        // field can take over. acceptsFirstResponder (false meanwhile)
+        // then keeps it from immediately reclaiming the role.
+        let base = super.resignFirstResponder()
+        return declinesFirstResponder ? true : base
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // Swallow clicks until the tab manager is up — a click that reaches
+        // the guest before the native tab bar exists wedges focus handling.
+        guard inputReady else { return }
+        declinesFirstResponder = false
+        super.mouseDown(with: event)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard inputReady else { return }
+        super.rightMouseDown(with: event)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        guard inputReady else { return }
+        super.otherMouseDown(with: event)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // ⌘P must drive the macOS print pipeline (File ▸ Print), not
+        // Chromium's own print dialog. When the guest holds keyboard focus
+        // the VZ view claims ⌘-chords and forwards them to the guest before
+        // the main menu gets a look, so Chromium's (invisible, hidden-
+        // chrome) print dialog opens instead. Intercept ⌘P here, hand it to
+        // the menu, and always consume it so it never reaches the guest —
+        // even when printing is disabled (which keeps that dialog
+        // suppressed). All other chords fall through to the VZ view's normal
+        // handling, so in-page ⌘C / ⌘V / ⌘Z etc. still reach Chromium.
+        let mods = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting([.capsLock, .numericPad, .function])
+        if mods == [.command],
+           event.charactersIgnoringModifiers?.lowercased() == "p" {
+            _ = NSApp.mainMenu?.performKeyEquivalent(with: event)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     override func scrollWheel(with event: NSEvent) {
         if let bridge = scrollBridge, bridge.isConnected,

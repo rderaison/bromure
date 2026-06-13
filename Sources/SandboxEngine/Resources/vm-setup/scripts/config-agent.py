@@ -843,6 +843,12 @@ def write_dynamic_policy(cfg):
     """Write session-specific Chrome enterprise policy (media capture, WebRTC)."""
     policy = {}
 
+    # Block Web Notifications outright. Setting 2 (= block) both prevents
+    # sites from showing notifications AND suppresses the "<site> wants to
+    # display notifications" permission prompt — pure noise in an ephemeral
+    # throwaway session nobody returns to.
+    policy["DefaultNotificationsSetting"] = 2
+
     # Media capture: allow only when the corresponding device is enabled
     policy["VideoCaptureAllowed"] = bool(cfg.get("webcam"))
     policy["AudioCaptureAllowed"] = bool(cfg.get("microphone"))

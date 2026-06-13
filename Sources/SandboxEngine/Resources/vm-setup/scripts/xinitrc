@@ -44,7 +44,16 @@ DISPLAY_SCALE=
 MTU=
 KEY_REPEAT_DELAY_MS=
 KEY_REPEAT_RATE_HZ=
+# `set -a` so every var assigned while sourcing chrome-env is EXPORTED, not
+# just set as a shell-local. The agents launched below (tab-agent, cdp-agent,
+# …) read their config from the environment — e.g. tab-agent gates printing on
+# os.environ["ALLOW_PRINTING"]. Without the export they inherit nothing, so
+# ALLOW_PRINTING reads empty and printing is silently blocked even when the
+# profile allows it. (Chromium is unaffected: it gets its config via $EXTRA_FLAGS
+# on the command line, not the environment.)
+set -a
 [ -f /tmp/bromure/chrome-env ] && . /tmp/bromure/chrome-env
+set +a
 
 # MTU clamp on the default-route interface. Default 1280 (IPv6
 # minimum) survives every VPN path (WireGuard ~1420, IKEv2 ~1400,

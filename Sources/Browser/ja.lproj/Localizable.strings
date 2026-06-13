@@ -693,3 +693,8 @@
 "Invalid Chrome Web Store URL. Expected format: chromewebstore.google.com/detail/.../EXTENSION_ID" = "Chrome ウェブストアの URL が無効です。想定される形式：chromewebstore.google.com/detail/.../EXTENSION_ID";
 "This extension is already added." = "この拡張機能はすでに追加されています。";
 "Failed to download extension: %@" = "拡張機能のダウンロードに失敗しました：%@";
+"OpenVPN Configuration" = "OpenVPN \U8A2D\U5B9A";
+"Paste your .ovpn file below, or use the import button to load it from disk. Certificates and keys can be inlined in the file." = ".ovpn \U30D5\U30A1\U30A4\U30EB\U3092\U4E0B\U306B\U8CBC\U308A\U4ED8\U3051\U308B\U304B\U3001\U30A4\U30F3\U30DD\U30FC\U30C8\U30DC\U30BF\U30F3\U3092\U4F7F\U7528\U3057\U3066\U30C7\U30A3\U30B9\U30AF\U304B\U3089\U8AAD\U307F\U8FBC\U307F\U307E\U3059\U3002\U8A3C\U660E\U66F8\U3068\U9375\U306F\U30D5\U30A1\U30A4\U30EB\U5185\U306B\U30A4\U30F3\U30E9\U30A4\U30F3\U5316\U3067\U304D\U307E\U3059\U3002";
+"Import .ovpn File\U2026" = ".ovpn \U30D5\U30A1\U30A4\U30EB\U3092\U8AAD\U307F\U8FBC\U3080\U2026";
+"Credentials" = "\U8A8D\U8A3C\U60C5\U5831";
+"Only needed when your config uses username/password (auth-user-pass). Leave blank for certificate-only configs." = "\U8A2D\U5B9A\U3067\U30E6\U30FC\U30B6\U30FC\U540D/\U30D1\U30B9\U30EF\U30FC\U30C9\UFF08auth-user-pass\UFF09\U3092\U4F7F\U7528\U3059\U308B\U5834\U5408\U306B\U306E\U307F\U5FC5\U8981\U3067\U3059\U3002\U8A3C\U660E\U66F8\U306E\U307F\U306E\U8A2D\U5B9A\U306E\U5834\U5408\U306F\U7A7A\U767D\U306E\U307E\U307E\U306B\U3057\U3066\U304F\U3060\U3055\U3044\U3002";

@@ -693,3 +693,8 @@
 "Invalid Chrome Web Store URL. Expected format: chromewebstore.google.com/detail/.../EXTENSION_ID" = "URL Chrome Web Store invalide. Format attendu\U00a0: chromewebstore.google.com/detail/.../EXTENSION_ID";
 "This extension is already added." = "Cette extension est d\U00e9j\U00e0 ajout\U00e9e.";
 "Failed to download extension: %@" = "\U00c9chec du t\U00e9l\U00e9chargement de l\U2019extension\U00a0: %@";
+"OpenVPN Configuration" = "Configuration OpenVPN";
+"Paste your .ovpn file below, or use the import button to load it from disk. Certificates and keys can be inlined in the file." = "Collez votre fichier .ovpn ci-dessous, ou utilisez le bouton d\U2019importation pour le charger depuis le disque. Les certificats et les cl\U00E9s peuvent \U00EAtre int\U00E9gr\U00E9s dans le fichier.";
+"Import .ovpn File\U2026" = "Importer un fichier .ovpn\U2026";
+"Credentials" = "Identifiants";
+"Only needed when your config uses username/password (auth-user-pass). Leave blank for certificate-only configs." = "N\U00E9cessaire uniquement si votre configuration utilise un nom d\U2019utilisateur/mot de passe (auth-user-pass). Laissez vide pour les configurations utilisant uniquement un certificat.";

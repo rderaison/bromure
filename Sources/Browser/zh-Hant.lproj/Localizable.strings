@@ -693,3 +693,8 @@
 "Invalid Chrome Web Store URL. Expected format: chromewebstore.google.com/detail/.../EXTENSION_ID" = "Chrome 線上應用程式商店 URL 無效。預期格式：chromewebstore.google.com/detail/.../EXTENSION_ID";
 "This extension is already added." = "此擴充功能已加入。";
 "Failed to download extension: %@" = "無法下載擴充功能：%@";
+"OpenVPN Configuration" = "OpenVPN \U8A2D\U5B9A";
+"Paste your .ovpn file below, or use the import button to load it from disk. Certificates and keys can be inlined in the file." = "\U5728\U4E0B\U65B9\U8CBC\U4E0A\U4F60\U7684 .ovpn \U6A94\U6848\UFF0C\U6216\U4F7F\U7528\U532F\U5165\U6309\U9215\U5F9E\U78C1\U789F\U8F09\U5165\U3002\U6191\U8B49\U548C\U91D1\U9470\U53EF\U4EE5\U5167\U5D4C\U65BC\U6A94\U6848\U4E2D\U3002";
+"Import .ovpn File\U2026" = "\U532F\U5165 .ovpn \U6A94\U6848\U2026";
+"Credentials" = "\U6191\U8B49";
+"Only needed when your config uses username/password (auth-user-pass). Leave blank for certificate-only configs." = "\U50C5\U7576\U4F60\U7684\U8A2D\U5B9A\U4F7F\U7528\U4F7F\U7528\U8005\U540D\U7A31/\U5BC6\U78BC\UFF08auth-user-pass\UFF09\U6642\U624D\U9700\U8981\U3002\U5C0D\U65BC\U50C5\U4F7F\U7528\U6191\U8B49\U7684\U8A2D\U5B9A\UFF0C\U8ACB\U7559\U7A7A\U3002";
