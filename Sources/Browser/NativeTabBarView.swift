@@ -809,11 +809,12 @@ private struct AddressField: NSViewRepresentable {
         field.placeholderString = "Search or enter URL"
         field.lineBreakMode = .byTruncatingTail
         field.cell?.usesSingleLineMode = true
-        // Alignment is set once and never changes. Toggling it dynamically
-        // (e.g. `.center` while displaying, `.left` while typing) re-lays
-        // out the field editor and clears the active selection, which on
-        // the second keystroke after a select-all looks like the field
-        // dropped focus.
+        // Initial alignment is the display state (centred for the active
+        // pill). It flips to `.left` while editing — set in
+        // `becomeFirstResponder` *before* the select-all so the relayout
+        // doesn't clear the selection — and back to the display alignment
+        // in `controlTextDidEndEditing`. Nothing touches alignment mid-edit,
+        // so a keystroke never re-lays out the field editor.
         field.alignment = centered ? .center : .left
         field.target = context.coordinator
         field.action = #selector(Coordinator.submit)
@@ -905,21 +906,33 @@ private struct AddressField: NSViewRepresentable {
         func controlTextDidBeginEditing(_ obj: Notification) {
             parent.isEditing = true
             parent.onBeginEditing?()
+            guard let field = obj.object as? NSTextField else { return }
             // updateNSView won't sync stringValue while editing (to avoid
             // racing with keystrokes), so if onBeginEditing pushed a new
             // value through the binding (the typical "domain → full URL"
             // swap on focus) we apply it directly here. parent.text is a
             // Binding, so this read sees whatever the closure just wrote.
-            if let field = obj.object as? NSTextField,
-               field.stringValue != parent.text {
+            if field.stringValue != parent.text {
                 field.stringValue = parent.text
-                if let editor = field.currentEditor() as? NSTextView {
-                    editor.selectAll(nil)
-                }
+            }
+            // Force left alignment for editing. Re-asserted here because
+            // assigning stringValue above can reset the field editor's
+            // alignment back to the cell's display value. Align before the
+            // select-all so the relayout doesn't drop the selection.
+            field.alignment = .left
+            if let editor = field.currentEditor() as? NSTextView {
+                editor.alignment = .left
+                editor.selectAll(nil)
             }
         }
         func controlTextDidEndEditing(_ obj: Notification) {
             parent.isEditing = false
+            // Restore the display alignment (centred for the active pill)
+            // now that editing is over. Fires on both blur and Enter/submit,
+            // so the URL re-centres once the user commits or clicks away.
+            if let field = obj.object as? NSTextField {
+                field.alignment = parent.centered ? .center : .left
+            }
             if !didSubmit {
                 parent.onEndEditing?()
             }
@@ -944,8 +957,18 @@ private struct AddressField: NSViewRepresentable {
 /// NSTextField subclass that selects all contents on focus (Safari-style).
 private final class BromureAddressField: NSTextField {
     override func becomeFirstResponder() -> Bool {
+        // Left-align while editing so the cursor sits at the start of the
+        // URL. This MUST be set before `super` installs the field editor —
+        // the editor copies its alignment from the cell at setup time, so
+        // setting it afterwards leaves the live text centred. The display
+        // alignment is restored in `controlTextDidEndEditing`.
+        alignment = .left
         let ok = super.becomeFirstResponder()
         if ok, let editor = currentEditor() as? NSTextView {
+            // Belt-and-suspenders: also align the field editor directly,
+            // then select all. Order matters — aligning relays out and
+            // would clear an existing selection, so select-all comes last.
+            editor.alignment = .left
             editor.selectAll(nil)
         }
         return ok
