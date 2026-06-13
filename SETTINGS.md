@@ -58,6 +58,7 @@ Audio output and device sharing for video calls, meetings, and media playback.
 | **Share Webcam** | Forwards your Mac's camera into the VM so websites can use it for video calls. When enabled, a live preview appears along with a quality picker and an Effects button for real-time visual effects, including face swap for anonymous video calls. |
 | **Share Microphone** | Forwards your Mac's microphone into the VM for voice calls and voice input. |
 | **Device Selection** | Choose which camera, microphone, and speaker each profile uses. Defaults to your Mac's default devices. |
+| **Speaker** | Choose which audio output device this profile uses for sound playback. Shown as a standalone picker when both webcam and microphone sharing are disabled; otherwise appears inline in the microphone section. Defaults to your Mac's default speaker. |
 
 ### File Transfer
 
@@ -108,6 +109,7 @@ Controls what the browser can access and share.
 | **Use macOS Passwords** | Autofill usernames and passwords from your Mac's saved passwords and iCloud Keychain. Disables Chromium's built-in password manager. |
 | **Block Screen Capture** | Hides this browser window from screenshots, screen recordings, and screen sharing apps like Zoom. Useful when sharing your screen in a meeting while keeping a browser session private. |
 | **Send Link to Other Session** | Adds a right-click context menu option to send a link to a different Bromure profile. Useful for opening a suspicious link in a more isolated profile. |
+| **User Agent** | How this browser identifies itself to websites. By default Bromure appears as Chrome on macOS so sites don't see the Linux VM. Enter a custom user agent string to override, or leave blank to use the default. |
 
 ### Network Isolation
 
@@ -162,6 +164,10 @@ Network privacy and ad blocking.
 | **IKEv2 — VPN Proxy** | Route browser traffic through an HTTP proxy reachable inside the VPN tunnel. Enter a hostname and port; username and password fields appear when a hostname is set. |
 | **IKEv2 — Use VPN DNS** | Use DNS servers pushed by the IKEv2 gateway, preventing DNS leaks outside the tunnel. |
 | **IKEv2 — Connect on Startup** | Automatically connect the IKEv2 tunnel when the browser session starts. You can always toggle it from the window's VPN button. |
+| **OpenVPN** | Routes all browser traffic through an OpenVPN tunnel running inside the disposable VM. Works with any standard OpenVPN server. Select this option to reveal the configuration editor. |
+| **OpenVPN Configuration** | The `.ovpn` file content for the OpenVPN tunnel. Paste the file contents directly into the text editor or use the **Import .ovpn File…** button to load it from disk. Certificates and keys can be inlined in the file. Only visible when OpenVPN is selected as the VPN mode. |
+| **OpenVPN — Username / Password** | Credentials for OpenVPN username/password authentication. Password is stored in your macOS Keychain. Visible only when OpenVPN is selected. |
+| **OpenVPN — Connect on Startup** | Automatically connect the OpenVPN tunnel when the browser session starts. You can always toggle it from the window's VPN button. |
 | **Block Ads** | Blocks ads and tracking scripts at the network layer using a built-in DNS sinkhole and Squid proxy. Ads are intercepted before they reach the browser. |
 
 > **Note:** If an HTTP proxy is configured in the Enterprise tab, both WARP and ad blocking are disabled.
