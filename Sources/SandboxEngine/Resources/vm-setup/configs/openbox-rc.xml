@@ -5,6 +5,9 @@
   <placement><policy>Smart</policy></placement>
   <theme><name>Clearlooks</name><titleLayout></titleLayout></theme>
   <desktops><number>1</number></desktops>
+  <!-- Keyless by default so legacy full-Chromium mode keeps its native
+       Ctrl+T/Ctrl+P etc. xinitrc swaps in rc-nativetabs.xml (browser-chrome
+       chord grabs) and reconfigures Openbox only when NATIVE_CHROME=1. -->
   <keyboard/>
   <mouse/>
   <applications>

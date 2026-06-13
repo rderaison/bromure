@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Native-tabs Openbox config. Identical to openbox-rc.xml except that it
+     globally grabs the browser-chrome chords and bounces them to the macOS
+     host via bromure-hostkey then tab-agent. xinitrc copies this over rc.xml
+     and reconfigures Openbox when NATIVE_CHROME=1. Keep the non-keyboard bits
+     in sync with openbox-rc.xml. -->
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <resistance><strength>10</strength><screen_edge_strength>20</screen_edge_strength></resistance>
+  <focus><focusNew>yes</focusNew><followMouse>yes</followMouse><raiseOnFocus>yes</raiseOnFocus></focus>
+  <placement><policy>Smart</policy></placement>
+  <theme><name>Clearlooks</name><titleLayout></titleLayout></theme>
+  <desktops><number>1</number></desktops>
+  <keyboard>
+    <!-- Openbox grabs these chords (consuming them so Chromium never acts on
+         them) and runs bromure-hostkey, which bounces the key to the host via
+         tab-agent. The host then owns ⌘T/⌘W/⌘L/⌘R/⌘P/⌘[/⌘] even while the VM
+         holds keyboard focus — the VZ view forwards captured keys to the guest
+         before AppKit can intercept them, so host-side interception alone
+         loses the race. The Cmd↔Ctrl swap maps the Mac ⌘ to Ctrl here. -->
+    <keybind key="C-t"><action name="Execute"><command>/usr/local/bin/bromure-hostkey t</command></action></keybind>
+    <keybind key="C-w"><action name="Execute"><command>/usr/local/bin/bromure-hostkey w</command></action></keybind>
+    <keybind key="C-l"><action name="Execute"><command>/usr/local/bin/bromure-hostkey l</command></action></keybind>
+    <keybind key="C-r"><action name="Execute"><command>/usr/local/bin/bromure-hostkey r</command></action></keybind>
+    <keybind key="C-p"><action name="Execute"><command>/usr/local/bin/bromure-hostkey p</command></action></keybind>
+    <keybind key="C-bracketleft"><action name="Execute"><command>/usr/local/bin/bromure-hostkey '['</command></action></keybind>
+    <keybind key="C-bracketright"><action name="Execute"><command>/usr/local/bin/bromure-hostkey ']'</command></action></keybind>
+  </keyboard>
+  <mouse/>
+  <applications>
+    <application class="*"><decor>no</decor><maximized>true</maximized></application>
+  </applications>
+</openbox_config>

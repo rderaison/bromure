@@ -97,6 +97,7 @@ VSOCK_PORT = 5810
 HOST_CID = 2
 CDP_HOST = "127.0.0.1"
 CDP_PORT = 9222
+SHORTCUT_PORT = 5917          # localhost: Openbox -> bromure-hostkey -> here
 POLL_INTERVAL = 0.4           # seconds between /json polls
 FAVICON_MAX_BYTES = 128 * 1024  # 128 KB cap; larger icons are sites' problem
 
@@ -919,6 +920,52 @@ def handle_cmd(msg, targets_by_id, link):
 # Main poll loop
 # ---------------------------------------------------------------------------
 
+def shortcut_listener(link):
+    """Relay browser-chrome shortcuts that Openbox grabbed in the guest back
+    to the macOS host. While the VM holds keyboard focus the VZ view forwards
+    every chord to the guest before AppKit can swallow it, so Openbox grabs
+    ⌘T/⌘W/⌘L/⌘R/⌘P (which the Cmd↔Ctrl swap turns into Ctrl+… that Chromium
+    would act on) and runs `bromure-hostkey <k>`, which connects here and
+    sends the bare key letter. We forward it over vsock so the host owns the
+    chord. Localhost-only listener; only an allowlisted key letter is
+    relayed."""
+    allowed = {"t", "w", "l", "r", "p", "[", "]"}
+    # Debounce: a held chord autorepeats in the guest X server (xset r rate),
+    # firing the Openbox keybind — and thus this listener — many times for one
+    # intentional press. Collapse repeats of the same key within this window so
+    # ⌘T doesn't spawn a pile of tabs. Well under a human double-tap interval.
+    debounce = 0.2
+    last_fire = {}
+    try:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", SHORTCUT_PORT))
+        srv.listen(8)
+    except OSError as e:
+        log(f"shortcut listener bind failed: {e}")
+        return
+    log(f"shortcut listener on 127.0.0.1:{SHORTCUT_PORT}")
+    while True:
+        try:
+            conn, _ = srv.accept()
+            conn.settimeout(1)
+            try:
+                data = conn.recv(8)
+            finally:
+                conn.close()
+            key = data.decode("utf-8", "ignore").strip()
+            if key in allowed:
+                now = time.monotonic()
+                if now - last_fire.get(key, 0.0) < debounce:
+                    continue
+                last_fire[key] = now
+                log(f"shortcut -> host: {key}")
+                link.send({"event": "shortcut", "key": key})
+        except Exception as e:
+            log(f"shortcut listener: {e}")
+            time.sleep(0.1)
+
+
 def main():
     # Wait for Chromium
     log("waiting for Chromium CDP…")
@@ -955,6 +1002,7 @@ def main():
         handle_cmd(msg, targets_by_id, link)
 
     threading.Thread(target=link.reader_loop, args=(on_cmd,), daemon=True).start()
+    threading.Thread(target=shortcut_listener, args=(link,), daemon=True).start()
 
     favicon_workers = set()
     workers_lock = threading.Lock()

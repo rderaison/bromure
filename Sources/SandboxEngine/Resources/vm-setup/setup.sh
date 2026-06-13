@@ -287,7 +287,8 @@ chroot /mnt chown chrome:chrome /home/chrome/.xinitrc
 # Openbox
 mkdir -p /mnt/home/chrome/.config/openbox
 mkdir -p /mnt/home/chrome/.cache/openbox/sessions
-install_config configs/openbox-rc.xml   /mnt/home/chrome/.config/openbox/rc.xml
+install_config configs/openbox-rc.xml          /mnt/home/chrome/.config/openbox/rc.xml
+install_config configs/openbox-rc-nativetabs.xml /mnt/home/chrome/.config/openbox/rc-nativetabs.xml
 install_config configs/openbox-menu.xml /mnt/home/chrome/.config/openbox/menu.xml
 
 # Chromium preferences
@@ -346,6 +347,7 @@ install_config scripts/routing-socks.py     /mnt/usr/local/bin/routing-socks.py 
 install_config scripts/config-agent.py      /mnt/usr/local/bin/config-agent.py      755
 install_config scripts/cdp-agent.py         /mnt/usr/local/bin/cdp-agent.py         755
 install_config scripts/tab-agent.py         /mnt/usr/local/bin/tab-agent.py         755
+install_config scripts/bromure-hostkey      /mnt/usr/local/bin/bromure-hostkey      755
 install_config scripts/shell-agent.py       /mnt/usr/local/bin/shell-agent.py       755
 install_config scripts/trace-agent.py      /mnt/usr/local/bin/trace-agent.py      755
 install_config scripts/resilient-launch.sh /mnt/usr/local/bin/resilient-launch.sh 755

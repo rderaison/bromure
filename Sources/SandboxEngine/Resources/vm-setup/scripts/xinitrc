@@ -100,6 +100,15 @@ fi
 [ "$MICROPHONE" = "1" ] && pactl load-module module-alsa-source device=hw:0,1 source_name=virtio_mic source_properties=device.description=Microphone 2>/dev/null &
 [ "$AUTOMATION" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/cdp-agent.py &
 [ "$NATIVE_CHROME" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/tab-agent.py &
+# Native tabs: swap in the Openbox config that grabs browser-chrome chords
+# (⌘T/⌘W/⌘L/⌘R/⌘P/⌘[/⌘]) and bounces them to the host via bromure-hostkey ->
+# tab-agent. Legacy full-Chromium mode keeps the keyless rc.xml so those
+# chords reach Chromium directly. openbox is already up (started at the top),
+# so reconfigure to (re)establish the key grabs.
+if [ "$NATIVE_CHROME" = "1" ] && [ -f "$HOME/.config/openbox/rc-nativetabs.xml" ]; then
+    cp "$HOME/.config/openbox/rc-nativetabs.xml" "$HOME/.config/openbox/rc.xml"
+    openbox --reconfigure 2>/dev/null
+fi
 [ "$DEBUG_SHELL" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/shell-agent.py &
 echo "xinitrc: EXTRA_FLAGS=$EXTRA_FLAGS CHROME_URL=$CHROME_URL SWAP_CMD_CTRL=$SWAP_CMD_CTRL" > /dev/hvc0
 # Mesa software GL (llvmpipe) — VZ's virtio-gpu has no 3D acceleration

@@ -85,6 +85,14 @@ public final class TabBridge: NSObject, @unchecked Sendable {
     /// Fires when the guest first connects (i.e. Chromium is up).
     public var onConnected: (() -> Void)?
 
+    /// Fires when the guest bounces a browser-chrome keyboard shortcut back to
+    /// the host. While the VM holds keyboard focus the VZ view forwards every
+    /// chord to the guest before AppKit can intercept it, so Openbox in the
+    /// guest grabs ⌘T/⌘W/⌘L/⌘R/⌘P (consuming them so Chromium never reacts)
+    /// and tab-agent relays the bare key letter here. The value is the
+    /// single-character key ("t", "w", "l", "r", "p", "[", "]").
+    public var onShortcut: ((String) -> Void)?
+
     /// Fires synchronously inside `send(...)` before bytes hit the wire.
     /// BrowserSession wires this up to ``VMAutoSuspend.resumeForAPIRequest``
     /// so any host-initiated tab action (URL submit, ⌘T, ⌘W, click, …) on a
@@ -287,6 +295,12 @@ public final class TabBridge: NSObject, @unchecked Sendable {
             let pdf = b64.isEmpty ? nil : Data(base64Encoded: b64)
             if let cb = pendingPrintRequests.removeValue(forKey: id) {
                 cb(pdf)
+            }
+        case "shortcut":
+            // A browser-chrome chord Openbox grabbed in the guest and bounced
+            // back because the VM had keyboard focus. Run the host action.
+            if let key = obj["key"] as? String, !key.isEmpty {
+                onShortcut?(key)
             }
         default:
             tbLog("[TabBridge] unknown event: \(event ?? "nil")")

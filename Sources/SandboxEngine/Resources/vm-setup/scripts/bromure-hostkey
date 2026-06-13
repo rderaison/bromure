@@ -1,0 +1,11 @@
+#!/bin/sh
+# bromure-hostkey <key>
+#
+# Forward a browser-chrome keyboard shortcut that Openbox grabbed in the guest
+# back to the macOS host. Openbox binds ⌘T/⌘W/⌘L/⌘R/⌘P (the Cmd↔Ctrl swap turns
+# the Mac ⌘ into Ctrl, which Chromium would otherwise act on) and runs this
+# helper, which pokes tab-agent's localhost listener; tab-agent relays the key
+# over vsock so the host owns the chord even while the VM holds keyboard focus.
+#
+# Best-effort and backgrounded so a keypress never stalls the window manager.
+printf '%s' "${1:-}" | nc -w 1 127.0.0.1 5917 >/dev/null 2>&1 &

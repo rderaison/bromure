@@ -1806,6 +1806,7 @@ final class BrowserSession {
     private var nativeTabBar: NativeTabBarChrome?
     private var nativeChromeKeyMonitor: Any?
     private var nativeChromeFlagsMonitor: Any?
+    private var nativeChromeKeyUpMonitor: Any?
     /// Swallows macOS-generated `isARepeat == true` keyDowns aimed at
     /// the session window so VZ doesn't forward them as discrete USB
     /// HID presses (which would bypass the X server's autorepeat at
@@ -2226,6 +2227,12 @@ final class BrowserSession {
                     if !tabs.isEmpty { vmView?.inputReady = true }
                     tabModel?.setTabs(tabs)
                 }
+                // Browser-chrome chords the guest grabbed (VM had keyboard
+                // focus) and bounced back — run the same host action the key
+                // monitor would for the app-focused case.
+                bridge.onShortcut = { [weak self] key in
+                    self?.performNativeChromeShortcut(key)
+                }
                 // Any host-initiated tab action (URL submit, ⌘T, click, …)
                 // should resume a paused VM so the command isn't stranded
                 // in the vsock buffer.
@@ -2337,7 +2344,7 @@ final class BrowserSession {
                 let windowID = ObjectIdentifier(window)
                 self.nativeChromeKeyMonitor = NSEvent.addLocalMonitorForEvents(
                     matching: .keyDown
-                ) { [weak bridge, weak tabModel, weak window, weak vmView] event in
+                ) { [weak self, weak window] event in
                     guard event.modifierFlags.contains(.command) else { return event }
                     // When the VZ view holds keyboard focus, AppKit can hand us
                     // the keyDown with a nil (or non-matching) event.window —
@@ -2418,68 +2425,16 @@ final class BrowserSession {
                         return nil
                     }
 
-                    Task { @MainActor in
-                        guard let bridge, let tabModel, let window else { return }
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
                         switch key {
-                        case "t":
-                            // See onNewTab above — resigning vmView before
-                            // we kick off tab creation prevents the new
-                            // address field from racing the VM for focus
-                            // and losing. Telling vmView to decline first
-                            // responder makes that stick: otherwise it
-                            // reclaims focus the instant the outgoing tab's
-                            // field is torn down, and keystrokes land in the
-                            // guest's hidden omnibox. forceFocusURLField then
-                            // settles focus on the new field.
-                            vmView?.declinesFirstResponder = true
-                            window.makeFirstResponder(nil)
-                            bridge.newTab(url: "about:blank")
-                            tabModel.pendingFocusOnActiveChange = true
-                            Self.forceFocusURLField(window: window, model: tabModel)
-                        case "l":
-                            // Focus the address field and select the URL.
-                            // A one-shot makeFirstResponder isn't enough:
-                            // vmView often refuses to resign on the first
-                            // attempt (see onNewTab), so force-resign and
-                            // run the retrying focus loop. Select-all
-                            // happens in the field's becomeFirstResponder.
-                            if let field = tabModel.addressField,
-                               let editor = field.currentEditor() as? NSTextView,
-                               field.window?.firstResponder === editor {
-                                // Already focused — re-select, Safari-style.
-                                editor.selectAll(nil)
-                            } else {
-                                vmView?.declinesFirstResponder = true
-                                window.makeFirstResponder(nil)
-                                Self.forceFocusURLField(window: window, model: tabModel)
-                            }
-                        case "r":
-                            if let id = tabModel.activeTab?.id { bridge.reload(id: id) }
-                        case "[":
-                            if let id = tabModel.activeTab?.id { bridge.back(id: id) }
-                        case "]":
-                            if let id = tabModel.activeTab?.id { bridge.forward(id: id) }
-                        case "w":
-                            // ⌘W closes the active tab when more than one
-                            // is open; on the last tab it falls through to
-                            // a regular window close (which tears down the
-                            // session). Mirrors Safari/Chrome behaviour and
-                            // keeps the macOS-app feel native-chrome aims
-                            // for. The active id is resolved guest-side
-                            // because the host's `active` flag is fed by a
-                            // 400 ms poll and lags behind spontaneous
-                            // tab switches in Chromium, which would
-                            // otherwise close the wrong tab.
-                            if tabModel.tabs.count > 1 {
-                                bridge.closeActive()
-                            } else {
-                                window.performClose(nil)
-                            }
                         case "1", "2", "3", "4", "5", "6", "7", "8", "9":
                             // Safari/Chrome convention: ⌘N switches to the
                             // Nth tab; ⌘9 jumps to the LAST tab regardless
                             // of count. Translate to a host-side activate
                             // (which also marks the tab active locally).
+                            guard let tabModel = self.nativeTabBar?.model,
+                                  let bridge = self.tabBridge else { return }
                             let n = Int(key) ?? 0
                             let tabs = tabModel.tabs
                             guard !tabs.isEmpty else { break }
@@ -2487,25 +2442,17 @@ final class BrowserSession {
                             tabModel.markActiveLocally(target.id)
                             bridge.activate(id: target.id)
                         case "h":
-                            // Only ⌥⌘H (Hide Others) reaches here — plain
-                            // ⌘H forwards to the guest as Ctrl+H, Chromium's
-                            // History page. VZVirtualMachineView's
-                            // performKeyEquivalent claims ⌘+letter chords
-                            // before AppKit walks the main menu, so we
-                            // dispatch hide-others ourselves; the menu item
-                            // still covers launcher/settings windows where
-                            // no monitor is installed.
-                            //
-                            // Defer to the next runloop tick: calling it
-                            // directly from within keyDown processing of a
-                            // session window doesn't actually hide — the
-                            // in-flight event seems to race the hide and
-                            // win.
+                            // Only ⌥⌘H (Hide Others) reaches here — plain ⌘H
+                            // forwards to the guest. Defer a runloop tick: a
+                            // direct call from within keyDown processing races
+                            // the hide and loses.
                             DispatchQueue.main.async {
                                 NSApp.hideOtherApplications(nil)
                             }
                         default:
-                            break
+                            // ⌘T / ⌘W / ⌘L / ⌘R / ⌘[ / ⌘] — shared with the
+                            // guest-bounce path so the focus-grab can't drift.
+                            self.performNativeChromeShortcut(key)
                         }
                     }
                     return nil
@@ -2528,6 +2475,32 @@ final class BrowserSession {
                           window.firstResponder !== vmView
                     else { return event }
                     vmView.flagsChanged(with: event)
+                    return event
+                }
+
+                // Same idea for regular key RELEASES, but scoped tightly. When
+                // a bounced shortcut (⌘T/⌘L/…) moves focus to the address
+                // field, the key-up for the chord's letter is delivered to that
+                // field, not the VZ view — so the guest never sees the release,
+                // the key sticks "down" in its X server, and autorepeats forever
+                // (type in a page, ⌘L, then endless "l" pours into the field).
+                // Only forward when a native TEXT FIELD holds focus (its field
+                // editor is an NSText) — i.e. exactly the field-stole-the-keyup
+                // case. Forwarding more broadly (whenever the VZ view merely
+                // isn't first responder, e.g. the neutral state right after a
+                // fresh load) suppresses the guest's own autorepeat, so a held
+                // key stops repeating. A key-up the guest never saw a key-down
+                // for is a no-op, so this never injects characters; `return
+                // event` lets the field still process its own key-ups.
+                self.nativeChromeKeyUpMonitor = NSEvent.addLocalMonitorForEvents(
+                    matching: .keyUp
+                ) { [weak vmView, weak window] event in
+                    guard let vmView, let window,
+                          let eventWindow = event.window,
+                          ObjectIdentifier(eventWindow) == windowID,
+                          window.firstResponder is NSText
+                    else { return event }
+                    vmView.keyUp(with: event)
                     return event
                 }
             }
@@ -2734,6 +2707,56 @@ final class BrowserSession {
         self.delegateHelper = helper
         warmVM.vm.delegate = helper
         window.delegate = helper
+    }
+
+    /// Run a native-chrome browser shortcut (⌘T/⌘W/⌘L/⌘R/⌘P/⌘[/⌘]). Called
+    /// from two paths that are mutually exclusive by focus:
+    ///   • the host key monitor, when the macOS side (e.g. the URL bar) has
+    ///     focus and the chord reaches AppKit;
+    ///   • TabBridge.onShortcut, when the VM has keyboard focus — Openbox in
+    ///     the guest grabs the chord (so Chromium never acts on it) and bounces
+    ///     it back over vsock. This is the only reliable way to own the chord
+    ///     while the guest holds the keyboard: the VZ view forwards captured
+    ///     keys to the guest before our monitor / performKeyEquivalent can
+    ///     swallow them.
+    /// Keeping both paths on this one method means the finicky ⌘T focus-grab
+    /// logic can't drift between them.
+    @MainActor
+    func performNativeChromeShortcut(_ key: String) {
+        guard let bridge = tabBridge, let tabModel = nativeTabBar?.model else { return }
+        switch key {
+        case "t":
+            // Resign vmView and have it decline first responder so the new
+            // tab's address field wins the focus race; forceFocusURLField then
+            // settles focus on it. (Same as the ⌘T monitor path.)
+            (vmView as? PrecisionScrollVMView)?.declinesFirstResponder = true
+            window.makeFirstResponder(nil)
+            bridge.newTab(url: "about:blank")
+            tabModel.pendingFocusOnActiveChange = true
+            Self.forceFocusURLField(window: window, model: tabModel)
+        case "l":
+            if let field = tabModel.addressField,
+               let editor = field.currentEditor() as? NSTextView,
+               field.window?.firstResponder === editor {
+                editor.selectAll(nil)
+            } else {
+                (vmView as? PrecisionScrollVMView)?.declinesFirstResponder = true
+                window.makeFirstResponder(nil)
+                Self.forceFocusURLField(window: window, model: tabModel)
+            }
+        case "r":
+            if let id = tabModel.activeTab?.id { bridge.reload(id: id) }
+        case "[":
+            if let id = tabModel.activeTab?.id { bridge.back(id: id) }
+        case "]":
+            if let id = tabModel.activeTab?.id { bridge.forward(id: id) }
+        case "w":
+            if tabModel.tabs.count > 1 { bridge.closeActive() } else { window.performClose(nil) }
+        case "p":
+            printActiveTab()
+        default:
+            break
+        }
     }
 
     /// Whether ⌘P / File ▸ Print should be available for this session: the
@@ -3513,6 +3536,10 @@ final class BrowserSession {
             if let monitor = nativeChromeFlagsMonitor {
                 NSEvent.removeMonitor(monitor)
                 nativeChromeFlagsMonitor = nil
+            }
+            if let monitor = nativeChromeKeyUpMonitor {
+                NSEvent.removeMonitor(monitor)
+                nativeChromeKeyUpMonitor = nil
             }
             if let monitor = keyRepeatFilterMonitor {
                 NSEvent.removeMonitor(monitor)
