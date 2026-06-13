@@ -112,6 +112,7 @@ public final class LinuxImageManager {
         // 6. Clean up
         try? fm.removeItem(at: netbootKernel)
         try? fm.removeItem(at: netbootInitrd)
+        try? fm.removeItem(at: netbootInitrdShimmedURL)
 
         // 7. Write version stamp
         try Self.imageVersion.write(to: imageVersionURL, atomically: true, encoding: .utf8)
@@ -135,6 +136,12 @@ public final class LinuxImageManager {
 
     public var imageVersionURL: URL {
         storageDir.appendingPathComponent("image-version")
+    }
+
+    /// Netboot initramfs with the MTU-clamp `rdinit` shim appended. Built from
+    /// the downloaded netboot initrd for the install boot, then cleaned up.
+    private var netbootInitrdShimmedURL: URL {
+        storageDir.appendingPathComponent("netboot-initramfs-shimmed")
     }
 
     // MARK: - VM Configuration
@@ -441,9 +448,29 @@ public final class LinuxImageManager {
 
         let vzConfig = VZVirtualMachineConfiguration()
 
+        // Clamp the installer NIC MTU in the initramfs, BEFORE Alpine's /init
+        // runs its modloop / APKINDEX fetches. On reduced-MTU paths (WireGuard
+        // ~1420, IKEv2 ~1400, nested tunnels) PMTUD doesn't always kick in and
+        // large TLS frames at MTU 1500 get blackholed — which would hang the
+        // boot-time modloop download long before the post-login `ip link set …
+        // mtu` (below) could run. The shim appends a `rdinit=/init.bromure`
+        // segment that does the single DHCP + MTU clamp itself, then exec's
+        // Alpine's /init. Default 1280 (IPv6 minimum) is safe; override via:
+        //   defaults write io.bromure.app vm.mtu -int <value>
+        let installerMTU = VMConfig.resolvedNICMTU()
+        try InitrdShim.writeShimmedInitrd(
+            original: netbootInitrd,
+            mtu: installerMTU,
+            to: netbootInitrdShimmedURL
+        )
+
         let bootLoader = VZLinuxBootLoader(kernelURL: netbootKernel)
-        bootLoader.initialRamdiskURL = netbootInitrd
-        bootLoader.commandLine = "console=hvc0 ip=dhcp alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main modloop=\(Self.netbootBase)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk \(extraKernelOptions)"
+        bootLoader.initialRamdiskURL = netbootInitrdShimmedURL
+        // No `ip=dhcp`: kernel autoconfig races vmnet's bootpd, fails, and
+        // brings the interface down. The rdinit shim does the single DHCP +
+        // MTU clamp itself; with no `ip=` on the cmdline, Alpine's /init sees
+        // the network already up and skips its own DHCP step.
+        bootLoader.commandLine = "console=hvc0 rdinit=/init.bromure alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main modloop=\(Self.netbootBase)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk \(extraKernelOptions)"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.platform = VZGenericPlatformConfiguration()
@@ -595,13 +622,10 @@ public final class LinuxImageManager {
         writer.write(Data("root\n".utf8))
         try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
 
-        // Clamp installer NIC MTU before any apk/wget call. VPN paths
-        // (WireGuard ~1420, IKEv2 ~1400) often silently truncate large
-        // TLS frames at MTU 1500. Default 1280 (IPv6 minimum) is safe;
-        // override via:
-        //   defaults write io.bromure.app vm.mtu -int <value>
-        let installerMTU = VMConfig.resolvedNICMTU()
-        progress(.message("Clamping installer MTU to \(installerMTU)..."))
+        // Belt-and-suspenders: re-clamp the NIC MTU once more after login.
+        // The initramfs shim already clamped it before /init (see above); this
+        // catches the running interface in case Alpine's /init re-leased it.
+        progress(.message("Re-clamping installer MTU to \(installerMTU)..."))
         writer.write(Data("NIC=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'); [ -n \"$NIC\" ] && ip link set dev \"$NIC\" mtu \(installerMTU) 2>/dev/null || true\n".utf8))
         try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 10, progress: progress)
 
