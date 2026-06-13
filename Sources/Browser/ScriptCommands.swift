@@ -26,6 +26,7 @@ private func findProfile(_ nameOrID: String) -> Profile? {
 private func readSetting(_ s: ProfileSettings, key: String) -> String? {
     switch key {
     case "homePage":        return s.homePage
+    case "userAgent":       return s.userAgent
     case "persistent":      return String(s.persistent)
     case "encryptOnDisk":   return String(s.encryptOnDisk)
     case "clipboard":       return String(s.enableClipboardSharing)
@@ -86,6 +87,7 @@ private func writeSetting(_ s: inout ProfileSettings, key: String, value: String
     let b = (value == "true" || value == "1" || value == "yes")
     switch key {
     case "homePage":        s.homePage = value
+    case "userAgent":       s.userAgent = value
     case "persistent":      s.persistent = b
     case "encryptOnDisk":   s.encryptOnDisk = b
     case "clipboard":       s.enableClipboardSharing = b

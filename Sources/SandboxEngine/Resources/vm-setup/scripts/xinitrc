@@ -39,6 +39,7 @@ AUDIO=
 AUDIO_VOLUME=
 PROFILE_DIR=
 CHROME_LANG=
+CHROME_UA=
 DISPLAY_SCALE=
 MTU=
 KEY_REPEAT_DELAY_MS=
@@ -187,7 +188,14 @@ fi
 start_ts=$(date +%s)
 prefs_backup=
 for attempt in 1 2 3 4 5; do
-    $CHROME_CMD
+    # CHROME_UA is applied here, not via $CHROME_CMD, because the UA string
+    # has spaces and $CHROME_CMD is word-split on launch. Quoting it as a
+    # standalone argument keeps it a single --user-agent value.
+    if [ -n "$CHROME_UA" ]; then
+        $CHROME_CMD --user-agent="$CHROME_UA"
+    else
+        $CHROME_CMD
+    fi
     now_ts=$(date +%s)
     elapsed=$((now_ts - start_ts))
     # If Chrome ran for more than 10 seconds, treat it as a real session

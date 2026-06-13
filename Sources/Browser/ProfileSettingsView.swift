@@ -823,6 +823,24 @@ struct ProfileSettingsView: View {
                 description: "Adds a right-click menu option to send a web page link to another Bromure profile.",
                 isOn: $draft.settings.enableLinkSender
             )
+
+            settingsDivider
+
+            // User Agent
+            VStack(alignment: .leading, spacing: 6) {
+                Text("User Agent").font(.headline)
+                Text("How this browser identifies itself to websites. By default Bromure appears as Chrome on macOS so sites don\u{2019}t see the Linux VM. Enter a custom user agent to override, or leave blank for the default.")
+                    .settingDescription()
+                TextField(
+                    "Chrome on macOS (default)",
+                    text: $draft.settings.userAgent,
+                    axis: .vertical
+                )
+                .lineLimit(1...3)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+                .autocorrectionDisabled()
+            }
         }
     }
 

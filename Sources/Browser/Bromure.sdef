@@ -38,7 +38,7 @@
         <!-- Profile Settings                                             -->
         <!-- ============================================================ -->
 
-        <command name="get profile setting" code="BrmrGpSt" description="Read a profile setting. Keys: homePage, persistent, encryptOnDisk, clipboard, gpu, webgl, audio, audioVolume, webcam, microphone, canUpload, canDownload, blockMalware, phishingWarning, linkSender, adBlocking, warp, warpAutoConnect, isolateFromLAN, restrictPorts, allowedPorts, proxyHost, proxyPort, proxyUsername, proxyPassword, locale, color, comments.">
+        <command name="get profile setting" code="BrmrGpSt" description="Read a profile setting. Keys: homePage, userAgent, persistent, encryptOnDisk, clipboard, gpu, webgl, audio, audioVolume, webcam, microphone, canUpload, canDownload, blockMalware, phishingWarning, linkSender, adBlocking, warp, warpAutoConnect, isolateFromLAN, restrictPorts, allowedPorts, proxyHost, proxyPort, proxyUsername, proxyPassword, locale, color, comments.">
             <cocoa class="BromureGetProfileSettingCommand"/>
             <direct-parameter type="text" description="Profile name or UUID"/>
             <parameter name="key" code="pKey" type="text" description="Setting key name"/>

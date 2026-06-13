@@ -131,6 +131,11 @@ public struct VMConfig {
     /// Home page URL for the browser.
     public var homePage: String
 
+    /// Custom User-Agent override. Empty = the guest presents as Chrome on
+    /// macOS (built from the real Chromium version). Non-empty is passed to
+    /// Chromium verbatim via `--user-agent`.
+    public var userAgent: String
+
     /// Whether GPU acceleration is enabled in the browser.
     public var enableGPU: Bool
 
@@ -295,6 +300,7 @@ public struct VMConfig {
         enableAdBlocking: Bool = false,
         swapCmdCtrl: Bool = true,
         homePage: String = "https://bromure.io/hello",
+        userAgent: String = "",
         enableGPU: Bool = true,
         enableWebGL: Bool = false,
         enableZeroCopy: Bool = true,
@@ -372,6 +378,7 @@ public struct VMConfig {
         self.enableAdBlocking = enableAdBlocking
         self.swapCmdCtrl = swapCmdCtrl
         self.homePage = homePage
+        self.userAgent = userAgent
         self.enableGPU = enableGPU
         self.enableWebGL = enableWebGL
         self.enableZeroCopy = enableZeroCopy

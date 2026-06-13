@@ -200,6 +200,12 @@ public struct ProfileSettings: Codable, Equatable {
     public var enableWebGL: Bool = false
     public var enableZeroCopy: Bool = true
     public var enableSmoothScrolling: Bool = true
+    /// Custom User-Agent override. Empty = present as Chrome on macOS
+    /// (the guest builds the string from its real Chromium version so the
+    /// platform reads "Macintosh" instead of leaking the Linux VM, while
+    /// the Chrome version stays accurate). A non-empty value is sent to
+    /// Chromium verbatim via `--user-agent`.
+    public var userAgent: String = ""
 
     // Network
     public var enableAdBlocking: Bool = false
@@ -326,7 +332,7 @@ public struct ProfileSettings: Codable, Equatable {
     public init() {}
 
     enum CodingKeys: String, CodingKey {
-        case homePage, enableGPU, enableWebGL, enableZeroCopy, enableSmoothScrolling
+        case homePage, enableGPU, enableWebGL, enableZeroCopy, enableSmoothScrolling, userAgent
         case enableAdBlocking, enableWarp, warpAutoConnect
         case vpnMode, wireGuardConfig, wireGuardAutoConnect
         case ikev2Server, ikev2RemoteID, ikev2AuthMethod, ikev2Username, ikev2UseDNS, ikev2AutoConnect
@@ -355,6 +361,7 @@ public struct ProfileSettings: Codable, Equatable {
         enableWebGL = try c.decodeIfPresent(Bool.self, forKey: .enableWebGL) ?? defaults.enableWebGL
         enableZeroCopy = try c.decodeIfPresent(Bool.self, forKey: .enableZeroCopy) ?? defaults.enableZeroCopy
         enableSmoothScrolling = try c.decodeIfPresent(Bool.self, forKey: .enableSmoothScrolling) ?? defaults.enableSmoothScrolling
+        userAgent = try c.decodeIfPresent(String.self, forKey: .userAgent) ?? defaults.userAgent
         enableAdBlocking = try c.decodeIfPresent(Bool.self, forKey: .enableAdBlocking) ?? defaults.enableAdBlocking
         // Migration: legacy enableWarp bool → vpnMode enum
         let legacyEnableWarp = try c.decodeIfPresent(Bool.self, forKey: .enableWarp) ?? false
@@ -432,6 +439,7 @@ public struct ProfileSettings: Codable, Equatable {
         try c.encode(enableWebGL, forKey: .enableWebGL)
         try c.encode(enableZeroCopy, forKey: .enableZeroCopy)
         try c.encode(enableSmoothScrolling, forKey: .enableSmoothScrolling)
+        try c.encode(userAgent, forKey: .userAgent)
         try c.encode(enableAdBlocking, forKey: .enableAdBlocking)
         try c.encode(vpnMode, forKey: .vpnMode)
         // Keep encoding enableWarp for compatibility with older app versions reading this profile
@@ -548,6 +556,7 @@ public struct ProfileSettings: Codable, Equatable {
             enableAdBlocking: effectiveAdBlocking,
             swapCmdCtrl: defaults.object(forKey: "vm.swapCmdCtrl") as? Bool ?? true,
             homePage: homePage,
+            userAgent: userAgent,
             enableGPU: enableGPU,
             enableWebGL: enableGPU ? enableWebGL : false,  // WebGL requires GPU
             enableZeroCopy: enableZeroCopy,

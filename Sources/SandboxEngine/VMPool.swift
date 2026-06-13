@@ -606,10 +606,15 @@ public final class VMPool {
             cfg["chromeEnvExtra"] = envExtra
         }
 
-        // App version for user-agent suffix
+        // App version — used by config-agent for the EV device-identity
+        // file (not the user-agent, which no longer carries a Bromure tag).
         if let version = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
             cfg["appVersion"] = version
         }
+
+        // User-Agent: empty = guest presents as Chrome on macOS; non-empty
+        // overrides verbatim. Always pass it so the guest knows the choice.
+        cfg["userAgent"] = config.userAgent
 
         // Test suite: inject TEST_SUITE flag and expectations for guest test-runner.sh
         if config.testSuite {

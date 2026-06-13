@@ -251,6 +251,46 @@ def sh_escape(s):
     return "'" + str(s).replace("'", "'\\''") + "'"
 
 
+# Fallback Chrome major if `chromium-browser --version` can't be read.
+# Only used on error; the live version is normally detected at runtime.
+_FALLBACK_CHROME_MAJOR = "142"
+
+
+def chromium_major_version():
+    """Best-effort Chrome major version (e.g. '142') from the installed
+    Chromium, so a spoofed macOS UA reports a version consistent with the
+    real engine instead of a stale hardcoded one."""
+    try:
+        out = subprocess.run(
+            ["chromium-browser", "--version"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+        m = re.search(r"\b(\d+)\.\d+\.\d+\.\d+\b", out)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return _FALLBACK_CHROME_MAJOR
+
+
+def resolve_user_agent(cfg):
+    """Return the User-Agent string to hand Chromium.
+
+    A non-empty `userAgent` is used verbatim. Empty (the default) yields a
+    Chrome-on-macOS UA built from the real Chromium version, so sites see a
+    stock macOS Chrome instead of the Linux VM — matching the rest of
+    Bromure's de-fingerprinting (locale, platform)."""
+    custom = (cfg.get("userAgent") or "").strip()
+    if custom:
+        return custom
+    major = chromium_major_version()
+    return (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{major}.0.0.0 Safari/537.36"
+    )
+
+
 def write_chrome_env(cfg):
     """Build and write the chrome-env file."""
     env_file = "/tmp/bromure/chrome-env"
@@ -376,10 +416,6 @@ def write_chrome_env(cfg):
         extra_flags.append("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
         extra_flags.append("--enforce-webrtc-ip-permission-check")
 
-    app_version = cfg.get("appVersion", "")
-    if app_version:
-        extra_flags.append(f"--append-user-agent=Bromure/{app_version}")
-
     if enable_features:
         extra_flags.append(f"--enable-features={','.join(enable_features)}")
     if disable_features:
@@ -481,6 +517,11 @@ def write_chrome_env(cfg):
     lines.append(f"export LANG={sh_escape(f'{locale}.UTF-8')}")
     lines.append(f"export LC_ALL={sh_escape(f'{locale}.UTF-8')}")
     lines.append(f"export LANGUAGE={sh_escape(base_lang)}")
+
+    # User-Agent. Passed as its own var (not folded into EXTRA_FLAGS, whose
+    # values xinitrc word-splits on spaces) so the spaced UA string reaches
+    # Chromium as a single --user-agent argument.
+    lines.append(f"CHROME_UA={sh_escape(resolve_user_agent(cfg))}")
 
     # Test suite: forward TEST_* expectations to chrome-env
     for key, val in cfg.items():

@@ -131,6 +131,14 @@ async function getChromeFlags(browser) {
   return flags;
 }
 
+/** Read navigator.userAgent from a fresh page in the session. */
+async function getUserAgent(browser) {
+  const page = await browser.newPage();
+  const ua = await page.evaluate(() => navigator.userAgent);
+  await page.close();
+  return ua;
+}
+
 /** Get CDP /json/list targets for a session. Retries on empty/error responses. */
 async function getTargets(sessionId) {
   for (let i = 0; i < 5; i++) {
@@ -530,6 +538,34 @@ async function main() {
           page.url.includes("example.com"),
           `Wrong URL: ${page.url}`
         );
+      }
+    );
+  });
+
+  await test("3.2 Default user agent presents as Chrome on macOS", async () => {
+    await withSession("E2E_UA_Default", {},
+      async ({ browser }) => {
+        const ua = await getUserAgent(browser);
+        // Spoofed to stock macOS Chrome: platform reads Macintosh, the
+        // Chrome version is present, and neither the Linux VM nor the old
+        // Bromure/<version> suffix leaks.
+        assertIncludes(ua, "Macintosh", `UA not macOS: ${ua}`);
+        assertIncludes(ua, "Mac OS X", `UA not macOS: ${ua}`);
+        assert(/Chrome\/\d+/.test(ua), `No Chrome version in UA: ${ua}`);
+        assert(!ua.includes("Linux"), `UA leaks Linux: ${ua}`);
+        assert(!ua.includes("Bromure"), `UA still carries Bromure tag: ${ua}`);
+      }
+    );
+  });
+
+  await test("3.3 Custom user agent is applied verbatim", async () => {
+    const custom = "E2E-CustomAgent/1.0 (Test Platform) CheckMe";
+    await withSession("E2E_UA_Custom", { userAgent: custom },
+      async ({ browser }) => {
+        const ua = await getUserAgent(browser);
+        assert(ua === custom, `Custom UA not applied verbatim: got ${ua}`);
+        const flags = await getChromeFlags(browser);
+        assertIncludes(flags, "--user-agent=", "No --user-agent flag present");
       }
     );
   });
