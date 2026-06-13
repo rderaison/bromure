@@ -158,7 +158,7 @@ rm -f /tmp/resolv_stub.c
 # ---------------------------------------------------------------------------
 
 retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools jq python3 \
-    v4l-utils nss-tools bash wireguard-tools strongswan openssl
+    v4l-utils nss-tools bash wireguard-tools strongswan openvpn openssl
 
 # ---------------------------------------------------------------------------
 # Configuration files (static)
@@ -244,6 +244,7 @@ echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/precision-scroll-
 echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/warp-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/wireguard-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/ikev2-agent.py' >> /mnt/etc/inittab
+echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/openvpn-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/network-refresh-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh su -s /bin/sh chrome -c /usr/local/bin/keyboard-agent.py' >> /mnt/etc/inittab
 echo '::once:/usr/local/bin/resilient-launch.sh su -s /bin/sh chrome -c /usr/local/bin/cjk-input-agent.py' >> /mnt/etc/inittab
@@ -337,6 +338,7 @@ install_config scripts/precision-scroll-agent.py      /mnt/usr/local/bin/precisi
 install_config scripts/warp-agent.py        /mnt/usr/local/bin/warp-agent.py        755
 install_config scripts/wireguard-agent.py  /mnt/usr/local/bin/wireguard-agent.py  755
 install_config scripts/ikev2-agent.py     /mnt/usr/local/bin/ikev2-agent.py     755
+install_config scripts/openvpn-agent.py   /mnt/usr/local/bin/openvpn-agent.py   755
 install_config scripts/network-refresh-agent.py /mnt/usr/local/bin/network-refresh-agent.py 755
 install_config scripts/keyboard-agent.py    /mnt/usr/local/bin/keyboard-agent.py    755
 install_config scripts/cjk-input-agent.py  /mnt/usr/local/bin/cjk-input-agent.py  755

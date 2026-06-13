@@ -491,6 +491,13 @@ public final class VMPool {
                 if let p = config.ikev2ProxyPassword { cfg["ikev2ProxyPassword"] = p }
             }
         }
+        if config.vpnMode == .openVPN, let ovpn = config.openVPNConfig, !ovpn.isEmpty {
+            cfg["enableOpenVPN"] = true
+            cfg["openVPNConfig"] = ovpn
+            if let username = config.openVPNUsername { cfg["openVPNUsername"] = username }
+            if let password = config.openVPNPassword { cfg["openVPNPassword"] = password }
+            if config.openVPNAutoConnect { cfg["openVPNAutoConnect"] = true }
+        }
         if let proxyHost = config.proxyHost, let proxyPort = config.proxyPort {
             cfg["proxyHost"] = proxyHost
             cfg["proxyPort"] = proxyPort
@@ -786,7 +793,26 @@ public final class VMPool {
         case .ikev2:
             // strongSwan defaults: IKE on UDP/500, NAT traversal on UDP/4500.
             return [500, 4500]
+        case .openVPN:
+            // Parse `remote host port [proto]` line(s) from the .ovpn.
+            // Fall back to OpenVPN's conventional UDP/1194.
+            guard let conf = config.openVPNConfig, !conf.isEmpty else { return [1194] }
+            let ports = parseOpenVPNRemotePorts(conf)
+            return ports.isEmpty ? [1194] : ports
         }
+    }
+
+    nonisolated private static func parseOpenVPNRemotePorts(_ conf: String) -> [UInt16] {
+        var ports: [UInt16] = []
+        for line in conf.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.lowercased().hasPrefix("remote ") else { continue }
+            // "remote host port [proto]" — the port is the 3rd whitespace token.
+            let tokens = trimmed.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard tokens.count >= 3, let port = UInt16(tokens[2]) else { continue }
+            ports.append(port)
+        }
+        return ports
     }
 
     nonisolated private static func parseWireGuardEndpointPorts(_ conf: String) -> [UInt16] {

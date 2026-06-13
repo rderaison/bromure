@@ -104,6 +104,7 @@ struct ProfileSettingsView: View {
         self._ikev2CertData = State(initialValue: VPNKeychain.retrieve(profileID: draft.id, key: VPNKeychain.ikev2Cert) ?? "")
         self._ikev2CertPass = State(initialValue: VPNKeychain.retrieve(profileID: draft.id, key: VPNKeychain.ikev2CertPass) ?? "")
         self._ikev2CertName = State(initialValue: VPNKeychain.retrieve(profileID: draft.id, key: VPNKeychain.ikev2Cert) != nil ? "Imported" : "")
+        self._openVPNPassword = State(initialValue: VPNKeychain.retrieve(profileID: draft.id, key: VPNKeychain.openVPNPassword) ?? "")
     }
     @State private var showWarpMemoryConfirm = false
     @State private var showEncryptionWarning = false
@@ -130,6 +131,9 @@ struct ProfileSettingsView: View {
     @State private var ikev2CertData: String = ""
     @State private var ikev2CertPass: String = ""
     @State private var ikev2CertName: String = ""
+
+    // OpenVPN keychain-backed secret (not stored in profile JSON)
+    @State private var openVPNPassword: String = ""
 
     private enum VTKeyStatus {
         case valid
@@ -1164,6 +1168,7 @@ struct ProfileSettingsView: View {
                         Text("Cloudflare WARP").tag(VPNMode.cloudflareWarp)
                         Text("WireGuard").tag(VPNMode.wireGuard)
                         Text("IKEv2").tag(VPNMode.ikev2)
+                        Text("OpenVPN").tag(VPNMode.openVPN)
                     }
                     .pickerStyle(.segmented)
                     .disabled(proxyActive)
@@ -1378,6 +1383,71 @@ struct ProfileSettingsView: View {
                         "Connect on Startup",
                         description: "Automatically connect the VPN when the browser session starts. You can always toggle it from the window\u{2019}s VPN button.",
                         isOn: $draft.settings.ikev2AutoConnect
+                    )
+                    .padding(.leading, 20)
+                }
+
+                // OpenVPN options
+                if draft.settings.vpnMode == .openVPN {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("OpenVPN Configuration")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Text("Paste your .ovpn file below, or use the import button to load it from disk. Certificates and keys can be inlined in the file.")
+                            .settingDescription()
+                        TextEditor(text: $draft.settings.openVPNConfig)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(minHeight: 120, maxHeight: 200)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                            )
+                            .padding(.top, 2)
+                        HStack {
+                            Spacer()
+                            Button("Import .ovpn File\u{2026}") {
+                                let panel = NSOpenPanel()
+                                panel.allowedContentTypes = [.init(filenameExtension: "ovpn")!]
+                                panel.allowsMultipleSelection = false
+                                if panel.runModal() == .OK, let url = panel.url,
+                                   let content = try? String(contentsOf: url, encoding: .utf8) {
+                                    draft.settings.openVPNConfig = content
+                                }
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.blue)
+                        }
+                    }
+                    .padding(.leading, 20)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Credentials")
+                            .font(.subheadline).bold()
+                        Text("Only needed when your config uses username/password (auth-user-pass). Leave blank for certificate-only configs.")
+                            .settingDescription()
+                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                            GridRow {
+                                Text("Username")
+                                    .frame(maxWidth: .infinity, alignment: .trailing)
+                                    .foregroundStyle(.primary)
+                                TextField("", text: $draft.settings.openVPNUsername)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                            GridRow {
+                                Text("Password")
+                                    .frame(maxWidth: .infinity, alignment: .trailing)
+                                    .foregroundStyle(.primary)
+                                SecureField("", text: openVPNPasswordBinding)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                    }
+                    .padding(.leading, 20)
+
+                    settingToggle(
+                        "Connect on Startup",
+                        description: "Automatically connect the VPN when the browser session starts. You can always toggle it from the window\u{2019}s VPN button.",
+                        isOn: $draft.settings.openVPNAutoConnect
                     )
                     .padding(.leading, 20)
                 }
@@ -1720,6 +1790,16 @@ struct ProfileSettingsView: View {
             set: { newValue in
                 ikev2CertPass = newValue
                 VPNKeychain.store(profileID: draft.id, key: VPNKeychain.ikev2CertPass, secret: newValue)
+            }
+        )
+    }
+
+    private var openVPNPasswordBinding: Binding<String> {
+        Binding(
+            get: { openVPNPassword },
+            set: { newValue in
+                openVPNPassword = newValue
+                VPNKeychain.store(profileID: draft.id, key: VPNKeychain.openVPNPassword, secret: newValue)
             }
         )
     }

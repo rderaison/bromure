@@ -110,6 +110,9 @@ public enum VPNMode: String, Codable, CaseIterable, Equatable, Sendable {
     case wireGuard
     /// IKEv2/IPsec (full network tunnel via strongSwan, supports EAP/cert/PSK).
     case ikev2
+    /// OpenVPN (full network tunnel via the openvpn client; user pastes a
+    /// .ovpn config, optionally with username/password auth).
+    case openVPN
 }
 
 /// IKEv2 authentication method.
@@ -231,6 +234,15 @@ public struct ProfileSettings: Codable, Equatable {
     public var ikev2ProxyUsername: String = ""
     public var ikev2ProxyPassword: String = ""
 
+    // OpenVPN
+    /// Raw .ovpn config file content (only used when vpnMode == .openVPN).
+    public var openVPNConfig: String = ""
+    /// Username for configs that use `auth-user-pass` (optional; cert-only
+    /// configs leave this blank). Password is keychain-backed.
+    public var openVPNUsername: String = ""
+    /// Auto-connect OpenVPN on session start (only used when vpnMode == .openVPN).
+    public var openVPNAutoConnect: Bool = true
+
     // Proxy
     public var proxyHost: String = ""
     public var proxyPort: Int = 0
@@ -337,6 +349,7 @@ public struct ProfileSettings: Codable, Equatable {
         case vpnMode, wireGuardConfig, wireGuardAutoConnect
         case ikev2Server, ikev2RemoteID, ikev2AuthMethod, ikev2Username, ikev2UseDNS, ikev2AutoConnect
         case ikev2ProxyHost, ikev2ProxyPort, ikev2ProxyUsername, ikev2ProxyPassword
+        case openVPNConfig, openVPNUsername, openVPNAutoConnect
         case proxyHost, proxyPort, proxyUsername, proxyPassword
         case enableClipboardSharing
         case canUpload, canDownload, virusTotalEnabled, virusTotalAPIKey, blockThreats, blockUnscannable
@@ -383,6 +396,9 @@ public struct ProfileSettings: Codable, Equatable {
         ikev2ProxyPort = try c.decodeIfPresent(Int.self, forKey: .ikev2ProxyPort) ?? defaults.ikev2ProxyPort
         ikev2ProxyUsername = try c.decodeIfPresent(String.self, forKey: .ikev2ProxyUsername) ?? defaults.ikev2ProxyUsername
         ikev2ProxyPassword = try c.decodeIfPresent(String.self, forKey: .ikev2ProxyPassword) ?? defaults.ikev2ProxyPassword
+        openVPNConfig = try c.decodeIfPresent(String.self, forKey: .openVPNConfig) ?? defaults.openVPNConfig
+        openVPNUsername = try c.decodeIfPresent(String.self, forKey: .openVPNUsername) ?? defaults.openVPNUsername
+        openVPNAutoConnect = try c.decodeIfPresent(Bool.self, forKey: .openVPNAutoConnect) ?? defaults.openVPNAutoConnect
         proxyHost = try c.decodeIfPresent(String.self, forKey: .proxyHost) ?? defaults.proxyHost
         proxyPort = try c.decodeIfPresent(Int.self, forKey: .proxyPort) ?? defaults.proxyPort
         proxyUsername = try c.decodeIfPresent(String.self, forKey: .proxyUsername) ?? defaults.proxyUsername
@@ -457,6 +473,9 @@ public struct ProfileSettings: Codable, Equatable {
         try c.encode(ikev2ProxyPort, forKey: .ikev2ProxyPort)
         try c.encode(ikev2ProxyUsername, forKey: .ikev2ProxyUsername)
         try c.encode(ikev2ProxyPassword, forKey: .ikev2ProxyPassword)
+        try c.encode(openVPNConfig, forKey: .openVPNConfig)
+        try c.encode(openVPNUsername, forKey: .openVPNUsername)
+        try c.encode(openVPNAutoConnect, forKey: .openVPNAutoConnect)
         try c.encode(proxyHost, forKey: .proxyHost)
         try c.encode(proxyPort, forKey: .proxyPort)
         try c.encode(proxyUsername, forKey: .proxyUsername)
@@ -552,6 +571,10 @@ public struct ProfileSettings: Codable, Equatable {
             ikev2ProxyPort: effectiveVPNMode == .ikev2 && ikev2ProxyPort > 0 ? ikev2ProxyPort : nil,
             ikev2ProxyUsername: effectiveVPNMode == .ikev2 && !ikev2ProxyUsername.isEmpty ? ikev2ProxyUsername : nil,
             ikev2ProxyPassword: effectiveVPNMode == .ikev2 && !ikev2ProxyPassword.isEmpty ? ikev2ProxyPassword : nil,
+            openVPNConfig: effectiveVPNMode == .openVPN ? resolveOpenVPNConfig(profileID: profileID) : nil,
+            openVPNUsername: effectiveVPNMode == .openVPN && !openVPNUsername.isEmpty ? openVPNUsername : nil,
+            openVPNPassword: effectiveVPNMode == .openVPN && !openVPNUsername.isEmpty ? profileID.flatMap { VPNKeychain.retrieve(profileID: $0, key: VPNKeychain.openVPNPassword) } : nil,
+            openVPNAutoConnect: effectiveVPNMode == .openVPN && openVPNAutoConnect,
             forceDarkMode: forceDark,
             enableAdBlocking: effectiveAdBlocking,
             swapCmdCtrl: defaults.object(forKey: "vm.swapCmdCtrl") as? Bool ?? true,
@@ -605,5 +628,13 @@ public struct ProfileSettings: Codable, Equatable {
             return fromKeychain.isEmpty ? nil : fromKeychain
         }
         return wireGuardConfig.isEmpty ? nil : wireGuardConfig
+    }
+
+    /// Resolve OpenVPN config: try keychain first, fall back to in-memory field.
+    private func resolveOpenVPNConfig(profileID: UUID?) -> String? {
+        if let id = profileID, let fromKeychain = VPNKeychain.retrieve(profileID: id, key: VPNKeychain.openVPNConfig) {
+            return fromKeychain.isEmpty ? nil : fromKeychain
+        }
+        return openVPNConfig.isEmpty ? nil : openVPNConfig
     }
 }

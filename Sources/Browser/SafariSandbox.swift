@@ -1758,6 +1758,7 @@ final class BrowserSession {
     private var warpBridge: WarpBridge?
     private var wireGuardBridge: WireGuardBridge?
     private var ikev2Bridge: IKEv2Bridge?
+    private var openVPNBridge: OpenVPNBridge?
     private var networkRefreshBridge: NetworkRefreshBridge?
     private(set) var cdpBridge: CDPBridge?
     private(set) var tabBridge: TabBridge?
@@ -2131,6 +2132,15 @@ final class BrowserSession {
                 // IKEv2 bridge on vsock port 5702
                 let bridge = MainActor.assumeIsolated { IKEv2Bridge(socketDevice: dev) }
                 self.ikev2Bridge = bridge
+                MainActor.assumeIsolated {
+                    bridge.onStateChanged = { [weak self] state in
+                        MainActor.assumeIsolated { self?.updateWarpButton(state: state) }
+                    }
+                }
+            } else if config.vpnMode == .openVPN {
+                // OpenVPN bridge on vsock port 5704
+                let bridge = MainActor.assumeIsolated { OpenVPNBridge(socketDevice: dev) }
+                self.openVPNBridge = bridge
                 MainActor.assumeIsolated {
                     bridge.onStateChanged = { [weak self] state in
                         MainActor.assumeIsolated { self?.updateWarpButton(state: state) }
@@ -2871,6 +2881,7 @@ final class BrowserSession {
             warpBridge?.toggle()
             wireGuardBridge?.toggle()
             ikev2Bridge?.toggle()
+            openVPNBridge?.toggle()
         }
     }
 
@@ -3338,6 +3349,10 @@ final class BrowserSession {
             warpBridge = nil
             wireGuardBridge?.stop()
             wireGuardBridge = nil
+            ikev2Bridge?.stop()
+            ikev2Bridge = nil
+            openVPNBridge?.stop()
+            openVPNBridge = nil
             if let nrb = networkRefreshBridge {
                 HostNetworkWatcher.shared.unregister(nrb)
                 nrb.stop()
@@ -3464,6 +3479,20 @@ final class BrowserSession {
             name: "WireGuard VPN",
             port: 5701,
             state: wireGuardBridge.map { $0.isAgentConnected ? .connected : .listening } ?? .disabled
+        ))
+
+        services.append(VsockServiceStatus(
+            id: "\(id)-ikev2",
+            name: "IKEv2 VPN",
+            port: 5702,
+            state: ikev2Bridge.map { $0.isAgentConnected ? .connected : .listening } ?? .disabled
+        ))
+
+        services.append(VsockServiceStatus(
+            id: "\(id)-openvpn",
+            name: "OpenVPN",
+            port: 5704,
+            state: openVPNBridge.map { $0.isAgentConnected ? .connected : .listening } ?? .disabled
         ))
 
         services.append(VsockServiceStatus(

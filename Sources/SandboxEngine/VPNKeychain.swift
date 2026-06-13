@@ -16,6 +16,8 @@ public enum VPNKeychain {
     public static let ikev2PSK = "ikev2-psk"
     public static let ikev2Cert = "ikev2-cert"
     public static let ikev2CertPass = "ikev2-cert-pass"
+    public static let openVPNConfig = "openvpn-config"
+    public static let openVPNPassword = "openvpn-password"
 
     /// Store a secret for a profile. Overwrites any existing value.
     public static func store(profileID: UUID, key: String, secret: String) {
@@ -70,7 +72,7 @@ public enum VPNKeychain {
 
     /// Delete all VPN secrets for a profile.
     public static func deleteAll(profileID: UUID) {
-        let allKeys = [wgConfig, proxyPassword, ikev2Password, ikev2PSK, ikev2Cert, ikev2CertPass]
+        let allKeys = [wgConfig, proxyPassword, ikev2Password, ikev2PSK, ikev2Cert, ikev2CertPass, openVPNConfig, openVPNPassword]
         for key in allKeys {
             delete(profileID: profileID, key: key)
         }

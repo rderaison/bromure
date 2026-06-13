@@ -68,6 +68,9 @@ private func readSetting(_ s: ProfileSettings, key: String) -> String? {
     case "ikev2ProxyPort":      return String(s.ikev2ProxyPort)
     case "ikev2ProxyUsername":  return s.ikev2ProxyUsername
     case "ikev2ProxyPassword":  return s.ikev2ProxyPassword
+    case "openvpnConfig":       return s.openVPNConfig
+    case "openvpnUsername":      return s.openVPNUsername
+    case "openvpnAutoConnect":   return String(s.openVPNAutoConnect)
     case "allowAutomation": return String(s.allowAutomation)
     case "traceLevel":      return String(s.traceLevel.rawValue)
     case "traceAutoStart":  return String(s.traceAutoStart)
@@ -128,6 +131,9 @@ private func writeSetting(_ s: inout ProfileSettings, key: String, value: String
     case "ikev2ProxyPort":      s.ikev2ProxyPort = Int(value) ?? s.ikev2ProxyPort
     case "ikev2ProxyUsername":  s.ikev2ProxyUsername = value
     case "ikev2ProxyPassword":  s.ikev2ProxyPassword = value
+    case "openvpnConfig":       s.openVPNConfig = value
+    case "openvpnUsername":      s.openVPNUsername = value
+    case "openvpnAutoConnect":   s.openVPNAutoConnect = b
     case "vpnMode":
         if let mode = VPNMode(rawValue: value) { s.vpnMode = mode }
     case "allowAutomation": s.allowAutomation = b
@@ -275,6 +281,9 @@ final class SetProfileSettingCommand: NSScriptCommand {
                 return nil
             case "ikev2PSKSecret":
                 VPNKeychain.store(profileID: profile.id, key: VPNKeychain.ikev2PSK, secret: value)
+                return nil
+            case "openvpnSecret":
+                VPNKeychain.store(profileID: profile.id, key: VPNKeychain.openVPNPassword, secret: value)
                 return nil
             case "addRootCA":
                 // value is the PEM string; add as a new CustomRootCA

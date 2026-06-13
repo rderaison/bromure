@@ -475,6 +475,8 @@ def write_chrome_env(cfg):
         lines.append("VPN_AUTO_CONNECT=wireguard")
     elif cfg.get("ikev2AutoConnect"):
         lines.append("VPN_AUTO_CONNECT=ikev2")
+    elif cfg.get("openVPNAutoConnect"):
+        lines.append("VPN_AUTO_CONNECT=openvpn")
 
     # Display scale: passed at runtime so changing 1x/2x doesn't require image rebuild
     display_scale = cfg.get("displayScale", 2)
@@ -798,6 +800,45 @@ esac
     os.chmod("/etc/swanctl/updown.sh", 0o755)
 
 
+OPENVPN_CONFIG_PATH = "/etc/openvpn/bromure.conf"
+OPENVPN_AUTH_PATH = "/etc/openvpn/bromure-auth.txt"
+
+
+def write_openvpn_config(cfg, ovpn_config):
+    """Write the user's .ovpn plus a credentials file when username/password
+    auth is configured. openvpn-agent runs the client against this config."""
+    os.makedirs("/etc/openvpn", exist_ok=True)
+
+    username = (cfg.get("openVPNUsername") or "").strip()
+    password = cfg.get("openVPNPassword") or ""
+
+    # Drop any auth-user-pass directive the user pasted (with or without a
+    # file argument) — we re-point it at our own credentials file so the
+    # client never blocks on an interactive prompt. Keep every other line
+    # verbatim, including inline <ca>/<cert>/<key> blocks.
+    cleaned = [
+        line for line in ovpn_config.splitlines()
+        if not line.strip().lower().startswith("auth-user-pass")
+    ]
+    if username:
+        cleaned.append(f"auth-user-pass {OPENVPN_AUTH_PATH}")
+
+    with open(OPENVPN_CONFIG_PATH, "w") as f:
+        f.write("\n".join(cleaned) + "\n")
+    os.chmod(OPENVPN_CONFIG_PATH, 0o600)
+
+    if username:
+        with open(OPENVPN_AUTH_PATH, "w") as f:
+            f.write(f"{username}\n{password}\n")
+        os.chmod(OPENVPN_AUTH_PATH, 0o600)
+    else:
+        # Cert-only config — make sure no stale credentials file lingers.
+        try:
+            os.unlink(OPENVPN_AUTH_PATH)
+        except FileNotFoundError:
+            pass
+
+
 def write_dynamic_policy(cfg):
     """Write session-specific Chrome enterprise policy (media capture, WebRTC)."""
     policy = {}
@@ -890,6 +931,16 @@ def configure_services(cfg, ca_count):
         open("/tmp/bromure/wireguard-boot-setup", "w").close()
         if cfg.get("wireGuardAutoConnect"):
             open("/tmp/bromure/wireguard-auto-connect", "w").close()
+
+    # OpenVPN: write the .ovpn (+ credentials file when the config uses
+    # auth-user-pass) and boot markers for openvpn-agent.  The agent runs
+    # the openvpn client, which routes all guest traffic through tun0.
+    ovpn_config = cfg.get("openVPNConfig")
+    if ovpn_config:
+        write_openvpn_config(cfg, ovpn_config)
+        open("/tmp/bromure/openvpn-boot-setup", "w").close()
+        if cfg.get("openVPNAutoConnect"):
+            open("/tmp/bromure/openvpn-auto-connect", "w").close()
 
     # IKEv2/IPsec: write swanctl.conf, start charon, and load config.
     if cfg.get("enableIKEv2"):

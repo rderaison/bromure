@@ -1,6 +1,6 @@
 import Foundation
 
-/// State of a VPN connection inside the guest VM (IKEv2 / WireGuard / WARP).
+/// State of a VPN connection inside the guest VM (IKEv2 / WireGuard / WARP / OpenVPN).
 ///
 /// Shared across all VPN bridges so the UI layer can render a single
 /// connection-status surface regardless of which transport is in use.

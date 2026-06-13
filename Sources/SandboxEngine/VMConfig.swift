@@ -110,6 +110,19 @@ public struct VMConfig {
     /// Password for the IKEv2 tunnel proxy.
     public var ikev2ProxyPassword: String?
 
+    /// Raw .ovpn config to install in the guest.
+    /// Only meaningful when ``vpnMode`` is ``.openVPN``.
+    public var openVPNConfig: String?
+
+    /// Username for OpenVPN `auth-user-pass` configs (nil = cert-only).
+    public var openVPNUsername: String?
+
+    /// Password paired with ``openVPNUsername``.
+    public var openVPNPassword: String?
+
+    /// Whether to automatically bring up the OpenVPN tunnel on session start.
+    public var openVPNAutoConnect: Bool
+
     /// Whether to force dark mode in the browser.
     public var forceDarkMode: Bool
 
@@ -296,6 +309,10 @@ public struct VMConfig {
         ikev2ProxyPort: Int? = nil,
         ikev2ProxyUsername: String? = nil,
         ikev2ProxyPassword: String? = nil,
+        openVPNConfig: String? = nil,
+        openVPNUsername: String? = nil,
+        openVPNPassword: String? = nil,
+        openVPNAutoConnect: Bool = false,
         forceDarkMode: Bool = false,
         enableAdBlocking: Bool = false,
         swapCmdCtrl: Bool = true,
@@ -374,6 +391,10 @@ public struct VMConfig {
         self.ikev2ProxyPort = ikev2ProxyPort
         self.ikev2ProxyUsername = ikev2ProxyUsername
         self.ikev2ProxyPassword = ikev2ProxyPassword
+        self.openVPNConfig = openVPNConfig
+        self.openVPNUsername = openVPNUsername
+        self.openVPNPassword = openVPNPassword
+        self.openVPNAutoConnect = openVPNAutoConnect
         self.forceDarkMode = forceDarkMode
         self.enableAdBlocking = enableAdBlocking
         self.swapCmdCtrl = swapCmdCtrl
