@@ -1854,9 +1854,14 @@ print('n/a')
     return (result.stdout || "").trim();
   }
 
-  // Helper: check if an IP is in the vmnet NAT subnet (192.168.64.0/24)
+  // Helper: check if an IP is in this app's vmnet NAT subnet. NetworkIdentity
+  // (VmnetSubnet.swift) assigns each app a stable 192.168.<octet>.0/24 in the
+  // 65–126 band — skipping the default .64 (reserved for Bromure AC) and the
+  // host LAN — so the exact octet is per-install but always lands in that band.
+  // Bridged sessions get a real LAN address (e.g. 10.x), which never matches.
   function isNATAddress(ip) {
-    return ip && ip.startsWith("192.168.64.");
+    const m = ip && ip.match(/^192\.168\.(\d+)\.\d+$/);
+    return !!m && Number(m[1]) >= 65 && Number(m[1]) <= 126;
   }
 
   await test("20.1 Default session gets a DHCP address (NAT)", async () => {
@@ -1866,11 +1871,13 @@ print('n/a')
       async ({ sessionId }) => {
         const net = await getVMNetwork(sessionId);
         assert(net !== null, "VM has no IP on eth0");
-        assert(isNATAddress(net.ip), `Expected NAT address (192.168.64.x), got ${net.ip}`);
+        assert(isNATAddress(net.ip), `Expected NAT address (192.168.<65-126>.x), got ${net.ip}`);
         console.log(`        IP: ${net.ip}/${net.prefix}`);
 
+        // The vmnet gateway is the .1 of whatever per-app /24 NetworkIdentity chose.
         const gw = await getVMGateway(sessionId);
-        assert(gw === "192.168.64.1", `Expected gateway 192.168.64.1, got ${gw}`);
+        const expectedGw = net.ip.split(".").slice(0, 3).join(".") + ".1";
+        assert(gw === expectedGw, `Expected gateway ${expectedGw}, got ${gw}`);
       }
     );
   });
@@ -1951,7 +1958,7 @@ print('n/a')
         assert(net !== null, "VM has no IP on eth0");
 
         // Attempt to reach the vmnet gateway (should be blocked except for DHCP/DNS)
-        // The gateway itself is allowed, but other 192.168.64.x hosts should be blocked.
+        // The gateway itself is allowed, but other hosts in the NAT subnet should be blocked.
         // Test by trying to reach a private IP range address.
         // 10.0.0.1 should be blocked by the private range filter.
         const result = await vmExec(
