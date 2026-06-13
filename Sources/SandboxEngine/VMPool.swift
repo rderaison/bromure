@@ -172,7 +172,10 @@ public final class VMPool {
         var networkFilter: NetworkFilter?
         for attempt in 1...3 {
             if let netInfo = HostNetworkInfo.detect() {
-                networkFilter = NetworkFilter(networkInfo: netInfo, bridgedInterface: bridgedInterface)
+                // In NAT mode, give this app its own subnet so it doesn't collide
+                // with other Bromure apps (e.g. Bromure AC) on vmnet's default net.
+                let subnet = bridgedInterface == nil ? NetworkIdentity.subnet(avoiding: netInfo) : nil
+                networkFilter = NetworkFilter(networkInfo: netInfo, bridgedInterface: bridgedInterface, subnet: subnet)
             }
             if networkFilter != nil { break }
             if attempt < 3 {

@@ -50,10 +50,15 @@ public final class NetworkFilter: @unchecked Sendable {
     private let gatewayIP: UInt32
     private let dnsServers: Set<UInt32>
 
-    // vmnet subnet — learned from vmnet or defaulted to 192.168.64.0/24
-    private var vmnetGateway: UInt32 = 0xC0A8_4001   // 192.168.64.1
-    private let vmnetSubnet: UInt32  = 0xC0A8_4000    // 192.168.64.0
-    private let vmnetMask: UInt32    = 0xFFFF_FF00    // /24
+    // vmnet subnet for this interface. Defaults to Apple's shared
+    // 192.168.64.0/24 network; a per-app custom subnet (shared mode only)
+    // overrides it so this process's NAT/DHCP is isolated from other Bromure
+    // apps on the host. Set once in init.
+    private var vmnetGateway: UInt32
+    private let vmnetSubnet: UInt32
+    private let vmnetMask: UInt32
+    /// Custom subnet to request from vmnet in shared mode (nil = default network).
+    private let requestedSubnet: VmnetSubnet?
 
     /// DNS servers to inject into DHCP responses (host byte order). Empty = no rewriting.
     private let dnsOverrideServers: [UInt32]
@@ -76,9 +81,12 @@ public final class NetworkFilter: @unchecked Sendable {
     ///   - dnsOverrideServers: Custom DNS servers to inject via DHCP rewriting.
     ///   - bridgedInterface: If non-nil, use vmnet bridged mode on this interface
     ///     (e.g. "en0"). If nil, use vmnet shared (NAT) mode.
+    ///   - subnet: Custom subnet for shared (NAT) mode, isolating this process's
+    ///     network from other Bromure apps. Ignored in bridged mode. nil = vmnet's
+    ///     default 192.168.64.0/24.
     ///
     /// Returns nil if vmnet cannot be started (missing entitlement or other error).
-    public init?(networkInfo: HostNetworkInfo, dnsOverrideServers: [UInt32] = [], bridgedInterface: String? = nil) {
+    public init?(networkInfo: HostNetworkInfo, dnsOverrideServers: [UInt32] = [], bridgedInterface: String? = nil, subnet: VmnetSubnet? = nil) {
         // Create datagram socketpair
         var fds: [Int32] = [0, 0]
         guard fds.withUnsafeMutableBufferPointer({ buf in
@@ -106,6 +114,14 @@ public final class NetworkFilter: @unchecked Sendable {
         self.dnsServers = Set(networkInfo.dnsServers)
         self.dnsOverrideServers = dnsOverrideServers
         self.bridgedInterface = bridgedInterface
+
+        // A custom subnet only applies to shared (NAT) mode; bridged VMs live
+        // on the host's physical LAN, so there's no vmnet subnet to choose.
+        let activeSubnet = (bridgedInterface == nil) ? subnet : nil
+        self.requestedSubnet = activeSubnet
+        self.vmnetGateway = activeSubnet?.gateway ?? 0xC0A8_4001   // 192.168.64.1
+        self.vmnetSubnet  = activeSubnet?.network ?? 0xC0A8_4000   // 192.168.64.0
+        self.vmnetMask    = activeSubnet?.mask    ?? 0xFFFF_FF00   // /24
 
         if dnsDebug {
             if dnsOverrideServers.isEmpty {
@@ -227,6 +243,17 @@ public final class NetworkFilter: @unchecked Sendable {
             print("[NetworkFilter] Starting vmnet in bridged mode on \(ifName)")
         } else {
             xpc_dictionary_set_uint64(desc, vmnet_operation_mode_key, UInt64(kVmnetSharedMode))
+            // Pin this process's NAT network to its own subnet so it doesn't
+            // share vmnet's default 192.168.64.0/24 with other Bromure apps
+            // (e.g. Bromure AC). On the shared subnet, each process's DHCP
+            // server independently hands out the low addresses and two VMs end
+            // up with the same IP — one of them then has no working network.
+            if let s = requestedSubnet {
+                xpc_dictionary_set_string(desc, vmnet_start_address_key, s.startAddressString)
+                xpc_dictionary_set_string(desc, vmnet_end_address_key, s.endAddressString)
+                xpc_dictionary_set_string(desc, vmnet_subnet_mask_key, s.subnetMaskString)
+                print("[NetworkFilter] shared mode on isolated subnet \(s.startAddressString)–\(s.endAddressString) mask \(s.subnetMaskString)")
+            }
         }
 
         let sem = DispatchSemaphore(value: 0)

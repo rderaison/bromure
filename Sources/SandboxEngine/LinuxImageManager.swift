@@ -481,7 +481,11 @@ public final class LinuxImageManager {
             } else {
                 dnsOverride = []
             }
-            if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, bridgedInterface: bridgedIface) {
+            // Build the image on this app's own subnet too, so rebuilding while
+            // another Bromure app is running a VM doesn't collide on vmnet's
+            // default network.
+            let buildSubnet = bridgedIface == nil ? NetworkIdentity.subnet(avoiding: netInfo) : nil
+            if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, bridgedInterface: bridgedIface, subnet: buildSubnet) {
                 buildNetworkFilter = filter
                 net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
             } else {
