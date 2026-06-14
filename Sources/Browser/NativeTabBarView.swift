@@ -367,18 +367,6 @@ private struct ActiveTabPill: View {
                 shouldFocusOnAppear: model.pendingFocusOnActiveChange,
                 onFocusConsumed: { model.pendingFocusOnActiveChange = false },
                 onFieldAvailable: { model.addressField = $0 },
-                onBeginEditing: {
-                    // Swap the domain display for the editable full URL,
-                    // unless the user is mid-draft (we already preserved
-                    // their typed text in pendingAddress). New-tab URLs
-                    // stay empty — nobody wants to delete "about:blank"
-                    // before they can type.
-                    if let url = model.activeTab?.url, !url.isEmpty,
-                       !NativeTabBarModel.isNewTabURL(url),
-                       model.pendingAddress == NativeTabBarModel.displayValue(for: model.activeTab) {
-                        model.pendingAddress = url
-                    }
-                },
                 onEndEditing: {
                     // User clicked away without submitting. Revert to the
                     // domain display so the field looks like a label again.
@@ -388,6 +376,18 @@ private struct ActiveTabPill: View {
                     // for the new tab, and reverting here would stomp it.
                     guard model.activeTab?.id == tab.id else { return }
                     model.pendingAddress = NativeTabBarModel.displayValue(for: model.activeTab)
+                },
+                editValue: {
+                    // Full (with-scheme) URL to edit, swapped in BEFORE focus
+                    // (in becomeFirstResponder) so there's no length change to
+                    // race the selection. Only when the field currently shows
+                    // the clean domain display (not a mid-edit draft, not a
+                    // new/empty tab) — otherwise keep what's shown.
+                    guard let url = model.activeTab?.url, !url.isEmpty,
+                          !NativeTabBarModel.isNewTabURL(url),
+                          model.pendingAddress == NativeTabBarModel.displayValue(for: model.activeTab)
+                    else { return nil }
+                    return url
                 },
                 onSubmit: { model.onNavigate?(model.pendingAddress) }
             )
@@ -924,6 +924,9 @@ private struct AddressField: NSViewRepresentable {
     var onFieldAvailable: ((NSTextField) -> Void)?
     var onBeginEditing: (() -> Void)?
     var onEndEditing: (() -> Void)?
+    /// Supplies the full (with-scheme) URL to swap in on focus, or nil to keep
+    /// the shown value. Used by BromureAddressField.becomeFirstResponder.
+    var editValue: (() -> String?)?
     let onSubmit: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -950,6 +953,7 @@ private struct AddressField: NSViewRepresentable {
         field.alignment = centered ? .center : .left
         field.target = context.coordinator
         field.action = #selector(Coordinator.submit)
+        field.editValueProvider = editValue
         onFieldAvailable?(field)
 
         if shouldFocusOnAppear {
@@ -1018,6 +1022,7 @@ private struct AddressField: NSViewRepresentable {
         // pill (and field) are recreated, and the new field must win over
         // a possibly still-alive predecessor.
         onFieldAvailable?(nsView)
+        (nsView as? BromureAddressField)?.editValueProvider = editValue
 
         // Only sync stringValue when the field is NOT being edited. While
         // the user is typing, the field editor is the source of truth:
@@ -1046,23 +1051,10 @@ private struct AddressField: NSViewRepresentable {
             parent.isEditing = true
             parent.onBeginEditing?()
             guard let field = obj.object as? NSTextField else { return }
-            // updateNSView won't sync stringValue while editing (to avoid
-            // racing with keystrokes), so if onBeginEditing pushed a new
-            // value through the binding (the typical "domain → full URL"
-            // swap on focus) we apply it directly here. parent.text is a
-            // Binding, so this read sees whatever the closure just wrote.
-            if field.stringValue != parent.text {
-                field.stringValue = parent.text
-            }
-            // Force left alignment for editing. Re-asserted here because
-            // assigning stringValue above can reset the field editor's
-            // alignment back to the cell's display value. Align before the
-            // select-all so the relayout doesn't drop the selection.
+            // Left-align for editing. (No value swap happens here anymore — the
+            // field already shows the value the user edits, so there's no length
+            // change to race the selection.)
             field.alignment = .left
-            if let editor = field.currentEditor() as? NSTextView {
-                editor.alignment = .left
-                editor.selectAll(nil)
-            }
         }
         func controlTextDidEndEditing(_ obj: Notification) {
             parent.isEditing = false
@@ -1082,6 +1074,17 @@ private struct AddressField: NSViewRepresentable {
                 parent.text = field.stringValue
             }
         }
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            // ESC abandons the edit. Resigning ends editing, which fires
+            // controlTextDidEndEditing -> onEndEditing and restores the
+            // displayed (original) URL. Keyboard focus drops back off the
+            // field; clicking the page re-engages the guest.
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                control.window?.makeFirstResponder(nil)
+                return true
+            }
+            return false
+        }
         @objc func submit(_ sender: Any) {
             if let field = sender as? NSTextField {
                 parent.text = field.stringValue
@@ -1095,18 +1098,33 @@ private struct AddressField: NSViewRepresentable {
 
 /// NSTextField subclass that selects all contents on focus (Safari-style).
 private final class BromureAddressField: NSTextField {
+    /// Returns the full (with-scheme) URL to edit, or nil to keep the shown
+    /// value. Called on focus to swap the stripped domain display for the full
+    /// URL BEFORE the field editor is installed — so the editor is created at
+    /// the full length and select-all covers it. (Swapping AFTER focus changed
+    /// the text length under the selection, which left the URL's tail when you
+    /// typed.)
+    var editValueProvider: (() -> String?)?
+
     override func becomeFirstResponder() -> Bool {
-        // Left-align while editing so the cursor sits at the start of the
-        // URL. This MUST be set before `super` installs the field editor —
-        // the editor copies its alignment from the cell at setup time, so
-        // setting it afterwards leaves the live text centred. The display
-        // alignment is restored in `controlTextDidEndEditing`.
+        // Swap to the full URL up front, before `super` installs the field
+        // editor with the cell's value. Must precede super for the editor to
+        // be created with the full URL (and, like alignment, because the editor
+        // copies the cell at setup time).
+        if let full = editValueProvider?(), !full.isEmpty, full != stringValue {
+            stringValue = full
+        }
+        // Left-align while editing so the cursor sits at the start of the URL.
+        // Also must precede super — the editor copies its alignment from the
+        // cell at setup. The display alignment is restored in
+        // controlTextDidEndEditing.
         alignment = .left
         let ok = super.becomeFirstResponder()
         if ok, let editor = currentEditor() as? NSTextView {
-            // Belt-and-suspenders: also align the field editor directly,
-            // then select all. Order matters — aligning relays out and
-            // would clear an existing selection, so select-all comes last.
+            // Align before selecting (aligning relays out and would drop the
+            // selection). The cell already holds the full URL, so the editor's
+            // text length doesn't change here and selectAll covers the whole
+            // value.
             editor.alignment = .left
             editor.selectAll(nil)
         }
