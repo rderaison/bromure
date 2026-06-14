@@ -13,17 +13,28 @@
   <keyboard>
     <!-- Openbox grabs these chords (consuming them so Chromium never acts on
          them) and runs bromure-hostkey, which bounces the key to the host via
-         tab-agent. The host then owns ⌘T/⌘W/⌘L/⌘R/⌘P/⌘[/⌘] even while the VM
+         tab-agent. The host then owns ⌘T/⌘W/⌘L/⌘R/⌘P/⌘H/⌘[/⌘] even while the VM
          holds keyboard focus — the VZ view forwards captured keys to the guest
          before AppKit can intercept them, so host-side interception alone
-         loses the race. The Cmd↔Ctrl swap maps the Mac ⌘ to Ctrl here. -->
+         loses the race. The Cmd↔Ctrl swap maps the Mac ⌘ to Ctrl here.
+         ⌘H (Ctrl+H) is grabbed so it Hides Bromure (macOS) instead of opening
+         Chromium's History; ⇧⌘H (S-C-h) is NOT grabbed, so it still reaches
+         the guest for the History page. -->
     <keybind key="C-t"><action name="Execute"><command>/usr/local/bin/bromure-hostkey t</command></action></keybind>
     <keybind key="C-w"><action name="Execute"><command>/usr/local/bin/bromure-hostkey w</command></action></keybind>
     <keybind key="C-l"><action name="Execute"><command>/usr/local/bin/bromure-hostkey l</command></action></keybind>
     <keybind key="C-r"><action name="Execute"><command>/usr/local/bin/bromure-hostkey r</command></action></keybind>
     <keybind key="C-p"><action name="Execute"><command>/usr/local/bin/bromure-hostkey p</command></action></keybind>
+    <keybind key="C-h"><action name="Execute"><command>/usr/local/bin/bromure-hostkey h</command></action></keybind>
     <keybind key="C-bracketleft"><action name="Execute"><command>/usr/local/bin/bromure-hostkey '['</command></action></keybind>
     <keybind key="C-bracketright"><action name="Execute"><command>/usr/local/bin/bromure-hostkey ']'</command></action></keybind>
+    <!-- ⇧⌘[ / ⇧⌘] → previous / next tab (host resolves the adjacent tab).
+         Shift+[ produces the `braceleft` keysym, so use that keysym; keep S-
+         in the mask so the grab is keycode([) + Shift+Control and does NOT
+         collide with C-bracketleft (plain ⌘[ → history back). Dropping S-
+         (plain C-braceleft) grabs keycode([)+Control, which shadows ⌘[. -->
+    <keybind key="S-C-braceleft"><action name="Execute"><command>/usr/local/bin/bromure-hostkey '{'</command></action></keybind>
+    <keybind key="S-C-braceright"><action name="Execute"><command>/usr/local/bin/bromure-hostkey '}'</command></action></keybind>
   </keyboard>
   <mouse/>
   <applications>

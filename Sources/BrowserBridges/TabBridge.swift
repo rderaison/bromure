@@ -90,7 +90,8 @@ public final class TabBridge: NSObject, @unchecked Sendable {
     /// chord to the guest before AppKit can intercept it, so Openbox in the
     /// guest grabs ⌘T/⌘W/⌘L/⌘R/⌘P (consuming them so Chromium never reacts)
     /// and tab-agent relays the bare key letter here. The value is the
-    /// single-character key ("t", "w", "l", "r", "p", "[", "]").
+    /// single-character key ("t", "w", "l", "r", "p", "h", "[", "]", and
+    /// "{" / "}" for ⇧⌘[ / ⇧⌘] previous/next tab).
     public var onShortcut: ((String) -> Void)?
 
     /// Fires synchronously inside `send(...)` before bytes hit the wire.

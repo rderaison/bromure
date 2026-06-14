@@ -2637,14 +2637,23 @@ final class BrowserSession {
 
                     // 3. Host-handled shortcuts. Exact-modifier match so
                     // e.g. ⇧⌘T doesn't trigger the ⌘T handler. "h" is
-                    // host-handled in all three flavours: ⌘H (Hide
-                    // Bromure), ⌥⌘H (Hide Others), ⇧⌘H (guest History).
-                    let handled = Self.nativeChromeShortcutKeys.contains(key)
-                        && (key == "h"
-                            ? (modifiers == [.command]
-                               || modifiers == [.command, .option]
-                               || modifiers == [.command, .shift])
-                            : modifiers == [.command])
+                    // host-handled in three flavours (⌘H Hide Bromure,
+                    // ⌥⌘H Hide Others, ⇧⌘H guest History). "{" / "}" are
+                    // ⇧⌘[ / ⇧⌘] (prev/next tab) — Shift is baked into the
+                    // brace character, so the chord carries .shift.
+                    let handled: Bool = {
+                        guard Self.nativeChromeShortcutKeys.contains(key) else { return false }
+                        switch key {
+                        case "h":
+                            return modifiers == [.command]
+                                || modifiers == [.command, .option]
+                                || modifiers == [.command, .shift]
+                        case "{", "}":
+                            return modifiers == [.command] || modifiers == [.command, .shift]
+                        default:
+                            return modifiers == [.command]
+                        }
+                    }()
 
                     // 5. Editing / zoom chords for the guest (⇧ variants
                     // included: ⇧⌘Z redo, ⇧⌘V paste-without-format,
@@ -2725,8 +2734,9 @@ final class BrowserSession {
                                 }
                             }
                         default:
-                            // ⌘T / ⌘W / ⌘L / ⌘R / ⌘[ / ⌘] — shared with the
-                            // guest-bounce path so the focus-grab can't drift.
+                            // ⌘T / ⌘W / ⌘L / ⌘R / ⌘[ / ⌘] and ⇧⌘[ / ⇧⌘]
+                            // ("{"/"}") — shared with the guest-bounce path so
+                            // the focus-grab can't drift.
                             self.performNativeChromeShortcut(key)
                         }
                     }
@@ -2998,6 +3008,16 @@ final class BrowserSession {
     /// logic can't drift between them.
     @MainActor
     func performNativeChromeShortcut(_ key: String) {
+        // ⌘H bounced from the guest (Openbox grabs Ctrl+H so Chromium never
+        // opens its History page). Hide Bromure, matching macOS ⌘H — same
+        // outcome as the host key monitor's plain-⌘H path for when a macOS
+        // window, not the VM, holds focus. Needs no tab state, so handle it
+        // before the guard. Deferred a runloop tick (a direct hide from key
+        // processing races and loses).
+        if key == "h" {
+            DispatchQueue.main.async { NSApp.hide(nil) }
+            return
+        }
         guard let bridge = tabBridge, let tabModel = nativeTabBar?.model else { return }
         switch key {
         case "t":
@@ -3025,6 +3045,17 @@ final class BrowserSession {
             if let id = tabModel.activeTab?.id { bridge.back(id: id) }
         case "]":
             if let id = tabModel.activeTab?.id { bridge.forward(id: id) }
+        case "{", "}":
+            // ⇧⌘[ / ⇧⌘] → previous / next tab (Safari convention), wrapping
+            // around the ends like ⌘1–9 jumps. "{" = previous, "}" = next.
+            let tabs = tabModel.tabs
+            guard tabs.count > 1,
+                  let activeId = tabModel.activeTab?.id,
+                  let cur = tabs.firstIndex(where: { $0.id == activeId }) else { break }
+            let delta = (key == "{") ? -1 : 1
+            let target = tabs[(cur + delta + tabs.count) % tabs.count]
+            tabModel.markActiveLocally(target.id)
+            bridge.activate(id: target.id)
         case "w":
             if tabModel.tabs.count > 1 { bridge.closeActive() } else { window.performClose(nil) }
         case "p":
@@ -3245,8 +3276,11 @@ final class BrowserSession {
     /// "offer to the main menu" path, which fires the File ▸ Print item
     /// (macOS print pipeline) and then swallows the event so Chromium's own
     /// hidden print dialog never opens.
+    /// "{" / "}" are ⇧⌘[ / ⇧⌘] (previous / next tab): Shift folds into the
+    /// character, so `charactersIgnoringModifiers` reports the brace, not
+    /// the bracket — we match the brace directly.
     static let nativeChromeShortcutKeys: Set<String> = [
-        "t", "w", "l", "r", "h", "[", "]",
+        "t", "w", "l", "r", "h", "[", "]", "{", "}",
         "1", "2", "3", "4", "5", "6", "7", "8", "9",
     ]
 

@@ -1113,7 +1113,7 @@ def shortcut_listener(link):
     sends the bare key letter. We forward it over vsock so the host owns the
     chord. Localhost-only listener; only an allowlisted key letter is
     relayed."""
-    allowed = {"t", "w", "l", "r", "p", "[", "]"}
+    allowed = {"t", "w", "l", "r", "p", "h", "[", "]", "{", "}"}
     # Debounce: a held chord autorepeats in the guest X server (xset r rate),
     # firing the Openbox keybind — and thus this listener — many times for one
     # intentional press. Collapse repeats of the same key within this window so
