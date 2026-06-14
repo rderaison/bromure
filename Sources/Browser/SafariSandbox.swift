@@ -2223,8 +2223,20 @@ final class BrowserSession {
                     vmView?.inputReady = true
                 }
 
-                bridge.onTabsChanged = { [weak tabModel, weak vmView] tabs in
-                    if !tabs.isEmpty { vmView?.inputReady = true }
+                bridge.onTabsChanged = { [weak tabModel, weak vmView, weak window] tabs in
+                    if !tabs.isEmpty, let vmView, !vmView.inputReady {
+                        // First real tab list: the VZ view is live. Ungate input
+                        // AND make it first responder. The input gate kept it
+                        // from accepting first responder during boot, and nothing
+                        // else grabs it, so without this the page never gets
+                        // keyboard focus until the user clicks it — and VZ only
+                        // delivers proper held-key autorepeat while it's first
+                        // responder (hold a key → no repeat until you click in).
+                        // Don't steal focus on later updates (the user may be in
+                        // the URL bar): one-shot, guarded on !inputReady.
+                        vmView.inputReady = true
+                        window?.makeFirstResponder(vmView)
+                    }
                     tabModel?.setTabs(tabs)
                 }
                 // Browser-chrome chords the guest grabbed (VM had keyboard
