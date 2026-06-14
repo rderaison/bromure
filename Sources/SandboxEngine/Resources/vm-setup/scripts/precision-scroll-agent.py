@@ -178,12 +178,14 @@ def serve(fd):
                     dy = max(-MAX_PX_PER_EVENT, min(MAX_PX_PER_EVENT, dy))
                     # Direction (measured on this libinput + Chromium stack
                     # with the device's NaturalScrolling forced off):
-                    #   positive REL_WHEEL_HI_RES -> page scrolls DOWN.
-                    # macOS natural scrolling: positive NSEvent
-                    # scrollingDeltaY (swipe down) -> page scrolls UP. So
-                    # negate dy to match native feel; dx maps directly.
+                    #   positive REL_WHEEL_HI_RES  -> page scrolls DOWN.
+                    #   positive REL_HWHEEL_HI_RES -> page scrolls RIGHT.
+                    # macOS scrollingDeltaY needs negating to match native
+                    # feel; scrollingDeltaX maps directly (its sign already
+                    # matches REL_HWHEEL). The two axes do NOT share a sign —
+                    # negating dx inverts left/right.
                     wrote = vertical.push(fd, -dy * v120_per_px)
-                    wrote |= horizontal.push(fd, -dx * v120_per_px)
+                    wrote |= horizontal.push(fd, dx * v120_per_px)
                     if wrote:
                         emit(fd, EV_SYN, SYN_REPORT, 0)
         except OSError as e:
