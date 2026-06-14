@@ -315,6 +315,21 @@
 "Toggle File Drawer" = "Toggle File Drawer";
 "VM Services" = "VM Services";
 
+/* Menu — Bookmarks */
+"Bookmarks" = "Bookmarks";
+"Open Bookmarks Manager" = "Open Bookmarks Manager";
+"Toggle Bookmarks Bar" = "Toggle Bookmarks Bar";
+"Bookmark This Tab" = "Bookmark This Tab";
+"Other Bookmarks" = "Other Bookmarks";
+"Untitled Folder" = "Untitled Folder";
+"(Empty)" = "(Empty)";
+
+/* Menu — History */
+"History" = "History";
+"Recently Closed" = "Recently Closed";
+"Recently Visited" = "Recently Visited";
+"Show Full History" = "Show Full History";
+
 /* Menu — Edit */
 "Edit" = "Edit";
 "Cut" = "Cut";

@@ -315,6 +315,21 @@
 "Toggle File Drawer" = "切換檔案面板";
 "VM Services" = "VM 服務";
 
+/* Menu — Bookmarks */
+"Bookmarks" = "書籤";
+"Open Bookmarks Manager" = "開啟書籤管理員";
+"Toggle Bookmarks Bar" = "切換書籤列";
+"Bookmark This Tab" = "將此分頁加入書籤";
+"Other Bookmarks" = "其他書籤";
+"Untitled Folder" = "未命名資料夾";
+"(Empty)" = "（空）";
+
+/* Menu — History */
+"History" = "瀏覽記錄";
+"Recently Closed" = "最近關閉";
+"Recently Visited" = "最近瀏覽";
+"Show Full History" = "顯示完整記錄";
+
 /* Menu — Edit */
 "Edit" = "編輯";
 "Cut" = "剪下";

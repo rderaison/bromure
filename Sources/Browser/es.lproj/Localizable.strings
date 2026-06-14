@@ -315,6 +315,21 @@
 "Toggle File Drawer" = "Mostrar/ocultar panel de archivos";
 "VM Services" = "Servicios de VM";
 
+/* Menu — Bookmarks */
+"Bookmarks" = "Marcadores";
+"Open Bookmarks Manager" = "Abrir gestor de marcadores";
+"Toggle Bookmarks Bar" = "Mostrar/ocultar barra de marcadores";
+"Bookmark This Tab" = "Añadir esta pestaña a marcadores";
+"Other Bookmarks" = "Otros marcadores";
+"Untitled Folder" = "Carpeta sin título";
+"(Empty)" = "(Vacío)";
+
+/* Menu — History */
+"History" = "Historial";
+"Recently Closed" = "Cerradas recientemente";
+"Recently Visited" = "Visitados recientemente";
+"Show Full History" = "Mostrar todo el historial";
+
 /* Menu — Edit */
 "Edit" = "Edición";
 "Cut" = "Cortar";

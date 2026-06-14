@@ -105,7 +105,7 @@ struct Launch: ParsableCommand {
 
 // MARK: - GUI App Delegate
 
-final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, NSMenuItemValidation {
     let state: AppState
     var sessions: [BrowserSession] = []
     /// Retired sessions kept alive permanently to prevent VZ dispatch source
@@ -115,6 +115,12 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var settingsWindow: NSWindow?
     private var diagnosticWindow: NSWindow?
     private var eulaWindow: NSWindow?
+    /// The Bookmarks menu and the number of fixed items at its top; the
+    /// mirrored bookmark tree is rebuilt below that mark on each open.
+    private weak var bookmarksMenu: NSMenu?
+    private var bookmarksStaticItemCount = 0
+    /// The History menu, rebuilt from the key window's session on each open.
+    private weak var historyMenu: NSMenu?
     private var consentWindow: NSWindow?
     private var enrollmentWindow: NSWindow?
     /// Sparkle auto-updater. Retained strongly — if this deallocates, scheduled
@@ -777,16 +783,61 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // View menu
         let viewMenu = NSMenu(title: NSLocalizedString("View", comment: ""))
+        // No key equivalent: ⌘D belongs to Bookmarks ▸ Bookmark This Tab.
         viewMenu.addItem(withTitle: NSLocalizedString("Toggle File Drawer", comment: ""),
                          action: #selector(toggleFileDrawerAction(_:)),
-                         keyEquivalent: "d")
+                         keyEquivalent: "")
         viewMenu.addItem(NSMenuItem.separator())
         viewMenu.addItem(withTitle: NSLocalizedString("VM Services", comment: ""),
                          action: #selector(showVsockDiagnosticAction(_:)),
                          keyEquivalent: "")
         let viewItem = NSMenuItem()
         viewItem.submenu = viewMenu
-        mainMenu.addItem(viewItem)
+        // Added to mainMenu after Edit/Bookmarks below to land the
+        // File · Edit · Bookmarks · View · Window order.
+
+        // Bookmarks menu. The chords are owned by the native-chrome key
+        // monitor (⌥⌘B routes here via performKeyEquivalent; ⇧⌘B / ⌘D
+        // forward straight to the guest), so set an explicit target so the
+        // items fire from that fallback and respond to mouse clicks too.
+        let bookmarksMenu = NSMenu(title: NSLocalizedString("Bookmarks", comment: ""))
+        let bookmarkManagerItem = NSMenuItem(
+            title: NSLocalizedString("Open Bookmarks Manager", comment: ""),
+            action: #selector(openBookmarksManagerAction(_:)),
+            keyEquivalent: "b")
+        bookmarkManagerItem.keyEquivalentModifierMask = [.command, .option]
+        bookmarkManagerItem.target = self
+        bookmarksMenu.addItem(bookmarkManagerItem)
+        let bookmarksBarItem = NSMenuItem(
+            title: NSLocalizedString("Toggle Bookmarks Bar", comment: ""),
+            action: #selector(toggleBookmarksBarAction(_:)),
+            keyEquivalent: "b")
+        bookmarksBarItem.keyEquivalentModifierMask = [.command, .shift]
+        bookmarksBarItem.target = self
+        bookmarksMenu.addItem(bookmarksBarItem)
+        let bookmarkTabItem = NSMenuItem(
+            title: NSLocalizedString("Bookmark This Tab", comment: ""),
+            action: #selector(bookmarkThisTabAction(_:)),
+            keyEquivalent: "d")
+        bookmarkTabItem.target = self
+        bookmarksMenu.addItem(bookmarkTabItem)
+        // Everything above is static; the live bookmark tree (mirrored from
+        // the key window's Chromium, like Chrome's own Bookmarks menu) is
+        // appended below on each open via the menu delegate.
+        bookmarksStaticItemCount = bookmarksMenu.numberOfItems
+        bookmarksMenu.delegate = self
+        self.bookmarksMenu = bookmarksMenu
+        let bookmarksItem = NSMenuItem()
+        bookmarksItem.submenu = bookmarksMenu
+
+        // History menu. Fully rebuilt on open from the key window's session
+        // (Recently Closed / Recently Visited sections + Show Full History),
+        // so its contents are created by the menu delegate, not here.
+        let historyMenu = NSMenu(title: NSLocalizedString("History", comment: ""))
+        historyMenu.delegate = self
+        self.historyMenu = historyMenu
+        let historyItem = NSMenuItem()
+        historyItem.submenu = historyMenu
 
         // Edit menu
         let editMenu = NSMenu(title: NSLocalizedString("Edit", comment: ""))
@@ -802,7 +853,11 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(withTitle: NSLocalizedString("Select All", comment: ""), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         let editItem = NSMenuItem()
         editItem.submenu = editMenu
+        // Menu bar order: File · Edit · Bookmarks · History · View · Window.
         mainMenu.addItem(editItem)
+        mainMenu.addItem(bookmarksItem)
+        mainMenu.addItem(historyItem)
+        mainMenu.addItem(viewItem)
 
         // Window menu
         let windowMenu = NSMenu(title: NSLocalizedString("Window", comment: ""))
@@ -832,6 +887,155 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         session.toggleDrawer()
     }
 
+    /// Resolve the key window's session for the Bookmarks menu actions.
+    @MainActor private func keyWindowSession() -> BrowserSession? {
+        guard let keyWindow = NSApp.keyWindow else { return nil }
+        return sessions.first(where: { $0.window === keyWindow })
+    }
+
+    @MainActor @objc func openBookmarksManagerAction(_ sender: Any?) {
+        keyWindowSession()?.openBookmarksManager()
+    }
+
+    @MainActor @objc func toggleBookmarksBarAction(_ sender: Any?) {
+        // Toggle bookmarks bar = Chromium's ⌃⇧B. Injected via xdotool in the
+        // guest (the ⇧⌘B keyboard path forwards the real event through VZ;
+        // a menu click can't, so it goes through the tab-agent instead).
+        keyWindowSession()?.tabBridge?.sendChord("ctrl+shift+b")
+    }
+
+    @MainActor @objc func bookmarkThisTabAction(_ sender: Any?) {
+        // Bookmark the current tab = Chromium's ⌃D.
+        keyWindowSession()?.tabBridge?.sendChord("ctrl+d")
+    }
+
+    @MainActor @objc func openBookmarkAction(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem,
+              let url = item.representedObject as? String else { return }
+        keyWindowSession()?.navigateActiveTab(to: url)
+    }
+
+    // MARK: - Bookmarks menu mirroring (NSMenuDelegate)
+
+    @MainActor @objc func menuNeedsUpdate(_ menu: NSMenu) {
+        // Paint immediately from the key window's cache (no flicker on
+        // reopen), then refresh from the guest for next time. A menu-bar
+        // menu won't repaint after this returns, so the cache is also warmed
+        // when the bridge connects — that's what makes the first open show.
+        if menu === bookmarksMenu {
+            rebuildBookmarksMenu()
+            guard let session = keyWindowSession() else { return }
+            Task { @MainActor in
+                if let tree = await session.loadBookmarks() {
+                    session.cachedBookmarkTree = tree
+                    rebuildBookmarksMenu()
+                }
+            }
+        } else if menu === historyMenu {
+            rebuildHistoryMenu()
+            guard let session = keyWindowSession() else { return }
+            Task { @MainActor in
+                if let lists = await session.loadHistory() {
+                    session.cachedHistory = lists
+                    rebuildHistoryMenu()
+                }
+            }
+        }
+    }
+
+    @MainActor private func rebuildBookmarksMenu() {
+        guard let menu = bookmarksMenu else { return }
+        while menu.numberOfItems > bookmarksStaticItemCount {
+            menu.removeItem(at: menu.numberOfItems - 1)
+        }
+        guard let tree = keyWindowSession()?.cachedBookmarkTree,
+              !(tree.bookmarkBar.isEmpty && tree.other.isEmpty) else { return }
+        menu.addItem(.separator())
+        for node in tree.bookmarkBar { menu.addItem(makeBookmarkItem(node)) }
+        if !tree.other.isEmpty {
+            let otherItem = NSMenuItem(
+                title: NSLocalizedString("Other Bookmarks", comment: ""),
+                action: nil, keyEquivalent: "")
+            let otherMenu = NSMenu()
+            for node in tree.other { otherMenu.addItem(makeBookmarkItem(node)) }
+            otherItem.submenu = otherMenu
+            menu.addItem(otherItem)
+        }
+    }
+
+    @MainActor private func makeBookmarkItem(_ node: TabBridge.BookmarkNode) -> NSMenuItem {
+        if node.isFolder {
+            let title = node.name.isEmpty ? NSLocalizedString("Untitled Folder", comment: "") : node.name
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            if node.children.isEmpty {
+                let empty = NSMenuItem(
+                    title: NSLocalizedString("(Empty)", comment: ""),
+                    action: nil, keyEquivalent: "")
+                empty.isEnabled = false
+                submenu.addItem(empty)
+            } else {
+                for child in node.children { submenu.addItem(makeBookmarkItem(child)) }
+            }
+            item.submenu = submenu
+            return item
+        }
+        let url = node.url ?? ""
+        let item = NSMenuItem(
+            title: node.name.isEmpty ? url : node.name,
+            action: #selector(openBookmarkAction(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = url
+        item.toolTip = url
+        return item
+    }
+
+    // MARK: - History menu mirroring
+
+    @MainActor @objc func showFullHistoryAction(_ sender: Any?) {
+        keyWindowSession()?.navigateActiveTab(to: "chrome://history/")
+    }
+
+    @MainActor @objc func openHistoryEntryAction(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem,
+              let url = item.representedObject as? String else { return }
+        keyWindowSession()?.navigateActiveTab(to: url)
+    }
+
+    @MainActor private func rebuildHistoryMenu() {
+        guard let menu = historyMenu else { return }
+        menu.removeAllItems()
+        if let lists = keyWindowSession()?.cachedHistory {
+            if !lists.recentlyClosed.isEmpty {
+                menu.addItem(.sectionHeader(title: NSLocalizedString("Recently Closed", comment: "")))
+                for e in lists.recentlyClosed { menu.addItem(makeHistoryItem(e)) }
+            }
+            if !lists.recentlyVisited.isEmpty {
+                menu.addItem(.sectionHeader(title: NSLocalizedString("Recently Visited", comment: "")))
+                for e in lists.recentlyVisited { menu.addItem(makeHistoryItem(e)) }
+            }
+            if !(lists.recentlyClosed.isEmpty && lists.recentlyVisited.isEmpty) {
+                menu.addItem(.separator())
+            }
+        }
+        // Always present (greyed out by validateMenuItem when not native).
+        let full = NSMenuItem(
+            title: NSLocalizedString("Show Full History", comment: ""),
+            action: #selector(showFullHistoryAction(_:)), keyEquivalent: "y")
+        full.target = self
+        menu.addItem(full)
+    }
+
+    @MainActor private func makeHistoryItem(_ entry: TabBridge.HistoryEntry) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: entry.title.isEmpty ? entry.url : entry.title,
+            action: #selector(openHistoryEntryAction(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = entry.url
+        item.toolTip = entry.url
+        return item
+    }
+
     @MainActor @objc func toggleWarpAction(_ sender: Any?) {
         guard let keyWindow = NSApp.keyWindow,
               let session = sessions.first(where: { $0.window === keyWindow }) else { return }
@@ -848,12 +1052,24 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// When it can't, the disabled item means ⌘P fires nothing — and the
     /// native-chrome monitor still swallows the event, so Chromium's hidden
     /// print dialog stays suppressed.
-    @MainActor func validateMenuItem(_ item: NSMenuItem) -> Bool {
+    @MainActor @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(printAction(_:)) {
-            guard let keyWindow = NSApp.keyWindow,
-                  let session = sessions.first(where: { $0.window === keyWindow })
-            else { return false }
-            return session.canPrint
+            return keyWindowSession()?.canPrint ?? false
+        }
+        // Bookmarks menu (fixed commands + the mirrored tree's links): only
+        // meaningful when the front window is a native-tabs VZ session.
+        if item.action == #selector(openBookmarksManagerAction(_:))
+            || item.action == #selector(toggleBookmarksBarAction(_:))
+            || item.action == #selector(bookmarkThisTabAction(_:))
+            || item.action == #selector(openBookmarkAction(_:))
+            || item.action == #selector(showFullHistoryAction(_:))
+            || item.action == #selector(openHistoryEntryAction(_:)) {
+            return keyWindowSession()?.isNativeChrome ?? false
+        }
+        // File drawer: only when this session can transfer files (uploads or
+        // downloads enabled — `hasFileTransfer` tracks the live bridge).
+        if item.action == #selector(toggleFileDrawerAction(_:)) {
+            return keyWindowSession()?.hasFileTransfer ?? false
         }
         return true
     }
@@ -1833,6 +2049,9 @@ final class BrowserSession {
     private var drawerHost: NSView?
     fileprivate var hasFileTransfer = false
     fileprivate var hasWebcam = false
+    /// Whether this session runs in native-tabs mode (host-drawn chrome).
+    /// The Bookmarks menu is only meaningful here.
+    fileprivate let isNativeChrome: Bool
     let profile: Profile?
     private var webcamEffects: WebcamEffects
     private var webcamDeviceID: String?
@@ -1840,6 +2059,7 @@ final class BrowserSession {
     init(warmVM: VMPool.WarmVM, config: VMConfig, profile: Profile? = nil, virusTotalAPIKey: String? = nil, blockThreats: Bool = false, blockUnscannable: Bool = false) {
         self.warmVM = warmVM
         self.profile = profile
+        self.isNativeChrome = config.nativeChrome
         self.webcamEffects = config.webcamEffects
         self.webcamDeviceID = config.webcamDeviceID
         BrowserSession.windowCount += 1
@@ -2008,7 +2228,7 @@ final class BrowserSession {
                 action: #selector(GUIAppDelegate.toggleFileDrawerAction(_:))
             )
             button.bezelStyle = NSButton.BezelStyle.recessed
-            button.toolTip = "Toggle File Drawer (⌘D)"
+            button.toolTip = NSLocalizedString("Toggle File Drawer", comment: "")
             accessory.view = button
             accessory.layoutAttribute = .trailing
             window.addTitlebarAccessoryViewController(accessory)
@@ -2245,6 +2465,21 @@ final class BrowserSession {
                 bridge.onShortcut = { [weak self] key in
                     self?.performNativeChromeShortcut(key)
                 }
+                // Warm the bookmark cache as soon as Chromium is up, so the
+                // Bookmarks menu is already populated on its first open — a
+                // menu-bar menu won't repaint after menuNeedsUpdate returns,
+                // so an open-time async fetch would otherwise show empty.
+                bridge.onConnected = { [weak self, weak bridge] in
+                    guard let self, let bridge else { return }
+                    Task { @MainActor in
+                        if let tree = await bridge.fetchBookmarks() {
+                            self.cachedBookmarkTree = tree
+                        }
+                        if let lists = await bridge.fetchHistory() {
+                            self.cachedHistory = lists
+                        }
+                    }
+                }
                 // Any host-initiated tab action (URL submit, ⌘T, click, …)
                 // should resume a paused VM so the command isn't stranded
                 // in the vsock buffer.
@@ -2336,14 +2571,18 @@ final class BrowserSession {
                 //      pass through; they're line/word editing chords in
                 //      guest text fields and in the address bar.
                 //   3. Host-handled browser shortcuts (⌘T, ⌘W, ⌘L, …,
-                //      ⌥⌘H) → handled here, swallowed.
-                //   4. ⌘H → to the guest (Ctrl+H after the Cmd/Ctrl swap:
-                //      Chromium's History page).
+                //      ⌘H, ⇧⌘H, ⌥⌘H) → handled here, swallowed.
+                //   4. ⌘H → Hide Bromure (macOS), ⌥⌘H → Hide Others,
+                //      ⇧⌘H → guest History page (chrome://history). All
+                //      three are dispatched host-side in the switch below.
                 //   5. In-page editing / zoom chords (⌘C/V/X/A/Z, ⌘=/-/0) →
                 //      to the guest, or to the address field's editor when
                 //      it has focus.
+                //  5b. Bookmark chords ⇧⌘B / ⌘D → to the guest (⌃⇧B/⌃D:
+                //      toggle the bookmarks bar / bookmark the tab). ⌥⌘B
+                //      falls through to the Bookmark Manager menu item.
                 //   6. Anything else ⌘-shaped → offered to the app's main
-                //      menu (⌘N, ⌘O, ⌘D, ⌘M, ⌘, and ⌘Q live there — the
+                //      menu (⌘N, ⌘O, ⌥⌘B, ⌘M, ⌘, and ⌘Q live there — the
                 //      VZ view would otherwise claim the chord before
                 //      AppKit walks the menu), then swallowed so stray
                 //      shortcuts never reach the VM and trigger Chromium
@@ -2398,19 +2637,14 @@ final class BrowserSession {
 
                     // 3. Host-handled shortcuts. Exact-modifier match so
                     // e.g. ⇧⌘T doesn't trigger the ⌘T handler. "h" is
-                    // host-handled only as ⌥⌘H (Hide Others); plain ⌘H
-                    // forwards to the guest below.
+                    // host-handled in all three flavours: ⌘H (Hide
+                    // Bromure), ⌥⌘H (Hide Others), ⇧⌘H (guest History).
                     let handled = Self.nativeChromeShortcutKeys.contains(key)
                         && (key == "h"
-                            ? modifiers == [.command, .option]
+                            ? (modifiers == [.command]
+                               || modifiers == [.command, .option]
+                               || modifiers == [.command, .shift])
                             : modifiers == [.command])
-
-                    // 4. ⌘H → the guest (Ctrl+H: Chromium's History page).
-                    // Hiding Bromure from a session window moved to the
-                    // menu only; ⌥⌘H (Hide Others) stays host-handled.
-                    if key == "h", modifiers == [.command] {
-                        return event
-                    }
 
                     // 5. Editing / zoom chords for the guest (⇧ variants
                     // included: ⇧⌘Z redo, ⇧⌘V paste-without-format,
@@ -2430,6 +2664,19 @@ final class BrowserSession {
                         return event
                     }
 
+                    // 5b. Bookmark chords → straight to the guest, which
+                    // sees ⌃⇧B / ⌃D after the Cmd↔Ctrl swap (toggle the
+                    // bookmarks bar / bookmark the tab). ⇧⌘B (not plain ⌘B)
+                    // so ⌥⌘B still falls through to the Bookmark Manager
+                    // menu item below. The Bookmarks menu's click path
+                    // injects the same chord; here we just let the real key
+                    // ride the VZ view's own ⌘+letter forwarding.
+                    if !handled,
+                       (modifiers == [.command] && key == "d")
+                        || (modifiers == [.command, .shift] && key == "b") {
+                        return event
+                    }
+
                     // 6. Unhandled ⌘ chord: main menu gets first refusal,
                     // then it dies here.
                     if !handled {
@@ -2437,7 +2684,7 @@ final class BrowserSession {
                         return nil
                     }
 
-                    Task { @MainActor [weak self] in
+                    Task { @MainActor [weak self, modifiers] in
                         guard let self else { return }
                         switch key {
                         case "1", "2", "3", "4", "5", "6", "7", "8", "9":
@@ -2454,12 +2701,28 @@ final class BrowserSession {
                             tabModel.markActiveLocally(target.id)
                             bridge.activate(id: target.id)
                         case "h":
-                            // Only ⌥⌘H (Hide Others) reaches here — plain ⌘H
-                            // forwards to the guest. Defer a runloop tick: a
-                            // direct call from within keyDown processing races
-                            // the hide and loses.
+                            // ⇧⌘H → guest History page. Plain ⌘H is the macOS
+                            // Hide shortcut here, so History moves to ⇧⌘H and
+                            // navigates the active tab to chrome://history
+                            // (what Ctrl+H does in Chromium).
+                            if modifiers == [.command, .shift] {
+                                if let bridge = self.tabBridge,
+                                   let id = self.nativeTabBar?.model.activeTab?.id
+                                            ?? self.nativeTabBar?.model.tabs.first?.id {
+                                    bridge.navigate(id: id, url: "chrome://history/")
+                                }
+                                break
+                            }
+                            // ⌘H → Hide Bromure, ⌥⌘H → Hide Others. Defer a
+                            // runloop tick: a direct call from within keyDown
+                            // processing races the hide and loses.
+                            let hideOthers = (modifiers == [.command, .option])
                             DispatchQueue.main.async {
-                                NSApp.hideOtherApplications(nil)
+                                if hideOthers {
+                                    NSApp.hideOtherApplications(nil)
+                                } else {
+                                    NSApp.hide(nil)
+                                }
                             }
                         default:
                             // ⌘T / ⌘W / ⌘L / ⌘R / ⌘[ / ⌘] — shared with the
@@ -2771,6 +3034,43 @@ final class BrowserSession {
         }
     }
 
+    /// Open Chromium's bookmark manager (⌥⌘B / menu) by navigating the
+    /// active tab to chrome://bookmarks — the host owns the chord in
+    /// native-tabs mode, so there's no in-guest accelerator to lean on.
+    @MainActor
+    func openBookmarksManager() {
+        navigateActiveTab(to: "chrome://bookmarks/")
+    }
+
+    /// Point the active tab (or the first tab, if the active flag is lagging)
+    /// at `url`. Used by the Bookmarks menu items and the bookmark manager.
+    @MainActor
+    func navigateActiveTab(to url: String) {
+        guard let bridge = tabBridge,
+              let id = nativeTabBar?.model.activeTab?.id
+                        ?? nativeTabBar?.model.tabs.first?.id else { return }
+        bridge.navigate(id: id, url: url)
+    }
+
+    /// Last bookmark tree mirrored from the guest, used to paint the menu
+    /// instantly on open while a fresh copy is fetched in the background.
+    var cachedBookmarkTree: TabBridge.BookmarkTree?
+
+    /// Pull the current bookmark tree from the guest's tab-agent.
+    @MainActor
+    func loadBookmarks() async -> TabBridge.BookmarkTree? {
+        await tabBridge?.fetchBookmarks()
+    }
+
+    /// Last session-history lists mirrored from the guest, for instant paint.
+    var cachedHistory: TabBridge.HistoryLists?
+
+    /// Pull the current session history from the guest's tab-agent.
+    @MainActor
+    func loadHistory() async -> TabBridge.HistoryLists? {
+        await tabBridge?.fetchHistory()
+    }
+
     /// Whether ⌘P / File ▸ Print should be available for this session: the
     /// profile must allow printing and the native-tabs bridge must be live
     /// (printing rides on the tab-agent's CDP connection).
@@ -2936,11 +3236,11 @@ final class BrowserSession {
     /// Must stay in sync with the switch statement in the monitor handler.
     /// ⌘W is here so we can close the active tab first and only close the
     /// window when there's a single tab left.
-    /// "h" is here for ⌥⌘H (Hide Others) only: VZVirtualMachineView's
+    /// "h" is here for all three flavours — ⌘H (Hide Bromure), ⌥⌘H (Hide
+    /// Others), ⇧⌘H (guest History page) — because VZVirtualMachineView's
     /// performKeyEquivalent claims ⌘+letter chords before AppKit walks the
-    /// main menu, so we dispatch hideOtherApplications ourselves. Plain ⌘H
-    /// forwards to the guest (Ctrl+H → Chromium's History page) instead of
-    /// hiding Bromure — see the monitor's routing.
+    /// main menu, so we dispatch hide / navigate ourselves. See the
+    /// monitor's routing.
     /// ⌘P is deliberately NOT here: it falls through to the monitor's
     /// "offer to the main menu" path, which fires the File ▸ Print item
     /// (macOS print pipeline) and then swallows the event so Chromium's own
@@ -2954,11 +3254,14 @@ final class BrowserSession {
     /// after the Cmd/Ctrl swap): in-page editing and page zoom. Every
     /// ⌘ chord that is neither here nor in ``nativeChromeShortcutKeys``
     /// (nor ⌘P) is swallowed by the monitor before it reaches the VM, so
-    /// stray browser shortcuts (⌘F, ⌘S, ⌘J, …) can't trigger Chromium UI
-    /// that renders invisibly in the clipped-off chrome region.
+    /// stray browser shortcuts (⌘S, ⌘J, …) can't trigger Chromium UI
+    /// that renders invisibly in the clipped-off chrome region. ⌘F/⌘G
+    /// (find-in-page / find-next) overlay the page content, not the
+    /// clipped chrome, so they're forwarded.
     static let nativeChromeGuestEditingKeys: Set<String> = [
         "c", "v", "x", "a", "z",   // copy / paste / cut / select-all / undo (⇧⌘Z = redo)
         "=", "-", "+", "0",        // zoom in / out / reset
+        "f", "g",                  // find-in-page / find-next (⇧⌘G = find-previous)
     ]
 
     /// Turn whatever the user typed in the native address bar into a URL

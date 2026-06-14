@@ -315,6 +315,21 @@
 "Toggle File Drawer" = "ファイルドロワーの表示切替";
 "VM Services" = "VMサービス";
 
+/* Menu — Bookmarks */
+"Bookmarks" = "ブックマーク";
+"Open Bookmarks Manager" = "ブックマークマネージャを開く";
+"Toggle Bookmarks Bar" = "ブックマークバーの表示切替";
+"Bookmark This Tab" = "このタブをブックマーク";
+"Other Bookmarks" = "その他のブックマーク";
+"Untitled Folder" = "名称未設定フォルダ";
+"(Empty)" = "（空）";
+
+/* Menu — History */
+"History" = "履歴";
+"Recently Closed" = "最近閉じたタブ";
+"Recently Visited" = "最近アクセスしたサイト";
+"Show Full History" = "全履歴を表示";
+
 /* Menu — Edit */
 "Edit" = "編集";
 "Cut" = "カット";

@@ -140,6 +140,10 @@ public final class TabBridge: NSObject, @unchecked Sendable {
         send(["cmd": "navigate", "id": id, "url": url])
     }
     public func reload(id: String)  { send(["cmd": "reload",  "id": id]) }
+    /// Inject a real browser-chrome accelerator into the guest via xdotool
+    /// (e.g. "ctrl+shift+b", "ctrl+d"). For menu-bar clicks, which can't ride
+    /// the VZ keyboard path. The guest allowlists the chord.
+    public func sendChord(_ chord: String) { send(["cmd": "key_chord", "chord": chord]) }
     public func back(id: String)    { send(["cmd": "back",    "id": id]) }
     public func forward(id: String) { send(["cmd": "forward", "id": id]) }
 
@@ -167,6 +171,102 @@ public final class TabBridge: NSObject, @unchecked Sendable {
                     cb(nil)
                 }
             }
+        }
+    }
+
+    // MARK: - Bookmarks request/response
+
+    /// A node in the guest Chromium's bookmark tree. A folder has `url == nil`
+    /// and may carry `children`; a bookmark has a `url` and no children.
+    public struct BookmarkNode: Sendable {
+        public let name: String
+        public let url: String?
+        public let children: [BookmarkNode]
+        public var isFolder: Bool { url == nil }
+    }
+
+    /// The two top-level bookmark roots Chrome surfaces in its menu: the
+    /// bookmarks-bar contents (shown inline) and Other Bookmarks.
+    public struct BookmarkTree: Sendable {
+        public let bookmarkBar: [BookmarkNode]
+        public let other: [BookmarkNode]
+    }
+
+    private var pendingBookmarkRequests: [String: (BookmarkTree?) -> Void] = [:]
+
+    /// Ask the guest for the current bookmark tree (read from Chromium's
+    /// `Bookmarks` JSON). Returns `nil` on timeout, or when the profile has
+    /// no bookmarks file yet. 5 s timeout mirrors the certificate path.
+    public func fetchBookmarks() async -> BookmarkTree? {
+        let requestId = UUID().uuidString
+        return await withCheckedContinuation { cont in
+            pendingBookmarkRequests[requestId] = { tree in cont.resume(returning: tree) }
+            send(["cmd": "get_bookmarks", "request_id": requestId])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                if let cb = self?.pendingBookmarkRequests.removeValue(forKey: requestId) {
+                    cb(nil)
+                }
+            }
+        }
+    }
+
+    private static func parseBookmarkNodes(_ arr: [[String: Any]]) -> [BookmarkNode] {
+        arr.compactMap { dict in
+            let name = dict["name"] as? String ?? ""
+            switch dict["type"] as? String {
+            case "url":
+                return BookmarkNode(name: name, url: dict["url"] as? String ?? "", children: [])
+            case "folder":
+                let kids = dict["children"] as? [[String: Any]] ?? []
+                return BookmarkNode(name: name, url: nil, children: parseBookmarkNodes(kids))
+            default:
+                return nil
+            }
+        }
+    }
+
+    private static func parseBookmarkTree(_ dict: [String: Any]) -> BookmarkTree {
+        BookmarkTree(
+            bookmarkBar: parseBookmarkNodes(dict["bookmark_bar"] as? [[String: Any]] ?? []),
+            other: parseBookmarkNodes(dict["other"] as? [[String: Any]] ?? [])
+        )
+    }
+
+    // MARK: - History request/response
+
+    /// One history row from the guest (recently closed or recently visited).
+    public struct HistoryEntry: Sendable {
+        public let title: String
+        public let url: String
+    }
+
+    /// The two session-history lists the History menu mirrors.
+    public struct HistoryLists: Sendable {
+        public let recentlyClosed: [HistoryEntry]
+        public let recentlyVisited: [HistoryEntry]
+    }
+
+    private var pendingHistoryRequests: [String: (HistoryLists?) -> Void] = [:]
+
+    /// Fetch the guest's session history (recorded by tab-agent into a SQLite
+    /// DB under Chromium's profile). Returns `nil` on timeout.
+    public func fetchHistory() async -> HistoryLists? {
+        let requestId = UUID().uuidString
+        return await withCheckedContinuation { cont in
+            pendingHistoryRequests[requestId] = { lists in cont.resume(returning: lists) }
+            send(["cmd": "get_history", "request_id": requestId])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                if let cb = self?.pendingHistoryRequests.removeValue(forKey: requestId) {
+                    cb(nil)
+                }
+            }
+        }
+    }
+
+    private static func parseHistoryEntries(_ arr: [[String: Any]]) -> [HistoryEntry] {
+        arr.compactMap { dict in
+            guard let url = dict["url"] as? String, !url.isEmpty else { return nil }
+            return HistoryEntry(title: dict["title"] as? String ?? url, url: url)
         }
     }
 
@@ -295,6 +395,20 @@ public final class TabBridge: NSObject, @unchecked Sendable {
             let pdf = b64.isEmpty ? nil : Data(base64Encoded: b64)
             if let cb = pendingPrintRequests.removeValue(forKey: id) {
                 cb(pdf)
+            }
+        case "bookmarks":
+            guard let id = obj["request_id"] as? String else { return }
+            // `tree` is null when the guest has no bookmarks file yet.
+            let parsed = (obj["tree"] as? [String: Any]).map(Self.parseBookmarkTree)
+            if let cb = pendingBookmarkRequests.removeValue(forKey: id) {
+                cb(parsed)
+            }
+        case "history":
+            guard let id = obj["request_id"] as? String else { return }
+            let closed = Self.parseHistoryEntries(obj["recently_closed"] as? [[String: Any]] ?? [])
+            let visited = Self.parseHistoryEntries(obj["recently_visited"] as? [[String: Any]] ?? [])
+            if let cb = pendingHistoryRequests.removeValue(forKey: id) {
+                cb(HistoryLists(recentlyClosed: closed, recentlyVisited: visited))
             }
         case "shortcut":
             // A browser-chrome chord Openbox grabbed in the guest and bounced

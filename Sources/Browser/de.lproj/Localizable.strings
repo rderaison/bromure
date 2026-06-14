@@ -315,6 +315,21 @@
 "Toggle File Drawer" = "Dateileiste ein-/ausblenden";
 "VM Services" = "VM-Dienste";
 
+/* Menu — Bookmarks */
+"Bookmarks" = "Lesezeichen";
+"Open Bookmarks Manager" = "Lesezeichenverwaltung öffnen";
+"Toggle Bookmarks Bar" = "Lesezeichenleiste ein-/ausblenden";
+"Bookmark This Tab" = "Tab als Lesezeichen sichern";
+"Other Bookmarks" = "Weitere Lesezeichen";
+"Untitled Folder" = "Unbenannter Ordner";
+"(Empty)" = "(Leer)";
+
+/* Menu — History */
+"History" = "Verlauf";
+"Recently Closed" = "Kürzlich geschlossen";
+"Recently Visited" = "Kürzlich besucht";
+"Show Full History" = "Gesamten Verlauf anzeigen";
+
 /* Menu — Edit */
 "Edit" = "Bearbeiten";
 "Cut" = "Ausschneiden";

@@ -158,7 +158,7 @@ rm -f /tmp/resolv_stub.c
 # ---------------------------------------------------------------------------
 
 retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools jq python3 \
-    v4l-utils nss-tools bash wireguard-tools strongswan openvpn openssl
+    sqlite-libs v4l-utils nss-tools bash wireguard-tools strongswan openvpn openssl
 
 # ---------------------------------------------------------------------------
 # Configuration files (static)

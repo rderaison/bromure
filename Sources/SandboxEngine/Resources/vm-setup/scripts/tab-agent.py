@@ -69,6 +69,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import ssl
 import struct
 import subprocess
@@ -92,6 +93,11 @@ _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9-]+$")
 
 def _is_safe_id(s):
     return bool(s) and isinstance(s, str) and _SAFE_ID_RE.match(s) is not None
+
+# Browser-chrome accelerators the host may inject via xdotool (menu clicks
+# that bypass the VZ keyboard path). xdotool sees the guest X server directly,
+# so these are the real Chromium chords (no Cmd↔Ctrl swap).
+_ALLOWED_CHORDS = {"ctrl+shift+b", "ctrl+d"}
 
 VSOCK_PORT = 5810
 HOST_CID = 2
@@ -775,6 +781,159 @@ def active_target_id(targets, visibility=None):
     return None
 
 
+def _chromium_profile_dir():
+    """Chromium's user-data-dir, read from the PROFILE_DIR env var that
+    xinitrc exports from chrome-env (config-agent writes it to match the
+    `--user-data-dir` it passes Chromium). Persistent profiles mount their
+    disk at that path, so the bookmarks we read and the history DB we write
+    beside it survive reboots. Ephemeral profiles leave PROFILE_DIR unset,
+    so we fall back to the default profile location on the throwaway root
+    disk — which is the right place for a session that shouldn't persist."""
+    return os.environ.get("PROFILE_DIR") or os.path.expanduser("~/.config/chromium")
+
+
+def _simplify_bookmark_node(node):
+    """Reduce a Chromium bookmarks node to {type, name, url?/children?}."""
+    ntype = node.get("type")
+    if ntype == "url":
+        return {"type": "url", "name": node.get("name", ""), "url": node.get("url", "")}
+    if ntype == "folder":
+        children = [
+            s for s in (_simplify_bookmark_node(c) for c in node.get("children", []))
+            if s is not None
+        ]
+        return {"type": "folder", "name": node.get("name", ""), "children": children}
+    return None
+
+
+def read_bookmarks():
+    """Read and simplify Chromium's bookmark tree into the bookmark-bar and
+    other-bookmarks top-level lists. Returns None when no bookmarks file has
+    been written yet (a fresh profile with no bookmarks). Chromium flushes
+    this file a beat after edits, so a just-added bookmark may lag by a
+    second or two."""
+    path = os.path.join(_chromium_profile_dir(), "Default", "Bookmarks")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        log(f"bookmarks: cannot read {path}: {e}")
+        return None
+    roots = data.get("roots", {})
+
+    def children_of(key):
+        node = roots.get(key) or {}
+        return [
+            s for s in (_simplify_bookmark_node(c) for c in node.get("children", []))
+            if s is not None
+        ]
+
+    return {"bookmark_bar": children_of("bookmark_bar"), "other": children_of("other")}
+
+
+# ---------------------------------------------------------------------------
+# Session history — recorded into a SQLite DB under Chromium's user-data-dir.
+# It therefore inherits the profile's persistence: ephemeral profiles lose it
+# with the VM; persistent profiles get it back on the next boot. The full,
+# Chromium-owned history still lives behind "Show Full History"
+# (chrome://history); these two lists feed the macOS History menu.
+# ---------------------------------------------------------------------------
+_HISTORY_VISITED_CAP = 100
+_HISTORY_CLOSED_CAP = 50
+_HISTORY_MENU_LIMIT = 25
+_history_db = None
+_history_lock = threading.Lock()
+
+
+def _history_connect():
+    """Open (once) the history DB beside Chromium's profile data. Returns the
+    connection or None if SQLite is unavailable / the path can't be opened."""
+    global _history_db
+    if _history_db is not None:
+        return _history_db
+    path = os.path.join(_chromium_profile_dir(), "bromure-history.db")
+    try:
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS visited "
+            "(url TEXT PRIMARY KEY, title TEXT, ts REAL)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS closed "
+            "(id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT, title TEXT, ts REAL)")
+        conn.commit()
+        _history_db = conn
+        log(f"history: opened {path}")
+    except Exception as e:
+        log(f"history: cannot open {path}: {e}")
+        _history_db = None
+    return _history_db
+
+
+def _record_visit(title, url):
+    if not url.startswith(("http://", "https://")):
+        return
+    with _history_lock:
+        conn = _history_connect()
+        if conn is None:
+            return
+        try:
+            conn.execute(
+                "INSERT INTO visited(url, title, ts) VALUES(?, ?, ?) "
+                "ON CONFLICT(url) DO UPDATE SET title=excluded.title, ts=excluded.ts",
+                (url, title or url, time.time()))
+            conn.execute(
+                "DELETE FROM visited WHERE url NOT IN "
+                "(SELECT url FROM visited ORDER BY ts DESC LIMIT ?)",
+                (_HISTORY_VISITED_CAP,))
+            conn.commit()
+        except Exception as e:
+            log(f"history: visit write failed: {e}")
+
+
+def _record_close(title, url):
+    if not url.startswith(("http://", "https://")):
+        return
+    with _history_lock:
+        conn = _history_connect()
+        if conn is None:
+            return
+        try:
+            conn.execute(
+                "INSERT INTO closed(url, title, ts) VALUES(?, ?, ?)",
+                (url, title or url, time.time()))
+            conn.execute(
+                "DELETE FROM closed WHERE id NOT IN "
+                "(SELECT id FROM closed ORDER BY id DESC LIMIT ?)",
+                (_HISTORY_CLOSED_CAP,))
+            conn.commit()
+        except Exception as e:
+            log(f"history: close write failed: {e}")
+
+
+def _history_snapshot():
+    with _history_lock:
+        conn = _history_connect()
+        if conn is None:
+            return {"recently_closed": [], "recently_visited": []}
+        try:
+            visited = [
+                {"title": t or u, "url": u}
+                for (u, t) in conn.execute(
+                    "SELECT url, title FROM visited ORDER BY ts DESC LIMIT ?",
+                    (_HISTORY_MENU_LIMIT,))
+            ]
+            closed = [
+                {"title": t or u, "url": u}
+                for (u, t) in conn.execute(
+                    "SELECT url, title FROM closed ORDER BY id DESC LIMIT ?",
+                    (_HISTORY_MENU_LIMIT,))
+            ]
+            return {"recently_closed": closed, "recently_visited": visited}
+        except Exception as e:
+            log(f"history: read failed: {e}")
+            return {"recently_closed": [], "recently_visited": []}
+
+
 def handle_cmd(msg, targets_by_id, link):
     cmd = msg.get("cmd")
     tid = msg.get("id")
@@ -845,6 +1004,31 @@ def handle_cmd(msg, targets_by_id, link):
                     # certificates, not table names).
                     certs = res.get("tableNames", []) or []
         link.send({"event": "certificate", "request_id": request_id, "certs": certs})
+    elif cmd == "get_bookmarks":
+        request_id = msg.get("request_id", "")
+        tree = read_bookmarks()
+        link.send({"event": "bookmarks", "request_id": request_id, "tree": tree})
+    elif cmd == "get_history":
+        request_id = msg.get("request_id", "")
+        snap = _history_snapshot()
+        link.send({
+            "event": "history",
+            "request_id": request_id,
+            "recently_closed": snap["recently_closed"],
+            "recently_visited": snap["recently_visited"],
+        })
+    elif cmd == "key_chord":
+        # Deliver a real browser-chrome accelerator to Chromium via xdotool
+        # (X11), used by menu-bar clicks that can't ride the VZ keyboard
+        # path. Allowlisted so only known bookmark chords are injectable.
+        chord = msg.get("chord", "")
+        if chord in _ALLOWED_CHORDS:
+            try:
+                subprocess.run(["xdotool", "key", "--clearmodifiers", chord], timeout=3)
+            except Exception as e:
+                log(f"key_chord {chord} failed: {e}")
+        else:
+            log(f"key_chord: refusing chord {chord!r}")
     elif cmd == "mouse_park":
         # Host cursor crossed out of the visible area into the macOS toolbar.
         # VZ's mouse-tracking still extends into the clipped inset, so without
@@ -1084,6 +1268,11 @@ def main():
                     "using_camera": using_camera,
                     "using_microphone": using_microphone,
                 })
+                # Record navigations into session history. Fire on URL change
+                # and on title change (the first upsert of a page often lands
+                # before its <title> resolves) — _record_visit upserts by URL.
+                if prev is None or prev.get("url") != url or prev.get("title") != title:
+                    _record_visit(title, url)
             # Re-fetch favicon whenever URL origin changes (cheap check).
             url_origin = _origin(url)
             prev_origin = _origin(prev.get("url", "")) if prev else None
@@ -1099,6 +1288,8 @@ def main():
 
         for tid in list(known.keys()):
             if tid not in current_ids:
+                gone = known.get(tid, {})
+                _record_close(gone.get("title", ""), gone.get("url", ""))
                 link.send({"event": "remove", "id": tid})
                 known.pop(tid, None)
 
