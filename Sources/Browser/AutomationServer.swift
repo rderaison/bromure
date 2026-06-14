@@ -452,12 +452,23 @@ final class AutomationServer {
         let rawStr = String(bytes: originalRequest[0..<requestLength], encoding: .utf8) ?? ""
         let rewritten = rawStr.replacingOccurrences(of: " \(originalPath) ", with: " \(rewrittenPath) ")
 
-        // Also rewrite the Host header to point to the local CDP
-        // (Chromium may check this for WebSocket upgrade)
+        // Rewrite the Host header to the local CDP (Chromium validates it on
+        // the WebSocket upgrade as a DNS-rebinding guard) and strip any Origin
+        // header. Chromium also rejects WS upgrades whose Origin isn't an
+        // allowed localhost origin; when the automation server is reached over
+        // a non-localhost address (bindAddress 0.0.0.0), the client sends that
+        // address as Origin and Chromium 403s the upgrade. It accepts upgrades
+        // with no Origin, so drop the line. Anchoring on the leading CRLF
+        // removes the whole header line without disturbing the others.
         let finalRequest = rewritten
             .replacingOccurrences(
                 of: "Host: [^\r\n]+",
                 with: "Host: 127.0.0.1:9222",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: "(?i)\r\nOrigin: [^\r\n]*",
+                with: "",
                 options: .regularExpression
             )
 
