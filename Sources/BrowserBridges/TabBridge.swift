@@ -213,10 +213,13 @@ public final class TabBridge: NSObject, @unchecked Sendable {
 
     private static func parseBookmarkNodes(_ arr: [[String: Any]]) -> [BookmarkNode] {
         arr.compactMap { dict in
-            let name = dict["name"] as? String ?? ""
+            let name = GuestTextSanitizer.title(dict["name"] as? String ?? "")
             switch dict["type"] as? String {
             case "url":
-                return BookmarkNode(name: name, url: dict["url"] as? String ?? "", children: [])
+                // Drop the whole bookmark if its URL isn't a safe, navigable
+                // scheme (javascript:, data:, file:, … are rejected here).
+                guard let url = GuestTextSanitizer.url(dict["url"] as? String ?? "") else { return nil }
+                return BookmarkNode(name: name, url: url, children: [])
             case "folder":
                 let kids = dict["children"] as? [[String: Any]] ?? []
                 return BookmarkNode(name: name, url: nil, children: parseBookmarkNodes(kids))
@@ -266,8 +269,9 @@ public final class TabBridge: NSObject, @unchecked Sendable {
 
     private static func parseHistoryEntries(_ arr: [[String: Any]]) -> [HistoryEntry] {
         arr.compactMap { dict in
-            guard let url = dict["url"] as? String, !url.isEmpty else { return nil }
-            return HistoryEntry(title: dict["title"] as? String ?? url, url: url)
+            guard let url = GuestTextSanitizer.url(dict["url"] as? String ?? "") else { return nil }
+            let title = GuestTextSanitizer.title(dict["title"] as? String ?? "")
+            return HistoryEntry(title: title, url: url)
         }
     }
 
@@ -492,6 +496,138 @@ public final class TabBridge: NSObject, @unchecked Sendable {
                 remaining -= n
             }
         }
+    }
+}
+
+extension TabBridge {
+    /// Truncate a display string to the same bound bookmark/history titles use.
+    /// Applied to the URL that the menu shows when a bookmark/history row has no
+    /// title, so an unnamed entry with an enormous URL can't blow out a row.
+    public static func truncatedMenuTitle(_ s: String) -> String {
+        GuestTextSanitizer.truncate(s)
+    }
+}
+
+/// Cleans bookmark/history strings before they reach an NSMenuItem or the
+/// navigation sink. These titles and URLs originate inside the disposable VM,
+/// which renders untrusted web content: a hostile page can write arbitrary
+/// bytes into a bookmark title or push a crafted URL into session history.
+/// Everything crossing this trust boundary is treated as adversarial.
+enum GuestTextSanitizer {
+    /// Max displayed length of a title. Menu rows clip well before this; the
+    /// cap mainly bounds memory and defeats UI-flooding via giant titles.
+    static let maxTitleLength = 100
+
+    /// Schemes we are willing to navigate to from a menu click. Everything
+    /// else — javascript:, data:, blob:, file:, vbscript:, chrome:, mailto:,
+    /// … — is dropped so a poisoned entry can't run script, exfiltrate via a
+    /// crafted URL, or reach the local filesystem.
+    static let allowedSchemes: Set<String> = ["http", "https", "ftp"]
+
+    /// Code points stripped from every title and URL: C0/C1 controls and DEL,
+    /// the Unicode bidi controls used for "Trojan Source" / right-to-left
+    /// spoofing, and zero-width / BOM characters that hide or fake content.
+    private static let forbiddenScalars: CharacterSet = {
+        var set = CharacterSet.controlCharacters // C0, C1, DEL
+        for u in 0x202A...0x202E { set.insert(Unicode.Scalar(u)!) } // bidi embeddings/overrides
+        for u in 0x2066...0x2069 { set.insert(Unicode.Scalar(u)!) } // bidi isolates
+        set.insert(Unicode.Scalar(0x200E)!) // LRM
+        set.insert(Unicode.Scalar(0x200F)!) // RLM
+        set.insert(Unicode.Scalar(0x061C)!) // Arabic letter mark
+        for u in [0x200B, 0x200C, 0x200D, 0xFEFF] { set.insert(Unicode.Scalar(u)!) } // zero-width + BOM
+        return set
+    }()
+
+    private static func stripForbidden(_ s: String) -> String {
+        String(String.UnicodeScalarView(s.unicodeScalars.filter { !forbiddenScalars.contains($0) }))
+    }
+
+    /// Sanitize a title for display: decode HTML entities (`&amp;` → `&`),
+    /// drop control / bidi / zero-width characters, collapse whitespace runs to
+    /// single spaces, and truncate. Entity decoding runs first so that an
+    /// entity-encoded control char (e.g. `&#x202E;`) is caught by the strip.
+    static func title(_ raw: String) -> String {
+        var s = decodeHTMLEntities(raw)
+        s = stripForbidden(s)
+        s = s.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        return truncate(s)
+    }
+
+    /// Truncate `s` to `max` characters, appending an ellipsis when cut.
+    static func truncate(_ s: String, max: Int = maxTitleLength) -> String {
+        guard s.count > max else { return s }
+        return s.prefix(max - 1) + "…"
+    }
+
+    /// Validate and clean a navigable URL. Returns `nil` when the scheme isn't
+    /// in `allowedSchemes`, signalling the caller to drop the whole entry.
+    static func url(_ raw: String) -> String? {
+        let cleaned = stripForbidden(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty,
+              let scheme = schemeOf(cleaned),
+              allowedSchemes.contains(scheme) else { return nil }
+        return cleaned
+    }
+
+    /// Extract a URL's scheme per RFC 3986 (`ALPHA *( ALPHA / DIGIT / "+" /
+    /// "-" / "." )` before the first `:`), lowercased. `nil` if there's no
+    /// well-formed scheme — which also rejects scheme-relative/relative URLs.
+    private static func schemeOf(_ s: String) -> String? {
+        guard let colon = s.firstIndex(of: ":") else { return nil }
+        let scheme = s[s.startIndex..<colon]
+        guard let first = scheme.first, first.isLetter else { return nil }
+        guard scheme.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "+" || $0 == "-" || $0 == "." })
+        else { return nil }
+        return scheme.lowercased()
+    }
+
+    private static let namedEntities: [String: Character] = [
+        "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'",
+        "nbsp": "\u{00A0}", "copy": "©", "reg": "®", "trade": "™",
+        "hellip": "…", "mdash": "—", "ndash": "–",
+        "lsquo": "\u{2018}", "rsquo": "\u{2019}", "ldquo": "\u{201C}", "rdquo": "\u{201D}",
+    ]
+
+    /// Decode a subset of HTML named entities plus decimal/hex numeric
+    /// references in a single left-to-right pass, so already-decoded text is
+    /// never re-decoded (e.g. `&amp;lt;` → `&lt;`, not `<`).
+    static func decodeHTMLEntities(_ s: String) -> String {
+        guard s.contains("&") else { return s }
+        var result = ""
+        result.reserveCapacity(s.count)
+        var i = s.startIndex
+        while i < s.endIndex {
+            guard s[i] == "&" else {
+                result.append(s[i])
+                i = s.index(after: i)
+                continue
+            }
+            // Look for a terminating ';' within a short window.
+            guard let semi = s[i...].firstIndex(of: ";"),
+                  s.distance(from: i, to: semi) <= 12,
+                  let decoded = decodeEntity(String(s[s.index(after: i)..<semi])) else {
+                result.append(s[i])
+                i = s.index(after: i)
+                continue
+            }
+            result.append(decoded)
+            i = s.index(after: semi)
+        }
+        return result
+    }
+
+    private static func decodeEntity(_ name: String) -> Character? {
+        if let c = namedEntities[name] { return c }
+        guard name.first == "#" else { return nil }
+        let digits = name.dropFirst()
+        let value: UInt32?
+        if let f = digits.first, f == "x" || f == "X" {
+            value = UInt32(digits.dropFirst(), radix: 16)
+        } else {
+            value = UInt32(digits, radix: 10)
+        }
+        guard let v = value, let scalar = Unicode.Scalar(v) else { return nil }
+        return Character(scalar)
     }
 }
 

@@ -982,7 +982,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
         let url = node.url ?? ""
         let item = NSMenuItem(
-            title: node.name.isEmpty ? url : node.name,
+            title: node.name.isEmpty ? TabBridge.truncatedMenuTitle(url) : node.name,
             action: #selector(openBookmarkAction(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = url
@@ -1028,7 +1028,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     @MainActor private func makeHistoryItem(_ entry: TabBridge.HistoryEntry) -> NSMenuItem {
         let item = NSMenuItem(
-            title: entry.title.isEmpty ? entry.url : entry.title,
+            title: entry.title.isEmpty ? TabBridge.truncatedMenuTitle(entry.url) : entry.title,
             action: #selector(openHistoryEntryAction(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = entry.url
