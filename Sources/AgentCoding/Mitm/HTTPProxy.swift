@@ -68,6 +68,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Set once by `MitmEngine.register`; nil → treat as disengaged.
     /// Static, same rationale as `promptInjectionPolicyProvider`.
     nonisolated(unsafe) static var fusionEngagedProvider: (@Sendable (UUID) -> Bool)?
+    /// Reaches the host-owned Claude subscription store + refresher. nil →
+    /// subscription auth off. Set once by `MitmEngine.register`; static, same
+    /// rationale as the providers above.
+    nonisolated(unsafe) static var claudeSubscriptionProvider: (@Sendable () -> (ClaudeSubscriptionStore, ClaudeSubscriptionRefresher)?)?
     /// Process-wide consent broker for the "ask me what to do" action.
     static let promptInjectionBroker = PromptInjectionConsentBroker()
 
@@ -235,7 +239,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // Pre-swap: scan for unswapped Bearer / x-api-key tokens. The
         // trace store records these as `LeakEntry` values so the user
         // sees exactly which secrets escaped the swap pipeline.
-        let leaks = swapper.detectLeaks(in: request, profileID: profileID)
+        var leaks = swapper.detectLeaks(in: request, profileID: profileID)
+        // Drop the false-positive x-api-key "leak" for a Claude subscription
+        // session: that key is our own bogus placeholder, which the transform
+        // below rewrites to a real OAuth Bearer — it's never a real secret
+        // escaping the VM.
+        if host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
+           let provider = Self.claudeSubscriptionProvider, let (store, _) = provider(),
+           let reqStr = String(data: request, encoding: .utf8),
+           let hdr = Self.headerSection(of: reqStr),
+           let apiKey = Self.headerValue("x-api-key", inHeaderSection: hdr),
+           store.profileForBogusKey(apiKey) != nil {
+            leaks = leaks.filter { $0.header.lowercased() != "x-api-key" }
+        }
 
         // Aho-Corasick scan over headers + body for any fake token
         // bound for a host outside the scope the fake was minted for.
@@ -322,6 +338,34 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     FileHandle.standardError.write(Data(
                         "[mitm] injected MCP bearer for \(host)\n".utf8))
                 }
+            }
+        }
+
+        // 5c. Claude subscription auth. In subscription mode the guest runs in
+        //     API-key mode with a *bogus* ANTHROPIC_API_KEY (so it never does
+        //     OAuth and never stores a real credential). Here we turn that into
+        //     a real subscription request: drop x-api-key, add Authorization:
+        //     Bearer <live access token> + the OAuth beta header. The token is
+        //     held only on the host, in a store shared by every session, and
+        //     the host owns its refresh — so one refresh serves all VMs.
+        //     `claudeSubStaleAccess` carries the injected token to the post-
+        //     relay 401 self-heal below.
+        var claudeSubStaleAccess: String? = nil
+        if host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
+           let provider = Self.claudeSubscriptionProvider, let (store, refresher) = provider(),
+           let reqStr = String(data: swap.modified, encoding: .utf8),
+           let headerSection = Self.headerSection(of: reqStr),
+           let apiKey = Self.headerValue("x-api-key", inHeaderSection: headerSection),
+           store.profileForBogusKey(apiKey) != nil {
+            do {
+                let access = try await refresher.accessToken(for: profileID)
+                swap.modified = Self.injectClaudeSubscriptionAuth(reqStr: reqStr, access: access)
+                claudeSubStaleAccess = access
+                FileHandle.standardError.write(Data(
+                    "[mitm] injected Claude subscription token for \(host)\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[mitm] Claude subscription token unavailable for \(host): \(error)\n".utf8))
             }
         }
 
@@ -904,6 +948,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                             host: host, port: port,
                                             session: session,
                                             tls: tls)
+
+        // Claude subscription 401 self-heal. The streaming relay has already
+        // committed the response to the guest, so we can't retry transparently
+        // — instead refresh the shared token in the background so the *next*
+        // request uses a fresh one (and Claude Code retries the failed call on
+        // its own). De-duped in the refresher against concurrent 401s.
+        if let stale = claudeSubStaleAccess,
+           Self.parseStatusCode(relay.buffer) == 401,
+           let provider = Self.claudeSubscriptionProvider, let (_, refresher) = provider() {
+            let pid = profileID
+            Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
+        }
 
         // 7. Trace. Build a TraceRecord from what we observed and
         //    hand it to the engine's TraceStore. Body capture is
@@ -1541,6 +1597,45 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
         return nil
+    }
+
+    /// The header block of a raw HTTP request string (request line + headers,
+    /// up to but excluding the blank line), or nil if there's no blank line.
+    /// Suitable to pass to `headerValue(_:inHeaderSection:)`.
+    static func headerSection(of reqStr: String) -> String? {
+        guard let end = reqStr.range(of: "\r\n\r\n") else { return nil }
+        return String(reqStr[..<end.lowerBound])
+    }
+
+    /// Turn a guest API-key request into a Claude subscription request: drop
+    /// `x-api-key` and any existing `Authorization`, set `Authorization: Bearer
+    /// <access>`, and ensure `anthropic-beta` carries the OAuth flag (merged,
+    /// not clobbered). Body is untouched, so Content-Length stays valid.
+    static func injectClaudeSubscriptionAuth(reqStr: String, access: String) -> Data {
+        guard let headerEnd = reqStr.range(of: "\r\n\r\n") else { return Data(reqStr.utf8) }
+        let headerBlock = String(reqStr[..<headerEnd.lowerBound])
+        let rest = reqStr[headerEnd.lowerBound...]   // "\r\n\r\n" + body
+        let oauthBeta = "oauth-2025-04-20"
+        var outLines: [String] = []
+        var sawBeta = false
+        for line in headerBlock.components(separatedBy: "\r\n") {
+            let lower = line.lowercased()
+            if lower.hasPrefix("x-api-key:") { continue }       // drop the bogus key
+            if lower.hasPrefix("authorization:") { continue }   // we set our own
+            if lower.hasPrefix("anthropic-beta:"), let colon = line.firstIndex(of: ":") {
+                sawBeta = true
+                let existing = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                let parts = existing.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                let merged = parts.contains(oauthBeta) ? existing
+                    : (existing.isEmpty ? oauthBeta : existing + "," + oauthBeta)
+                outLines.append("anthropic-beta: \(merged)")
+            } else {
+                outLines.append(line)
+            }
+        }
+        outLines.append("Authorization: Bearer \(access)")
+        if !sawBeta { outLines.append("anthropic-beta: \(oauthBeta)") }
+        return Data((outLines.joined(separator: "\r\n") + rest).utf8)
     }
 
     /// Extract the `Action` value from a form-urlencoded AWS query-protocol

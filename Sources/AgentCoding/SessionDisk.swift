@@ -350,6 +350,14 @@ public final class SessionDisk {
             }
             lines.append("export \(spec.tool.apiKeyEnvVar)=\(shellQuote(value))")
         }
+        // Claude subscription mode: export the bogus ANTHROPIC_API_KEY so Claude
+        // Code runs in API-key mode (never doing OAuth in the guest). The proxy
+        // swaps it for a live subscription OAuth Bearer token held on the host.
+        // Only present when a subscription credential is registered (see
+        // makeTokenPlan); otherwise the guest logs in interactively as before.
+        if let bogus = tokenPlan?.claudeSubscriptionBogusKey {
+            lines.append("export ANTHROPIC_API_KEY=\(shellQuote(bogus))")
+        }
         // Manual tokens defined in the editor's Advanced section.
         // Same trick as above: we inject the fake; the host swaps it
         // for the real value at the proxy.

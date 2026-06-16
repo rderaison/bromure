@@ -10,6 +10,11 @@ public final class MitmEngine {
     public let ca: BromureCA
     public let certCache: CertCache
     public let swapper: TokenSwapper
+    /// Host-owned shared Claude subscription credential + the bogus-key
+    /// registry the proxy consults. One per process, shared by every session.
+    public let claudeSubscriptionStore: ClaudeSubscriptionStore
+    /// Serializes Claude OAuth refresh so concurrent VMs share one refresh.
+    public let claudeRefresher: ClaudeSubscriptionRefresher
     public let sshAgent: SSHAgentServer
     public let awsCreds: AWSCredentialServer
     /// Strips the (intentionally invalid) signature on AWS-bound
@@ -249,6 +254,9 @@ public final class MitmEngine {
         self.socketClient = SocketDevClient()
         self.publishTimeCache = PublishTimeCache()
         self.swapper = TokenSwapper(consent: broker)
+        let claudeStore = ClaudeSubscriptionStore()
+        self.claudeSubscriptionStore = claudeStore
+        self.claudeRefresher = ClaudeSubscriptionRefresher(store: claudeStore)
         self.sshAgent = SSHAgentServer(consent: broker)
         self.awsCreds = AWSCredentialServer(consent: broker)
         self.awsResigner = AWSResigner(credServer: awsCreds)
@@ -290,6 +298,12 @@ public final class MitmEngine {
         // the proxy ask "is Fusion engaged for this session right now?".
         HTTPMitmConnection.fusionEngagedProvider = { [weak self] pid in
             self?.fusionEngaged(for: pid) ?? false
+        }
+        // Claude subscription auth: one closure lets the proxy reach the shared
+        // store (bogus-key lookup) + refresher (live access token).
+        HTTPMitmConnection.claudeSubscriptionProvider = { [weak self] in
+            guard let self else { return nil }
+            return (self.claudeSubscriptionStore, self.claudeRefresher)
         }
         let tokenHook = self.subscriptionTokenSeen
         let codexHook = self.codexTokenSeen

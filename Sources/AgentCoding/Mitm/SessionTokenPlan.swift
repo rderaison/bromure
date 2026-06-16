@@ -68,8 +68,28 @@ public struct SessionTokenPlan: Sendable {
 
     public var entries: [Entry]
 
-    public init(entries: [Entry] = []) {
+    /// Set when this is a Claude **subscription**-mode session and a shared
+    /// subscription credential is registered: the bogus `ANTHROPIC_API_KEY`
+    /// exported into the guest. Unlike `entries`, this carries NO real secret
+    /// and is deliberately kept out of `tokenMap()` — the proxy recognizes it
+    /// via the store's bogus-key registry and injects a live OAuth Bearer token
+    /// pulled from the host store instead of doing a static fake→real swap.
+    public var claudeSubscriptionBogusKey: String?
+
+    public init(entries: [Entry] = [], claudeSubscriptionBogusKey: String? = nil) {
         self.entries = entries
+        self.claudeSubscriptionBogusKey = claudeSubscriptionBogusKey
+    }
+
+    /// Deterministic bogus `ANTHROPIC_API_KEY` for a subscription session.
+    /// Per-profile (so concurrent sessions get distinct keys and the registry
+    /// stays unambiguous) and stable in `(salt, profileID)` so Claude Code
+    /// never sees the key rotate. Valid Anthropic `sk-ant-api03-…` shape with a
+    /// `brm-` marker so the proxy can tell it apart from a real user key.
+    public static func claudeSubscriptionBogusKey(salt: Data, profileID: UUID) -> String {
+        deriveFake(prefix: "sk-ant-api03-brm-",
+                   real: "claude-subscription:\(profileID.uuidString)",
+                   salt: salt)
     }
 
     /// Build the proxy's swap map. Each entry becomes one fake→real
@@ -246,7 +266,7 @@ public extension Profile {
     /// (user pasted a new key) or the salt (user deleted
     /// `~/Library/Application Support/BromureAC/fake-salt.bin`) is the
     /// only way fakes change.
-    func makeTokenPlan(salt: Data) -> SessionTokenPlan {
+    func makeTokenPlan(salt: Data, claudeSubscriptionAvailable: Bool = false) -> SessionTokenPlan {
         var entries: [SessionTokenPlan.Entry] = []
 
         // Primary tool API key gating: the primary tool's flag lives
@@ -479,7 +499,18 @@ public extension Profile {
             }
         }
 
-        return SessionTokenPlan(entries: entries)
+        // Claude subscription mode: when a shared subscription credential is
+        // registered on the host, run the guest in API-key mode with a bogus
+        // key (the proxy swaps it for a live OAuth Bearer token). Without a
+        // credential we emit nothing, so the guest falls back to interactive
+        // `claude login`.
+        var bogus: String? = nil
+        if claudeSubscriptionAvailable,
+           allToolSpecs.contains(where: { $0.tool == .claude && $0.authMode == .subscription }) {
+            bogus = SessionTokenPlan.claudeSubscriptionBogusKey(salt: salt, profileID: id)
+        }
+
+        return SessionTokenPlan(entries: entries, claudeSubscriptionBogusKey: bogus)
     }
 }
 

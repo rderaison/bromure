@@ -1506,9 +1506,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     // MARK: - Fusion eligibility
 
     /// True when this profile has a usable **Anthropic** credential that
-    /// Fusion can drive directly: an API key, or Bedrock. A subscription
-    /// (interactive `claude login` in the VM) does NOT count — the host
-    /// proxy can't replay against it.
+    /// Fusion can drive directly: an API key, Bedrock, or a subscription.
+    /// Subscription now counts — the host either injects a real OAuth Bearer
+    /// (when registered via "Register with Claude") or the guest's own
+    /// `claude login` token rides along; either way the forwarded
+    /// `/v1/messages` request Fusion replays carries valid auth.
     public var hasUsableAnthropicCredential: Bool {
         allToolSpecs.contains { s in
             guard s.tool == .claude else { return false }
@@ -1518,7 +1520,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .bedrock:
                 return awsCredentials.isUsable
             case .subscription:
-                return false
+                return true
             }
         }
     }

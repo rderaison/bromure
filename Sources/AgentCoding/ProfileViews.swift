@@ -429,6 +429,14 @@ struct ProfileEditorView: View {
     /// Called when the user removes a row — frees the on-disk file +
     /// keychain entry. Provided by ACAppDelegate.
     let onRemoveSSHKey: ((ImportedSSHKey) -> Void)?
+    /// When this profile/preferences has a stored Claude subscription
+    /// credential, the date it was captured (for the "registered ✓" status).
+    let claudeAccountSavedAt: Date?
+    /// Launch the "Register with Claude" flow (scope baked in by the caller).
+    /// nil hides the row entirely (e.g. no proxy engine).
+    let onRegisterClaude: (() -> Void)?
+    /// Forget the stored Claude credential for this scope.
+    let onForgetClaude: (() -> Void)?
 
     init(
         profile: Profile? = nil,
@@ -438,10 +446,16 @@ struct ProfileEditorView: View {
         onSave: @escaping (Profile, _ generateSSH: Bool) -> Void,
         onCancel: @escaping () -> Void,
         onImportSSHKey: ((URL, _ passphrase: String?, _ label: String) throws -> ImportedSSHKey)? = nil,
-        onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil
+        onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil,
+        claudeAccountSavedAt: Date? = nil,
+        onRegisterClaude: (() -> Void)? = nil,
+        onForgetClaude: (() -> Void)? = nil
     ) {
         self.onImportSSHKey = onImportSSHKey
         self.onRemoveSSHKey = onRemoveSSHKey
+        self.claudeAccountSavedAt = claudeAccountSavedAt
+        self.onRegisterClaude = onRegisterClaude
+        self.onForgetClaude = onForgetClaude
         var p = profile ?? Profile(name: "", tool: .claude, authMode: .token)
         // New profiles: pre-fill custom appearance fields with Terminal.app
         // defaults so the editor opens with sensible, editable starting
@@ -722,9 +736,48 @@ struct ProfileEditorView: View {
                 )
             }
 
+            claudeAccountRow
+
             Divider().padding(.vertical, 6)
 
             fusionToggle
+        }
+    }
+
+    /// "Register with Claude" status + actions. Sign in once in a throwaway VM;
+    /// the tokens stay on the host and are shared with subscription-mode Claude
+    /// sessions so the guest never logs in or holds a credential.
+    @ViewBuilder
+    private var claudeAccountRow: some View {
+        if let onRegisterClaude {
+            Divider().padding(.vertical, 6)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: claudeAccountSavedAt != nil
+                          ? "checkmark.seal.fill" : "person.crop.circle.badge.questionmark")
+                        .foregroundStyle(claudeAccountSavedAt != nil ? Color.green : Color.secondary)
+                    if let saved = claudeAccountSavedAt {
+                        Text("Claude account registered")
+                        Text("· saved \(saved.formatted(.relative(presentation: .named)))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("No Claude account registered")
+                    }
+                    Spacer()
+                    Button(claudeAccountSavedAt != nil
+                           ? NSLocalizedString("Re-register…", comment: "")
+                           : NSLocalizedString("Register with Claude…", comment: "")) {
+                        onRegisterClaude()
+                    }
+                    if claudeAccountSavedAt != nil, let onForgetClaude {
+                        Button(NSLocalizedString("Forget", comment: ""), role: .destructive) {
+                            onForgetClaude()
+                        }
+                    }
+                }
+                Text("Sign in once in a temporary, isolated VM. Bromure keeps the tokens on this Mac and shares them with subscription-mode Claude sessions, so the guest never logs in or holds a credential.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -751,7 +804,7 @@ struct ProfileEditorView: View {
             }
             .disabled(!available)
 
-            Text("Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (API key or Bedrock) **and** an OpenAI API key in this profile — subscription logins won’t work.")
+            Text("Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (Claude subscription, API key, or Bedrock) **and** an OpenAI API key in this profile.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.leading, 22)
@@ -762,7 +815,7 @@ struct ProfileEditorView: View {
                 .padding(.leading, 22)
 
             if !available {
-                Text("Add both an Anthropic and an OpenAI key above to turn this on.")
+                Text("Add an Anthropic credential (subscription, API key, or Bedrock) and an OpenAI API key above to turn this on.")
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .padding(.leading, 22)

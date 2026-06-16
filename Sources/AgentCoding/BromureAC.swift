@@ -261,7 +261,7 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
 /// VZVirtualMachineView for that session.
 @MainActor
 final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    private let imageManager: UbuntuImageManager
+    let imageManager: UbuntuImageManager
     let store = ProfileStore()
     var profiles: [Profile] = [] {
         didSet {
@@ -277,7 +277,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Snapshot of Terminal.app's default profile captured at app launch.
     /// Cached so changes the user makes to Terminal.app while AC is
     /// running don't surprise them mid-session.
-    private let terminalDefaults: TerminalAppDefaults = TerminalAppDefaults.load()
+    let terminalDefaults: TerminalAppDefaults = TerminalAppDefaults.load()
 
     /// Internal so the AppleScript bridge can read window IDs.
     var mainWindow: NSWindow?
@@ -323,7 +323,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Process-lifetime MITM engine. One instance per app run, holds
     /// the CA + per-profile token swap maps + ssh-agent keystore. Lazy
     /// because CA generation hits disk on first access.
-    private lazy var mitmEngine: MitmEngine? = {
+    lazy var mitmEngine: MitmEngine? = {
         do {
             let e = try MitmEngine()
             // Route clean-OAuth-token detections from the proxy hot
@@ -389,7 +389,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// SPM-resource-bundle path to the in-VM bridge script. Resolved
     /// once and copied into each session's meta share.
-    private lazy var bridgeScriptURL: URL? = {
+    lazy var bridgeScriptURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/bromure-vm-bridge",
                              withExtension: "py")
     }()
@@ -397,7 +397,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// SPM-resource-bundle path to the in-VM keyboard agent. Pushed
     /// into the meta share so xinitrc can launch it; the host-side
     /// `KeyboardBridge` then ferries macOS layout changes to it.
-    private lazy var keyboardAgentURL: URL? = {
+    lazy var keyboardAgentURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/keyboard-agent",
                              withExtension: "py")
     }()
@@ -413,7 +413,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// SPM-resource-bundle path to the AWS `credential_process` helper.
     /// Shipped to /mnt/bromure-meta and referenced from the per-profile
     /// ~/.aws/config so the SDK pulls JSON creds from the host on demand.
-    private lazy var awsCredsHelperURL: URL? = {
+    lazy var awsCredsHelperURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/bromure-aws-creds",
                              withExtension: "py")
     }()
@@ -421,7 +421,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// SPM-resource-bundle path to the Claude subscription-token agent.
     /// Dropped in the meta share, launched from xinitrc, talks vsock
     /// to host port 8446 (`SubscriptionTokenBridge`).
-    private lazy var claudeTokenAgentURL: URL? = {
+    lazy var claudeTokenAgentURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/claude-token-agent",
                              withExtension: "py")
     }()
@@ -429,7 +429,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// SPM-resource-bundle path to the Codex / ChatGPT
     /// subscription-token agent. Vsock port 8447, reads/writes
     /// ~/.codex/auth.json.
-    private lazy var codexTokenAgentURL: URL? = {
+    lazy var codexTokenAgentURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/codex-token-agent",
                              withExtension: "py")
     }()
@@ -447,14 +447,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Loopback-callback relay (vsock 5010). Shipped in the meta share and
     /// started from xinitrc; lets OAuth logins inside the VM receive their
     /// 127.0.0.1 redirect callback from the host browser.
-    private lazy var loopbackRelayAgentURL: URL? = {
+    lazy var loopbackRelayAgentURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/loopback-relay-agent",
                              withExtension: "py")
     }()
 
     /// Live host→guest loopback forwarders, one per detected OAuth login.
     /// They auto-expire (5 min); we also prune stopped ones on each new login.
-    private var loopbackForwarders: [LoopbackCallbackForwarder] = []
+    var loopbackForwarders: [LoopbackCallbackForwarder] = []
+    /// In-flight "Register with Claude" throwaway session, if any. Held so the
+    /// window-close handler can route to its teardown instead of the normal
+    /// session cleanup, and to guard against launching two at once.
+    var claudeRegistration: ClaudeRegistrationState?
 
     /// If `url` is an OAuth authorize URL whose `redirect_uri` is a loopback
     /// callback (`http://127.0.0.1:<port>` or `localhost`), return that port —
@@ -1156,6 +1160,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NSWindow else { return }
+        // Registration throwaway window: route to its own teardown (destroys
+        // the scratch VM + dir) instead of the normal per-profile session
+        // cleanup, which would suspend/save state and could terminate the app.
+        if let reg = claudeRegistration, win === reg.window {
+            teardownClaudeRegistration(reason: .windowClosed)
+            return
+        }
         if win === mainWindow {
             mainWindow = nil
             return
@@ -1249,6 +1260,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ssoRefreshTasks.removeValue(forKey: session.profile.id)
             mitmEngine?.clearSessionTrace(for: session.profile.id)
             mitmEngine?.unregister(profileID: session.profile.id)
+            mitmEngine?.claudeSubscriptionStore.unregisterBogusKeys(for: session.profile.id)
             SubscriptionTokenCoordinator.shared.unregister(profileID: session.profile.id)
             // Stop the debug shell bridge (no-op when not running) so
             // its vsock listener doesn't outlive the VM.
@@ -1757,6 +1769,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             onCancel: { [weak self] in
                 self?.preferencesWindow?.close()
                 self?.preferencesWindow = nil
+            },
+            claudeAccountSavedAt: mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt,
+            onRegisterClaude: { [weak self] in
+                self?.beginClaudeRegistration(scope: .alwaysShared)
+            },
+            onForgetClaude: { [weak self] in
+                try? self?.mitmEngine?.claudeSubscriptionStore.forget(for: nil)
             }
         ))
         win.makeKeyAndOrderFront(nil)
@@ -1919,6 +1938,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             onRemoveSSHKey: { [weak self] key in
                 guard let self, let editing else { return }
                 self.removeImportedSSHKey(key, for: editing)
+            },
+            claudeAccountSavedAt: (editing ?? initialDraft).flatMap { p in
+                mitmEngine?.claudeSubscriptionStore.record(for: p.id)?.savedAt
+            } ?? mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt,
+            onRegisterClaude: (editing ?? initialDraft).map { p in
+                { [weak self] in self?.beginClaudeRegistration(scope: .askPerSession(p.id)) }
+            },
+            onForgetClaude: (editing ?? initialDraft).map { p in
+                { [weak self] in try? self?.mitmEngine?.claudeSubscriptionStore.forget(for: p.id) }
             }
         ))
         win.isReleasedWhenClosed = false
@@ -2326,7 +2354,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var profile = new
         populateMCPBearerTokens(in: &profile)
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
-        let plan = profile.makeTokenPlan(salt: salt)
+        let plan = self.sessionTokenPlan(for: profile, salt: salt)
 
         var kubeYAML: String?
         if let engine = mitmEngine {
@@ -2581,7 +2609,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var profile = profile
         populateMCPBearerTokens(in: &profile)
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
-        let plan = profile.makeTokenPlan(salt: salt)
+        let plan = self.sessionTokenPlan(for: profile, salt: salt)
         // (prepareHomeDirectory call moved below — needs the
         // materialized kubeconfig YAML produced by the engine block.)
 
@@ -3518,7 +3546,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 baseDiskURL: imageManager.baseDiskURL
             )
             let salt = self.mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
-            let plan = profile.makeTokenPlan(salt: salt)
+            let plan = self.sessionTokenPlan(for: profile, salt: salt)
             sessionDisk.tokenPlan = plan
             if let engine = self.mitmEngine, let scriptURL = self.bridgeScriptURL {
                 let debugShellURL = ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil
@@ -3608,7 +3636,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Helpers
 
-    private func showError(_ error: Error, message: String) {
+    func showError(_ error: Error, message: String) {
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = error.localizedDescription
@@ -4004,6 +4032,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return Profile(name: "", tool: .claude, authMode: .token)
         }
         return p
+    }
+
+    /// Build a session token plan, enabling Claude subscription mode when a
+    /// shared subscription credential is registered, and register the minted
+    /// bogus `ANTHROPIC_API_KEY` so the proxy recognizes it. Use this instead
+    /// of calling `profile.makeTokenPlan` directly at session-launch sites.
+    private func sessionTokenPlan(for profile: Profile, salt: Data) -> SessionTokenPlan {
+        let available = mitmEngine?.claudeSubscriptionStore.hasCredential(for: profile.id) ?? false
+        let plan = profile.makeTokenPlan(salt: salt, claudeSubscriptionAvailable: available)
+        if let bogus = plan.claudeSubscriptionBogusKey {
+            mitmEngine?.claudeSubscriptionStore.registerBogusKey(bogus, for: profile.id)
+        }
+        return plan
     }
 
     private func populateMCPBearerTokens(in profile: inout Profile) {
