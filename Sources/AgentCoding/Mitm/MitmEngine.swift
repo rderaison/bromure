@@ -15,6 +15,12 @@ public final class MitmEngine {
     public let claudeSubscriptionStore: ClaudeSubscriptionStore
     /// Serializes Claude OAuth refresh so concurrent VMs share one refresh.
     public let claudeRefresher: ClaudeSubscriptionRefresher
+    /// Codex / ChatGPT counterparts of the Claude subscription store + refresher.
+    public let codexSubscriptionStore: CodexSubscriptionStore
+    public let codexRefresher: CodexSubscriptionRefresher
+    /// Grok (xAI) counterparts.
+    public let grokSubscriptionStore: GrokSubscriptionStore
+    public let grokRefresher: GrokSubscriptionRefresher
     public let sshAgent: SSHAgentServer
     public let awsCreds: AWSCredentialServer
     /// Strips the (intentionally invalid) signature on AWS-bound
@@ -257,6 +263,12 @@ public final class MitmEngine {
         let claudeStore = ClaudeSubscriptionStore()
         self.claudeSubscriptionStore = claudeStore
         self.claudeRefresher = ClaudeSubscriptionRefresher(store: claudeStore)
+        let codexStore = CodexSubscriptionStore()
+        self.codexSubscriptionStore = codexStore
+        self.codexRefresher = CodexSubscriptionRefresher(store: codexStore)
+        let grokStore = GrokSubscriptionStore()
+        self.grokSubscriptionStore = grokStore
+        self.grokRefresher = GrokSubscriptionRefresher(store: grokStore)
         self.sshAgent = SSHAgentServer(consent: broker)
         self.awsCreds = AWSCredentialServer(consent: broker)
         self.awsResigner = AWSResigner(credServer: awsCreds)
@@ -304,6 +316,14 @@ public final class MitmEngine {
         HTTPMitmConnection.claudeSubscriptionProvider = { [weak self] in
             guard let self else { return nil }
             return (self.claudeSubscriptionStore, self.claudeRefresher)
+        }
+        HTTPMitmConnection.codexSubscriptionProvider = { [weak self] in
+            guard let self else { return nil }
+            return (self.codexSubscriptionStore, self.codexRefresher)
+        }
+        HTTPMitmConnection.grokSubscriptionProvider = { [weak self] in
+            guard let self else { return nil }
+            return (self.grokSubscriptionStore, self.grokRefresher)
         }
         let tokenHook = self.subscriptionTokenSeen
         let codexHook = self.codexTokenSeen

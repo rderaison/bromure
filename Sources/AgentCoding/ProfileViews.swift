@@ -437,6 +437,14 @@ struct ProfileEditorView: View {
     let onRegisterClaude: (() -> Void)?
     /// Forget the stored Claude credential for this scope.
     let onForgetClaude: (() -> Void)?
+    /// ChatGPT / Codex counterparts of the three above.
+    let codexAccountSavedAt: Date?
+    let onRegisterCodex: (() -> Void)?
+    let onForgetCodex: (() -> Void)?
+    /// Grok (xAI) counterparts.
+    let grokAccountSavedAt: Date?
+    let onRegisterGrok: (() -> Void)?
+    let onForgetGrok: (() -> Void)?
 
     init(
         profile: Profile? = nil,
@@ -449,13 +457,25 @@ struct ProfileEditorView: View {
         onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil,
         claudeAccountSavedAt: Date? = nil,
         onRegisterClaude: (() -> Void)? = nil,
-        onForgetClaude: (() -> Void)? = nil
+        onForgetClaude: (() -> Void)? = nil,
+        codexAccountSavedAt: Date? = nil,
+        onRegisterCodex: (() -> Void)? = nil,
+        onForgetCodex: (() -> Void)? = nil,
+        grokAccountSavedAt: Date? = nil,
+        onRegisterGrok: (() -> Void)? = nil,
+        onForgetGrok: (() -> Void)? = nil
     ) {
         self.onImportSSHKey = onImportSSHKey
         self.onRemoveSSHKey = onRemoveSSHKey
         self.claudeAccountSavedAt = claudeAccountSavedAt
         self.onRegisterClaude = onRegisterClaude
         self.onForgetClaude = onForgetClaude
+        self.codexAccountSavedAt = codexAccountSavedAt
+        self.onRegisterCodex = onRegisterCodex
+        self.onForgetCodex = onForgetCodex
+        self.grokAccountSavedAt = grokAccountSavedAt
+        self.onRegisterGrok = onRegisterGrok
+        self.onForgetGrok = onForgetGrok
         var p = profile ?? Profile(name: "", tool: .claude, authMode: .token)
         // New profiles: pre-fill custom appearance fields with Terminal.app
         // defaults so the editor opens with sensible, editable starting
@@ -736,7 +756,7 @@ struct ProfileEditorView: View {
                 )
             }
 
-            claudeAccountRow
+            subscriptionAccountRows
 
             Divider().padding(.vertical, 6)
 
@@ -744,39 +764,59 @@ struct ProfileEditorView: View {
         }
     }
 
-    /// "Register with Claude" status + actions. Sign in once in a throwaway VM;
-    /// the tokens stay on the host and are shared with subscription-mode Claude
-    /// sessions so the guest never logs in or holds a credential.
+    /// "Register with Claude / ChatGPT" status + actions. Sign in once in a
+    /// throwaway VM; the tokens stay on the host and are shared with
+    /// subscription-mode sessions so the guest never logs in or holds a
+    /// credential.
     @ViewBuilder
-    private var claudeAccountRow: some View {
-        if let onRegisterClaude {
+    private var subscriptionAccountRows: some View {
+        if onRegisterClaude != nil || onRegisterCodex != nil || onRegisterGrok != nil {
             Divider().padding(.vertical, 6)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Image(systemName: claudeAccountSavedAt != nil
-                          ? "checkmark.seal.fill" : "person.crop.circle.badge.questionmark")
-                        .foregroundStyle(claudeAccountSavedAt != nil ? Color.green : Color.secondary)
-                    if let saved = claudeAccountSavedAt {
-                        Text("Claude account registered")
-                        Text("· saved \(saved.formatted(.relative(presentation: .named)))")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text("No Claude account registered")
-                    }
-                    Spacer()
-                    Button(claudeAccountSavedAt != nil
-                           ? NSLocalizedString("Re-register…", comment: "")
-                           : NSLocalizedString("Register with Claude…", comment: "")) {
-                        onRegisterClaude()
-                    }
-                    if claudeAccountSavedAt != nil, let onForgetClaude {
-                        Button(NSLocalizedString("Forget", comment: ""), role: .destructive) {
-                            onForgetClaude()
-                        }
-                    }
+            VStack(alignment: .leading, spacing: 10) {
+                if let onRegisterClaude {
+                    subscriptionAccountRow(
+                        name: "Claude", savedAt: claudeAccountSavedAt,
+                        onRegister: onRegisterClaude, onForget: onForgetClaude)
                 }
-                Text("Sign in once in a temporary, isolated VM. Bromure keeps the tokens on this Mac and shares them with subscription-mode Claude sessions, so the guest never logs in or holds a credential.")
+                if let onRegisterCodex {
+                    subscriptionAccountRow(
+                        name: "ChatGPT", savedAt: codexAccountSavedAt,
+                        onRegister: onRegisterCodex, onForget: onForgetCodex)
+                }
+                if let onRegisterGrok {
+                    subscriptionAccountRow(
+                        name: "Grok", savedAt: grokAccountSavedAt,
+                        onRegister: onRegisterGrok, onForget: onForgetGrok)
+                }
+                Text("Sign in once in a temporary, isolated VM. Bromure keeps the tokens on this Mac and shares them with subscription-mode sessions, so the guest never logs in or holds a credential.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func subscriptionAccountRow(name: String, savedAt: Date?,
+                                        onRegister: @escaping () -> Void,
+                                        onForget: (() -> Void)?) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: savedAt != nil
+                  ? "checkmark.seal.fill" : "person.crop.circle.badge.questionmark")
+                .foregroundStyle(savedAt != nil ? Color.green : Color.secondary)
+            if let saved = savedAt {
+                Text("\(name) account registered")
+                Text("· saved \(saved.formatted(.relative(presentation: .named)))")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("No \(name) account registered")
+            }
+            Spacer()
+            Button(savedAt != nil
+                   ? NSLocalizedString("Re-register…", comment: "")
+                   : String(format: NSLocalizedString("Register with %@…", comment: ""), name)) {
+                onRegister()
+            }
+            if savedAt != nil, let onForget {
+                Button(NSLocalizedString("Forget", comment: ""), role: .destructive) { onForget() }
             }
         }
     }

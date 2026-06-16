@@ -49,6 +49,50 @@ enum SubscriptionFakeMint {
         return "\(parts[0]).\(parts[1]).\(fakeSig)"
     }
 
+    /// Mint a fake JWT like ``mintJWTFake`` but also push the payload's `exp`
+    /// (and `iat`/`nbf` if present) far into the future, so a guest reading
+    /// this token from its credentials file believes it's valid for years and
+    /// never attempts an OAuth refresh — the host owns refresh in the
+    /// subscription store. Real claims (account id, plan, etc.) are preserved.
+    /// Falls back to ``mintJWTFake`` if the payload can't be parsed.
+    static func mintNoRefreshJWTFake(realJWT: String, salt: Data) -> String? {
+        let parts = realJWT.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        guard var payload = decodeJWTSegment(String(parts[1])) else {
+            return mintJWTFake(realJWT: realJWT, salt: salt)
+        }
+        let farFuture = Int(Date().addingTimeInterval(10 * 365 * 24 * 3600).timeIntervalSince1970)
+        payload["exp"] = farFuture
+        if payload["iat"] != nil { payload["iat"] = Int(Date().timeIntervalSince1970) }
+        if payload["nbf"] != nil { payload["nbf"] = Int(Date().timeIntervalSince1970) }
+        guard let newPayload = encodeJWTSegment(payload) else {
+            return mintJWTFake(realJWT: realJWT, salt: salt)
+        }
+        let realSig = String(parts[2])
+        let fakeSig = SessionTokenPlan.deriveFake(
+            prefix: jwtSignatureMarker, real: realSig, salt: salt,
+            targetLength: realSig.count)
+        return "\(parts[0]).\(newPayload).\(fakeSig)"
+    }
+
+    private static func decodeJWTSegment(_ seg: String) -> [String: Any]? {
+        var s = seg.replacingOccurrences(of: "-", with: "+")
+                   .replacingOccurrences(of: "_", with: "/")
+        while s.count % 4 != 0 { s += "=" }
+        guard let d = Data(base64Encoded: s),
+              let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
+        else { return nil }
+        return obj
+    }
+
+    private static func encodeJWTSegment(_ obj: [String: Any]) -> String? {
+        guard let d = try? JSONSerialization.data(withJSONObject: obj) else { return nil }
+        return d.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
     /// Returns true if `tok` looks like one of our JWT fakes — i.e.
     /// its signature segment starts with `jwtSignatureMarker`. Used
     /// by `TokenSwapper.detectCodexAccessToken` to avoid re-prompting

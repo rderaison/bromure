@@ -72,6 +72,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// subscription auth off. Set once by `MitmEngine.register`; static, same
     /// rationale as the providers above.
     nonisolated(unsafe) static var claudeSubscriptionProvider: (@Sendable () -> (ClaudeSubscriptionStore, ClaudeSubscriptionRefresher)?)?
+    /// Codex / ChatGPT counterpart of `claudeSubscriptionProvider`.
+    nonisolated(unsafe) static var codexSubscriptionProvider: (@Sendable () -> (CodexSubscriptionStore, CodexSubscriptionRefresher)?)?
+    /// Grok (xAI) counterpart of `claudeSubscriptionProvider`.
+    nonisolated(unsafe) static var grokSubscriptionProvider: (@Sendable () -> (GrokSubscriptionStore, GrokSubscriptionRefresher)?)?
     /// Process-wide consent broker for the "ask me what to do" action.
     static let promptInjectionBroker = PromptInjectionConsentBroker()
 
@@ -366,6 +370,55 @@ final class HTTPMitmConnection: @unchecked Sendable {
             } catch {
                 FileHandle.standardError.write(Data(
                     "[mitm] Claude subscription token unavailable for \(host): \(error)\n".utf8))
+            }
+        }
+
+        // 5d. Codex / ChatGPT subscription auth. The guest's ~/.codex/auth.json
+        //     holds a *bogus* far-future-exp JWT (so it never refreshes); on the
+        //     ChatGPT backend it sends that as `Authorization: Bearer`. Swap it
+        //     for the live real access token from the host store, which the host
+        //     refreshes. Distinct from the Claude path (x-api-key → Bearer):
+        //     here the guest already sends a Bearer, so it's a value swap.
+        var codexSubStaleAccess: String? = nil
+        if host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com",
+           let provider = Self.codexSubscriptionProvider, let (store, refresher) = provider(),
+           let reqStr = String(data: swap.modified, encoding: .utf8),
+           let headerSection = Self.headerSection(of: reqStr),
+           let bearer = Self.bearerToken(inHeaderSection: headerSection),
+           store.profileForBogusKey(bearer) != nil {
+            do {
+                let access = try await refresher.accessToken(for: profileID)
+                swap.modified = Self.replaceAuthorizationBearer(reqStr: reqStr, token: access)
+                codexSubStaleAccess = access
+                FileHandle.standardError.write(Data(
+                    "[mitm] injected Codex subscription token for \(host)\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[mitm] Codex subscription token unavailable for \(host): \(error)\n".utf8))
+            }
+        }
+
+        // 5e. Grok (xAI) subscription auth. The guest's ~/.grok/auth.json holds
+        //     a bogus OIDC token with a far-future expiry (so it never
+        //     refreshes); on the chat proxy it sends that as Bearer. Swap it for
+        //     the live real access token from the host store, which the host
+        //     refreshes against auth.x.ai.
+        var grokSubStaleAccess: String? = nil
+        if host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com"),
+           let provider = Self.grokSubscriptionProvider, let (store, refresher) = provider(),
+           let reqStr = String(data: swap.modified, encoding: .utf8),
+           let headerSection = Self.headerSection(of: reqStr),
+           let bearer = Self.bearerToken(inHeaderSection: headerSection),
+           store.profileForBogusKey(bearer) != nil {
+            do {
+                let access = try await refresher.accessToken(for: profileID)
+                swap.modified = Self.replaceAuthorizationBearer(reqStr: reqStr, token: access)
+                grokSubStaleAccess = access
+                FileHandle.standardError.write(Data(
+                    "[mitm] injected Grok subscription token for \(host)\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[mitm] Grok subscription token unavailable for \(host): \(error)\n".utf8))
             }
         }
 
@@ -957,6 +1010,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
         if let stale = claudeSubStaleAccess,
            Self.parseStatusCode(relay.buffer) == 401,
            let provider = Self.claudeSubscriptionProvider, let (_, refresher) = provider() {
+            let pid = profileID
+            Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
+        }
+        if let stale = codexSubStaleAccess,
+           Self.parseStatusCode(relay.buffer) == 401,
+           let provider = Self.codexSubscriptionProvider, let (_, refresher) = provider() {
+            let pid = profileID
+            Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
+        }
+        if let stale = grokSubStaleAccess,
+           Self.parseStatusCode(relay.buffer) == 401,
+           let provider = Self.grokSubscriptionProvider, let (_, refresher) = provider() {
             let pid = profileID
             Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
         }
@@ -1635,6 +1700,35 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         outLines.append("Authorization: Bearer \(access)")
         if !sawBeta { outLines.append("anthropic-beta: \(oauthBeta)") }
+        return Data((outLines.joined(separator: "\r\n") + rest).utf8)
+    }
+
+    /// The token from an `Authorization: Bearer <token>` header (or nil).
+    static func bearerToken(inHeaderSection text: String) -> String? {
+        guard let v = headerValue("authorization", inHeaderSection: text) else { return nil }
+        let prefix = "Bearer "
+        guard v.count > prefix.count,
+              v.lowercased().hasPrefix(prefix.lowercased()) else { return nil }
+        return String(v.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Rewrite the request's `Authorization` header to `Bearer <token>`,
+    /// preserving everything else (and the body / Content-Length).
+    static func replaceAuthorizationBearer(reqStr: String, token: String) -> Data {
+        guard let headerEnd = reqStr.range(of: "\r\n\r\n") else { return Data(reqStr.utf8) }
+        let headerBlock = String(reqStr[..<headerEnd.lowerBound])
+        let rest = reqStr[headerEnd.lowerBound...]   // "\r\n\r\n" + body
+        var outLines: [String] = []
+        var replaced = false
+        for line in headerBlock.components(separatedBy: "\r\n") {
+            if line.lowercased().hasPrefix("authorization:") {
+                outLines.append("Authorization: Bearer \(token)")
+                replaced = true
+            } else {
+                outLines.append(line)
+            }
+        }
+        if !replaced { outLines.append("Authorization: Bearer \(token)") }
         return Data((outLines.joined(separator: "\r\n") + rest).utf8)
     }
 

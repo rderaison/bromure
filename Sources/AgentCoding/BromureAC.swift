@@ -1261,6 +1261,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             mitmEngine?.clearSessionTrace(for: session.profile.id)
             mitmEngine?.unregister(profileID: session.profile.id)
             mitmEngine?.claudeSubscriptionStore.unregisterBogusKeys(for: session.profile.id)
+            mitmEngine?.codexSubscriptionStore.unregisterBogusKeys(for: session.profile.id)
+            mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: session.profile.id)
             SubscriptionTokenCoordinator.shared.unregister(profileID: session.profile.id)
             // Stop the debug shell bridge (no-op when not running) so
             // its vsock listener doesn't outlive the VM.
@@ -1772,10 +1774,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             },
             claudeAccountSavedAt: mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt,
             onRegisterClaude: { [weak self] in
-                self?.beginClaudeRegistration(scope: .alwaysShared)
+                self?.beginSubscriptionRegistration(provider: .claude, scope: .alwaysShared)
             },
             onForgetClaude: { [weak self] in
                 try? self?.mitmEngine?.claudeSubscriptionStore.forget(for: nil)
+            },
+            codexAccountSavedAt: mitmEngine?.codexSubscriptionStore.record(for: nil)?.savedAt,
+            onRegisterCodex: { [weak self] in
+                self?.beginSubscriptionRegistration(provider: .codex, scope: .alwaysShared)
+            },
+            onForgetCodex: { [weak self] in
+                try? self?.mitmEngine?.codexSubscriptionStore.forget(for: nil)
+            },
+            grokAccountSavedAt: mitmEngine?.grokSubscriptionStore.record(for: nil)?.savedAt,
+            onRegisterGrok: { [weak self] in
+                self?.beginSubscriptionRegistration(provider: .grok, scope: .alwaysShared)
+            },
+            onForgetGrok: { [weak self] in
+                try? self?.mitmEngine?.grokSubscriptionStore.forget(for: nil)
             }
         ))
         win.makeKeyAndOrderFront(nil)
@@ -1943,10 +1959,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 mitmEngine?.claudeSubscriptionStore.record(for: p.id)?.savedAt
             } ?? mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt,
             onRegisterClaude: (editing ?? initialDraft).map { p in
-                { [weak self] in self?.beginClaudeRegistration(scope: .askPerSession(p.id)) }
+                { [weak self] in self?.beginSubscriptionRegistration(provider: .claude, scope: .askPerSession(p.id)) }
             },
             onForgetClaude: (editing ?? initialDraft).map { p in
                 { [weak self] in try? self?.mitmEngine?.claudeSubscriptionStore.forget(for: p.id) }
+            },
+            codexAccountSavedAt: (editing ?? initialDraft).flatMap { p in
+                mitmEngine?.codexSubscriptionStore.record(for: p.id)?.savedAt
+            } ?? mitmEngine?.codexSubscriptionStore.record(for: nil)?.savedAt,
+            onRegisterCodex: (editing ?? initialDraft).map { p in
+                { [weak self] in self?.beginSubscriptionRegistration(provider: .codex, scope: .askPerSession(p.id)) }
+            },
+            onForgetCodex: (editing ?? initialDraft).map { p in
+                { [weak self] in try? self?.mitmEngine?.codexSubscriptionStore.forget(for: p.id) }
+            },
+            grokAccountSavedAt: (editing ?? initialDraft).flatMap { p in
+                mitmEngine?.grokSubscriptionStore.record(for: p.id)?.savedAt
+            } ?? mitmEngine?.grokSubscriptionStore.record(for: nil)?.savedAt,
+            onRegisterGrok: (editing ?? initialDraft).map { p in
+                { [weak self] in self?.beginSubscriptionRegistration(provider: .grok, scope: .askPerSession(p.id)) }
+            },
+            onForgetGrok: (editing ?? initialDraft).map { p in
+                { [weak self] in try? self?.mitmEngine?.grokSubscriptionStore.forget(for: p.id) }
             }
         ))
         win.isReleasedWhenClosed = false
@@ -2663,6 +2697,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                         terminalDefaults: terminalDefaults,
                                         tokenPlan: plan,
                                         kubeconfigYAML: kubeYAMLForVM)
+        // Codex subscription: seed a bogus ~/.codex/auth.json before boot so
+        // the guest runs without logging in (host owns the real token).
+        seedCodexAuthFile(for: profile)
+        seedGrokAuthFile(for: profile)
         if let engine = mitmEngine {
             // Tell the trace store what level + session id to record
             // under for traffic from this profile.
@@ -3548,6 +3586,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let salt = self.mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
             let plan = self.sessionTokenPlan(for: profile, salt: salt)
             sessionDisk.tokenPlan = plan
+            self.seedCodexAuthFile(for: profile)
+            self.seedGrokAuthFile(for: profile)
             if let engine = self.mitmEngine, let scriptURL = self.bridgeScriptURL {
                 let debugShellURL = ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil
                     ? self.shellAgentURL : nil
@@ -4045,6 +4085,102 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             mitmEngine?.claudeSubscriptionStore.registerBogusKey(bogus, for: profile.id)
         }
         return plan
+    }
+
+    /// Codex subscription mode: write a bogus `~/.codex/auth.json` into the
+    /// profile's (host-side, pre-boot) home dir so the guest runs Codex without
+    /// logging in. The bogus access/id JWTs carry a far-future `exp` so the
+    /// guest never refreshes; the host owns the real token + refresh and the
+    /// proxy swaps the bogus Bearer for the live one on chatgpt.com/openai.com.
+    /// No-op unless this profile is Codex+subscription with a registered cred.
+    func seedCodexAuthFile(for profile: Profile) {
+        guard let engine = mitmEngine,
+              profile.allToolSpecs.contains(where: { $0.tool == .codex && $0.authMode == .subscription }),
+              let real = engine.codexSubscriptionStore.record(for: profile.id) else { return }
+        let saltA = Data("codex-bogus-access:\(profile.id)".utf8)
+        let saltR = Data("codex-bogus-refresh:\(profile.id)".utf8)
+        let saltI = Data("codex-bogus-id:\(profile.id)".utf8)
+        guard let bogusAccess = SubscriptionFakeMint.mintNoRefreshJWTFake(
+                realJWT: real.accessToken, salt: saltA),
+              let bogusID = SubscriptionFakeMint.mintNoRefreshJWTFake(
+                realJWT: real.idToken, salt: saltI) else {
+            FileHandle.standardError.write(Data(
+                "[codex-sub] seed skipped — stored tokens aren't JWT-shaped\n".utf8))
+            return
+        }
+        let bogusRefresh = SubscriptionFakeMint.mintCodexRefreshFake(real: real.refreshToken, salt: saltR)
+        engine.codexSubscriptionStore.registerBogusKey(bogusAccess, for: profile.id)
+
+        var tokens: [String: Any] = [
+            "id_token": bogusID, "access_token": bogusAccess, "refresh_token": bogusRefresh,
+        ]
+        if let accountID = Self.codexAccountID(fromIDToken: real.idToken) {
+            tokens["account_id"] = accountID
+        }
+        let doc: [String: Any] = [
+            "OPENAI_API_KEY": NSNull(),
+            "tokens": tokens,
+            "last_refresh": ISO8601DateFormatter().string(from: Date()),
+        ]
+        let dir = store.homeDirectory(for: profile).appendingPathComponent(".codex", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("auth.json")
+        if let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted]) {
+            try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
+        }
+    }
+
+    /// Grok subscription mode: write a bogus `~/.grok/auth.json` into the
+    /// profile's (host-side, pre-boot) home dir so the guest runs Grok without
+    /// logging in. The bogus token carries a far-future `expires_at` so the
+    /// guest never refreshes; the host owns refresh and the proxy swaps the
+    /// bogus Bearer for the live one on cli-chat-proxy.grok.com.
+    func seedGrokAuthFile(for profile: Profile) {
+        guard let engine = mitmEngine,
+              profile.allToolSpecs.contains(where: { $0.tool == .grok && $0.authMode == .subscription }),
+              let real = engine.grokSubscriptionStore.record(for: profile.id) else { return }
+        let saltA = Data("grok-bogus-access:\(profile.id)".utf8)
+        let saltR = Data("grok-bogus-refresh:\(profile.id)".utf8)
+        let bogusAccess = SessionTokenPlan.deriveFake(
+            prefix: "grok-brm-", real: real.accessToken, salt: saltA,
+            targetLength: max(40, real.accessToken.count))
+        let bogusRefresh = SessionTokenPlan.deriveFake(
+            prefix: "grokrt-brm-", real: real.refreshToken, salt: saltR,
+            targetLength: max(40, real.refreshToken.count))
+        engine.grokSubscriptionStore.registerBogusKey(bogusAccess, for: profile.id)
+
+        let farFuture = Int(Date().addingTimeInterval(10 * 365 * 24 * 3600).timeIntervalSince1970)
+        let doc: [String: Any] = [
+            grokOIDCScope: [
+                "key": bogusAccess,
+                "refresh_token": bogusRefresh,
+                "expires_at": farFuture,
+            ],
+        ]
+        let dir = store.homeDirectory(for: profile).appendingPathComponent(".grok", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("auth.json")
+        if let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted]) {
+            try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
+        }
+    }
+
+    /// Pull `chatgpt_account_id` out of a Codex id-token JWT (best effort).
+    static func codexAccountID(fromIDToken jwt: String) -> String? {
+        let parts = jwt.split(separator: ".")
+        guard parts.count == 3 else { return nil }
+        var s = String(parts[1]).replacingOccurrences(of: "-", with: "+")
+                                .replacingOccurrences(of: "_", with: "/")
+        while s.count % 4 != 0 { s += "=" }
+        guard let d = Data(base64Encoded: s),
+              let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return nil }
+        if let auth = obj["https://api.openai.com/auth"] as? [String: Any],
+           let acct = auth["chatgpt_account_id"] as? String { return acct }
+        return obj["chatgpt_account_id"] as? String
     }
 
     private func populateMCPBearerTokens(in profile: inout Profile) {
