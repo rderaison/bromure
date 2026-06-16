@@ -33,6 +33,12 @@ public final class SessionDisk {
     /// this session.
     public var mitmAssets: MitmSessionAssets?
 
+    /// True only for a "Register with …" throwaway VM. Emits
+    /// `BROMURE_AC_REGISTER=1` into the guest env so `.bashrc` auto-launches the
+    /// agent (to start its OAuth login). Normal sessions leave this false and
+    /// land at a plain shell.
+    public var registrationMode = false
+
     public struct MitmSessionAssets: Sendable {
         public let caCertificatePEM: String
         public let bridgeScriptURL: URL
@@ -380,6 +386,7 @@ public final class SessionDisk {
 
         lines.append("export BROMURE_AC_TOOL=\(profile.tool.rawValue)")
         lines.append("export BROMURE_AC_AUTH=\(profile.authMode.rawValue)")
+        if registrationMode { lines.append("export BROMURE_AC_REGISTER=1") }
         try lines.joined(separator: "\n").appending("\n").write(
             to: tmp.appendingPathComponent("api_key.env"),
             atomically: true, encoding: .utf8

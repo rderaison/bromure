@@ -111,6 +111,7 @@ extension ACAppDelegate {
         let sessionDisk = SessionDisk(profile: scratch, store: store,
                                       baseDiskURL: imageManager.baseDiskURL)
         sessionDisk.tokenPlan = nil
+        sessionDisk.registrationMode = true   // auto-launch the agent for login
         if let scriptURL = bridgeScriptURL {
             sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                 caCertificatePEM: engine.ca.certificatePEM,
@@ -230,7 +231,8 @@ extension ACAppDelegate {
                 }
                 if state.provider == .grok, let g = Self.readGrokAuthFile(at: grokAuthURL) {
                     self.finishClaudeRegistration(state: state,
-                        record: .grok(access: g.access, refresh: g.refresh, expiresAt: g.expiresAt))
+                        record: .grok(access: g.access, refresh: g.refresh,
+                                      scopeKey: g.scopeKey, template: g.template))
                     return
                 }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -249,28 +251,37 @@ extension ACAppDelegate {
     enum CapturedSubscription {
         case claude(access: String, refresh: String)
         case codex(access: String, refresh: String, idToken: String)
-        case grok(access: String, refresh: String, expiresAt: Date)
+        case grok(access: String, refresh: String, scopeKey: String, template: Data)
     }
 
     /// Read real Grok tokens from a freshly-written `~/.grok/auth.json`, or nil
     /// until the user has signed in. Shape: `{ "<scope>": { key, refresh_token,
-    /// expires_at } }`. We pick the scope carrying a non-bogus `key`.
-    static func readGrokAuthFile(at url: URL) -> (access: String, refresh: String, expiresAt: Date)? {
+    /// expires_at, auth_mode, team_name, … } }`. We capture the FULL entry so
+    /// the seed can reproduce every account-specific field grok requires.
+    static func readGrokAuthFile(at url: URL)
+        -> (access: String, refresh: String, expiresAt: Date, scopeKey: String, template: Data)? {
         guard let data = try? Data(contentsOf: url),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return nil }
-        // Prefer the OIDC scope; fall back to any scope with a usable key.
         let scopes = [grokOIDCScope] + obj.keys.filter { $0 != grokOIDCScope }
         for scope in scopes {
-            guard let entry = obj[scope] as? [String: Any],
+            guard var entry = obj[scope] as? [String: Any],
                   let key = entry["key"] as? String, !key.isEmpty,
                   !key.hasPrefix("grok-brm-") else { continue }   // skip our own bogus
             let refresh = (entry["refresh_token"] as? String) ?? ""
             let exp: Date
-            if let e = entry["expires_at"] as? Double { exp = Date(timeIntervalSince1970: e) }
+            if let s = entry["expires_at"] as? String,
+               let d = ISO8601DateFormatter().date(from: s) { exp = d }
+            else if let e = entry["expires_at"] as? Double { exp = Date(timeIntervalSince1970: e) }
             else if let e = entry["expires_at"] as? Int { exp = Date(timeIntervalSince1970: Double(e)) }
             else { exp = .distantPast }
-            return (key, refresh, exp)
+            // Stash a template that keeps the account fields but drops the live
+            // secrets (re-injected, as bogus, at seed time).
+            entry.removeValue(forKey: "key")
+            entry.removeValue(forKey: "refresh_token")
+            entry.removeValue(forKey: "expires_at")
+            let template = (try? JSONSerialization.data(withJSONObject: entry)) ?? Data()
+            return (key, refresh, exp, scope, template)
         }
         return nil
     }
@@ -312,12 +323,13 @@ extension ACAppDelegate {
                     expiresAt: .distantPast, savedAt: Date())
                 if let pid = overrideProfile { try engine.codexSubscriptionStore.setOverride(rec, for: pid) }
                 else { try engine.codexSubscriptionStore.setShared(rec) }
-            case .grok(let access, let refresh, _):
+            case .grok(let access, let refresh, let scopeKey, let template):
                 // Force an immediate proactive refresh on first use to establish
                 // the real expiry + prove the refresh path.
                 let rec = GrokSubscriptionRecord(
                     accessToken: access, refreshToken: refresh,
-                    expiresAt: .distantPast, savedAt: Date())
+                    expiresAt: .distantPast, savedAt: Date(),
+                    scopeKey: scopeKey, templateJSON: template)
                 if let pid = overrideProfile { try engine.grokSubscriptionStore.setOverride(rec, for: pid) }
                 else { try engine.grokSubscriptionStore.setShared(rec) }
             }

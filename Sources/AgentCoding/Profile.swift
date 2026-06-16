@@ -2908,7 +2908,14 @@ public final class ProfileStore {
     # all skip the launch and land at plain bash. The marker lives in
     # /tmp so it resets across reboots.
     _bromure_marker=/tmp/.bromure-ac-agent-launched
-    if [ "$SHLVL" = "1" ] \\
+    # Auto-launch the agent ONLY in a registration VM (BROMURE_AC_REGISTER=1),
+    # so a throwaway login VM kicks off `claude`/`codex` automatically. Normal
+    # sessions intentionally land at a plain shell — the user starts the agent
+    # themselves. Gated to once per boot by the marker; `-t 1` (interactive
+    # terminal) is used instead of `$SHLVL=1` because the kitty's bash runs at
+    # SHLVL 2 (login shell → startx → openbox → kitty adds a level).
+    if [ "$BROMURE_AC_REGISTER" = "1" ] \\
+       && [ -t 1 ] \\
        && [ ! -e "$_bromure_marker" ] \\
        && [ -n "$BROMURE_AC_TOOL" ]; then
         if ! command -v "$BROMURE_AC_TOOL" >/dev/null 2>&1; then

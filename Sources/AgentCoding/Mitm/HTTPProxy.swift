@@ -404,7 +404,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     the live real access token from the host store, which the host
         //     refreshes against auth.x.ai.
         var grokSubStaleAccess: String? = nil
-        if host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com"),
+        if host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
+            || host == "x.ai" || host.hasSuffix(".x.ai"),
            let provider = Self.grokSubscriptionProvider, let (store, refresher) = provider(),
            let reqStr = String(data: swap.modified, encoding: .utf8),
            let headerSection = Self.headerSection(of: reqStr),

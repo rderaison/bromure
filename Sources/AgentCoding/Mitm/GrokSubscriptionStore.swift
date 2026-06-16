@@ -27,12 +27,22 @@ public struct GrokSubscriptionRecord: Codable, Sendable, Equatable {
     public var refreshToken: String
     public var expiresAt: Date
     public var savedAt: Date
+    /// The OIDC scope key the entry lives under in `~/.grok/auth.json`.
+    public var scopeKey: String
+    /// The FULL real scope object as captured at registration (JSON), so we can
+    /// re-seed a bogus copy that preserves every account-specific field grok's
+    /// strict serde requires (`auth_mode`, `team_name`, `subscription_tier`, …).
+    /// nil for legacy records captured before this was stored.
+    public var templateJSON: Data?
 
-    public init(accessToken: String, refreshToken: String, expiresAt: Date, savedAt: Date) {
+    public init(accessToken: String, refreshToken: String, expiresAt: Date,
+                savedAt: Date, scopeKey: String = grokOIDCScope, templateJSON: Data? = nil) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.expiresAt = expiresAt
         self.savedAt = savedAt
+        self.scopeKey = scopeKey
+        self.templateJSON = templateJSON
     }
 }
 
@@ -188,7 +198,8 @@ public actor GrokSubscriptionRefresher {
 
         let updated = GrokSubscriptionRecord(
             accessToken: newAccess, refreshToken: newRefresh,
-            expiresAt: Date().addingTimeInterval(expiresIn), savedAt: Date())
+            expiresAt: Date().addingTimeInterval(expiresIn), savedAt: Date(),
+            scopeKey: record.scopeKey, templateJSON: record.templateJSON)
         try store.update(updated, for: profileID)
         return newAccess
     }

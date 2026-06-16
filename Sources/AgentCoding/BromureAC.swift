@@ -4143,22 +4143,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
               let real = engine.grokSubscriptionStore.record(for: profile.id) else { return }
         let saltA = Data("grok-bogus-access:\(profile.id)".utf8)
         let saltR = Data("grok-bogus-refresh:\(profile.id)".utf8)
-        let bogusAccess = SessionTokenPlan.deriveFake(
-            prefix: "grok-brm-", real: real.accessToken, salt: saltA,
-            targetLength: max(40, real.accessToken.count))
+        // Grok's access token is a JWT — mint a JWT-shaped bogus (real claims,
+        // far-future exp, fake signature) so grok can decode it locally;
+        // an opaque placeholder makes grok treat the session as logged out.
+        let bogusAccess = SubscriptionFakeMint.mintNoRefreshJWTFake(
+                realJWT: real.accessToken, salt: saltA)
+            ?? SessionTokenPlan.deriveFake(
+                prefix: "grok-brm-", real: real.accessToken, salt: saltA,
+                targetLength: max(40, real.accessToken.count))
         let bogusRefresh = SessionTokenPlan.deriveFake(
             prefix: "grokrt-brm-", real: real.refreshToken, salt: saltR,
             targetLength: max(40, real.refreshToken.count))
         engine.grokSubscriptionStore.registerBogusKey(bogusAccess, for: profile.id)
 
-        let farFuture = Int(Date().addingTimeInterval(10 * 365 * 24 * 3600).timeIntervalSince1970)
-        let doc: [String: Any] = [
-            grokOIDCScope: [
-                "key": bogusAccess,
-                "refresh_token": bogusRefresh,
-                "expires_at": farFuture,
-            ],
-        ]
+        // Rebuild grok's scope entry from the captured template (which carries
+        // the account-specific fields grok's strict serde requires —
+        // auth_mode, team_name, subscription_tier, …) and inject bogus secrets.
+        // `expires_at` must be an RFC 3339 STRING (serde rejects a bare epoch
+        // integer, making the file unreadable). Push it ~10y out.
+        let farFuture = ISO8601DateFormatter().string(
+            from: Date().addingTimeInterval(10 * 365 * 24 * 3600))
+        var entry: [String: Any] = (real.templateJSON.flatMap {
+            (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
+        }) ?? [:]
+        entry["key"] = bogusAccess
+        entry["refresh_token"] = bogusRefresh
+        entry["expires_at"] = farFuture
+        let doc: [String: Any] = [real.scopeKey: entry]
         let dir = store.homeDirectory(for: profile).appendingPathComponent(".grok", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("auth.json")
