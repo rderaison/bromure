@@ -166,6 +166,34 @@ public final class MitmEngine {
         promptInjectionPolicies.removeValue(forKey: profileID)
     }
 
+    // MARK: - Fusion engaged state
+    //
+    // Per-profile runtime flag for whether Fusion is currently engaged.
+    // Written from the @MainActor UI (the title-bar lightning toggle and
+    // session launch) and read from the proxy's non-MainActor hot path,
+    // so it lives behind a lock rather than on the UI's @Observable model.
+    private let fusionLock = NSLock()
+    nonisolated(unsafe) private var fusionEngagedFlags: [UUID: Bool] = [:]
+
+    public nonisolated func setFusionEngaged(_ engaged: Bool, for profileID: UUID) {
+        fusionLock.lock()
+        let prior = fusionEngagedFlags[profileID]
+        fusionEngagedFlags[profileID] = engaged
+        fusionLock.unlock()
+        if prior != engaged {
+            SupplyChainLog.shared.record(
+                "[fusion] \(engaged ? "engaged" : "disengaged") for \(profileID.uuidString.prefix(8))")
+        }
+    }
+    public nonisolated func fusionEngaged(for profileID: UUID) -> Bool {
+        fusionLock.lock(); defer { fusionLock.unlock() }
+        return fusionEngagedFlags[profileID] ?? false
+    }
+    public nonisolated func clearFusionEngaged(for profileID: UUID) {
+        fusionLock.lock(); defer { fusionLock.unlock() }
+        fusionEngagedFlags.removeValue(forKey: profileID)
+    }
+
     /// Per-install 32-byte salt for deriving fake tokens from real
     /// ones via HKDF. Generated once, persisted under app support so
     /// a given real key always maps to the same fake on this Mac —
@@ -258,6 +286,11 @@ public final class MitmEngine {
         HTTPMitmConnection.promptInjectionPolicyProvider = { [weak self] pid in
             self?.promptInjectionPolicy(for: pid)
         }
+        // Same idea for Fusion: one closure routes by profile id and lets
+        // the proxy ask "is Fusion engaged for this session right now?".
+        HTTPMitmConnection.fusionEngagedProvider = { [weak self] pid in
+            self?.fusionEngaged(for: pid) ?? false
+        }
         let tokenHook = self.subscriptionTokenSeen
         let codexHook = self.codexTokenSeen
         let rotatedHook = self.oauthRotated
@@ -307,6 +340,7 @@ public final class MitmEngine {
         listenerHolders.removeValue(forKey: profileID)
         clearGuardrailsConfig(for: profileID)
         clearSupplyChainPolicy(for: profileID)
+        clearFusionEngaged(for: profileID)
         swapper.clearMap(for: profileID)
         sshAgent.clearKeys(for: profileID)
         sshAgent.clearImportedKeyApprovals(for: profileID)

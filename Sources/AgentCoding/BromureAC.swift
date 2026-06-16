@@ -1668,6 +1668,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// host directories mounted via virtiofs, so the panel just reads
     /// and writes them directly — dragging a file out copies it to the
     /// Mac, dropping one in drops it into the VM.
+    /// Title-bar lightning toggle → push the engaged/disengaged state
+    /// into the MITM engine so the proxy hot path picks it up live.
+    func setFusionEngaged(_ engaged: Bool, for profile: Profile) {
+        mitmEngine?.setFusionEngaged(engaged, for: profile.id)
+    }
+
     func openFileBrowser(for window: TabbedSessionWindow) {
         let profile = window.profile
         if let win = fileBrowserWindows[profile.id] {
@@ -2286,6 +2292,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func applyLiveSessionRefresh(from old: Profile, to new: Profile,
                                          terminalDefaults: TerminalAppDefaults,
                                          window win: TabbedSessionWindow) {
+        // Fusion availability / opt-in can change without tripping the
+        // session-refresh guard below (e.g. just ticking "Enable Fusion"),
+        // so reconcile it first and unconditionally.
+        let wasConfigured = old.fusionEffective
+        let nowConfigured = new.fusionEffective
+        win.model.fusionConfigured = nowConfigured
+        if !nowConfigured {
+            // Credentials removed or opted out → force off.
+            win.model.fusionEngaged = false
+            mitmEngine?.setFusionEngaged(false, for: new.id)
+        } else if !wasConfigured {
+            // Newly eligible → engage by default; preserve the user's
+            // runtime choice when it was already configured.
+            win.model.fusionEngaged = true
+            mitmEngine?.setFusionEngaged(true, for: new.id)
+        }
+
         guard sessionRefreshAffectingChange(from: old, to: new) else { return }
 
         // Guardrail config is consulted live on every proxied request —
@@ -2831,6 +2854,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 engine.setPromptInjectionPolicy(profile.promptInjection, for: profile.id)
                 if profile.promptInjection.detectSourceInjection { PromptInjectionModels.ensureInstalledInBackground(.promptGuard) }
                 if profile.promptInjection.detectRulesInjection { PromptInjectionModels.ensureInstalledInBackground(.claudeMdGuard) }
+                // Fusion: show the title-bar toggle when configured, but
+                // start disengaged — the user clicks the lightning bolt to
+                // turn it on for the session.
+                win.model.fusionConfigured = profile.fusionEffective
+                win.model.fusionEngaged = false
+                engine.setFusionEngaged(false, for: profile.id)
             }
             // Keyboard layout bridge — pushes the macOS layout into the
             // guest at boot and follows live changes (or pins an
@@ -3523,6 +3552,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 engine.setPromptInjectionPolicy(profile.promptInjection, for: profile.id)
                 if profile.promptInjection.detectSourceInjection { PromptInjectionModels.ensureInstalledInBackground(.promptGuard) }
                 if profile.promptInjection.detectRulesInjection { PromptInjectionModels.ensureInstalledInBackground(.claudeMdGuard) }
+                // Fusion: keep the toggle visible when configured, but reset
+                // to disengaged on reboot (user re-engages on demand).
+                win.model.fusionConfigured = profile.fusionEffective
+                win.model.fusionEngaged = false
+                engine.setFusionEngaged(false, for: profile.id)
             }
             if let dev = sandbox.socketDevice {
                 win.keyboardBridge = KeyboardBridge(

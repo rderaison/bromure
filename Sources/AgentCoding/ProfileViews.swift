@@ -285,7 +285,7 @@ public extension Notification.Name {
 
 enum EditorCategory: String, CaseIterable, Identifiable {
     case general     = "General"
-    case agent       = "Agent"
+    case models      = "Models"
     case folders     = "Folders"
     case credentials = "Credentials"
     case environment = "Environment"
@@ -306,7 +306,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .general:     "person.text.rectangle.fill"
-        case .agent:       "sparkles"
+        case .models:      "sparkles"
         case .folders:     "folder.fill"
         case .credentials: "key.fill"
         case .environment: "terminal.fill"
@@ -324,7 +324,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     var color: Color {
         switch self {
         case .general:     .indigo
-        case .agent:       .purple
+        case .models:      .purple
         case .folders:     .orange
         case .credentials: .green
         case .environment: .teal
@@ -554,7 +554,7 @@ struct ProfileEditorView: View {
     private var detailContent: some View {
         switch selectedCategory {
         case .general:     generalSection
-        case .agent:       agentSection
+        case .models:      modelsSection
         case .folders:     foldersSection
         case .credentials: credentialsSection
         case .environment: environmentSection
@@ -703,7 +703,7 @@ struct ProfileEditorView: View {
     }
 
     @ViewBuilder
-    private var agentSection: some View {
+    private var modelsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab.")
                 .font(.caption)
@@ -721,7 +721,43 @@ struct ProfileEditorView: View {
                     profileDirHint: profileDirHint
                 )
             }
+
+            Divider().padding(.vertical, 6)
+
+            fusionToggle
         }
+    }
+
+    /// "Enable Fusion" opt-in. Greyed out until the profile carries both
+    /// an Anthropic credential (API key or Bedrock) and an OpenAI API key
+    /// — subscription logins can't be replayed host-side, so they don't
+    /// qualify.
+    @ViewBuilder
+    private var fusionToggle: some View {
+        let available = draft.fusionAvailable
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $draft.fusionEnabled) {
+                HStack(spacing: 6) {
+                    Image(systemName: "bolt.fill")
+                        .foregroundStyle(available ? .yellow : .secondary)
+                    Text("Enable Fusion")
+                }
+            }
+            .disabled(!available)
+
+            Text("Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (API key or Bedrock) **and** an OpenAI API key in this profile — subscription logins won’t work.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 22)
+
+            if !available {
+                Text("Add both an Anthropic and an OpenAI key above to turn this on.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .padding(.leading, 22)
+            }
+        }
+        .opacity(available ? 1 : 0.6)
     }
 
     /// The currently-applied set of enabled tools = primary + additional.

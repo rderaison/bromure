@@ -37,6 +37,14 @@ final class TabsModel {
     /// ACAppDelegate.refreshStreamingState() pushes updates here.
     var streamingActive: Bool = false
 
+    /// True when this profile opted into Fusion AND both credentials are
+    /// present — gates whether the title-bar lightning toggle is shown.
+    var fusionConfigured: Bool = false
+    /// Runtime on/off for Fusion this session. Only meaningful when
+    /// `fusionConfigured`. Flipped by the lightning toggle; mirrored into
+    /// the MITM engine so the proxy hot path sees the change.
+    var fusionEngaged: Bool = false
+
     var activeTab: Tab? {
         tabs.indices.contains(activeIndex) ? tabs[activeIndex] : nil
     }
@@ -248,6 +256,10 @@ final class TabbedSessionWindow: NSWindow {
             onEditProfile: { [weak self] in
                 guard let self else { return }
                 self.acDelegate?.openEditorWindow(editing: self.profile)
+            },
+            onToggleFusion: { [weak self] engaged in
+                guard let self else { return }
+                self.acDelegate?.setFusionEngaged(engaged, for: self.profile)
             })
         toolbarChromeDelegate = delegate
 
@@ -527,6 +539,7 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
     let onReboot: () -> Void
     let onFiles:  () -> Void
     let onEditProfile: () -> Void
+    let onToggleFusion: (Bool) -> Void
 
     init(model: TabsModel,
          sharedFolderPaths: [String],
@@ -536,7 +549,8 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
          onInspectTrace: @escaping () -> Void,
          onReboot: @escaping () -> Void,
          onFiles:  @escaping () -> Void,
-         onEditProfile: @escaping () -> Void) {
+         onEditProfile: @escaping () -> Void,
+         onToggleFusion: @escaping (Bool) -> Void) {
         self.model = model
         self.sharedFolderPaths = sharedFolderPaths
         self.onSelect = onSelect
@@ -546,6 +560,7 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
         self.onReboot = onReboot
         self.onFiles = onFiles
         self.onEditProfile = onEditProfile
+        self.onToggleFusion = onToggleFusion
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -573,7 +588,8 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
             onInspectTrace: onInspectTrace,
             onReboot: onReboot,
             onFiles:  onFiles,
-            onEditProfile: onEditProfile
+            onEditProfile: onEditProfile,
+            onToggleFusion: onToggleFusion
         ))
         host.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(host)
@@ -614,6 +630,7 @@ private struct TabsBar: View {
     let onReboot: () -> Void
     let onFiles:  () -> Void
     let onEditProfile: () -> Void
+    let onToggleFusion: (Bool) -> Void
 
     @State private var foldersPopoverShown = false
 
@@ -653,6 +670,26 @@ private struct TabsBar: View {
             // just renders the latest flag.
             if model.streamingActive {
                 StreamingIndicator()
+            }
+
+            // Fusion toggle — only present when the profile is configured
+            // for Fusion (opted in + both credentials available). Filled
+            // bolt + accent colour when engaged; hollow grey when not.
+            if model.fusionConfigured {
+                Button {
+                    model.fusionEngaged.toggle()
+                    onToggleFusion(model.fusionEngaged)
+                } label: {
+                    Image(systemName: model.fusionEngaged ? "bolt.fill" : "bolt")
+                        .foregroundStyle(model.fusionEngaged ? Color.yellow : Color.secondary)
+                        .frame(width: 24, height: 22)
+                }
+                .buttonStyle(.borderless)
+                .help(model.fusionEngaged
+                    ? NSLocalizedString("Fusion engaged — answers are synthesized from Claude + GPT. Click to disengage.",
+                                        comment: "Fusion toggle tooltip, engaged")
+                    : NSLocalizedString("Fusion available — disengaged. Click to engage Claude + GPT synthesis.",
+                                        comment: "Fusion toggle tooltip, disengaged"))
             }
 
             if let ip = model.ipAddress {

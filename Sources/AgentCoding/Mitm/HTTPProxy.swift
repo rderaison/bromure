@@ -64,6 +64,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// detection off. Static to avoid threading a closure through every
     /// listener/delegate layer.
     nonisolated(unsafe) static var promptInjectionPolicyProvider: (@Sendable (UUID) -> PromptInjectionPolicy?)?
+    /// Reads whether Fusion is currently engaged for a profile's session.
+    /// Set once by `MitmEngine.register`; nil → treat as disengaged.
+    /// Static, same rationale as `promptInjectionPolicyProvider`.
+    nonisolated(unsafe) static var fusionEngagedProvider: (@Sendable (UUID) -> Bool)?
     /// Process-wide consent broker for the "ask me what to do" action.
     static let promptInjectionBroker = PromptInjectionConsentBroker()
 
@@ -849,6 +853,51 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     break
                 }
             }
+        }
+
+        // 6d. Fusion (prototype, BROMURE_FUSION=1). For Claude
+        //     /v1/messages requests where the profile also holds an
+        //     OpenAI credential, fan the dialogue out to both models,
+        //     judge the two answers into a structured analysis, then
+        //     synthesize a single final answer — delivered back in the
+        //     guest's expected wire shape. Returns nil (no bytes
+        //     written) when not eligible, so we fall through to the
+        //     normal single-model relay below.
+        // Engaged purely by the per-session UI toggle (the title-bar
+        // lightning bolt). No env override — otherwise toggling Fusion
+        // off in the UI wouldn't actually turn it off.
+        let fusionOn = Self.fusionEngagedProvider?(profileID) ?? false
+        if fusionOn,
+           let outcome = try await Fusion.run(rawRequest: toForward,
+                                              host: host, port: port,
+                                              session: session, tls: tls,
+                                              swapper: swapper,
+                                              profileID: profileID) {
+            let elapsed = Date().timeIntervalSince(t0) * 1000
+            // Trace each upstream model call Fusion made (leg A/B, judge,
+            // synth) so managed mode audits every provider hit — notably
+            // the api.openai.com call. These run through the same trace +
+            // cloud-LLM-extraction path as ordinary proxied requests.
+            for sc in outcome.subCalls {
+                await emitTrace(host: sc.host, port: sc.port,
+                                preSwapRequest: sc.requestBlob,
+                                upstreamResponse: sc.responseBlob,
+                                upstreamWireBytes: sc.wireBytes,
+                                responseTruncated: false,
+                                swaps: [],
+                                leaks: [],
+                                latencyMs: sc.latencyMs)
+            }
+            // Then the guest-facing exchange (original request → fused reply).
+            await emitTrace(host: host, port: port,
+                            preSwapRequest: request,
+                            upstreamResponse: outcome.buffer,
+                            upstreamWireBytes: outcome.wireBytes,
+                            responseTruncated: false,
+                            swaps: swap.swaps,
+                            leaks: leaks,
+                            latencyMs: elapsed)
+            return
         }
 
         let relay = try await relayUpstream(rawRequest: toForward,
