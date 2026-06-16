@@ -195,6 +195,22 @@ extension TerminalAppDefaults {
         map super+8              discard_event
         map super+9              discard_event
 
+        # Fix double-delete (and double-enter / double-tab) for crossterm
+        # TUIs like codex and grok. They enable kitty's keyboard protocol
+        # with REPORT_EVENT_TYPES (codex pushes `CSI >7u`, grok `CSI >3u`),
+        # and kitty 0.32.2 then reports the *release* of a legacy key by
+        # re-emitting its legacy byte — so one Backspace arrives as `7f 7f`,
+        # one Enter as `0d 0d`, one Tab as `09 09`, deleting/submitting
+        # twice. (Ink-based agents like claude never enable the protocol, so
+        # they're immune — hence the per-app asymmetry.) Mapping each key to
+        # send_text makes kitty emit the byte once, on press only, bypassing
+        # the protocol's release encoding. Modified variants (shift+enter for
+        # newline, shift+tab, …) are distinct key specs and still flow
+        # through the protocol untouched.
+        map backspace send_text all \\x7f
+        map enter     send_text all \\r
+        map tab       send_text all \\t
+
         # macOS muscle memory: copy/paste/select-all + font size.
         map super+c    copy_to_clipboard
         map super+v    paste_from_clipboard
