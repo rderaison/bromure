@@ -225,16 +225,17 @@ enum Fusion {
                                        question: question, maxTokens: maxTokens, token: key,
                                        session: session, callLog: callLog)
         case .openAISubscription(let tok):
-            // ChatGPT/Codex backend Responses API. Needs the experimental beta
-            // header + the originator/account headers Codex sends.
-            var extra = ["OpenAI-Beta": "responses=experimental", "originator": "codex_cli_rs"]
-            if let rec = HTTPMitmConnection.codexSubscriptionProvider?()?.0.record(for: nil),
-               let acct = jwtClaimAccountID(rec.idToken) {
-                extra["chatgpt-account-id"] = acct
+            // The ChatGPT/Codex backend serves its Responses API over a
+            // WebSocket (GET /backend-api/codex/responses, upgrade), NOT a
+            // plain POST — a REST attempt 404s/400s. We open a WS, send one
+            // `response.create` frame and drain the streamed events.
+            var acct = jwtClaimAccountID(tok)
+            if acct == nil, let rec = HTTPMitmConnection.codexSubscriptionProvider?()?.0.record(for: nil) {
+                acct = jwtClaimAccountID(rec.idToken)
             }
-            return await askResponsesAPI(url: "https://chatgpt.com/backend-api/codex/responses",
-                                         model: model, system: system, question: question, token: tok,
-                                         extraHeaders: extra, session: session, callLog: callLog)
+            return await askCodexWebSocket(token: tok, accountID: acct, model: model,
+                                           system: system, question: question,
+                                           session: session, callLog: callLog)
         case .grokSubscription(let tok):
             // cli-chat-proxy rejects requests without a recent client version.
             return await askResponsesAPI(url: "https://cli-chat-proxy.grok.com/v1/responses",
@@ -344,6 +345,120 @@ enum Fusion {
         }
         let t = extractResponsesText(raw.body)
         return t.isEmpty ? nil : t
+    }
+
+    /// Codex version string Codex CLI sends; the backend gates the WS API on
+    /// a recent originator/version pair.
+    static let codexClientVersion = "0.140.0"
+
+    /// Ask the ChatGPT/Codex subscription backend over its WebSocket transport.
+    ///
+    /// Codex 0.140 negotiates `GET /backend-api/codex/responses` as a WS
+    /// upgrade (`openai-beta: responses_websockets=2026-02-06`), then sends a
+    /// single `response.create` JSON frame and reads streamed Responses-API
+    /// events (`response.output_text.delta` … `response.completed`). We use
+    /// `URLSessionWebSocketTask` (which does NOT advertise permessage-deflate,
+    /// so the server replies with uncompressed frames we can read directly).
+    /// Best-effort: any failure returns nil so the leg is dropped.
+    private static func askCodexWebSocket(token: String, accountID: String?,
+                                          model: String, system: String, question: String,
+                                          session: URLSession, callLog: CallLog) async -> String? {
+        guard let url = URL(string: "wss://chatgpt.com/backend-api/codex/responses") else { return nil }
+        let sid = UUID().uuidString.lowercased()
+        var r = URLRequest(url: url)
+        r.timeoutInterval = requestTimeout
+        r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let accountID { r.setValue(accountID, forHTTPHeaderField: "chatgpt-account-id") }
+        r.setValue("responses_websockets=2026-02-06", forHTTPHeaderField: "openai-beta")
+        r.setValue("codex-tui", forHTTPHeaderField: "originator")
+        r.setValue(codexClientVersion, forHTTPHeaderField: "version")
+        r.setValue("codex-tui/\(codexClientVersion) (Bromure) Fusion", forHTTPHeaderField: "user-agent")
+        r.setValue(sid, forHTTPHeaderField: "session-id")
+        r.setValue(sid, forHTTPHeaderField: "thread-id")
+        r.setValue(UUID().uuidString.lowercased(), forHTTPHeaderField: "x-client-request-id")
+
+        let envelope: [String: Any] = [
+            "type": "response.create",
+            "model": model,
+            "instructions": system,
+            "input": [["type": "message", "role": "user",
+                       "content": [["type": "input_text", "text": question]]]],
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "reasoning": ["effort": "low"],
+            "store": false,
+            "stream": true,
+            "text": ["verbosity": "medium"],
+            "prompt_cache_key": sid,
+        ]
+        guard let payload = try? JSONSerialization.data(withJSONObject: envelope),
+              let payloadStr = String(data: payload, encoding: .utf8) else { return nil }
+
+        let t0 = Date()
+        let task = session.webSocketTask(with: r)
+        task.resume()
+        defer { task.cancel(with: .goingAway, reason: nil) }
+
+        do {
+            try await task.send(.string(payloadStr))
+        } catch {
+            log("codex WS send failed: \(error); dropping leg")
+            return nil
+        }
+
+        var accumulated = ""
+        var doneText: String?
+        var eventTypes: [String] = []
+        let deadline = Date().addingTimeInterval(requestTimeout)
+        loop: while Date() < deadline {
+            let msg: URLSessionWebSocketTask.Message
+            do { msg = try await task.receive() }
+            catch {
+                // Clean server close after `response.completed` surfaces here
+                // too; only treat as failure if we have nothing.
+                if accumulated.isEmpty && doneText == nil {
+                    log("codex WS receive failed: \(error); dropping leg")
+                    return nil
+                }
+                break loop
+            }
+            let text: String
+            switch msg {
+            case .string(let s): text = s
+            case .data(let d):   text = String(data: d, encoding: .utf8) ?? ""
+            @unknown default:    continue
+            }
+            guard let ev = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any],
+                  let type = ev["type"] as? String else { continue }
+            eventTypes.append(type)
+            switch type {
+            case "response.output_text.delta":
+                if let d = ev["delta"] as? String { accumulated += d }
+            case "response.output_text.done":
+                if let t = ev["text"] as? String { doneText = t }
+            case "response.completed":
+                break loop
+            case "response.failed", "error", "response.error":
+                log("codex WS error event: \(snippet(Data(text.utf8))); dropping leg")
+                break loop
+            default:
+                continue
+            }
+        }
+
+        let answer = (doneText?.isEmpty == false) ? doneText! : accumulated
+        // Trace the exchange as a SubCall so it shows up in managed mode like
+        // every other leg (synthetic 101 + event summary as the "response").
+        let latency = Date().timeIntervalSince(t0) * 1000
+        let respSummary = "events: \(eventTypes.joined(separator: ", "))\n\n\(answer)"
+        let respBlob = Data("HTTP/1.1 101 Switching Protocols\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n\(respSummary)".utf8)
+        callLog.add(SubCall(host: "chatgpt.com", port: 443,
+                            requestBlob: requestWireBlob(r, body: payload),
+                            responseBlob: respBlob,
+                            wireBytes: respBlob.count,
+                            latencyMs: latency))
+        return answer.isEmpty ? nil : answer
     }
 
     /// Parse an OpenAI Responses-API body: prefer `output_text`, else join
@@ -720,7 +835,7 @@ enum Fusion {
     /// Rebuild a `URLRequest` as an HTTP/1.1 request blob — the same
     /// shape the proxy's normal path feeds to `emitTrace`, so the
     /// conversation parser and cloud LLM extractor work on it.
-    private static func requestWireBlob(_ req: URLRequest) -> Data {
+    private static func requestWireBlob(_ req: URLRequest, body: Data? = nil) -> Data {
         let path = req.url?.path ?? "/"
         let query = req.url?.query.map { "?\($0)" } ?? ""
         var s = "\(req.httpMethod ?? "POST") \(path)\(query) HTTP/1.1\r\n"
@@ -728,7 +843,7 @@ enum Fusion {
         for (k, v) in req.allHTTPHeaderFields ?? [:] { s += "\(k): \(v)\r\n" }
         s += "\r\n"
         var out = Data(s.utf8)
-        if let b = req.httpBody { out.append(b) }
+        if let b = body ?? req.httpBody { out.append(b) }
         return out
     }
 
@@ -807,7 +922,7 @@ enum Fusion {
     private static func defaultLegModel(_ tool: Profile.Tool, _ authMode: Profile.AuthMode) -> String {
         switch tool {
         case .claude: return "claude-opus-4-8"
-        case .codex:  return authMode == .subscription ? "gpt-5-codex" : "gpt-5.5-2026-04-23"
+        case .codex:  return authMode == .subscription ? "gpt-5.5" : "gpt-5.5-2026-04-23"
         case .grok:   return "grok-build"
         }
     }
