@@ -46,19 +46,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// socket.dev lookups, install-script stripping). Read on
     /// every registry intercept.
     let supplyChainProvider: @Sendable () -> SupplyChainPolicy?
-    /// Fired when the proxy sees a clean Anthropic subscription OAuth
-    /// access token in an outbound request. The host wires this to
-    /// `SubscriptionTokenCoordinator.handleCleanAccessToken` which
-    /// throttles per-profile and presents the consent sheet.
-    let subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)?
-    /// Codex / ChatGPT counterpart: fires when a clean JWT-shaped
-    /// access token is seen on chatgpt.com / openai.com.
-    let codexTokenSeen: (@Sendable (UUID, String) -> Void)?
-    /// Fires after a successful `/oauth/token` response rewrite — the
-    /// host uses this to keep `Profile.default*Tokens` and the
-    /// preferences template in sync with whatever the upstream just
-    /// rotated to. nil = host doesn't care.
-    let oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)?
     /// Reads the per-profile prompt-injection policy (source-code / CLAUDE.md
     /// scanning + log/ask/block action). Set once by `MitmEngine`; nil →
     /// detection off. Static to avoid threading a closure through every
@@ -92,10 +79,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
          publishTimeCache: PublishTimeCache,
          sessionTraceProvider: @escaping @Sendable () -> MitmEngine.SessionTrace?,
          guardrailsProvider: @escaping @Sendable () -> GuardrailsConfig? = { nil },
-         supplyChainProvider: @escaping @Sendable () -> SupplyChainPolicy? = { nil },
-         subscriptionTokenSeen: (@Sendable (UUID, String) -> Void)? = nil,
-         codexTokenSeen: (@Sendable (UUID, String) -> Void)? = nil,
-         oauthRotated: (@Sendable (UUID, OAuthRotationProvider, StoredOAuthTokens) -> Void)? = nil) {
+         supplyChainProvider: @escaping @Sendable () -> SupplyChainPolicy? = { nil }) {
         self.fd = fd
         self.profileID = profileID
         self.certCache = certCache
@@ -113,9 +97,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
         self.sessionTraceProvider = sessionTraceProvider
         self.guardrailsProvider = guardrailsProvider
         self.supplyChainProvider = supplyChainProvider
-        self.subscriptionTokenSeen = subscriptionTokenSeen
-        self.codexTokenSeen = codexTokenSeen
-        self.oauthRotated = oauthRotated
     }
 
     /// Drives the full MITM exchange. Must be called from a Task —
@@ -244,17 +225,29 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // trace store records these as `LeakEntry` values so the user
         // sees exactly which secrets escaped the swap pipeline.
         var leaks = swapper.detectLeaks(in: request, profileID: profileID)
-        // Drop the false-positive x-api-key "leak" for a Claude subscription
-        // session: that key is our own bogus placeholder, which the transform
-        // below rewrites to a real OAuth Bearer — it's never a real secret
-        // escaping the VM.
-        if host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
-           let provider = Self.claudeSubscriptionProvider, let (store, _) = provider(),
-           let reqStr = String(data: request, encoding: .utf8),
-           let hdr = Self.headerSection(of: reqStr),
-           let apiKey = Self.headerValue("x-api-key", inHeaderSection: hdr),
-           store.profileForBogusKey(apiKey) != nil {
-            leaks = leaks.filter { $0.header.lowercased() != "x-api-key" }
+        // Drop false-positive "leaks" for our own bogus subscription tokens:
+        // they're host-minted placeholders the transforms below rewrite to the
+        // real credential — never a real secret escaping the VM.
+        if let reqStr = String(data: request, encoding: .utf8),
+           let hdr = Self.headerSection(of: reqStr) {
+            // Claude: bogus x-api-key on anthropic hosts.
+            if host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
+               let provider = Self.claudeSubscriptionProvider, let (store, _) = provider(),
+               let apiKey = Self.headerValue("x-api-key", inHeaderSection: hdr),
+               store.profileForBogusKey(apiKey) != nil {
+                leaks = leaks.filter { $0.header.lowercased() != "x-api-key" }
+            }
+            // Codex / Grok: bogus Bearer on their backends.
+            let codexHost = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com"
+            let grokHost = host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
+                || host == "x.ai" || host.hasSuffix(".x.ai")
+            if codexHost || grokHost, let bearer = Self.bearerToken(inHeaderSection: hdr) {
+                let codexBogus = Self.codexSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
+                let grokBogus = Self.grokSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
+                if codexBogus || grokBogus {
+                    leaks = leaks.filter { $0.header.lowercased() != "authorization" }
+                }
+            }
         }
 
         // Aho-Corasick scan over headers + body for any fake token
@@ -298,29 +291,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
         for leak in leaks {
             FileHandle.standardError.write(Data(
                 "[mitm] LEAK \(leak.header)=\(leak.valuePreview) on \(host) (\(leak.suspicion.rawValue))\n".utf8))
-        }
-
-        // Subscription-token swap: clean `sk-ant-oat01-…` going out to
-        // anthropic.com? Surface to the coordinator so it can prompt
-        // (once per session per profile). The hook is fire-and-forget:
-        // we still forward the request as-is; the swap kicks in on the
-        // *next* outbound request once the user accepts.
-        if host == "api.anthropic.com" || host.hasSuffix(".anthropic.com") {
-            if let cleanToken = swapper.detectSubscriptionAccessToken(
-                in: swap.modified, profileID: profileID) {
-                subscriptionTokenSeen?(profileID, cleanToken)
-            }
-        }
-        // Codex / ChatGPT subscription-token swap. Codex CLI auths
-        // against chatgpt.com (browser flow) and refreshes against
-        // auth.openai.com — same JWT shape on the wire.
-        if host == "chatgpt.com" || host.hasSuffix(".chatgpt.com")
-            || host == "auth.openai.com"
-            || host == "api.openai.com" {
-            if let cleanToken = swapper.detectCodexAccessToken(
-                in: swap.modified, profileID: profileID) {
-                codexTokenSeen?(profileID, cleanToken)
-            }
         }
 
         // 5b. MCP bearer header injection. For MCP servers whose OAuth
@@ -543,21 +513,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // complete normally, then breaks the retain cycle.
         defer { session.finishTasksAndInvalidate() }
 
-        // TEMPORARILY DISABLED: OAuth rotation rewrite for Claude /
-        // Codex. The rewriter replaces the new access/refresh/id
-        // tokens in the response body with fakes, but in practice the
-        // refresh-token rotation isn't being mirrored back into the
-        // VM's stored fake reliably, leaving the VM with a stale fake
-        // that fails the next refresh. Until that's fixed we let the
-        // upstream response stream straight through so the VM receives
-        // the real rotated tokens (security regression accepted for
-        // now in exchange for the CLI staying logged in). Re-enable by
-        // uncommenting the if/else below.
-        //
-        // Supply-chain interception. Sits between the guardrails
-        // block (above) and the OAuth-rotation rewriter (below) so
-        // it shares the same per-request URLSession the rest of the
-        // proxy uses.
+        // Supply-chain interception. Shares the same per-request URLSession
+        // the rest of the proxy uses.
         if let policy = supplyChainProvider(), policy.isActive,
            let kind = SupplyChainRegistry.classify(host: host, path: reqPath) {
             let cutoff = Date().addingTimeInterval(-Double(policy.ageGateDays) * 86400)
@@ -869,32 +826,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
 
-        // let (_, refreshPath) = Self.parseRequestLine(toForward)
-        // let oauthProvider = OAuthRotationRewriter.provider(
-        //     for: host, path: refreshPath)
-        // let relay: RelayResponse
-        // if let provider = oauthProvider {
-        //     let rotatedHook = self.oauthRotated
-        //     relay = try await relayUpstreamBuffered(
-        //         rawRequest: toForward,
-        //         host: host, port: port,
-        //         session: session,
-        //         tls: tls,
-        //         rewrite: { [profileID, swapper] raw in
-        //             let result = OAuthRotationRewriter.rewrite(
-        //                 raw: raw, provider: provider,
-        //                 profileID: profileID, swapper: swapper)
-        //             if let newReals = result.newReals {
-        //                 rotatedHook?(profileID, provider, newReals)
-        //             }
-        //             return result.bytes
-        //         })
-        // } else {
-        //     relay = try await relayUpstream(rawRequest: toForward,
-        //                                     host: host, port: port,
-        //                                     session: session,
-        //                                     tls: tls)
-        // }
         // Prompt-injection enforcement (ask / block). Runs pre-forward so we
         // can stop a poisoned request before the model ever sees it. `log`
         // mode is handled post-response in emitTrace (zero added latency).

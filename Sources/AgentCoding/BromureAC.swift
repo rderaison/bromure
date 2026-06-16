@@ -326,58 +326,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     lazy var mitmEngine: MitmEngine? = {
         do {
             let e = try MitmEngine()
-            // Route clean-OAuth-token detections from the proxy hot
-            // path to the coordinator. Captured `store` and `swapper`
-            // are stable references; the profile lookup happens once
-            // we're already on MainActor so we don't violate isolation.
-            let storeRef = self.store
-            let swapperRef = e.swapper
-            // TEMPORARILY DISABLED: Claude / Codex subscription-token
-            // swap. The OAuth rotation path doesn't reliably replace
-            // the rotated refresh token in the response body, so the
-            // VM ends up with a stale fake refresh and gets logged out
-            // on the next refresh attempt. Leaving the consent
-            // callbacks unset means clean Claude / Codex access tokens
-            // flow through the proxy untouched. Re-enable once the
-            // rotation rewriter is fixed.
-            //
-            // e.subscriptionTokenSeen = { [weak self] profileID, token in
-            //     Task { @MainActor in
-            //         guard let profile = self?.profiles.first(where: { $0.id == profileID })
-            //         else { return }
-            //         SubscriptionTokenCoordinator.shared.handleCleanAccessToken(
-            //             token,
-            //             profile: profile,
-            //             store: storeRef,
-            //             swapper: swapperRef)
-            //     }
-            // }
-            // e.codexTokenSeen = { [weak self] profileID, token in
-            //     Task { @MainActor in
-            //         guard let profile = self?.profiles.first(where: { $0.id == profileID })
-            //         else { return }
-            //         SubscriptionTokenCoordinator.shared.handleCleanCodexAccessToken(
-            //             token,
-            //             profile: profile,
-            //             store: storeRef,
-            //             swapper: swapperRef)
-            //     }
-            // }
-            _ = storeRef
-            _ = swapperRef
-            e.oauthRotated = { [weak self] profileID, provider, tokens in
-                Task { @MainActor in
-                    SubscriptionTokenCoordinator.shared.recordRotation(
-                        profileID: profileID,
-                        provider: provider,
-                        tokens: tokens,
-                        store: storeRef)
-                    // Reload `profiles` so any subsequent picker
-                    // render / new-session launch sees the rotated
-                    // default-token state.
-                    self?.profiles = storeRef.loadAll()
-                }
-            }
             return e
         }
         catch {
@@ -1263,7 +1211,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             mitmEngine?.claudeSubscriptionStore.unregisterBogusKeys(for: session.profile.id)
             mitmEngine?.codexSubscriptionStore.unregisterBogusKeys(for: session.profile.id)
             mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: session.profile.id)
-            SubscriptionTokenCoordinator.shared.unregister(profileID: session.profile.id)
             // Stop the debug shell bridge (no-op when not running) so
             // its vsock listener doesn't outlive the VM.
             shellBridges[session.profile.id]?.stop()
@@ -2935,22 +2882,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     socketDevice: dev,
                     forcedLayout: profile.keyboardLayoutOverride)
             }
-            // Claude subscription-token bridge — listens on vsock 8446
-            // for the in-VM agent. Registered with the coordinator so
-            // detection events from the proxy hot path can find it.
-            if let dev = sandbox.socketDevice,
-               profile.subscriptionTokenSwap != .declined {
-                let bridge = SubscriptionTokenBridge(socketDevice: dev)
-                SubscriptionTokenCoordinator.shared.register(
-                    profileID: profile.id, bridge: bridge)
-            }
-            // Codex subscription-token bridge — vsock 8447. Same gate.
-            if let dev = sandbox.socketDevice,
-               profile.codexTokenSwap != .declined {
-                let bridge = CodexTokenBridge(socketDevice: dev)
-                SubscriptionTokenCoordinator.shared.registerCodex(
-                    profileID: profile.id, bridge: bridge)
-            }
             // Debug shell bridge — vsock 5800. Only when the host runs
             // with BROMURE_DEBUG_CLAUDE (also gates SessionDisk shipping
             // the agent into the meta share, so the guest pool wouldn't
@@ -2960,16 +2891,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
             }
-            // TEMPORARILY DISABLED with the rest of the Claude / Codex
-            // subscription swap — see the comment on the disabled
-            // `subscriptionTokenSeen` callback wiring above.
-            //
-            // if let engine = self.mitmEngine {
-            //     SubscriptionTokenCoordinator.shared.autoSeedIfNeeded(
-            //         profile: profile,
-            //         store: self.store,
-            //         swapper: engine.swapper)
-            // }
             if sessionDisk.didCloneOnLastEnsure, let current = currentBaseVersion {
                 var p = profile
                 p.baseImageVersionAtClone = current
@@ -3631,22 +3552,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     socketDevice: dev,
                     forcedLayout: profile.keyboardLayoutOverride)
             }
-            // Subscription-token bridges + auto-seed: same wiring as
-            // the primary session-start path. Without these, a session
-            // launched via the secondary path would skip detection
-            // entirely and never fire the consent / seed flow.
-            if let dev = sandbox.socketDevice,
-               profile.subscriptionTokenSwap != .declined {
-                let bridge = SubscriptionTokenBridge(socketDevice: dev)
-                SubscriptionTokenCoordinator.shared.register(
-                    profileID: profile.id, bridge: bridge)
-            }
-            if let dev = sandbox.socketDevice,
-               profile.codexTokenSwap != .declined {
-                let bridge = CodexTokenBridge(socketDevice: dev)
-                SubscriptionTokenCoordinator.shared.registerCodex(
-                    profileID: profile.id, bridge: bridge)
-            }
             // Debug shell bridge — see the matching block on the
             // warm-boot path above.
             if let dev = sandbox.socketDevice,
@@ -3654,15 +3559,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
             }
-            // TEMPORARILY DISABLED — see the comment on the first
-            // autoSeedIfNeeded site higher up in this file.
-            //
-            // if let engine = self.mitmEngine {
-            //     SubscriptionTokenCoordinator.shared.autoSeedIfNeeded(
-            //         profile: profile,
-            //         store: self.store,
-            //         swapper: engine.swapper)
-            // }
             self.wireSandboxCallbacks(sandbox, win: win)
             win.sandbox = sandbox
             self.requestSpawnKitty(id: firstTab.id, in: win)
