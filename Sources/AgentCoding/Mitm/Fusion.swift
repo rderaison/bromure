@@ -448,11 +448,19 @@ enum Fusion {
         }
 
         let answer = (doneText?.isEmpty == false) ? doneText! : accumulated
+        _ = eventTypes
         // Trace the exchange as a SubCall so it shows up in managed mode like
-        // every other leg (synthetic 101 + event summary as the "response").
+        // every other leg. The WS transport is opaque to the trace pipeline,
+        // so we present it as the equivalent /v1/responses exchange (the same
+        // shape ConversationParser already understands): the request is our
+        // `response.create` envelope (instructions + input); the response is a
+        // Responses-API `output` envelope carrying the answer text.
         let latency = Date().timeIntervalSince(t0) * 1000
-        let respSummary = "events: \(eventTypes.joined(separator: ", "))\n\n\(answer)"
-        let respBlob = Data("HTTP/1.1 101 Switching Protocols\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n\(respSummary)".utf8)
+        let respJSON: [String: Any] = ["output": [["type": "message", "role": "assistant",
+                                                    "content": [["type": "output_text", "text": answer]]]]]
+        let respBody = (try? JSONSerialization.data(withJSONObject: respJSON)) ?? Data("{}".utf8)
+        var respBlob = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(respBody.count)\r\n\r\n".utf8)
+        respBlob.append(respBody)
         callLog.add(SubCall(host: "chatgpt.com", port: 443,
                             requestBlob: requestWireBlob(r, body: payload),
                             responseBlob: respBlob,

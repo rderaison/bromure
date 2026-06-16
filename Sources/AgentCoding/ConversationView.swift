@@ -92,8 +92,10 @@ enum ConversationParser {
             return parseAnthropic(req: req, res: res)
         }
         if h.contains("openai.com")
+            || h.contains("chatgpt.com")   // Codex subscription backend
             || h.contains("mistral.ai")
             || h.contains("x.ai")
+            || h.contains("grok.com")      // Grok subscription (cli-chat-proxy)
             || h.contains("groq.com")
             || h.contains("perplexity.ai") {
             // openai.com vendor + OpenAI-compatible providers all
@@ -163,8 +165,10 @@ enum ConversationParser {
         // providers fall through and use synthesize-and-route.
         let h = host.lowercased()
         guard h.contains("openai.com")
+            || h.contains("chatgpt.com")   // Codex subscription backend
             || h.contains("mistral.ai")
             || h.contains("x.ai")
+            || h.contains("grok.com")      // Grok subscription (cli-chat-proxy)
             || h.contains("groq.com")
             || h.contains("perplexity.ai") else {
             return nil

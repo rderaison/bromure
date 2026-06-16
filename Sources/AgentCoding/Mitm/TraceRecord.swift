@@ -32,12 +32,14 @@ public enum TraceLevel: String, Codable, CaseIterable, Sendable {
     public static let aiHosts: [String] = [
         "anthropic.com",
         "openai.com",
+        "chatgpt.com",        // ChatGPT/Codex subscription backend
         "googleapis.com",     // Gemini
         "google.com",         // GenAI APIs sometimes route here
         "cohere.com",
         "mistral.ai",
         "perplexity.ai",
         "x.ai",
+        "grok.com",           // Grok subscription backend (cli-chat-proxy)
         "groq.com",
         "replicate.com",
         "huggingface.co",
