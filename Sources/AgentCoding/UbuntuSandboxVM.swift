@@ -57,6 +57,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// MAC claimed from the shared pool. Released on stop so the same
     /// address is reused next time, keeping vmnet's DHCP lease table small.
     private var claimedMAC: String?
+    /// VM-side handle of this VM's port on the shared `VMNetSwitch` (NAT mode
+    /// only). Detached on stop so the switch forgets its learned MACs.
+    private var switchPort: FileHandle?
     /// The underlying VZ machine. Exposed so the host app can attach a
     /// VZVirtualMachineView for display.
     public private(set) var vm: VZVirtualMachine?
@@ -124,7 +127,16 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         let mode = sessionDisk?.profile.networkMode ?? .nat
         switch mode {
         case .nat:
-            net.attachment = VZNATNetworkDeviceAttachment()
+            // Attach to the process-wide software switch so every AC VM shares
+            // one vmnet/NAT segment: distinct DHCP IPs + mutual reachability,
+            // instead of each VM getting its own island that collides on .2.
+            // Fall back to Apple's NAT if the switch can't bring up vmnet.
+            if let port = VMNetSwitch.shared.attachPort() {
+                net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: port)
+                self.switchPort = port
+            } else {
+                net.attachment = VZNATNetworkDeviceAttachment()
+            }
         case .bridged:
             let bridgedID = sessionDisk?.profile.bridgedInterfaceID
             let interfaces = VZBridgedNetworkInterface.networkInterfaces
@@ -521,6 +533,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         if let mac = claimedMAC {
             MACAddressPool.shared.release(mac)
             claimedMAC = nil
+        }
+        if let port = switchPort {
+            VMNetSwitch.shared.detachPort(port)
+            switchPort = nil
         }
     }
 

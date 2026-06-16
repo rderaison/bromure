@@ -55,6 +55,28 @@ public struct HostNetworkInfo {
         )
     }
 
+    /// Third octets of every local IPv4 interface that sits inside
+    /// `192.168.0.0/16`. Lets a NAT subnet picker steer clear of any
+    /// `192.168.x.0/24` the host is genuinely on (Wi-Fi, Ethernet, other
+    /// vmnet/bridge interfaces, VPNs, etc.) — not just the primary one.
+    public static func localPrivateClassCOctets() -> Set<UInt8> {
+        var octets: Set<UInt8> = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return octets }
+        defer { freeifaddrs(ifaddr) }
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            guard let addr = ptr.pointee.ifa_addr,
+                  addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let ip = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
+            }
+            if (ip & 0xFFFF_0000) == 0xC0A8_0000 {   // 192.168.0.0/16
+                octets.insert(UInt8((ip >> 8) & 0xFF))
+            }
+        }
+        return octets
+    }
+
     /// Parse a dotted-decimal IPv4 string into a host-byte-order UInt32.
     static func parseIPv4(_ string: String) -> UInt32? {
         let parts = string.split(separator: ".").compactMap { UInt32($0) }

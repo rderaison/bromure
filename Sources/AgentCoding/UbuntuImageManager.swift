@@ -439,9 +439,9 @@ public final class UbuntuImageManager {
 
         // Claim a MAC from the shared pool so the installer reuses a
         // small set of addresses instead of asking VZ for a random
-        // one each bake. Keeps vmnet's bootpd lease table small and
-        // makes successive bakes more reproducible (deterministic
-        // ARP / NAT state on the host).
+        // one each bake, and so our DHCP server hands it a stable lease.
+        // Makes successive bakes more reproducible (deterministic ARP /
+        // NAT state on the host).
         let claimedInstallerMAC = MACAddressPool.shared.claim()
         defer {
             if let mac = claimedInstallerMAC {
@@ -450,7 +450,20 @@ public final class UbuntuImageManager {
         }
 
         let net = VZVirtioNetworkDeviceConfiguration()
-        net.attachment = VZNATNetworkDeviceAttachment()
+        // Attach to the process-wide software switch — same path a normal AC
+        // VM takes — so the installer lands on our own DHCP/NAT segment: a
+        // distinct lease that can't collide with a live AC VM, on a subnet
+        // picked clear of the host's LAN. Fall back to Apple's NAT if vmnet
+        // can't be brought up.
+        let switchPort = VMNetSwitch.shared.attachPort()
+        if let switchPort {
+            net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: switchPort)
+        } else {
+            net.attachment = VZNATNetworkDeviceAttachment()
+        }
+        defer {
+            if let switchPort { VMNetSwitch.shared.detachPort(switchPort) }
+        }
         if let mac = claimedInstallerMAC,
            let vzMAC = VZMACAddress(string: mac) {
             net.macAddress = vzMAC
