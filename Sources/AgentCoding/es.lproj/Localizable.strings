@@ -495,3 +495,13 @@
 "Couldn't download the detector model" = "No se pudo descargar el modelo del detector";
 "Source-code prompt-injection" = "inyección de prompts en el código fuente";
 "Rogue-instruction (CLAUDE.md)" = "instrucciones maliciosas (CLAUDE.md)";
+
+/* Fusion (Models section) */
+"Models" = "Modelos";
+"Enable Fusion" = "Activar Fusion";
+"BETA" = "BETA";
+"Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (API key or Bedrock) **and** an OpenAI API key in this profile — subscription logins won’t work." = "Fusion responde a cada solicitud con Claude y GPT, luego un modelo juez evalúa ambas y sintetiza la mejor respuesta única. Requiere una credencial de Anthropic (clave API o Bedrock) **y** una clave API de OpenAI en este perfil — los inicios de sesión por suscripción no funcionan.";
+"Only **Claude Code** is fused — Fusion works by intercepting Claude’s API. Other agents in this profile (Codex, Grok) run normally and are unaffected." = "Solo se fusiona **Claude Code** — Fusion funciona interceptando la API de Claude. Los demás agentes de este perfil (Codex, Grok) funcionan con normalidad y no se ven afectados.";
+"Add both an Anthropic and an OpenAI key above to turn this on." = "Añada arriba una clave de Anthropic y otra de OpenAI para activarlo.";
+"Fusion engaged — answers are synthesized from Claude + GPT. Click to disengage." = "Fusion activada — las respuestas se sintetizan a partir de Claude + GPT. Haga clic para desactivar.";
+"Fusion available — disengaged. Click to engage Claude + GPT synthesis." = "Fusion disponible — desactivada. Haga clic para activar la síntesis de Claude + GPT.";

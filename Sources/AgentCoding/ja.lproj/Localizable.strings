@@ -495,3 +495,13 @@
 "Couldn't download the detector model" = "検出モデルをダウンロードできませんでした";
 "Source-code prompt-injection" = "ソースコードのプロンプトインジェクション";
 "Rogue-instruction (CLAUDE.md)" = "不正な指示 (CLAUDE.md)";
+
+/* Fusion (Models section) */
+"Models" = "モデル";
+"Enable Fusion" = "Fusion を有効にする";
+"BETA" = "ベータ";
+"Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (API key or Bedrock) **and** an OpenAI API key in this profile — subscription logins won’t work." = "Fusion は各リクエストに Claude と GPT の両方で回答し、ジャッジモデルが両者を比較して最も優れた単一の回答を統合します。このプロファイルに Anthropic の認証情報(API キーまたは Bedrock)**と** OpenAI の API キーの両方が必要です — サブスクリプションのログインでは動作しません。";
+"Only **Claude Code** is fused — Fusion works by intercepting Claude’s API. Other agents in this profile (Codex, Grok) run normally and are unaffected." = "統合されるのは **Claude Code** のみです — Fusion は Claude の API を傍受することで動作します。このプロファイル内の他のエージェント(Codex、Grok)は通常どおり動作し、影響を受けません。";
+"Add both an Anthropic and an OpenAI key above to turn this on." = "有効にするには、上で Anthropic と OpenAI の両方のキーを追加してください。";
+"Fusion engaged — answers are synthesized from Claude + GPT. Click to disengage." = "Fusion 有効 — 回答は Claude + GPT から統合されます。クリックして無効化します。";
+"Fusion available — disengaged. Click to engage Claude + GPT synthesis." = "Fusion 利用可能 — 無効です。クリックして Claude + GPT の統合を有効にします。";

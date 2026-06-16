@@ -495,3 +495,13 @@
 "Couldn't download the detector model" = "无法下载检测模型";
 "Source-code prompt-injection" = "源代码提示注入";
 "Rogue-instruction (CLAUDE.md)" = "恶意指令 (CLAUDE.md)";
+
+/* Fusion (Models section) */
+"Models" = "模型";
+"Enable Fusion" = "启用 Fusion";
+"BETA" = "测试版";
+"Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (API key or Bedrock) **and** an OpenAI API key in this profile — subscription logins won’t work." = "Fusion 会用 Claude 和 GPT 同时回答每个请求,然后由一个评判模型权衡两者并综合出最佳的单一回复。它需要在此配置中同时拥有 Anthropic 凭据(API 密钥或 Bedrock)**和** OpenAI API 密钥 — 订阅登录无法使用。";
+"Only **Claude Code** is fused — Fusion works by intercepting Claude’s API. Other agents in this profile (Codex, Grok) run normally and are unaffected." = "只有 **Claude Code** 会被融合 — Fusion 通过拦截 Claude 的 API 工作。此配置中的其他代理(Codex、Grok)将正常运行,不受影响。";
+"Add both an Anthropic and an OpenAI key above to turn this on." = "请在上方同时添加 Anthropic 和 OpenAI 密钥以启用此功能。";
+"Fusion engaged — answers are synthesized from Claude + GPT. Click to disengage." = "Fusion 已启用 — 回复由 Claude + GPT 综合生成。点击以停用。";
+"Fusion available — disengaged. Click to engage Claude + GPT synthesis." = "Fusion 可用 — 已停用。点击以启用 Claude + GPT 综合。";

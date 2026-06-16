@@ -741,11 +741,22 @@ struct ProfileEditorView: View {
                     Image(systemName: "bolt.fill")
                         .foregroundStyle(available ? .yellow : .secondary)
                     Text("Enable Fusion")
+                    Text("BETA")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.orange, in: Capsule())
                 }
             }
             .disabled(!available)
 
             Text("Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (API key or Bedrock) **and** an OpenAI API key in this profile — subscription logins won’t work.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 22)
+
+            Text("Only **Claude Code** is fused — Fusion works by intercepting Claude’s API. Other agents in this profile (Codex, Grok) run normally and are unaffected.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.leading, 22)
