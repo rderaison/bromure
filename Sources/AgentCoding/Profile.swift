@@ -903,16 +903,16 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// see this"). Mirrors a similar opt-out on Bromure Web.
     public var privateMode: Bool
 
-    /// When true, this profile opts into **Fusion**: outbound Claude
-    /// `/v1/messages` requests are answered by both Claude and GPT, the
-    /// two drafts are judged into a structured analysis, and a single
-    /// synthesized reply is returned. Only meaningful when
-    /// `fusionAvailable` is true (both an Anthropic and an OpenAI
-    /// non-subscription credential are configured). This is the
-    /// per-profile *capability* switch; the user can still engage /
-    /// disengage Fusion live per session from the title-bar toggle.
-    /// Default false.
-    public var fusionEnabled: Bool
+    /// **Fusion** configuration. The agents whose answers are fused on a
+    /// Claude-Code text turn (any subset of the configured providers, 1–3).
+    /// Fusion engages per-session from the title-bar toggle; it's only
+    /// engageable when `fusionConfigurable` (≥2 of these have a usable
+    /// credential). Empty = nothing selected yet.
+    public var fusionLegs: Set<Tool>
+    /// Provider whose model judges + synthesizes the fused answer.
+    public var fusionJudgeProvider: Tool?
+    /// The judge model id (e.g. "claude-opus-4-8"). nil → engine default.
+    public var fusionJudgeModel: String?
 
     /// Whether the user has consented to swap the Claude subscription
     /// OAuth tokens (access + refresh) on disk for proxy-side fakes.
@@ -1161,7 +1161,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // preserves prior behaviour for pre-field profiles).
         traceLevel: TraceLevel = .aiDetails,
         privateMode: Bool = false,
-        fusionEnabled: Bool = false,
+        fusionLegs: Set<Tool> = [],
+        fusionJudgeProvider: Tool? = nil,
+        fusionJudgeModel: String? = nil,
         subscriptionTokenSwap: SubscriptionTokenSwapState = .unset,
         codexTokenSwap: SubscriptionTokenSwapState = .unset,
         defaultClaudeTokens: StoredOAuthTokens? = nil,
@@ -1217,7 +1219,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.environmentVariables = environmentVariables
         self.traceLevel = traceLevel
         self.privateMode = privateMode
-        self.fusionEnabled = fusionEnabled
+        self.fusionLegs = fusionLegs
+        self.fusionJudgeProvider = fusionJudgeProvider
+        self.fusionJudgeModel = fusionJudgeModel
         self.subscriptionTokenSwap = subscriptionTokenSwap
         self.codexTokenSwap = codexTokenSwap
         self.defaultClaudeTokens = defaultClaudeTokens
@@ -1279,7 +1283,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case environmentVariables
         case traceLevel
         case privateMode
-        case fusionEnabled
+        case fusionEnabled   // legacy; decoded for migration, never encoded
+        case fusionLegs
+        case fusionJudgeProvider
+        case fusionJudgeModel
         case subscriptionTokenSwap
         case codexTokenSwap
         case kubeconfigs
@@ -1357,9 +1364,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                                                      forKey: .environmentVariables) ?? []
         traceLevel = try c.decodeIfPresent(TraceLevel.self, forKey: .traceLevel) ?? .off
         privateMode = try c.decodeIfPresent(Bool.self, forKey: .privateMode) ?? false
-        // Backward compat: profiles written before Fusion existed have no
-        // `fusionEnabled` key — default to false (feature off).
-        fusionEnabled = try c.decodeIfPresent(Bool.self, forKey: .fusionEnabled) ?? false
+        // Fusion config. New keys default to empty/nil. Legacy profiles that
+        // had `fusionEnabled == true` migrate to fusing whatever providers they
+        // had credentials for — resolved lazily by `fusionConfigurable`, so we
+        // just leave legs empty here and let the user pick in the new panel.
+        fusionLegs = try c.decodeIfPresent(Set<Tool>.self, forKey: .fusionLegs) ?? []
+        fusionJudgeProvider = try c.decodeIfPresent(Tool.self, forKey: .fusionJudgeProvider)
+        fusionJudgeModel = try c.decodeIfPresent(String.self, forKey: .fusionJudgeModel)
         subscriptionTokenSwap = try c.decodeIfPresent(SubscriptionTokenSwapState.self,
                                                       forKey: .subscriptionTokenSwap) ?? .unset
         codexTokenSwap = try c.decodeIfPresent(SubscriptionTokenSwapState.self,
@@ -1436,10 +1447,17 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if privateMode {
             try c.encode(privateMode, forKey: .privateMode)
         }
-        // Only emit fusionEnabled when true, so profiles that never touch
-        // Fusion serialize byte-for-byte as before (no spurious diffs).
-        if fusionEnabled {
-            try c.encode(fusionEnabled, forKey: .fusionEnabled)
+        // Only emit Fusion config when set, so profiles that never touch
+        // Fusion serialize compactly (no spurious diffs). Legacy `fusionEnabled`
+        // is intentionally never written back.
+        if !fusionLegs.isEmpty {
+            try c.encode(fusionLegs, forKey: .fusionLegs)
+        }
+        if let fusionJudgeProvider {
+            try c.encode(fusionJudgeProvider, forKey: .fusionJudgeProvider)
+        }
+        if let fusionJudgeModel {
+            try c.encode(fusionJudgeModel, forKey: .fusionJudgeModel)
         }
         if subscriptionTokenSwap != .unset {
             try c.encode(subscriptionTokenSwap, forKey: .subscriptionTokenSwap)
@@ -1505,49 +1523,32 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
 
     // MARK: - Fusion eligibility
 
-    /// True when this profile has a usable **Anthropic** credential that
-    /// Fusion can drive directly: an API key, Bedrock, or a subscription.
-    /// Subscription now counts — the host either injects a real OAuth Bearer
-    /// (when registered via "Register with Claude") or the guest's own
-    /// `claude login` token rides along; either way the forwarded
-    /// `/v1/messages` request Fusion replays carries valid auth.
-    public var hasUsableAnthropicCredential: Bool {
-        allToolSpecs.contains { s in
-            guard s.tool == .claude else { return false }
-            switch s.authMode {
-            case .token:
-                return !(s.apiKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            case .bedrock:
-                return awsCredentials.isUsable
-            case .subscription:
-                return true
-            }
+    /// True when `tool` is enabled in this profile AND has a credential Fusion
+    /// can drive as a leg: an API key (token mode), Bedrock (Claude only), or a
+    /// subscription (host-side — assumed registered; the leg call fails
+    /// gracefully if not). Used for the panel's leg checkboxes + judge picker.
+    public func hasUsableCredential(for tool: Tool) -> Bool {
+        guard let s = allToolSpecs.first(where: { $0.tool == tool }) else { return false }
+        switch s.authMode {
+        case .token:
+            return !(s.apiKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .bedrock:
+            return tool == .claude && awsCredentials.isUsable
+        case .subscription:
+            return true
         }
     }
 
-    /// True when this profile has a usable **OpenAI** credential for
-    /// Fusion: an API key. OpenAI has no Bedrock equivalent, and a
-    /// ChatGPT subscription login can't be replayed host-side, so neither
-    /// of those counts.
-    public var hasUsableOpenAICredential: Bool {
-        allToolSpecs.contains { s in
-            s.tool == .codex
-                && s.authMode == .token
-                && !(s.apiKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
+    /// Providers that can participate in Fusion (enabled + credentialed).
+    public var fusionUsableProviders: [Tool] {
+        Tool.allCases.filter { hasUsableCredential(for: $0) }
     }
 
-    /// Whether Fusion *can* run for this profile — both providers have a
-    /// non-subscription credential. The "Enable Fusion" toggle is only
-    /// meaningful (and only enabled in the UI) when this is true.
-    public var fusionAvailable: Bool {
-        hasUsableAnthropicCredential && hasUsableOpenAICredential
-    }
-
-    /// Fusion should actually engage for new sessions of this profile:
-    /// the user opted in *and* the credentials are present.
-    public var fusionEffective: Bool {
-        fusionEnabled && fusionAvailable
+    /// Whether Fusion can be engaged for this profile: at least two providers
+    /// have a usable credential. Gates the title-bar toggle; the actual legs
+    /// used are `fusionLegs` (intersected with usable providers) at runtime.
+    public var fusionConfigurable: Bool {
+        fusionUsableProviders.count >= 2
     }
 
     /// Resolve the final styling for this profile. Each `customX` field

@@ -37,11 +37,11 @@ final class TabsModel {
     /// ACAppDelegate.refreshStreamingState() pushes updates here.
     var streamingActive: Bool = false
 
-    /// True when this profile opted into Fusion AND both credentials are
-    /// present — gates whether the title-bar lightning toggle is shown.
-    var fusionConfigured: Bool = false
+    /// True when ≥2 providers have a usable credential — gates whether the
+    /// title-bar lightning toggle can be engaged (it's always shown).
+    var fusionConfigurable: Bool = false
     /// Runtime on/off for Fusion this session. Only meaningful when
-    /// `fusionConfigured`. Flipped by the lightning toggle; mirrored into
+    /// `fusionConfigurable`. Flipped by the lightning toggle; mirrored into
     /// the MITM engine so the proxy hot path sees the change.
     var fusionEngaged: Bool = false
 
@@ -672,25 +672,31 @@ private struct TabsBar: View {
                 StreamingIndicator()
             }
 
-            // Fusion toggle — only present when the profile is configured
-            // for Fusion (opted in + both credentials available). Filled
-            // bolt + accent colour when engaged; hollow grey when not.
-            if model.fusionConfigured {
-                Button {
-                    model.fusionEngaged.toggle()
-                    onToggleFusion(model.fusionEngaged)
-                } label: {
-                    Image(systemName: model.fusionEngaged ? "bolt.fill" : "bolt")
-                        .foregroundStyle(model.fusionEngaged ? Color.yellow : Color.secondary)
-                        .frame(width: 24, height: 22)
-                }
-                .buttonStyle(.borderless)
-                .help(model.fusionEngaged
-                    ? NSLocalizedString("Fusion engaged — answers are synthesized from Claude + GPT. Click to disengage.",
-                                        comment: "Fusion toggle tooltip, engaged")
-                    : NSLocalizedString("Fusion available — disengaged. Click to engage Claude + GPT synthesis.",
-                                        comment: "Fusion toggle tooltip, disengaged"))
+            // Fusion toggle — ALWAYS present. Three states:
+            //   • not configurable (<2 usable models): hollow bolt, disabled;
+            //   • configurable + disengaged: filled bolt, dark grey;
+            //   • engaged: filled bolt, yellow.
+            Button {
+                guard model.fusionConfigurable else { return }
+                model.fusionEngaged.toggle()
+                onToggleFusion(model.fusionEngaged)
+            } label: {
+                Image(systemName: model.fusionConfigurable ? "bolt.fill" : "bolt")
+                    .foregroundStyle(
+                        !model.fusionConfigurable ? Color.secondary
+                            : (model.fusionEngaged ? Color.yellow : Color(nsColor: .darkGray)))
+                    .frame(width: 24, height: 22)
             }
+            .buttonStyle(.borderless)
+            .disabled(!model.fusionConfigurable)
+            .help(!model.fusionConfigurable
+                ? NSLocalizedString("To enable Fusion you need to have at least two models enabled.",
+                                    comment: "Fusion toggle tooltip, not configurable")
+                : (model.fusionEngaged
+                    ? NSLocalizedString("Fusion engaged — answers are synthesized across your selected models. Click to disengage.",
+                                        comment: "Fusion toggle tooltip, engaged")
+                    : NSLocalizedString("Fusion available — disengaged. Click to engage multi-model synthesis.",
+                                        comment: "Fusion toggle tooltip, disengaged")))
 
             if let ip = model.ipAddress {
                 IPChip(ip: ip)

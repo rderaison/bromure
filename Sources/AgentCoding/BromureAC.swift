@@ -414,6 +414,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Resolve a profile's Guardrails policy into the runtime config the MITM
     /// enforces — the kube mode plus the concrete kube API hostnames pulled
     /// from the profile's kubeconfigs.
+    /// Build the per-session Fusion config from a profile, or nil if the
+    /// profile isn't fusion-configurable (<2 usable providers). Legs = the
+    /// selected set intersected with usable providers (falling back to all
+    /// usable if the selection is too small); judge falls back to the first
+    /// usable provider + engine default model.
+    func makeFusionConfig(for profile: Profile) -> Fusion.Config? {
+        let usable = profile.fusionUsableProviders
+        guard usable.count >= 2 else { return nil }
+        var legs = Profile.Tool.allCases.filter {
+            profile.fusionLegs.contains($0) && usable.contains($0)
+        }
+        if legs.count < 2 { legs = usable }   // default: fuse everything usable
+        let judgeProvider = (profile.fusionJudgeProvider.flatMap { usable.contains($0) ? $0 : nil })
+            ?? usable.first!
+        let judgeModel = profile.fusionJudgeModel ?? Fusion.defaultJudgeModel
+        var authModes: [Profile.Tool: Profile.AuthMode] = [:]
+        for spec in profile.allToolSpecs { authModes[spec.tool] = spec.authMode }
+        return Fusion.Config(legs: legs, judgeProvider: judgeProvider,
+                             judgeModel: judgeModel, authModes: authModes, legModels: [:])
+    }
+
     static func makeGuardrailsConfig(for profile: Profile) -> GuardrailsConfig {
         let kubeHosts = Set(profile.kubeconfigs.compactMap {
             URL(string: $0.serverURL)?.host?.lowercased()
@@ -1742,6 +1763,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             onForgetGrok: { [weak self] in
                 try? self?.mitmEngine?.grokSubscriptionStore.forget(for: nil)
                 NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+            },
+            onFetchFusionModels: { provider, authMode, apiKey, completion in
+                Task {
+                    let m = await Fusion.listModels(provider: provider, authMode: authMode,
+                                                    apiKey: apiKey, profileID: nil)
+                    await MainActor.run { completion(m) }
+                }
             }
         ))
         win.makeKeyAndOrderFront(nil)
@@ -1948,6 +1976,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 { [weak self] in
                     try? self?.mitmEngine?.grokSubscriptionStore.forget(for: p.id)
                     NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+                }
+            },
+            onFetchFusionModels: { provider, authMode, apiKey, completion in
+                let pid = (editing ?? initialDraft)?.id
+                Task {
+                    let m = await Fusion.listModels(provider: provider, authMode: authMode,
+                                                    apiKey: apiKey, profileID: pid)
+                    await MainActor.run { completion(m) }
                 }
             }
         ))
@@ -2322,21 +2358,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func applyLiveSessionRefresh(from old: Profile, to new: Profile,
                                          terminalDefaults: TerminalAppDefaults,
                                          window win: TabbedSessionWindow) {
-        // Fusion availability / opt-in can change without tripping the
-        // session-refresh guard below (e.g. just ticking "Enable Fusion"),
-        // so reconcile it first and unconditionally.
-        let wasConfigured = old.fusionEffective
-        let nowConfigured = new.fusionEffective
-        win.model.fusionConfigured = nowConfigured
-        if !nowConfigured {
-            // Credentials removed or opted out → force off.
+        // Fusion config can change without tripping the session-refresh guard
+        // below (e.g. editing legs/judge), so reconcile it first and
+        // unconditionally. Engagement is the user's per-session choice via the
+        // title-bar toggle — we don't auto-engage; we only force-off when the
+        // profile is no longer configurable.
+        _ = old
+        let nowConfigurable = new.fusionConfigurable
+        win.model.fusionConfigurable = nowConfigurable
+        mitmEngine?.setFusionConfig(makeFusionConfig(for: new), for: new.id)
+        if !nowConfigurable {
             win.model.fusionEngaged = false
             mitmEngine?.setFusionEngaged(false, for: new.id)
-        } else if !wasConfigured {
-            // Newly eligible → engage by default; preserve the user's
-            // runtime choice when it was already configured.
-            win.model.fusionEngaged = true
-            mitmEngine?.setFusionEngaged(true, for: new.id)
         }
 
         guard sessionRefreshAffectingChange(from: old, to: new) else { return }
@@ -2891,9 +2924,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // Fusion: show the title-bar toggle when configured, but
                 // start disengaged — the user clicks the lightning bolt to
                 // turn it on for the session.
-                win.model.fusionConfigured = profile.fusionEffective
+                win.model.fusionConfigurable = profile.fusionConfigurable
                 win.model.fusionEngaged = false
                 engine.setFusionEngaged(false, for: profile.id)
+                engine.setFusionConfig(self.makeFusionConfig(for: profile), for: profile.id)
             }
             // Keyboard layout bridge — pushes the macOS layout into the
             // guest at boot and follows live changes (or pins an
@@ -3564,9 +3598,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if profile.promptInjection.detectRulesInjection { PromptInjectionModels.ensureInstalledInBackground(.claudeMdGuard) }
                 // Fusion: keep the toggle visible when configured, but reset
                 // to disengaged on reboot (user re-engages on demand).
-                win.model.fusionConfigured = profile.fusionEffective
+                win.model.fusionConfigurable = profile.fusionConfigurable
                 win.model.fusionEngaged = false
                 engine.setFusionEngaged(false, for: profile.id)
+                engine.setFusionConfig(self.makeFusionConfig(for: profile), for: profile.id)
             }
             if let dev = sandbox.socketDevice {
                 win.keyboardBridge = KeyboardBridge(

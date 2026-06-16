@@ -286,6 +286,7 @@ public extension Notification.Name {
 enum EditorCategory: String, CaseIterable, Identifiable {
     case general     = "General"
     case models      = "Agents"
+    case fusion      = "Fusion"
     case folders     = "Folders"
     case credentials = "Credentials"
     case environment = "Environment"
@@ -307,6 +308,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general:     "person.text.rectangle.fill"
         case .models:      "sparkles"
+        case .fusion:      "bolt.fill"
         case .folders:     "folder.fill"
         case .credentials: "key.fill"
         case .environment: "terminal.fill"
@@ -325,6 +327,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general:     .indigo
         case .models:      .purple
+        case .fusion:      .yellow
         case .folders:     .orange
         case .credentials: .green
         case .environment: .teal
@@ -397,6 +400,9 @@ struct ProfileEditorView: View {
     /// Bumped on `.bromureSubscriptionStoresChanged` to re-read per-tool
     /// registration status after a register/forget (runs in another window).
     @State private var subscriptionRefreshTick = 0
+    /// Live model list for the Fusion judge picker (fetched per provider).
+    @State private var fusionJudgeModels: [String] = []
+    @State private var fusionJudgeModelsLoading = false
 
     /// Sheet state for the SSH-key import flow.
     @State private var importSheet: ImportSheetState?
@@ -444,6 +450,11 @@ struct ProfileEditorView: View {
     let codexAccountSavedAt: (() -> Date?)?
     let onRegisterCodex: (() -> Void)?
     let onForgetCodex: (() -> Void)?
+    /// Fetch the available model ids for a provider (for the judge picker).
+    /// `(provider, authMode, apiKey?, completion)` — host resolves the cred
+    /// (API key here, or its subscription store) and calls back on the main
+    /// actor with the model ids (empty on failure).
+    let onFetchFusionModels: ((Profile.Tool, Profile.AuthMode, String?, @escaping ([String]) -> Void) -> Void)?
     /// Grok (xAI) counterparts.
     let grokAccountSavedAt: (() -> Date?)?
     let onRegisterGrok: (() -> Void)?
@@ -466,7 +477,8 @@ struct ProfileEditorView: View {
         onForgetCodex: (() -> Void)? = nil,
         grokAccountSavedAt: (() -> Date?)? = nil,
         onRegisterGrok: (() -> Void)? = nil,
-        onForgetGrok: (() -> Void)? = nil
+        onForgetGrok: (() -> Void)? = nil,
+        onFetchFusionModels: ((Profile.Tool, Profile.AuthMode, String?, @escaping ([String]) -> Void) -> Void)? = nil
     ) {
         self.onImportSSHKey = onImportSSHKey
         self.onRemoveSSHKey = onRemoveSSHKey
@@ -479,6 +491,7 @@ struct ProfileEditorView: View {
         self.grokAccountSavedAt = grokAccountSavedAt
         self.onRegisterGrok = onRegisterGrok
         self.onForgetGrok = onForgetGrok
+        self.onFetchFusionModels = onFetchFusionModels
         var p = profile ?? Profile(name: "", tool: .claude, authMode: .token)
         // New profiles: pre-fill custom appearance fields with Terminal.app
         // defaults so the editor opens with sensible, editable starting
@@ -592,6 +605,7 @@ struct ProfileEditorView: View {
         switch selectedCategory {
         case .general:     generalSection
         case .models:      modelsSection
+        case .fusion:      fusionSection
         case .folders:     foldersSection
         case .credentials: credentialsSection
         case .environment: environmentSection
@@ -762,10 +776,6 @@ struct ProfileEditorView: View {
                     onForgetSubscription: sub.onForget
                 )
             }
-
-            Divider().padding(.vertical, 6)
-
-            fusionToggle
         }
         // Re-read registration status when a register/forget completes (it runs
         // in a separate window), so the inline controls flip without reopening.
@@ -788,47 +798,110 @@ struct ProfileEditorView: View {
         }
     }
 
-    /// "Enable Fusion" opt-in. Greyed out until the profile carries both
-    /// an Anthropic credential (API key or Bedrock) and an OpenAI API key
-    /// — subscription logins can't be replayed host-side, so they don't
-    /// qualify.
+    // MARK: - Fusion pane
+
     @ViewBuilder
-    private var fusionToggle: some View {
-        let available = draft.fusionAvailable
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle(isOn: $draft.fusionEnabled) {
+    private var fusionSection: some View {
+        let usable = draft.fusionUsableProviders
+        VStack(alignment: .leading, spacing: 12) {
+            // Blurb.
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Image(systemName: "bolt.fill")
-                        .foregroundStyle(available ? .yellow : .secondary)
-                    Text("Enable Fusion")
-                    Text("BETA")
-                        .font(.caption2.bold())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
+                    Image(systemName: "bolt.fill").foregroundStyle(.yellow)
+                    Text("Fusion").font(.body.weight(.semibold))
+                    Text("BETA").font(.caption2.bold()).foregroundStyle(.white)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(.orange, in: Capsule())
                 }
+                Text("When engaged, Fusion answers each prompt with **multiple** models at once, has a judge model map where they agree, conflict, and each shine, then synthesizes a single best reply — delivered to Claude Code as if one model wrote it. Engage it per session from the ⚡ in the title bar.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Fusion runs on the **Claude Code** session (it intercepts Claude's API). It needs at least two configured agents below.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            .disabled(!available)
 
-            Text("Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (Claude subscription, API key, or Bedrock) **and** an OpenAI API key in this profile.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 22)
+            Divider()
 
-            Text("Only **Claude Code** is fused — Fusion works by intercepting Claude’s API. Other agents in this profile (Codex, Grok) run normally and are unaffected.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 22)
+            // Legs.
+            Text("Agents to fuse").font(.subheadline.weight(.medium))
+            ForEach(Profile.Tool.allCases, id: \.self) { t in
+                let ok = draft.hasUsableCredential(for: t)
+                Toggle(isOn: Binding(
+                    get: { draft.fusionLegs.contains(t) && ok },
+                    set: { on in
+                        if on { draft.fusionLegs.insert(t) } else { draft.fusionLegs.remove(t) }
+                    })) {
+                    HStack(spacing: 6) {
+                        Image(systemName: t.sfSymbol).foregroundStyle(ok ? .primary : .secondary)
+                        Text(t.displayName)
+                        if !ok {
+                            Text("— no credential (configure it in Agents)")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .toggleStyle(.checkbox)
+                .disabled(!ok)
+            }
+            if usable.count < 2 {
+                Text("Enable at least two agents with a credential (Agents tab) to use Fusion.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
 
-            if !available {
-                Text("Add an Anthropic credential (subscription, API key, or Bedrock) and an OpenAI API key above to turn this on.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .padding(.leading, 22)
+            Divider()
+
+            // Judge.
+            Text("Judge").font(.subheadline.weight(.medium))
+            Text("The model that weighs the drafts and writes the final answer.")
+                .font(.caption).foregroundStyle(.secondary)
+            fusionJudgePickers(usable: usable)
+        }
+        .onAppear { ensureFusionJudgeDefaults(usable: usable) }
+    }
+
+    /// Provider + model pickers for the judge. Models are fetched live for the
+    /// chosen provider (`fusionJudgeModelOptions`), with a free-text fallback.
+    @ViewBuilder
+    private func fusionJudgePickers(usable: [Profile.Tool]) -> some View {
+        HStack(spacing: 8) {
+            Picker("Provider", selection: Binding(
+                get: { draft.fusionJudgeProvider ?? usable.first ?? .claude },
+                set: { draft.fusionJudgeProvider = $0; fusionJudgeModels = []; loadFusionJudgeModels() })) {
+                ForEach(usable, id: \.self) { Text($0.displayName).tag($0) }
+            }
+            .frame(maxWidth: 180)
+
+            if fusionJudgeModelsLoading {
+                ProgressView().controlSize(.small)
+            }
+            Picker("Model", selection: Binding(
+                get: { draft.fusionJudgeModel ?? "" },
+                set: { draft.fusionJudgeModel = $0.isEmpty ? nil : $0 })) {
+                Text("(default)").tag("")
+                ForEach(fusionJudgeModels, id: \.self) { Text($0).tag($0) }
+                // Keep a stored custom model visible even if not in the list.
+                if let m = draft.fusionJudgeModel, !fusionJudgeModels.contains(m) {
+                    Text(m).tag(m)
+                }
             }
         }
-        .opacity(available ? 1 : 0.6)
+        .disabled(usable.isEmpty)
+    }
+
+    private func ensureFusionJudgeDefaults(usable: [Profile.Tool]) {
+        if draft.fusionJudgeProvider == nil { draft.fusionJudgeProvider = usable.first }
+        if fusionJudgeModels.isEmpty { loadFusionJudgeModels() }
+    }
+
+    /// Fetch the model list for the current judge provider via the host.
+    private func loadFusionJudgeModels() {
+        guard let provider = draft.fusionJudgeProvider ?? draft.fusionUsableProviders.first,
+              let fetch = onFetchFusionModels else { return }
+        let spec = draft.allToolSpecs.first { $0.tool == provider }
+        fusionJudgeModelsLoading = true
+        fetch(provider, spec?.authMode ?? .token, spec?.apiKey) { models in
+            fusionJudgeModels = models
+            fusionJudgeModelsLoading = false
+        }
     }
 
     /// The currently-applied set of enabled tools = primary + additional.

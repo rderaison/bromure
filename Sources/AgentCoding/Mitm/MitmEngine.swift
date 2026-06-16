@@ -205,6 +205,22 @@ public final class MitmEngine {
         fusionEngagedFlags.removeValue(forKey: profileID)
     }
 
+    /// Per-profile Fusion config (legs + judge + auth modes), pushed at session
+    /// launch. Read by the proxy's `fusionConfigProvider` on the hot path.
+    nonisolated(unsafe) private var fusionConfigs: [UUID: Fusion.Config] = [:]
+    nonisolated func setFusionConfig(_ config: Fusion.Config?, for profileID: UUID) {
+        fusionLock.lock(); defer { fusionLock.unlock() }
+        fusionConfigs[profileID] = config
+    }
+    nonisolated func fusionConfig(for profileID: UUID) -> Fusion.Config? {
+        fusionLock.lock(); defer { fusionLock.unlock() }
+        return fusionConfigs[profileID]
+    }
+    nonisolated func clearFusionConfig(for profileID: UUID) {
+        fusionLock.lock(); defer { fusionLock.unlock() }
+        fusionConfigs.removeValue(forKey: profileID)
+    }
+
     /// Per-install 32-byte salt for deriving fake tokens from real
     /// ones via HKDF. Generated once, persisted under app support so
     /// a given real key always maps to the same fake on this Mac —
@@ -297,6 +313,9 @@ public final class MitmEngine {
         // the proxy ask "is Fusion engaged for this session right now?".
         HTTPMitmConnection.fusionEngagedProvider = { [weak self] pid in
             self?.fusionEngaged(for: pid) ?? false
+        }
+        HTTPMitmConnection.fusionConfigProvider = { [weak self] pid in
+            self?.fusionConfig(for: pid)
         }
         // Claude subscription auth: one closure lets the proxy reach the shared
         // store (bogus-key lookup) + refresher (live access token).

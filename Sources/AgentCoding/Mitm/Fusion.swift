@@ -88,6 +88,35 @@ enum Fusion {
         return isNewerOpenAIModel(model) ? 128_000 : 16_384
     }
 
+    // MARK: N-way config
+
+    /// Per-profile Fusion configuration, pushed into the proxy by the host
+    /// (BromureAC → MitmEngine.setFusionConfig). Carries which providers to
+    /// fuse, the judge, and each provider's auth mode so the engine can resolve
+    /// a credential per leg. The actual secrets come from the swap map (token
+    /// mode) or the subscription stores/refreshers (subscription mode).
+    struct Config: Sendable {
+        var legs: [Profile.Tool]            // providers to fuse (in display order)
+        var judgeProvider: Profile.Tool
+        var judgeModel: String
+        var authModes: [Profile.Tool: Profile.AuthMode]
+        /// Default leg models per provider (when not the guest's own request).
+        var legModels: [Profile.Tool: String]
+    }
+
+    /// A resolved credential for one upstream leg/judge call.
+    enum Cred: Sendable {
+        case anthropicBearer(String)     // subscription oat → Bearer + oauth beta
+        case anthropicKey(String)        // token → x-api-key
+        case openAIKey(String)           // api.openai.com Bearer
+        case openAISubscription(String)  // chatgpt.com backend Bearer (best-effort)
+        case grokKey(String)             // api.x.ai Bearer (OpenAI-compatible)
+        case grokSubscription(String)    // cli-chat-proxy.grok.com Bearer (best-effort)
+    }
+
+    /// Engine-default judge model when the profile hasn't picked one.
+    static let defaultJudgeModel = "claude-opus-4-8"
+
     // MARK: Logging
 
     static func log(_ msg: String) {
@@ -129,6 +158,272 @@ enum Fusion {
         func add(_ c: SubCall) { calls.append(c) }
     }
 
+    // MARK: - Credential resolution
+
+    /// Resolve a usable credential for `tool` in the profile's `authMode`,
+    /// reading the swap map (token mode) or the subscription stores/refreshers
+    /// (subscription mode, via the proxy's static providers). Returns nil when
+    /// no credential is available — the caller drops that leg.
+    static func resolveCred(tool: Profile.Tool, authMode: Profile.AuthMode,
+                            swapper: TokenSwapper, profileID: UUID) async -> Cred? {
+        switch (tool, authMode) {
+        case (.claude, .subscription):
+            guard let (_, r) = HTTPMitmConnection.claudeSubscriptionProvider?(),
+                  let tok = try? await r.accessToken(for: profileID) else { return nil }
+            return .anthropicBearer(tok)
+        case (.claude, .token):
+            return realFor(["anthropic.com"], swapper, profileID).map(Cred.anthropicKey)
+        case (.claude, .bedrock):
+            return nil   // Claude is the primary; its leg uses the guest's own request
+        case (.codex, .token):
+            return realFor(["openai.com"], swapper, profileID).map(Cred.openAIKey)
+        case (.codex, .subscription):
+            guard let (_, r) = HTTPMitmConnection.codexSubscriptionProvider?(),
+                  let tok = try? await r.accessToken(for: profileID) else { return nil }
+            return .openAISubscription(tok)
+        case (.grok, .token):
+            return realFor(["x.ai"], swapper, profileID).map(Cred.grokKey)
+        case (.grok, .subscription):
+            guard let (_, r) = HTTPMitmConnection.grokSubscriptionProvider?(),
+                  let tok = try? await r.accessToken(for: profileID) else { return nil }
+            return .grokSubscription(tok)
+        default:
+            return nil
+        }
+    }
+
+    /// First swap-map real whose host matches one of `hosts` (exact or subdomain).
+    private static func realFor(_ hosts: [String], _ swapper: TokenSwapper, _ profileID: UUID) -> String? {
+        for e in swapper.entries(for: profileID) {
+            let h = (e.host ?? "").lowercased()
+            for want in hosts where h == want || h.hasSuffix("." + want) { return e.real }
+        }
+        return nil
+    }
+
+    // MARK: - Unified single-question call (legs + judge)
+
+    /// Ask one model a single-turn question; returns its plain-text answer (nil
+    /// on any failure). Every call is recorded in `callLog` for tracing.
+    static func askModel(cred: Cred, model: String, system: String, question: String,
+                         maxTokens: Int, session: URLSession, callLog: CallLog) async -> String? {
+        switch cred {
+        case .anthropicBearer(let tok):
+            return await askAnthropic(model: model, system: system, question: question,
+                                      maxTokens: maxTokens, header: ("Authorization", "Bearer \(tok)"),
+                                      beta: true, session: session, callLog: callLog)
+        case .anthropicKey(let key):
+            return await askAnthropic(model: model, system: system, question: question,
+                                      maxTokens: maxTokens, header: ("x-api-key", key),
+                                      beta: false, session: session, callLog: callLog)
+        case .openAIKey(let key):
+            return await askOpenAIChat(base: "https://api.openai.com", model: model, system: system,
+                                       question: question, maxTokens: maxTokens, token: key,
+                                       session: session, callLog: callLog)
+        case .grokKey(let key):
+            return await askOpenAIChat(base: "https://api.x.ai", model: model, system: system,
+                                       question: question, maxTokens: maxTokens, token: key,
+                                       session: session, callLog: callLog)
+        case .openAISubscription(let tok):
+            // ChatGPT/Codex backend Responses API. Needs the experimental beta
+            // header + the originator/account headers Codex sends.
+            var extra = ["OpenAI-Beta": "responses=experimental", "originator": "codex_cli_rs"]
+            if let rec = HTTPMitmConnection.codexSubscriptionProvider?()?.0.record(for: nil),
+               let acct = jwtClaimAccountID(rec.idToken) {
+                extra["chatgpt-account-id"] = acct
+            }
+            return await askResponsesAPI(url: "https://chatgpt.com/backend-api/codex/responses",
+                                         model: model, system: system, question: question, token: tok,
+                                         extraHeaders: extra, session: session, callLog: callLog)
+        case .grokSubscription(let tok):
+            // cli-chat-proxy rejects requests without a recent client version.
+            return await askResponsesAPI(url: "https://cli-chat-proxy.grok.com/v1/responses",
+                                         model: model, system: system, question: question, token: tok,
+                                         extraHeaders: ["x-grok-client-version": grokClientVersion],
+                                         session: session, callLog: callLog)
+        }
+    }
+
+    /// Client version cli-chat-proxy.grok.com requires (≥ 0.1.202). Matches the
+    /// grok build the base image installs.
+    static let grokClientVersion = "0.2.54"
+
+    /// Pull `chatgpt_account_id` from a Codex JWT's `https://api.openai.com/auth`
+    /// claim (best effort).
+    private static func jwtClaimAccountID(_ jwt: String) -> String? {
+        let parts = jwt.split(separator: ".")
+        guard parts.count == 3 else { return nil }
+        var s = String(parts[1]).replacingOccurrences(of: "-", with: "+")
+                                .replacingOccurrences(of: "_", with: "/")
+        while s.count % 4 != 0 { s += "=" }
+        guard let d = Data(base64Encoded: s),
+              let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return nil }
+        if let auth = obj["https://api.openai.com/auth"] as? [String: Any],
+           let acct = auth["chatgpt_account_id"] as? String { return acct }
+        return obj["chatgpt_account_id"] as? String
+    }
+
+    /// First system block Anthropic requires on OAuth/subscription requests —
+    /// the token is rejected unless the request looks like Claude Code.
+    static let claudeCodeIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
+
+    private static func askAnthropic(model: String, system: String, question: String,
+                                     maxTokens: Int, header: (String, String), beta: Bool,
+                                     session: URLSession, callLog: CallLog) async -> String? {
+        // Subscription (oat) tokens require the Claude Code identity as the
+        // first system block; the real instructions follow as a second block.
+        let systemValue: Any = beta
+            ? [["type": "text", "text": claudeCodeIdentity], ["type": "text", "text": system]]
+            : system
+        let body: [String: Any] = ["model": model, "max_tokens": maxTokens, "system": systemValue,
+                                   "messages": [["role": "user", "content": question]]]
+        guard let url = URL(string: "https://api.anthropic.com/v1/messages"),
+              let payload = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+        var r = URLRequest(url: url)
+        r.httpMethod = "POST"; r.httpBody = payload; r.timeoutInterval = requestTimeout
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        r.setValue(header.1, forHTTPHeaderField: header.0)
+        if beta { r.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta") }
+        guard let raw = await perform(r, host: "api.anthropic.com", port: 443,
+                                      session: session, callLog: callLog), raw.status == 200 else { return nil }
+        let t = extractAnthropicText(raw.body)
+        return t.isEmpty ? nil : t
+    }
+
+    /// OpenAI-compatible /v1/chat/completions — works for api.openai.com and
+    /// api.x.ai (Grok) alike.
+    private static func askOpenAIChat(base: String, model: String, system: String, question: String,
+                                      maxTokens: Int, token: String,
+                                      session: URLSession, callLog: CallLog) async -> String? {
+        let host = URL(string: base)?.host ?? base
+        let newer = isNewerOpenAIModel(model)
+        var body: [String: Any] = ["model": model,
+                                   "messages": [["role": "system", "content": system],
+                                                ["role": "user", "content": question]]]
+        body[newer ? "max_completion_tokens" : "max_tokens"] = min(maxTokens, openAIMaxTokensCap(model: model))
+        guard let url = URL(string: "\(base)/v1/chat/completions"),
+              let payload = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+        var r = URLRequest(url: url)
+        r.httpMethod = "POST"; r.httpBody = payload; r.timeoutInterval = requestTimeout
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        guard let raw = await perform(r, host: host, port: 443,
+                                      session: session, callLog: callLog), raw.status == 200 else { return nil }
+        let t = extractOpenAIText(raw.body)
+        return t.isEmpty ? nil : t
+    }
+
+    /// Best-effort OpenAI **Responses API** call for the proprietary
+    /// subscription backends (ChatGPT codex backend, Grok cli-chat-proxy). These
+    /// are undocumented and may need extra fields/headers — on any non-200 we
+    /// log and return nil so the leg is dropped rather than breaking the fuse.
+    /// TODO: pin the exact request/response shapes from a live trace.
+    private static func askResponsesAPI(url urlString: String, model: String, system: String, question: String,
+                                        token: String, extraHeaders: [String: String],
+                                        session: URLSession, callLog: CallLog) async -> String? {
+        let host = URL(string: urlString)?.host ?? urlString
+        let body: [String: Any] = [
+            "model": model,
+            "instructions": system,
+            "input": question,
+            "store": false,
+            "stream": false,
+        ]
+        guard let url = URL(string: urlString),
+              let payload = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+        var r = URLRequest(url: url)
+        r.httpMethod = "POST"; r.httpBody = payload; r.timeoutInterval = requestTimeout
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        for (k, v) in extraHeaders { r.setValue(v, forHTTPHeaderField: k) }
+        guard let raw = await perform(r, host: host, port: 443, session: session, callLog: callLog) else { return nil }
+        guard raw.status == 200 else {
+            log("subscription leg \(host) responded \(raw.status) — \(snippet(raw.body)); dropping leg")
+            return nil
+        }
+        let t = extractResponsesText(raw.body)
+        return t.isEmpty ? nil : t
+    }
+
+    /// Parse an OpenAI Responses-API body: prefer `output_text`, else join
+    /// text parts under `output[].content[]`.
+    private static func extractResponsesText(_ data: Data) -> String {
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return "" }
+        if let s = obj["output_text"] as? String { return s }
+        var parts: [String] = []
+        for item in (obj["output"] as? [[String: Any]]) ?? [] {
+            for c in (item["content"] as? [[String: Any]]) ?? [] {
+                if let t = c["text"] as? String { parts.append(t) }
+            }
+        }
+        return parts.joined()
+    }
+
+    // MARK: - Dynamic model lists (judge picker)
+
+    /// Fetch the available model ids for a provider, for the Fusion judge
+    /// picker. Resolves a credential from `apiKey` (token mode) or the
+    /// subscription store (subscription mode), GETs the provider's /v1/models,
+    /// and falls back to a small hardcoded list on any failure.
+    static func listModels(provider: Profile.Tool, authMode: Profile.AuthMode,
+                           apiKey: String?, profileID: UUID?) async -> [String] {
+        var cred: Cred?
+        switch (provider, authMode) {
+        case (.claude, .subscription):
+            if let r = HTTPMitmConnection.claudeSubscriptionProvider?()?.1,
+               let t = try? await r.accessToken(for: profileID) { cred = .anthropicBearer(t) }
+        case (.claude, _):
+            cred = apiKey.map(Cred.anthropicKey)
+        case (.codex, .subscription):
+            if let r = HTTPMitmConnection.codexSubscriptionProvider?()?.1,
+               let t = try? await r.accessToken(for: profileID) { cred = .openAISubscription(t) }
+        case (.codex, _):
+            cred = apiKey.map(Cred.openAIKey)
+        case (.grok, .subscription):
+            if let r = HTTPMitmConnection.grokSubscriptionProvider?()?.1,
+               let t = try? await r.accessToken(for: profileID) { cred = .grokSubscription(t) }
+        case (.grok, _):
+            cred = apiKey.map(Cred.grokKey)
+        }
+        guard let cred else { return defaultModels(provider) }
+        let fetched = await fetchModels(cred: cred)
+        return fetched.isEmpty ? defaultModels(provider) : fetched
+    }
+
+    private static func defaultModels(_ provider: Profile.Tool) -> [String] {
+        switch provider {
+        case .claude: return ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+        case .codex:  return ["gpt-5.5-2026-04-23", "gpt-5", "gpt-4o"]
+        case .grok:   return ["grok-build", "grok-4", "grok-3"]
+        }
+    }
+
+    private static func fetchModels(cred: Cred) async -> [String] {
+        let (base, header): (String, (String, String)) = {
+            switch cred {
+            case .anthropicBearer(let t): return ("https://api.anthropic.com", ("Authorization", "Bearer \(t)"))
+            case .anthropicKey(let k):    return ("https://api.anthropic.com", ("x-api-key", k))
+            case .openAIKey(let k):       return ("https://api.openai.com", ("Authorization", "Bearer \(k)"))
+            case .openAISubscription(let t): return ("https://chatgpt.com/backend-api", ("Authorization", "Bearer \(t)"))
+            case .grokKey(let k):         return ("https://api.x.ai", ("Authorization", "Bearer \(k)"))
+            case .grokSubscription(let t): return ("https://cli-chat-proxy.grok.com", ("Authorization", "Bearer \(t)"))
+            }
+        }()
+        guard let url = URL(string: "\(base)/v1/models") else { return [] }
+        var r = URLRequest(url: url)
+        r.timeoutInterval = 20
+        r.setValue(header.1, forHTTPHeaderField: header.0)
+        if case .anthropicBearer = cred { r.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta") }
+        if base.contains("anthropic") { r.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version") }
+        let session = URLSession(configuration: .ephemeral)
+        guard let (data, resp) = try? await session.data(for: r),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let arr = obj["data"] as? [[String: Any]] else { return [] }
+        return arr.compactMap { $0["id"] as? String }
+    }
+
     // MARK: Entry point
 
     /// Attempt to handle `rawRequest` (the post-swap, real-credentialed
@@ -151,6 +446,7 @@ enum Fusion {
                     session: URLSession,
                     tls: TLSServerStream,
                     swapper: TokenSwapper,
+                    config: Config,
                     profileID: UUID) async throws -> Outcome? {
 
         // ---- Eligibility: Anthropic /v1/messages POST only ----------
@@ -165,14 +461,6 @@ enum Fusion {
         guard let anthropicBody = (try? JSONSerialization.jsonObject(with: req.body))
                 as? [String: Any] else {
             log("eligible host but body wasn't JSON — falling through")
-            return nil
-        }
-
-        // ---- Need an OpenAI credential for leg B --------------------
-        guard let openAIToken = openAITokenInMap(swapper: swapper, profileID: profileID) else {
-            let hosts = swapper.entries(for: profileID)
-                .map { $0.host ?? "*" }.joined(separator: ", ")
-            log("no OpenAI credential in token map (map hosts: [\(hosts)]) — falling through to plain Claude relay")
             return nil
         }
 
@@ -221,51 +509,73 @@ enum Fusion {
         }
 
         let claudeText = extractAnthropicTextFromMessage(messageA)
-        log("leg A (Claude) is a TEXT turn — \(claudeText.count) chars; fusing")
+        log("leg A (Claude) is a TEXT turn — \(claudeText.count) chars; fusing legs=\(config.legs.map { $0.rawValue })")
 
-        // ===== Leg B: GPT (translated to chat-completions) ===========
-        // Only reached on text turns, so we never spend a GPT call on a
-        // tool-use turn.
-        let openAIBody = translateToOpenAI(anthropicBody: anthropicBody, model: openAIModel)
-        let gptAnswer = await callOpenAI(
-            body: openAIBody, token: openAIToken, session: session, callLog: callLog)
-        let gptText: String
-        switch gptAnswer {
-        case .success(let txt): gptText = txt; log("leg B (GPT) ok — \(txt.count) chars")
-        case .failure(let why):  gptText = ""; log("leg B (GPT) FAILED — \(why)")
+        // ===== Legs: one text answer per selected provider ===========
+        // Claude's answer is leg A (already have it). For every other selected
+        // provider, resolve a credential and ask the same question. Drop any
+        // leg that has no credential or errors. Only reached on text turns.
+        let guestSystem = flattenSystem(anthropicBody["system"]) ?? ""
+        let transcript = flattenTranscript(anthropicBody)
+        let question = lastUserText(anthropicBody: anthropicBody)
+
+        var answers: [(provider: String, text: String)] = []
+        for leg in config.legs {
+            if leg == .claude {
+                if !claudeText.isEmpty { answers.append(("Claude", claudeText)) }
+                continue
+            }
+            guard let mode = config.authModes[leg],
+                  let cred = await resolveCred(tool: leg, authMode: mode,
+                                               swapper: swapper, profileID: profileID) else {
+                log("leg \(leg.rawValue): no usable credential — dropping")
+                continue
+            }
+            let model = config.legModels[leg] ?? defaultLegModel(leg, mode)
+            if let txt = await askModel(cred: cred, model: model,
+                                        system: guestSystem.isEmpty ? legSystem : guestSystem,
+                                        question: transcript.isEmpty ? question : transcript,
+                                        maxTokens: synthMaxTokens, session: session, callLog: callLog),
+               !txt.isEmpty {
+                answers.append((leg.displayName, txt))
+                log("leg \(leg.rawValue) (\(model)) ok — \(txt.count) chars")
+            } else {
+                log("leg \(leg.rawValue) (\(model)) produced no answer — dropping")
+            }
         }
 
-        // If GPT failed we have nothing to fuse against — just return
-        // Claude's own text answer rather than a degraded single-model
-        // "fusion".
-        if gptText.isEmpty {
+        // Need at least two drafts to fuse — otherwise return Claude's answer.
+        if answers.count < 2 {
             let wire = wireFromMessage(messageA, wantsStream: wantsStream)
             try tls.write(wire)
-            log("no GPT draft — returning Claude's text answer unchanged (\(wire.count) wire bytes)")
+            log("only \(answers.count) leg answer(s) — returning Claude's answer unchanged (\(wire.count) wire bytes)")
             return Outcome(buffer: wire, wireBytes: wire.count, subCalls: callLog.calls)
         }
 
-        // The user-visible question = the last user turn. Used to ground
-        // the judge + synthesis prompts.
-        let question = lastUserText(anthropicBody: anthropicBody)
+        // ===== Judge + synthesis on the configured judge model ========
+        guard let judgeMode = config.authModes[config.judgeProvider],
+              let judgeCred = await resolveCred(tool: config.judgeProvider, authMode: judgeMode,
+                                                swapper: swapper, profileID: profileID) else {
+            // Judge unusable → return Claude's own answer rather than nothing.
+            let wire = wireFromMessage(messageA, wantsStream: wantsStream)
+            try tls.write(wire)
+            log("judge (\(config.judgeProvider.rawValue)) has no credential — returning Claude's answer")
+            return Outcome(buffer: wire, wireBytes: wire.count, subCalls: callLog.calls)
+        }
 
-        // ===== Judge: structured analysis (NOT a combined answer) =====
-        let analysis = await judge(question: question,
-                                   claude: claudeText, gpt: gptText,
-                                   model: judgeModel,
-                                   host: host, headers: req.headers,
-                                   session: session, callLog: callLog)
-        log("judge analysis — \(analysis.count) chars of JSON")
+        let analysis = await askModel(cred: judgeCred, model: config.judgeModel,
+                                      system: judgeSystem, question: judgeUser(question: question, answers: answers),
+                                      maxTokens: synthMaxTokens, session: session, callLog: callLog)
+            ?? "{\"error\":\"judge call failed\"}"
+        log("judge (\(config.judgeProvider.rawValue)/\(config.judgeModel)) — \(analysis.count) chars")
 
-        // ===== Synthesis: final answer FROM the analysis ==============
-        var finalText = await synthesize(question: question, analysis: analysis,
-                                         model: judgeModel,
-                                         host: host, headers: req.headers,
-                                         session: session, callLog: callLog)
+        var finalText = await askModel(cred: judgeCred, model: config.judgeModel,
+                                       system: synthSystem,
+                                       question: "QUESTION:\n\(question)\n\nANALYSIS (JSON):\n\(analysis)\n\nWrite the final answer now.",
+                                       maxTokens: synthMaxTokens, session: session, callLog: callLog) ?? ""
         if finalText.isEmpty {
-            // Degrade gracefully: prefer Claude's raw draft, else GPT's.
-            finalText = claudeText.isEmpty ? gptText : claudeText
-            log("synthesis empty — falling back to a raw model draft (\(finalText.count) chars)")
+            finalText = answers.first?.text ?? claudeText
+            log("synthesis empty — falling back to a raw draft (\(finalText.count) chars)")
         } else {
             log("synthesis ok — final answer \(finalText.count) chars")
         }
@@ -445,92 +755,73 @@ enum Fusion {
         return out
     }
 
-    // MARK: - Judge + synthesis
+    // MARK: - Judge + synthesis prompts (N-way)
+
+    /// System prompt for a leg model when it doesn't carry the guest's own
+    /// system prompt. Kept minimal — just answer the question well.
+    private static let legSystem =
+        "You are a helpful expert assistant. Answer the user's question as completely and correctly as you can."
 
     private static let judgeSystem = """
-    You are an impartial analysis engine comparing two AI answers to the \
-    same question. Do NOT write a combined or improved answer. Your only \
-    job is to map the terrain between the two answers.
+    You are an impartial analysis engine comparing several AI answers to the \
+    same question. Do NOT write a combined or improved answer. Your only job \
+    is to map the terrain between the answers.
 
     Respond with a single JSON object and nothing else, of the shape:
     {
-      "consensus":      [ "points both answers agree on" ],
-      "conflicts":      [ { "topic": "...", "answer_a": "...", "answer_b": "..." } ],
-      "unique_to_a":    [ "insights only answer A had" ],
-      "unique_to_b":    [ "insights only answer B had" ],
-      "blind_spots":    [ "things both answers missed or got wrong" ],
-      "verdict":        "one sentence on which answer is stronger and why"
+      "consensus":   [ "points the answers agree on" ],
+      "conflicts":   [ { "topic": "...", "positions": "who says what" } ],
+      "unique":      [ { "source": "provider name", "insight": "..." } ],
+      "blind_spots": [ "things the answers missed or got wrong" ],
+      "verdict":     "one sentence on which answer is strongest and why"
     }
-    Answer A is from Claude. Answer B is from GPT.
+    Each answer is labelled with the provider that produced it.
     """
 
     private static let synthSystem = """
-    You are writing the definitive final answer to a user's question. \
-    You are given a structured ANALYSIS comparing two earlier draft \
-    answers (one from Claude, one from GPT): where they agreed, where \
-    they conflicted, what each uniquely contributed, and what both \
-    missed.
+    You are writing the definitive final answer to a user's question. You are \
+    given a structured ANALYSIS comparing several earlier draft answers from \
+    different models: where they agreed, where they conflicted, what each \
+    uniquely contributed, and what they missed.
 
-    Use the analysis to write the single best answer. Resolve conflicts \
-    in favour of correctness, fold in the unique insights from both, and \
-    cover the blind spots. Write the answer directly to the user — do not \
-    mention the analysis, the drafts, or that multiple models were involved.
+    Use the analysis to write the single best answer. Resolve conflicts in \
+    favour of correctness, fold in the unique insights, and cover the blind \
+    spots. Write the answer directly to the user — do not mention the analysis, \
+    the drafts, or that multiple models were involved.
     """
 
-    private static func judge(question: String, claude: String, gpt: String,
-                              model: String, host: String,
-                              headers: [(String, String)],
-                              session: URLSession, callLog: CallLog) async -> String {
-        let user = """
-        QUESTION:
-        \(question)
+    /// Build the judge's user message: the question + each labelled answer.
+    private static func judgeUser(question: String,
+                                  answers: [(provider: String, text: String)]) -> String {
+        var s = "QUESTION:\n\(question)\n"
+        for (i, a) in answers.enumerated() {
+            s += "\nANSWER \(i + 1) (\(a.provider)):\n\(a.text.isEmpty ? "(no answer)" : a.text)\n"
+        }
+        s += "\nProduce the JSON analysis now."
+        return s
+    }
 
-        ANSWER A (Claude):
-        \(claude.isEmpty ? "(no answer)" : claude)
-
-        ANSWER B (GPT):
-        \(gpt.isEmpty ? "(no answer)" : gpt)
-
-        Produce the JSON analysis now.
-        """
-        let body = anthropicCall(model: model, system: judgeSystem, user: user)
-        let res = await callAnthropic(body: body, host: host, headers: headers,
-                                      session: session, callLog: callLog)
-        switch res {
-        case .success(let s): return s
-        case .failure(let e):
-            log("judge leg FAILED — \(e)")
-            return "{\"error\":\"judge call failed\"}"
+    /// Default leg model per provider + auth mode when the panel hasn't pinned
+    /// one. ChatGPT-account Codex only accepts its own models (e.g. gpt-5-codex),
+    /// not the public API model ids.
+    private static func defaultLegModel(_ tool: Profile.Tool, _ authMode: Profile.AuthMode) -> String {
+        switch tool {
+        case .claude: return "claude-opus-4-8"
+        case .codex:  return authMode == .subscription ? "gpt-5-codex" : "gpt-5.5-2026-04-23"
+        case .grok:   return "grok-build"
         }
     }
 
-    private static func synthesize(question: String, analysis: String,
-                                   model: String, host: String,
-                                   headers: [(String, String)],
-                                   session: URLSession, callLog: CallLog) async -> String {
-        let user = """
-        QUESTION:
-        \(question)
-
-        ANALYSIS (JSON):
-        \(analysis)
-
-        Write the final answer now.
-        """
-        let body = anthropicCall(model: model, system: synthSystem, user: user)
-        let res = await callAnthropic(body: body, host: host, headers: headers,
-                                      session: session, callLog: callLog)
-        return (try? res.get()) ?? ""
-    }
-
-    /// Minimal single-turn Anthropic /v1/messages body.
-    private static func anthropicCall(model: String, system: String, user: String) -> [String: Any] {
-        [
-            "model": model,
-            "max_tokens": synthMaxTokens,
-            "system": system,
-            "messages": [["role": "user", "content": user]],
-        ]
+    /// Flatten the whole guest dialogue (all turns) into a single transcript
+    /// string so non-Claude legs answer with the same context Claude saw.
+    private static func flattenTranscript(_ anthropicBody: [String: Any]) -> String {
+        var parts: [String] = []
+        for m in (anthropicBody["messages"] as? [[String: Any]]) ?? [] {
+            let role = (m["role"] as? String) ?? "user"
+            let text = flattenContent(m["content"])
+            if !text.isEmpty { parts.append("\(role.uppercased()): \(text)") }
+        }
+        return parts.joined(separator: "\n\n")
     }
 
     // MARK: - Format translation (Anthropic → OpenAI chat-completions)

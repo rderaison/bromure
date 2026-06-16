@@ -55,6 +55,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Set once by `MitmEngine.register`; nil → treat as disengaged.
     /// Static, same rationale as `promptInjectionPolicyProvider`.
     nonisolated(unsafe) static var fusionEngagedProvider: (@Sendable (UUID) -> Bool)?
+    /// Per-profile Fusion config (legs + judge + auth modes). nil → not
+    /// configured. Set by `MitmEngine.register`; same static-provider rationale.
+    nonisolated(unsafe) static var fusionConfigProvider: (@Sendable (UUID) -> Fusion.Config?)?
     /// Reaches the host-owned Claude subscription store + refresher. nil →
     /// subscription auth off. Set once by `MitmEngine.register`; static, same
     /// rationale as the providers above.
@@ -897,10 +900,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // off in the UI wouldn't actually turn it off.
         let fusionOn = Self.fusionEngagedProvider?(profileID) ?? false
         if fusionOn,
+           let fusionConfig = Self.fusionConfigProvider?(profileID),
            let outcome = try await Fusion.run(rawRequest: toForward,
                                               host: host, port: port,
                                               session: session, tls: tls,
                                               swapper: swapper,
+                                              config: fusionConfig,
                                               profileID: profileID) {
             let elapsed = Date().timeIntervalSince(t0) * 1000
             // Trace each upstream model call Fusion made (leg A/B, judge,
