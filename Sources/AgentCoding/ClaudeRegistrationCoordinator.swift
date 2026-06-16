@@ -15,6 +15,12 @@ import Virtualization
 /// tokens we read them over the vsock token bridge, persist them, and destroy
 /// the VM.
 
+public extension Notification.Name {
+    /// Posted after a subscription credential is registered or forgotten, so
+    /// open editors re-read their per-tool registration status.
+    static let bromureSubscriptionStoresChanged = Notification.Name("bromureSubscriptionStoresChanged")
+}
+
 public enum SubscriptionProvider: Sendable {
     case claude
     case codex
@@ -339,6 +345,8 @@ extension ACAppDelegate {
         }
 
         let providerName = state.provider.displayName
+        // Let any open profile editor flip its inline Register → Re-register.
+        NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
         teardownClaudeRegistration(reason: .success)
 
         let done = NSAlert()

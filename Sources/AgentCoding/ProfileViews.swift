@@ -285,7 +285,7 @@ public extension Notification.Name {
 
 enum EditorCategory: String, CaseIterable, Identifiable {
     case general     = "General"
-    case models      = "Models"
+    case models      = "Agents"
     case folders     = "Folders"
     case credentials = "Credentials"
     case environment = "Environment"
@@ -394,6 +394,9 @@ struct ProfileEditorView: View {
     /// "Generate SSH key" toggle is decoupled from the model — only used
     /// to decide whether to call ssh-keygen on save.
     @State private var generateSSH: Bool
+    /// Bumped on `.bromureSubscriptionStoresChanged` to re-read per-tool
+    /// registration status after a register/forget (runs in another window).
+    @State private var subscriptionRefreshTick = 0
 
     /// Sheet state for the SSH-key import flow.
     @State private var importSheet: ImportSheetState?
@@ -429,20 +432,20 @@ struct ProfileEditorView: View {
     /// Called when the user removes a row — frees the on-disk file +
     /// keychain entry. Provided by ACAppDelegate.
     let onRemoveSSHKey: ((ImportedSSHKey) -> Void)?
-    /// When this profile/preferences has a stored Claude subscription
-    /// credential, the date it was captured (for the "registered ✓" status).
-    let claudeAccountSavedAt: Date?
+    /// Returns the date this profile/preferences' Claude subscription was
+    /// captured (nil = not registered). A closure (not a value) so it's
+    /// re-read live after a register/forget. nil = no proxy engine → hide.
+    let claudeAccountSavedAt: (() -> Date?)?
     /// Launch the "Register with Claude" flow (scope baked in by the caller).
-    /// nil hides the row entirely (e.g. no proxy engine).
     let onRegisterClaude: (() -> Void)?
     /// Forget the stored Claude credential for this scope.
     let onForgetClaude: (() -> Void)?
     /// ChatGPT / Codex counterparts of the three above.
-    let codexAccountSavedAt: Date?
+    let codexAccountSavedAt: (() -> Date?)?
     let onRegisterCodex: (() -> Void)?
     let onForgetCodex: (() -> Void)?
     /// Grok (xAI) counterparts.
-    let grokAccountSavedAt: Date?
+    let grokAccountSavedAt: (() -> Date?)?
     let onRegisterGrok: (() -> Void)?
     let onForgetGrok: (() -> Void)?
 
@@ -455,13 +458,13 @@ struct ProfileEditorView: View {
         onCancel: @escaping () -> Void,
         onImportSSHKey: ((URL, _ passphrase: String?, _ label: String) throws -> ImportedSSHKey)? = nil,
         onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil,
-        claudeAccountSavedAt: Date? = nil,
+        claudeAccountSavedAt: (() -> Date?)? = nil,
         onRegisterClaude: (() -> Void)? = nil,
         onForgetClaude: (() -> Void)? = nil,
-        codexAccountSavedAt: Date? = nil,
+        codexAccountSavedAt: (() -> Date?)? = nil,
         onRegisterCodex: (() -> Void)? = nil,
         onForgetCodex: (() -> Void)? = nil,
-        grokAccountSavedAt: Date? = nil,
+        grokAccountSavedAt: (() -> Date?)? = nil,
         onRegisterGrok: (() -> Void)? = nil,
         onForgetGrok: (() -> Void)? = nil
     ) {
@@ -744,6 +747,7 @@ struct ProfileEditorView: View {
                 .foregroundStyle(.secondary)
 
             ForEach(Profile.Tool.allCases, id: \.self) { t in
+                let sub = subscriptionInfo(for: t)
                 ToolConfigCard(
                     tool: t,
                     isPrimary: draft.tool == t,
@@ -752,72 +756,35 @@ struct ProfileEditorView: View {
                     bedrockModelID: $draft.bedrockModelID,
                     onToggleEnabled: { setToolEnabled(t, enabled: $0) },
                     onMakePrimary: { setPrimary(t) },
-                    profileDirHint: profileDirHint
+                    profileDirHint: profileDirHint,
+                    subscriptionRegisteredAt: sub.savedAt,
+                    onRegisterSubscription: sub.onRegister,
+                    onForgetSubscription: sub.onForget
                 )
             }
-
-            subscriptionAccountRows
 
             Divider().padding(.vertical, 6)
 
             fusionToggle
         }
-    }
-
-    /// "Register with Claude / ChatGPT" status + actions. Sign in once in a
-    /// throwaway VM; the tokens stay on the host and are shared with
-    /// subscription-mode sessions so the guest never logs in or holds a
-    /// credential.
-    @ViewBuilder
-    private var subscriptionAccountRows: some View {
-        if onRegisterClaude != nil || onRegisterCodex != nil || onRegisterGrok != nil {
-            Divider().padding(.vertical, 6)
-            VStack(alignment: .leading, spacing: 10) {
-                if let onRegisterClaude {
-                    subscriptionAccountRow(
-                        name: "Claude", savedAt: claudeAccountSavedAt,
-                        onRegister: onRegisterClaude, onForget: onForgetClaude)
-                }
-                if let onRegisterCodex {
-                    subscriptionAccountRow(
-                        name: "ChatGPT", savedAt: codexAccountSavedAt,
-                        onRegister: onRegisterCodex, onForget: onForgetCodex)
-                }
-                if let onRegisterGrok {
-                    subscriptionAccountRow(
-                        name: "Grok", savedAt: grokAccountSavedAt,
-                        onRegister: onRegisterGrok, onForget: onForgetGrok)
-                }
-                Text("Sign in once in a temporary, isolated VM. Bromure keeps the tokens on this Mac and shares them with subscription-mode sessions, so the guest never logs in or holds a credential.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+        // Re-read registration status when a register/forget completes (it runs
+        // in a separate window), so the inline controls flip without reopening.
+        .onReceive(NotificationCenter.default.publisher(
+            for: .bromureSubscriptionStoresChanged)) { _ in
+            subscriptionRefreshTick &+= 1
         }
     }
 
-    @ViewBuilder
-    private func subscriptionAccountRow(name: String, savedAt: Date?,
-                                        onRegister: @escaping () -> Void,
-                                        onForget: (() -> Void)?) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: savedAt != nil
-                  ? "checkmark.seal.fill" : "person.crop.circle.badge.questionmark")
-                .foregroundStyle(savedAt != nil ? Color.green : Color.secondary)
-            if let saved = savedAt {
-                Text("\(name) account registered")
-                Text("· saved \(saved.formatted(.relative(presentation: .named)))")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
-                Text("No \(name) account registered")
-            }
-            Spacer()
-            Button(savedAt != nil
-                   ? NSLocalizedString("Re-register…", comment: "")
-                   : String(format: NSLocalizedString("Register with %@…", comment: ""), name)) {
-                onRegister()
-            }
-            if savedAt != nil, let onForget {
-                Button(NSLocalizedString("Forget", comment: ""), role: .destructive) { onForget() }
-            }
+    /// Per-tool subscription registration status + actions, routed to the
+    /// matching account closures supplied by the host. The savedAt closures are
+    /// re-read on every render (bumped by `subscriptionRefreshTick`).
+    private func subscriptionInfo(for tool: Profile.Tool)
+        -> (savedAt: Date?, onRegister: (() -> Void)?, onForget: (() -> Void)?) {
+        _ = subscriptionRefreshTick   // tie re-render to the refresh counter
+        switch tool {
+        case .claude: return (claudeAccountSavedAt?(), onRegisterClaude, onForgetClaude)
+        case .codex:  return (codexAccountSavedAt?(), onRegisterCodex, onForgetCodex)
+        case .grok:   return (grokAccountSavedAt?(), onRegisterGrok, onForgetGrok)
         }
     }
 
@@ -3555,6 +3522,12 @@ private struct ToolConfigCard: View {
     let onToggleEnabled: (Bool) -> Void
     let onMakePrimary: () -> Void
     let profileDirHint: String
+    /// Date this tool's subscription was registered host-side (nil = not yet).
+    /// Drives the inline Register / Re-register+Forget controls on the
+    /// Subscription radio row. `onRegisterSubscription == nil` hides them.
+    let subscriptionRegisteredAt: Date?
+    let onRegisterSubscription: (() -> Void)?
+    let onForgetSubscription: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -3585,16 +3558,45 @@ private struct ToolConfigCard: View {
             }
 
             if isEnabled {
-                Picker("Auth", selection: $spec.authMode) {
+                // Custom radio group so the Subscription row can carry an inline
+                // Register / Re-register+Forget control.
+                VStack(alignment: .leading, spacing: 6) {
                     ForEach(Profile.AuthMode.allCases, id: \.self) { m in
                         if m == .bedrock && tool != .claude {
                             EmptyView()
                         } else {
-                            Text(m.displayName).tag(m)
+                            HStack(spacing: 8) {
+                                Button { spec.authMode = m } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: spec.authMode == m
+                                              ? "largecircle.fill.circle" : "circle")
+                                            .foregroundStyle(spec.authMode == m
+                                                             ? Color.accentColor : Color.secondary)
+                                        Text(m.displayName).foregroundStyle(.primary)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+
+                                if m == .subscription, let onRegister = onRegisterSubscription {
+                                    if subscriptionRegisteredAt != nil {
+                                        Image(systemName: "checkmark.seal.fill")
+                                            .foregroundStyle(.green).controlSize(.small)
+                                        Button(NSLocalizedString("Re-register…", comment: "")) { onRegister() }
+                                            .buttonStyle(.borderless).controlSize(.small)
+                                        if let onForget = onForgetSubscription {
+                                            Button(NSLocalizedString("Forget", comment: ""),
+                                                   role: .destructive) { onForget() }
+                                                .buttonStyle(.borderless).controlSize(.small)
+                                        }
+                                    } else {
+                                        Button(NSLocalizedString("Register…", comment: "")) { onRegister() }
+                                            .buttonStyle(.borderless).controlSize(.small)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-                .pickerStyle(.radioGroup)
 
                 switch spec.authMode {
                 case .token:
@@ -3613,9 +3615,7 @@ private struct ToolConfigCard: View {
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
                 case .subscription:
-                    Text("You'll run `\(tool.rawValue) login` once inside the VM.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    EmptyView()
                 case .bedrock:
                     Text("Claude Code will authenticate via AWS Bedrock using the credentials configured in the AWS section below.")
                         .font(.caption)

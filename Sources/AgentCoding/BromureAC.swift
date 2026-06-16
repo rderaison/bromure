@@ -1719,26 +1719,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self?.preferencesWindow?.close()
                 self?.preferencesWindow = nil
             },
-            claudeAccountSavedAt: mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt,
+            claudeAccountSavedAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt },
             onRegisterClaude: { [weak self] in
                 self?.beginSubscriptionRegistration(provider: .claude, scope: .alwaysShared)
             },
             onForgetClaude: { [weak self] in
                 try? self?.mitmEngine?.claudeSubscriptionStore.forget(for: nil)
+                NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
             },
-            codexAccountSavedAt: mitmEngine?.codexSubscriptionStore.record(for: nil)?.savedAt,
+            codexAccountSavedAt: { [weak self] in self?.mitmEngine?.codexSubscriptionStore.record(for: nil)?.savedAt },
             onRegisterCodex: { [weak self] in
                 self?.beginSubscriptionRegistration(provider: .codex, scope: .alwaysShared)
             },
             onForgetCodex: { [weak self] in
                 try? self?.mitmEngine?.codexSubscriptionStore.forget(for: nil)
+                NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
             },
-            grokAccountSavedAt: mitmEngine?.grokSubscriptionStore.record(for: nil)?.savedAt,
+            grokAccountSavedAt: { [weak self] in self?.mitmEngine?.grokSubscriptionStore.record(for: nil)?.savedAt },
             onRegisterGrok: { [weak self] in
                 self?.beginSubscriptionRegistration(provider: .grok, scope: .alwaysShared)
             },
             onForgetGrok: { [weak self] in
                 try? self?.mitmEngine?.grokSubscriptionStore.forget(for: nil)
+                NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
             }
         ))
         win.makeKeyAndOrderFront(nil)
@@ -1902,32 +1905,50 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 guard let self, let editing else { return }
                 self.removeImportedSSHKey(key, for: editing)
             },
-            claudeAccountSavedAt: (editing ?? initialDraft).flatMap { p in
-                mitmEngine?.claudeSubscriptionStore.record(for: p.id)?.savedAt
-            } ?? mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt,
+            claudeAccountSavedAt: (editing ?? initialDraft).map { p in
+                { [weak self] in
+                    self?.mitmEngine?.claudeSubscriptionStore.record(for: p.id)?.savedAt
+                        ?? self?.mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt
+                }
+            },
             onRegisterClaude: (editing ?? initialDraft).map { p in
                 { [weak self] in self?.beginSubscriptionRegistration(provider: .claude, scope: .askPerSession(p.id)) }
             },
             onForgetClaude: (editing ?? initialDraft).map { p in
-                { [weak self] in try? self?.mitmEngine?.claudeSubscriptionStore.forget(for: p.id) }
+                { [weak self] in
+                    try? self?.mitmEngine?.claudeSubscriptionStore.forget(for: p.id)
+                    NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+                }
             },
-            codexAccountSavedAt: (editing ?? initialDraft).flatMap { p in
-                mitmEngine?.codexSubscriptionStore.record(for: p.id)?.savedAt
-            } ?? mitmEngine?.codexSubscriptionStore.record(for: nil)?.savedAt,
+            codexAccountSavedAt: (editing ?? initialDraft).map { p in
+                { [weak self] in
+                    self?.mitmEngine?.codexSubscriptionStore.record(for: p.id)?.savedAt
+                        ?? self?.mitmEngine?.codexSubscriptionStore.record(for: nil)?.savedAt
+                }
+            },
             onRegisterCodex: (editing ?? initialDraft).map { p in
                 { [weak self] in self?.beginSubscriptionRegistration(provider: .codex, scope: .askPerSession(p.id)) }
             },
             onForgetCodex: (editing ?? initialDraft).map { p in
-                { [weak self] in try? self?.mitmEngine?.codexSubscriptionStore.forget(for: p.id) }
+                { [weak self] in
+                    try? self?.mitmEngine?.codexSubscriptionStore.forget(for: p.id)
+                    NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+                }
             },
-            grokAccountSavedAt: (editing ?? initialDraft).flatMap { p in
-                mitmEngine?.grokSubscriptionStore.record(for: p.id)?.savedAt
-            } ?? mitmEngine?.grokSubscriptionStore.record(for: nil)?.savedAt,
+            grokAccountSavedAt: (editing ?? initialDraft).map { p in
+                { [weak self] in
+                    self?.mitmEngine?.grokSubscriptionStore.record(for: p.id)?.savedAt
+                        ?? self?.mitmEngine?.grokSubscriptionStore.record(for: nil)?.savedAt
+                }
+            },
             onRegisterGrok: (editing ?? initialDraft).map { p in
                 { [weak self] in self?.beginSubscriptionRegistration(provider: .grok, scope: .askPerSession(p.id)) }
             },
             onForgetGrok: (editing ?? initialDraft).map { p in
-                { [weak self] in try? self?.mitmEngine?.grokSubscriptionStore.forget(for: p.id) }
+                { [weak self] in
+                    try? self?.mitmEngine?.grokSubscriptionStore.forget(for: p.id)
+                    NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+                }
             }
         ))
         win.isReleasedWhenClosed = false
