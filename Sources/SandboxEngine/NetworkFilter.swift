@@ -25,6 +25,17 @@ public final class NetworkFilter: @unchecked Sendable {
 
     private let hostFD: Int32
     private var vmnetInterface: interface_ref?
+
+    /// Where this filter's uplink goes: its own vmnet interface (bridged mode
+    /// or NAT fallback) or a port on the process-wide ``VMNetSwitch`` (the NAT
+    /// default — one shared interface + our own DHCP, so every VM gets a
+    /// distinct lease).
+    private enum Uplink { case vmnet; case switchPort(Int32) }
+    private let uplink: Uplink
+    /// Retained switch-port handle (switch mode only) so its fd stays open and
+    /// we can detach from the switch on stop.
+    private let switchHandle: FileHandle?
+
     private let vmnetQueue: DispatchQueue
     private let readQueue: DispatchQueue
     private var maxPacketSize: Int = 1600
@@ -84,9 +95,13 @@ public final class NetworkFilter: @unchecked Sendable {
     ///   - subnet: Custom subnet for shared (NAT) mode, isolating this process's
     ///     network from other Bromure apps. Ignored in bridged mode. nil = vmnet's
     ///     default 192.168.64.0/24.
+    ///   - switchPort: A ``VMNetSwitch`` port handle. When non-nil this filter
+    ///     does not start its own vmnet interface — it forwards to/from the shared
+    ///     switch instead (NAT default). Takes precedence over `bridgedInterface`
+    ///     and `subnet`.
     ///
     /// Returns nil if vmnet cannot be started (missing entitlement or other error).
-    public init?(networkInfo: HostNetworkInfo, dnsOverrideServers: [UInt32] = [], bridgedInterface: String? = nil, subnet: VmnetSubnet? = nil) {
+    public init?(networkInfo: HostNetworkInfo, dnsOverrideServers: [UInt32] = [], bridgedInterface: String? = nil, subnet: VmnetSubnet? = nil, switchPort: FileHandle? = nil) {
         // Create datagram socketpair
         var fds: [Int32] = [0, 0]
         guard fds.withUnsafeMutableBufferPointer({ buf in
@@ -113,15 +128,35 @@ public final class NetworkFilter: @unchecked Sendable {
         self.gatewayIP = networkInfo.gateway
         self.dnsServers = Set(networkInfo.dnsServers)
         self.dnsOverrideServers = dnsOverrideServers
-        self.bridgedInterface = bridgedInterface
+        self.bridgedInterface = switchPort == nil ? bridgedInterface : nil
 
-        // A custom subnet only applies to shared (NAT) mode; bridged VMs live
-        // on the host's physical LAN, so there's no vmnet subnet to choose.
-        let activeSubnet = (bridgedInterface == nil) ? subnet : nil
-        self.requestedSubnet = activeSubnet
-        self.vmnetGateway = activeSubnet?.gateway ?? 0xC0A8_4001   // 192.168.64.1
-        self.vmnetSubnet  = activeSubnet?.network ?? 0xC0A8_4000   // 192.168.64.0
-        self.vmnetMask    = activeSubnet?.mask    ?? 0xFFFF_FF00   // /24
+        if let switchPort {
+            // Switch-backed NAT: no vmnet interface of our own — egress goes to
+            // the shared VMNetSwitch (one interface for the whole app, its own
+            // DHCP). Filter rules use the switch's actual leased subnet so
+            // "allow gateway" / "deny inter-VM subnet" stay correct.
+            self.uplink = .switchPort(switchPort.fileDescriptor)
+            self.switchHandle = switchPort
+            self.requestedSubnet = nil
+            // We never get vmnet's max-packet-size callback in switch mode, so
+            // size the frame buffers generously to never truncate a datagram
+            // the switch forwards (the socket buffers above are already 1 MB).
+            self.maxPacketSize = 65536
+            let s = VMNetSwitch.shared.subnet
+            self.vmnetGateway = s?.gateway ?? 0xC0A8_4001
+            self.vmnetSubnet  = s?.network ?? 0xC0A8_4000
+            self.vmnetMask    = s?.mask    ?? 0xFFFF_FF00
+        } else {
+            self.uplink = .vmnet
+            self.switchHandle = nil
+            // A custom subnet only applies to shared (NAT) mode; bridged VMs live
+            // on the host's physical LAN, so there's no vmnet subnet to choose.
+            let activeSubnet = (bridgedInterface == nil) ? subnet : nil
+            self.requestedSubnet = activeSubnet
+            self.vmnetGateway = activeSubnet?.gateway ?? 0xC0A8_4001   // 192.168.64.1
+            self.vmnetSubnet  = activeSubnet?.network ?? 0xC0A8_4000   // 192.168.64.0
+            self.vmnetMask    = activeSubnet?.mask    ?? 0xFFFF_FF00   // /24
+        }
 
         if dnsDebug {
             if dnsOverrideServers.isEmpty {
@@ -135,14 +170,18 @@ public final class NetworkFilter: @unchecked Sendable {
         self.vmnetQueue = DispatchQueue(label: "io.bromure.vmnet", qos: .userInteractive)
         self.readQueue = DispatchQueue(label: "io.bromure.vmnet-read", qos: .userInteractive)
 
-        // Start vmnet interface in shared (NAT) mode
-        guard startVmnet() else {
-            Darwin.close(vmSideFD)
-            Darwin.close(hostFD)
-            return nil
+        // Start vmnet interface in shared (NAT) / bridged mode — unless we're
+        // riding on the shared switch, which already owns the vmnet interface.
+        if case .vmnet = uplink {
+            guard startVmnet() else {
+                Darwin.close(vmSideFD)
+                Darwin.close(hostFD)
+                return nil
+            }
+            if fwDebug { print("[NetworkFilter] vmnet proxy started (pass-through until activateFiltering())") }
+        } else if fwDebug {
+            print("[NetworkFilter] switch-backed proxy started (pass-through until activateFiltering())")
         }
-
-        if fwDebug { print("[NetworkFilter] vmnet proxy started (pass-through until activateFiltering())") }
 
         startProxy()
     }
@@ -220,10 +259,18 @@ public final class NetworkFilter: @unchecked Sendable {
     public func stop() {
         guard !stopped else { return }
         stopped = true
-        Darwin.close(hostFD)
-        if let iface = vmnetInterface {
-            vmnet_stop_interface(iface, vmnetQueue) { _ in }
-            vmnetInterface = nil
+        switch uplink {
+        case .vmnet:
+            Darwin.close(hostFD)
+            if let iface = vmnetInterface {
+                vmnet_stop_interface(iface, vmnetQueue) { _ in }
+                vmnetInterface = nil
+            }
+        case .switchPort:
+            // Detaching closes the switch's end of the socketpair (EOF unblocks
+            // drainSwitchToVM); closing hostFD unblocks readVMLoop.
+            if let switchHandle { VMNetSwitch.shared.detachPort(switchHandle) }
+            Darwin.close(hostFD)
         }
         if fwDebug { print("[NetworkFilter] stopped") }
     }
@@ -280,16 +327,53 @@ public final class NetworkFilter: @unchecked Sendable {
     // MARK: - Packet proxy
 
     private func startProxy() {
-        guard let iface = vmnetInterface else { return }
+        switch uplink {
+        case .vmnet:
+            guard let iface = vmnetInterface else { return }
 
-        // vmnet → VM: register event callback for incoming packets
-        vmnet_interface_set_event_callback(iface, interface_event_t(rawValue: kVmnetInterfacePacketsAvail), vmnetQueue) { [weak self] _, _ in
-            self?.drainVmnetToVM()
+            // vmnet → VM: register event callback for incoming packets
+            vmnet_interface_set_event_callback(iface, interface_event_t(rawValue: kVmnetInterfacePacketsAvail), vmnetQueue) { [weak self] _, _ in
+                self?.drainVmnetToVM()
+            }
+
+            // VM → vmnet: blocking read loop on a dedicated queue
+            readQueue.async { [weak self] in
+                self?.readVMLoop()
+            }
+        case .switchPort(let fd):
+            // VM → switch: filtered egress on the read queue.
+            readQueue.async { [weak self] in
+                self?.readVMLoop()
+            }
+            // switch → VM: drain the switch's frames toward the guest NIC.
+            vmnetQueue.async { [weak self] in
+                self?.drainSwitchToVM(fd)
+            }
         }
+    }
 
-        // VM → vmnet: blocking read loop on a dedicated queue
-        readQueue.async { [weak self] in
-            self?.readVMLoop()
+    /// Switch mode: read frames the switch sends toward this VM, optionally
+    /// rewrite DHCP DNS (the switch is now the DHCP server), forward to the guest.
+    private func drainSwitchToVM(_ fd: Int32) {
+        let bufSize = maxPacketSize
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
+        defer { buf.deallocate() }
+
+        while !stopped {
+            let n = Darwin.read(fd, buf, bufSize)
+            guard n > 0 else { break }
+            _packetCount.withLock { $0 += 1 }
+
+            if !dnsOverrideServers.isEmpty,
+               let rewritten = rewriteDHCPDNS(buf, count: n) {
+                let w = rewritten.withUnsafeBytes { ptr in
+                    Darwin.write(hostFD, ptr.baseAddress!, rewritten.count)
+                }
+                if w <= 0 { break }
+            } else {
+                let w = Darwin.write(hostFD, buf, n)
+                if w <= 0 { break }
+            }
         }
     }
 
@@ -349,12 +433,18 @@ public final class NetworkFilter: @unchecked Sendable {
 
             _packetCount.withLock { $0 += 1 }
 
-            guard let iface = vmnetInterface, !stopped else { break }
-            var iov = iovec(iov_base: buf, iov_len: n)
-            var count: Int32 = 1
-            withUnsafeMutablePointer(to: &iov) { iovPtr in
-                var pkt = vmpktdesc(vm_pkt_size: n, vm_pkt_iov: iovPtr, vm_pkt_iovcnt: 1, vm_flags: 0)
-                vmnet_write(iface, &pkt, &count)
+            guard !stopped else { break }
+            switch uplink {
+            case .vmnet:
+                guard let iface = vmnetInterface else { break }
+                var iov = iovec(iov_base: buf, iov_len: n)
+                var count: Int32 = 1
+                withUnsafeMutablePointer(to: &iov) { iovPtr in
+                    var pkt = vmpktdesc(vm_pkt_size: n, vm_pkt_iov: iovPtr, vm_pkt_iovcnt: 1, vm_flags: 0)
+                    vmnet_write(iface, &pkt, &count)
+                }
+            case .switchPort(let fd):
+                _ = Darwin.write(fd, buf, n)
             }
         }
     }

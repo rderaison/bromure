@@ -172,10 +172,25 @@ public final class VMPool {
         var networkFilter: NetworkFilter?
         for attempt in 1...3 {
             if let netInfo = HostNetworkInfo.detect() {
-                // In NAT mode, give this app its own subnet so it doesn't collide
-                // with other Bromure apps (e.g. Bromure AC) on vmnet's default net.
-                let subnet = bridgedInterface == nil ? NetworkIdentity.subnet(avoiding: netInfo) : nil
-                networkFilter = NetworkFilter(networkInfo: netInfo, bridgedInterface: bridgedInterface, subnet: subnet)
+                if bridgedInterface == nil {
+                    // NAT: route through the process-wide shared switch — one vmnet
+                    // interface for the whole app, with our own DHCP handing each
+                    // VM a distinct lease (kills #24's same-IP collision and Apple's
+                    // bootpd). Web walks the subnet up and keeps VMs isolated.
+                    VMNetSwitch.shared.configure(ascendingSubnet: true, bridgePeers: false)
+                    if let port = VMNetSwitch.shared.attachPort() {
+                        networkFilter = NetworkFilter(networkInfo: netInfo, switchPort: port)
+                        if networkFilter == nil { VMNetSwitch.shared.detachPort(port) }
+                    }
+                    if networkFilter == nil {
+                        // Switch couldn't start (e.g. entitlement not yet effective)
+                        // — fall back to a per-VM vmnet interface on our own subnet.
+                        let subnet = NetworkIdentity.subnet(avoiding: netInfo)
+                        networkFilter = NetworkFilter(networkInfo: netInfo, subnet: subnet)
+                    }
+                } else {
+                    networkFilter = NetworkFilter(networkInfo: netInfo, bridgedInterface: bridgedInterface)
+                }
             }
             if networkFilter != nil { break }
             if attempt < 3 {

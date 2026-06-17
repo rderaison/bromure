@@ -508,11 +508,29 @@ public final class LinuxImageManager {
             } else {
                 dnsOverride = []
             }
-            // Build the image on this app's own subnet too, so rebuilding while
-            // another Bromure app is running a VM doesn't collide on vmnet's
-            // default network.
-            let buildSubnet = bridgedIface == nil ? NetworkIdentity.subnet(avoiding: netInfo) : nil
-            if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, bridgedInterface: bridgedIface, subnet: buildSubnet) {
+            // Route the bake through the same shared switch a normal NAT VM
+            // takes, so the installer gets a collision-free DHCP lease on our
+            // own segment instead of vmnet's bootpd. Bridged bakes keep their
+            // own vmnet interface; fall back to a per-VM interface, then to
+            // Apple's NAT, if the switch can't come up.
+            if bridgedIface == nil {
+                VMNetSwitch.shared.configure(ascendingSubnet: true, bridgePeers: false)
+                if let port = VMNetSwitch.shared.attachPort() {
+                    if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, switchPort: port) {
+                        buildNetworkFilter = filter
+                    } else {
+                        VMNetSwitch.shared.detachPort(port)
+                    }
+                }
+                if buildNetworkFilter == nil {
+                    buildNetworkFilter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, subnet: NetworkIdentity.subnet(avoiding: netInfo))
+                }
+                if let filter = buildNetworkFilter {
+                    net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
+                } else {
+                    net.attachment = VZNATNetworkDeviceAttachment()
+                }
+            } else if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, bridgedInterface: bridgedIface) {
                 buildNetworkFilter = filter
                 net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
             } else {

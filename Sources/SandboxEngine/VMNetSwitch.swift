@@ -66,7 +66,17 @@ public final class VMNetSwitch: @unchecked Sendable {
     private let vmnetWriteLock = NSLock()
     private var maxPacketSize = 1600
     private var started = false
-    private var startFailed = false
+
+    // MARK: - Per-app policy (resolved before the interface starts)
+
+    /// Walk the subnet's third octet *up* (65…126) instead of *down* (64…2).
+    /// Bromure Web sets this so it never shares a band with AC (which walks
+    /// down). Defaults to AC's downward search.
+    private var ascendingSubnet = false
+    /// Forward frames directly between VMs on the switch. AC wants its VMs to
+    /// reach each other; Bromure Web keeps every ephemeral session mutually
+    /// unreachable, so it disables peer forwarding (internet egress still flows).
+    private var bridgePeers = true
 
     // MARK: - DHCP (we serve it ourselves)
 
@@ -93,6 +103,29 @@ public final class VMNetSwitch: @unchecked Sendable {
 
     private init() {}
 
+    // MARK: - Configuration
+
+    /// Opt into a non-default policy. Must be called before the first
+    /// `attachPort()` (no-op once the interface has started). Bromure Web calls
+    /// this to walk the subnet up and isolate its VMs; AC relies on the defaults.
+    public func configure(ascendingSubnet: Bool, bridgePeers: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !started else { return }
+        self.ascendingSubnet = ascendingSubnet
+        self.bridgePeers = bridgePeers
+    }
+
+    /// The subnet the shared interface is leasing from, once started. Lets a
+    /// switch-backed `NetworkFilter` build its filter rules from the real
+    /// gateway/network/mask instead of guessing.
+    public var subnet: VmnetSubnet? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard started else { return nil }
+        return VmnetSubnet(gateway: gatewayIP, mask: subnetMask, poolEnd: dhcpPoolEnd)
+    }
+
     // MARK: - Port lifecycle
 
     /// Attach a new VM to the switch.
@@ -103,15 +136,13 @@ public final class VMNetSwitch: @unchecked Sendable {
     public func attachPort() -> FileHandle? {
         lock.lock()
 
-        if startFailed {
-            lock.unlock()
-            return nil
-        }
         if !started {
             // Start the shared interface while holding the lock so two
             // concurrent attaches can't race two interfaces into existence.
+            // We deliberately don't latch a permanent failure: the vmnet
+            // entitlement can take a moment to become effective right after
+            // Gatekeeper approval, so a later attach is allowed to retry.
             guard startVmnetLocked() else {
-                startFailed = true
                 lock.unlock()
                 print("[VMNetSwitch] vmnet interface failed to start — caller should fall back to NAT")
                 return nil
@@ -181,7 +212,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         xpc_dictionary_set_uint64(desc, vmnet_operation_mode_key, UInt64(kVmnetSharedMode))
 
         // Pick a free 192.168.<octet>.0/24, avoiding any the host is really on.
-        let octet = Self.chooseSubnetOctet()
+        let octet = chooseSubnetOctet()
         let base: UInt32 = 0xC0A8_0000 | (UInt32(octet) << 8)  // 192.168.octet.0
         gatewayIP = base | 1
         dhcpPoolStart = base | 2
@@ -283,10 +314,14 @@ public final class VMNetSwitch: @unchecked Sendable {
             return
         }
 
-        // Broadcast / multicast (covers ARP + DHCP DISCOVER): flood to peer
-        // VMs and the uplink so the gateway / DHCP server sees it too.
+        // Broadcast / multicast (covers ARP + DHCP DISCOVER): always reaches the
+        // uplink so the gateway / DHCP server sees it. Only flood peer VMs when
+        // peer bridging is on (AC); with it off (Bromure Web) VMs can't even ARP
+        // each other, so they stay mutually unreachable.
         if buf[0] & 0x01 != 0 {
-            for fd in peerPortFDs(except: srcPortID) { _ = Darwin.write(fd, buf, n) }
+            if bridgePeers {
+                for fd in peerPortFDs(except: srcPortID) { _ = Darwin.write(fd, buf, n) }
+            }
             writeToVmnet(buf, n)
             return
         }
@@ -295,12 +330,17 @@ public final class VMNetSwitch: @unchecked Sendable {
         case Self.uplinkPortID:
             writeToVmnet(buf, n)
         case .some(let dstPort) where dstPort != srcPortID:
-            if let fd = portFD(dstPort) { _ = Darwin.write(fd, buf, n) }
+            // A frame addressed to a peer VM — deliver only when bridging peers,
+            // otherwise drop it to preserve inter-VM isolation.
+            if bridgePeers, let fd = portFD(dstPort) { _ = Darwin.write(fd, buf, n) }
         case .some:
             break  // destined back to itself — drop
         case nil:
-            // Unknown unicast: flood to peers and the uplink until we learn it.
-            for fd in peerPortFDs(except: srcPortID) { _ = Darwin.write(fd, buf, n) }
+            // Unknown unicast: always try the uplink; flood peers only when
+            // bridging is enabled.
+            if bridgePeers {
+                for fd in peerPortFDs(except: srcPortID) { _ = Darwin.write(fd, buf, n) }
+            }
             writeToVmnet(buf, n)
         }
     }
@@ -345,8 +385,17 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// LAN/VPN/bridge the user is connected to. Bromure Web walks *up* into
     /// 65…126, so the two never meet. Falls back to 64 if the whole 2…64 band
     /// is somehow taken (vanishingly unlikely).
-    private static func chooseSubnetOctet() -> UInt8 {
+    private func chooseSubnetOctet() -> UInt8 {
         let used = HostNetworkInfo.localPrivateClassCOctets()
+        if ascendingSubnet {
+            // Bromure Web: walk up 65 → 126, clear of AC's downward 64 → 2 band.
+            var octet = 65
+            while octet <= 126 {
+                if !used.contains(UInt8(octet)) { return UInt8(octet) }
+                octet += 1
+            }
+            return 65
+        }
         var octet = 64
         while octet >= 2 {
             if !used.contains(UInt8(octet)) { return UInt8(octet) }
