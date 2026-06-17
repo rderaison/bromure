@@ -2002,16 +2002,18 @@ public final class ProfileStore {
     /// Fork a fresh, save-ready Profile from the user's template.
     /// Generates a new UUID + createdAt; everything else (settings,
     /// default OAuth tokens, kubeconfigs, etc.) is copied through
-    /// from the template. Caller fills `name`, `tool`, `authMode`
-    /// before saving.
+    /// from the template — including the template's primary agent and
+    /// its auth mode, so a new profile honors the user's Preferences
+    /// default (e.g. Claude in subscription mode). `tool`/`authMode`
+    /// are optional overrides; leave them nil to keep the template's.
     public func newProfileFromTemplate(name: String,
-                                        tool: Profile.Tool,
-                                        authMode: Profile.AuthMode) -> Profile {
+                                        tool: Profile.Tool? = nil,
+                                        authMode: Profile.AuthMode? = nil) -> Profile {
         var p = loadTemplate()
         p.id = UUID()
         p.name = name
-        p.tool = tool
-        p.authMode = authMode
+        if let tool { p.tool = tool }
+        if let authMode { p.authMode = authMode }
         p.createdAt = Date()
         p.lastUsedAt = nil
         p.baseImageVersionAtClone = nil

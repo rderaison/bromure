@@ -1901,9 +1901,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // immediately without typing one. Existing profiles keep
         // their own values.
         let initialDraft: Profile? = editing
-            ?? store.newProfileFromTemplate(name: nextDefaultProfileName(),
-                                             tool: .claude,
-                                             authMode: .token)
+            ?? store.newProfileFromTemplate(name: nextDefaultProfileName())
         win.contentView = NSHostingView(rootView: ProfileEditorView(
             profile: initialDraft,
             isNew: editing == nil,
@@ -1921,8 +1919,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     throw NSError(domain: "BromureAC", code: 1, userInfo: [
                         NSLocalizedDescriptionKey: "App not available"])
                 }
-                let target = editing ?? self.store.newProfileFromTemplate(
-                    name: "", tool: .claude, authMode: .token)
+                let target = editing ?? self.store.newProfileFromTemplate(name: "")
                 if editing == nil {
                     try self.store.save(target)
                 }
