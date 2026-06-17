@@ -158,7 +158,7 @@ Controls how the MITM proxy records traffic for this profile. Higher levels writ
 
 | Setting | Description |
 |---|---|
-| **Session trace** | How aggressively the proxy records traffic. **Off** — nothing recorded (default). **Activity** — metadata only: host, status, latency, swap report, leak warnings; no request or response bodies. **AI request details** — same as Activity, plus full bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). **Everything** — bodies for every host; uses disk space fastest (capped at 100 MB per session / 5 GB total). Bodies are AES-GCM encrypted with the same keychain key as profile secrets. |
+| **Session trace** | How aggressively the proxy records traffic. **Off** — nothing recorded. **Activity** — metadata only: host, status, latency, swap report, leak warnings; no request or response bodies. **AI request details** — same as Activity, plus full bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Default for new profiles. **Everything** — bodies for every host; uses disk space fastest (capped at 100 MB per session / 5 GB total). Bodies are AES-GCM encrypted with the same keychain key as profile secrets. |
 | **Private mode** | (Only shown on Macs enrolled with a bromure.io workspace.) When enabled, sessions for this profile do not stream metadata (tools, files, commands, token usage) to the workspace. The local trace inspector is unaffected. Useful when working with a personal API key you do not want your admin to see. |
 | **Claude subscription token swap** | (Shown only after the proxy has prompted about this profile.) Displays whether the real Claude OAuth tokens are currently being swapped by the proxy (**Active**) or whether the user declined the swap (**Declined**). A reset button lets the user be asked again on the next session. |
 | **Codex subscription token swap** | Same three-state swap consent as above, scoped to the Codex / ChatGPT OAuth tokens (`~/.codex/auth.json`). Shown independently so a profile that uses both agents can manage each provider separately. |
@@ -166,6 +166,10 @@ Controls how the MITM proxy records traffic for this profile. Higher levels writ
 ---
 
 ## Guardrails
+
+<p align="center">
+  <img src="Resources/ac/editor_guardrails_en.jpg" width="600" alt="Guardrails settings panel">
+</p>
 
 Host-side policy engine that strips destructive operations from the protocols the agent speaks. Enforcement happens inside the MITM proxy on the host, so a misbehaving or compromised agent in the VM cannot bypass it — blocked calls return a hard 403 error that the agent sees as a normal API failure.
 
