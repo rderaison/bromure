@@ -443,6 +443,8 @@
 /* Supply Chain Log window (Window menu) */
 "Supply Chain Log…" = "サプライチェーン ログ…";
 "Supply Chain Log" = "サプライチェーン ログ";
+"Security Log…" = "セキュリティ ログ…";
+"Security Log" = "セキュリティ ログ";
 "Filter…" = "フィルタ…";
 "Auto-scroll" = "自動スクロール";
 "Clear" = "クリア";
@@ -496,12 +498,76 @@
 "Source-code prompt-injection" = "ソースコードのプロンプトインジェクション";
 "Rogue-instruction (CLAUDE.md)" = "不正な指示 (CLAUDE.md)";
 
-/* Fusion (Models section) */
-"Models" = "モデル";
-"Enable Fusion" = "Fusion を有効にする";
+/* Agents pane — sidebar category + subscription controls */
+"Agents" = "エージェント";
+"Re-register…" = "再登録…";
+"Forget" = "削除";
+"Register…" = "登録…";
+
+/* Fusion pane (redesigned N-way Fusion) */
+"Fusion" = "Fusion";
 "BETA" = "ベータ";
-"Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (API key or Bedrock) **and** an OpenAI API key in this profile — subscription logins won’t work." = "Fusion は各リクエストに Claude と GPT の両方で回答し、ジャッジモデルが両者を比較して最も優れた単一の回答を統合します。このプロファイルに Anthropic の認証情報(API キーまたは Bedrock)**と** OpenAI の API キーの両方が必要です — サブスクリプションのログインでは動作しません。";
-"Only **Claude Code** is fused — Fusion works by intercepting Claude’s API. Other agents in this profile (Codex, Grok) run normally and are unaffected." = "統合されるのは **Claude Code** のみです — Fusion は Claude の API を傍受することで動作します。このプロファイル内の他のエージェント(Codex、Grok)は通常どおり動作し、影響を受けません。";
-"Add both an Anthropic and an OpenAI key above to turn this on." = "有効にするには、上で Anthropic と OpenAI の両方のキーを追加してください。";
-"Fusion engaged — answers are synthesized from Claude + GPT. Click to disengage." = "Fusion 有効 — 回答は Claude + GPT から統合されます。クリックして無効化します。";
-"Fusion available — disengaged. Click to engage Claude + GPT synthesis." = "Fusion 利用可能 — 無効です。クリックして Claude + GPT の統合を有効にします。";
+"When engaged, Fusion answers each prompt with **multiple** models at once, has a judge model map where they agree, conflict, and each shine, then synthesizes a single best reply — delivered to Claude Code as if one model wrote it. Engage it per session from the ⚡ in the title bar." = "有効にすると、Fusion は各リクエストに **複数の** モデルで同時に回答し、ジャッジモデルがそれらの一致点・対立点・各モデルの強みを整理したうえで、単一の最良の回答を統合します — 1 つのモデルが書いたかのように Claude Code へ届けられます。セッションごとにタイトルバーの ⚡ から有効化します。";
+"Fusion runs on the **Claude Code** session (it intercepts Claude's API). It needs at least two configured agents below." = "Fusion は **Claude Code** のセッション上で動作します(Claude の API を傍受します)。下記で設定されたエージェントが少なくとも 2 つ必要です。";
+"Agents to fuse" = "統合するエージェント";
+"— no credential (configure it in Agents)" = "— 認証情報なし(エージェントで設定してください)";
+"Enable at least two agents with a credential (Agents tab) to use Fusion." = "Fusion を使用するには、認証情報を持つエージェントを少なくとも 2 つ有効にしてください(エージェント タブ)。";
+"Judge" = "ジャッジ";
+"The model that weighs the drafts and writes the final answer." = "各案を比較検討し、最終的な回答を作成するモデルです。";
+"Provider" = "プロバイダー";
+"Model" = "モデル";
+"(default)" = "(既定)";
+"To enable Fusion you need to have at least two models enabled." = "Fusion を有効にするには、少なくとも 2 つのモデルを有効にする必要があります。";
+"Fusion engaged — answers are synthesized across your selected models. Click to disengage." = "Fusion 有効 — 回答は選択したモデル全体から統合されます。クリックして無効化します。";
+"Fusion available — disengaged. Click to engage multi-model synthesis." = "Fusion 利用可能 — 無効です。クリックして複数モデルの統合を有効にします。";
+
+/* Subscription token-swap sheet */
+"Swap %@ subscription token?" = "%@ のサブスクリプショントークンを差し替えますか？";
+"Bromure detected a real %@ subscription token going out to %@ from “%@”. We can replace it inside the VM with a fake — the real token stays on this Mac and the proxy substitutes it on the wire only when needed." = "Bromure は「%@」から %@ へ送信される本物の %@ サブスクリプショントークンを検出しました。VM 内ではダミーに置き換えられます — 本物のトークンはこの Mac に留まり、proxy が必要なときだけ通信経路上で差し替えます。";
+"Both the access and refresh tokens are swapped together." = "アクセストークンとリフレッシュトークンはまとめて差し替えられます。";
+"The VM never receives any real credential — only the fake replacements." = "VM が本物の認証情報を受け取ることはありません — ダミーの置き換えのみです。";
+"Never for this profile" = "このプロファイルでは今後しない";
+"Not now" = "今はしない";
+"Swap" = "差し替える";
+
+/* Subscription registration (Register… from Agents pane) */
+"Proxy unavailable" = "proxy を利用できません";
+"The Bromure proxy isn't running, so registration can't capture your tokens." = "Bromure の proxy が実行されていないため、登録時にトークンを取得できません。";
+"Register with %@" = "%@ に登録";
+"Bromure will open a temporary, isolated VM with no access to your profiles or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM." = "Bromure は、あなたのプロファイルや保存済みのシークレットにアクセスできない一時的な隔離 VM を起動します。%@ はサインインページを Mac のブラウザで開きます。サインイン後、Bromure が認証情報を取得し、その VM を停止して削除します。";
+"Couldn't start the registration VM." = "登録用 VM を起動できませんでした。";
+"Registration timed out" = "登録がタイムアウトしました";
+"Bromure didn't receive a %@ sign-in in time. You can try again." = "Bromure は %@ のサインインを時間内に受け取れませんでした。もう一度お試しください。";
+"Share with every session?" = "すべてのセッションで共有しますか？";
+"Use this %@ sign-in for every Bromure session, or only for this profile?" = "この %@ のサインインを、すべての Bromure セッションで使用しますか、それともこのプロファイルのみで使用しますか？";
+"Every session" = "すべてのセッション";
+"Just this profile" = "このプロファイルのみ";
+"Couldn't save the captured credentials." = "取得した認証情報を保存できませんでした。";
+"Registered with %@" = "%@ に登録しました";
+"Saved for all sessions. New sessions will use it automatically." = "すべてのセッション用に保存しました。新しいセッションでは自動的に使用されます。";
+"Saved for this profile." = "このプロファイル用に保存しました。";
+
+/* bromure.io enrollment sheet */
+"Enroll in bromure.io" = "bromure.io に登録";
+"Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Profiles in private mode never stream." = "管理者から 6 単語の登録コードが渡されます。登録すると、Bromure Agentic Coding はセッションのメタデータ (ツール、ファイル、コマンド、トークン使用量) をワークスペースに送信し、管理者がアクティビティを確認できるようになります。プライベートモードのプロファイルは送信されません。";
+"Enrollment Code" = "登録コード";
+"Device Name" = "デバイス名";
+"Shown to your administrator so they can recognize this Mac." = "この Mac を識別できるよう、管理者に表示されます。";
+"Server URL (optional)" = "サーバー URL (任意)";
+"Enroll" = "登録";
+"bromure.io enrollment" = "bromure.io への登録";
+"Workspace" = "ワークスペース";
+"User" = "ユーザー";
+"Device" = "デバイス";
+"Enrolled" = "登録済み";
+"Certificate" = "証明書";
+"Valid until %@" = "有効期限：%@";
+"Expired — renewing automatically" = "期限切れ — 自動的に更新中";
+"Renew certificate" = "証明書を更新";
+"Sign out" = "サインアウト";
+"Not enrolled" = "未登録";
+"Open Window → Enroll in bromure.io… to register this Mac with your workspace." = "「ウインドウ → bromure.io に登録…」を開いて、この Mac をワークスペースに登録してください。";
+"Enrollment revoked" = "登録が取り消されました";
+"Your administrator revoked this install. Sign out and enroll again with a new code to resume managed mode." = "管理者がこのインストールを取り消しました。管理モードを再開するには、サインアウトして新しいコードで再登録してください。";
+"Enrollment no longer accepted" = "登録は受け付けられなくなりました";
+"The server rejected this install's credentials — they may have expired or been reset. Sign out and enroll again with a new code." = "サーバーがこのインストールの認証情報を拒否しました — 期限切れかリセットされた可能性があります。サインアウトして新しいコードで再登録してください。";

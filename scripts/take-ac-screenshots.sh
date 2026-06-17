@@ -47,9 +47,14 @@ if [ -x "$LSREGISTER" ]; then
     sleep 5
 fi
 
-# Editor sidebar entries that the AppleScript bridge accepts. Order
-# matches the on-screen sidebar so the loop reads top-to-bottom.
-CATEGORIES=(general agent folders credentials environment mcp tracing guardrails supplychain promptinjection appearance resources)
+# Editor sidebar entries to capture, top-to-bottom in on-screen order.
+# Each item is "filekey" or "filekey:selectkey". The AppleScript bridge
+# matches selectkey against the EditorCategory rawValue (case- and
+# space-insensitive); filekey is the token baked into the output filename.
+# They differ only for the Agents pane: its rawValue is "Agents" (so the
+# select key must be "agents"), but the on-disk screenshot keeps its
+# historical "agent" filename so existing references stay valid.
+CATEGORIES=(general agent:agents fusion folders credentials environment mcp tracing guardrails supplychain promptinjection appearance resources)
 
 # (locale-code  filename-suffix). Locale codes are what
 # `defaults write -AppleLanguages` understands; suffix is what gets
@@ -221,14 +226,16 @@ for entry in "${LOCALES[@]}"; do
         continue
     fi
 
-    for category in "${CATEGORIES[@]}"; do
+    for cat_entry in "${CATEGORIES[@]}"; do
+        category="${cat_entry%%:*}"    # filename token
+        selkey="${cat_entry##*:}"      # AppleScript select key (== category if no colon)
         outfile="$OUTPUT_DIR/editor_${category}_${suffix}.jpg"
         # Retry the select+capture a few times: a single AXRaise race or a
         # transient screencapture miss used to drop one tile silently and
         # ship a partial grid (e.g. supplychain_en went missing this way).
         captured=false
         for attempt in 1 2 3; do
-            sel=$(ac_tell "select editor category \"$category\"")
+            sel=$(ac_tell "select editor category \"$selkey\"")
             if [[ "$sel" == error* ]]; then
                 echo "  $category select failed (attempt $attempt): $sel" >&2
                 sleep 0.6
@@ -272,7 +279,8 @@ echo "$count screenshots captured under $OUTPUT_DIR/"
 missing=()
 for entry in "${LOCALES[@]}"; do
     suffix=$(echo "$entry" | awk '{print $2}')
-    for category in "${CATEGORIES[@]}"; do
+    for cat_entry in "${CATEGORIES[@]}"; do
+        category="${cat_entry%%:*}"   # filename token (strip any :selectkey)
         f="$OUTPUT_DIR/editor_${category}_${suffix}.jpg"
         [ -s "$f" ] || missing+=("$(basename "$f")")
     done

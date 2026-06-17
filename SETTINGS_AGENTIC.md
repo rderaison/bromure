@@ -24,10 +24,10 @@ Basic identity and behavior for the profile.
 
 ---
 
-## Agent
+## Agents
 
 <p align="center">
-  <img src="Resources/ac/editor_agent_en.jpg" width="600" alt="Agent settings panel">
+  <img src="Resources/ac/editor_agent_en.jpg" width="600" alt="Agents settings panel">
 </p>
 
 Choose which coding agents are available in this profile and how they authenticate. The agent marked **Primary** is auto-launched in the first kitty tab when a session opens; other enabled agents are installed and authenticated but started on demand from a new tab.
@@ -45,6 +45,22 @@ Choose which coding agents are available in this profile and how they authentica
 | **Grok Build** | Enable or disable the Grok Build (xAI) agent for this profile. Toggle on to configure. |
 | **Grok Build — Auth** | Authentication method for Grok Build: **API token** (paste an `XAI_API_KEY` — injected as an env var; the proxy swaps the fake `xai-brm-…` key back to the real value on requests to `api.x.ai`, so the real key never enters the VM) or **Subscription (interactive login)** (run `grok login` once inside the VM). Bedrock is not available for Grok Build. |
 | **Grok Build — Require approval to use** | (Token mode only.) When enabled, every fake→real swap of the xAI API key shows a host-side consent dialog before the key is forwarded. Off by default. |
+
+---
+
+## Fusion
+
+<p align="center">
+  <img src="Resources/ac/editor_fusion_en.jpg" width="600" alt="Fusion settings panel">
+</p>
+
+**Fusion (BETA)** answers each prompt with *multiple* models at once: a judge model maps where the drafts agree, conflict, and each shine, then synthesizes a single best reply that is delivered to Claude Code as if one model wrote it. Fusion runs on the **Claude Code** session (it works by intercepting Claude's API), so it needs at least two configured agents in this profile. It is engaged per session from the ⚡ button in the session window's title bar; the configuration below sets which agents take part and which model judges.
+
+| Setting | Description |
+|---|---|
+| **Agents to fuse** | The agents whose drafts are fused. Each agent with a usable credential (configured in the Agents pane) gets a checkbox; agents without a credential are shown disabled with a "— no credential" hint. At least two agents must be enabled with a credential for Fusion to be usable. |
+| **Judge — Provider** | Which configured agent's model acts as the judge that weighs the drafts and writes the final answer. Defaults to the first usable agent. |
+| **Judge — Model** | The specific model used for judging, fetched live for the chosen provider. Leave on **(default)** to let the provider pick, or select a specific model; a previously-saved custom model stays selectable even if it is not in the fetched list. |
 
 ---
 

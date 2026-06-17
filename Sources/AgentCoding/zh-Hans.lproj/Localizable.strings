@@ -443,6 +443,8 @@
 /* Supply Chain Log window (Window menu) */
 "Supply Chain Log…" = "供应链日志…";
 "Supply Chain Log" = "供应链日志";
+"Security Log…" = "安全日志…";
+"Security Log" = "安全日志";
 "Filter…" = "筛选…";
 "Auto-scroll" = "自动滚动";
 "Clear" = "清空";
@@ -496,12 +498,76 @@
 "Source-code prompt-injection" = "源代码提示注入";
 "Rogue-instruction (CLAUDE.md)" = "恶意指令 (CLAUDE.md)";
 
-/* Fusion (Models section) */
-"Models" = "模型";
-"Enable Fusion" = "启用 Fusion";
+/* Agents pane — sidebar category + subscription controls */
+"Agents" = "代理";
+"Re-register…" = "重新注册…";
+"Forget" = "忘记";
+"Register…" = "注册…";
+
+/* Fusion pane (redesigned N-way Fusion) */
+"Fusion" = "Fusion";
 "BETA" = "测试版";
-"Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (API key or Bedrock) **and** an OpenAI API key in this profile — subscription logins won’t work." = "Fusion 会用 Claude 和 GPT 同时回答每个请求,然后由一个评判模型权衡两者并综合出最佳的单一回复。它需要在此配置中同时拥有 Anthropic 凭据(API 密钥或 Bedrock)**和** OpenAI API 密钥 — 订阅登录无法使用。";
-"Only **Claude Code** is fused — Fusion works by intercepting Claude’s API. Other agents in this profile (Codex, Grok) run normally and are unaffected." = "只有 **Claude Code** 会被融合 — Fusion 通过拦截 Claude 的 API 工作。此配置中的其他代理(Codex、Grok)将正常运行,不受影响。";
-"Add both an Anthropic and an OpenAI key above to turn this on." = "请在上方同时添加 Anthropic 和 OpenAI 密钥以启用此功能。";
-"Fusion engaged — answers are synthesized from Claude + GPT. Click to disengage." = "Fusion 已启用 — 回复由 Claude + GPT 综合生成。点击以停用。";
-"Fusion available — disengaged. Click to engage Claude + GPT synthesis." = "Fusion 可用 — 已停用。点击以启用 Claude + GPT 综合。";
+"When engaged, Fusion answers each prompt with **multiple** models at once, has a judge model map where they agree, conflict, and each shine, then synthesizes a single best reply — delivered to Claude Code as if one model wrote it. Engage it per session from the ⚡ in the title bar." = "启用后,Fusion 会用**多个**模型同时回答每个请求,由一个评判模型梳理它们在何处一致、冲突以及各自的亮点,然后综合出唯一的最佳回复 —— 交付给 Claude Code 时就如同出自单个模型之手。可在标题栏的 ⚡ 处为每个会话单独启用。";
+"Fusion runs on the **Claude Code** session (it intercepts Claude's API). It needs at least two configured agents below." = "Fusion 运行在 **Claude Code** 会话上(它会拦截 Claude 的 API)。它需要在下方至少配置两个代理。";
+"Agents to fuse" = "要融合的代理";
+"— no credential (configure it in Agents)" = "— 无凭据(请在“代理”中配置)";
+"Enable at least two agents with a credential (Agents tab) to use Fusion." = "请启用至少两个带有凭据的代理(“代理”选项卡)以使用 Fusion。";
+"Judge" = "评判模型";
+"The model that weighs the drafts and writes the final answer." = "权衡各份草稿并撰写最终答案的模型。";
+"Provider" = "提供方";
+"Model" = "模型";
+"(default)" = "(默认)";
+"To enable Fusion you need to have at least two models enabled." = "要启用 Fusion,您需要至少启用两个模型。";
+"Fusion engaged — answers are synthesized across your selected models. Click to disengage." = "Fusion 已启用 — 回复由您所选的多个模型综合生成。点击以停用。";
+"Fusion available — disengaged. Click to engage multi-model synthesis." = "Fusion 可用 — 已停用。点击以启用多模型综合。";
+
+/* Subscription token-swap sheet */
+"Swap %@ subscription token?" = "替换 %@ 订阅令牌？";
+"Bromure detected a real %@ subscription token going out to %@ from “%@”. We can replace it inside the VM with a fake — the real token stays on this Mac and the proxy substitutes it on the wire only when needed." = "Bromure 检测到一个真实的 %@ 订阅令牌从“%@”发往 %@。我们可以在 VM 内将其替换为伪造令牌——真实令牌保留在本机 Mac 上，proxy 仅在需要时才在传输链路上将其替换回来。";
+"Both the access and refresh tokens are swapped together." = "访问令牌和刷新令牌会一并替换。";
+"The VM never receives any real credential — only the fake replacements." = "VM 永远不会收到任何真实凭据——只会收到伪造的替换令牌。";
+"Never for this profile" = "对此配置文件永不";
+"Not now" = "暂不";
+"Swap" = "替换";
+
+/* Subscription registration (Register… from Agents pane) */
+"Proxy unavailable" = "proxy 不可用";
+"The Bromure proxy isn't running, so registration can't capture your tokens." = "Bromure proxy 未运行，因此注册无法捕获您的令牌。";
+"Register with %@" = "通过 %@ 注册";
+"Bromure will open a temporary, isolated VM with no access to your profiles or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM." = "Bromure 将打开一个临时的隔离 VM，它无法访问您的配置文件或已保存的机密。%@ 会在您 Mac 的浏览器中打开其登录页面。您登录后，Bromure 会捕获凭据，随后关闭并删除该 VM。";
+"Couldn't start the registration VM." = "无法启动注册 VM。";
+"Registration timed out" = "注册超时";
+"Bromure didn't receive a %@ sign-in in time. You can try again." = "Bromure 未能及时收到 %@ 登录。您可以重试。";
+"Share with every session?" = "与每个会话共享？";
+"Use this %@ sign-in for every Bromure session, or only for this profile?" = "将此 %@ 登录用于每个 Bromure 会话，还是仅用于此配置文件？";
+"Every session" = "每个会话";
+"Just this profile" = "仅此配置文件";
+"Couldn't save the captured credentials." = "无法保存已捕获的凭据。";
+"Registered with %@" = "已通过 %@ 注册";
+"Saved for all sessions. New sessions will use it automatically." = "已为所有会话保存。新会话将自动使用它。";
+"Saved for this profile." = "已为此配置文件保存。";
+
+/* bromure.io enrollment sheet */
+"Enroll in bromure.io" = "注册到 bromure.io";
+"Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Profiles in private mode never stream." = "您的管理员会给您一个 6 个单词的注册码。注册后，Bromure Agentic Coding 会将会话元数据（工具、文件、命令、令牌用量）发送到您的工作区，以便管理员审查活动。处于私密模式的配置文件永远不会上传。";
+"Enrollment Code" = "注册码";
+"Device Name" = "设备名称";
+"Shown to your administrator so they can recognize this Mac." = "向您的管理员显示，以便其识别这台 Mac。";
+"Server URL (optional)" = "服务器 URL（可选）";
+"Enroll" = "注册";
+"bromure.io enrollment" = "bromure.io 注册";
+"Workspace" = "工作区";
+"User" = "用户";
+"Device" = "设备";
+"Enrolled" = "已注册";
+"Certificate" = "证书";
+"Valid until %@" = "有效期至 %@";
+"Expired — renewing automatically" = "已过期——正在自动续期";
+"Renew certificate" = "续期证书";
+"Sign out" = "退出登录";
+"Not enrolled" = "未注册";
+"Open Window → Enroll in bromure.io… to register this Mac with your workspace." = "打开 窗口 → 注册到 bromure.io… 以将这台 Mac 注册到您的工作区。";
+"Enrollment revoked" = "注册已撤销";
+"Your administrator revoked this install. Sign out and enroll again with a new code to resume managed mode." = "您的管理员已撤销此安装。请退出登录并使用新的注册码重新注册以恢复托管模式。";
+"Enrollment no longer accepted" = "注册不再被接受";
+"The server rejected this install's credentials — they may have expired or been reset. Sign out and enroll again with a new code." = "服务器拒绝了此安装的凭据——它们可能已过期或被重置。请退出登录并使用新的注册码重新注册。";

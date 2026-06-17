@@ -499,12 +499,76 @@
 "Source-code prompt-injection" = "Source-code prompt-injection";
 "Rogue-instruction (CLAUDE.md)" = "Rogue-instruction (CLAUDE.md)";
 
-/* Fusion (Models section) */
-"Models" = "Models";
-"Enable Fusion" = "Enable Fusion";
+/* Agents pane — sidebar category + subscription controls */
+"Agents" = "Agents";
+"Re-register…" = "Re-register…";
+"Forget" = "Forget";
+"Register…" = "Register…";
+
+/* Fusion pane (redesigned N-way Fusion) */
+"Fusion" = "Fusion";
 "BETA" = "BETA";
-"Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (API key or Bedrock) **and** an OpenAI API key in this profile — subscription logins won’t work." = "Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (API key or Bedrock) **and** an OpenAI API key in this profile — subscription logins won’t work.";
-"Only **Claude Code** is fused — Fusion works by intercepting Claude’s API. Other agents in this profile (Codex, Grok) run normally and are unaffected." = "Only **Claude Code** is fused — Fusion works by intercepting Claude’s API. Other agents in this profile (Codex, Grok) run normally and are unaffected.";
-"Add both an Anthropic and an OpenAI key above to turn this on." = "Add both an Anthropic and an OpenAI key above to turn this on.";
-"Fusion engaged — answers are synthesized from Claude + GPT. Click to disengage." = "Fusion engaged — answers are synthesized from Claude + GPT. Click to disengage.";
-"Fusion available — disengaged. Click to engage Claude + GPT synthesis." = "Fusion available — disengaged. Click to engage Claude + GPT synthesis.";
+"When engaged, Fusion answers each prompt with **multiple** models at once, has a judge model map where they agree, conflict, and each shine, then synthesizes a single best reply — delivered to Claude Code as if one model wrote it. Engage it per session from the ⚡ in the title bar." = "When engaged, Fusion answers each prompt with **multiple** models at once, has a judge model map where they agree, conflict, and each shine, then synthesizes a single best reply — delivered to Claude Code as if one model wrote it. Engage it per session from the ⚡ in the title bar.";
+"Fusion runs on the **Claude Code** session (it intercepts Claude's API). It needs at least two configured agents below." = "Fusion runs on the **Claude Code** session (it intercepts Claude's API). It needs at least two configured agents below.";
+"Agents to fuse" = "Agents to fuse";
+"— no credential (configure it in Agents)" = "— no credential (configure it in Agents)";
+"Enable at least two agents with a credential (Agents tab) to use Fusion." = "Enable at least two agents with a credential (Agents tab) to use Fusion.";
+"Judge" = "Judge";
+"The model that weighs the drafts and writes the final answer." = "The model that weighs the drafts and writes the final answer.";
+"Provider" = "Provider";
+"Model" = "Model";
+"(default)" = "(default)";
+"To enable Fusion you need to have at least two models enabled." = "To enable Fusion you need to have at least two models enabled.";
+"Fusion engaged — answers are synthesized across your selected models. Click to disengage." = "Fusion engaged — answers are synthesized across your selected models. Click to disengage.";
+"Fusion available — disengaged. Click to engage multi-model synthesis." = "Fusion available — disengaged. Click to engage multi-model synthesis.";
+
+/* Subscription token-swap sheet */
+"Swap %@ subscription token?" = "Swap %@ subscription token?";
+"Bromure detected a real %@ subscription token going out to %@ from “%@”. We can replace it inside the VM with a fake — the real token stays on this Mac and the proxy substitutes it on the wire only when needed." = "Bromure detected a real %@ subscription token going out to %@ from “%@”. We can replace it inside the VM with a fake — the real token stays on this Mac and the proxy substitutes it on the wire only when needed.";
+"Both the access and refresh tokens are swapped together." = "Both the access and refresh tokens are swapped together.";
+"The VM never receives any real credential — only the fake replacements." = "The VM never receives any real credential — only the fake replacements.";
+"Never for this profile" = "Never for this profile";
+"Not now" = "Not now";
+"Swap" = "Swap";
+
+/* Subscription registration (Register… from Agents pane) */
+"Proxy unavailable" = "Proxy unavailable";
+"The Bromure proxy isn't running, so registration can't capture your tokens." = "The Bromure proxy isn't running, so registration can't capture your tokens.";
+"Register with %@" = "Register with %@";
+"Bromure will open a temporary, isolated VM with no access to your profiles or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM." = "Bromure will open a temporary, isolated VM with no access to your profiles or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM.";
+"Couldn't start the registration VM." = "Couldn't start the registration VM.";
+"Registration timed out" = "Registration timed out";
+"Bromure didn't receive a %@ sign-in in time. You can try again." = "Bromure didn't receive a %@ sign-in in time. You can try again.";
+"Share with every session?" = "Share with every session?";
+"Use this %@ sign-in for every Bromure session, or only for this profile?" = "Use this %@ sign-in for every Bromure session, or only for this profile?";
+"Every session" = "Every session";
+"Just this profile" = "Just this profile";
+"Couldn't save the captured credentials." = "Couldn't save the captured credentials.";
+"Registered with %@" = "Registered with %@";
+"Saved for all sessions. New sessions will use it automatically." = "Saved for all sessions. New sessions will use it automatically.";
+"Saved for this profile." = "Saved for this profile.";
+
+/* bromure.io enrollment sheet */
+"Enroll in bromure.io" = "Enroll in bromure.io";
+"Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Profiles in private mode never stream." = "Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Profiles in private mode never stream.";
+"Enrollment Code" = "Enrollment Code";
+"Device Name" = "Device Name";
+"Shown to your administrator so they can recognize this Mac." = "Shown to your administrator so they can recognize this Mac.";
+"Server URL (optional)" = "Server URL (optional)";
+"Enroll" = "Enroll";
+"bromure.io enrollment" = "bromure.io enrollment";
+"Workspace" = "Workspace";
+"User" = "User";
+"Device" = "Device";
+"Enrolled" = "Enrolled";
+"Certificate" = "Certificate";
+"Valid until %@" = "Valid until %@";
+"Expired — renewing automatically" = "Expired — renewing automatically";
+"Renew certificate" = "Renew certificate";
+"Sign out" = "Sign out";
+"Not enrolled" = "Not enrolled";
+"Open Window → Enroll in bromure.io… to register this Mac with your workspace." = "Open Window → Enroll in bromure.io… to register this Mac with your workspace.";
+"Enrollment revoked" = "Enrollment revoked";
+"Your administrator revoked this install. Sign out and enroll again with a new code to resume managed mode." = "Your administrator revoked this install. Sign out and enroll again with a new code to resume managed mode.";
+"Enrollment no longer accepted" = "Enrollment no longer accepted";
+"The server rejected this install's credentials — they may have expired or been reset. Sign out and enroll again with a new code." = "The server rejected this install's credentials — they may have expired or been reset. Sign out and enroll again with a new code.";

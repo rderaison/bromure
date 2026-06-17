@@ -443,6 +443,8 @@
 /* Supply Chain Log window (Window menu) */
 "Supply Chain Log…" = "Journal de la chaîne d’approvisionnement…";
 "Supply Chain Log" = "Journal de la chaîne d’approvisionnement";
+"Security Log…" = "Journal de sécurité…";
+"Security Log" = "Journal de sécurité";
 "Filter…" = "Filtrer…";
 "Auto-scroll" = "Défilement auto";
 "Clear" = "Effacer";
@@ -496,12 +498,76 @@
 "Source-code prompt-injection" = "injection de prompt dans le code source";
 "Rogue-instruction (CLAUDE.md)" = "instructions malveillantes (CLAUDE.md)";
 
-/* Fusion (Models section) */
-"Models" = "Modèles";
-"Enable Fusion" = "Activer Fusion";
+/* Agents pane — sidebar category + subscription controls */
+"Agents" = "Agents";
+"Re-register…" = "Réinscrire…";
+"Forget" = "Oublier";
+"Register…" = "Inscrire…";
+
+/* Fusion pane (redesigned N-way Fusion) */
+"Fusion" = "Fusion";
 "BETA" = "BÊTA";
-"Fusion answers every prompt with both Claude and GPT, then has a judge model weigh the two and synthesize the strongest single reply. It needs an Anthropic credential (API key or Bedrock) **and** an OpenAI API key in this profile — subscription logins won’t work." = "Fusion répond à chaque requête avec Claude et GPT, puis un modèle juge évalue les deux et synthétise la meilleure réponse unique. Cela nécessite un identifiant Anthropic (clé API ou Bedrock) **et** une clé API OpenAI dans ce profil — les connexions par abonnement ne fonctionnent pas.";
-"Only **Claude Code** is fused — Fusion works by intercepting Claude’s API. Other agents in this profile (Codex, Grok) run normally and are unaffected." = "Seul **Claude Code** est fusionné — Fusion fonctionne en interceptant l’API de Claude. Les autres agents de ce profil (Codex, Grok) fonctionnent normalement et ne sont pas affectés.";
-"Add both an Anthropic and an OpenAI key above to turn this on." = "Ajoutez à la fois une clé Anthropic et une clé OpenAI ci-dessus pour l’activer.";
-"Fusion engaged — answers are synthesized from Claude + GPT. Click to disengage." = "Fusion activée — les réponses sont synthétisées à partir de Claude + GPT. Cliquez pour désactiver.";
-"Fusion available — disengaged. Click to engage Claude + GPT synthesis." = "Fusion disponible — désactivée. Cliquez pour activer la synthèse Claude + GPT.";
+"When engaged, Fusion answers each prompt with **multiple** models at once, has a judge model map where they agree, conflict, and each shine, then synthesizes a single best reply — delivered to Claude Code as if one model wrote it. Engage it per session from the ⚡ in the title bar." = "Lorsqu’elle est activée, Fusion répond à chaque requête avec **plusieurs** modèles à la fois, fait appel à un modèle juge pour cartographier leurs points d’accord, de désaccord et de force, puis synthétise une seule meilleure réponse — transmise à Claude Code comme si un seul modèle l’avait écrite. Activez-la par session depuis le ⚡ dans la barre de titre.";
+"Fusion runs on the **Claude Code** session (it intercepts Claude's API). It needs at least two configured agents below." = "Fusion s’exécute sur la session **Claude Code** (elle intercepte l’API de Claude). Elle nécessite au moins deux agents configurés ci-dessous.";
+"Agents to fuse" = "Agents à fusionner";
+"— no credential (configure it in Agents)" = "— aucun identifiant (configurez-le dans Agents)";
+"Enable at least two agents with a credential (Agents tab) to use Fusion." = "Activez au moins deux agents munis d’un identifiant (onglet Agents) pour utiliser Fusion.";
+"Judge" = "Juge";
+"The model that weighs the drafts and writes the final answer." = "Le modèle qui évalue les ébauches et rédige la réponse finale.";
+"Provider" = "Fournisseur";
+"Model" = "Modèle";
+"(default)" = "(par défaut)";
+"To enable Fusion you need to have at least two models enabled." = "Pour activer Fusion, vous devez avoir au moins deux modèles activés.";
+"Fusion engaged — answers are synthesized across your selected models. Click to disengage." = "Fusion activée — les réponses sont synthétisées à partir des modèles sélectionnés. Cliquez pour désactiver.";
+"Fusion available — disengaged. Click to engage multi-model synthesis." = "Fusion disponible — désactivée. Cliquez pour activer la synthèse multi-modèles.";
+
+/* Subscription token-swap sheet */
+"Swap %@ subscription token?" = "Remplacer le jeton d’abonnement %@ ?";
+"Bromure detected a real %@ subscription token going out to %@ from “%@”. We can replace it inside the VM with a fake — the real token stays on this Mac and the proxy substitutes it on the wire only when needed." = "Bromure a détecté un vrai jeton d’abonnement %@ envoyé vers %@ depuis « %@ ». Nous pouvons le remplacer par un faux à l’intérieur de la VM — le vrai jeton reste sur ce Mac et le proxy ne le substitue sur le réseau qu’en cas de besoin.";
+"Both the access and refresh tokens are swapped together." = "Les jetons d’accès et de rafraîchissement sont remplacés ensemble.";
+"The VM never receives any real credential — only the fake replacements." = "La VM ne reçoit jamais aucun identifiant réel — uniquement les faux remplacements.";
+"Never for this profile" = "Jamais pour ce profil";
+"Not now" = "Pas maintenant";
+"Swap" = "Remplacer";
+
+/* Subscription registration (Register… from Agents pane) */
+"Proxy unavailable" = "Proxy indisponible";
+"The Bromure proxy isn't running, so registration can't capture your tokens." = "Le proxy Bromure n’est pas en cours d’exécution, l’inscription ne peut donc pas capturer vos jetons.";
+"Register with %@" = "S’inscrire avec %@";
+"Bromure will open a temporary, isolated VM with no access to your profiles or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM." = "Bromure va ouvrir une VM temporaire et isolée, sans accès à vos profils ni à vos secrets enregistrés. %@ ouvrira sa page de connexion dans le navigateur de votre Mac. Une fois connecté, Bromure capture les identifiants, puis arrête et supprime la VM.";
+"Couldn't start the registration VM." = "Impossible de démarrer la VM d’inscription.";
+"Registration timed out" = "L’inscription a expiré";
+"Bromure didn't receive a %@ sign-in in time. You can try again." = "Bromure n’a pas reçu de connexion %@ à temps. Vous pouvez réessayer.";
+"Share with every session?" = "Partager avec toutes les sessions ?";
+"Use this %@ sign-in for every Bromure session, or only for this profile?" = "Utiliser cette connexion %@ pour toutes les sessions Bromure, ou uniquement pour ce profil ?";
+"Every session" = "Toutes les sessions";
+"Just this profile" = "Ce profil uniquement";
+"Couldn't save the captured credentials." = "Impossible d’enregistrer les identifiants capturés.";
+"Registered with %@" = "Inscrit avec %@";
+"Saved for all sessions. New sessions will use it automatically." = "Enregistré pour toutes les sessions. Les nouvelles sessions l’utiliseront automatiquement.";
+"Saved for this profile." = "Enregistré pour ce profil.";
+
+/* bromure.io enrollment sheet */
+"Enroll in bromure.io" = "S’inscrire à bromure.io";
+"Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Profiles in private mode never stream." = "Votre administrateur vous fournira un code d’inscription de 6 mots. Une fois inscrit, Bromure Agentic Coding envoie les métadonnées de session (outils, fichiers, commandes, consommation de jetons) à votre espace de travail afin que les administrateurs puissent examiner l’activité. Les profils en mode privé ne transmettent jamais rien.";
+"Enrollment Code" = "Code d’inscription";
+"Device Name" = "Nom de l’appareil";
+"Shown to your administrator so they can recognize this Mac." = "Affiché à votre administrateur pour qu’il puisse reconnaître ce Mac.";
+"Server URL (optional)" = "URL du serveur (facultatif)";
+"Enroll" = "S’inscrire";
+"bromure.io enrollment" = "Inscription à bromure.io";
+"Workspace" = "Espace de travail";
+"User" = "Utilisateur";
+"Device" = "Appareil";
+"Enrolled" = "Inscrit";
+"Certificate" = "Certificat";
+"Valid until %@" = "Valide jusqu’au %@";
+"Expired — renewing automatically" = "Expiré — renouvellement automatique";
+"Renew certificate" = "Renouveler le certificat";
+"Sign out" = "Se déconnecter";
+"Not enrolled" = "Non inscrit";
+"Open Window → Enroll in bromure.io… to register this Mac with your workspace." = "Ouvrez Fenêtre → S’inscrire à bromure.io… pour enregistrer ce Mac auprès de votre espace de travail.";
+"Enrollment revoked" = "Inscription révoquée";
+"Your administrator revoked this install. Sign out and enroll again with a new code to resume managed mode." = "Votre administrateur a révoqué cette installation. Déconnectez-vous et réinscrivez-vous avec un nouveau code pour reprendre le mode géré.";
+"Enrollment no longer accepted" = "Inscription plus acceptée";
+"The server rejected this install's credentials — they may have expired or been reset. Sign out and enroll again with a new code." = "Le serveur a rejeté les identifiants de cette installation — ils ont peut-être expiré ou été réinitialisés. Déconnectez-vous et réinscrivez-vous avec un nouveau code.";
