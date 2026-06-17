@@ -231,8 +231,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // Drop false-positive "leaks" for our own bogus subscription tokens:
         // they're host-minted placeholders the transforms below rewrite to the
         // real credential — never a real secret escaping the VM.
-        if let reqStr = String(data: request, encoding: .utf8),
-           let hdr = Self.headerSection(of: reqStr) {
+        if let hdr = Self.rawHeaderSection(of: request) {
             // Claude: bogus x-api-key on anthropic hosts.
             if host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
                let provider = Self.claudeSubscriptionProvider, let (store, _) = provider(),
@@ -304,17 +303,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // already carry an Authorization header.
         if let mcpReal = swapper.entries(for: profileID)
             .first(where: { $0.host == host && $0.fake.hasPrefix("brm-mcp_") })?.real {
-            if let reqStr = String(data: swap.modified, encoding: .utf8),
-               !reqStr.lowercased().contains("\r\nauthorization:") {
-                if let headerEnd = reqStr.range(of: "\r\n\r\n") {
-                    let authHeader = "Authorization: Bearer \(mcpReal)\r\n"
-                    var modified = reqStr[..<headerEnd.lowerBound]
-                    modified += "\r\n" + authHeader
-                    modified += reqStr[headerEnd.lowerBound...]
-                    swap.modified = Data(modified.utf8)
-                    FileHandle.standardError.write(Data(
-                        "[mitm] injected MCP bearer for \(host)\n".utf8))
-                }
+            if let hdr = Self.rawHeaderSection(of: swap.modified),
+               Self.headerValue("authorization", inHeaderSection: hdr) == nil {
+                // Append our bearer to the header block; the byte-safe splice
+                // keeps any binary body intact.
+                swap.modified = Self.spliceHeaderSection(
+                    of: swap.modified,
+                    newHeader: hdr + "\r\nAuthorization: Bearer \(mcpReal)")
+                FileHandle.standardError.write(Data(
+                    "[mitm] injected MCP bearer for \(host)\n".utf8))
             }
         }
 
@@ -330,13 +327,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
         var claudeSubStaleAccess: String? = nil
         if host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
            let provider = Self.claudeSubscriptionProvider, let (store, refresher) = provider(),
-           let reqStr = String(data: swap.modified, encoding: .utf8),
-           let headerSection = Self.headerSection(of: reqStr),
+           let headerSection = Self.rawHeaderSection(of: swap.modified),
            let apiKey = Self.headerValue("x-api-key", inHeaderSection: headerSection),
            store.profileForBogusKey(apiKey) != nil {
             do {
                 let access = try await refresher.accessToken(for: profileID)
-                swap.modified = Self.injectClaudeSubscriptionAuth(reqStr: reqStr, access: access)
+                swap.modified = Self.injectClaudeSubscriptionAuth(rawRequest: swap.modified, access: access)
                 claudeSubStaleAccess = access
                 FileHandle.standardError.write(Data(
                     "[mitm] injected Claude subscription token for \(host)\n".utf8))
@@ -355,13 +351,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
         var codexSubStaleAccess: String? = nil
         if host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com",
            let provider = Self.codexSubscriptionProvider, let (store, refresher) = provider(),
-           let reqStr = String(data: swap.modified, encoding: .utf8),
-           let headerSection = Self.headerSection(of: reqStr),
+           let headerSection = Self.rawHeaderSection(of: swap.modified),
            let bearer = Self.bearerToken(inHeaderSection: headerSection),
            store.profileForBogusKey(bearer) != nil {
             do {
                 let access = try await refresher.accessToken(for: profileID)
-                swap.modified = Self.replaceAuthorizationBearer(reqStr: reqStr, token: access)
+                swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
                 codexSubStaleAccess = access
                 FileHandle.standardError.write(Data(
                     "[mitm] injected Codex subscription token for \(host)\n".utf8))
@@ -380,13 +375,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
         if host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
             || host == "x.ai" || host.hasSuffix(".x.ai"),
            let provider = Self.grokSubscriptionProvider, let (store, refresher) = provider(),
-           let reqStr = String(data: swap.modified, encoding: .utf8),
-           let headerSection = Self.headerSection(of: reqStr),
+           let headerSection = Self.rawHeaderSection(of: swap.modified),
            let bearer = Self.bearerToken(inHeaderSection: headerSection),
            store.profileForBogusKey(bearer) != nil {
             do {
                 let access = try await refresher.accessToken(for: profileID)
-                swap.modified = Self.replaceAuthorizationBearer(reqStr: reqStr, token: access)
+                swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
                 grokSubStaleAccess = access
                 FileHandle.standardError.write(Data(
                     "[mitm] injected Grok subscription token for \(host)\n".utf8))
@@ -1601,22 +1595,43 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return nil
     }
 
-    /// The header block of a raw HTTP request string (request line + headers,
-    /// up to but excluding the blank line), or nil if there's no blank line.
+    /// The header block of a raw HTTP request (request line + headers, up to
+    /// but excluding the blank line), decoded body-agnostically, or nil if
+    /// there's no blank line.
+    ///
+    /// HTTP header bytes are ASCII and Latin-1 maps every byte 1:1 (it never
+    /// returns nil), so this yields the headers even when the *body* is binary
+    /// — a gzip artifact upload, protobuf, etc. The swap + leak paths used to
+    /// decode the whole request as UTF-8, which returned nil on a single
+    /// non-UTF-8 body byte; that silently skipped subscription-token swaps
+    /// (bogus token left on the wire → HTTP 401) and credential-leak
+    /// suppression (false-positive `LEAK authorization=…` warnings) for e.g.
+    /// Grok's `*.tar.gz` session-state and OTLP `/v1/traces` uploads.
     /// Suitable to pass to `headerValue(_:inHeaderSection:)`.
-    static func headerSection(of reqStr: String) -> String? {
-        guard let end = reqStr.range(of: "\r\n\r\n") else { return nil }
-        return String(reqStr[..<end.lowerBound])
+    static func rawHeaderSection(of raw: Data) -> String? {
+        guard let end = raw.range(of: Data("\r\n\r\n".utf8))?.lowerBound else { return nil }
+        return String(data: raw.subdata(in: raw.startIndex..<end), encoding: .isoLatin1)
+    }
+
+    /// Replace a raw request's header block with `newHeader`, keeping the
+    /// original — possibly binary — body byte-for-byte (Content-Length stays
+    /// valid because the body is untouched). `newHeader` is the transformed
+    /// header block *without* the trailing blank line.
+    static func spliceHeaderSection(of raw: Data, newHeader: String) -> Data {
+        guard let sep = raw.range(of: Data("\r\n\r\n".utf8)) else {
+            return newHeader.data(using: .isoLatin1) ?? raw
+        }
+        var out = newHeader.data(using: .isoLatin1) ?? Data()
+        out.append(raw.subdata(in: sep.lowerBound..<raw.endIndex))   // "\r\n\r\n" + body
+        return out
     }
 
     /// Turn a guest API-key request into a Claude subscription request: drop
     /// `x-api-key` and any existing `Authorization`, set `Authorization: Bearer
     /// <access>`, and ensure `anthropic-beta` carries the OAuth flag (merged,
     /// not clobbered). Body is untouched, so Content-Length stays valid.
-    static func injectClaudeSubscriptionAuth(reqStr: String, access: String) -> Data {
-        guard let headerEnd = reqStr.range(of: "\r\n\r\n") else { return Data(reqStr.utf8) }
-        let headerBlock = String(reqStr[..<headerEnd.lowerBound])
-        let rest = reqStr[headerEnd.lowerBound...]   // "\r\n\r\n" + body
+    static func injectClaudeSubscriptionAuth(rawRequest raw: Data, access: String) -> Data {
+        guard let headerBlock = Self.rawHeaderSection(of: raw) else { return raw }
         let oauthBeta = "oauth-2025-04-20"
         var outLines: [String] = []
         var sawBeta = false
@@ -1637,7 +1652,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         outLines.append("Authorization: Bearer \(access)")
         if !sawBeta { outLines.append("anthropic-beta: \(oauthBeta)") }
-        return Data((outLines.joined(separator: "\r\n") + rest).utf8)
+        return Self.spliceHeaderSection(of: raw, newHeader: outLines.joined(separator: "\r\n"))
     }
 
     /// The token from an `Authorization: Bearer <token>` header (or nil).
@@ -1650,11 +1665,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
     }
 
     /// Rewrite the request's `Authorization` header to `Bearer <token>`,
-    /// preserving everything else (and the body / Content-Length).
-    static func replaceAuthorizationBearer(reqStr: String, token: String) -> Data {
-        guard let headerEnd = reqStr.range(of: "\r\n\r\n") else { return Data(reqStr.utf8) }
-        let headerBlock = String(reqStr[..<headerEnd.lowerBound])
-        let rest = reqStr[headerEnd.lowerBound...]   // "\r\n\r\n" + body
+    /// preserving everything else (and the body / Content-Length). Operates on
+    /// raw bytes so a binary body survives untouched.
+    static func replaceAuthorizationBearer(rawRequest raw: Data, token: String) -> Data {
+        guard let headerBlock = Self.rawHeaderSection(of: raw) else { return raw }
         var outLines: [String] = []
         var replaced = false
         for line in headerBlock.components(separatedBy: "\r\n") {
@@ -1666,7 +1680,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
         if !replaced { outLines.append("Authorization: Bearer \(token)") }
-        return Data((outLines.joined(separator: "\r\n") + rest).utf8)
+        return Self.spliceHeaderSection(of: raw, newHeader: outLines.joined(separator: "\r\n"))
     }
 
     /// Extract the `Action` value from a form-urlencoded AWS query-protocol
