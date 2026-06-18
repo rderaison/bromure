@@ -85,6 +85,20 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         super.init()
     }
 
+    deinit {
+        // Safety net for teardown paths that never run `guestDidStop` — notably
+        // `suspend()`, which only *pauses* the VM, saves a RAM snapshot, and
+        // expects the caller to drop this object. Without this the switch would
+        // keep that VM's host fd, read loop and MAC-table entry forever. Keep
+        // the DHCP lease (releaseLease: false): a resumed snapshot restores with
+        // the same IP and never re-DHCPs, so the address must stay reserved.
+        // The normal stop path already detached (and freed the lease) and set
+        // `switchPort` to nil, so this is a no-op there.
+        if let switchPort {
+            VMNetSwitch.shared.detachPort(switchPort, releaseLease: false)
+        }
+    }
+
     public func prepare() throws {
         guard imageManager.hasBaseImage else {
             throw UbuntuImageError.installerStoppedEarly

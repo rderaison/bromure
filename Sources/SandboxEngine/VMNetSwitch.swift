@@ -167,7 +167,12 @@ public final class VMNetSwitch: @unchecked Sendable {
             setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufSize, socklen_t(MemoryLayout<Int32>.size))
         }
 
-        let handle = FileHandle(fileDescriptor: vmSideFD, closeOnDealloc: true)
+        // closeOnDealloc is deliberately false: `detachPort` is the single owner
+        // of this fd's lifecycle and closes it explicitly. If the FileHandle
+        // also closed on dealloc, a delayed dealloc (the caller's NetworkFilter
+        // can outlive the session) would close(2) an fd number the OS may have
+        // already recycled for another port — silently breaking that session.
+        let handle = FileHandle(fileDescriptor: vmSideFD, closeOnDealloc: false)
         let id = nextPortID
         nextPortID += 1
         let port = Port(id: id, hostFD: hostFD, vmFileHandle: handle)
@@ -185,7 +190,13 @@ public final class VMNetSwitch: @unchecked Sendable {
 
     /// Detach a VM from the switch (call on VM teardown). Closes the host side
     /// of the socketpair and forgets any MACs learned on that port.
-    public func detachPort(_ handle: FileHandle) {
+    ///
+    /// `releaseLease` controls whether the VM's DHCP lease is also freed. Pass
+    /// `false` when the VM is only being *suspended* (e.g. AC saving a RAM
+    /// snapshot to disk): the resumed VM restores with the same IP without
+    /// re-DHCPing, so the lease must stay reserved or another VM could grab that
+    /// address while it's away. A real teardown frees it (the default).
+    public func detachPort(_ handle: FileHandle, releaseLease: Bool = true) {
         lock.lock()
         guard let id = portByHandle.removeValue(forKey: ObjectIdentifier(handle)),
               let port = ports.removeValue(forKey: id) else {
@@ -195,11 +206,16 @@ public final class VMNetSwitch: @unchecked Sendable {
         port.stopped = true
         let macsOnPort = macTable.compactMap { $0.value == id ? $0.key : nil }
         macTable = macTable.filter { $0.value != id }
-        for m in macsOnPort { dhcpLeases[m] = nil }
+        if releaseLease {
+            for m in macsOnPort { dhcpLeases[m] = nil }
+        }
         lock.unlock()
 
-        // Closing the host fd unblocks the port's read loop.
+        // Closing the host fd unblocks the port's read loop; closing the VM-side
+        // fd (which the FileHandle no longer auto-closes) reclaims the second
+        // half of the socketpair. detachPort is the single owner of both ends.
         Darwin.close(port.hostFD)
+        try? handle.close()
         if switchDebug { print("[VMNetSwitch] port \(id) detached (\(ports.count) remaining)") }
     }
 

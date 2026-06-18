@@ -375,6 +375,7 @@ public final class VMPool {
                 print("[VMPool] Failed to resume pre-warmed VM: \(error)")
                 if let mac = warm.macAddress { MACAddressPool.shared.release(mac) }
                 try? warm.ephemeralDisk.destroy()
+                warm.networkFilter?.stop()
                 return nil
             }
         }
@@ -878,6 +879,10 @@ public final class VMPool {
         if let mac = warm.macAddress {
             MACAddressPool.shared.release(mac)
         }
+        // Detach the shared VMNetSwitch port / close the proxy socketpairs and
+        // free the DHCP lease. Explicit because relying on NetworkFilter.deinit
+        // leaks a socketpair + switch port per VM (see fullCleanup). Idempotent.
+        warm.networkFilter?.stop()
         if warm.vm.state == .running || warm.vm.state == .paused {
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 DispatchQueue.main.async {
@@ -928,6 +933,8 @@ public final class VMPool {
             try? warm.serialInput.fileHandleForReading.close()
             try? warm.serialInput.fileHandleForWriting.close()
             try? warm.ephemeralDisk.destroy()
+            // Detach the switch port / close proxy socketpairs (see tearDown).
+            warm.networkFilter?.stop()
             warmVM = nil
         }
     }

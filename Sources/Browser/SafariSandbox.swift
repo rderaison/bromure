@@ -3794,6 +3794,15 @@ final class BrowserSession {
             try? vm.serialInput.fileHandleForWriting.close()
             try? vm.ephemeralDisk.destroy()
         }
+        // 3.5. Tear down host-side networking: detach the shared VMNetSwitch
+        // port, free the DHCP lease, and close the proxy socketpairs. This must
+        // be explicit — `NetworkFilter` otherwise only cleans up in `deinit`,
+        // which is delayed indefinitely because the retired (kept-alive) VM's
+        // VZ attachment keeps the filter referenced. Without it every closed
+        // session leaks a socketpair + switch port, and a Finder/launchd-
+        // launched app (256-fd soft limit) exhausts descriptors mid-run, after
+        // which `socketpair()` fails and vmnet setup breaks. Idempotent.
+        warmVM?.networkFilter?.stop()
         // 4. Release VZ resources
         warmVM = nil
     }
