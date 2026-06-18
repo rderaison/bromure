@@ -1415,17 +1415,24 @@
   chrome.runtime.onMessage.addListener(function (message) {
     if (message.type === "llmVerdict") {
       removeAnalyzingBanner();
-      if (message.verdict === "phishing") {
-        removeBanner();
-        showPhishingBanner(message.reason || "This page has been identified as a phishing attempt.");
-        // background.js also handles redirect to blocked.html
-      } else if (message.verdict === "suspicious") {
-        removeBanner();
-        showSuspiciousBanner(message.reason || "This page has suspicious characteristics.", message.confidence || 0.5);
-      } else if (message.verdict === "safe") {
-        removeBanner();
-        // Optionally flash a brief "verified safe" indicator
-      }
+      // Defense in depth alongside background.js: never re-raise a warning on a
+      // page the user has trusted, even for a verdict that was in flight before
+      // the trust click or that lands on a later visit to the trusted page.
+      // This is the in-page half of the fix for E2E 8.5's intermittent failure.
+      isPageDomainTrusted().then(function (trusted) {
+        if (trusted) return;
+        if (message.verdict === "phishing") {
+          removeBanner();
+          showPhishingBanner(message.reason || "This page has been identified as a phishing attempt.");
+          // background.js also handles redirect to blocked.html
+        } else if (message.verdict === "suspicious") {
+          removeBanner();
+          showSuspiciousBanner(message.reason || "This page has suspicious characteristics.", message.confidence || 0.5);
+        } else if (message.verdict === "safe") {
+          removeBanner();
+          // Optionally flash a brief "verified safe" indicator
+        }
+      });
     }
 
     if (message.type === "llmServiceStatus") {

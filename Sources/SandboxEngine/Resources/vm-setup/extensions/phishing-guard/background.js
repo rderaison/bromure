@@ -211,20 +211,40 @@ function handleNativeResponse(msg) {
 
   const reason = msg.reason || "";
 
-  if (verdict === "phishing") {
-    pendingWarnings.delete(tabId);
-    chrome.tabs.sendMessage(tabId, { type: "llmVerdict", verdict: "phishing", reason }).catch(() => {});
-    redirectToBlocked(tabId, domain);
-  } else if (verdict === "suspicious") {
-    pendingWarnings.set(tabId, { domain, verdict: "suspicious", reason });
-    chrome.action.setBadgeText({ text: "!", tabId });
-    chrome.action.setBadgeBackgroundColor({ color: "#f59e0b", tabId });
-    chrome.tabs.sendMessage(tabId, { type: "llmVerdict", verdict: "suspicious", reason, confidence: msg.confidence || 0.5 }).catch(() => {});
-  } else if (verdict === "safe") {
-    pendingWarnings.delete(tabId);
-    chrome.action.setBadgeText({ text: "", tabId });
-    chrome.tabs.sendMessage(tabId, { type: "llmVerdict", verdict: "safe", reason }).catch(() => {});
-  }
+  // Honor an "I trust this site" decision made *while this analysis was in
+  // flight*. A first-visit "unknown" page fires an LLM request; the user can
+  // dismiss the local banner via "I know this site" and navigate on well
+  // before the (network-bound) verdict returns. Without re-checking here, that
+  // late verdict re-raises the banner — or, for "phishing", redirects to
+  // blocked.html — silently overriding the trust decision. It also covers a
+  // verdict landing on a later navigation back to the now-trusted page, which
+  // is the root cause of E2E 8.5's intermittent failure. The request-time gate
+  // in the analyzeWithLLM handler can't catch this — the trust happened after.
+  getTrustedDomains().then((trusted) => {
+    const isTrusted =
+      trusted.includes(domain) || trusted.includes(getRegistrableDomain(domain));
+    if (isTrusted) {
+      console.log(`[Phishing Guard] suppressing ${verdict} verdict — ${domain} is user-trusted`);
+      pendingWarnings.delete(tabId);
+      chrome.action.setBadgeText({ text: "", tabId }).catch(() => {});
+      return;
+    }
+
+    if (verdict === "phishing") {
+      pendingWarnings.delete(tabId);
+      chrome.tabs.sendMessage(tabId, { type: "llmVerdict", verdict: "phishing", reason }).catch(() => {});
+      redirectToBlocked(tabId, domain);
+    } else if (verdict === "suspicious") {
+      pendingWarnings.set(tabId, { domain, verdict: "suspicious", reason });
+      chrome.action.setBadgeText({ text: "!", tabId });
+      chrome.action.setBadgeBackgroundColor({ color: "#f59e0b", tabId });
+      chrome.tabs.sendMessage(tabId, { type: "llmVerdict", verdict: "suspicious", reason, confidence: msg.confidence || 0.5 }).catch(() => {});
+    } else if (verdict === "safe") {
+      pendingWarnings.delete(tabId);
+      chrome.action.setBadgeText({ text: "", tabId });
+      chrome.tabs.sendMessage(tabId, { type: "llmVerdict", verdict: "safe", reason }).catch(() => {});
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
