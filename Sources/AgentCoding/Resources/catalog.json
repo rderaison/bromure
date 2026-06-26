@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "models": [
     {
       "id": "qwen2.5-coder-7b-mlx-4bit",
@@ -18,6 +18,25 @@
       "tool_calling": "verified",
       "tool_parser": "hermes",
       "min_chip": "M1",
+      "recommended": true
+    },
+    {
+      "id": "gpt-oss-20b-mlx-mxfp4",
+      "repo": "mlx-community/gpt-oss-20b-MXFP4-Q4",
+      "engine": "vllm-mlx",
+      "name": "gpt-oss 20B (MXFP4 MLX)",
+      "publisher": "OpenAI",
+      "license": "Apache-2.0",
+      "params_total_b": 21,
+      "params_active_b": 3.6,
+      "quant": "mxfp4",
+      "download_gb": 12,
+      "min_unified_mem_gb": 24,
+      "context": 131072,
+      "tags": ["coding", "tools", "agentic", "reasoning", "s"],
+      "tool_calling": "verified",
+      "tool_parser": "gpt-oss",
+      "min_chip": "M1 Pro",
       "recommended": true
     },
     {
@@ -56,6 +75,25 @@
       "tool_calling": "verified",
       "tool_parser": "qwen3_coder",
       "min_chip": "M2 Max",
+      "recommended": true
+    },
+    {
+      "id": "gpt-oss-120b-mlx-mxfp4",
+      "repo": "mlx-community/gpt-oss-120b-MXFP4-Q4",
+      "engine": "vllm-mlx",
+      "name": "gpt-oss 120B (MXFP4 MLX)",
+      "publisher": "OpenAI",
+      "license": "Apache-2.0",
+      "params_total_b": 117,
+      "params_active_b": 5.1,
+      "quant": "mxfp4",
+      "download_gb": 63,
+      "min_unified_mem_gb": 96,
+      "context": 131072,
+      "tags": ["coding", "tools", "agentic", "reasoning", "l"],
+      "tool_calling": "verified",
+      "tool_parser": "gpt-oss",
+      "min_chip": "M3 Max",
       "recommended": true
     },
     {
