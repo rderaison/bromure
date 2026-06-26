@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "models": [
     {
       "id": "qwen2.5-coder-7b-mlx-4bit",
@@ -18,25 +18,6 @@
       "tool_calling": "verified",
       "tool_parser": "hermes",
       "min_chip": "M1",
-      "recommended": true
-    },
-    {
-      "id": "gpt-oss-20b-mlx-mxfp4",
-      "repo": "mlx-community/gpt-oss-20b-MXFP4-Q4",
-      "engine": "vllm-mlx",
-      "name": "gpt-oss 20B (MXFP4 MLX)",
-      "publisher": "OpenAI",
-      "license": "Apache-2.0",
-      "params_total_b": 21,
-      "params_active_b": 3.6,
-      "quant": "mxfp4",
-      "download_gb": 12,
-      "min_unified_mem_gb": 24,
-      "context": 131072,
-      "tags": ["coding", "tools", "agentic", "reasoning", "s"],
-      "tool_calling": "verified",
-      "tool_parser": "gpt-oss",
-      "min_chip": "M1 Pro",
       "recommended": true
     },
     {
@@ -59,6 +40,25 @@
       "recommended": true
     },
     {
+      "id": "qwen2.5-coder-32b-mlx-8bit",
+      "repo": "mlx-community/Qwen2.5-Coder-32B-Instruct-8bit",
+      "engine": "vllm-mlx",
+      "name": "Qwen2.5-Coder 32B (8-bit MLX)",
+      "publisher": "Alibaba",
+      "license": "Apache-2.0",
+      "params_total_b": 32,
+      "params_active_b": 32,
+      "quant": "q8",
+      "download_gb": 35,
+      "min_unified_mem_gb": 64,
+      "context": 128000,
+      "tags": ["coding", "tools", "m"],
+      "tool_calling": "verified",
+      "tool_parser": "hermes",
+      "min_chip": "M2 Max",
+      "recommended": false
+    },
+    {
       "id": "qwen3-coder-next-mlx-mxfp4",
       "repo": "mlx-community/Qwen3-Coder-Next-mxfp4",
       "engine": "vllm-mlx",
@@ -75,25 +75,6 @@
       "tool_calling": "verified",
       "tool_parser": "qwen3_coder",
       "min_chip": "M2 Max",
-      "recommended": true
-    },
-    {
-      "id": "gpt-oss-120b-mlx-mxfp4",
-      "repo": "mlx-community/gpt-oss-120b-MXFP4-Q4",
-      "engine": "vllm-mlx",
-      "name": "gpt-oss 120B (MXFP4 MLX)",
-      "publisher": "OpenAI",
-      "license": "Apache-2.0",
-      "params_total_b": 117,
-      "params_active_b": 5.1,
-      "quant": "mxfp4",
-      "download_gb": 63,
-      "min_unified_mem_gb": 96,
-      "context": 131072,
-      "tags": ["coding", "tools", "agentic", "reasoning", "l"],
-      "tool_calling": "verified",
-      "tool_parser": "gpt-oss",
-      "min_chip": "M3 Max",
       "recommended": true
     },
     {
