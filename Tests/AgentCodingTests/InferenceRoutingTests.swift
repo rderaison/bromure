@@ -227,6 +227,16 @@ struct HybridRouterTests {
         #expect(local > 200 && local < 400)
     }
 
+    @Test("Output-token extraction feeds the budget") func tokens() {
+        // Anthropic streamed message_delta carries the cumulative total.
+        let sse = Data(#"event: message_delta\ndata: {"usage":{"output_tokens":137}}\n"#.utf8)
+        #expect(HTTPMitmConnection.extractOutputTokens(sse) == 137)
+        // OpenAI completion_tokens.
+        let oai = Data(#"{"usage":{"prompt_tokens":10,"completion_tokens":42}}"#.utf8)
+        #expect(HTTPMitmConnection.extractOutputTokens(oai) == 42)
+        #expect(HTTPMitmConnection.extractOutputTokens(Data("no usage here".utf8)) == nil)
+    }
+
     @Test("Precedence: budget beats split") func precedence() {
         let r = HybridRouter(config: HybridConfig(cloudTokenBudget: 100,
                                                   localSplitPercent: 0))
@@ -380,7 +390,7 @@ struct LocalToolAuthTests {
         let toml = SessionDisk.codexLocalProviderTOML(model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
         #expect(toml.contains("model_provider = \"bromure-local\""))
         #expect(toml.contains("base_url = \"http://127.0.0.1:11434/v1\""))
-        #expect(toml.contains("wire_api = \"chat\""))
+        #expect(toml.contains("wire_api = \"responses\""))
         #expect(toml.contains("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"))
     }
 

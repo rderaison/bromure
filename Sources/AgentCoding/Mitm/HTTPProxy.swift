@@ -971,15 +971,27 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                             tls: tls,
                                             upstreamScheme: routedBackend == .local ? "http" : "https")
 
-        // Hybrid hard-error fallback feed (§4.3 Trap 1). A cloud turn that
-        // came back 429/529/5xx pins the session local and trips the health
-        // gate so subsequent sessions skip the cloud penalty. The streaming
-        // relay already committed this response to the guest, so we can't
-        // replay *this* turn — but new sessions route correctly.
-        if let routingCtx, routingCtx.routing == .hybrid, routedBackend == .cloud,
-           LLMRouting.isHardErrorStatus(Self.parseStatusCode(relay.buffer)) {
-            routingCtx.hybrid.recordHardError(sessionID: profileID.uuidString,
-                                              now: Date().timeIntervalSince1970)
+        // Feed the hybrid policy engine from this cloud turn (§4.3). The
+        // streaming relay already committed the response, so we can't replay
+        // *this* turn — but the health gate (TTFT EWMA + error rate) and the
+        // rolling token budget steer *subsequent* sessions, at session
+        // granularity (the sticky-session coherence guard).
+        if let routingCtx, routingCtx.routing == .hybrid, routedBackend == .cloud {
+            let now = Date().timeIntervalSince1970
+            let session = profileID.uuidString
+            if LLMRouting.isHardErrorStatus(Self.parseStatusCode(relay.buffer)) {
+                routingCtx.hybrid.recordHardError(sessionID: session, now: now)
+            } else {
+                // Health gate: time-to-first-token. Soft-timeout TTFTs feed in
+                // as slow samples too (a slow first token raises the EWMA).
+                if let ttft = relay.ttftSeconds {
+                    routingCtx.hybrid.recordSuccess(ttftSeconds: ttft)
+                }
+                // Budget: cloud output tokens against the rolling window.
+                if let toks = Self.extractOutputTokens(relay.buffer) {
+                    routingCtx.hybrid.recordCloudTokens(toks, now: now)
+                }
+            }
         }
 
         // Claude subscription 401 self-heal. The streaming relay has already
@@ -1773,6 +1785,24 @@ final class HTTPMitmConnection: @unchecked Sendable {
         guard parts.count >= 2, let n = Int(parts[1]) else { return 0 }
         return n
     }
+
+    /// Best-effort output-token count from an LLM response (Anthropic
+    /// `output_tokens` / OpenAI `completion_tokens`). Returns the max value
+    /// seen — for streamed SSE the final `message_delta` carries the
+    /// cumulative total. Feeds the hybrid cloud-token budget.
+    static func extractOutputTokens(_ buffer: Data) -> Int? {
+        guard let s = String(data: buffer, encoding: .utf8) else { return nil }
+        var best: Int?
+        for pattern in [#""output_tokens"\s*:\s*(\d+)"#, #""completion_tokens"\s*:\s*(\d+)"#] {
+            guard let re = try? NSRegularExpression(pattern: pattern) else { continue }
+            re.enumerateMatches(in: s, range: NSRange(s.startIndex..., in: s)) { m, _, _ in
+                if let m, let r = Range(m.range(at: 1), in: s), let n = Int(s[r]) {
+                    best = max(best ?? 0, n)
+                }
+            }
+        }
+        return best
+    }
 }
 
 // MARK: - HTTP wire helpers
@@ -2321,6 +2351,8 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
     var responseBuffer = Data()
     var totalWireBytes = 0
     var truncatedForTrace = false
+    let reqStart = Date()
+    var ttft: Double? = nil
     for try await event in events {
         switch event {
         case .head(let http):
@@ -2341,6 +2373,7 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
             // header limits, well under any sensible cap.
             responseBuffer.append(headData)
         case .chunk(let chunk):
+            if ttft == nil { ttft = Date().timeIntervalSince(reqStart) }
             try tls.write(chunk)
             totalWireBytes += chunk.count
             if responseBuffer.count + chunk.count <= bodyBufferCap {
@@ -2360,7 +2393,8 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
     }
     return RelayResponse(buffer: responseBuffer,
                          wireBytes: totalWireBytes,
-                         truncatedForTrace: truncatedForTrace)
+                         truncatedForTrace: truncatedForTrace,
+                         ttftSeconds: ttft)
 }
 
 /// Tuple-ish return for `relayUpstream`. Splits "what we kept for
@@ -2373,6 +2407,10 @@ struct RelayResponse {
     /// True when the response exceeded the in-memory cap. The trace
     /// path uses this to refuse to save a partial body.
     let truncatedForTrace: Bool
+    /// Seconds from request start to the first body chunk — the upstream's
+    /// time-to-first-token. Feeds the hybrid health gate. nil for the
+    /// buffered path (no streaming timing).
+    var ttftSeconds: Double? = nil
 }
 
 /// URLSessionDataDelegate that funnels the response head, each body
