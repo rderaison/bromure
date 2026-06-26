@@ -473,9 +473,81 @@ final class TabbedSessionWindow: NSWindow {
         }
     }
 
-    /// ⌘T / ⌘W / ⌘1-9 dispatch shared by `sendEvent`, `performKeyEquivalent`
-    /// and the app delegate's NSEvent monitor. Returns true when the
-    /// shortcut matched and the event should be consumed.
+    /// Per-key timestamp of the last host-owned chord *seen* — whether it
+    /// fired or was suppressed — feeding `acAutorepeatGuard`. Cross-path
+    /// duplicates are handled structurally by `vmHasKeyboardFocus` gating, not
+    /// here; this only collapses a single path's autorepeat.
+    private var lastShortcutAt: [String: Date] = [:]
+
+    /// True when this window is key AND the embedded VZ view holds keyboard
+    /// focus — i.e. a keystroke is being delivered into the guest. In that
+    /// state host-owned chords (⌘T/⌘W/⌘N/⌘1-9) must NOT be acted on by the
+    /// host key monitor / `sendEvent`: the chord reaches the guest, Openbox
+    /// grabs it, and the bounce (`UbuntuSandboxVM.onShortcut` →
+    /// `performACShortcut`) runs the action. Acting in BOTH places double-
+    /// processes one press — e.g. ⌘T spawning two kittys that then race on X
+    /// startup (one bails with a BadWindow), or ⌘W closing two tabs. When a
+    /// native control holds focus instead, the chord never reaches the guest,
+    /// so this is false and the monitor/sendEvent path is the one that acts.
+    var vmHasKeyboardFocus: Bool {
+        guard isKeyWindow, let fr = firstResponder as? NSView else { return false }
+        return fr === vmView || fr.isDescendant(of: vmView)
+    }
+
+    /// Run a host-owned keychord by its bare key ("t" / "w" / "n" / "1"…"9").
+    /// Single sink shared by BOTH routes that can deliver one:
+    ///   • the host key monitor / `sendEvent` (when a native control in the
+    ///     session window holds focus), and
+    ///   • the guest bounce via `UbuntuSandboxVM.onShortcut` (when the VM
+    ///     holds focus and Openbox grabbed the chord).
+    /// Funnelling them through one method is what stops the ⌘T action from
+    /// drifting between paths. Returns true when the key matched (and the
+    /// event, if any, should be consumed).
+    @discardableResult
+    func performACShortcut(_ key: String, isRepeat: Bool = false) -> Bool {
+        // `isRepeat` is only known on the native NSEvent path; the guest bounce
+        // can't carry it, so `acAutorepeatGuard` is the backstop there. Either
+        // way the chord is still *consumed* (we return true for an owned key) —
+        // only the action is gated, so a suppressed repeat never leaks to the
+        // guest's kitty.
+        let fire = !isRepeat && acAutorepeatGuard(key)
+        switch key {
+        case "t":
+            if fire { acDelegate?.spawnNewTab(in: self) }
+            return true
+        case "w":
+            if fire { closeTab(at: model.activeIndex) }
+            return true
+        case "n":
+            // ⌘N → profile picker / "new session".
+            if fire { acDelegate?.openProfileManagerAction(nil) }
+            return true
+        default:
+            guard let n = Int(key), (1...9).contains(n),
+                  model.tabs.indices.contains(n - 1) else { return false }
+            if fire { switchTo(index: n - 1) }
+            return true
+        }
+    }
+
+    /// Leading-edge autorepeat filter for the guest-bounce path, which — unlike
+    /// the native NSEvent path's `isARepeat` — has no flag distinguishing a
+    /// held chord from a deliberate re-press. X11 repeats a held chord ~every
+    /// 40ms; a deliberate re-press is ≥~120ms apart, so an 80ms window passes
+    /// real presses but swallows autorepeat. The per-key timestamp is refreshed
+    /// on EVERY call — including suppressed ones — so a held key keeps resetting
+    /// the window and fires once, rather than re-firing every 80ms.
+    private func acAutorepeatGuard(_ key: String) -> Bool {
+        let now = Date()
+        defer { lastShortcutAt[key] = now }
+        guard let prev = lastShortcutAt[key] else { return true }
+        return now.timeIntervalSince(prev) >= 0.08
+    }
+
+    /// ⌘T / ⌘W / ⌘1-9 / ⌘N dispatch for `sendEvent`, `performKeyEquivalent`
+    /// and the app delegate's NSEvent monitor (the native-focus path; the VM-
+    /// focus path comes through the guest bounce → `performACShortcut`).
+    /// Returns true when the shortcut matched and the event should be consumed.
     ///
     /// The relaxed-modifier mask matches ACAppDelegate.interceptKey:
     /// capsLock / numericPad / help / function leak in unrelated bits
@@ -485,22 +557,12 @@ final class TabbedSessionWindow: NSWindow {
         let userMods: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
         let mods = event.modifierFlags.intersection(userMods)
         guard mods == [.command] else { return false }
+        // VM has focus → the chord reaches the guest and comes back via the
+        // bounce. Don't also act here (return false → fall through to the VZ
+        // view). See `vmHasKeyboardFocus`.
+        if vmHasKeyboardFocus { return false }
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
-        switch chars {
-        case "t":
-            acDelegate?.spawnNewTab(in: self)
-            return true
-        case "w":
-            closeTab(at: model.activeIndex)
-            return true
-        default:
-            if let n = Int(chars), (1...9).contains(n),
-               model.tabs.indices.contains(n - 1) {
-                switchTo(index: n - 1)
-                return true
-            }
-            return false
-        }
+        return performACShortcut(chars, isRepeat: event.isARepeat)
     }
 
     /// Last-resort intercept for ⌘T / ⌘W / ⌘1-9. NSWindow.sendEvent

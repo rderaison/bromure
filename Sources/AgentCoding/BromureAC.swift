@@ -650,10 +650,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
 
-        // ⌘T / ⌘W / ⌘1-9 must run BEFORE VZVirtualMachineView's
+        // ⌘T / ⌘W / ⌘1-9 / ⌘N must run BEFORE VZVirtualMachineView's
         // keyDown forwards them to the guest (where kitty's super+t /
         // super+w mappings would create a kitty-internal tab instead
-        // of a host pill). A local monitor fires before window /
+        // of a host pill, and super+n would reach the agent). A local
+        // monitor fires before window /
         // menu / responder-chain dispatch, so this is the earliest
         // hook we have. `interceptKey` returns nil when it has
         // handled the event — propagate that nil so AppKit drops
@@ -818,35 +819,45 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return nil
         }
 
-        // The remaining shortcuts (⌘T / ⌘W / ⌘1-9) only make sense
-        // when a session window is up. Without one, defer to the
-        // standard responder chain.
+        // Find the owning session window. keyWindow first, then any visible
+        // session — mirrors the Browser monitor's keyWindow fallback so we
+        // still own the chord when the VZ view has grabbed focus and AppKit
+        // hands us a keyDown with a nil/foreign event.window.
+        //
+        // NOTE: this monitor is only ONE of the two routes for host-owned
+        // chords. When the VM holds keyboard focus the VZ view forwards the
+        // chord to the guest before AppKit dispatches keyDown, so this monitor
+        // typically never fires for it — Openbox grabs it in the guest and
+        // bounces it back via UbuntuSandboxVM.onShortcut instead. This path
+        // covers the other case: a native control in the session window holds
+        // focus. Both funnel into win.performACShortcut, which debounces.
         let sessions = NSApp.windows.compactMap { $0 as? TabbedSessionWindow }
         let win = (NSApp.keyWindow as? TabbedSessionWindow)
             ?? sessions.first(where: { $0.isVisible })
-        guard let win else { return event }
 
-        switch chars {
-        case "t":
-            print("[BromureAC] ⌘T → spawn tab in '\(win.profile.name)'")
-            spawnNewTab(in: win)
-            return nil
-        case "w":
-            print("[BromureAC] ⌘W → close active tab in '\(win.profile.name)'")
-            win.closeTab(at: win.model.activeIndex)
-            return nil
-        default:
-            if let n = Int(chars), (1...9).contains(n),
-               win.model.tabs.indices.contains(n - 1) {
-                print("[BromureAC] ⌘\(n) → switch tab in '\(win.profile.name)'")
-                win.switchTo(index: n - 1)
+        // ⌘N opens the picker even with no session window up.
+        guard let win else {
+            if chars == "n" {
+                openProfileManagerAction(nil)
                 return nil
             }
-            // Anything else (incl. ⌘Tab, ⌘Q, ⌘Space) falls through to
-            // the system. Since the VZ view no longer captures system
-            // keys, macOS handles these natively.
             return event
         }
+
+        // When the VM holds keyboard focus, DON'T act here: the chord reaches
+        // the guest, Openbox grabs it, and it bounces back via onShortcut →
+        // performACShortcut. Acting here too would double-process one press
+        // (⌘T → two kittys racing on X startup, ⌘W → two tabs closed) — the
+        // bounce's up-to-500ms poll latency is longer than performACShortcut's
+        // debounce, so the debounce alone can't dedupe the two paths. Return
+        // the event so it flows to the guest and the bounce owns it.
+        if win.vmHasKeyboardFocus { return event }
+
+        // Native control in the session window has focus → the chord won't
+        // reach the guest, so this is the path that runs it. Host-owned chords
+        // (⌘T / ⌘W / ⌘N / ⌘1-9) → consume; every other ⌘ chord is sent on.
+        if win.performACShortcut(chars, isRepeat: event.isARepeat) { return nil }
+        return event
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -3511,6 +3522,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         sandbox.onIPUpdate = { [weak win] ip in
             Task { @MainActor in win?.model.ipAddress = ip }
+        }
+        sandbox.onShortcut = { [weak win] key in
+            // A host-owned chord (⌘T/⌘W/⌘N/⌘1-9) that Openbox grabbed in the
+            // guest and bounced back because the VM held keyboard focus. Run
+            // the same action the key monitor would — performACShortcut is the
+            // shared sink, so the two paths can't drift.
+            Task { @MainActor in win?.performACShortcut(key) }
         }
     }
 

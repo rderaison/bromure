@@ -2827,6 +2827,26 @@ public final class ProfileStore {
         *) PROMPT_COMMAND="_bromure_reload_env${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
     esac
 
+    # virtiofs cwd heal. Restoring a suspended VM rebuilds VZ's virtiofs
+    # backend, which hands the guest fresh inode handles — so the kernel's
+    # cached handle for whatever directory a process is *sitting in* goes
+    # stale, and a shell parked in a shared dir (home or a project mount) gets
+    # ENOENT on its own cwd after resume. Absolute-path access re-resolves on
+    # its own; a held cwd can't, so nudge it: if "." has gone stale, re-chdir
+    # to the absolute $PWD (a fresh walk from the mount root). One stat per
+    # prompt, a no-op unless actually stale. Same exec-freeze caveat as the env
+    # refresh above — a long-running foreground agent that spanned the resume
+    # keeps its own stale cwd until it exits, and the very first command after
+    # a resume still runs before this fires (a bare Enter re-syncs the prompt).
+    _bromure_cwd_guard() {
+        [ -d . ] 2>/dev/null || builtin cd -- "$PWD" 2>/dev/null \
+            || builtin cd "$HOME" 2>/dev/null
+    }
+    case "${PROMPT_COMMAND:-}" in
+        *_bromure_cwd_guard*) ;;
+        *) PROMPT_COMMAND="_bromure_cwd_guard${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+    esac
+
     # MCP server configs from the profile. The host generates both
     # Claude Code and Codex formats; we install whichever matches
     # the active tool.
@@ -3384,6 +3404,62 @@ public final class ProfileStore {
 
     log "starting"
 
+    # --- Host-owned keychords: ⌘T / ⌘W / ⌘N / ⌘1-9 ----------------------------
+    # The VZ view forwards captured keys to the guest before AppKit can see
+    # them, so host-side interception races the guest and loses intermittently
+    # (the same chord sometimes makes a kitty tab, sometimes a host pill).
+    # Invert it, exactly like Bromure Web: let the chord reach the guest, have
+    # Openbox globally GRAB it (the Mac ⌘ arrives as Super here) so kitty never
+    # acts, and bounce the bare key to the host via the outbox. Bromure then
+    # runs the real action. The host key monitor still covers the case where a
+    # native macOS window (not the VM) holds focus — the two paths are mutually
+    # exclusive by focus, so they can't both fire for one press.
+    HOSTKEY="$HOME/.bromure-hostkey"
+    cat > "$HOSTKEY" <<'HKEOF'
+    #!/bin/sh
+    # bromure-hostkey <key>: bounce a host-owned chord to macOS via the outbox.
+    # Fixed filename per key — a held chord's autorepeat just overwrites it, and
+    # the host deletes on read, so it sees ~one event per poll, not a pile of
+    # tabs. Backgrounding isn't needed: the write is a single cheap syscall.
+    key="${1:-}"
+    [ -n "$key" ] || exit 0
+    d=/mnt/bromure-outbox
+    [ -d "$d" ] || exit 0
+    : > "$d/shortcut-${key}.txt" 2>/dev/null
+    HKEOF
+    chmod +x "$HOSTKEY"
+
+    # Openbox grabs only the host-owned chords; every other ⌘ chord (⌘C/⌘V/…)
+    # falls through to kitty as Super+… as before. ⌘H/⌘Q/⌘Tab never reach the
+    # guest (capturesSystemKeys = false → macOS owns them), so they aren't here.
+    # Written as a per-user config (precedence over /etc/xdg) + reconfigure;
+    # openbox is already up (started from xinitrc before this agent runs).
+    mkdir -p "$HOME/.config/openbox"
+    cat > "$HOME/.config/openbox/rc.xml" <<OBEOF
+    <?xml version="1.0" encoding="UTF-8"?>
+    <openbox_config xmlns="http://openbox.org/3.4/rc">
+      <keyboard>
+        <keybind key="W-t"><action name="Execute"><command>$HOSTKEY t</command></action></keybind>
+        <keybind key="W-w"><action name="Execute"><command>$HOSTKEY w</command></action></keybind>
+        <keybind key="W-n"><action name="Execute"><command>$HOSTKEY n</command></action></keybind>
+        <keybind key="W-1"><action name="Execute"><command>$HOSTKEY 1</command></action></keybind>
+        <keybind key="W-2"><action name="Execute"><command>$HOSTKEY 2</command></action></keybind>
+        <keybind key="W-3"><action name="Execute"><command>$HOSTKEY 3</command></action></keybind>
+        <keybind key="W-4"><action name="Execute"><command>$HOSTKEY 4</command></action></keybind>
+        <keybind key="W-5"><action name="Execute"><command>$HOSTKEY 5</command></action></keybind>
+        <keybind key="W-6"><action name="Execute"><command>$HOSTKEY 6</command></action></keybind>
+        <keybind key="W-7"><action name="Execute"><command>$HOSTKEY 7</command></action></keybind>
+        <keybind key="W-8"><action name="Execute"><command>$HOSTKEY 8</command></action></keybind>
+        <keybind key="W-9"><action name="Execute"><command>$HOSTKEY 9</command></action></keybind>
+      </keyboard>
+      <applications>
+        <application class="*"><decor>no</decor><focus>yes</focus></application>
+      </applications>
+    </openbox_config>
+    OBEOF
+    openbox --reconfigure >/dev/null 2>&1 || true
+    log "installed openbox keychord grabs (host owns ⌘T/⌘W/⌘N/⌘1-9)"
+
     have_xdotool=0
     command -v xdotool >/dev/null 2>&1 && have_xdotool=1
     log "xdotool=$have_xdotool"
@@ -3409,13 +3485,20 @@ public final class ProfileStore {
             dur=$((end - start))
             echo "$(date +%T) [agent] kitty rc=$rc id=$id dur=${dur}s" >> "$LOG"
             # Diagnostics for "session started then bailed right away": when
-            # kitty exits non-zero or lives <3s, capture why (exit code, how
+            # kitty dies within 3s of spawning, capture why (exit code, how
             # long it ran, kitty version, $DISPLAY, and the tail of its own
             # log) into diag-<id>.txt so the host can surface it without
             # needing debug-shell access. Written atomically before the
             # closed marker so the host has the reason in hand when it reaps
             # the pill.
-            if [ "$rc" -ne 0 ] || [ "$dur" -lt 3 ]; then
+            #
+            # Gate on DURATION only, not exit code. A long-lived kitty that
+            # exits non-zero is almost always a deliberate close (or a benign
+            # X teardown race on the virtio-GL stack — BadWindow on
+            # X_GetProperty as windows come and go), not a "bail"; the pill is
+            # reaped either way via the roster, so flagging rc!=0 on a kitty
+            # that ran fine just spams misleading diagnostics.
+            if [ "$dur" -lt 3 ]; then
                 {
                     echo "rc=$rc"
                     echo "duration_s=$dur"

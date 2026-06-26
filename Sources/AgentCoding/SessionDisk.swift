@@ -960,14 +960,20 @@ public final class SessionDisk {
         return tmp
     }
 
-    /// Remove stale one-shot guest→host event files (closed-*, diag-*) left
-    /// in the outbox by a prior session. See `prepareOutboxDirectory`.
+    /// Remove stale one-shot guest→host event files (closed-*, diag-*,
+    /// shortcut-*) left in the outbox by a prior session. See
+    /// `prepareOutboxDirectory`. `shortcut-*` is a host-owned keychord the
+    /// guest bounced (⌘T/⌘W/⌘N/⌘1-9); a leftover one means the VM was
+    /// suspended in the sub-tick window before the host drained it, and
+    /// replaying a pre-suspend chord after resume (a phantom ⌘T) is wrong —
+    /// so it's stale-by-definition here too.
     private func purgeStaleEvents(in dir: URL) {
         guard let entries = try? fm.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: nil) else { return }
         for entry in entries {
             let name = entry.lastPathComponent
-            if name.hasPrefix("closed-") || name.hasPrefix("diag-") {
+            if name.hasPrefix("closed-") || name.hasPrefix("diag-")
+                || name.hasPrefix("shortcut-") {
                 try? fm.removeItem(at: entry)
             }
         }

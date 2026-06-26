@@ -182,7 +182,7 @@ extension TerminalAppDefaults {
         map super+tab            discard_event
         map super+shift+tab      discard_event
         map super+space          discard_event
-        map super+backtick       discard_event
+        map super+`              discard_event
         map super+shift+left     discard_event
         map super+shift+right    discard_event
         map super+1              discard_event

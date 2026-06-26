@@ -38,6 +38,16 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// dynamic tab labels.
     public var onTabTitleUpdate: ((UUID, String) -> Void)?
 
+    /// Called when the guest bounces a host-owned keychord (⌘T/⌘W/⌘N/⌘1-9)
+    /// back to the host. While the VM holds keyboard focus the VZ view
+    /// forwards every chord to the guest before AppKit can intercept it, so
+    /// Openbox in the guest globally grabs these chords (consuming them so
+    /// kitty never acts) and drops a `shortcut-<key>.txt` marker in the
+    /// outbox. The value is the bare key ("t", "w", "n", "1"…"9"). Wire to
+    /// the same action the host key monitor runs — the two paths are mutually
+    /// exclusive by focus, so a single press fires exactly one of them.
+    public var onShortcut: ((String) -> Void)?
+
     /// Most-recently-reported title per tab. Used to suppress redundant
     /// callbacks when the title hasn't changed between polls.
     private var lastReportedTitles: [UUID: String] = [:]
@@ -386,7 +396,40 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         outboxPollTask?.cancel()
         outboxPollTask = Task { @MainActor [weak self] in
             let fm = FileManager.default
+            // One task, two cadences. Host-owned keychords (⌘T/⌘W/⌘N/⌘1-9)
+            // that the guest bounced are drained every tick (~40ms) so the pill
+            // appears the instant the chord lands — routing them through the
+            // 500ms heavy cadence is what made ⌘T feel sluggish. Everything else
+            // in the outbox (ip / url relay / titles / roster) is latency-
+            // tolerant and stays on the ~480ms cadence via the tick gate below.
+            var ticks = 0
             while !Task.isCancelled {
+                // FAST PATH — shortcut-<key>.txt: a host-owned chord Openbox
+                // grabbed in the guest and bounced back while the VM held
+                // keyboard focus. Fixed filename per key, so a held chord's
+                // autorepeat just overwrites it; we delete on read and the sink
+                // (performACShortcut) collapses what's left. Body is empty —
+                // the key is in the filename.
+                if let entries = try? fm.contentsOfDirectory(
+                    at: outbox, includingPropertiesForKeys: nil) {
+                    for entry in entries
+                    where entry.lastPathComponent.hasPrefix("shortcut-") {
+                        try? fm.removeItem(at: entry)
+                        let key = entry.lastPathComponent
+                            .replacingOccurrences(of: "shortcut-", with: "")
+                            .replacingOccurrences(of: ".txt", with: "")
+                        if !key.isEmpty { self?.onShortcut?(key) }
+                    }
+                }
+
+                // Throttle the heavier scan to ~every 12th tick (~480ms) so
+                // titles / roster / url relay keep their original cadence.
+                ticks &+= 1
+                if ticks % 12 != 0 {
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                    continue
+                }
+
                 // Read the always-present ip.txt without consuming it —
                 // the guest rewrites it every 5s.
                 let ipFile = outbox.appendingPathComponent("ip.txt")
@@ -507,11 +550,14 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             }
                             continue
                         }
+                        // shortcut-<key>.txt is handled by the fast path at the
+                        // top of the loop; it never reaches this scan.
+                        //
                         // cmd-*.txt — host-written, consumed by the in-VM
                         // tab agent. Leave alone.
                     }
                 }
-                try? await Task.sleep(nanoseconds: 500_000_000)
+                try? await Task.sleep(nanoseconds: 40_000_000)
             }
         }
     }
