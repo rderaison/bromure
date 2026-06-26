@@ -325,13 +325,24 @@ struct LocalToolAuthTests {
         #expect(yaml.contains("name: \"c/d\""))
     }
 
-    @Test("Engine launch carries the API key + offline flag when cached") func launchFlags() {
+    @Test("Engine launch carries api key, offline, + tool-call parser") func launchFlags() {
         let plan = InferenceService.makeLaunchPlan(
             engine: .vllmMLX, executable: URL(fileURLWithPath: "/x/vllm-mlx"),
-            modelRepo: "a/b", cached: true, apiKey: "brk-test", env: [:])
+            modelRepo: "a/b", cached: true, toolParser: "hermes", apiKey: "brk-test", env: [:])
         #expect(plan.arguments.contains("--api-key"))
         #expect(plan.arguments.contains("brk-test"))
         #expect(plan.environment["HF_HUB_OFFLINE"] == "1")
+        // Without these, the model never emits tool_use blocks.
+        #expect(plan.arguments.contains("--enable-auto-tool-choice"))
+        let i = plan.arguments.firstIndex(of: "--tool-call-parser")
+        #expect(i != nil && plan.arguments[i! + 1] == "hermes")
+    }
+
+    @Test("Shipped catalog gives each model a tool-call parser") func catalogParsers() throws {
+        let url = URL(fileURLWithPath: "Sources/AgentCoding/Resources/catalog.json")
+        let cat = try ModelCatalog.parse(Data(contentsOf: url))
+        #expect(cat.models.allSatisfy { ($0.toolParser ?? "").isEmpty == false })
+        #expect(cat.model(id: "qwen2.5-coder-7b-mlx-4bit")?.toolParser == "hermes")
     }
 
     @Test("Prometheus metrics parse + sum across labels") func metricsParse() {

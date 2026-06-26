@@ -589,7 +589,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let m = CatalogStore.shared.resolve(id)
             let repo = m?.repo ?? id
             let est = Int((m?.downloadGB ?? 8).rounded(.up))
-            return InferenceModel(name: repo, repo: repo, estMemGB: est)
+            return InferenceModel(name: repo, repo: repo, estMemGB: est,
+                                  toolParser: m?.toolParser ?? "auto")
         }
         // Budget for parallel models: most of unified memory, leaving room
         // for the OS + the VMs. vllm-mlx evicts idle models LRU under this.

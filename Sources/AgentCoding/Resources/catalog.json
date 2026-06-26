@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "models": [
     {
       "id": "qwen2.5-coder-7b-mlx-4bit",
@@ -16,6 +16,7 @@
       "context": 128000,
       "tags": ["coding", "tools", "s"],
       "tool_calling": "verified",
+      "tool_parser": "hermes",
       "min_chip": "M1",
       "recommended": true
     },
@@ -34,6 +35,7 @@
       "context": 256000,
       "tags": ["coding", "tools", "agentic", "m"],
       "tool_calling": "verified",
+      "tool_parser": "qwen3_coder",
       "min_chip": "M1 Pro",
       "recommended": true
     },
@@ -52,6 +54,7 @@
       "context": 256000,
       "tags": ["coding", "tools", "agentic", "l"],
       "tool_calling": "verified",
+      "tool_parser": "qwen3_coder",
       "min_chip": "M2 Max",
       "recommended": true
     },
@@ -70,6 +73,7 @@
       "context": 1000000,
       "tags": ["coding", "tools", "reasoning", "xl"],
       "tool_calling": "verified",
+      "tool_parser": "glm47",
       "min_chip": "M3 Max",
       "recommended": true
     }

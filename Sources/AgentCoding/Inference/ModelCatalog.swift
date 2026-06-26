@@ -33,6 +33,10 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
     public var context: Int?
     public var tags: [String]
     public var toolCalling: ToolCalling
+    /// vllm-mlx tool-call parser for this model (`--tool-call-parser`):
+    /// hermes / qwen3_coder / glm47 / mistral / … Without the matching
+    /// parser the engine never emits tool_use blocks. nil → "auto".
+    public var toolParser: String?
     public var minChip: String?
     public var recommended: Bool
 
@@ -41,8 +45,8 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
                 paramsTotalB: Double? = nil, paramsActiveB: Double? = nil,
                 quant: String? = nil, downloadGB: Double, minUnifiedMemGB: Int,
                 context: Int? = nil, tags: [String] = [],
-                toolCalling: ToolCalling = .untested, minChip: String? = nil,
-                recommended: Bool = false) {
+                toolCalling: ToolCalling = .untested, toolParser: String? = nil,
+                minChip: String? = nil, recommended: Bool = false) {
         self.id = id
         self.repo = repo
         self.engine = engine
@@ -57,6 +61,7 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
         self.context = context
         self.tags = tags
         self.toolCalling = toolCalling
+        self.toolParser = toolParser
         self.minChip = minChip
         self.recommended = recommended
     }
@@ -70,6 +75,7 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
         case minUnifiedMemGB = "min_unified_mem_gb"
         case context, tags
         case toolCalling = "tool_calling"
+        case toolParser = "tool_parser"
         case minChip = "min_chip"
         case recommended
     }
@@ -90,6 +96,7 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
         context = try c.decodeIfPresent(Int.self, forKey: .context)
         tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
         toolCalling = try c.decodeIfPresent(ToolCalling.self, forKey: .toolCalling) ?? .untested
+        toolParser = try c.decodeIfPresent(String.self, forKey: .toolParser)
         minChip = try c.decodeIfPresent(String.self, forKey: .minChip)
         recommended = try c.decodeIfPresent(Bool.self, forKey: .recommended) ?? false
     }
@@ -200,7 +207,7 @@ extension ModelCatalog {
             publisher: "Alibaba", license: "Apache-2.0",
             quant: "q4", downloadGB: 4.3, minUnifiedMemGB: 16, context: 128_000,
             tags: ["coding", "tools", "s"],
-            toolCalling: .verified, minChip: "M1", recommended: true),
+            toolCalling: .verified, toolParser: "hermes", minChip: "M1", recommended: true),
     ])
 
     /// Coarse size tier from the memory requirement — drives the picker's

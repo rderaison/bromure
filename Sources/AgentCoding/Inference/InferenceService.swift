@@ -10,11 +10,16 @@ public enum InferenceEngine: String, Sendable {
     /// Server subcommand arguments to bind loopback and serve a model,
     /// gated behind a per-session API key (Bearer auth) since the engine is
     /// shared across VMs.
-    func serverArgs(model: String, host: String, port: Int, apiKey: String) -> [String] {
+    func serverArgs(model: String, host: String, port: Int, apiKey: String,
+                    toolParser: String) -> [String] {
         switch self {
         case .vllmMLX:
+            // Tool calling is OFF unless explicitly enabled with a parser —
+            // without this the model never emits tool_use blocks (verified
+            // live: Qwen + hermes works, no flag = plain text).
             return ["serve", model, "--host", host, "--port", String(port),
-                    "--api-key", apiKey, "--enable-metrics"]
+                    "--api-key", apiKey, "--enable-metrics",
+                    "--enable-auto-tool-choice", "--tool-call-parser", toolParser]
         }
     }
 
@@ -24,9 +29,13 @@ public enum InferenceEngine: String, Sendable {
     func serverArgsMulti(configPath: String, host: String, port: Int, apiKey: String) -> [String] {
         switch self {
         case .vllmMLX:
+            // Per-model parsers live in the registry; "auto" lets the engine
+            // pick each model's parser. (--enable-auto-tool-choice requires a
+            // global --tool-call-parser.)
             return ["serve", "--models-config", configPath,
                     "--host", host, "--port", String(port),
-                    "--api-key", apiKey, "--continuous-batching", "--enable-metrics"]
+                    "--api-key", apiKey, "--continuous-batching", "--enable-metrics",
+                    "--enable-auto-tool-choice", "--tool-call-parser", "auto"]
         }
     }
 
@@ -42,8 +51,10 @@ public struct InferenceModel: Equatable, Sendable {
     public var name: String
     public var repo: String
     public var estMemGB: Int
-    public init(name: String, repo: String, estMemGB: Int) {
+    public var toolParser: String
+    public init(name: String, repo: String, estMemGB: Int, toolParser: String = "auto") {
         self.name = name; self.repo = repo; self.estMemGB = estMemGB
+        self.toolParser = toolParser
     }
 }
 
@@ -153,6 +164,7 @@ public actor InferenceService {
         executable: URL,
         modelRepo: String,
         cached: Bool = false,
+        toolParser: String = "auto",
         apiKey: String = InferenceService.apiKey,
         env: [String: String] = ProcessInfo.processInfo.environment
     ) -> EngineLaunchPlan {
@@ -167,7 +179,7 @@ public actor InferenceService {
             executableURL: executable,
             arguments: engine.serverArgs(model: modelRepo,
                                          host: engineHost, port: enginePort,
-                                         apiKey: apiKey),
+                                         apiKey: apiKey, toolParser: toolParser),
             environment: childEnv,
             host: engineHost,
             port: enginePort)
@@ -189,8 +201,9 @@ public actor InferenceService {
             throw InferenceServiceError.engineNotFound
         }
         let cached = catalog.isInstalled(repo: modelRepo)
+        let parser = catalog.resolve(modelRepo)?.toolParser ?? "auto"
         let plan = Self.makeLaunchPlan(engine: engine, executable: exe,
-                                       modelRepo: modelRepo, cached: cached)
+                                       modelRepo: modelRepo, cached: cached, toolParser: parser)
         return try await launch(plan: plan, exe: exe, repos: [modelRepo], timeout: timeout)
     }
 
@@ -248,6 +261,7 @@ public actor InferenceService {
             s += "  - name: \"\(m.name)\"\n"
             s += "    model: \"\(m.repo)\"\n"
             s += "    continuous_batching: true\n"
+            s += "    tool_call_parser: \"\(m.toolParser)\"\n"
             s += "    estimated_memory_gb: \(m.estMemGB)\n"
         }
         return s
