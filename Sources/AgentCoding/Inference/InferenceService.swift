@@ -335,6 +335,9 @@ public actor InferenceService {
     private func waitUntilReady(url: URL, deadline: Date) async throws {
         var req = URLRequest(url: url)
         req.timeoutInterval = 5
+        // The engine now requires --api-key; the readiness probe must
+        // authenticate or /v1/models 401s and we never see "ready".
+        req.setValue("Bearer \(Self.apiKey)", forHTTPHeaderField: "Authorization")
         while Date() < deadline {
             if (process?.isRunning ?? false) == false {
                 throw InferenceServiceError.startTimedOut
