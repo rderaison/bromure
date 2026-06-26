@@ -41,9 +41,41 @@ public final class CatalogStore: @unchecked Sendable {
 
     /// The merged, display-ready catalog.
     public func effective() -> ModelCatalog {
-        lock.lock(); defer { lock.unlock() }
-        if let remote = cachedRemote { return ModelCatalog.baseline.merged(with: remote) }
-        return ModelCatalog.baseline
+        lock.lock(); let remote = cachedRemote; lock.unlock()
+        // The fetched catalog fully REPLACES the bundled baseline — no merging
+        // of stale entries (a retired model disappears the moment it's dropped
+        // from the published catalog.json). The bundled baseline is only the
+        // offline day-one fallback.
+        let base = remote ?? ModelCatalog.baseline
+        return withInstalledExtras(base)
+    }
+
+    /// Append any *already-downloaded* model that isn't in `cat` as an
+    /// `installed`/untested entry, so replacing the catalog never hides a
+    /// model the user has on disk (e.g. one retired from the curated list).
+    private func withInstalledExtras(_ cat: ModelCatalog) -> ModelCatalog {
+        let present = Set(cat.models.map { $0.repo })
+        let extras = installedRepos().filter { !present.contains($0) }.map { repo -> CatalogModel in
+            let gb = (Double(installedBytes(repo: repo)) / 1_000_000_000 * 10).rounded() / 10
+            return CatalogModel(
+                id: repo, repo: repo, name: repo,
+                downloadGB: gb, minUnifiedMemGB: max(8, Int(gb.rounded(.up)) + 8),
+                tags: ["installed"], toolCalling: .untested)
+        }
+        guard !extras.isEmpty else { return cat }
+        return ModelCatalog(version: cat.version, models: cat.models + extras)
+    }
+
+    /// HF repos fully downloaded in the hub cache (`models--org--name`).
+    public func installedRepos() -> [String] {
+        guard let names = try? FileManager.default
+            .contentsOfDirectory(atPath: hubCacheURL.path) else { return [] }
+        return names.compactMap { name -> String? in
+            guard name.hasPrefix("models--") else { return nil }
+            let repo = String(name.dropFirst("models--".count))
+                .replacingOccurrences(of: "--", with: "/")
+            return isInstalled(repo: repo) ? repo : nil
+        }.sorted()
     }
 
     /// Resolve a user-supplied selector to a catalog entry. Accepts a

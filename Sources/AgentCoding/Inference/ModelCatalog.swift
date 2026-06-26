@@ -163,19 +163,6 @@ public struct ModelCatalog: Codable, Sendable {
         }
     }
 
-    /// Merge a fetched catalog over this one: entries with the same `id`
-    /// are replaced, new ids are appended (§5.1 "merge over baseline").
-    public func merged(with remote: ModelCatalog) -> ModelCatalog {
-        var byID: [String: CatalogModel] = [:]
-        var order: [String] = []
-        for m in models { byID[m.id] = m; order.append(m.id) }
-        for m in remote.models {
-            if byID[m.id] == nil { order.append(m.id) }
-            byID[m.id] = m
-        }
-        return ModelCatalog(version: max(version, remote.version),
-                            models: order.compactMap { byID[$0] })
-    }
 }
 
 // MARK: - Baseline (shipped, offline day one)

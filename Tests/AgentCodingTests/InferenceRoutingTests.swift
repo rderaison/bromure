@@ -36,21 +36,29 @@ struct ModelCatalogTests {
         #expect(RAMFitGate.fit(model: big, hostUnifiedMemGB: 128) == .tight)
     }
 
-    @Test("Remote catalog merges over baseline by id")
-    func merge() {
-        let baseline = ModelCatalog(version: 1, models: [
-            CatalogModel(id: "a", repo: "x/a", name: "A", downloadGB: 1, minUnifiedMemGB: 8),
-            CatalogModel(id: "b", repo: "x/b", name: "B", downloadGB: 1, minUnifiedMemGB: 8),
-        ])
-        let remote = ModelCatalog(version: 2, models: [
-            CatalogModel(id: "b", repo: "x/b2", name: "B2", downloadGB: 2, minUnifiedMemGB: 16),
-            CatalogModel(id: "c", repo: "x/c", name: "C", downloadGB: 1, minUnifiedMemGB: 8),
-        ])
-        let merged = baseline.merged(with: remote)
-        #expect(merged.version == 2)
-        #expect(merged.model(id: "b")?.repo == "x/b2")   // replaced
-        #expect(merged.model(id: "a") != nil)            // kept
-        #expect(merged.model(id: "c") != nil)            // added
+    @Test("Effective catalog replaces baseline + keeps downloaded extras")
+    func replaceAndExtras() throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("bromure-cat-\(UUID().uuidString)")
+        let hub = tmp.appendingPathComponent("hub")
+        // A fully-downloaded "retired" repo on disk, not in the catalog.
+        let snap = hub.appendingPathComponent("models--x--retired/snapshots/main")
+        try fm.createDirectory(at: snap, withIntermediateDirectories: true)
+        try "{}".write(to: snap.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        // A cached remote catalog (CatalogStore.init loads supportDir/catalog.json).
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        try #"{"version":9,"models":[{"id":"only","repo":"y/only","name":"Only","download_gb":1,"min_unified_mem_gb":8}]}"#
+            .write(to: tmp.appendingPathComponent("catalog.json"), atomically: true, encoding: .utf8)
+        defer { try? fm.removeItem(at: tmp) }
+
+        let store = CatalogStore(supportDir: tmp, hubCacheDir: hub)
+        #expect(store.installedRepos().contains("x/retired"))
+        let eff = store.effective()
+        // Remote fully REPLACED the bundled baseline (its ids don't leak in).
+        #expect(eff.models.contains { $0.repo == "y/only" })
+        #expect(!eff.models.contains { $0.id == "qwen2.5-coder-7b-mlx-4bit" })
+        // The downloaded retired model is preserved as an installed extra.
+        #expect(eff.models.contains { $0.repo == "x/retired" && $0.tags.contains("installed") })
     }
 
     @Test("Catalog parses the §5.2 JSON schema")
