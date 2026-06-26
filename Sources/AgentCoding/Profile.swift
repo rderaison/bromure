@@ -800,16 +800,22 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             let key = InferenceService.apiKey
             switch self {
             case .claude:
-                // Only ANTHROPIC_API_KEY — setting ANTHROPIC_AUTH_TOKEN too
-                // makes Claude Code warn about conflicting auth.
+                // ANTHROPIC_AUTH_TOKEN (sent as `Authorization: Bearer`),
+                // NOT ANTHROPIC_API_KEY (`x-api-key`): vllm-mlx's --api-key
+                // only checks Bearer, so x-api-key 401s. Use only one of them
+                // — setting both makes Claude Code warn about conflicting auth.
+                // Disable non-essential traffic so telemetry / bootstrap /
+                // mcp-registry don't spray the engine with 404s (and don't
+                // carry the key off to api.anthropic.com).
                 return [
                     ("ANTHROPIC_BASE_URL", base),
-                    ("ANTHROPIC_API_KEY", key),
+                    ("ANTHROPIC_AUTH_TOKEN", key),
                     ("ANTHROPIC_MODEL", model),
                     ("ANTHROPIC_SMALL_FAST_MODEL", model),
                     ("ANTHROPIC_DEFAULT_OPUS_MODEL", model),
                     ("ANTHROPIC_DEFAULT_SONNET_MODEL", model),
                     ("ANTHROPIC_DEFAULT_HAIKU_MODEL", model),
+                    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
                 ]
             case .codex:
                 // Codex doesn't redirect via env — it uses the Responses API

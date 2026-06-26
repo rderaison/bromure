@@ -334,6 +334,11 @@ public final class TokenSwapper: @unchecked Sendable {
             // fire — not a leak.
             if knownFakes.contains(tok) { continue }
 
+            // The on-host inference engine's own per-session key (`brk-…`,
+            // sent as Bearer to the local engine) is ours, not a leaked
+            // credential — never flag it.
+            if tok.hasPrefix("brk-") { continue }
+
             // Heuristic: known secret prefixes are almost certainly
             // real credentials.
             let knownPrefixes = ["sk-ant-", "sk-", "ghp_", "ghu_", "ghs_", "gho_",

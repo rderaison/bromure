@@ -310,8 +310,10 @@ struct LocalToolAuthTests {
                   "ANTHROPIC_DEFAULT_HAIKU_MODEL"] {
             #expect(env[k] == "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
         }
-        // The key is the per-session engine API key, not a fixed dummy.
-        #expect(env["ANTHROPIC_API_KEY"] == InferenceService.apiKey)
+        // Bearer auth (ANTHROPIC_AUTH_TOKEN), not x-api-key — vllm-mlx only
+        // checks Bearer. And only one of them, to avoid Claude's warning.
+        #expect(env["ANTHROPIC_AUTH_TOKEN"] == InferenceService.apiKey)
+        #expect(env["ANTHROPIC_API_KEY"] == nil)
         #expect(InferenceService.apiKey.hasPrefix("brk-"))
     }
 
