@@ -45,6 +45,15 @@ final class TabsModel {
     /// the MITM engine so the proxy hot path sees the change.
     var fusionEngaged: Bool = false
 
+    /// Local-inference engine status for this session's title-bar badge.
+    /// nil = no local model (cloud session), so the badge is hidden.
+    var engineStatus: EngineStatus?
+    enum EngineStatus: Equatable {
+        case starting(String)   // provisioning / loading the model
+        case ready(String)      // serving (model label)
+        case failed(String)
+    }
+
     var activeTab: Tab? {
         tabs.indices.contains(activeIndex) ? tabs[activeIndex] : nil
     }
@@ -734,6 +743,11 @@ private struct TabsBar: View {
                 StreamingIndicator()
             }
 
+            // Local-inference engine status (warming / ready / failed).
+            if let status = model.engineStatus {
+                EngineStatusBadge(status: status)
+            }
+
             // Fusion toggle — ALWAYS present. Three states:
             //   • not configurable (<2 usable models): hollow bolt, disabled;
             //   • configurable + disengaged: filled bolt, dark grey;
@@ -898,6 +912,31 @@ private struct SharedFolderRow: View {
 /// Red dot signalling the proxy is streaming session metadata to
 /// bromure.io for this profile. Pulses gently so it doesn't blend
 /// into the toolbar background. Tooltip explains the why.
+/// Title-bar badge for the local inference engine: a spinner while it warms
+/// up (provisioning / loading the model), a green chip once serving, or an
+/// orange warning if it failed to start.
+private struct EngineStatusBadge: View {
+    let status: TabsModel.EngineStatus
+    var body: some View {
+        switch status {
+        case .starting(let detail):
+            HStack(spacing: 5) {
+                ProgressView().controlSize(.small).scaleEffect(0.7)
+                Image(systemName: "cpu").foregroundStyle(.secondary)
+            }
+            .help(detail)
+        case .ready(let model):
+            Image(systemName: "cpu.fill")
+                .foregroundStyle(.green)
+                .help(String(format: NSLocalizedString("Local model ready — serving %@.", comment: ""), model))
+        case .failed(let msg):
+            Image(systemName: "cpu")
+                .foregroundStyle(.orange)
+                .help(String(format: NSLocalizedString("Local engine failed to start: %@", comment: ""), msg))
+        }
+    }
+}
+
 private struct StreamingIndicator: View {
     @State private var pulse = false
     var body: some View {

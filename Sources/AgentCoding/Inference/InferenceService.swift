@@ -11,15 +11,21 @@ public enum InferenceEngine: String, Sendable {
     /// gated behind a per-session API key (Bearer auth) since the engine is
     /// shared across VMs.
     func serverArgs(model: String, host: String, port: Int, apiKey: String,
-                    toolParser: String) -> [String] {
+                    toolParser: String, reasoningParser: String?) -> [String] {
         switch self {
         case .vllmMLX:
             // Tool calling is OFF unless explicitly enabled with a parser —
             // without this the model never emits tool_use blocks (verified
             // live: Qwen + hermes works, no flag = plain text).
-            return ["serve", model, "--host", host, "--port", String(port),
-                    "--api-key", apiKey, "--enable-metrics",
-                    "--enable-auto-tool-choice", "--tool-call-parser", toolParser]
+            var args = ["serve", model, "--host", host, "--port", String(port),
+                        "--api-key", apiKey, "--enable-metrics",
+                        "--enable-auto-tool-choice", "--tool-call-parser", toolParser]
+            // Reasoning models: extract <think> into reasoning_content instead
+            // of leaking it into the visible answer.
+            if let rp = reasoningParser, !rp.isEmpty {
+                args += ["--reasoning-parser", rp]
+            }
+            return args
         }
     }
 
@@ -52,9 +58,11 @@ public struct InferenceModel: Equatable, Sendable {
     public var repo: String
     public var estMemGB: Int
     public var toolParser: String
-    public init(name: String, repo: String, estMemGB: Int, toolParser: String = "auto") {
+    public var reasoningParser: String?
+    public init(name: String, repo: String, estMemGB: Int,
+                toolParser: String = "auto", reasoningParser: String? = nil) {
         self.name = name; self.repo = repo; self.estMemGB = estMemGB
-        self.toolParser = toolParser
+        self.toolParser = toolParser; self.reasoningParser = reasoningParser
     }
 }
 
@@ -122,6 +130,11 @@ public actor InferenceService {
     private let catalog: CatalogStore
     private var process: Process?
     private var activeModels: [String] = []   // repos currently served (sorted)
+    // Last launch, for auto-restart on an unexpected crash.
+    private var lastPlan: EngineLaunchPlan?
+    private var lastExe: URL?
+    private var lastRepos: [String] = []
+    private var restartCount = 0
 
     public init(engine: InferenceEngine = .vllmMLX, catalog: CatalogStore = .shared) {
         self.engine = engine
@@ -165,6 +178,7 @@ public actor InferenceService {
         modelRepo: String,
         cached: Bool = false,
         toolParser: String = "auto",
+        reasoningParser: String? = nil,
         apiKey: String = InferenceService.apiKey,
         env: [String: String] = ProcessInfo.processInfo.environment
     ) -> EngineLaunchPlan {
@@ -179,7 +193,8 @@ public actor InferenceService {
             executableURL: executable,
             arguments: engine.serverArgs(model: modelRepo,
                                          host: engineHost, port: enginePort,
-                                         apiKey: apiKey, toolParser: toolParser),
+                                         apiKey: apiKey, toolParser: toolParser,
+                                         reasoningParser: reasoningParser),
             environment: childEnv,
             host: engineHost,
             port: enginePort)
@@ -201,9 +216,11 @@ public actor InferenceService {
             throw InferenceServiceError.engineNotFound
         }
         let cached = catalog.isInstalled(repo: modelRepo)
-        let parser = catalog.resolve(modelRepo)?.toolParser ?? "auto"
+        let m = catalog.resolve(modelRepo)
         let plan = Self.makeLaunchPlan(engine: engine, executable: exe,
-                                       modelRepo: modelRepo, cached: cached, toolParser: parser)
+                                       modelRepo: modelRepo, cached: cached,
+                                       toolParser: m?.toolParser ?? "auto",
+                                       reasoningParser: m?.reasoningParser)
         return try await launch(plan: plan, exe: exe, repos: [modelRepo], timeout: timeout)
     }
 
@@ -262,6 +279,9 @@ public actor InferenceService {
             s += "    model: \"\(m.repo)\"\n"
             s += "    continuous_batching: true\n"
             s += "    tool_call_parser: \"\(m.toolParser)\"\n"
+            if let rp = m.reasoningParser, !rp.isEmpty {
+                s += "    reasoning_parser: \"\(rp)\"\n"
+            }
             s += "    estimated_memory_gb: \(m.estMemGB)\n"
         }
         return s
@@ -277,13 +297,39 @@ public actor InferenceService {
         proc.executableURL = exe
         proc.arguments = plan.arguments
         proc.environment = plan.environment
+        // Auto-restart on an unexpected exit (a crash / OOM-kill). Cleanly
+        // stopping or switching models clears `process` first, so the guard
+        // in `onProcessExit` ignores those.
+        proc.terminationHandler = { [weak self] p in
+            Task { await self?.onProcessExit(p) }
+        }
         try proc.run()
         self.process = proc
         self.activeModels = repos
+        self.lastPlan = plan; self.lastExe = exe; self.lastRepos = repos
         Self.runningPID = proc.processIdentifier
 
         try await waitUntilReady(url: plan.readinessURL, deadline: Date().addingTimeInterval(timeout))
+        restartCount = 0   // healthy boot resets the crash-loop counter
         return plan
+    }
+
+    /// Called from the process termination handler. Restarts the engine on
+    /// an unexpected crash (bounded retries with backoff).
+    private func onProcessExit(_ exited: Process) async {
+        guard exited === process else { return }   // superseded by a clean stop/switch
+        process = nil
+        Self.runningPID = 0
+        guard let plan = lastPlan, let exe = lastExe, !lastRepos.isEmpty else { return }
+        guard restartCount < 3 else {
+            SupplyChainLog.shared.record("[inference] engine crashed repeatedly — giving up")
+            return
+        }
+        restartCount += 1
+        SupplyChainLog.shared.record("[inference] engine exited unexpectedly; restarting (\(restartCount)/3)")
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        do { _ = try await launch(plan: plan, exe: exe, repos: lastRepos, timeout: 120) }
+        catch { SupplyChainLog.shared.record("[inference] engine restart failed: \(error)") }
     }
 
     private func waitUntilReady(url: URL, deadline: Date) async throws {
@@ -302,11 +348,27 @@ public actor InferenceService {
         throw InferenceServiceError.startTimedOut
     }
 
-    /// Graceful teardown (called on app exit).
+    /// Graceful teardown (called on app exit). Clears `process` first so the
+    /// termination handler doesn't treat this as a crash and restart.
     public func stop() {
-        process?.terminate()
+        let p = process
         process = nil
         activeModels = []
+        lastPlan = nil; lastRepos = []
         Self.runningPID = 0
+        p?.terminate()
+    }
+
+    /// Reap leftover engine processes from a previous run (a SIGKILL / jetsam
+    /// kill leaves vllm-mlx orphaned, holding tens of GB). Run once at app
+    /// launch, before we start any engine of our own. Matches our venv's
+    /// vllm-mlx by path so it never touches an unrelated process.
+    nonisolated public static func reapOrphans() {
+        let exe = EngineProvisioner.shared.vllmExecutable.path
+        guard FileManager.default.fileExists(atPath: exe) else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        p.arguments = ["-f", exe]
+        try? p.run(); p.waitUntilExit()
     }
 }

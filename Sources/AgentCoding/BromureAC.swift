@@ -590,17 +590,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let repo = m?.repo ?? id
             let est = Int((m?.downloadGB ?? 8).rounded(.up))
             return InferenceModel(name: repo, repo: repo, estMemGB: est,
-                                  toolParser: m?.toolParser ?? "auto")
+                                  toolParser: m?.toolParser ?? "auto",
+                                  reasoningParser: m?.reasoningParser)
         }
         // Budget for parallel models: most of unified memory, leaving room
         // for the OS + the VMs. vllm-mlx evicts idle models LRU under this.
         let budget = max(8, HostMemory.unifiedMemoryGB() - 16)
+        let pid = profile.id
+        let label = models.first.map { CatalogStore.shared.resolve($0.repo)?.name ?? $0.repo } ?? ""
+        profileWindows[pid]?.model.engineStatus = .starting("Starting local engine…")
         Task.detached(priority: .userInitiated) {
             do {
-                try await InferenceService.shared.ensureRunning(models: models, memoryBudgetGB: budget)
+                try await InferenceService.shared.ensureRunning(
+                    models: models, memoryBudgetGB: budget,
+                    onProvisionProgress: { _ in
+                        Task { @MainActor in
+                            self.profileWindows[pid]?.model.engineStatus = .starting("Setting up engine…")
+                        }
+                    })
+                await MainActor.run { self.profileWindows[pid]?.model.engineStatus = .ready(label) }
                 SupplyChainLog.shared.record(
                     "[inference] engine serving \(models.map(\.repo).joined(separator: ", "))")
             } catch {
+                await MainActor.run { self.profileWindows[pid]?.model.engineStatus = .failed("\(error)") }
                 SupplyChainLog.shared.record("[inference] engine start failed: \(error)")
             }
         }
@@ -736,6 +748,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // background (vLLM.md §5.1). Non-fatal — falls back to the bundled
         // catalog.json on any network failure, so this never blocks launch.
         Task.detached(priority: .background) { await CatalogStore.shared.refresh() }
+
+        // Reap any vllm-mlx engine orphaned by a previous hard kill before we
+        // start our own (it can hold tens of GB of unified memory).
+        Task.detached(priority: .background) { InferenceService.reapOrphans() }
 
         // Keep the login LaunchAgent in sync, then (headless login agent only)
         // boot any profiles flagged "Start at login".

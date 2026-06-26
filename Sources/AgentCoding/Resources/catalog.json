@@ -93,6 +93,7 @@
       "tags": ["coding", "tools", "reasoning", "xl"],
       "tool_calling": "verified",
       "tool_parser": "glm47",
+      "reasoning_parser": "glm4",
       "min_chip": "M3 Max",
       "recommended": true
     }

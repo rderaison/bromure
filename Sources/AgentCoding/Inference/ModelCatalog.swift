@@ -37,6 +37,10 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
     /// hermes / qwen3_coder / glm47 / mistral / … Without the matching
     /// parser the engine never emits tool_use blocks. nil → "auto".
     public var toolParser: String?
+    /// vllm-mlx reasoning parser (`--reasoning-parser`) for thinking models:
+    /// qwen3 / deepseek_r1 / glm4 / … Extracts <think> into reasoning_content
+    /// so it doesn't leak into the visible answer. nil → none.
+    public var reasoningParser: String?
     public var minChip: String?
     public var recommended: Bool
 
@@ -46,6 +50,7 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
                 quant: String? = nil, downloadGB: Double, minUnifiedMemGB: Int,
                 context: Int? = nil, tags: [String] = [],
                 toolCalling: ToolCalling = .untested, toolParser: String? = nil,
+                reasoningParser: String? = nil,
                 minChip: String? = nil, recommended: Bool = false) {
         self.id = id
         self.repo = repo
@@ -62,6 +67,7 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
         self.tags = tags
         self.toolCalling = toolCalling
         self.toolParser = toolParser
+        self.reasoningParser = reasoningParser
         self.minChip = minChip
         self.recommended = recommended
     }
@@ -76,6 +82,7 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
         case context, tags
         case toolCalling = "tool_calling"
         case toolParser = "tool_parser"
+        case reasoningParser = "reasoning_parser"
         case minChip = "min_chip"
         case recommended
     }
@@ -97,6 +104,7 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
         tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
         toolCalling = try c.decodeIfPresent(ToolCalling.self, forKey: .toolCalling) ?? .untested
         toolParser = try c.decodeIfPresent(String.self, forKey: .toolParser)
+        reasoningParser = try c.decodeIfPresent(String.self, forKey: .reasoningParser)
         minChip = try c.decodeIfPresent(String.self, forKey: .minChip)
         recommended = try c.decodeIfPresent(Bool.self, forKey: .recommended) ?? false
     }
