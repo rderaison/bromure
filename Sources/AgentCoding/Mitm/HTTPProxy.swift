@@ -964,10 +964,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
             return
         }
 
+        // The local engine speaks plain HTTP on loopback; cloud is HTTPS.
         let relay = try await relayUpstream(rawRequest: toForward,
                                             host: upstreamHost, port: upstreamPort,
                                             session: session,
-                                            tls: tls)
+                                            tls: tls,
+                                            upstreamScheme: routedBackend == .local ? "http" : "https")
 
         // Hybrid hard-error fallback feed (§4.3 Trap 1). A cloud turn that
         // came back 429/529/5xx pins the session local and trips the health
@@ -2203,7 +2205,8 @@ private func emitSupplyChainFetch(profileID: UUID,
 @available(macOS, deprecated: 10.15)
 private func relayUpstream(rawRequest: Data, host: String, port: Int,
                            session: URLSession,
-                           tls: TLSServerStream) async throws -> RelayResponse {
+                           tls: TLSServerStream,
+                           upstreamScheme: String = "https") async throws -> RelayResponse {
     guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)) else {
         throw MitmError.malformedHTTPRequest
     }
@@ -2223,13 +2226,15 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
     let method = String(lineParts[0])
     let path   = String(lineParts[1])
 
-    // CONNECT tunnels are TLS by definition — the port is just where
-    // the upstream listens (e.g. 6443 for k8s API servers, 8443 for
-    // some internal stacks). Always replay as https so URLSession
-    // performs a real TLS handshake upstream; firing http:// at a
-    // TLS-only port lands a Bad Request.
+    // CONNECT tunnels are TLS by definition — the port is just where the
+    // upstream listens (e.g. 6443 for k8s API servers, 8443 for some
+    // internal stacks). Cloud upstreams replay as https so URLSession does
+    // a real TLS handshake. The local inference engine, however, speaks
+    // plain HTTP on loopback, so `upstreamScheme` is "http" when routing
+    // re-targeted this request there — otherwise the TLS handshake fails
+    // (NSURLErrorSecureConnectionFailed) and every local turn dies.
     let portStr = (port == 443) ? "" : ":\(port)"
-    guard let url = URL(string: "https://\(host)\(portStr)\(path)") else {
+    guard let url = URL(string: "\(upstreamScheme)://\(host)\(portStr)\(path)") else {
         throw MitmError.malformedHTTPRequest
     }
 
@@ -2237,6 +2242,11 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
     req.httpMethod = method
     if !body.isEmpty { req.httpBody = body }
 
+    // When re-routed to the local engine, the request still carries the
+    // guest's cloud auth (a swapped fake key). The engine authenticates with
+    // its own per-session key, so drop the cloud auth headers and inject the
+    // engine Bearer key instead — otherwise it 401s.
+    let local = (upstreamScheme == "http" && host == InferenceService.engineHost)
     for line in lines where !line.isEmpty {
         guard let colon = line.firstIndex(of: ":") else { continue }
         let name = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
@@ -2246,9 +2256,15 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         case "host", "content-length", "connection", "transfer-encoding",
              "proxy-connection", "keep-alive", "te", "upgrade":
             continue
+        case "authorization", "x-api-key":
+            if local { continue }   // replaced below for the local engine
+            req.setValue(value, forHTTPHeaderField: name)
         default:
             req.setValue(value, forHTTPHeaderField: name)
         }
+    }
+    if local {
+        req.setValue("Bearer \(InferenceService.apiKey)", forHTTPHeaderField: "Authorization")
     }
 
     // Bridge URLSession's delegate callbacks (head / data chunks /
