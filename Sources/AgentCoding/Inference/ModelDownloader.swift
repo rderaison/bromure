@@ -117,8 +117,21 @@ public enum ModelDownloader {
             onProgress(s)
         }
         try proc.run()
-        proc.waitUntilExit()
+        // Wait for exit in a cancellable way: cancelling the enclosing Task
+        // terminates the `hf` process (so the UI's Cancel button actually
+        // stops the bytes), then we surface CancellationError.
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global(qos: .utility).async {
+                    proc.waitUntilExit()
+                    cont.resume()
+                }
+            }
+        } onCancel: {
+            proc.terminate()
+        }
         pipe.fileHandleForReading.readabilityHandler = nil
+        if Task.isCancelled { throw CancellationError() }
         guard proc.terminationStatus == 0 else {
             throw DownloadError.downloadFailed("exit \(proc.terminationStatus)")
         }

@@ -1503,8 +1503,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // small (it's idle and tiny) but worth tidying up at least
         // for the clean-quit path.
         mitmEngine?.privateAgent.terminate()
-        // Stop the local inference engine so vllm-mlx doesn't outlive us.
-        Task { await InferenceService.shared.stop() }
+        // Synchronously kill the local inference engine — a detached
+        // Task wouldn't run before the process exits, orphaning vllm-mlx
+        // (and its large RAM footprint).
+        InferenceService.killIfRunning()
     }
 
     /// Catch the catchable abnormal-termination signals so we still
@@ -1529,8 +1531,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             src.setEventHandler { [weak self] in
                 FileHandle.standardError.write(Data(
-                    "[bromure-ac] caught signal \(sig); terminating ssh-agent + exiting\n".utf8))
+                    "[bromure-ac] caught signal \(sig); terminating ssh-agent + engine + exiting\n".utf8))
                 self?.mitmEngine?.privateAgent.terminate()
+                InferenceService.killIfRunning()
                 // Exit with a non-zero code so callers can distinguish
                 // signal-driven shutdown from a clean ⌘Q.
                 exit(128 + sig)
@@ -3129,6 +3132,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let session = runningSessions[profile.id] {
             attachWindow(to: session)
             return
+        }
+
+        // Refuse to boot while the local model this profile needs is still
+        // downloading — the agent would come up pointed at an engine that
+        // can't load yet, producing a wall of connection errors.
+        if let modelID = profile.localEngineModelID {
+            let resolved = CatalogStore.shared.resolve(modelID)
+            let repo = resolved?.repo ?? modelID
+            if ModelDownloadManager.shared.isDownloading(repo: repo) {
+                let alert = NSAlert()
+                alert.messageText = NSLocalizedString("Model still downloading", comment: "")
+                alert.informativeText = String(
+                    format: NSLocalizedString(
+                        "“%@” is still downloading. Wait for it to finish, then launch “%@”.",
+                        comment: ""),
+                    resolved?.name ?? repo, profile.name)
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+                alert.runModal()
+                return
+            }
         }
 
         // Compromised profiles refuse to boot until the user confirms

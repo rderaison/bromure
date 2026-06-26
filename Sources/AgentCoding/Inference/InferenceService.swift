@@ -56,6 +56,19 @@ public actor InferenceService {
     /// now; the per-model pool + single-port model router come next.
     public static let shared = InferenceService()
 
+    /// PID of the running engine, readable synchronously from a signal
+    /// handler / `applicationWillTerminate` (where we can't await the
+    /// actor). 0 = not running. The engine holds a lot of RAM, so killing
+    /// it on exit matters more than for the idle ssh-agent.
+    nonisolated(unsafe) public static var runningPID: pid_t = 0
+
+    /// Synchronously terminate the engine if running. Safe from a signal
+    /// handler (runs on the main queue) and from app teardown.
+    nonisolated public static func killIfRunning() {
+        let pid = runningPID
+        if pid > 0 { kill(pid, SIGTERM); runningPID = 0 }
+    }
+
     public let engine: InferenceEngine
     private let catalog: CatalogStore
     private var process: Process?
@@ -143,6 +156,7 @@ public actor InferenceService {
         try proc.run()
         self.process = proc
         self.activeModelRepo = modelRepo
+        Self.runningPID = proc.processIdentifier
 
         try await waitUntilReady(url: plan.readinessURL, deadline: Date().addingTimeInterval(timeout))
         return plan
@@ -169,5 +183,6 @@ public actor InferenceService {
         process?.terminate()
         process = nil
         activeModelRepo = nil
+        Self.runningPID = 0
     }
 }

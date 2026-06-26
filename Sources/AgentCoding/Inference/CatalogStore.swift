@@ -96,8 +96,25 @@ public final class CatalogStore: @unchecked Sendable {
         return hubCacheURL.appendingPathComponent(slug, isDirectory: true)
     }
 
+    /// True only when the repo is **fully** downloaded — not merely that
+    /// the cache dir exists (it appears the moment a pull starts, with
+    /// partial `.incomplete` blobs). A complete pull has no `.incomplete`
+    /// files and a snapshot containing `config.json` (a loadable model).
     public func isInstalled(repo: String) -> Bool {
-        FileManager.default.fileExists(atPath: installDirectory(for: repo).path)
+        let fm = FileManager.default
+        let dir = installDirectory(for: repo)
+        guard fm.fileExists(atPath: dir.path) else { return false }
+        // Any in-flight blob → not done.
+        if let en = fm.enumerator(at: dir, includingPropertiesForKeys: nil) {
+            for case let url as URL in en where url.lastPathComponent.hasSuffix(".incomplete") {
+                return false
+            }
+        }
+        // A usable snapshot must carry config.json.
+        let snapshots = dir.appendingPathComponent("snapshots", isDirectory: true)
+        guard let revs = try? fm.contentsOfDirectory(
+            at: snapshots, includingPropertiesForKeys: nil) else { return false }
+        return revs.contains { fm.fileExists(atPath: $0.appendingPathComponent("config.json").path) }
     }
 
     /// Bytes on disk for an installed repo (best-effort recursive sum).

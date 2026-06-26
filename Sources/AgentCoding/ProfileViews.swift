@@ -2995,16 +2995,13 @@ struct LocalModelsSettingsView: View {
     @State private var engineReady = EngineProvisioner.shared.isProvisioned
     @State private var showInstallPrompt = false
     @State private var engineState: EngineState = .idle
-    @State private var downloads: [String: DownloadState] = [:]
+    // Download progress lives in the shared manager so it survives leaving
+    // and re-entering this pane (and so the VM-launch path can see it).
+    private let downloads = ModelDownloadManager.shared
 
     enum EngineState: Equatable {
         case idle
         case installing(Double, String)   // fraction 0–1, status line
-        case failed(String)
-    }
-    enum DownloadState: Equatable {
-        case downloading(Double, String)  // fraction 0–1, "X.X / Y GB"
-        case installed
         case failed(String)
     }
 
@@ -3119,8 +3116,10 @@ struct LocalModelsSettingsView: View {
         let fit = RAMFitGate.fit(model: model, hostUnifiedMemGB: hostGB)
         let wontFit = (fit == .wontFit)
         let isActive = (activeModelID == model.id)
-        let state = downloads[model.id]
-        let installed = (state == .installed) || CatalogStore.shared.isInstalled(repo: model.repo)
+        let state = downloads.state(repo: model.repo)
+        // "Installed" only when fully downloaded — never while a pull is
+        // still running (CatalogStore.isInstalled checks completeness).
+        let installed = (state == nil) && CatalogStore.shared.isInstalled(repo: model.repo)
 
         HStack(spacing: 10) {
             // Active-model radio (only meaningful when it fits).
@@ -3153,17 +3152,30 @@ struct LocalModelsSettingsView: View {
         .padding(.vertical, 2)
     }
 
-    @ViewBuilder private func modelAction(model: CatalogModel, state: DownloadState?,
+    @ViewBuilder private func modelAction(model: CatalogModel,
+                                          state: ModelDownloadManager.State?,
                                           installed: Bool, wontFit: Bool) -> some View {
         switch state {
         case .downloading(let frac, let label):
-            VStack(alignment: .trailing, spacing: 2) {
-                ProgressView(value: frac).progressViewStyle(.linear).frame(width: 120)
-                Text(label).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                VStack(alignment: .trailing, spacing: 2) {
+                    ProgressView(value: frac).progressViewStyle(.linear).frame(width: 110)
+                    Text(label).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                Button {
+                    downloads.cancel(repo: model.repo)
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Stop download")
             }
-        case .failed:
-            Button("Retry") { startDownload(model) }.controlSize(.small)
-        default:
+        case .failed(let msg):
+            HStack(spacing: 6) {
+                Button("Retry") { startDownload(model) }.controlSize(.small)
+            }
+            .help(msg)
+        case nil:
             if installed {
                 Menu {
                     Button("Remove", role: .destructive) { removeModel(model) }
@@ -3228,49 +3240,13 @@ struct LocalModelsSettingsView: View {
     }
 
     private func startDownload(_ model: CatalogModel) {
-        downloads[model.id] = .downloading(0, "Starting…")
-        let total = max(1, Int64(model.downloadGB * 1_000_000_000))
-        Task {
-            // `hf` lives in the engine venv — provision it first if needed.
-            if !EngineProvisioner.shared.isProvisioned {
-                do {
-                    try await EngineProvisioner.shared.ensureProvisioned()
-                    await MainActor.run { engineReady = true }
-                } catch {
-                    await MainActor.run { downloads[model.id] = .failed("engine: \(error)") }
-                    return
-                }
-            }
-            // Determinate progress from bytes-on-disk vs the known total —
-            // reliable regardless of how hf formats its tqdm output.
-            let repo = model.repo
-            let id = model.id
-            let poller = Task { @MainActor in
-                while true {
-                    try? await Task.sleep(nanoseconds: 700_000_000)
-                    if Task.isCancelled { break }
-                    let bytes = CatalogStore.shared.installedBytes(repo: repo)
-                    let frac = min(0.99, Double(bytes) / Double(total))
-                    downloads[id] = .downloading(frac, ProgressBar.bytesLabel(bytes, total))
-                }
-            }
-            do {
-                try await ModelDownloader.pull(repo: repo, onProgress: { _ in })
-                poller.cancel()
-                await MainActor.run {
-                    downloads[id] = .installed
-                    if activeModelID == nil { activeModelID = id }
-                }
-            } catch {
-                poller.cancel()
-                await MainActor.run { downloads[id] = .failed("\(error)") }
-            }
-        }
+        downloads.start(repo: model.repo,
+                        totalBytes: Int64(model.downloadGB * 1_000_000_000))
+        if activeModelID == nil { activeModelID = model.id }
     }
 
     private func removeModel(_ model: CatalogModel) {
         try? CatalogStore.shared.removeInstalled(repo: model.repo)
-        downloads[model.id] = nil
         if activeModelID == model.id { activeModelID = nil }
     }
 }

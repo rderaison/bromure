@@ -799,9 +799,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             let base = Self.localEngineBaseURL
             switch self {
             case .claude:
+                // Only ANTHROPIC_API_KEY — setting ANTHROPIC_AUTH_TOKEN too
+                // makes Claude Code warn about conflicting auth.
                 return [
                     ("ANTHROPIC_BASE_URL", base),
-                    ("ANTHROPIC_AUTH_TOKEN", "bromure-local"),
                     ("ANTHROPIC_API_KEY", "bromure-local"),
                     ("ANTHROPIC_MODEL", model),
                     ("ANTHROPIC_SMALL_FAST_MODEL", model),
