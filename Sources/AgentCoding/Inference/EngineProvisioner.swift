@@ -89,7 +89,9 @@ public final class EngineProvisioner: @unchecked Sendable {
     /// Application-Support `engine-requirements.txt`.
     public static let defaultRequirements = """
     # Bromure local MLX inference engine (vLLM.md §3.1).
-    --extra-index-url https://dl.bromure.io/mlx/simple/
+    # find-links points at an explicit HTML file (not a directory) because
+    # DigitalOcean Spaces won't serve a trailing-slash PEP 503 index.
+    --find-links https://dl.bromure.io/mlx/find-links.html
     vllm-mlx
     """
 

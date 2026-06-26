@@ -265,7 +265,8 @@ struct EngineProvisionerTests {
     @Test("Default requirements install vllm-mlx from the Bromure index") func reqs() {
         let r = EngineProvisioner.defaultRequirements
         #expect(r.contains("vllm-mlx"))
-        #expect(r.contains("https://dl.bromure.io/mlx/simple/"))
+        #expect(r.contains("--find-links"))
+        #expect(r.contains("https://dl.bromure.io/mlx/find-links.html"))
     }
 
     @Test("Engine executable resolution prefers the env override") func engineResolve() {

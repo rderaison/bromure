@@ -74,21 +74,43 @@ if enabled "$PUBLISH_WHEEL"; then
     WHEEL_FILE="$(basename "$WHEEL_PATH")"
     echo "Built $WHEEL_FILE"
 
-    # PEP 503 "simple" index page for the one package.
-    cat > "$STAGING/index.html" <<HTML
+    WHEEL_KEY="$PREFIX/wheels/$WHEEL_FILE"
+    WHEEL_URL="${DO_SPACES_PUBLIC_BASE}/$WHEEL_KEY"
+
+    # `--find-links` page: a single HTML file (NOT a directory) listing the
+    # wheel by ABSOLUTE URL. DigitalOcean Spaces doesn't serve index.html
+    # for a trailing-slash directory request (a PEP 503 `--extra-index-url`
+    # would 403), so we point uv at this exact file instead.
+    cat > "$STAGING/find-links.html" <<HTML
 <!DOCTYPE html>
-<html><head><meta name="pypi:repository-version" content="1.0"><title>vllm-mlx</title></head>
-<body><h1>vllm-mlx</h1>
-<a href="$WHEEL_FILE">$WHEEL_FILE</a><br>
+<html><head><title>Bromure MLX engine wheels</title></head>
+<body>
+<a href="$WHEEL_URL">$WHEEL_FILE</a><br>
 </body></html>
 HTML
 
-    echo "=== Publishing wheel + index ==="
-    put "$WHEEL_PATH"          "$PREFIX/simple/vllm-mlx/$WHEEL_FILE" "application/zip"
-    put "$STAGING/index.html"  "$PREFIX/simple/vllm-mlx/index.html" "text/html; charset=utf-8"
+    echo "=== Publishing wheel + find-links ==="
+    put "$WHEEL_PATH"               "$WHEEL_KEY"            "application/zip"
+    put "$STAGING/find-links.html"  "$PREFIX/find-links.html" "text/html; charset=utf-8"
+
+    # Smoke-test the exact runtime install path: provision a throwaway venv
+    # and install vllm-mlx from the just-published find-links URL (mlx/mlx-lm
+    # resolve from PyPI). Fails the build loudly if the wheel isn't
+    # installable — the same command EngineProvisioner runs on the user's Mac.
+    if enabled "${SMOKE_TEST:-1}"; then
+        echo "=== Smoke-test: install from published find-links ==="
+        FL_URL="${DO_SPACES_PUBLIC_BASE}/$PREFIX/find-links.html"
+        # Allow a few seconds for CDN propagation.
+        for i in 1 2 3 4 5; do curl -fsSL "$FL_URL" >/dev/null 2>&1 && break || sleep 5; done
+        SMOKE="$STAGING/smoke"
+        uv venv "$SMOKE" --python 3.12 --python-preference only-managed
+        uv pip install --python "$SMOKE/bin/python" --find-links "$FL_URL" vllm-mlx
+        "$SMOKE/bin/python" -c "import vllm_mlx; print('vllm_mlx import OK')"
+        echo "Smoke-test passed."
+    fi
 fi
 
 echo ""
 echo "=== Done ==="
-echo "Catalog:  ${DO_SPACES_PUBLIC_BASE}/$PREFIX/catalog.json"
-echo "Index:    ${DO_SPACES_PUBLIC_BASE}/$PREFIX/simple/vllm-mlx/"
+echo "Catalog:     ${DO_SPACES_PUBLIC_BASE}/$PREFIX/catalog.json"
+echo "Find-links:  ${DO_SPACES_PUBLIC_BASE}/$PREFIX/find-links.html"
