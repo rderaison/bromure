@@ -587,19 +587,38 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func makeFusionConfig(for profile: Profile) -> Fusion.Config? {
-        let usable = profile.fusionUsableProviders
-        guard usable.count >= 2 else { return nil }
+        guard profile.fusionConfigurable else { return nil }
+        let usable = profile.fusionUsableProviders   // cloud providers with creds
         var legs = Profile.Tool.allCases.filter {
             profile.fusionLegs.contains($0) && usable.contains($0)
         }
-        if legs.count < 2 { legs = usable }   // default: fuse everything usable
-        let judgeProvider = (profile.fusionJudgeProvider.flatMap { usable.contains($0) ? $0 : nil })
-            ?? usable.first!
-        let judgeModel = profile.fusionJudgeModel ?? Fusion.defaultJudgeModel
+        // The local Fusion leg (a model served by the on-host engine).
+        let localLegModel: String? = {
+            guard let id = profile.fusionLocalLeg, !id.isEmpty else { return nil }
+            return CatalogStore.shared.resolve(id)?.repo ?? id
+        }()
+        // Need ≥2 drafts to fuse (cloud legs + the local leg). If the user
+        // under-specified, default to fusing every usable cloud provider.
+        if legs.count + (localLegModel != nil ? 1 : 0) < 2 { legs = usable }
+
         var authModes: [Profile.Tool: Profile.AuthMode] = [:]
         for spec in profile.allToolSpecs { authModes[spec.tool] = spec.authMode }
+
+        // Judge: the local engine, or a chosen cloud provider.
+        let judgeLocal = profile.fusionJudgeLocal
+        let judgeProvider = (profile.fusionJudgeProvider.flatMap { usable.contains($0) ? $0 : nil })
+            ?? usable.first ?? .claude
+        let judgeModel: String
+        if judgeLocal {
+            let id = profile.fusionJudgeModel ?? profile.fusionLocalLeg ?? ""
+            judgeModel = CatalogStore.shared.resolve(id)?.repo ?? id
+        } else {
+            judgeModel = profile.fusionJudgeModel ?? Fusion.defaultJudgeModel
+        }
+
         return Fusion.Config(legs: legs, judgeProvider: judgeProvider,
-                             judgeModel: judgeModel, authModes: authModes, legModels: [:])
+                             judgeModel: judgeModel, authModes: authModes,
+                             legModels: [:], localLegModel: localLegModel, judgeLocal: judgeLocal)
     }
 
     static func makeGuardrailsConfig(for profile: Profile) -> GuardrailsConfig {

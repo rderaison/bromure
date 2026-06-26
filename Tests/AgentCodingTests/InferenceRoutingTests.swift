@@ -295,15 +295,29 @@ struct LocalToolAuthTests {
         #expect(env["ANTHROPIC_API_KEY"] == "bromure-local")
     }
 
-    @Test("Codex + Grok get OpenAI-style base URL + model") func codexGrok() {
+    @Test("Codex carries only the dummy key (config.toml does the routing)") func codexEnv() {
         let codex = Dictionary(uniqueKeysWithValues:
             Profile.Tool.codex.localEnvExports(model: "m").map { ($0.name, $0.value) })
-        #expect(codex["OPENAI_BASE_URL"] == "http://127.0.0.1:11434/v1")
-        #expect(codex["OPENAI_MODEL"] == "m")
+        #expect(codex["OPENAI_API_KEY"] == "bromure-local")
+        // Codex is redirected by the config.toml provider, not env vars.
+        #expect(codex["OPENAI_BASE_URL"] == nil)
+    }
+
+    @Test("Grok uses GROK_* env (not XAI_*)") func grokEnv() {
         let grok = Dictionary(uniqueKeysWithValues:
             Profile.Tool.grok.localEnvExports(model: "m").map { ($0.name, $0.value) })
-        #expect(grok["XAI_BASE_URL"] == "http://127.0.0.1:11434/v1")
-        #expect(grok["XAI_API_KEY"] == "bromure-local")
+        #expect(grok["GROK_BASE_URL"] == "http://127.0.0.1:11434/v1")
+        #expect(grok["GROK_MODEL"] == "m")
+        #expect(grok["GROK_API_KEY"] == "bromure-local")
+        #expect(grok["XAI_BASE_URL"] == nil)
+    }
+
+    @Test("Codex local provider TOML uses the chat wire API") func codexTOML() {
+        let toml = SessionDisk.codexLocalProviderTOML(model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        #expect(toml.contains("model_provider = \"bromure-local\""))
+        #expect(toml.contains("base_url = \"http://127.0.0.1:11434/v1\""))
+        #expect(toml.contains("wire_api = \"chat\""))
+        #expect(toml.contains("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"))
     }
 
     @Test("ToolSpec local model round-trips through Codable") func specRoundTrip() throws {
@@ -320,6 +334,30 @@ struct LocalToolAuthTests {
         p.activeModelID = "qwen2.5-coder-7b-mlx-4bit"
         let primary = p.allToolSpecs.first { $0.tool == .claude }
         #expect(primary?.localModelID == "qwen2.5-coder-7b-mlx-4bit")
+    }
+
+    @Test("A local model fuses as a standalone leg, not a tool credential") func fusionLocal() {
+        // Cloud Claude session + a standalone local fuse leg → 2 drafts →
+        // Fusion is configurable.
+        var p = Profile(name: "t", tool: .claude, authMode: .token, apiKey: "sk-ant-x")
+        p.fusionLocalLeg = "qwen2.5-coder-7b-mlx-4bit"
+        #expect(p.fusionConfigurable)
+        // The local leg also makes the engine boot for this profile.
+        #expect(p.localEngineModelID == "qwen2.5-coder-7b-mlx-4bit")
+
+        // A tool in local *agent* mode is NOT a cloud Fusion provider — that's
+        // separate from the standalone local fuse leg.
+        var p2 = Profile(name: "t", tool: .claude, authMode: .token, apiKey: "sk-ant-x")
+        p2.additionalTools = [Profile.ToolSpec(tool: .codex, authMode: .local,
+                                               localModelID: "x")]
+        #expect(!p2.hasUsableCredential(for: .codex))
+        #expect(!p2.fusionUsableProviders.contains(.codex))
+
+        // Local judge boots the engine too.
+        var p3 = Profile(name: "t", tool: .claude, authMode: .token, apiKey: "sk-ant-x")
+        p3.fusionJudgeLocal = true
+        p3.fusionJudgeModel = "qwen2.5-coder-7b-mlx-4bit"
+        #expect(p3.localEngineModelID == "qwen2.5-coder-7b-mlx-4bit")
     }
 
     @Test("Engine model resolves from the right source") func engineModel() {

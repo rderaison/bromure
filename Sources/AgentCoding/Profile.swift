@@ -811,17 +811,21 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                     ("ANTHROPIC_DEFAULT_HAIKU_MODEL", model),
                 ]
             case .codex:
+                // Codex doesn't redirect via env — it uses the Responses API
+                // and a config-file provider. The real wiring is a
+                // `~/.codex/config.toml` model_provider with wire_api="chat"
+                // (written by SessionDisk). We still export the dummy key the
+                // provider's env_key points at.
                 return [
-                    ("OPENAI_BASE_URL", "\(base)/v1"),
                     ("OPENAI_API_KEY", "bromure-local"),
-                    ("OPENAI_MODEL", model),
                 ]
             case .grok:
-                // Grok Build speaks the OpenAI-compatible API; best-effort.
+                // Grok CLI reads GROK_* (not XAI_*) and speaks the
+                // OpenAI-compatible API at GROK_BASE_URL.
                 return [
-                    ("XAI_BASE_URL", "\(base)/v1"),
-                    ("XAI_API_KEY", "bromure-local"),
-                    ("XAI_MODEL", model),
+                    ("GROK_BASE_URL", "\(base)/v1"),
+                    ("GROK_API_KEY", "bromure-local"),
+                    ("GROK_MODEL", model),
                 ]
             }
         }
@@ -963,8 +967,18 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var fusionLegs: Set<Tool>
     /// Provider whose model judges + synthesizes the fused answer.
     public var fusionJudgeProvider: Tool?
-    /// The judge model id (e.g. "claude-opus-4-8"). nil → engine default.
+    /// The judge model id (e.g. "claude-opus-4-8", or a local model id when
+    /// `fusionJudgeLocal`). nil → engine default.
     public var fusionJudgeModel: String?
+
+    /// **Local Fusion leg** — a local model fused in alongside the cloud
+    /// legs (Fusion calls it host-side on the loopback engine). A catalog
+    /// id; nil = no local leg. Independent of the per-tool `.local` agent
+    /// auth — this is purely "also fuse this local model's answer".
+    public var fusionLocalLeg: String?
+    /// When true, the Fusion judge runs on the local engine (the model is
+    /// `fusionJudgeModel`, a local catalog id) instead of a cloud provider.
+    public var fusionJudgeLocal: Bool
 
     /// **Routing** — top-level, per-profile backend selection for the
     /// coding agent's LLM traffic. Orthogonal to Fusion (which is an
@@ -1271,6 +1285,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         fusionLegs: Set<Tool> = [],
         fusionJudgeProvider: Tool? = nil,
         fusionJudgeModel: String? = nil,
+        fusionLocalLeg: String? = nil,
+        fusionJudgeLocal: Bool = false,
         modelRouting: Routing = .cloud,
         activeModelID: String? = nil,
         hybridCloudTokenBudget: Int = 0,
@@ -1336,6 +1352,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.fusionLegs = fusionLegs
         self.fusionJudgeProvider = fusionJudgeProvider
         self.fusionJudgeModel = fusionJudgeModel
+        self.fusionLocalLeg = fusionLocalLeg
+        self.fusionJudgeLocal = fusionJudgeLocal
         self.modelRouting = modelRouting
         self.activeModelID = activeModelID
         self.hybridCloudTokenBudget = hybridCloudTokenBudget
@@ -1408,6 +1426,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case fusionLegs
         case fusionJudgeProvider
         case fusionJudgeModel
+        case fusionLocalLeg
+        case fusionJudgeLocal
         case modelRouting
         case activeModelID
         case hybridCloudTokenBudget
@@ -1499,6 +1519,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         fusionLegs = try c.decodeIfPresent(Set<Tool>.self, forKey: .fusionLegs) ?? []
         fusionJudgeProvider = try c.decodeIfPresent(Tool.self, forKey: .fusionJudgeProvider)
         fusionJudgeModel = try c.decodeIfPresent(String.self, forKey: .fusionJudgeModel)
+        fusionLocalLeg = try c.decodeIfPresent(String.self, forKey: .fusionLocalLeg)
+        fusionJudgeLocal = try c.decodeIfPresent(Bool.self, forKey: .fusionJudgeLocal) ?? false
         modelRouting = try c.decodeIfPresent(Routing.self, forKey: .modelRouting) ?? .cloud
         activeModelID = try c.decodeIfPresent(String.self, forKey: .activeModelID)
         hybridCloudTokenBudget = try c.decodeIfPresent(Int.self, forKey: .hybridCloudTokenBudget) ?? 0
@@ -1593,6 +1615,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if let fusionJudgeModel {
             try c.encode(fusionJudgeModel, forKey: .fusionJudgeModel)
+        }
+        if let fusionLocalLeg, !fusionLocalLeg.isEmpty {
+            try c.encode(fusionLocalLeg, forKey: .fusionLocalLeg)
+        }
+        if fusionJudgeLocal {
+            try c.encode(fusionJudgeLocal, forKey: .fusionJudgeLocal)
         }
         // Routing: only emit when non-default so cloud-only profiles stay compact.
         if modelRouting != .cloud {
@@ -1692,9 +1720,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case .subscription:
             return true
         case .local:
-            // Local is a backend, not a cloud identity — it isn't a Fusion
-            // leg (Fusion intercepts the cloud APIs), so it doesn't count
-            // toward Fusion eligibility here.
+            // A tool in local mode has no *cloud* identity, so it isn't a
+            // cloud Fusion leg. The local Fusion leg/judge is a standalone
+            // backend (`fusionLocalLeg` / `fusionJudgeLocal`), not tied to a
+            // tool's credential.
             return false
         }
     }
@@ -1713,6 +1742,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         for spec in additionalTools where spec.authMode == .local {
             if let m = spec.localModelID, !m.isEmpty { return m }
         }
+        // A local Fusion leg or judge also needs the engine serving its model.
+        if let m = fusionLocalLeg, !m.isEmpty { return m }
+        if fusionJudgeLocal, let m = fusionJudgeModel, !m.isEmpty { return m }
         if modelRouting != .cloud, let m = activeModelID, !m.isEmpty { return m }
         return nil
     }
@@ -1721,7 +1753,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// have a usable credential. Gates the title-bar toggle; the actual legs
     /// used are `fusionLegs` (intersected with usable providers) at runtime.
     public var fusionConfigurable: Bool {
-        fusionUsableProviders.count >= 2
+        // Cloud providers with creds, plus the local leg if one is selected.
+        fusionUsableProviders.count + ((fusionLocalLeg?.isEmpty == false) ? 1 : 0) >= 2
     }
 
     /// Resolve the final styling for this profile. Each `customX` field
@@ -3042,6 +3075,15 @@ public final class ProfileStore {
         *_bromure_cwd_guard*) ;;
         *) PROMPT_COMMAND="_bromure_cwd_guard${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
     esac
+
+    # Codex local-inference provider. Points Codex at the on-host engine via
+    # a model_provider (wire_api="chat"). Laid down BEFORE the MCP block so
+    # its top-level keys (model / model_provider) precede any [mcp_servers.*]
+    # tables — TOML requires top-level keys before table headers.
+    if [ -r /mnt/bromure-meta/codex-local.toml ]; then
+        mkdir -p "$HOME/.codex"
+        cat /mnt/bromure-meta/codex-local.toml > "$HOME/.codex/config.toml"
+    fi
 
     # MCP server configs from the profile. The host generates both
     # Claude Code and Codex formats; we install whichever matches

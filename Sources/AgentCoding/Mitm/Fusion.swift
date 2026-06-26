@@ -102,6 +102,12 @@ enum Fusion {
         var authModes: [Profile.Tool: Profile.AuthMode]
         /// Default leg models per provider (when not the guest's own request).
         var legModels: [Profile.Tool: String]
+        /// A local model (served repo) to fuse in as an extra leg, host-side
+        /// on the loopback engine. nil = no local leg.
+        var localLegModel: String?
+        /// When true, the judge runs on the local engine (`judgeModel` is the
+        /// served repo) rather than `judgeProvider`'s cloud API.
+        var judgeLocal: Bool
     }
 
     /// A resolved credential for one upstream leg/judge call.
@@ -112,6 +118,7 @@ enum Fusion {
         case openAISubscription(String)  // chatgpt.com backend Bearer (best-effort)
         case grokKey(String)             // api.x.ai Bearer (OpenAI-compatible)
         case grokSubscription(String)    // cli-chat-proxy.grok.com Bearer (best-effort)
+        case local(base: String)         // on-host vllm-mlx engine, OpenAI-compatible
     }
 
     /// Engine-default judge model when the profile hasn't picked one.
@@ -187,6 +194,10 @@ enum Fusion {
             guard let (_, r) = HTTPMitmConnection.grokSubscriptionProvider?(),
                   let tok = try? await r.accessToken(for: profileID) else { return nil }
             return .grokSubscription(tok)
+        case (_, .local):
+            // Any tool in local mode → the on-host engine (loopback). No
+            // real credential needed; the engine ignores the dummy key.
+            return .local(base: Profile.Tool.localEngineBaseURL)
         default:
             return nil
         }
@@ -242,6 +253,11 @@ enum Fusion {
                                          model: model, system: system, question: question, token: tok,
                                          extraHeaders: ["x-grok-client-version": grokClientVersion],
                                          session: session, callLog: callLog)
+        case .local(let base):
+            // vllm-mlx serves the OpenAI chat API on the host loopback.
+            return await askOpenAIChat(base: base, model: model, system: system,
+                                       question: question, maxTokens: maxTokens, token: "bromure-local",
+                                       session: session, callLog: callLog)
         }
     }
 
@@ -531,6 +547,7 @@ enum Fusion {
             case .openAISubscription(let t): return ("https://chatgpt.com/backend-api", ("Authorization", "Bearer \(t)"))
             case .grokKey(let k):         return ("https://api.x.ai", ("Authorization", "Bearer \(k)"))
             case .grokSubscription(let t): return ("https://cli-chat-proxy.grok.com", ("Authorization", "Bearer \(t)"))
+            case .local(let base):        return (base, ("Authorization", "Bearer bromure-local"))
             }
         }()
         guard let url = URL(string: "\(base)/v1/models") else { return [] }
@@ -667,6 +684,22 @@ enum Fusion {
             }
         }
 
+        // Local leg — a model served by the on-host engine, fused alongside
+        // the cloud legs. OpenAI-compatible call to the loopback engine.
+        if let localModel = config.localLegModel, !localModel.isEmpty {
+            if let txt = await askModel(cred: .local(base: Profile.Tool.localEngineBaseURL),
+                                        model: localModel,
+                                        system: guestSystem.isEmpty ? legSystem : guestSystem,
+                                        question: transcript.isEmpty ? question : transcript,
+                                        maxTokens: synthMaxTokens, session: session, callLog: callLog),
+               !txt.isEmpty {
+                answers.append(("Local (\(localModel))", txt))
+                log("leg local (\(localModel)) ok — \(txt.count) chars")
+            } else {
+                log("leg local (\(localModel)) produced no answer — dropping")
+            }
+        }
+
         // Need at least two drafts to fuse — otherwise return Claude's answer.
         if answers.count < 2 {
             let wire = wireFromMessage(messageA, wantsStream: wantsStream)
@@ -676,13 +709,23 @@ enum Fusion {
         }
 
         // ===== Judge + synthesis on the configured judge model ========
-        guard let judgeMode = config.authModes[config.judgeProvider],
-              let judgeCred = await resolveCred(tool: config.judgeProvider, authMode: judgeMode,
-                                                swapper: swapper, profileID: profileID) else {
+        // A local judge runs on the loopback engine (no cloud credential);
+        // otherwise resolve the chosen cloud provider's credential.
+        let judgeCred: Cred?
+        if config.judgeLocal {
+            judgeCred = .local(base: Profile.Tool.localEngineBaseURL)
+        } else if let judgeMode = config.authModes[config.judgeProvider] {
+            judgeCred = await resolveCred(tool: config.judgeProvider, authMode: judgeMode,
+                                          swapper: swapper, profileID: profileID)
+        } else {
+            judgeCred = nil
+        }
+        guard let judgeCred else {
             // Judge unusable → return Claude's own answer rather than nothing.
             let wire = wireFromMessage(messageA, wantsStream: wantsStream)
             try tls.write(wire)
-            log("judge (\(config.judgeProvider.rawValue)) has no credential — returning Claude's answer")
+            let who = config.judgeLocal ? "local" : config.judgeProvider.rawValue
+            log("judge (\(who)) has no credential — returning Claude's answer")
             return Outcome(buffer: wire, wireBytes: wire.count, subCalls: callLog.calls)
         }
 

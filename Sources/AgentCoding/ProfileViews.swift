@@ -826,6 +826,9 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var fusionSection: some View {
         let usable = draft.fusionUsableProviders
+        // Installed local models, available as a fuse leg / judge backend.
+        let localModels = CatalogStore.shared.effective().models
+            .filter { CatalogStore.shared.isInstalled(repo: $0.repo) }
         VStack(alignment: .leading, spacing: 12) {
             // Blurb.
             VStack(alignment: .leading, spacing: 4) {
@@ -844,8 +847,10 @@ struct ProfileEditorView: View {
 
             Divider()
 
-            // Legs.
-            Text("Agents to fuse").font(.subheadline.weight(.medium))
+            // Models to fuse.
+            Text("Models to fuse").font(.subheadline.weight(.medium))
+            Text("Your Claude Code session is always one of the fused models; pick the others.")
+                .font(.caption).foregroundStyle(.secondary)
             ForEach(Profile.Tool.allCases, id: \.self) { t in
                 let ok = draft.hasUsableCredential(for: t)
                 Toggle(isOn: Binding(
@@ -855,9 +860,9 @@ struct ProfileEditorView: View {
                     })) {
                     HStack(spacing: 6) {
                         Image(systemName: t.sfSymbol).foregroundStyle(ok ? .primary : .secondary)
-                        Text(t.displayName)
+                        Text(fusionBackendLabel(t))
                         if !ok {
-                            Text("— no credential (configure it in Agents)")
+                            Text("— no cloud credential (configure it in Agents)")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -865,8 +870,11 @@ struct ProfileEditorView: View {
                 .toggleStyle(.checkbox)
                 .disabled(!ok)
             }
-            if usable.count < 2 {
-                Text("Enable at least two agents with a credential (Agents tab) to use Fusion.")
+            // Local model leg.
+            fusionLocalLegRow(localModels: localModels)
+
+            if !draft.fusionConfigurable {
+                Text("Pick at least two models to fuse — your Claude Code session counts as one, so add one more (a cloud agent or a local model).")
                     .font(.caption).foregroundStyle(.orange)
             }
 
@@ -876,48 +884,119 @@ struct ProfileEditorView: View {
             Text("Judge").font(.subheadline.weight(.medium))
             Text("The model that weighs the drafts and writes the final answer.")
                 .font(.caption).foregroundStyle(.secondary)
-            fusionJudgePickers(usable: usable)
+            fusionJudgePickers(usable: usable, localModels: localModels)
         }
         .onAppear { ensureFusionJudgeDefaults(usable: usable) }
     }
 
-    /// Provider + model pickers for the judge. Models are fetched live for the
-    /// chosen provider (`fusionJudgeModelOptions`), with a free-text fallback.
-    @ViewBuilder
-    private func fusionJudgePickers(usable: [Profile.Tool]) -> some View {
-        HStack(spacing: 8) {
-            Picker("Provider", selection: Binding(
-                get: { draft.fusionJudgeProvider ?? usable.first ?? .claude },
-                set: { draft.fusionJudgeProvider = $0; fusionJudgeModels = []; loadFusionJudgeModels() })) {
-                ForEach(usable, id: \.self) { Text($0.displayName).tag($0) }
-            }
-            .frame(maxWidth: 180)
+    /// Backend-flavoured label for a cloud leg.
+    private func fusionBackendLabel(_ t: Profile.Tool) -> String {
+        switch t {
+        case .claude: return "Claude Code (Anthropic) — your session"
+        case .codex:  return "Codex (OpenAI)"
+        case .grok:   return "Grok (xAI)"
+        }
+    }
 
-            if fusionJudgeModelsLoading {
-                ProgressView().controlSize(.small)
+    /// The "Local model" fuse-leg row: a checkbox + model picker. Greyed out
+    /// when no local model is installed.
+    @ViewBuilder
+    private func fusionLocalLegRow(localModels: [CatalogModel]) -> some View {
+        if localModels.isEmpty {
+            HStack(spacing: 6) {
+                Image(systemName: "cpu").foregroundStyle(.secondary)
+                Text("Local model").foregroundStyle(.secondary)
+                Text("— download one in Local Models")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            Picker("Model", selection: Binding(
-                get: { draft.fusionJudgeModel ?? "" },
-                set: { draft.fusionJudgeModel = $0.isEmpty ? nil : $0 })) {
-                Text("(default)").tag("")
-                ForEach(fusionJudgeModels, id: \.self) { Text($0).tag($0) }
-                // Keep a stored custom model visible even if not in the list.
-                if let m = draft.fusionJudgeModel, !fusionJudgeModels.contains(m) {
-                    Text(m).tag(m)
+            .opacity(0.6)
+        } else {
+            HStack(spacing: 8) {
+                Toggle(isOn: Binding(
+                    get: { (draft.fusionLocalLeg?.isEmpty == false) },
+                    set: { on in
+                        draft.fusionLocalLeg = on ? (draft.fusionLocalLeg ?? localModels.first?.id) : nil
+                    })) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "cpu").foregroundStyle(.mint)
+                        Text("Local model")
+                    }
+                }
+                .toggleStyle(.checkbox)
+                if draft.fusionLocalLeg?.isEmpty == false {
+                    Picker("", selection: Binding(
+                        get: { draft.fusionLocalLeg ?? localModels.first?.id ?? "" },
+                        set: { draft.fusionLocalLeg = $0 })) {
+                        ForEach(localModels) { Text($0.name).tag($0.id) }
+                    }
+                    .labelsHidden().frame(maxWidth: 220)
                 }
             }
         }
-        .disabled(usable.isEmpty)
+    }
+
+    /// Provider + model pickers for the judge. Backends are the usable cloud
+    /// providers plus "Local" (when a local model is installed); cloud model
+    /// lists are fetched live, local lists come from the installed catalog.
+    @ViewBuilder
+    private func fusionJudgePickers(usable: [Profile.Tool], localModels: [CatalogModel]) -> some View {
+        HStack(spacing: 8) {
+            Picker("Provider", selection: Binding(
+                get: { draft.fusionJudgeLocal ? "local"
+                        : (draft.fusionJudgeProvider?.rawValue ?? usable.first?.rawValue ?? "") },
+                set: { tag in
+                    if tag == "local" {
+                        draft.fusionJudgeLocal = true
+                        if draft.fusionJudgeModel == nil {
+                            draft.fusionJudgeModel = draft.fusionLocalLeg ?? localModels.first?.id
+                        }
+                    } else {
+                        draft.fusionJudgeLocal = false
+                        draft.fusionJudgeProvider = Profile.Tool(rawValue: tag)
+                        draft.fusionJudgeModel = nil
+                        fusionJudgeModels = []
+                        loadFusionJudgeModels()
+                    }
+                })) {
+                ForEach(usable, id: \.self) { Text(fusionBackendLabel($0)).tag($0.rawValue) }
+                if !localModels.isEmpty { Text("Local").tag("local") }
+            }
+            .frame(maxWidth: 200)
+
+            if draft.fusionJudgeLocal {
+                Picker("Model", selection: Binding(
+                    get: { draft.fusionJudgeModel ?? localModels.first?.id ?? "" },
+                    set: { draft.fusionJudgeModel = $0 })) {
+                    ForEach(localModels) { Text($0.name).tag($0.id) }
+                }
+            } else {
+                if fusionJudgeModelsLoading { ProgressView().controlSize(.small) }
+                Picker("Model", selection: Binding(
+                    get: { draft.fusionJudgeModel ?? "" },
+                    set: { draft.fusionJudgeModel = $0.isEmpty ? nil : $0 })) {
+                    Text("(default)").tag("")
+                    ForEach(fusionJudgeModels, id: \.self) { Text($0).tag($0) }
+                    if let m = draft.fusionJudgeModel, !fusionJudgeModels.contains(m) {
+                        Text(m).tag(m)
+                    }
+                }
+            }
+        }
+        .disabled(usable.isEmpty && localModels.isEmpty)
     }
 
     private func ensureFusionJudgeDefaults(usable: [Profile.Tool]) {
-        if draft.fusionJudgeProvider == nil { draft.fusionJudgeProvider = usable.first }
-        if fusionJudgeModels.isEmpty { loadFusionJudgeModels() }
+        if !draft.fusionJudgeLocal && draft.fusionJudgeProvider == nil {
+            draft.fusionJudgeProvider = usable.first
+        }
+        if !draft.fusionJudgeLocal && fusionJudgeModels.isEmpty { loadFusionJudgeModels() }
     }
 
-    /// Fetch the model list for the current judge provider via the host.
+    /// Fetch the cloud model list for the current judge provider via the host.
+    /// (A local judge picks from the installed catalog, no fetch needed.)
     private func loadFusionJudgeModels() {
-        guard let provider = draft.fusionJudgeProvider ?? draft.fusionUsableProviders.first,
+        guard !draft.fusionJudgeLocal,
+              let provider = draft.fusionJudgeProvider ?? draft.fusionUsableProviders.first,
               let fetch = onFetchFusionModels else { return }
         let spec = draft.allToolSpecs.first { $0.tool == provider }
         fusionJudgeModelsLoading = true
