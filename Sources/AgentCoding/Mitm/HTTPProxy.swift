@@ -10,7 +10,13 @@ import Compression
 /// with HTTP/1.1 pipelining or keep-alive within a CONNECT — the cost
 /// of a fresh CONNECT per request is negligible at agent traffic
 /// volumes, and it keeps the state machine sane.
-@available(macOS, deprecated: 10.15, message: "owns a TLSServerStream which wraps SecureTransport")
+/// NOTE: the SecureTransport deprecation is contained to the three
+/// methods that actually name `TLSServerStream` — `run()` / `drive()`
+/// / `handleWebSocketUpgrade(serverTLS:…)` — rather than the whole
+/// class. `TLSServerStream` is a local inside `drive()`, never a stored
+/// property, so the class itself isn't "deprecated"; marking it so made
+/// every unrelated member access (e.g. the static `*Provider` config
+/// closures from `MitmEngine.register`) inherit the warning.
 final class HTTPMitmConnection: @unchecked Sendable {
     let fd: Int32
     let profileID: UUID
@@ -105,6 +111,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Drives the full MITM exchange. Must be called from a Task —
     /// uses blocking syscalls under the hood. Closes the FD on exit
     /// regardless of success.
+    @available(macOS, deprecated: 10.15, message: "drives TLSServerStream which wraps SecureTransport")
     func run() async {
         defer { close(fd) }
         do {
@@ -114,6 +121,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
     }
 
+    @available(macOS, deprecated: 10.15, message: "creates TLSServerStream which wraps SecureTransport")
     private func drive() async throws {
         let t0 = Date()
 
@@ -1021,6 +1029,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// parse RFC 6455 frames in both directions and accumulate a
     /// chronological transcript that the caller renders into the
     /// trace's response body.
+    @available(macOS, deprecated: 10.15, message: "takes TLSServerStream which wraps SecureTransport")
     private func handleWebSocketUpgrade(serverTLS: TLSServerStream,
                                         rawRequest: Data,
                                         host: String, port: Int,
