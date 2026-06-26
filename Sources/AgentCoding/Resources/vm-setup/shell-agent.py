@@ -11,16 +11,22 @@ Guest-initiated connection pool pattern (same as cdp-agent.py):
   2. When the host sends a command, this agent executes it.
   3. After each command, a replacement connection is opened.
 
-Started from xinitrc when DEBUG_SHELL=1 (set by host when BROMURE_DEBUG_CLAUDE is set).
+Started from xinitrc whenever the script is staged in the meta share (always,
+now that `exec` is a first-class CLI verb gated by the host's control socket).
 """
 
+import errno
+import fcntl
 import json
 import os
+import pty
+import select
 import signal
 import socket
 import struct
 import subprocess
 import sys
+import termios
 import threading
 import time
 
@@ -46,6 +52,123 @@ def recv_exact(sock, n):
             return None
         data += chunk
     return data
+
+
+# Interactive PTY framing (both directions):
+#   [1 byte type][4 byte BE length][payload]
+#   type 0 = data (raw tty bytes), 1 = resize (payload: u16be cols, u16be rows),
+#   2 = exit (guest→host; payload: i32be exit code), 3 = stdin EOF (host→guest).
+FRAME_DATA = 0
+FRAME_RESIZE = 1
+FRAME_EXIT = 2
+FRAME_EOF = 3
+
+
+def _send_frame(sock, ftype, payload=b""):
+    sock.sendall(bytes([ftype]) + struct.pack(">I", len(payload)) + payload)
+
+
+def _set_winsize(fd, rows, cols):
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    except OSError:
+        pass
+
+
+def _run_interactive(vsock_sock, req):
+    """Allocate a pty, run the command on it, and bridge it to the vsock."""
+    cmd = req.get("cmd", "")
+    cols = int(req.get("cols", 80) or 80)
+    rows = int(req.get("rows", 24) or 24)
+
+    pid, master = pty.fork()
+    if pid == 0:
+        # Child: stdin/stdout/stderr are the pty slave. Source proxy.env so
+        # curl/pip/npm see the MITM proxy, then exec the command (or a login
+        # shell). `bash -li` makes the default shell interactive so .bashrc
+        # runs; `-lc` runs an explicit command with the login environment.
+        try:
+            os.environ.setdefault("TERM", "xterm-256color")
+            if cmd:
+                # NB: no `exec` prefix — it would replace the shell with the
+                # first word of a compound command (`a; b; c`) and drop the rest.
+                wrapped = (
+                    "if [ -r /mnt/bromure-meta/proxy.env ]; then "
+                    "set -a; . /mnt/bromure-meta/proxy.env; set +a; fi; " + cmd
+                )
+                os.execvp("/bin/bash", ["/bin/bash", "-lc", wrapped])
+            else:
+                os.execvp("/bin/bash", ["/bin/bash", "-li"])
+        except Exception:
+            pass
+        os._exit(127)
+
+    # Parent: pump pty master <-> vsock until the child exits or the host hangs up.
+    _set_winsize(master, rows, cols)
+    buf = b""
+    try:
+        while True:
+            try:
+                rlist, _, _ = select.select([vsock_sock, master], [], [])
+            except (OSError, ValueError):
+                break
+            if master in rlist:
+                try:
+                    out = os.read(master, 65536)
+                except OSError:
+                    out = b""
+                if not out:
+                    break  # child closed the pty (exited)
+                _send_frame(vsock_sock, FRAME_DATA, out)
+            if vsock_sock in rlist:
+                try:
+                    chunk = vsock_sock.recv(65536)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    break  # host hung up
+                buf += chunk
+                while len(buf) >= 5:
+                    ftype = buf[0]
+                    flen = struct.unpack(">I", buf[1:5])[0]
+                    if len(buf) < 5 + flen:
+                        break
+                    payload = buf[5:5 + flen]
+                    buf = buf[5 + flen:]
+                    if ftype == FRAME_DATA:
+                        try:
+                            os.write(master, payload)
+                        except OSError:
+                            pass
+                    elif ftype == FRAME_RESIZE and flen >= 4:
+                        c, r = struct.unpack(">HH", payload[:4])
+                        _set_winsize(master, r, c)
+                    elif ftype == FRAME_EOF:
+                        break
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        code = 0
+        try:
+            os.kill(pid, signal.SIGHUP)
+        except OSError:
+            pass
+        try:
+            _, status = os.waitpid(pid, 0)
+            if hasattr(os, "waitstatus_to_exitcode"):
+                code = os.waitstatus_to_exitcode(status)
+            elif os.WIFEXITED(status):
+                code = os.WEXITSTATUS(status)
+            else:
+                code = -1
+        except OSError:
+            pass
+        try:
+            _send_frame(vsock_sock, FRAME_EXIT, struct.pack(">i", code))
+        except OSError:
+            pass
 
 
 def handle_connection(vsock_sock, replenish_fn):
@@ -74,6 +197,13 @@ def handle_connection(vsock_sock, replenish_fn):
         cmd = req.get("cmd", "")
         timeout = req.get("timeout", 30)
         workdir = req.get("workdir")
+
+        # Interactive PTY session (`exec -it`, or a tab attach running
+        # `tmux attach`): allocate a pty, run the command on it, and stream
+        # raw bytes framed over the vsock until the child exits.
+        if req.get("interactive"):
+            _run_interactive(vsock_sock, req)
+            return  # finally below closes the vsock + replenishes the pool
 
         # Source /mnt/bromure-meta/proxy.env before running so the
         # command sees HTTPS_PROXY + the per-language CA bundle

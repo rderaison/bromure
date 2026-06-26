@@ -80,7 +80,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     public static let runtimeCPUs: Int = 4
 
     /// Session-less init for legacy callers. Boots base.img directly
-    /// (Phase A behaviour) — kept so tools / smoke tests still work.
+    /// (no per-profile disk) — kept so tools / smoke tests still work.
     public init(imageManager: UbuntuImageManager) {
         self.imageManager = imageManager
         self.sessionDisk = nil

@@ -1,0 +1,517 @@
+import ArgumentParser
+import Foundation
+import SandboxEngine
+
+// MARK: - Control-socket client
+
+/// Synchronous HTTP-over-Unix-socket client for the agent's control socket —
+/// the `bromure-ac` CLI's transport. Mirrors how `docker` talks to
+/// /var/run/docker.sock: plain HTTP/1.1 over an AF_UNIX stream.
+struct ControlClient {
+    let socketPath: String
+
+    init(socketPath: String? = nil) {
+        self.socketPath = socketPath ?? ProfileStore().controlSocketURL.path
+    }
+
+    struct Response { let status: Int; let json: [String: Any] }
+
+    enum ClientError: LocalizedError {
+        case agentNotRunning
+        case transport(String)
+        var errorDescription: String? {
+            switch self {
+            case .agentNotRunning:  return "The bromure-ac agent isn't running."
+            case .transport(let m): return m
+            }
+        }
+    }
+
+    // MARK: Request
+
+    @discardableResult
+    func request(_ method: String, _ path: String, body: [String: Any]? = nil) throws -> Response {
+        guard let fd = Self.connect(to: socketPath) else { throw ClientError.agentNotRunning }
+        defer { Darwin.close(fd) }
+
+        let bodyData = try body.map { try JSONSerialization.data(withJSONObject: $0) } ?? Data()
+        var head = "\(method) \(path) HTTP/1.1\r\n"
+        head += "Host: localhost\r\n"
+        head += "Content-Type: application/json\r\n"
+        head += "Content-Length: \(bodyData.count)\r\n"
+        head += "Connection: close\r\n\r\n"
+        var out = Data(head.utf8); out.append(bodyData)
+        _ = out.withUnsafeBytes { ptr -> Int in
+            guard let base = ptr.baseAddress else { return 0 }
+            return Darwin.write(fd, base, out.count)
+        }
+
+        var resp = Data()
+        var buf = [UInt8](repeating: 0, count: 65536)
+        while true {
+            let n = buf.withUnsafeMutableBufferPointer { Darwin.read(fd, $0.baseAddress!, $0.count) }
+            if n <= 0 { break }
+            resp.append(contentsOf: buf[0..<n])
+        }
+        guard let str = String(data: resp, encoding: .utf8),
+              let sep = str.range(of: "\r\n\r\n") else {
+            throw ClientError.transport("Invalid HTTP response from agent")
+        }
+        // NB: "\r\n" is a single grapheme cluster in Swift, so
+        // `firstIndex(of: "\r")` finds nothing — split on the substring instead.
+        let firstLine = str.components(separatedBy: "\r\n").first ?? ""
+        let status = firstLine.split(separator: " ").dropFirst().first.flatMap { Int($0) } ?? 0
+        let json = (try? JSONSerialization.jsonObject(
+            with: Data(str[sep.upperBound...].utf8)) as? [String: Any]) ?? [:]
+        return Response(status: status, json: json)
+    }
+
+    /// Open a streaming connection: send the request, consume the response
+    /// header, and hand back the raw fd for bidirectional streaming. The caller
+    /// owns the fd and must close it. Throws on non-200.
+    func openStream(_ method: String, _ path: String, body: [String: Any]) throws -> Int32 {
+        guard let fd = Self.connect(to: socketPath) else { throw ClientError.agentNotRunning }
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        var head = "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\n"
+        head += "Content-Type: application/json\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n"
+        var out = Data(head.utf8); out.append(bodyData)
+        _ = out.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, out.count) }
+
+        // Read exactly up to the end of the response header (\r\n\r\n) one byte
+        // at a time, so we don't swallow any stream bytes that follow it.
+        var header = [UInt8]()
+        var one = [UInt8](repeating: 0, count: 1)
+        while true {
+            let r = Darwin.read(fd, &one, 1)
+            if r <= 0 { Darwin.close(fd); throw ClientError.transport("Agent closed during handshake") }
+            header.append(one[0])
+            let c = header.count
+            if c >= 4, header[c-4] == 13, header[c-3] == 10, header[c-2] == 13, header[c-1] == 10 { break }
+            if c > 16384 { Darwin.close(fd); throw ClientError.transport("Oversized response header") }
+        }
+        let headStr = String(decoding: header, as: UTF8.self)
+        let firstLine = headStr.components(separatedBy: "\r\n").first ?? ""
+        let status = firstLine.split(separator: " ").dropFirst().first.flatMap { Int($0) } ?? 0
+        if status != 200 {
+            var rest = Data(); var b = [UInt8](repeating: 0, count: 4096)
+            while true { let r = Darwin.read(fd, &b, b.count); if r <= 0 { break }; rest.append(contentsOf: b[0..<r]) }
+            Darwin.close(fd)
+            let msg = ((try? JSONSerialization.jsonObject(with: rest)) as? [String: Any])?["error"] as? String
+                ?? "request failed (HTTP \(status))"
+            throw ClientError.transport(msg)
+        }
+        return fd
+    }
+
+    /// True if the agent answers a health probe on the control socket.
+    func isAgentRunning() -> Bool {
+        ((try? request("GET", "/health"))?.status ?? 0) == 200
+    }
+
+    /// Ensure the agent is up — autostart `bromure-ac run --headless` if not,
+    /// then poll the control socket until it answers (or `timeout` elapses).
+    func ensureAgentRunning(timeout: TimeInterval = 40) throws {
+        if isAgentRunning() { return }
+
+        let exe = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = ["run", "--headless"]
+        // Detach from this CLI's stdio so the agent survives us exiting.
+        proc.standardInput = FileHandle.nullDevice
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do { try proc.run() }
+        catch { throw ClientError.transport("Couldn't start the agent: \(error.localizedDescription)") }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if isAgentRunning() { return }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        throw ClientError.transport("Agent didn't come up within \(Int(timeout))s.")
+    }
+
+    /// Percent-encode an id/name as a single path segment so values with
+    /// spaces (e.g. a profile named "Default profile") survive the HTTP request
+    /// line. The agent decodes it before resolving.
+    static func encodeSegment(_ s: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
+    }
+
+    // MARK: Socket
+
+    private static let cliDebug = ProcessInfo.processInfo.environment["BROMURE_CLI_DEBUG"] != nil
+
+    private static func connect(to path: String) -> Int32? {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            if cliDebug { FileHandle.standardError.write(Data("[cli] socket() failed: \(String(cString: strerror(errno)))\n".utf8)) }
+            return nil
+        }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        let cap = MemoryLayout.size(ofValue: addr.sun_path)
+        guard bytes.count < cap else {
+            if cliDebug { FileHandle.standardError.write(Data("[cli] path too long (\(bytes.count) >= \(cap)): \(path)\n".utf8)) }
+            Darwin.close(fd); return nil
+        }
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: UInt8.self, capacity: cap) { dst in
+                for (i, b) in bytes.enumerated() { dst[i] = b }
+                dst[bytes.count] = 0
+            }
+        }
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if rc != 0 {
+            if cliDebug { FileHandle.standardError.write(Data("[cli] connect() failed: \(String(cString: strerror(errno))) path=\(path)\n".utf8)) }
+            Darwin.close(fd); return nil
+        }
+        return fd
+    }
+}
+
+// MARK: - Formatting helpers
+
+private func pad(_ s: String, _ width: Int) -> String {
+    s.count >= width ? s : s + String(repeating: " ", count: width - s.count)
+}
+
+private func formatUptime(_ seconds: Int) -> String {
+    if seconds < 60 { return "\(seconds)s" }
+    let m = seconds / 60
+    if m < 60 { return "\(m)m" }
+    let h = m / 60
+    return "\(h)h\(m % 60)m"
+}
+
+// MARK: - `vm` subcommand group
+
+struct VM: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "vm",
+        abstract: "Manage bromure-ac VMs (like `docker` for containers).",
+        subcommands: [VMList.self, VMRun.self, VMKill.self, VMAttach.self])
+}
+
+struct VMRun: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "run",
+        abstract: "Create and boot a VM, optionally from an on-the-fly profile (like `docker run`).")
+
+    @Option(name: [.customShort("v"), .long],
+            help: "Mount a host folder into the VM at ~/<basename>. Repeatable (max 8). e.g. -v ~/project")
+    var volume: [String] = []
+
+    @Option(name: .long, help: "Use an existing profile (name or id) instead of creating one.")
+    var profile: String?
+
+    @Option(name: .long, help: "Name for an on-the-fly profile (default: cli-XXXX).")
+    var name: String?
+
+    @Option(name: .long, help: "Tool for an on-the-fly profile: claude | codex | grok.")
+    var tool: String?
+
+    @Option(name: .long, help: "Auth mode for an on-the-fly profile: token | subscription | bedrock.")
+    var auth: String?
+
+    @Option(name: .long, help: "API key (for --auth token).")
+    var apiKey: String?
+
+    @Option(name: .long, help: "VM RAM in GB.")
+    var memory: Int?
+
+    @Flag(name: [.customShort("d"), .long], help: "Detached: boot headless, no window.")
+    var detach = false
+
+    @Flag(name: .long, help: "Delete the profile + disk when the VM stops (ephemeral).")
+    var rm = false
+
+    func run() throws {
+        let client = ControlClient()
+        try client.ensureAgentRunning()
+        var spec: [String: Any] = ["detach": detach, "rm": rm]
+        if let profile { spec["profile"] = profile }
+        if let name { spec["name"] = name }
+        if let tool { spec["tool"] = tool }
+        if let auth { spec["auth"] = auth }
+        if let apiKey { spec["apiKey"] = apiKey }
+        if let memory { spec["memoryGB"] = memory }
+        if !volume.isEmpty {
+            spec["mounts"] = volume.map { ($0 as NSString).expandingTildeInPath }
+        }
+        let resp = try client.request("POST", "/vms", body: spec)
+        guard resp.status == 201 else {
+            throw ValidationError(resp.json["error"] as? String ?? "vm run failed (HTTP \(resp.status))")
+        }
+        let id = resp.json["shortId"] as? String ?? String((resp.json["id"] as? String ?? "?").prefix(12))
+        let nm = resp.json["name"] as? String ?? "?"
+        print("Started VM \(nm) (\(id))\(detach ? " [detached]" : "").")
+    }
+}
+
+struct VMList: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ls", abstract: "List running VMs (attached or detached).")
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else {
+            print("No bromure-ac agent running.")
+            return
+        }
+        let vms = (try client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
+        if vms.isEmpty { print("No running VMs."); return }
+        print(pad("VM ID", 14) + pad("NAME", 22) + pad("TOOL", 9)
+              + pad("STATE", 11) + pad("UP", 8) + "WINDOW")
+        for vm in vms.sorted(by: { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }) {
+            let id = vm["shortId"] as? String ?? String((vm["id"] as? String ?? "").prefix(12))
+            let name = vm["name"] as? String ?? ""
+            let tool = vm["tool"] as? String ?? ""
+            let state = vm["state"] as? String ?? ""
+            let up = formatUptime(vm["uptimeSeconds"] as? Int ?? 0)
+            let win = (vm["attached"] as? Bool ?? false) ? "attached" : "detached"
+            print(pad(id, 14) + pad(name, 22) + pad(tool, 9) + pad(state, 11) + pad(up, 8) + win)
+            // Tabs (kitty terminals) as a tree; attach with `vm attach <id> <n>`.
+            let tabs = vm["tabs"] as? [[String: Any]] ?? []
+            for t in tabs {
+                let idx = t["index"] as? Int ?? 0
+                let title = t["title"] as? String ?? "shell"
+                print("    └─ \(title) (\(idx))")
+            }
+        }
+    }
+}
+
+struct VMKill: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "kill", abstract: "Stop a VM (shut down, or suspend with --suspend).")
+
+    @Argument(help: "VM id or profile name.")
+    var vm: String
+
+    @Flag(name: .long, help: "Suspend (save RAM to disk) instead of powering off.")
+    var suspend = false
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let action = suspend ? "suspend" : "shutdown"
+        let resp = try client.request("DELETE", "/vms/\(ControlClient.encodeSegment(vm))", body: ["action": action])
+        guard resp.status == 200 else {
+            throw ValidationError(resp.json["error"] as? String ?? "Couldn't stop \(vm).")
+        }
+        print("\(suspend ? "Suspended" : "Stopped") \(vm).")
+    }
+}
+
+struct VMAttach: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "attach",
+        abstract: "Attach to a VM: open a window, or (with a tab number) attach your terminal to that tab, tmux-style.")
+
+    @Argument(help: "VM id or profile name.")
+    var vm: String
+
+    @Argument(help: "Tab number from `vm ls` to attach your terminal to. Omit to open a window.")
+    var tab: Int?
+
+    func run() throws {
+        let client = ControlClient()
+        try client.ensureAgentRunning()
+
+        // With a tab number: attach this terminal to that tab's tmux session.
+        if let tab {
+            let vms = (try client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
+            guard let vmObj = vms.first(where: { matchesVM($0, vm) }) else {
+                throw ValidationError("VM not found: \(vm)")
+            }
+            let tabs = vmObj["tabs"] as? [[String: Any]] ?? []
+            guard tab >= 1, tab <= tabs.count, let uuid = tabs[tab - 1]["id"] as? String else {
+                throw ValidationError("No tab \(tab) — that VM has \(tabs.count) tab(s). Run `vm ls`.")
+            }
+            let target = (vmObj["id"] as? String) ?? vm
+            try InteractiveExec.run(client: client, vm: target,
+                                    command: "tmux attach -t bromure-\(uuid)")
+            return
+        }
+
+        // No tab: open a GUI window onto the VM.
+        let resp = try client.request("POST", "/vms/\(ControlClient.encodeSegment(vm))/attach")
+        guard resp.status == 200 else {
+            throw ValidationError(resp.json["error"] as? String ?? "Couldn't attach to \(vm).")
+        }
+        print("Attached \(vm).")
+    }
+}
+
+/// Match a `vm ls` entry against a user-supplied id / short-id-prefix / name.
+private func matchesVM(_ vm: [String: Any], _ key: String) -> Bool {
+    let k = key.replacingOccurrences(of: "-", with: "").lowercased()
+    if let name = vm["name"] as? String, name.lowercased() == key.lowercased() { return true }
+    if let sid = vm["shortId"] as? String, sid.lowercased().hasPrefix(k) { return true }
+    if let id = vm["id"] as? String,
+       id.replacingOccurrences(of: "-", with: "").lowercased().hasPrefix(k) { return true }
+    return false
+}
+
+// MARK: - `exec`
+
+struct Exec: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Run a command inside a VM (like `docker exec`). Use -it for an interactive shell.")
+
+    @Flag(name: [.customShort("i"), .long], help: "Interactive: keep stdin open.")
+    var interactive = false
+
+    @Flag(name: [.customShort("t"), .long], help: "Allocate a pseudo-tty.")
+    var tty = false
+
+    @Option(name: .long, help: "Timeout in seconds (non-interactive only).")
+    var timeout: Int = 60
+
+    @Argument(help: "VM id or profile name.")
+    var vm: String
+
+    @Argument(parsing: .captureForPassthrough,
+              help: "Command and args. Omit (with -it) for an interactive shell.")
+    var command: [String] = []
+
+    func run() throws {
+        let client = ControlClient()
+        try client.ensureAgentRunning()
+        let cmd = command.joined(separator: " ")
+
+        // -i and/or -t → interactive pty session (a raw bidirectional stream).
+        if interactive || tty {
+            try InteractiveExec.run(client: client, vm: vm, command: cmd)
+            return
+        }
+
+        guard !cmd.isEmpty else {
+            throw ValidationError("No command given (use -it for an interactive shell).")
+        }
+        let resp = try client.request("POST", "/vms/\(ControlClient.encodeSegment(vm))/exec",
+                                      body: ["command": cmd, "timeout": timeout])
+        guard resp.status == 200 else {
+            let msg = resp.json["error"] as? String ?? "exec failed (HTTP \(resp.status))"
+            FileHandle.standardError.write(Data((msg + "\n").utf8))
+            throw ExitCode(1)
+        }
+        if let out = resp.json["stdout"] as? String { FileHandle.standardOutput.write(Data(out.utf8)) }
+        if let err = resp.json["stderr"] as? String, !err.isEmpty {
+            FileHandle.standardError.write(Data(err.utf8))
+        }
+        let code = Int32(resp.json["exitCode"] as? Int ?? 0)
+        if code != 0 { throw ExitCode(code) }
+    }
+}
+
+// MARK: - Interactive pty session
+
+/// Set by the SIGWINCH handler; drained in the poll loop to forward a resize.
+private nonisolated(unsafe) var gWinchPending: Int32 = 0
+
+/// Drives an interactive pty `exec`: opens a raw stream to the agent, puts the
+/// local terminal in raw mode, and pumps the framed pty protocol (data / resize
+/// / exit) until the remote command exits.
+enum InteractiveExec {
+    static func run(client: ControlClient, vm: String, command: String) throws {
+        var ws = winsize()
+        _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws)
+        let cols0 = ws.ws_col == 0 ? 80 : Int(ws.ws_col)
+        let rows0 = ws.ws_row == 0 ? 24 : Int(ws.ws_row)
+
+        let fd = try client.openStream(
+            "POST", "/vms/\(ControlClient.encodeSegment(vm))/exec",
+            body: ["command": command, "interactive": true, "cols": cols0, "rows": rows0])
+        defer { Darwin.close(fd) }
+
+        // Raw terminal mode (restored on exit) so keystrokes go straight to the
+        // guest pty and the guest controls echo/line editing.
+        let haveTTY = isatty(STDIN_FILENO) != 0
+        var orig = termios()
+        if haveTTY {
+            tcgetattr(STDIN_FILENO, &orig)
+            var raw = orig
+            cfmakeraw(&raw)
+            tcsetattr(STDIN_FILENO, TCSANOW, &raw)
+        }
+        defer { if haveTTY { var o = orig; tcsetattr(STDIN_FILENO, TCSANOW, &o) } }
+
+        gWinchPending = 0
+        signal(SIGWINCH) { _ in gWinchPending = 1 }
+        defer { signal(SIGWINCH, SIG_DFL) }
+
+        var stdinFD: Int32 = STDIN_FILENO
+        var inbuf = [UInt8](); inbuf.reserveCapacity(1 << 16)
+        var rbuf = [UInt8](repeating: 0, count: 1 << 16)
+        var exitCode: Int32 = 0
+        let pollIn = Int16(POLLIN)
+        let pollBad = Int16(POLLHUP | POLLERR | POLLNVAL)
+
+        loop: while true {
+            if gWinchPending != 0 {
+                gWinchPending = 0
+                var w = winsize(); _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &w)
+                sendFrame(fd, 1, resizePayload(cols: Int(w.ws_col), rows: Int(w.ws_row)))
+            }
+            var fds = [pollfd(fd: stdinFD, events: pollIn, revents: 0),
+                       pollfd(fd: fd, events: pollIn, revents: 0)]
+            let n = poll(&fds, 2, -1)
+            if n < 0 { if errno == EINTR { continue }; break }
+
+            if fds[0].revents & pollIn != 0 {
+                let r = Darwin.read(stdinFD, &rbuf, rbuf.count)
+                if r > 0 { sendFrame(fd, 0, Array(rbuf[0..<r])) }
+                else { sendFrame(fd, 3, []); stdinFD = -1 }   // EOF: stop polling stdin
+            }
+            if fds[1].revents & pollIn != 0 {
+                let r = Darwin.read(fd, &rbuf, rbuf.count)
+                if r <= 0 { break }
+                inbuf.append(contentsOf: rbuf[0..<r])
+                while inbuf.count >= 5 {
+                    let ftype = inbuf[0]
+                    let flen = (Int(inbuf[1]) << 24) | (Int(inbuf[2]) << 16)
+                             | (Int(inbuf[3]) << 8) | Int(inbuf[4])
+                    if inbuf.count < 5 + flen { break }
+                    let payload = Array(inbuf[5 ..< 5 + flen])
+                    inbuf.removeFirst(5 + flen)
+                    if ftype == 0, !payload.isEmpty {
+                        payload.withUnsafeBytes { _ = Darwin.write(STDOUT_FILENO, $0.baseAddress, payload.count) }
+                    } else if ftype == 2 {
+                        if payload.count >= 4 {
+                            exitCode = Int32(bitPattern:
+                                (UInt32(payload[0]) << 24) | (UInt32(payload[1]) << 16)
+                                | (UInt32(payload[2]) << 8) | UInt32(payload[3]))
+                        }
+                        break loop
+                    }
+                }
+            }
+            if (fds[1].revents & pollBad) != 0 && (fds[1].revents & pollIn) == 0 { break }
+        }
+        if exitCode != 0 { throw ExitCode(exitCode) }
+    }
+
+    private static func sendFrame(_ fd: Int32, _ type: UInt8, _ payload: [UInt8]) {
+        var out: [UInt8] = [type]
+        let len = UInt32(payload.count)
+        out.append(UInt8((len >> 24) & 0xff)); out.append(UInt8((len >> 16) & 0xff))
+        out.append(UInt8((len >> 8) & 0xff));  out.append(UInt8(len & 0xff))
+        out.append(contentsOf: payload)
+        out.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, out.count) }
+    }
+
+    private static func resizePayload(cols: Int, rows: Int) -> [UInt8] {
+        let c = UInt16(clamping: cols), r = UInt16(clamping: rows)
+        return [UInt8(c >> 8), UInt8(c & 0xff), UInt8(r >> 8), UInt8(r & 0xff)]
+    }
+}

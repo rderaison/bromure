@@ -11,8 +11,7 @@ import SwiftASN1
 // keychain service + on-disk path scoped to BAC's bundle, so Web's
 // enrollment list (and vice versa) doesn't leak into the wrong app.
 //
-// Phase 3a delivers what's testable end-to-end without parser/uploader
-// work: an admin mints an `app: agentic-coding` code on the user
+// Enrollment flow: an admin mints an `app: agentic-coding` code on the user
 // detail page, the user pastes it into BAC's enrollment sheet, and the
 // new install row appears at /agentic-coding/installs.
 
@@ -178,7 +177,7 @@ public enum BACEnrollmentStore {
     // if anything goes wrong); the private key lives in the Keychain
     // keyed by serial, so a key rotation can keep N versions until the
     // old cert expires. URLSession-side construction of a SecIdentity
-    // happens in Phase 3b.
+    // happens at request time.
 
     public static func storeLeafCert(certPem: String, caPem: String, privateKeyDER: Data, serialHex: String) throws {
         let lower = serialHex.lowercased()

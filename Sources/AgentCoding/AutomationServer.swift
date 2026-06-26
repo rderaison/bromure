@@ -14,18 +14,30 @@ import SandboxEngine
 ///                                   `AutomationSessionInfo` for the new session
 ///   GET    /sessions/{id}         — single-session info (id is the profile UUID)
 ///   DELETE /sessions/{id}         — close any open session for that profile
-///   GET    /app/state             — debug-gated; full app-state snapshot
-///   POST   /sessions/{id}/exec    — debug-gated; shell exec inside the guest. Wired
-///                                   when ShellBridge lands in Phase 2b — returns
-///                                   503 until then.
+///   GET    /app/state             — full app-state snapshot
+///   POST   /sessions/{id}/exec    — run a shell command inside the guest
+///   GET    /vms                   — list running VMs
+///   POST   /vms                   — create + boot a VM (profile ref or inline spec)
+///   DELETE /vms/{id}              — stop a VM (body: `{ "action": "shutdown"|"suspend" }`)
+///   POST   /vms/{id}/attach       — open a window onto a running VM
+///   POST   /vms/{id}/exec         — run a shell command inside the guest
 ///
-/// Bound to 127.0.0.1 by default. Debug endpoints are gated on the
-/// BROMURE_DEBUG_CLAUDE environment variable, same as the browser.
+/// The TCP listener binds 127.0.0.1 and gates exec / app-state / vm endpoints
+/// behind BROMURE_DEBUG_CLAUDE. The owner-only Unix control socket
+/// (`control.sock`, mode 0600) used by the `bromure-ac` CLI is trusted: the
+/// socket file's permissions are the access gate, so no env var is required.
 final class ACAutomationServer {
     private var serverSocket: Int32 = -1
     private var acceptSource: DispatchSourceRead?
     let port: UInt16
     let bindAddress: String
+    /// When non-nil, bind an AF_UNIX socket at this path instead of TCP — the
+    /// owner-only local control socket used by the `bromure-ac` CLI.
+    let unixSocketPath: String?
+    /// True for the Unix control socket: `exec` / `/app/state` / `/vms` routes
+    /// are allowed without `BROMURE_DEBUG_CLAUDE`, because reaching a 0600
+    /// socket already proves local ownership.
+    let isTrustedLocal: Bool
 
     let debugEnabled: Bool
 
@@ -35,20 +47,44 @@ final class ACAutomationServer {
     var onCreateSession: ((_ profileNameOrID: String) async -> ACAutomationSessionInfo?)?
     var onDestroySession: ((_ profileNameOrID: String) async -> Bool)?
     var onGetAppState: (() -> [String: Any])?
-    /// Returns a vsock connection wrapping a ShellBridge-dequeued one,
-    /// or nil if no shell-agent connection is available for that session.
-    /// Will be wired in Phase 2b.
+    /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
+    /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
+
+    // docker-style VM control plane (CLI). Each returns plain dicts/bools so
+    // the server stays free of app types.
+    var onListVMs: (() -> [[String: Any]])?
+    var onStopVM: ((_ idOrName: String, _ action: String) async -> Bool)?
+    var onAttachVM: ((_ idOrName: String) async -> Bool)?
+    /// Create (boot) a VM from a profile ref or inline spec + mounts. Returns
+    /// the new VM's info dict, or nil on failure.
+    var onCreateVM: ((_ spec: [String: Any]) async -> [String: Any]?)?
 
     init(port: UInt16 = 9223, bindAddress: String = "127.0.0.1") {
         // 9223 (one off from the browser's 9222) so both apps can run side
         // by side during development without conflicting.
         self.port = port
         self.bindAddress = bindAddress
+        self.unixSocketPath = nil
+        self.isTrustedLocal = false
+        self.debugEnabled = ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil
+    }
+
+    /// Owner-only Unix-domain control socket for the local CLI. Always trusted
+    /// — the 0600 socket file is the access gate.
+    init(unixSocketPath: String) {
+        self.port = 0
+        self.bindAddress = ""
+        self.unixSocketPath = unixSocketPath
+        self.isTrustedLocal = true
         self.debugEnabled = ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil
     }
 
     func start() {
+        if let path = unixSocketPath { startUnix(path: path) } else { startTCP() }
+    }
+
+    private func startTCP() {
         let sock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
         guard sock >= 0 else {
             print("[ACAutomation] ERROR: failed to create socket")
@@ -77,17 +113,59 @@ final class ACAutomationServer {
         }
 
         Darwin.listen(sock, 32)
-        self.serverSocket = sock
+        beginAccepting(on: sock)
+        print("[ACAutomation] listening on \(bindAddress):\(port)\(debugEnabled ? " (debug endpoints enabled)" : "")")
+    }
 
+    private func startUnix(path: String) {
+        unlink(path)   // clear any stale socket from a previous run
+        let sock = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard sock >= 0 else {
+            print("[ACAutomation] ERROR: failed to create unix socket")
+            return
+        }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        let cap = MemoryLayout.size(ofValue: addr.sun_path)   // 104 on Darwin
+        guard pathBytes.count < cap else {
+            print("[ACAutomation] ERROR: control socket path too long (\(pathBytes.count) ≥ \(cap))")
+            Darwin.close(sock)
+            return
+        }
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: UInt8.self, capacity: cap) { dst in
+                for (i, b) in pathBytes.enumerated() { dst[i] = b }
+                dst[pathBytes.count] = 0
+            }
+        }
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.bind(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if bindResult != 0 {
+            print("[ACAutomation] ERROR: unix bind failed on \(path): \(String(cString: strerror(errno)))")
+            Darwin.close(sock)
+            return
+        }
+        chmod(path, 0o600)   // owner-only: the file mode is the access gate
+        Darwin.listen(sock, 32)
+        beginAccepting(on: sock)
+        print("[ACAutomation] control socket listening on \(path)")
+    }
+
+    private func beginAccepting(on sock: Int32) {
+        self.serverSocket = sock
+        let unixPath = unixSocketPath
         let source = DispatchSource.makeReadSource(fileDescriptor: sock, queue: .main)
         source.setEventHandler { [weak self] in self?.acceptConnection() }
         source.setCancelHandler { [weak self] in
             if self?.serverSocket == sock { Darwin.close(sock) }
+            if let unixPath { unlink(unixPath) }
         }
         source.resume()
         self.acceptSource = source
-
-        print("[ACAutomation] listening on \(bindAddress):\(port)\(debugEnabled ? " (debug endpoints enabled)" : "")")
     }
 
     func stop() {
@@ -103,13 +181,9 @@ final class ACAutomationServer {
     // MARK: - Connection
 
     private func acceptConnection() {
-        var clientAddr = sockaddr_in()
-        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let clientFD = withUnsafeMutablePointer(to: &clientAddr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.accept(serverSocket, sockPtr, &addrLen)
-            }
-        }
+        // Address-family-agnostic accept (works for both TCP and the Unix
+        // control socket); we don't use the peer address.
+        let clientFD = Darwin.accept(serverSocket, nil, nil)
         guard clientFD >= 0 else { return }
 
         var linger = Darwin.linger(l_onoff: 1, l_linger: 2)
@@ -213,7 +287,7 @@ final class ACAutomationServer {
             }
 
         case ("GET", "/app/state"):
-            guard debugEnabled else {
+            guard debugEnabled || isTrustedLocal else {
                 sendResponse(fd: fd, status: 403, body: ["error": "Debug endpoints require BROMURE_DEBUG_CLAUDE"])
                 return
             }
@@ -234,6 +308,34 @@ final class ACAutomationServer {
             let text = (bodyJSON["text"] as? String) ?? ""
             let kind = (bodyJSON["kind"] as? String) ?? "rules"
             sendResponse(fd: fd, status: 200, body: Self.runDetection(text: text, kind: kind))
+
+        // docker-style VM control plane.
+        case ("GET", "/vms"):
+            let vms = DispatchQueue.main.sync { self.onListVMs?() ?? [] }
+            sendResponse(fd: fd, status: 200, body: ["vms": vms])
+
+        case ("POST", "/vms"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            let semaphore = DispatchSemaphore(value: 0)
+            var result: [String: Any]?
+            DispatchQueue.main.async {
+                Task { @MainActor in
+                    result = await self.onCreateVM?(bodyJSON)
+                    semaphore.signal()
+                }
+            }
+            semaphore.wait()
+            if let info = result {
+                sendResponse(fd: fd, status: 201, body: info)
+            } else {
+                sendResponse(fd: fd, status: 500, body: ["error": "Failed to create VM"])
+            }
+
+        case (let m, let p) where p.hasPrefix("/vms/"):
+            handleVMRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)
 
         // /sessions/{id} and /sessions/{id}/exec
         case (let m, let p) where p.hasPrefix("/sessions/"):
@@ -296,7 +398,7 @@ final class ACAutomationServer {
     private func handleSessionRoute(fd: Int32, method: String, path: String, bodyJSON: [String: Any]) {
         let rest = String(path.dropFirst("/sessions/".count))
         if rest.hasSuffix("/exec") {
-            guard debugEnabled else {
+            guard debugEnabled || isTrustedLocal else {
                 sendResponse(fd: fd, status: 403, body: ["error": "Debug endpoints require BROMURE_DEBUG_CLAUDE"])
                 return
             }
@@ -339,7 +441,75 @@ final class ACAutomationServer {
         }
     }
 
+    private func handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String: Any]) {
+        guard debugEnabled || isTrustedLocal else {
+            sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+            return
+        }
+        // Strip any query string; params come from the JSON body.
+        let noQuery = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        let rest = String(noQuery.dropFirst("/vms/".count))
+        // The id/name is a single percent-encoded path segment (so names with
+        // spaces survive the request line) — decode it before resolving.
+        func decode(_ s: String) -> String { s.removingPercentEncoding ?? s }
+
+        if rest.hasSuffix("/exec") {
+            guard method == "POST" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            handleExec(fd: fd, profileID: decode(String(rest.dropLast("/exec".count))), bodyJSON: bodyJSON)
+            return
+        }
+        if rest.hasSuffix("/attach") {
+            guard method == "POST" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let id = decode(String(rest.dropLast("/attach".count)))
+            let semaphore = DispatchSemaphore(value: 0)
+            var ok = false
+            DispatchQueue.main.async {
+                Task { @MainActor in ok = await self.onAttachVM?(id) ?? false; semaphore.signal() }
+            }
+            semaphore.wait()
+            sendResponse(fd: fd, status: ok ? 200 : 404,
+                         body: ok ? ["status": "attached"] : ["error": "VM not found"])
+            return
+        }
+        // /vms/{id}
+        let id = decode(rest)
+        switch method {
+        case "DELETE":
+            let action = (bodyJSON["action"] as? String) ?? "shutdown"
+            let semaphore = DispatchSemaphore(value: 0)
+            var ok = false
+            DispatchQueue.main.async {
+                Task { @MainActor in ok = await self.onStopVM?(id, action) ?? false; semaphore.signal() }
+            }
+            semaphore.wait()
+            sendResponse(fd: fd, status: ok ? 200 : 404,
+                         body: ok ? ["status": "stopped"] : ["error": "VM not found"])
+        case "GET":
+            let vms = DispatchQueue.main.sync { self.onListVMs?() ?? [] }
+            if let vm = vms.first(where: {
+                ($0["id"] as? String) == id || ($0["shortId"] as? String) == id
+                    || ($0["name"] as? String) == id
+            }) {
+                sendResponse(fd: fd, status: 200, body: vm)
+            } else {
+                sendResponse(fd: fd, status: 404, body: ["error": "VM not found"])
+            }
+        default:
+            sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"])
+        }
+    }
+
     private func handleExec(fd: Int32, profileID: String, bodyJSON: [String: Any]) {
+        // Interactive (`exec -it`): hijack the client connection and stream a
+        // pty session — no request/response framing at this layer.
+        if bodyJSON["interactive"] as? Bool == true {
+            handleInteractiveExec(clientFD: fd, profileID: profileID, bodyJSON: bodyJSON)
+            return
+        }
         let command = bodyJSON["command"] as? String ?? ""
         if command.isEmpty {
             sendResponse(fd: fd, status: 400, body: ["error": "Missing 'command' field"])
@@ -356,7 +526,7 @@ final class ACAutomationServer {
         }
         guard let conn = shellConn else {
             sendResponse(fd: fd, status: 502, body: [
-                "error": "No shell connection available for profile \(profileID) after 10s. ShellBridge wiring lands in Phase 2b.",
+                "error": "No shell connection for '\(profileID)' after 10s — the VM may not be running, the id/name didn't match, or its shell agent hasn't come up yet.",
             ])
             return
         }
@@ -371,6 +541,86 @@ final class ACAutomationServer {
             sendResponse(fd: fd, status: 502, body: ["error": "Shell command execution failed"])
         }
         _ = conn.conn  // keep alive until response is sent
+    }
+
+    /// Interactive pty session: dequeue a guest shell connection, tell the
+    /// guest to go interactive, then pump raw bytes between the CLI's socket and
+    /// the guest vsock until either side closes. The pty framing is end-to-end
+    /// (CLI <-> guest); this layer is a transparent byte pump.
+    private func handleInteractiveExec(clientFD: Int32, profileID: String, bodyJSON: [String: Any]) {
+        let command = bodyJSON["command"] as? String ?? ""
+        let cols = bodyJSON["cols"] as? Int ?? 80
+        let rows = bodyJSON["rows"] as? Int ?? 24
+
+        var shellConn: ACShellProxyConnection?
+        for _ in 0..<100 {
+            shellConn = DispatchQueue.main.sync { self.onGetShellConnection?(profileID) }
+            if shellConn != nil { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        guard let conn = shellConn else {
+            sendResponse(fd: clientFD, status: 502, body: [
+                "error": "No shell connection for '\(profileID)' after 10s — the VM may not be running or its shell agent hasn't come up yet.",
+            ])
+            return
+        }
+        let vsockFD = conn.fd
+
+        // Tell the guest to start an interactive pty: [u32be len][JSON].
+        let req: [String: Any] = ["cmd": command, "interactive": true, "cols": cols, "rows": rows]
+        guard let reqData = try? JSONSerialization.data(withJSONObject: req) else {
+            sendResponse(fd: clientFD, status: 500, body: ["error": "Failed to encode request"])
+            return
+        }
+        var lenBE = UInt32(reqData.count).bigEndian
+        let framed = Data(bytes: &lenBE, count: 4) + reqData
+        _ = framed.withUnsafeBytes { Darwin.write(vsockFD, $0.baseAddress, framed.count) }
+
+        // Switch the client to raw streaming, then become a transparent pump.
+        let header = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
+        let hbytes = Array(header.utf8)
+        _ = hbytes.withUnsafeBytes { Darwin.write(clientFD, $0.baseAddress, hbytes.count) }
+
+        Self.pump(clientFD, vsockFD)
+        _ = conn.conn   // keep the vsock connection alive for the whole pump
+        Darwin.close(clientFD)
+    }
+
+    /// Bidirectional raw byte pump between two fds until either closes.
+    private static func pump(_ a: Int32, _ b: Int32) {
+        var buf = [UInt8](repeating: 0, count: 65536)
+        let bad = Int16(POLLHUP | POLLERR | POLLNVAL)
+        while true {
+            var fds = [pollfd(fd: a, events: Int16(POLLIN), revents: 0),
+                       pollfd(fd: b, events: Int16(POLLIN), revents: 0)]
+            let n = poll(&fds, 2, -1)
+            if n < 0 { if errno == EINTR { continue }; break }
+            if n == 0 { continue }
+            if fds[0].revents & Int16(POLLIN) != 0 {
+                let r = Darwin.read(a, &buf, buf.count)
+                if r <= 0 { break }
+                if !writeAll(b, buf, r) { break }
+            }
+            if fds[1].revents & Int16(POLLIN) != 0 {
+                let r = Darwin.read(b, &buf, buf.count)
+                if r <= 0 { break }
+                if !writeAll(a, buf, r) { break }
+            }
+            if (fds[0].revents & bad) != 0 && (fds[0].revents & Int16(POLLIN)) == 0 { break }
+            if (fds[1].revents & bad) != 0 && (fds[1].revents & Int16(POLLIN)) == 0 { break }
+        }
+    }
+
+    private static func writeAll(_ fd: Int32, _ buf: [UInt8], _ count: Int) -> Bool {
+        var off = 0
+        while off < count {
+            let w = buf.withUnsafeBytes { ptr -> Int in
+                Darwin.write(fd, ptr.baseAddress!.advanced(by: off), count - off)
+            }
+            if w <= 0 { return false }
+            off += w
+        }
+        return true
     }
 
     // MARK: - Shell-agent protocol

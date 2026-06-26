@@ -665,7 +665,7 @@ step "install azure-cli (Microsoft)" \
 
 # ---------------------------------------------------------------------------
 # Default user account (ubuntu) with passwordless sudo.
-# Phase B will rotate this through the profile system; for now we hard-code.
+# Hard-coded for now; this can later be rotated through the profile system.
 # ---------------------------------------------------------------------------
 
 if ! id ubuntu >/dev/null 2>&1; then

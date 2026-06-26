@@ -8,8 +8,8 @@ import SandboxEngine
 /// with the data.
 ///
 /// In-memory only: dropping buffered events on a hard quit is fine for
-/// telemetry, and a disk-backed retry queue is a Phase 3c-or-later
-/// problem. Up to 200 events / 5 s in flight at once. Failures are
+/// telemetry, and a disk-backed retry queue isn't worth the added
+/// complexity. Up to 200 events / 5 s in flight at once. Failures are
 /// logged but don't drop the buffer — the next flush retries the whole
 /// batch.
 public final class BACCloudUploader: @unchecked Sendable {

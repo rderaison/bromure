@@ -170,7 +170,9 @@ extension ACAppDelegate {
             engine.register(socketDevice: dev, profileID: scratch.id)
             self.wireRegistrationSandbox(sandbox)
             // `requestSpawnKitty` resolves the outbox via `win.sandbox` — set it
-            // before spawning or the command is silently dropped (black screen).
+            // (and register the canonical session) before spawning or the
+            // command is silently dropped (black screen).
+            self.registerSession(sandbox, profile: win.profile)
             win.sandbox = sandbox
 
             switch provider {
@@ -373,8 +375,10 @@ extension ACAppDelegate {
         mitmEngine?.codexSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
         mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
 
-        // Detach the window's sandbox so the close path below doesn't try to
-        // suspend/poweroff it (we own the stop here).
+        // Drop the registry entry + the window borrow so the close path below
+        // sees no VM and won't try to suspend/poweroff it — we own the stop
+        // here via `state.sandbox`.
+        unregisterSession(state.scratchProfile.id)
         state.window?.sandbox = nil
 
         let dir = state.scratchDir

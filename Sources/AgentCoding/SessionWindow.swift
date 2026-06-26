@@ -96,8 +96,11 @@ final class TabbedSessionWindow: NSWindow {
         return v
     }()
 
-    /// The single sandbox backing this whole window. Set by ACAppDelegate
-    /// after the VM finishes starting; nil while booting.
+    /// The single sandbox backing this whole window, set by ACAppDelegate
+    /// after the VM starts; nil while booting. The *canonical* owner is
+    /// ACAppDelegate's `runningSessions` registry (keyed by profile id) — this
+    /// is just a per-window borrow, so when the window closes/detaches its ref
+    /// drops but the registry keeps the VM alive (the persistent-agent model).
     var sandbox: UbuntuSandboxVM?
 
     /// Keyboard-layout bridge that ferries macOS layout changes into
@@ -422,14 +425,11 @@ final class TabbedSessionWindow: NSWindow {
         if model.tabs.isEmpty {
             // Guest-side end-of-session: the user closed every kitty
             // from inside the VM (Ctrl+D, `exit`, kitty crash). That
-            // signals "I'm done" — suspending RAM here would just
-            // freeze a do-nothing X session and on restore we'd end
-            // up with no usable terminal anyway. Force shutdown,
-            // bypass the profile's normal closeAction, and skip the
-            // confirmation prompt (the user already confirmed by
-            // killing their last shell).
-            pendingCloseAction = .shutdown
-            close()
+            // signals "I'm done" — explicitly STOP the VM (closing the
+            // window would only detach now, leaving a shell-less VM
+            // running). Bypass the profile's closeAction and shut down:
+            // killing the last shell is itself the confirmation.
+            acDelegate?.requestStopSession(profile.id, action: .shutdown)
         }
     }
 

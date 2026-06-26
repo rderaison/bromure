@@ -64,9 +64,9 @@ public final class SessionDisk {
         /// `claudeTokenAgentURL`, talks vsock 8447, edits
         /// ~/.codex/auth.json.
         public let codexTokenAgentURL: URL?
-        /// Debug shell agent. Vsock 5800. Shipped only when the host
-        /// runs with BROMURE_DEBUG_CLAUDE; xinitrc no-ops otherwise.
-        /// Powers `POST /sessions/{id}/exec` in AutomationServer.
+        /// Shell-exec agent. Vsock 5800. Always shipped now; powers
+        /// `bromure-ac exec` and the control socket's /vms/{id}/exec route.
+        /// The exec surface is gated host-side by the owner-only control socket.
         public let shellAgentURL: URL?
         /// Loopback-callback relay. Vsock 5010 (guest listens, host
         /// connects). Lets the host reach a 127.0.0.1:<port> listener the

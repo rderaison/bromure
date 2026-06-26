@@ -847,10 +847,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var tool: Tool
     public var authMode: AuthMode
 
-    /// Plaintext API token. Only stored on disk inside the profile dir
-    /// (which is in the user's library), not in the keychain — the
-    /// agentic-coding base image is the only consumer and it lives on
-    /// the same Mac. Phase B+ moves this to the keychain.
+    /// Plaintext API token. Stored encrypted in the profile dir (via
+    /// ProfileSecrets), not in the keychain — the agentic-coding base image is
+    /// the only consumer and it lives on the same Mac.
     public var apiKey: String?
 
     /// Other coding agents the user wants available in this profile.
@@ -1924,6 +1923,15 @@ public final class ProfileStore {
 
     public var profilesDirectory: URL { rootDir }
 
+    /// Unix-domain control socket for the CLI ↔ agent control plane. Sits at
+    /// ~/Library/Application Support/BromureAC/control.sock (next to the
+    /// profiles dir), owner-only (chmod 0600) — reaching it proves local
+    /// ownership, which is the access gate for `exec` / `vm` operations.
+    public var controlSocketURL: URL {
+        rootDir.deletingLastPathComponent()
+            .appendingPathComponent("control.sock")
+    }
+
     /// Where the templated "default profile" (Bromure → Preferences…)
     /// is persisted. Sits next to the profiles dir, not inside it, so
     /// `loadAll()` doesn't surface it as a real profile in the picker.
@@ -2514,6 +2522,20 @@ public final class ProfileStore {
         try TerminalAppDefaults
             .kittyConfig(for: profile, terminalDefaults: terminalDefaults)
             .write(to: kittyConfig, atomically: true, encoding: .utf8)
+
+        // ~/.tmux.conf — each kitty tab runs inside a tmux session (so the CLI
+        // can attach to it). Keep tmux invisible in the GUI: no status bar, no
+        // perceptible escape delay. `window-size latest` so a small CLI client
+        // attaching doesn't permanently shrink the GUI's view.
+        try """
+        set -g status off
+        set -g mouse on
+        set -g escape-time 10
+        set -g history-limit 100000
+        set -g default-terminal "screen-256color"
+        set -g window-size latest
+        """.write(to: home.appendingPathComponent(".tmux.conf"),
+                  atomically: true, encoding: .utf8)
 
         // ~/.kube/config — synthetic kubeconfig with throwaway client
         // certs / fake bearer tokens. Real credentials live on the
@@ -3228,11 +3250,10 @@ public final class ProfileStore {
         echo "[xinit] keyboard-agent pid $!" >> /tmp/xinitrc.log
     fi
 
-    # Debug shell agent — proactively opens a vsock pool to host port
-    # 5800 so the AutomationServer's /sessions/{id}/exec endpoint can
-    # dequeue a connection on demand. Only launched when the meta
-    # share carries the script, which only happens when the host runs
-    # with BROMURE_DEBUG_CLAUDE set (SessionDisk gates the copy).
+    # Shell-exec agent — proactively opens a vsock pool to host port
+    # 5800 so the control socket's /vms/{id}/exec (and `bromure-ac exec`)
+    # can dequeue a connection on demand. Always staged now; the exec
+    # surface is gated host-side by the owner-only control socket.
     if [ -r /mnt/bromure-meta/shell-agent.py ]; then
         python3 /mnt/bromure-meta/shell-agent.py &
         echo "[xinit] shell-agent pid $!" >> /tmp/xinitrc.log
@@ -3477,8 +3498,13 @@ public final class ProfileStore {
             # one in some environments, ignoring the per-profile values.
             local start end dur
             start=$(date +%s)
+            # Run the terminal inside a per-tab tmux session named by the tab
+            # UUID. The GUI kitty is one client; `bromure-ac vm attach <id> <n>`
+            # attaches a second client to the SAME session over the CLI — true
+            # tmux-style shared attach. `-A` creates-or-attaches.
             kitty --config "$kitty_conf" --start-as=fullscreen \
                   --class "bromure-${id}" \
+                  tmux new-session -A -s "bromure-${id}" \
                   >"$kitty_log" 2>&1
             rc=$?
             end=$(date +%s)
@@ -3527,6 +3553,9 @@ public final class ProfileStore {
     close_kitty() {
         local id="$1"
         log "close id=$id"
+        # Kill the tab's tmux session so closing a tab doesn't leave the
+        # program (and a detached session) running in the background.
+        tmux kill-session -t "bromure-${id}" 2>/dev/null || true
         if [ "$have_xdotool" = "1" ]; then
             local wid
             wid=$(xdotool search --class "bromure-${id}" 2>/dev/null | head -1)
@@ -3562,14 +3591,10 @@ public final class ProfileStore {
                 uuid=$(printf '%s' "$cmd" | sed -n 's/.*--class bromure-\([^ ]*\).*/\1/p')
                 [ -z "$uuid" ] && continue
                 roster="${roster}${uuid}"$'\n'
-                # Kitty's child = the shell. Then the shell's tty
-                # foreground PG = whatever the user is running.
-                shell=$(pgrep -P "$pid" 2>/dev/null | head -1)
-                [ -z "$shell" ] && continue
-                fg_pgid=$(ps -o tpgid= -p "$shell" 2>/dev/null | tr -d ' ')
-                [ -z "$fg_pgid" ] && continue
-                title=$(ps -p "$fg_pgid" -o comm= 2>/dev/null | tr -d ' \n')
-                [ -z "$title" ] && continue
+                # Kitty runs `tmux new -A -s bromure-<uuid>`; the meaningful
+                # tab label is the active pane's foreground program.
+                title=$(tmux display-message -p -t "bromure-${uuid}" '#{pane_current_command}' 2>/dev/null | tr -d ' \n')
+                [ -z "$title" ] && title="shell"
                 printf '%s\n' "$title" > "$INBOX/title-${uuid}.txt" 2>/dev/null
             done
             # Atomic rewrite via tmp + rename — virtiofs delivers the

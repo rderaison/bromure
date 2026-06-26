@@ -1,7 +1,7 @@
 import Foundation
 import SandboxEngine
 
-// Phase 3b-b client → /v1/installs/:installId/ac-events.
+// Cloud event client → /v1/installs/:installId/ac-events.
 //
 // One emitter, one uploader, one activity-based session tracker —
 // kept in this file so the credential hooks (TokenSwap, SSHAgent,
@@ -10,8 +10,8 @@ import SandboxEngine
 // Privacy posture: emit silently no-ops when the Mac isn't enrolled
 // with bromure.io (no install token → nothing to authenticate as,
 // nothing to send), AND when the profile is in private mode
-// (Phase 3c will set the per-profile flag; the hook is in place
-// here so 3c is purely a UI/Profile change). Anything that would be
+// (the per-profile private-mode flag is set from the Profile UI; the
+// hook is in place here so toggling it is purely a UI change). Anything that would be
 // streamed bypasses the emitter entirely — the buffer never sees it.
 
 /// Wire-shape event matching the server's POST /v1/installs/:installId/ac-events.
@@ -79,8 +79,8 @@ extension AnyJSON {
 }
 
 /// Activity-based session tracker. A "session" rolls over after 20
-/// minutes of no activity for that profile, matching the model
-/// agreed in Phase 0 (sessions = "when a user starts using claude
+/// minutes of no activity for that profile, matching the product
+/// model (sessions = "when a user starts using claude
 /// and stops using it", not VM lifecycle). One session id per
 /// (profile, activity window).
 public actor BACSessionTracker {
@@ -143,15 +143,15 @@ public actor BACSessionTracker {
 /// the proxy's connection task without bouncing back to MainActor.
 ///
 /// `enabled` short-circuits when no install identity is present
-/// (not enrolled) or when the profile is in private mode (Phase 3c).
+/// (not enrolled) or when the profile is in private mode.
 public final class BACEventEmitter: @unchecked Sendable {
     public static let shared = BACEventEmitter()
     private init() {}
 
     private let lock = NSLock()
     private var uploader: BACCloudUploader?
-    /// Profile UUIDs that are flagged "do not stream". Phase 3c
-    /// populates this set from the Profile UI toggle.
+    /// Profile UUIDs flagged "do not stream", populated from the
+    /// Profile UI's private-mode toggle.
     private var privateProfileIDs: Set<UUID> = []
 
     public func setPrivateProfiles(_ ids: Set<UUID>) {
@@ -188,7 +188,7 @@ public final class BACEventEmitter: @unchecked Sendable {
                          "drop (not enrolled) eventType=\(eventType)")
             return
         }
-        // Soft gate: per-profile private mode (Phase 3c).
+        // Soft gate: per-profile private mode.
         let isPrivate: Bool = {
             lock.lock(); defer { lock.unlock() }
             return privateProfileIDs.contains(profileID)

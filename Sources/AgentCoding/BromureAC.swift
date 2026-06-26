@@ -27,7 +27,8 @@ struct BromureAC: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac",
         abstract: "Run Codex / Claude Code in an isolated, persistent VM.",
-        subcommands: [Init.self, Run.self, Reset.self, MCP.self, Enroll.self, Unenroll.self, Status.self],
+        subcommands: [Init.self, Run.self, Reset.self, MCP.self, Enroll.self, Unenroll.self, Status.self,
+                      VM.self, Exec.self],
         // No-arg invocation (double-click in Finder, `open` w/o args,
         // bare `bromure-ac` in a terminal) opens the GUI. CLI users who
         // want headless setup still have `bromure-ac init`.
@@ -100,6 +101,10 @@ struct Run: ParsableCommand {
         abstract: "Boot a session against the base image and open the display window."
     )
 
+    @Flag(name: .long,
+          help: "Run as a background agent (no window). Used by the CLI to autostart the VM service.")
+    var headless = false
+
     func run() throws {
         let imageManager = try makeImageManager()
         // No base-image gate here. `ACAppDelegate.applicationDidFinishLaunching`
@@ -112,12 +117,14 @@ struct Run: ParsableCommand {
         // pattern. NSApplication.run() needs to drive the main RunLoop
         // directly; running it inside an async context (`AsyncParsableCommand`
         // + `MainActor.run`) wedges the run loop and the app never appears.
+        let headless = self.headless
         MainActor.assumeIsolated {
-            FileHandle.standardError.write(Data("[run] launching NSApplication…\n".utf8))
+            FileHandle.standardError.write(Data(
+                "[run] launching NSApplication\(headless ? " (headless agent)" : "")…\n".utf8))
             let app = NSApplication.shared
-            app.setActivationPolicy(.regular)
+            app.setActivationPolicy(headless ? .accessory : .regular)
 
-            let delegate = ACAppDelegate(imageManager: imageManager)
+            let delegate = ACAppDelegate(imageManager: imageManager, headless: headless)
             app.delegate = delegate
             app.mainMenu = makeMainMenu(delegate: delegate)
 
@@ -126,8 +133,8 @@ struct Run: ParsableCommand {
     }
 }
 
-/// Minimal menu so ⌘-Q, ⌘-W, etc. work. No File / Edit / View / Help yet —
-/// those land in Phase C alongside the profile picker.
+/// Minimal app menu so ⌘-Q, ⌘-W, etc. work, plus a standard Edit menu so
+/// Cut/Copy/Paste/Select-All function in text fields.
 @MainActor
 private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     let main = NSMenu()
@@ -256,6 +263,49 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     return main
 }
 
+/// A running VM session, owned by `ACAppDelegate.runningSessions` and keyed
+/// by profile id. Decouples VM lifetime from any window: a session keeps
+/// running while no window is attached (the persistent-agent / "tmux server"
+/// model). The attached window, when present, lives in `profileWindows[id]`.
+@MainActor
+final class RunningSession {
+    let profileID: Profile.ID
+    /// Live profile copy; kept in sync when the user saves the editor.
+    var profile: Profile
+    /// The VM. Strong owner — this is what keeps the VZVirtualMachine alive
+    /// independent of any window.
+    var sandbox: UbuntuSandboxVM
+    /// When the VM booted — surfaced as uptime in `vm ls`.
+    let startedAt: Date
+    /// Last tab snapshot, captured on detach so a reattaching window can
+    /// rebuild its bar against the kittys still running inside the guest.
+    var lastTabsSnapshot: SessionDisk.TabsState?
+    /// Last IP / kitty roster reported by the guest, mirrored here so a
+    /// reattaching (or headless) session can render them without a window.
+    var lastIP: String?
+    var lastRoster: Set<UUID> = []
+    /// Ordered live tab UUIDs and their last-known titles (the foreground
+    /// program, e.g. "bash"/"claude"), mirrored from the guest's roster/title
+    /// reports so `vm ls` can show the tabs even while the session is detached.
+    var tabOrder: [UUID] = []
+    var tabTitles: [UUID: String] = [:]
+    /// Fusion engaged state, mirrored from the engine so a reattaching
+    /// window restores the toolbar toggle correctly.
+    var fusionEngaged: Bool = false
+    /// Host folders mounted into this VM (display only, for `vm ls`).
+    var mounts: [String] = []
+    /// True once an explicit stop is in flight, so the VM-stopped callback
+    /// doesn't double-run teardown.
+    var stopping: Bool = false
+
+    init(profileID: Profile.ID, profile: Profile, sandbox: UbuntuSandboxVM) {
+        self.profileID = profileID
+        self.profile = profile
+        self.sandbox = sandbox
+        self.startedAt = Date()
+    }
+}
+
 /// App delegate for `bromure-ac run`. Hosts the profile picker, the
 /// create-profile wizard, and (once a profile launches) the
 /// VZVirtualMachineView for that session.
@@ -285,9 +335,50 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var sshWindow: NSWindow?
     private var editorEditingProfile: Profile?  // nil = creating
 
-    /// One window per profile. Each window holds N tabs, each tab is a
-    /// distinct VM session.
+    /// One *attached* window per profile. Each window holds N tabs, all
+    /// rendering the same VM. Note this is only the windows currently on
+    /// screen — a running VM with no window lives in `runningSessions`.
     private var profileWindows: [Profile.ID: TabbedSessionWindow] = [:]
+
+    /// VM sessions that are *running*, keyed by profile id — the canonical
+    /// owner of each `UbuntuSandboxVM`. Distinct from `profileWindows`
+    /// (only the *attached* windows): a session can run with no window
+    /// attached (detached / headless). The persistent-agent model — where
+    /// VMs survive the GUI being closed — hangs off this split.
+    var runningSessions: [Profile.ID: RunningSession] = [:]
+
+    /// Profiles created with `vm run --rm`: deleted (profile + disk) when their
+    /// VM stops, mirroring `docker run --rm`.
+    private var ephemeralProfiles: Set<Profile.ID> = []
+
+    /// The running VM for a profile, or nil if it isn't running. The control
+    /// plane (and any window-less caller) resolves a profile's VM through here.
+    func sandbox(for id: Profile.ID) -> UbuntuSandboxVM? {
+        runningSessions[id]?.sandbox
+    }
+
+    /// Register (or update) the running session for a profile. The registry
+    /// is the strong owner that keeps the VM alive independent of any window.
+    @discardableResult
+    func registerSession(_ sandbox: UbuntuSandboxVM, profile: Profile) -> RunningSession {
+        if let existing = runningSessions[profile.id] {
+            existing.sandbox = sandbox
+            existing.profile = profile
+            return existing
+        }
+        let session = RunningSession(profileID: profile.id, profile: profile, sandbox: sandbox)
+        runningSessions[profile.id] = session
+        updateStatusMenu()
+        return session
+    }
+
+    /// Drop the registry's strong reference to a profile's VM. The VM
+    /// deallocates once any in-flight stop/suspend task also releases it
+    /// (its `deinit` then detaches the vmnet switch port).
+    func unregisterSession(_ id: Profile.ID) {
+        runningSessions.removeValue(forKey: id)
+        updateStatusMenu()
+    }
 
     /// NSEvent monitor that intercepts ⌘T / ⌘W / ⌘1-9 at the
     /// application level — before the responder chain, before the
@@ -319,6 +410,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// automation.enabled -bool true`. Tests/ac-e2e.mjs sets this before
     /// launching the app.
     private var automationServer: ACAutomationServer?
+    /// Always-on owner-only Unix control socket for the `bromure-ac` CLI.
+    private var controlServer: ACAutomationServer?
+
+    /// Menu-bar item. The only UI surface once every window closes and the
+    /// app demotes to `.accessory` — lists running VMs and offers Quit so a
+    /// fully-detached agent stays reachable.
+    private var statusItem: NSStatusItem?
 
     /// Process-lifetime MITM engine. One instance per app run, holds
     /// the CA + per-profile token swap maps + ssh-agent keystore. Lazy
@@ -492,8 +590,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var updaterController: SPUStandardUpdaterController?
 
 
-    init(imageManager: UbuntuImageManager) {
+    /// When true the app launches as a background agent: no picker window, just
+    /// the control socket + status item + MITM engine. Used by the CLI's
+    /// autostart (`bromure-ac run --headless`).
+    let headless: Bool
+
+    init(imageManager: UbuntuImageManager, headless: Bool = false) {
         self.imageManager = imageManager
+        self.headless = headless
         super.init()
     }
 
@@ -501,6 +605,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         profiles = store.loadAll()
+        // Menu-bar item: the persistent surface for reattaching / stopping VMs
+        // once all windows close and the app demotes to a background agent.
+        setupStatusItem()
+        // Always-on Unix control socket for the `bromure-ac` CLI (exec / vm …).
+        startControlSocket()
 
         // Default SSH key: every new profile inherits this keypair via
         // the user's preferences template. Generate it on first launch
@@ -609,6 +718,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
+        // Headless agent (CLI autostart): no picker window — the control socket
+        // + status item are the only surfaces. Everything else (engine, signal
+        // handlers, automation, control socket) still runs.
+        if !headless {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 540, height: 420),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
@@ -649,6 +762,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             renderSetup()
         }
         NSApp.activate(ignoringOtherApps: true)
+        }   // if !headless
 
         // ⌘T / ⌘W / ⌘1-9 / ⌘N must run BEFORE VZVirtualMachineView's
         // keyDown forwards them to the guest (where kitty's super+t /
@@ -684,7 +798,34 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let port = UInt16(defaults.integer(forKey: "automation.port"))
         let bindAddr = defaults.string(forKey: "automation.bindAddress") ?? "127.0.0.1"
         let server = ACAutomationServer(port: port > 0 ? port : 9223, bindAddress: bindAddr)
+        wireAutomationCallbacks(into: server)
+        server.start()
+        automationServer = server
+    }
 
+    /// Always-on owner-only Unix control socket for the `bromure-ac` CLI.
+    /// Independent of `automation.enabled` (which only gates the TCP API) so the
+    /// CLI works out of the box. exec / vm operations are allowed here without
+    /// the debug flag — the 0600 socket file is the access gate.
+    @MainActor func startControlSocket() {
+        if controlServer != nil { return }
+        let socketURL = store.controlSocketURL
+        try? FileManager.default.createDirectory(
+            at: socketURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let server = ACAutomationServer(unixSocketPath: socketURL.path)
+        wireAutomationCallbacks(into: server)
+        server.start()
+        controlServer = server
+    }
+
+    @MainActor func stopAutomationServer() {
+        automationServer?.stop()
+        automationServer = nil
+    }
+
+    /// Wire the shared control-plane callbacks into a server instance (used by
+    /// both the opt-in TCP API and the always-on Unix control socket).
+    @MainActor private func wireAutomationCallbacks(into server: ACAutomationServer) {
         server.onListProfiles = { [weak self] in
             guard let self else { return [] }
             return self.profiles.map { p in
@@ -699,14 +840,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
+        // Sessions = the registry (so detached, window-less VMs are listed too).
         server.onListSessions = { [weak self] in
             guard let self else { return [] }
-            return self.profileWindows.compactMap { (profileID, window) in
-                ACAutomationSessionInfo(
-                    profileID: profileID.uuidString,
-                    profileName: window.profile.name,
-                    windowID: window.windowNumber,
-                    visible: window.isVisible
+            return self.runningSessions.values.map { s in
+                let win = self.profileWindows[s.profileID]
+                return ACAutomationSessionInfo(
+                    profileID: s.profileID.uuidString,
+                    profileName: s.profile.name,
+                    windowID: win?.windowNumber ?? 0,
+                    visible: win?.isVisible ?? false
                 )
             }
         }
@@ -728,26 +871,175 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "mainWindowOpen": self.mainWindow?.isVisible ?? false,
                 "editorOpen": self.editorWindow?.isVisible ?? false,
                 "profileCount": self.profiles.count,
-                "sessionCount": self.profileWindows.count,
+                "sessionCount": self.runningSessions.count,
                 "hasBaseImage": self.imageManager.hasBaseImage,
             ]
         }
 
-        server.onGetShellConnection = { [weak self] profileID in
+        server.onGetShellConnection = { [weak self] idOrName in
             guard let self else { return nil }
-            guard let uuid = UUID(uuidString: profileID) else { return nil }
+            guard let uuid = self.resolveRunningSessionID(idOrName) else { return nil }
             guard let bridge = self.shellBridges[uuid] else { return nil }
             guard let conn = bridge.dequeueConnection() else { return nil }
             return ACShellProxyConnection(fd: conn.fileDescriptor, conn: conn)
         }
 
-        server.start()
-        automationServer = server
+        // docker-style VM control plane.
+        server.onListVMs = { [weak self] in self?.automationVMList() ?? [] }
+        server.onStopVM = { [weak self] idOrName, action in
+            guard let self else { return false }
+            return await self.automationStopVM(idOrName: idOrName, action: action)
+        }
+        server.onAttachVM = { [weak self] idOrName in
+            guard let self else { return false }
+            return await self.automationAttachVM(idOrName: idOrName)
+        }
+        server.onCreateVM = { [weak self] spec in
+            guard let self else { return nil }
+            return await self.automationCreateVM(spec: spec)
+        }
     }
 
-    @MainActor func stopAutomationServer() {
-        automationServer?.stop()
-        automationServer = nil
+    /// Snapshot of running VMs for `vm ls`.
+    @MainActor private func automationVMList() -> [[String: Any]] {
+        let now = Date()
+        return runningSessions.values.map { s in
+            let stateStr: String
+            switch s.sandbox.state {
+            case .created:  stateStr = "created"
+            case .starting: stateStr = "starting"
+            case .running:  stateStr = "running"
+            case .stopped:  stateStr = "stopped"
+            case .error:    stateStr = "error"
+            }
+            let tabs: [[String: Any]] = s.tabOrder.enumerated().map { (i, id) in
+                ["index": i + 1, "id": id.uuidString, "title": s.tabTitles[id] ?? "shell"]
+            }
+            return [
+                "id": s.profileID.uuidString,
+                "shortId": Self.shortID(s.profileID),
+                "name": s.profile.name,
+                "tool": s.profile.tool.rawValue,
+                "state": stateStr,
+                "attached": profileWindows[s.profileID] != nil,
+                "uptimeSeconds": Int(now.timeIntervalSince(s.startedAt)),
+                "ip": s.lastIP ?? "",
+                "mounts": s.mounts,
+                "tabs": tabs,
+            ]
+        }
+    }
+
+    @MainActor private func automationStopVM(idOrName: String, action: String) async -> Bool {
+        guard let id = resolveRunningSessionID(idOrName) else { return false }
+        let closeAction: Profile.CloseAction
+        switch action.lowercased() {
+        case "suspend":            closeAction = .suspend
+        default:                   closeAction = .shutdown   // shutdown / kill / stop
+        }
+        await stopSession(id, action: closeAction)
+        return true
+    }
+
+    @MainActor private func automationAttachVM(idOrName: String) async -> Bool {
+        guard let id = resolveRunningSessionID(idOrName),
+              let session = runningSessions[id] else { return false }
+        attachWindow(to: session)
+        return true
+    }
+
+    /// Docker-style 12-char short id for a profile: the UUID's hex with dashes
+    /// stripped, lowercased, truncated. Shown by `vm ls` and accepted (as a
+    /// prefix) by every `<id|name>` argument.
+    static func shortID(_ id: Profile.ID) -> String {
+        String(id.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(12))
+    }
+
+    /// Resolve a CLI-supplied id-or-name to a *running* session's profile id.
+    /// Accepts a full UUID, an exact profile name (case-insensitive), or a
+    /// unique short-id *prefix* (dash-insensitive) — so the 12-char hex id from
+    /// `vm ls` (or any unambiguous prefix of it) works, docker-style.
+    @MainActor private func resolveRunningSessionID(_ key: String) -> Profile.ID? {
+        if let uuid = UUID(uuidString: key), runningSessions[uuid] != nil { return uuid }
+        if let byName = runningSessions.values
+            .first(where: { $0.profile.name.lowercased() == key.lowercased() }) {
+            return byName.profileID
+        }
+        let k = key.replacingOccurrences(of: "-", with: "").lowercased()
+        guard !k.isEmpty else { return nil }
+        let matches = runningSessions.keys.filter {
+            $0.uuidString.replacingOccurrences(of: "-", with: "").lowercased().hasPrefix(k)
+        }
+        return matches.count == 1 ? matches.first : nil
+    }
+
+    /// Create (boot) a VM from a control-plane spec — the `vm run` path. Mints
+    /// or resolves a profile, applies `-v` mounts, persists it, then drives the
+    /// normal `launch` path (so all the engine / token / boot wiring is shared)
+    /// and optionally detaches for a headless `-d` run.
+    @MainActor private func automationCreateVM(spec: [String: Any]) async -> [String: Any]? {
+        // 1. Resolve an existing profile, or mint one on the fly.
+        var profile: Profile
+        if let ref = spec["profile"] as? String, let existing = profileByNameOrID(ref) {
+            profile = existing
+        } else {
+            let fallback = "cli-" + String(UUID().uuidString.prefix(8)).lowercased()
+            let name = (spec["name"] as? String) ?? (spec["profile"] as? String) ?? fallback
+            let tool = (spec["tool"] as? String).flatMap { Profile.Tool(rawValue: $0) }
+            let auth = (spec["auth"] as? String).flatMap { Profile.AuthMode(rawValue: $0) }
+            var p = store.newProfileFromTemplate(name: name, tool: tool, authMode: auth)
+            if let key = spec["apiKey"] as? String, !key.isEmpty { p.apiKey = key }
+            if let mem = spec["memoryGB"] as? Int, mem > 0 { p.memoryGB = mem }
+            profile = p
+        }
+
+        // 2. Apply `-v` mounts (host paths → ~/<basename> in the guest), capped
+        //    at the base image's 8 fstab slots.
+        if let mounts = spec["mounts"] as? [String], !mounts.isEmpty {
+            var paths = profile.folderPaths
+            for m in mounts {
+                let host = (m as NSString).expandingTildeInPath
+                guard FileManager.default.fileExists(atPath: host) else {
+                    FileHandle.standardError.write(Data("[vm run] mount not found, skipping: \(host)\n".utf8))
+                    continue
+                }
+                if !paths.contains(host) { paths.append(host) }
+            }
+            profile.folderPaths = Array(paths.prefix(8))
+        }
+
+        // 3. Persist + refresh the in-memory list.
+        do { try store.save(profile) }
+        catch {
+            FileHandle.standardError.write(Data("[vm run] couldn't save profile: \(error)\n".utf8))
+            return nil
+        }
+        profiles = store.loadAll()
+        let saved = profiles.first { $0.id == profile.id } ?? profile
+        if spec["rm"] as? Bool == true { ephemeralProfiles.insert(saved.id) }
+
+        // 4. Boot via the shared launch path (unless already running).
+        if runningSessions[saved.id] == nil { launch(saved) }
+
+        // 5. Wait for the VM to register (first boot can take a while).
+        var ready = false
+        for _ in 0..<600 {   // up to ~60s
+            if runningSessions[saved.id] != nil { ready = true; break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        guard ready else { return nil }
+
+        // 6. Detach for a headless `-d` run — the VM keeps running window-less.
+        let detach = spec["detach"] as? Bool == true
+        if detach, let win = profileWindows[saved.id] { win.close() }
+
+        return [
+            "id": saved.id.uuidString,
+            "shortId": Self.shortID(saved.id),
+            "name": saved.name,
+            "tool": saved.tool.rawValue,
+            "detached": detach,
+        ]
     }
 
     @MainActor private func automationCreateSession(profileNameOrID: String) async -> ACAutomationSessionInfo? {
@@ -880,19 +1172,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// `vm.stop()` callbacks: drained-first means VZ ends its
     /// internal activity exactly once, in order.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let runningSessions = profileWindows.values.filter {
-            $0.sandbox?.vm?.state == .running
-        }
-        if runningSessions.isEmpty { return .terminateNow }
+        let running = runningSessions.values.filter { $0.sandbox.vm?.state == .running }
+        if running.isEmpty { return .terminateNow }
 
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Quit Bromure Agentic Coding?", comment: "")
-        let names = runningSessions.map { $0.profile.name }.joined(separator: ", ")
+        let names = running.map { $0.profile.name }.joined(separator: ", ")
         alert.informativeText = String(
             format: NSLocalizedString(
                 "%d VM(s) currently running (%@) will be closed according to each profile's close action.",
                 comment: ""),
-            runningSessions.count, names)
+            running.count, names)
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Quit", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
@@ -907,86 +1197,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return .terminateLater
     }
 
-    /// Stop every running session's VM in parallel, with a 15 s
-    /// per-VM ACPI window then a hard `vm.stop()` if the guest
-    /// didn't actually power off. We mark each session with
-    /// `pendingCloseAction = .shutdown` so the subsequent
-    /// `windowWillClose` (fired by AppKit while terminating) sees
-    /// `vm.state == .stopped` and skips its own stop branch —
-    /// no double-stop, no double-end of VZ's NSActivity.
+    /// Stop every running VM in parallel on quit via `stopSession`, honoring
+    /// each profile's close action (`.ask` → `.suspend`). Iterates the
+    /// registry, so it drains *detached* VMs too — not just windowed ones.
     @MainActor
     private func drainRunningVMs() async {
-        let sessions = profileWindows.values.filter {
-            $0.sandbox?.vm?.state == .running
-        }
+        let ids = runningSessions.values
+            .filter { $0.sandbox.vm?.state == .running }
+            .map { $0.profileID }
         await withTaskGroup(of: Void.self) { group in
-            for session in sessions {
-                group.addTask { @MainActor in
-                    await self.drainSession(session)
-                }
+            for id in ids {
+                let action = runningSessions[id]?.profile.closeAction ?? .suspend
+                group.addTask { @MainActor in await self.stopSession(id, action: action) }
             }
-        }
-    }
-
-    @MainActor
-    private func drainSession(_ session: TabbedSessionWindow) async {
-        guard let sandbox = session.sandbox,
-              let vm = sandbox.vm,
-              vm.state == .running else { return }
-        let name = session.profile.name
-
-        // Honour the profile's close action. `.ask` falls through to
-        // `.suspend` — app quit isn't the right moment to throw a
-        // per-VM modal at the user; suspend keeps their state and
-        // they can decide at next launch.
-        let resolvedAction: Profile.CloseAction =
-            (session.profile.closeAction == .ask) ? .suspend : session.profile.closeAction
-
-        switch resolvedAction {
-        case .suspend:
-            // Tab state has to be snapshotted BEFORE pause so the
-            // model can't drift mid-save (same reasoning as the
-            // per-window suspend path).
-            sandbox.sessionDisk?.saveTabs(session.snapshotTabs())
-            session.pendingCloseAction = .suspend
-            do {
-                try await sandbox.suspend()
-                FileHandle.standardError.write(Data(
-                    "[ac] suspended '\(name)' on quit\n".utf8))
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "[ac] suspend on '\(name)' failed (\(error)) — wiping snapshot + forcing stop\n".utf8))
-                sandbox.sessionDisk?.clearSavedState()
-                await Self.forceStop(vm)
-            }
-        case .shutdown:
-            session.pendingCloseAction = .shutdown
-            sandbox.sessionDisk?.clearSavedState()
-            do {
-                try vm.requestStop()
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "[ac] requestStop on '\(name)' failed (\(error)) — forcing\n".utf8))
-                await Self.forceStop(vm)
-                return
-            }
-            // ACPI poweroff usually completes in 2-5 s. Allow up to
-            // 15 s before the watchdog forces it.
-            let deadline = Date().addingTimeInterval(15)
-            while vm.state == .running && Date() < deadline {
-                try? await Task.sleep(nanoseconds: 250_000_000)
-            }
-            if vm.state == .running {
-                FileHandle.standardError.write(Data(
-                    "[ac] '\(name)' didn't poweroff in 15 s — forcing stop\n".utf8))
-                await Self.forceStop(vm)
-            } else {
-                FileHandle.standardError.write(Data(
-                    "[ac] '\(name)' powered off cleanly\n".utf8))
-            }
-        case .ask:
-            // Unreachable — collapsed to .suspend above.
-            break
         }
     }
 
@@ -1070,73 +1293,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return false
         }
 
-        guard let session = sender as? TabbedSessionWindow else { return true }
-        return decideSessionClose(for: session)
+        // Closing a session window now *detaches* — the VM keeps running in the
+        // registry and can be reattached. The real stop (suspend/poweroff) is
+        // driven by `vm kill`, ⌘Q, the status item, or the guest closing its
+        // last shell. So there's nothing to prompt about here.
+        return true
     }
 
-    /// Branch on the profile's `closeAction` setting. Sets
-    /// `session.pendingCloseAction` so `windowWillClose` can dispatch
-    /// without prompting the user a second time.
-    private func decideSessionClose(for session: TabbedSessionWindow) -> Bool {
-        switch session.profile.closeAction {
-        case .suspend:
-            session.pendingCloseAction = .suspend
-            return true
-        case .shutdown:
-            return confirmShutdown(for: session)
-        case .ask:
-            return askCloseAction(for: session)
-        }
-    }
-
-    /// Two-button "Are you sure?" used when the profile is set to shut
-    /// down on close. Default button is Cancel so an accidental ⌘W +
-    /// Enter doesn't blow the VM away.
-    private func confirmShutdown(for session: TabbedSessionWindow) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = String(
-            format: NSLocalizedString("Shut down session “%@”?", comment: ""),
-            session.profile.name)
-        alert.informativeText = NSLocalizedString(
-            "The VM will shut down and any running processes will be stopped.",
-            comment: "")
-        alert.alertStyle = .warning
-        let closeButton = alert.addButton(withTitle: NSLocalizedString("Shut down", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        closeButton.keyEquivalent = ""
-        if alert.runModal() == .alertFirstButtonReturn {
-            session.pendingCloseAction = .shutdown
-            return true
-        }
-        return false
-    }
-
-    /// Three-button picker used when the profile is set to ask. Suspend
-    /// is the primary action (matches the suspend-by-default vibe of
-    /// the rest of the app).
-    private func askCloseAction(for session: TabbedSessionWindow) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = String(
-            format: NSLocalizedString("Close session “%@”?", comment: ""),
-            session.profile.name)
-        alert.informativeText = NSLocalizedString(
-            "Suspend keeps the VM's state on disk so it resumes instantly next time. Shut down powers it off cleanly.",
-            comment: "")
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: NSLocalizedString("Suspend", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Shut down", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            session.pendingCloseAction = .suspend
-            return true
-        case .alertSecondButtonReturn:
-            session.pendingCloseAction = .shutdown
-            return true
-        default:
-            return false
-        }
-    }
+    // NB: the former close-prompt methods (decideSessionClose / confirmShutdown
+    // / askCloseAction) were removed — window close is now a non-destructive
+    // detach, so there's nothing to confirm. The profile's closeAction is
+    // honored by the explicit stop path (`stopSession`) instead.
 
     func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NSWindow else { return }
@@ -1149,6 +1316,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if win === mainWindow {
             mainWindow = nil
+            updateActivationPolicy()
             return
         }
         if win === credentialApprovalsWindow {
@@ -1172,86 +1340,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         if let session = win as? TabbedSessionWindow {
-            // Stop the single shared VM. All in-VM kittys die with it.
-            // The profile's `closeAction` (resolved in windowShouldClose
-            // → session.pendingCloseAction) decides whether to suspend
-            // (pause + save RAM to disk for instant resume) or to do a
-            // clean ACPI poweroff.
-            let profileName = session.profile.name
-            if let sandbox = session.sandbox, let vm = sandbox.vm,
-               vm.state == .running {
-                switch session.pendingCloseAction {
-                case .suspend:
-                    // Persist the host's tab UUIDs + active index
-                    // alongside the RAM snapshot, so restore can
-                    // rebuild the bar against the kittys that are
-                    // still running inside the resumed VM. Done
-                    // BEFORE pause so the model can't drift mid-save.
-                    sandbox.sessionDisk?.saveTabs(session.snapshotTabs())
-                    Task { @MainActor in
-                        do {
-                            try await sandbox.suspend()
-                            FileHandle.standardError.write(Data(
-                                "[ac] suspended '\(profileName)' to disk\n".utf8))
-                        } catch {
-                            FileHandle.standardError.write(Data(
-                                "[ac] suspend failed (\(error)) — forcing stop\n".utf8))
-                            // Suspended state may be partial / corrupt;
-                            // wipe so next launch boots fresh.
-                            sandbox.sessionDisk?.clearSavedState()
-                            vm.stop(completionHandler: { _ in })
-                        }
-                    }
-                case .shutdown:
-                    // A previously-suspended profile being shut down
-                    // explicitly: drop the saved snapshot so the next
-                    // launch is fresh.
-                    sandbox.sessionDisk?.clearSavedState()
-                    do {
-                        try vm.requestStop()
-                        FileHandle.standardError.write(Data(
-                            "[ac] requested clean poweroff for '\(profileName)'\n".utf8))
-                    } catch {
-                        FileHandle.standardError.write(Data(
-                            "[ac] requestStop failed (\(error)) — forcing\n".utf8))
-                        vm.stop(completionHandler: { _ in })
-                    }
-                    // Watchdog. Captures `vm` strongly inside the Task
-                    // so it stays alive for the deadline; once the Task
-                    // completes the ref drops naturally.
-                    let watchdogVM = vm
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .seconds(30))
-                        if watchdogVM.state == .running {
-                            FileHandle.standardError.write(Data(
-                                "[ac] '\(profileName)' didn't poweroff in 30s — forcing stop\n".utf8))
-                            watchdogVM.stop(completionHandler: { _ in })
-                        }
-                    }
-                }
+            // DETACH (persistent-agent model): closing the window leaves the VM
+            // running in `runningSessions` so it can be reattached later. The VM
+            // is NOT stopped and the engine/ssh/shell registrations are NOT torn
+            // down here — those live until an explicit stop (`stopSession`,
+            // driven by `vm kill`, ⌘Q, the status item, or the guest closing its
+            // last shell). Capture a tab snapshot first so a reattaching window
+            // rebuilds the bar against the kittys still alive in the guest.
+            let id = session.profile.id
+            if runningSessions[id] != nil {
+                runningSessions[id]?.lastTabsSnapshot = session.snapshotTabs()
             }
-            // Drop the engine's per-profile state — token map, ssh
-            // keys, listener delegates. Otherwise we leak per-session
-            // until app quit.
-            for key in loadAgentKeys(for: session.profile) {
-                removeKeyFromHostAgent(publicKey: key.publicKey)
-            }
-            ssoRefreshTasks[session.profile.id]?.cancel()
-            ssoRefreshTasks.removeValue(forKey: session.profile.id)
-            mitmEngine?.clearSessionTrace(for: session.profile.id)
-            mitmEngine?.unregister(profileID: session.profile.id)
-            mitmEngine?.claudeSubscriptionStore.unregisterBogusKeys(for: session.profile.id)
-            mitmEngine?.codexSubscriptionStore.unregisterBogusKeys(for: session.profile.id)
-            mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: session.profile.id)
-            // Stop the debug shell bridge (no-op when not running) so
-            // its vsock listener doesn't outlive the VM.
-            shellBridges[session.profile.id]?.stop()
-            shellBridges.removeValue(forKey: session.profile.id)
-            profileWindows.removeValue(forKey: session.profile.id)
+            session.vmView.virtualMachine = nil
+            session.keyboardBridge = nil
+            session.sandbox = nil
+            profileWindows.removeValue(forKey: id)
             renderPicker()
-            if mainWindow == nil && profileWindows.isEmpty {
-                NSApp.terminate(nil)
-            }
+            updateStatusMenu()
+            updateActivationPolicy()
         }
     }
 
@@ -1595,6 +1701,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// recreates it if the user closed the window earlier in the
     /// session (windowWillClose nils out `mainWindow`).
     @objc func openProfileManagerAction(_ sender: Any?) {
+        // Promote back to a regular (Dock-visible) app — we may be coming from
+        // the status item while running as a background agent.
+        NSApp.setActivationPolicy(.regular)
         if let win = mainWindow {
             win.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -1665,6 +1774,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// into the MITM engine so the proxy hot path picks it up live.
     func setFusionEngaged(_ engaged: Bool, for profile: Profile) {
         mitmEngine?.setFusionEngaged(engaged, for: profile.id)
+        runningSessions[profile.id]?.fusionEngaged = engaged
     }
 
     func openFileBrowser(for window: TabbedSessionWindow) {
@@ -2596,9 +2706,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func launch(_ profile: Profile) {
-        // If a window is already open for this profile, just focus it.
+        // Already attached → just focus the window.
         if let existing = profileWindows[profile.id] {
+            NSApp.setActivationPolicy(.regular)
             existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        // Running but detached (window was closed, VM kept alive) → reattach a
+        // fresh window onto the live VM, with its tabs intact.
+        if let session = runningSessions[profile.id] {
+            attachWindow(to: session)
             return
         }
 
@@ -2821,7 +2939,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         // First session for this profile — create the tabbed window with
-        // its single shared VM, then queue the first tab.
+        // its single shared VM, then queue the first tab. Promote to a regular
+        // app first in case we're launching from a headless/background agent.
+        NSApp.setActivationPolicy(.regular)
         let win = TabbedSessionWindow(profile: profile, acDelegate: self)
         win.delegate = self
         win.center()
@@ -2862,8 +2982,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             )
             sessionDisk.tokenPlan = plan
             if let engine = mitmEngine, let scriptURL = bridgeScriptURL {
-                let debugShellURL = ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil
-                    ? shellAgentURL : nil
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
@@ -2871,7 +2989,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     awsCredsHelperURL: awsCredsHelperURL,
                     claudeTokenAgentURL: claudeTokenAgentURL,
                     codexTokenAgentURL: codexTokenAgentURL,
-                    shellAgentURL: debugShellURL,
+                    // Always ship the shell agent now — `exec` is a first-class
+                    // CLI verb, gated by the owner-only control socket.
+                    shellAgentURL: shellAgentURL,
                     loopbackRelayAgentURL: loopbackRelayAgentURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
@@ -2945,12 +3065,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     socketDevice: dev,
                     forcedLayout: profile.keyboardLayoutOverride)
             }
-            // Debug shell bridge — vsock 5800. Only when the host runs
-            // with BROMURE_DEBUG_CLAUDE (also gates SessionDisk shipping
-            // the agent into the meta share, so the guest pool wouldn't
-            // fill anyway). Powers AutomationServer's /exec endpoint.
-            if let dev = sandbox.socketDevice,
-               ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil {
+            // Shell-exec bridge (vsock 5800). Always created now — powers
+            // `bromure-ac exec` and the control socket's /exec route. The guest
+            // ships shell-agent.py unconditionally; the surface is gated by the
+            // owner-only control socket, not the debug env var.
+            if let dev = sandbox.socketDevice {
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
             }
@@ -2961,7 +3080,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.profiles = self.store.loadAll()
                 self.renderPicker()
             }
-            self.wireSandboxCallbacks(sandbox, win: win)
+            self.wireSandboxCallbacks(sandbox)
+            self.registerSession(sandbox, profile: profile)
             win.sandbox = sandbox
 
             // Restored snapshots already have kittys running with
@@ -3167,6 +3287,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @MainActor
     func handleCompromise(_ event: CompromiseEvent) {
         if compromiseAlertActive { return }
+        // The VM may be detached (window closed, VM still running). A compromise
+        // must still pause it and surface the alert, so force a reattach first
+        // — that binds a view to the live VM so the user sees the frozen frame.
+        if profileWindows[event.profileID] == nil,
+           let session = runningSessions[event.profileID] {
+            attachWindow(to: session)
+        }
         guard let window = profileWindows[event.profileID],
               let sandbox = window.sandbox,
               let vm = sandbox.vm else { return }
@@ -3473,16 +3600,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// hinge that turns "VM stopped" into "rebuild VM in place"
     /// instead of "close window".
     @MainActor
-    private func wireSandboxCallbacks(_ sandbox: UbuntuSandboxVM,
-                                      win: TabbedSessionWindow) {
-        sandbox.onStopped = { [weak win, weak self] _ in
+    /// Wire the sandbox's guest-event callbacks. Keyed off the profile id
+    /// (resolved from the sandbox's own session disk) rather than a captured
+    /// window, so the callbacks keep working while the session is detached
+    /// (no window). UI-affecting events look up the attached window lazily and
+    /// no-op when there isn't one; state (IP, roster) is mirrored into the
+    /// registry so a reattaching window can render it.
+    private func wireSandboxCallbacks(_ sandbox: UbuntuSandboxVM) {
+        guard let pid = sandbox.sessionDisk?.profile.id else { return }
+        sandbox.onStopped = { [weak self] _ in
             Task { @MainActor in
-                guard let win, let self else { return }
-                if win.rebootRequested {
+                guard let self else { return }
+                // A user-requested reboot rebuilds the VM in the same window.
+                if let win = self.profileWindows[pid], win.rebootRequested {
                     win.rebootRequested = false
                     self.relaunchVM(in: win)
                 } else {
-                    win.close()
+                    // Real stop (guest poweroff, crash, or our requestStop):
+                    // tear the session down and close any attached window.
+                    self.handleSessionStopped(profileID: pid)
                 }
             }
         }
@@ -3503,8 +3639,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 NSWorkspace.shared.open(url)
             }
         }
-        sandbox.onTabClosed = { [weak win] id in
-            Task { @MainActor in win?.handleTabClosedFromGuest(id: id) }
+        sandbox.onTabClosed = { [weak self] id in
+            Task { @MainActor in self?.profileWindows[pid]?.handleTabClosedFromGuest(id: id) }
         }
         sandbox.onTabDiag = { id, diag in
             // Surface why a kitty bailed right after spawning. Prefixed and
@@ -3514,22 +3650,301 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             FileHandle.standardError.write(Data(
                 "[ac] tab \(id.uuidString) bailed — kitty diagnostics:\n\(indented)\n".utf8))
         }
-        sandbox.onTabRoster = { [weak win] alive in
-            Task { @MainActor in win?.reconcileTabRoster(alive: alive) }
+        sandbox.onTabRoster = { [weak self] alive in
+            Task { @MainActor in
+                guard let self else { return }
+                if let session = self.runningSessions[pid] {
+                    session.lastRoster = alive
+                    // Keep existing order for still-alive tabs; append newcomers
+                    // (sorted for determinism); drop titles for gone tabs.
+                    var order = session.tabOrder.filter { alive.contains($0) }
+                    for id in alive.sorted(by: { $0.uuidString < $1.uuidString })
+                    where !order.contains(id) { order.append(id) }
+                    session.tabOrder = order
+                    session.tabTitles = session.tabTitles.filter { alive.contains($0.key) }
+                }
+                self.profileWindows[pid]?.reconcileTabRoster(alive: alive)
+            }
         }
-        sandbox.onTabTitleUpdate = { [weak win] id, title in
-            Task { @MainActor in win?.handleTabTitleUpdate(id: id, title: title) }
+        sandbox.onTabTitleUpdate = { [weak self] id, title in
+            Task { @MainActor in
+                guard let self else { return }
+                self.runningSessions[pid]?.tabTitles[id] = title
+                self.profileWindows[pid]?.handleTabTitleUpdate(id: id, title: title)
+            }
         }
-        sandbox.onIPUpdate = { [weak win] ip in
-            Task { @MainActor in win?.model.ipAddress = ip }
+        sandbox.onIPUpdate = { [weak self] ip in
+            Task { @MainActor in
+                guard let self else { return }
+                self.runningSessions[pid]?.lastIP = ip
+                self.profileWindows[pid]?.model.ipAddress = ip
+            }
         }
-        sandbox.onShortcut = { [weak win] key in
+        sandbox.onShortcut = { [weak self] key in
             // A host-owned chord (⌘T/⌘W/⌘N/⌘1-9) that Openbox grabbed in the
             // guest and bounced back because the VM held keyboard focus. Run
             // the same action the key monitor would — performACShortcut is the
-            // shared sink, so the two paths can't drift.
-            Task { @MainActor in win?.performACShortcut(key) }
+            // shared sink, so the two paths can't drift. No-op when detached.
+            Task { @MainActor in self?.profileWindows[pid]?.performACShortcut(key) }
         }
+    }
+
+    // MARK: - Session lifetime (persistent-agent model)
+
+    /// Tear down a profile's host-side session registrations — the MITM
+    /// engine maps, ssh-agent keys, SSO refresh loop, and shell bridge. Moved
+    /// out of `windowWillClose` (which now only *detaches*): these must outlive
+    /// a mere detach and only drop when the VM actually stops.
+    @MainActor
+    private func cleanupSessionRegistrations(for profile: Profile) {
+        for key in loadAgentKeys(for: profile) {
+            removeKeyFromHostAgent(publicKey: key.publicKey)
+        }
+        ssoRefreshTasks[profile.id]?.cancel()
+        ssoRefreshTasks.removeValue(forKey: profile.id)
+        mitmEngine?.clearSessionTrace(for: profile.id)
+        mitmEngine?.unregister(profileID: profile.id)
+        mitmEngine?.claudeSubscriptionStore.unregisterBogusKeys(for: profile.id)
+        mitmEngine?.codexSubscriptionStore.unregisterBogusKeys(for: profile.id)
+        mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: profile.id)
+        shellBridges[profile.id]?.stop()
+        shellBridges.removeValue(forKey: profile.id)
+    }
+
+    /// The VM for `profileID` stopped (guest poweroff, crash, or the tail of an
+    /// explicit stop). Idempotent: runs per-session teardown once, drops the
+    /// registry entry, and closes any attached window.
+    @MainActor
+    func handleSessionStopped(profileID: Profile.ID) {
+        guard let session = runningSessions[profileID] else { return }   // already handled
+        cleanupSessionRegistrations(for: session.profile)
+        unregisterSession(profileID)
+        if let win = profileWindows[profileID] {
+            win.vmView.virtualMachine = nil
+            win.keyboardBridge = nil
+            win.sandbox = nil
+            profileWindows.removeValue(forKey: profileID)
+            win.orderOut(nil)
+        }
+        // `vm run --rm`: delete the ephemeral profile + its disk now it stopped.
+        if ephemeralProfiles.remove(profileID) != nil,
+           let p = profiles.first(where: { $0.id == profileID }) {
+            try? store.delete(p)
+            profiles = store.loadAll()
+        }
+        renderPicker()
+        updateStatusMenu()
+        updateActivationPolicy()
+    }
+
+    /// Explicitly stop a running session's VM (honoring `action`), then tear it
+    /// down. This is the *only* path that powers a VM off — window close is a
+    /// detach. Invoked by `vm kill`, the ⌘Q drain, the status-item, and the
+    /// guest "all shells exited" signal.
+    @MainActor
+    func stopSession(_ profileID: Profile.ID, action: Profile.CloseAction) async {
+        guard let session = runningSessions[profileID], !session.stopping,
+              let vm = session.sandbox.vm else { return }
+        let sandbox = session.sandbox
+        session.stopping = true
+        let name = session.profile.name
+        // `.ask` collapses to `.suspend` — a programmatic stop isn't the moment
+        // for a modal; suspend keeps state and the user decides at next launch.
+        let resolved: Profile.CloseAction = (action == .ask) ? .suspend : action
+        switch resolved {
+        case .suspend:
+            sandbox.sessionDisk?.saveTabs(currentTabsSnapshot(for: profileID))
+            do {
+                try await sandbox.suspend()
+                FileHandle.standardError.write(Data("[ac] suspended '\(name)'\n".utf8))
+                handleSessionStopped(profileID: profileID)   // suspend fires no onStopped
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[ac] suspend '\(name)' failed (\(error)) — forcing stop\n".utf8))
+                sandbox.sessionDisk?.clearSavedState()
+                await Self.forceStop(vm)   // → guestDidStop → onStopped → handleSessionStopped
+            }
+        case .shutdown:
+            sandbox.sessionDisk?.clearSavedState()
+            do { try vm.requestStop() }
+            catch {
+                await Self.forceStop(vm)
+                return
+            }
+            let deadline = Date().addingTimeInterval(15)
+            while vm.state == .running && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            if vm.state == .running {
+                FileHandle.standardError.write(Data(
+                    "[ac] '\(name)' didn't poweroff in 15s — forcing stop\n".utf8))
+                await Self.forceStop(vm)
+            }
+            // onStopped → handleSessionStopped finishes teardown.
+        case .ask:
+            break   // unreachable
+        }
+    }
+
+    /// Fire-and-forget `stopSession` for non-async callers (the guest
+    /// "all shells exited" path, status item, CLI control plane).
+    @MainActor
+    func requestStopSession(_ profileID: Profile.ID, action: Profile.CloseAction) {
+        Task { @MainActor in await self.stopSession(profileID, action: action) }
+    }
+
+    /// Best-effort current tab snapshot for `profileID`: the attached window's
+    /// live model when attached, else the last snapshot captured on detach.
+    @MainActor
+    private func currentTabsSnapshot(for profileID: Profile.ID) -> SessionDisk.TabsState {
+        if let win = profileWindows[profileID] { return win.snapshotTabs() }
+        return runningSessions[profileID]?.lastTabsSnapshot
+            ?? SessionDisk.TabsState(tabs: [], activeIndex: 0)
+    }
+
+    /// Build a window onto an already-running session and bind a fresh
+    /// VZVirtualMachineView to its live VM. Used to reattach after a detach
+    /// (window closed, VM kept running) and by the control plane's attach.
+    @MainActor
+    func attachWindow(to session: RunningSession) {
+        // Already attached → focus.
+        if let existing = profileWindows[session.profileID] {
+            NSApp.setActivationPolicy(.regular)
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let profile = session.profile
+        let sandbox = session.sandbox
+        let win = TabbedSessionWindow(profile: profile, acDelegate: self)
+        win.delegate = self
+        win.center()
+        win.isReleasedWhenClosed = false
+        profileWindows[profile.id] = win
+        win.sandbox = sandbox
+        // Bind the fresh view to the already-running VM (the guest keeps
+        // rendering into the virtio framebuffer regardless of any host view).
+        win.vmView.virtualMachine = sandbox.vm
+        if let dev = sandbox.socketDevice {
+            win.keyboardBridge = KeyboardBridge(
+                socketDevice: dev, forcedLayout: profile.keyboardLayoutOverride)
+        }
+        // Rebuild the tab bar from the last snapshot (or the live roster); the
+        // kittys already exist in the guest, so raise — never spawn.
+        var didSpawn = false
+        if let snap = session.lastTabsSnapshot, !snap.tabs.isEmpty {
+            win.rehydrateTabs(from: snap)
+        } else if !session.lastRoster.isEmpty {
+            let tabs = session.lastRoster.map {
+                SessionDisk.TabSnapshot(id: $0, label: "Session")
+            }
+            win.rehydrateTabs(from: SessionDisk.TabsState(tabs: tabs, activeIndex: 0))
+        } else {
+            spawnNewTab(in: win)   // running VM with no known kitty — make one
+            didSpawn = true
+        }
+        if !didSpawn, let target = win.model.activeTab ?? win.model.tabs.first {
+            requestRaiseTab(id: target.id, in: win)
+        }
+        // Restore display state from the registry.
+        win.model.ipAddress = session.lastIP
+        win.model.fusionConfigurable = profile.fusionConfigurable
+        win.model.fusionEngaged = session.fusionEngaged
+        NSApp.setActivationPolicy(.regular)
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        refreshStreamingState()
+        renderPicker()
+        updateStatusMenu()
+    }
+
+    /// Demote to a background (no Dock icon) agent when no session window or
+    /// the picker is visible — VMs keep running. Promoted back to `.regular`
+    /// at the window-show sites (`attachWindow`, the picker opener).
+    @MainActor
+    func updateActivationPolicy() {
+        if profileWindows.isEmpty && mainWindow == nil {
+            NSApp.setActivationPolicy(.accessory)
+        } else {
+            NSApp.setActivationPolicy(.regular)
+        }
+    }
+
+    // MARK: - Status-bar item (reachable while detached / accessory)
+
+    /// Stand up the menu-bar item. Created once in `applicationDidFinishLaunching`.
+    /// It's the only UI surface once every window is closed and the app has
+    /// demoted to `.accessory`, so it must list running sessions + offer Quit.
+    @MainActor
+    func setupStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            button.image = NSImage(systemSymbolName: "shippingbox",
+                                   accessibilityDescription: "Bromure Agentic Coding")
+            button.image?.isTemplate = true
+        }
+        statusItem = item
+        updateStatusMenu()
+    }
+
+    /// Rebuild the status-item menu from the current `runningSessions`.
+    @MainActor
+    func updateStatusMenu() {
+        guard let statusItem else { return }
+        let menu = NSMenu()
+        let sessions = runningSessions.values.sorted { $0.profile.name < $1.profile.name }
+        if sessions.isEmpty {
+            let none = NSMenuItem(title: NSLocalizedString("No running VMs", comment: ""),
+                                  action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        } else {
+            for session in sessions {
+                let attached = profileWindows[session.profileID] != nil
+                let title = "\(session.profile.name)\(attached ? "" : " — detached")"
+                let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                header.isEnabled = false
+                menu.addItem(header)
+
+                let reattach = NSMenuItem(
+                    title: attached
+                        ? NSLocalizedString("    Focus window", comment: "")
+                        : NSLocalizedString("    Reattach", comment: ""),
+                    action: #selector(statusReattach(_:)), keyEquivalent: "")
+                reattach.target = self
+                reattach.representedObject = session.profileID.uuidString
+                menu.addItem(reattach)
+
+                let stop = NSMenuItem(title: NSLocalizedString("    Shut down", comment: ""),
+                                      action: #selector(statusStop(_:)), keyEquivalent: "")
+                stop.target = self
+                stop.representedObject = session.profileID.uuidString
+                menu.addItem(stop)
+            }
+        }
+        menu.addItem(.separator())
+        let picker = NSMenuItem(title: NSLocalizedString("Open Bromure Agentic Coding", comment: ""),
+                                action: #selector(openProfileManagerAction(_:)), keyEquivalent: "")
+        picker.target = self
+        menu.addItem(picker)
+        let quit = NSMenuItem(title: NSLocalizedString("Quit", comment: ""),
+                              action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+        menu.addItem(quit)
+        statusItem.menu = menu
+    }
+
+    @MainActor @objc private func statusReattach(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let id = UUID(uuidString: raw),
+              let session = runningSessions[id] else { return }
+        attachWindow(to: session)
+    }
+
+    @MainActor @objc private func statusStop(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let id = UUID(uuidString: raw) else { return }
+        let action = runningSessions[id]?.profile.closeAction ?? .shutdown
+        Task { @MainActor in await self.stopSession(id, action: action) }
     }
 
     /// Build a fresh sandbox in `win` after the previous one stopped.
@@ -3546,6 +3961,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // directory and removing closed-* files out from under it.
         win.sandbox?.stopPolling()
         win.vmView.virtualMachine = nil
+        // Drop the old VM from the registry (and the window borrow) so it
+        // deallocates (its deinit detaches the vmnet switch port). The fresh
+        // sandbox is registered below once it's built.
+        unregisterSession(profile.id)
         win.sandbox = nil
         win.keyboardBridge = nil
         win.model.tabs.removeAll()
@@ -3580,8 +3999,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.seedCodexAuthFile(for: profile)
             self.seedGrokAuthFile(for: profile)
             if let engine = self.mitmEngine, let scriptURL = self.bridgeScriptURL {
-                let debugShellURL = ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil
-                    ? self.shellAgentURL : nil
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
@@ -3589,7 +4006,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     awsCredsHelperURL: awsCredsHelperURL,
                     claudeTokenAgentURL: claudeTokenAgentURL,
                     codexTokenAgentURL: codexTokenAgentURL,
-                    shellAgentURL: debugShellURL,
+                    shellAgentURL: self.shellAgentURL,   // always ship (see warm-boot path)
                     loopbackRelayAgentURL: loopbackRelayAgentURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager,
@@ -3623,14 +4040,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     socketDevice: dev,
                     forcedLayout: profile.keyboardLayoutOverride)
             }
-            // Debug shell bridge — see the matching block on the
-            // warm-boot path above.
-            if let dev = sandbox.socketDevice,
-               ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil {
+            // Shell-exec bridge — see the matching block on the warm-boot path.
+            if let dev = sandbox.socketDevice {
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
             }
-            self.wireSandboxCallbacks(sandbox, win: win)
+            self.wireSandboxCallbacks(sandbox)
+            self.registerSession(sandbox, profile: profile)
             win.sandbox = sandbox
             self.requestSpawnKitty(id: firstTab.id, in: win)
         }
