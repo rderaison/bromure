@@ -574,12 +574,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// guest reaches it once ready via the vsock-8446 bridge. No-op when the
     /// profile needs no local model. (Single-engine phase: one model.)
     @MainActor func startLocalEngineIfNeeded(for profile: Profile) {
-        guard let modelID = profile.localEngineModelID else { return }
-        let repo = CatalogStore.shared.resolve(modelID)?.repo ?? modelID
+        let ids = profile.distinctLocalModelIDs
+        guard !ids.isEmpty else { return }
+        // Resolve each selected model to a registry entry (name = repo, so
+        // existing model env/config keeps working). estMemGB = its weight
+        // footprint for the engine's LRU budget.
+        let models: [InferenceModel] = ids.map { id in
+            let m = CatalogStore.shared.resolve(id)
+            let repo = m?.repo ?? id
+            let est = Int((m?.downloadGB ?? 8).rounded(.up))
+            return InferenceModel(name: repo, repo: repo, estMemGB: est)
+        }
+        // Budget for parallel models: most of unified memory, leaving room
+        // for the OS + the VMs. vllm-mlx evicts idle models LRU under this.
+        let budget = max(8, HostMemory.unifiedMemoryGB() - 16)
         Task.detached(priority: .userInitiated) {
             do {
-                try await InferenceService.shared.ensureRunning(modelRepo: repo)
-                SupplyChainLog.shared.record("[inference] engine serving \(repo)")
+                try await InferenceService.shared.ensureRunning(models: models, memoryBudgetGB: budget)
+                SupplyChainLog.shared.record(
+                    "[inference] engine serving \(models.map(\.repo).joined(separator: ", "))")
             } catch {
                 SupplyChainLog.shared.record("[inference] engine start failed: \(error)")
             }

@@ -256,7 +256,8 @@ enum Fusion {
         case .local(let base):
             // vllm-mlx serves the OpenAI chat API on the host loopback.
             return await askOpenAIChat(base: base, model: model, system: system,
-                                       question: question, maxTokens: maxTokens, token: "bromure-local",
+                                       question: question, maxTokens: maxTokens,
+                                       token: InferenceService.apiKey,
                                        session: session, callLog: callLog)
         }
     }
@@ -547,7 +548,7 @@ enum Fusion {
             case .openAISubscription(let t): return ("https://chatgpt.com/backend-api", ("Authorization", "Bearer \(t)"))
             case .grokKey(let k):         return ("https://api.x.ai", ("Authorization", "Bearer \(k)"))
             case .grokSubscription(let t): return ("https://cli-chat-proxy.grok.com", ("Authorization", "Bearer \(t)"))
-            case .local(let base):        return (base, ("Authorization", "Bearer bromure-local"))
+            case .local(let base):        return (base, ("Authorization", "Bearer \(InferenceService.apiKey)"))
             }
         }()
         guard let url = URL(string: "\(base)/v1/models") else { return [] }

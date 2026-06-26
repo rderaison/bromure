@@ -646,7 +646,8 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var localModelsSection: some View {
         LocalModelsSettingsView(routing: $draft.modelRouting,
-                                activeModelID: $draft.activeModelID)
+                                activeModelID: $draft.activeModelID,
+                                selectedModelIDs: draft.distinctLocalModelIDs)
     }
 
     @ViewBuilder
@@ -3067,9 +3068,17 @@ struct ProfileEditorView: View {
 struct LocalModelsSettingsView: View {
     @Binding var routing: Profile.Routing
     @Binding var activeModelID: String?
+    /// Every distinct local model this profile would load at once — for the
+    /// combined-memory warning (the engine can serve several in parallel).
+    var selectedModelIDs: [String] = []
 
     private let hostGB = HostMemory.unifiedMemoryGB()
     private let catalog = CatalogStore.shared.effective()
+
+    /// Combined memory of all distinct local models that would load at once.
+    private var combinedMemGB: Int {
+        selectedModelIDs.reduce(0) { $0 + (CatalogStore.shared.resolve($1)?.minUnifiedMemGB ?? 0) }
+    }
 
     @State private var engineReady = EngineProvisioner.shared.isProvisioned
     @State private var showInstallPrompt = false
@@ -3125,6 +3134,23 @@ struct LocalModelsSettingsView: View {
 
                 Section("Engine") {
                     engineRow
+                }
+
+                if combinedMemGB > 0, combinedMemGB > Int(Double(hostGB) * 0.85) {
+                    Section {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(combinedMemGB > hostGB
+                                     ? "Selected local models need ~\(combinedMemGB) GB together — more than this Mac's \(hostGB) GB."
+                                     : "Selected local models need ~\(combinedMemGB) GB together, close to this Mac's \(hostGB) GB.")
+                                Text("They run in parallel (one engine, several models), so their memory adds up. Drop one, or pick smaller models.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(combinedMemGB > hostGB ? .red : .orange)
+                        }
+                    }
                 }
 
                 Section {

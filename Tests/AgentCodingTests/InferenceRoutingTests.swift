@@ -292,13 +292,15 @@ struct LocalToolAuthTests {
                   "ANTHROPIC_DEFAULT_HAIKU_MODEL"] {
             #expect(env[k] == "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
         }
-        #expect(env["ANTHROPIC_API_KEY"] == "bromure-local")
+        // The key is the per-session engine API key, not a fixed dummy.
+        #expect(env["ANTHROPIC_API_KEY"] == InferenceService.apiKey)
+        #expect(InferenceService.apiKey.hasPrefix("brk-"))
     }
 
     @Test("Codex carries only the dummy key (config.toml does the routing)") func codexEnv() {
         let codex = Dictionary(uniqueKeysWithValues:
             Profile.Tool.codex.localEnvExports(model: "m").map { ($0.name, $0.value) })
-        #expect(codex["OPENAI_API_KEY"] == "bromure-local")
+        #expect(codex["OPENAI_API_KEY"] == InferenceService.apiKey)
         // Codex is redirected by the config.toml provider, not env vars.
         #expect(codex["OPENAI_BASE_URL"] == nil)
     }
@@ -308,8 +310,36 @@ struct LocalToolAuthTests {
             Profile.Tool.grok.localEnvExports(model: "m").map { ($0.name, $0.value) })
         #expect(grok["GROK_BASE_URL"] == "http://127.0.0.1:11434/v1")
         #expect(grok["GROK_MODEL"] == "m")
-        #expect(grok["GROK_API_KEY"] == "bromure-local")
+        #expect(grok["GROK_API_KEY"] == InferenceService.apiKey)
         #expect(grok["XAI_BASE_URL"] == nil)
+    }
+
+    @Test("Multi-model registry YAML lists each model + a memory budget") func modelsYAML() {
+        let yaml = InferenceService.makeModelsYAML(models: [
+            InferenceModel(name: "a/b", repo: "a/b", estMemGB: 13),
+            InferenceModel(name: "c/d", repo: "c/d", estMemGB: 42),
+        ], memoryBudgetGB: 110)
+        #expect(yaml.contains("memory_budget_gb: 110"))
+        #expect(yaml.contains("model: \"a/b\""))
+        #expect(yaml.contains("estimated_memory_gb: 42"))
+        #expect(yaml.contains("name: \"c/d\""))
+    }
+
+    @Test("Engine launch carries the API key + offline flag when cached") func launchFlags() {
+        let plan = InferenceService.makeLaunchPlan(
+            engine: .vllmMLX, executable: URL(fileURLWithPath: "/x/vllm-mlx"),
+            modelRepo: "a/b", cached: true, apiKey: "brk-test", env: [:])
+        #expect(plan.arguments.contains("--api-key"))
+        #expect(plan.arguments.contains("brk-test"))
+        #expect(plan.environment["HF_HUB_OFFLINE"] == "1")
+    }
+
+    @Test("Distinct local models gather across tools + fusion") func distinctModels() {
+        var p = Profile(name: "t", tool: .claude, authMode: .local)
+        p.activeModelID = "m1"
+        p.additionalTools = [Profile.ToolSpec(tool: .codex, authMode: .local, localModelID: "m2")]
+        p.fusionLocalLeg = "m3"
+        #expect(Set(p.distinctLocalModelIDs) == ["m1", "m2", "m3"])
     }
 
     @Test("Codex local provider TOML uses the chat wire API") func codexTOML() {

@@ -797,13 +797,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         /// a cloud model the engine doesn't serve.
         public func localEnvExports(model: String) -> [(name: String, value: String)] {
             let base = Self.localEngineBaseURL
+            let key = InferenceService.apiKey
             switch self {
             case .claude:
                 // Only ANTHROPIC_API_KEY — setting ANTHROPIC_AUTH_TOKEN too
                 // makes Claude Code warn about conflicting auth.
                 return [
                     ("ANTHROPIC_BASE_URL", base),
-                    ("ANTHROPIC_API_KEY", "bromure-local"),
+                    ("ANTHROPIC_API_KEY", key),
                     ("ANTHROPIC_MODEL", model),
                     ("ANTHROPIC_SMALL_FAST_MODEL", model),
                     ("ANTHROPIC_DEFAULT_OPUS_MODEL", model),
@@ -817,14 +818,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                 // (written by SessionDisk). We still export the dummy key the
                 // provider's env_key points at.
                 return [
-                    ("OPENAI_API_KEY", "bromure-local"),
+                    ("OPENAI_API_KEY", key),
                 ]
             case .grok:
                 // Grok CLI reads GROK_* (not XAI_*) and speaks the
                 // OpenAI-compatible API at GROK_BASE_URL.
                 return [
                     ("GROK_BASE_URL", "\(base)/v1"),
-                    ("GROK_API_KEY", "bromure-local"),
+                    ("GROK_API_KEY", key),
                     ("GROK_MODEL", model),
                 ]
             }
@@ -1747,6 +1748,22 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if fusionJudgeLocal, let m = fusionJudgeModel, !m.isEmpty { return m }
         if modelRouting != .cloud, let m = activeModelID, !m.isEmpty { return m }
         return nil
+    }
+
+    /// Every distinct local model this profile would load — per-tool `.local`
+    /// agents, the Fusion local leg + judge, and the active/routing model.
+    /// Used to warn when their combined memory approaches the host's, since
+    /// the engine can serve several at once (parallel models).
+    public var distinctLocalModelIDs: [String] {
+        var ids = Set<String>()
+        if authMode == .local, let m = activeModelID { ids.insert(m) }
+        for s in additionalTools where s.authMode == .local {
+            if let m = s.localModelID { ids.insert(m) }
+        }
+        if let m = fusionLocalLeg { ids.insert(m) }
+        if fusionJudgeLocal, let m = fusionJudgeModel { ids.insert(m) }
+        if modelRouting != .cloud, let m = activeModelID { ids.insert(m) }
+        return ids.filter { !$0.isEmpty }.sorted()
     }
 
     /// Whether Fusion can be engaged for this profile: at least two providers
