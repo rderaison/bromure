@@ -14,7 +14,7 @@ public enum InferenceEngine: String, Sendable {
         switch self {
         case .vllmMLX:
             return ["serve", model, "--host", host, "--port", String(port),
-                    "--api-key", apiKey]
+                    "--api-key", apiKey, "--enable-metrics"]
         }
     }
 
@@ -26,7 +26,7 @@ public enum InferenceEngine: String, Sendable {
         case .vllmMLX:
             return ["serve", "--models-config", configPath,
                     "--host", host, "--port", String(port),
-                    "--api-key", apiKey, "--continuous-batching"]
+                    "--api-key", apiKey, "--continuous-batching", "--enable-metrics"]
         }
     }
 

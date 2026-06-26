@@ -334,6 +334,21 @@ struct LocalToolAuthTests {
         #expect(plan.environment["HF_HUB_OFFLINE"] == "1")
     }
 
+    @Test("Prometheus metrics parse + sum across labels") func metricsParse() {
+        let text = """
+        # HELP vllm:generation_tokens_total Generated tokens
+        # TYPE vllm:generation_tokens_total counter
+        vllm:generation_tokens_total{model="a"} 100
+        vllm:generation_tokens_total{model="b"} 50
+        vllm:num_requests_running 2
+        garbage line without value
+        """
+        let m = InferenceMetrics.parse(text)
+        #expect(m.generationTokens == 150)   // summed across label sets
+        #expect(m.requestsRunning == 2)
+        #expect(m.promptTokens == nil)
+    }
+
     @Test("Distinct local models gather across tools + fusion") func distinctModels() {
         var p = Profile(name: "t", tool: .claude, authMode: .local)
         p.activeModelID = "m1"

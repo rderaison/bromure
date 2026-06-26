@@ -281,6 +281,12 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     inspectorItem.target = delegate
     windowMenu.addItem(inspectorItem)
 
+    let metricsItem = NSMenuItem(title: L("Inference Metrics…"),
+                                 action: #selector(ACAppDelegate.openInferenceMetricsAction(_:)),
+                                 keyEquivalent: "")
+    metricsItem.target = delegate
+    windowMenu.addItem(metricsItem)
+
     let approvalsItem = NSMenuItem(title: L("Credential Approvals…"),
                                    action: #selector(ACAppDelegate.openCredentialApprovalsAction(_:)),
                                    keyEquivalent: "")
@@ -1999,6 +2005,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// runs `init --force` from inside the GUI — same flow as the
     /// first-time setup, but proactive.
     private var traceInspectorWindow: NSWindow?
+    private var inferenceMetricsWindow: NSWindow?
     private var credentialApprovalsWindow: NSWindow?
     private var enrollmentWindow: NSWindow?
     private var preferencesWindow: NSWindow?
@@ -2009,6 +2016,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Wired to the "Trace Inspector…" menu item (⇧⌘I).
     /// Opens the inspector with no profile pre-filter.
+    @objc func openInferenceMetricsAction(_ sender: Any?) {
+        if let win = inferenceMetricsWindow {
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 480),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false)
+        win.title = NSLocalizedString("Inference Metrics", comment: "")
+        win.center()
+        win.contentView = NSHostingView(rootView: InferenceMetricsView())
+        win.delegate = self
+        win.isReleasedWhenClosed = false
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        inferenceMetricsWindow = win
+    }
+
     @objc func openTraceInspectorAction(_ sender: Any?) {
         openTraceInspector(for: nil)
     }
