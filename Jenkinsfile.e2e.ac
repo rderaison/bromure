@@ -197,6 +197,40 @@ pipeline {
                 }
             }
         }
+
+        stage('13. CLI plumbing') {
+            // `bromure-ac` subcommands over the owner-only control socket:
+            // vm ls, info, profiles ls/describe/rm, trace ls/summary/hostnames/
+            // clear, and the vm fusion guards. No VM required.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^13\\."'
+                }
+            }
+        }
+
+        stage('14. Profile options') {
+            // JSON round-trip for the new profile settings: closeAction
+            // (background/suspend/shutdown, default ask), bootAtStartup,
+            // startInBackground. No VM required.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^14\\."'
+                }
+            }
+        }
+
+        stage('15. CLI VM lifecycle') {
+            // Boots VMs via the CLI (needs the base image from the Init stage):
+            // vm run/ls/exec/describe (MAC + IP), stable IP across stop/restart
+            // (sqlite DHCP lease), startInBackground = detached boot, and the
+            // profiles-rm-while-running guard.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^15\\."'
+                }
+            }
+        }
     }
 
     post {

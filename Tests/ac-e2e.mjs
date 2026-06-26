@@ -19,7 +19,8 @@
  *   node Tests/ac-e2e.mjs --no-sessions   # skip the session-launch tests
  */
 
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
+import { readFileSync } from "fs";
 
 const APP_NAME = "Bromure Agentic Coding";
 const API = process.env.BROMURE_AC_API_URL || "http://127.0.0.1:9223";
@@ -84,6 +85,34 @@ async function api(method, path, body) {
     return json;
   } catch {
     return { _status: res.status, _error: `Invalid JSON: ${text.slice(0, 200)}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CLI bridge (`bromure-ac` subcommands over the owner-only control socket)
+// ---------------------------------------------------------------------------
+
+function resolveACBin() {
+  if (process.env.BROMURE_AC_BIN) return process.env.BROMURE_AC_BIN;
+  // The Jenkins Build stage writes the bundle path here.
+  try {
+    const bundle = readFileSync(".app_bundle_path", "utf-8").trim();
+    if (bundle) return `${bundle}/Contents/MacOS/bromure-ac`;
+  } catch {}
+  return ".build/arm64-apple-macosx/release/Bromure Agentic Coding.app/Contents/MacOS/bromure-ac";
+}
+const AC_BIN = resolveACBin();
+
+// Run a `bromure-ac` subcommand. execFile (no shell) so spaces in the bundle
+// path are safe. Returns trimmed stdout+stderr; on non-zero exit either returns
+// the output (allowFail) or throws with it.
+function cli(args, { timeoutMs = 60000, allowFail = false } = {}) {
+  try {
+    return execFileSync(AC_BIN, args, { encoding: "utf-8", timeout: timeoutMs }).trim();
+  } catch (e) {
+    const out = ((e.stdout || "") + (e.stderr || "")).toString().trim();
+    if (allowFail) return out;
+    throw new Error(`cli ${args.join(" ")} (exit ${e.status ?? "?"}): ${out || e.message}`);
   }
 }
 
@@ -1431,6 +1460,261 @@ async function main() {
       assertEq(r.detector, "source");
       assert(typeof r.flagged === "boolean", "flagged field missing");
       if (r.modelInstalled) assert(r.flagged, "PromptGuard should flag a blatant injection");
+    });
+  }
+
+  // ======================================================================
+  // 13. CLI plumbing (bromure-ac over the control socket — no VM)
+  // ======================================================================
+  console.log("\n--- 13. CLI ---");
+
+  // Reachable = the CLI binary ran AND an agent answered (a `vm ls` table or
+  // "No running VMs"). A missing binary or down socket misses both → skip.
+  const cliReachable = /No running VMs|VM ID/.test(cli(["vm", "ls"], { allowFail: true }));
+  if (!cliReachable) {
+    console.log(
+      "  \x1b[33mSKIP\x1b[0m  CLI tests (bromure-ac binary not found or control socket down)"
+    );
+  } else {
+    await test("13.1 vm ls reports running VMs (table or empty)", async () => {
+      const out = cli(["vm", "ls"]);
+      assert(/No running VMs|VM ID/.test(out), `unexpected vm ls output: ${out}`);
+    });
+
+    await test("13.2 info prints something about the base image", async () => {
+      const out = cli(["info"], { allowFail: true });
+      assert(out.length > 0, "info produced no output");
+    });
+
+    await test("13.3 profiles ls includes a freshly-created profile", async () => {
+      const id = createProfile("ACE2E_CLI_List");
+      try {
+        assertIncludes(cli(["profiles", "ls"]), "ACE2E_CLI_List");
+      } finally {
+        deleteProfile(id);
+      }
+    });
+
+    await test("13.4 profiles describe shows tool/auth/mac, no secrets", async () => {
+      const id = createProfile("ACE2E_CLI_Desc");
+      try {
+        const out = cli(["profiles", "describe", "ACE2E_CLI_Desc"]);
+        assertIncludes(out, "ACE2E_CLI_Desc");
+        assertIncludes(out, "tool");
+        assertIncludes(out, "mac");
+        assert(!/sk-ant-|ghp_|api[-_ ]?key.*\S{20}/i.test(out), `describe leaked a secret: ${out}`);
+      } finally {
+        deleteProfile(id);
+      }
+    });
+
+    await test("13.5 profiles rm deletes a stopped profile", async () => {
+      const id = createProfile("ACE2E_CLI_Rm");
+      cli(["profiles", "rm", "ACE2E_CLI_Rm", "-f"]);
+      assert(!cli(["profiles", "ls"]).includes("ACE2E_CLI_Rm"), "profile still listed after rm");
+      deleteProfile(id); // safety net (already gone)
+    });
+
+    await test("13.6 trace ls/summary/hostnames exit cleanly", async () => {
+      for (const sub of ["ls", "summary", "hostnames"]) {
+        cli(["trace", sub]); // cli() throws on non-zero exit — that IS the assertion
+      }
+    });
+
+    await test("13.7 trace clear succeeds", async () => {
+      assertIncludes(cli(["trace", "clear", "-f"]), "Cleared");
+    });
+
+    await test("13.8 vm fusion on an unknown VM errors clearly", async () => {
+      const out = cli(["vm", "fusion", "enable", "no-such-vm-zzz"], { allowFail: true });
+      assert(/not found/i.test(out), `expected 'not found', got: ${out}`);
+    });
+
+    await test("13.9 vm fusion rejects a bad action verb", async () => {
+      const out = cli(["vm", "fusion", "sideways", "whatever"], { allowFail: true });
+      assert(/enable|disable/i.test(out), `expected an action hint, got: ${out}`);
+    });
+  }
+
+  // ======================================================================
+  // 14. New profile options (close action / boot-at-login / start-in-bg)
+  //     JSON-layer only — no VM required.
+  // ======================================================================
+  console.log("\n--- 14. Profile options ---");
+
+  await test("14.1 A profile with no closeAction decodes to the 'ask' default", async () => {
+    const id = createProfile("ACE2E_Opt_Default");
+    try {
+      const p = getProfileJSON(id);
+      delete p.closeAction;
+      setProfileJSON(id, p);
+      assertEq(getProfileJSON(id).closeAction, "ask");
+    } finally {
+      deleteProfile(id);
+    }
+  });
+
+  await test("14.2 closeAction roundtrips background/suspend/shutdown/ask", async () => {
+    const id = createProfile("ACE2E_Opt_Close");
+    try {
+      for (const v of ["background", "suspend", "shutdown", "ask"]) {
+        const p = getProfileJSON(id);
+        p.closeAction = v;
+        setProfileJSON(id, p);
+        assertEq(getProfileJSON(id).closeAction, v);
+      }
+    } finally {
+      deleteProfile(id);
+    }
+  });
+
+  await test("14.3 bootAtStartup roundtrips (default off)", async () => {
+    const id = createProfile("ACE2E_Opt_Boot");
+    try {
+      assert(!getProfileJSON(id).bootAtStartup, "bootAtStartup should default off");
+      const p = getProfileJSON(id);
+      p.bootAtStartup = true;
+      setProfileJSON(id, p);
+      assertEq(getProfileJSON(id).bootAtStartup, true);
+    } finally {
+      deleteProfile(id);
+    }
+  });
+
+  await test("14.4 startInBackground roundtrips (default off)", async () => {
+    const id = createProfile("ACE2E_Opt_StartBg");
+    try {
+      assert(!getProfileJSON(id).startInBackground, "startInBackground should default off");
+      const p = getProfileJSON(id);
+      p.startInBackground = true;
+      setProfileJSON(id, p);
+      assertEq(getProfileJSON(id).startInBackground, true);
+    } finally {
+      deleteProfile(id);
+    }
+  });
+
+  // ======================================================================
+  // 15. CLI + options, VM-side (boots VMs via the CLI — needs a base image)
+  // ======================================================================
+  console.log("\n--- 15. CLI VM lifecycle ---");
+
+  // Reuse the section 6/8 base-image gate.
+  let cliVMable = cliReachable;
+  if (cliReachable && !SKIP_SESSIONS) {
+    try {
+      const pid = createProfile("ACE2E_CLI_Probe");
+      if (ac(`open ac session "${pid}"`).startsWith("error:")) cliVMable = false;
+      await sleep(1000);
+      ac(`close ac session "${pid}"`);
+      await sleep(500);
+      deleteProfile(pid);
+    } catch {
+      cliVMable = false;
+    }
+  } else {
+    cliVMable = false;
+  }
+
+  if (!cliVMable) {
+    console.log(
+      "  \x1b[33mSKIP\x1b[0m  CLI VM tests (no base image, --no-sessions, or socket unreachable)"
+    );
+  } else {
+    const runArgs = ["--tool", "claude", "--auth", "subscription"];
+
+    // describe text once the guest has reported an IP.
+    async function describeWithIP(name) {
+      let v = "";
+      for (let i = 0; i < 25; i++) {
+        v = cli(["vm", "describe", name], { allowFail: true });
+        if (/^\s*ip\s+\d+\.\d+\.\d+\.\d+/m.test(v)) return v;
+        await sleep(2000);
+      }
+      return v;
+    }
+    const ipOf = (desc) => (desc.match(/^\s*ip\s+(\d+\.\d+\.\d+\.\d+)/m) || [])[1] || "";
+
+    // boot via the CLI, wait for the shell agent, run cb, always clean up.
+    async function withCLIVM(name, extra, cb) {
+      cli(["vm", "run", "--name", name, ...runArgs, "-d", ...extra]);
+      try {
+        let up = false;
+        for (let i = 0; i < 20; i++) {
+          const r = cli(["vm", "exec", name, "true"], { allowFail: true });
+          if (!/No shell connection|not found|not running/i.test(r)) {
+            up = true;
+            break;
+          }
+          await sleep(3000);
+        }
+        if (!up) throw new Error("VM shell never came up via the CLI");
+        await cb(name);
+      } finally {
+        cli(["vm", "kill", name], { allowFail: true });
+        cli(["profiles", "rm", name, "-f"], { allowFail: true });
+      }
+    }
+
+    await test("15.1 vm run → ls / exec / describe (MAC + IP) all work", async () => {
+      await withCLIVM("ACE2E_CLI_VM", [], async (name) => {
+        assertIncludes(cli(["vm", "ls"]), name);
+        assertIncludes(cli(["vm", "exec", name, "uname -s"]), "Linux");
+        const v = await describeWithIP(name);
+        assert(/^\s*mac\s+([0-9a-f]{2}:){5}[0-9a-f]{2}/im.test(v), `no MAC in describe:\n${v}`);
+        assert(/^\s*ip\s+\d+\.\d+\.\d+\.\d+/m.test(v), `no IP in describe:\n${v}`);
+      });
+    });
+
+    await test("15.2 a profile keeps its IP across stop + restart (sqlite lease)", async () => {
+      const name = "ACE2E_CLI_IP";
+      try {
+        cli(["vm", "run", "--name", name, ...runArgs, "-d"]);
+        const ip1 = ipOf(await describeWithIP(name));
+        assert(ip1, "no IP on first boot");
+        cli(["vm", "kill", name]);
+        await sleep(2500);
+        cli(["vm", "run", "--profile", name, "-d"]);
+        const ip2 = ipOf(await describeWithIP(name));
+        assertEq(ip2, ip1, "IP changed after restart");
+      } finally {
+        cli(["vm", "kill", name], { allowFail: true });
+        cli(["profiles", "rm", name, "-f"], { allowFail: true });
+      }
+    });
+
+    await test("15.3 startInBackground boots the VM detached (no window)", async () => {
+      const name = "ACE2E_CLI_Bg";
+      try {
+        // Create the profile, flag startInBackground, then run WITHOUT -d.
+        cli(["vm", "run", "--name", name, ...runArgs, "-d"]);
+        cli(["vm", "kill", name]);
+        await sleep(1500);
+        const p = getProfileJSON(name);
+        p.startInBackground = true;
+        setProfileJSON(name, p);
+        cli(["vm", "run", "--profile", name]); // no -d
+        let win = "";
+        for (let i = 0; i < 25; i++) {
+          const m = cli(["vm", "describe", name], { allowFail: true }).match(/^\s*window\s+(\w+)/m);
+          if (m) {
+            win = m[1];
+            if (win === "detached") break;
+          }
+          await sleep(2000);
+        }
+        assertEq(win, "detached", "startInBackground profile did not start detached");
+      } finally {
+        cli(["vm", "kill", name], { allowFail: true });
+        cli(["profiles", "rm", name, "-f"], { allowFail: true });
+      }
+    });
+
+    await test("15.4 profiles rm refuses while the VM is running", async () => {
+      await withCLIVM("ACE2E_CLI_RmGuard", [], async (name) => {
+        const out = cli(["profiles", "rm", name, "-f"], { allowFail: true });
+        assert(/running VM/i.test(out), `expected a refusal, got: ${out}`);
+      });
     });
   }
 
