@@ -781,18 +781,63 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .grok:   return "XAI_API_KEY"
             }
         }
+
+        /// Guest-side base URL for the on-host inference engine (Path 1):
+        /// 127.0.0.1:11434 → vsock 8446 bridge → host loopback engine.
+        public static let localEngineBaseURL = "http://127.0.0.1:11434"
+
+        /// Env exports that pin this tool at the local engine serving
+        /// `model`. The model name must match what the engine reports in
+        /// `/v1/models` (we launch it with `--model <repo>`, so it's the
+        /// repo). Keys are dummies — the engine ignores them.
+        ///
+        /// Claude Code resolves *several* model slots (main + small/fast +
+        /// the opus/sonnet/haiku aliases the `/model` picker maps to); we
+        /// point every slot at the one local model so no slot falls back to
+        /// a cloud model the engine doesn't serve.
+        public func localEnvExports(model: String) -> [(name: String, value: String)] {
+            let base = Self.localEngineBaseURL
+            switch self {
+            case .claude:
+                return [
+                    ("ANTHROPIC_BASE_URL", base),
+                    ("ANTHROPIC_AUTH_TOKEN", "bromure-local"),
+                    ("ANTHROPIC_API_KEY", "bromure-local"),
+                    ("ANTHROPIC_MODEL", model),
+                    ("ANTHROPIC_SMALL_FAST_MODEL", model),
+                    ("ANTHROPIC_DEFAULT_OPUS_MODEL", model),
+                    ("ANTHROPIC_DEFAULT_SONNET_MODEL", model),
+                    ("ANTHROPIC_DEFAULT_HAIKU_MODEL", model),
+                ]
+            case .codex:
+                return [
+                    ("OPENAI_BASE_URL", "\(base)/v1"),
+                    ("OPENAI_API_KEY", "bromure-local"),
+                    ("OPENAI_MODEL", model),
+                ]
+            case .grok:
+                // Grok Build speaks the OpenAI-compatible API; best-effort.
+                return [
+                    ("XAI_BASE_URL", "\(base)/v1"),
+                    ("XAI_API_KEY", "bromure-local"),
+                    ("XAI_MODEL", model),
+                ]
+            }
+        }
     }
 
     public enum AuthMode: String, Codable, CaseIterable, Sendable {
         case token         // user-supplied API key, injected as env var
         case subscription  // user runs `claude login` / `codex login` in the VM
         case bedrock       // AWS Bedrock via SSO or static IAM keys
+        case local         // on-host vllm-mlx engine; tool pinned via base-URL env
 
         public var displayName: String {
             switch self {
             case .token:        return "API token"
             case .subscription: return "Subscription (interactive login)"
             case .bedrock:      return "Bedrock (AWS)"
+            case .local:        return "Local model"
             }
         }
     }
@@ -806,6 +851,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         public var authMode: AuthMode
         /// Cleartext API key. Only honored when `authMode == .token`.
         public var apiKey: String?
+        /// Catalog id (or HF repo) of the local model to serve this tool.
+        /// Only honored when `authMode == .local`.
+        public var localModelID: String?
         /// When true, every fake→real swap of this tool's API key
         /// prompts on the host. See `ConsentBroker`.
         public var requireApproval: Bool
@@ -813,21 +861,24 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         public var id: Tool { tool }
 
         public init(tool: Tool, authMode: AuthMode = .token,
-                    apiKey: String? = nil, requireApproval: Bool = false) {
+                    apiKey: String? = nil, localModelID: String? = nil,
+                    requireApproval: Bool = false) {
             self.tool = tool
             self.authMode = authMode
             self.apiKey = apiKey
+            self.localModelID = localModelID
             self.requireApproval = requireApproval
         }
 
         private enum CodingKeys: String, CodingKey {
-            case tool, authMode, apiKey, requireApproval
+            case tool, authMode, apiKey, localModelID, requireApproval
         }
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             tool            = try c.decode(Tool.self, forKey: .tool)
             authMode        = try c.decodeIfPresent(AuthMode.self, forKey: .authMode) ?? .token
             apiKey          = try c.decodeIfPresent(String.self, forKey: .apiKey)
+            localModelID    = try c.decodeIfPresent(String.self, forKey: .localModelID)
             requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
         }
         public func encode(to encoder: Encoder) throws {
@@ -835,6 +886,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             try c.encode(tool, forKey: .tool)
             try c.encode(authMode, forKey: .authMode)
             try c.encodeIfPresent(apiKey, forKey: .apiKey)
+            try c.encodeIfPresent(localModelID, forKey: .localModelID)
             if requireApproval { try c.encode(true, forKey: .requireApproval) }
         }
     }
@@ -1612,7 +1664,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// agent (e.g. SessionDisk's api_key.env writer, the welcome message)
     /// can iterate this without caring which one is "primary".
     public var allToolSpecs: [ToolSpec] {
-        var specs = [ToolSpec(tool: tool, authMode: authMode, apiKey: apiKey)]
+        // The primary tool's local model is the profile-level activeModelID.
+        var specs = [ToolSpec(tool: tool, authMode: authMode, apiKey: apiKey,
+                              localModelID: activeModelID)]
         // Defensive: filter out any duplicate of the primary in case the
         // editor's invariant slipped (or a JSON edit bypassed the decoder).
         for s in additionalTools where s.tool != tool {
@@ -1636,12 +1690,30 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             return tool == .claude && awsCredentials.isUsable
         case .subscription:
             return true
+        case .local:
+            // Local is a backend, not a cloud identity — it isn't a Fusion
+            // leg (Fusion intercepts the cloud APIs), so it doesn't count
+            // toward Fusion eligibility here.
+            return false
         }
     }
 
     /// Providers that can participate in Fusion (enabled + credentialed).
     public var fusionUsableProviders: [Tool] {
         Tool.allCases.filter { hasUsableCredential(for: $0) }
+    }
+
+    /// The model id the on-host engine should serve for this profile, or
+    /// nil if no local inference is needed. Single-engine phase: one model.
+    /// A tool explicitly in `.local` mode wins (primary first); otherwise
+    /// Local/Hybrid routing needs the active model served too.
+    public var localEngineModelID: String? {
+        if authMode == .local, let m = activeModelID, !m.isEmpty { return m }
+        for spec in additionalTools where spec.authMode == .local {
+            if let m = spec.localModelID, !m.isEmpty { return m }
+        }
+        if modelRouting != .cloud, let m = activeModelID, !m.isEmpty { return m }
+        return nil
     }
 
     /// Whether Fusion can be engaged for this profile: at least two providers

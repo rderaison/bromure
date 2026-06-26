@@ -277,6 +277,75 @@ struct EngineProvisionerTests {
     }
 }
 
+// MARK: - Per-tool local model auth (env injection)
+
+@Suite("Local model per-tool")
+struct LocalToolAuthTests {
+    @Test("Claude points every model slot at the local model") func claudeSlots() {
+        let env = Dictionary(uniqueKeysWithValues:
+            Profile.Tool.claude.localEnvExports(model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+                .map { ($0.name, $0.value) })
+        #expect(env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:11434")
+        // All five model slots (main + small-fast + the 3 aliases) → local.
+        for k in ["ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+                  "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                  "ANTHROPIC_DEFAULT_HAIKU_MODEL"] {
+            #expect(env[k] == "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        }
+        #expect(env["ANTHROPIC_API_KEY"] == "bromure-local")
+    }
+
+    @Test("Codex + Grok get OpenAI-style base URL + model") func codexGrok() {
+        let codex = Dictionary(uniqueKeysWithValues:
+            Profile.Tool.codex.localEnvExports(model: "m").map { ($0.name, $0.value) })
+        #expect(codex["OPENAI_BASE_URL"] == "http://127.0.0.1:11434/v1")
+        #expect(codex["OPENAI_MODEL"] == "m")
+        let grok = Dictionary(uniqueKeysWithValues:
+            Profile.Tool.grok.localEnvExports(model: "m").map { ($0.name, $0.value) })
+        #expect(grok["XAI_BASE_URL"] == "http://127.0.0.1:11434/v1")
+        #expect(grok["XAI_API_KEY"] == "bromure-local")
+    }
+
+    @Test("ToolSpec local model round-trips through Codable") func specRoundTrip() throws {
+        let spec = Profile.ToolSpec(tool: .claude, authMode: .local,
+                                    localModelID: "qwen2.5-coder-7b-mlx-4bit")
+        let back = try JSONDecoder().decode(Profile.ToolSpec.self,
+                                            from: try JSONEncoder().encode(spec))
+        #expect(back.authMode == .local)
+        #expect(back.localModelID == "qwen2.5-coder-7b-mlx-4bit")
+    }
+
+    @Test("Primary tool's local model is the profile activeModelID") func primarySpec() {
+        var p = Profile(name: "t", tool: .claude, authMode: .local)
+        p.activeModelID = "qwen2.5-coder-7b-mlx-4bit"
+        let primary = p.allToolSpecs.first { $0.tool == .claude }
+        #expect(primary?.localModelID == "qwen2.5-coder-7b-mlx-4bit")
+    }
+
+    @Test("Engine model resolves from the right source") func engineModel() {
+        // Primary in local mode → its activeModelID.
+        var p = Profile(name: "t", tool: .claude, authMode: .local)
+        p.activeModelID = "m-primary"
+        #expect(p.localEngineModelID == "m-primary")
+
+        // Cloud primary, but an additional tool is local → its model.
+        var p2 = Profile(name: "t", tool: .claude, authMode: .token)
+        p2.additionalTools = [Profile.ToolSpec(tool: .codex, authMode: .local,
+                                               localModelID: "m-codex")]
+        #expect(p2.localEngineModelID == "m-codex")
+
+        // Hybrid routing also needs the active model served.
+        var p3 = Profile(name: "t", tool: .claude, authMode: .token)
+        p3.modelRouting = .hybrid
+        p3.activeModelID = "m-route"
+        #expect(p3.localEngineModelID == "m-route")
+
+        // Pure cloud, no local tool → nothing to serve.
+        let p4 = Profile(name: "t", tool: .claude, authMode: .token)
+        #expect(p4.localEngineModelID == nil)
+    }
+}
+
 // MARK: - Profile persistence round-trip
 
 @Suite("Profile routing persistence")

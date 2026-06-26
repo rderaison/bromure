@@ -552,20 +552,20 @@ public final class SessionDisk {
             ]
             proxyLines.append(contentsOf: ghEnv)
 
-            // Local inference (Path 1, vLLM.md §3.3). When routing is
-            // `.local`, pin the agent at the on-host engine via the vsock
-            // bridge (127.0.0.1:11434 → vsock 8446 → loopback engine).
-            // 127.0.0.1 is already in NO_PROXY above, so these requests
-            // bypass the MITM proxy and hit the bridge directly. Keys are
-            // dummies — the engine ignores them. `.hybrid` deliberately
-            // leaves the base URLs unset so traffic flows to the cloud
-            // host and the MITM routing/fallback engine decides per
-            // session; `.cloud` is today's behaviour (nothing injected).
-            if profile.modelRouting == .local {
-                proxyLines.append("export ANTHROPIC_BASE_URL=http://127.0.0.1:11434")
-                proxyLines.append("export ANTHROPIC_API_KEY=bromure-local")
-                proxyLines.append("export OPENAI_BASE_URL=http://127.0.0.1:11434/v1")
-                proxyLines.append("export OPENAI_API_KEY=bromure-local")
+            // Local inference (Path 1, vLLM.md §3.3). For each tool the user
+            // set to "Local model", pin it at the on-host engine via the
+            // vsock bridge (127.0.0.1:11434 → vsock 8446 → loopback engine)
+            // and point every model slot at the selected model. 127.0.0.1 is
+            // already in NO_PROXY above, so these bypass the MITM proxy and
+            // hit the bridge directly; keys are dummies the engine ignores.
+            // (This is the explicit per-tool path; transparent Hybrid routing
+            // is handled separately by the MITM engine, not here.)
+            for spec in profile.allToolSpecs where spec.authMode == .local {
+                guard let id = spec.localModelID, !id.isEmpty else { continue }
+                let model = CatalogStore.shared.resolve(id)?.repo ?? id
+                for export in spec.tool.localEnvExports(model: model) {
+                    proxyLines.append("export \(export.name)=\(shellQuote(export.value))")
+                }
             }
 
             // User-defined env vars from the profile. No substitution
@@ -1057,6 +1057,8 @@ public final class SessionDisk {
                 s += "• `\(spec.tool.rawValue) login` once, then `\(spec.tool.rawValue)`.\n"
             case .bedrock:
                 s += "• `\(spec.tool.rawValue)` — using AWS Bedrock credentials.\n"
+            case .local:
+                s += "• `\(spec.tool.rawValue)` — using the local model (on-device).\n"
             }
         }
         return s

@@ -776,6 +776,12 @@ struct ProfileEditorView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            // Local models the user can pin a tool to — the installed ones
+            // (download more in the Local Models section). Empty → the
+            // "Local model" auth option is greyed out.
+            let localModels = CatalogStore.shared.effective().models
+                .filter { CatalogStore.shared.isInstalled(repo: $0.repo) }
+
             ForEach(Profile.Tool.allCases, id: \.self) { t in
                 let sub = subscriptionInfo(for: t)
                 ToolConfigCard(
@@ -783,6 +789,7 @@ struct ProfileEditorView: View {
                     isPrimary: draft.tool == t,
                     isEnabled: isToolEnabled(t),
                     spec: bindingForTool(t),
+                    localModels: localModels,
                     bedrockModelID: $draft.bedrockModelID,
                     onToggleEnabled: { setToolEnabled(t, enabled: $0) },
                     onMakePrimary: { setPrimary(t) },
@@ -938,6 +945,7 @@ struct ProfileEditorView: View {
                         tool: t,
                         authMode: self.draft.authMode,
                         apiKey: self.draft.apiKey,
+                        localModelID: self.draft.activeModelID,
                         requireApproval: self.draft.apiKeyRequiresApproval)
                 }
                 if let s = self.draft.additionalTools.first(where: { $0.tool == t }) {
@@ -949,6 +957,7 @@ struct ProfileEditorView: View {
                 if t == self.draft.tool {
                     self.draft.authMode = newValue.authMode
                     self.draft.apiKey   = newValue.apiKey
+                    self.draft.activeModelID = newValue.localModelID
                     self.draft.apiKeyRequiresApproval = newValue.requireApproval
                 } else if let i = self.draft.additionalTools.firstIndex(where: { $0.tool == t }) {
                     self.draft.additionalTools[i] = newValue
@@ -3906,6 +3915,9 @@ private struct ToolConfigCard: View {
     let isPrimary: Bool
     let isEnabled: Bool
     @Binding var spec: Profile.ToolSpec
+    /// Installed local models the user can pin this tool to. Empty → the
+    /// "Local model" option is greyed out.
+    let localModels: [CatalogModel]
     @Binding var bedrockModelID: String
     let onToggleEnabled: (Bool) -> Void
     let onMakePrimary: () -> Void
@@ -3916,6 +3928,15 @@ private struct ToolConfigCard: View {
     let subscriptionRegisteredAt: Date?
     let onRegisterSubscription: (() -> Void)?
     let onForgetSubscription: (() -> Void)?
+
+    /// The base-URL env var this tool reads, for the explanatory caption.
+    private var localBaseURLEnvName: String {
+        switch tool {
+        case .claude: return "ANTHROPIC_BASE_URL"
+        case .codex:  return "OPENAI_BASE_URL"
+        case .grok:   return "XAI_BASE_URL"
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -3953,6 +3974,7 @@ private struct ToolConfigCard: View {
                         if m == .bedrock && tool != .claude {
                             EmptyView()
                         } else {
+                            let localDisabled = (m == .local && localModels.isEmpty)
                             HStack(spacing: 8) {
                                 Button { spec.authMode = m } label: {
                                     HStack(spacing: 6) {
@@ -3964,6 +3986,13 @@ private struct ToolConfigCard: View {
                                     }
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(localDisabled)
+                                .opacity(localDisabled ? 0.45 : 1)
+
+                                if localDisabled {
+                                    Text("— download a model in Local Models")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
 
                                 if m == .subscription, let onRegister = onRegisterSubscription {
                                     if subscriptionRegisteredAt != nil {
@@ -4017,6 +4046,20 @@ private struct ToolConfigCard: View {
                     Text("Configure AWS credentials (SSO or static keys) in the Credentials → AWS section.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                case .local:
+                    if localModels.isEmpty {
+                        Text("No local models installed yet. Enable and download one in the Local Models section, then pick it here.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Picker(NSLocalizedString("Model", comment: ""), selection: Binding(
+                            get: { spec.localModelID ?? localModels.first?.id ?? "" },
+                            set: { spec.localModelID = $0 })) {
+                            ForEach(localModels) { m in Text(m.name).tag(m.id) }
+                        }
+                        .pickerStyle(.menu)
+                        Text("Runs on this Mac via the local engine — \(tool.displayName) is pointed at it through \(localBaseURLEnvName).")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }
         }

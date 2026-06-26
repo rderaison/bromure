@@ -568,6 +568,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                           for: profile.id)
     }
 
+    /// Start (or switch) the on-host vllm-mlx engine for a session that
+    /// needs local inference — any tool in `.local` mode, or Local/Hybrid
+    /// routing. Runs in the background so it warms while the VM boots; the
+    /// guest reaches it once ready via the vsock-8446 bridge. No-op when the
+    /// profile needs no local model. (Single-engine phase: one model.)
+    @MainActor func startLocalEngineIfNeeded(for profile: Profile) {
+        guard let modelID = profile.localEngineModelID else { return }
+        let repo = CatalogStore.shared.resolve(modelID)?.repo ?? modelID
+        Task.detached(priority: .userInitiated) {
+            do {
+                try await InferenceService.shared.ensureRunning(modelRepo: repo)
+                SupplyChainLog.shared.record("[inference] engine serving \(repo)")
+            } catch {
+                SupplyChainLog.shared.record("[inference] engine start failed: \(error)")
+            }
+        }
+    }
+
     func makeFusionConfig(for profile: Profile) -> Fusion.Config? {
         let usable = profile.fusionUsableProviders
         guard usable.count >= 2 else { return nil }
@@ -1485,6 +1503,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // small (it's idle and tiny) but worth tidying up at least
         // for the clean-quit path.
         mitmEngine?.privateAgent.terminate()
+        // Stop the local inference engine so vllm-mlx doesn't outlive us.
+        Task { await InferenceService.shared.stop() }
     }
 
     /// Catch the catchable abnormal-termination signals so we still
@@ -3456,6 +3476,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 engine.setFusionEngaged(false, for: profile.id)
                 engine.setFusionConfig(self.makeFusionConfig(for: profile), for: profile.id)
                 self.applyRouting(engine, for: profile)
+                self.startLocalEngineIfNeeded(for: profile)
             }
             // Keyboard layout bridge — pushes the macOS layout into the
             // guest at boot and follows live changes (or pins an
@@ -4436,6 +4457,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 engine.setFusionEngaged(false, for: profile.id)
                 engine.setFusionConfig(self.makeFusionConfig(for: profile), for: profile.id)
                 self.applyRouting(engine, for: profile)
+                self.startLocalEngineIfNeeded(for: profile)
             }
             if let dev = sandbox.socketDevice {
                 win.keyboardBridge = KeyboardBridge(

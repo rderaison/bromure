@@ -52,6 +52,10 @@ public actor InferenceService {
     public static let enginePort = 11434
     public static let engineHost = "127.0.0.1"
 
+    /// Process-wide engine. Single shared instance (one model loaded) for
+    /// now; the per-model pool + single-port model router come next.
+    public static let shared = InferenceService()
+
     public let engine: InferenceEngine
     private let catalog: CatalogStore
     private var process: Process?

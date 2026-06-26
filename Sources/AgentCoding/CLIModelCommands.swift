@@ -188,8 +188,21 @@ struct ModelCatalogList: ParsableCommand {
     @Flag(name: .long, help: "Show models that won't fit this Mac too.")
     var all = false
 
+    @Flag(name: .long, help: "Skip the live catalog refresh; use bundled + cached only.")
+    var offline = false
+
     func run() throws {
         let hostGB = HostMemory.unifiedMemoryGB()
+        // Live lookup against dl.bromure.io/mlx/catalog.json (merged over the
+        // bundled baseline). Non-fatal — falls back to bundled + cached on
+        // any network failure.
+        if !offline {
+            let ok = try blockingRun { await CatalogStore.shared.refresh() }
+            if !ok {
+                FileHandle.standardError.write(Data(
+                    "warning: couldn't reach the catalog server; showing bundled + cached.\n".utf8))
+            }
+        }
         let cat = CatalogStore.shared.effective()
         print("Host unified memory: \(hostGB) GB\n")
         let header = String(format: "%-26@ %-7@ %-9@ %-7@ %@",
