@@ -1044,22 +1044,34 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// `.suspend` saves RAM to disk and resumes instantly next launch.
     /// `.shutdown` does a clean ACPI poweroff. `.ask` prompts each time.
     public enum CloseAction: String, Codable, CaseIterable, Sendable {
+        /// Keep the VM running in the background, detached — reattach later.
+        case background
         case suspend
         case shutdown
         case ask
 
         public var displayName: String {
             switch self {
-            case .suspend:  return NSLocalizedString("Suspend", comment: "")
-            case .shutdown: return NSLocalizedString("Shut down", comment: "")
-            case .ask:      return NSLocalizedString("Ask", comment: "")
+            case .background: return NSLocalizedString("Run in the background", comment: "")
+            case .suspend:    return NSLocalizedString("Suspend", comment: "")
+            case .shutdown:   return NSLocalizedString("Shut down", comment: "")
+            case .ask:        return NSLocalizedString("Ask", comment: "")
             }
         }
     }
 
-    /// What happens when the user closes a session window. Defaults to
-    /// `.suspend` so closing a window feels instant on next launch.
+    /// What happens when the user closes a session window: run in the
+    /// background (detach, VM keeps running), suspend, shut down, or ask each
+    /// time. Defaults to `.ask`.
     public var closeAction: CloseAction
+
+    /// Boot a VM for this profile automatically when the agent starts (at login,
+    /// via the LaunchAgent installed while any profile has this on). Default off.
+    public var bootAtStartup: Bool
+
+    /// Start this profile's VM detached (no window) — it boots and runs in the
+    /// background; reattach via the menu-bar item or `vm attach`. Default off.
+    public var startInBackground: Bool
 
     public enum NetworkMode: String, Codable, CaseIterable, Sendable {
         case nat
@@ -1201,7 +1213,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         keyboardLayoutOverride: String? = nil,
         keyRepeatDelayMs: Int? = nil,
         keyRepeatRateHz: Int? = nil,
-        closeAction: CloseAction = .suspend,
+        closeAction: CloseAction = .ask,
+        bootAtStartup: Bool = false,
+        startInBackground: Bool = false,
         mcpServers: [MCPServer] = []
     ) {
         self.id = id
@@ -1260,6 +1274,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.customForegroundHex = customForegroundHex
         self.fontLigatures = fontLigatures
         self.closeAction = closeAction
+        self.bootAtStartup = bootAtStartup
+        self.startInBackground = startInBackground
         self.mcpServers = mcpServers
     }
 
@@ -1301,6 +1317,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case digitalOceanTokenRequiresApproval
         case sshKeyRequiresApproval
         case closeAction
+        case bootAtStartup
+        case startInBackground
         case mcpServers
     }
 
@@ -1387,7 +1405,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         apiKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .apiKeyRequiresApproval) ?? false
         digitalOceanTokenRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .digitalOceanTokenRequiresApproval) ?? false
         sshKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .sshKeyRequiresApproval) ?? false
-        closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .suspend
+        closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .ask
+        bootAtStartup = try c.decodeIfPresent(Bool.self, forKey: .bootAtStartup) ?? false
+        startInBackground = try c.decodeIfPresent(Bool.self, forKey: .startInBackground) ?? false
         mcpServers = try c.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
     }
 
@@ -1501,6 +1521,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if sshKeyRequiresApproval { try c.encode(true, forKey: .sshKeyRequiresApproval) }
         try c.encode(closeAction, forKey: .closeAction)
+        if bootAtStartup { try c.encode(bootAtStartup, forKey: .bootAtStartup) }
+        if startInBackground { try c.encode(startInBackground, forKey: .startInBackground) }
         if !mcpServers.isEmpty {
             try c.encode(mcpServers, forKey: .mcpServers)
         }

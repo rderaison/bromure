@@ -95,6 +95,11 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// MAC (packed) → leased IPv4, so a client's REQUEST and later renewals get
     /// the same address its DISCOVER was offered. Guarded by `lock`.
     private var dhcpLeases: [UInt64: UInt32] = [:]
+    /// Optional sqlite backing for `dhcpLeases` so a MAC keeps its IP across
+    /// agent restarts (set via `enablePersistentLeases(at:)`, opened when the
+    /// interface starts). nil = in-memory only.
+    private var leaseStoreURL: URL?
+    private var leaseStore: DHCPLeaseStore?
     /// Locally-administered MAC we send DHCP replies from. The real default
     /// route (gateway IP) still resolves to vmnet's own gateway MAC via ARP, so
     /// routing and NAT egress are unaffected by this synthetic address.
@@ -114,6 +119,16 @@ public final class VMNetSwitch: @unchecked Sendable {
         guard !started else { return }
         self.ascendingSubnet = ascendingSubnet
         self.bridgePeers = bridgePeers
+    }
+
+    /// Persist DHCP leases to a sqlite db at `url` so a MAC keeps its IP across
+    /// agent restarts. Must be called before the interface starts (i.e. before
+    /// the first `attachPort()`); a no-op afterwards.
+    public func enablePersistentLeases(at url: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !started else { return }
+        self.leaseStoreURL = url
     }
 
     /// The subnet the shared interface is leasing from, once started. Lets a
@@ -261,6 +276,13 @@ public final class VMNetSwitch: @unchecked Sendable {
 
         guard success, vmnetInterface != nil else { return false }
         if switchDebug { print("[VMNetSwitch] shared vmnet started, max packet size \(maxPacketSize)") }
+
+        if let leaseStoreURL {
+            // Cap the persisted table at the number of leasable addresses — no
+            // point remembering more MACs than the pool can ever serve at once.
+            leaseStore = DHCPLeaseStore(
+                url: leaseStoreURL, capacity: Int(dhcpPoolEnd - dhcpPoolStart + 1))
+        }
 
         startVmnetReadCallback()
         return true
@@ -488,10 +510,20 @@ public final class VMNetSwitch: @unchecked Sendable {
         defer { lock.unlock() }
         if let ip = dhcpLeases[mac] { return ip }
         let taken = Set(dhcpLeases.values)
+        // Prefer the address this MAC held last time (persisted across restarts)
+        // so a profile's VM keeps the same IP as often as possible — only moving
+        // off it if it's taken or no longer inside the current subnet's pool.
+        if let persisted = leaseStore?.ip(forMAC: mac),
+           persisted >= dhcpPoolStart, persisted <= dhcpPoolEnd,
+           persisted != gatewayIP, !taken.contains(persisted) {
+            dhcpLeases[mac] = persisted
+            return persisted
+        }
         var ip = dhcpPoolStart
         while ip <= dhcpPoolEnd {
             if ip != gatewayIP && !taken.contains(ip) {
                 dhcpLeases[mac] = ip
+                leaseStore?.record(mac: mac, ip: ip)
                 return ip
             }
             ip += 1

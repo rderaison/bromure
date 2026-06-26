@@ -650,6 +650,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Always-on Unix control socket for the `bromure-ac` CLI (exec / vm …).
         startControlSocket()
 
+        // Persist the in-process DHCP server's leases so a profile's VM — which
+        // already has a stable per-profile MAC (MACBindings) — keeps the same IP
+        // across agent restarts, as often as the address stays free.
+        let acSupport = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("BromureAC", isDirectory: true)
+        VMNetSwitch.shared.enablePersistentLeases(
+            at: acSupport.appendingPathComponent("dhcp-leases.sqlite"))
+
+        // Offer to install the `bromure-cli` command-line tool (admin prompt).
+        // Deferred so the main window appears first; no-op for the headless agent.
+        DispatchQueue.main.async { [weak self] in self?.offerCLISymlinkIfNeeded() }
+
+        // Keep the login LaunchAgent in sync, then (headless login agent only)
+        // boot any profiles flagged "Start at login".
+        reconcileBootLaunchAgent()
+        DispatchQueue.main.async { [weak self] in self?.bootFlaggedProfilesAtStartup() }
+
         // Default SSH key: every new profile inherits this keypair via
         // the user's preferences template. Generate it on first launch
         // (idempotent — `ensureExists` no-ops when the files are
@@ -1008,7 +1026,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "apiKeySet": (p.apiKey?.isEmpty == false),
             "memoryGB": p.memoryGB,
             "networkMode": p.networkMode.rawValue,
+            "macAddress": MACBindings.shared.macAddress(for: p.id),
             "closeAction": p.closeAction.rawValue,
+            "bootAtStartup": p.bootAtStartup,
+            "startInBackground": p.startInBackground,
             "folderPaths": p.folderPaths,
             "mcpServers": p.mcpServers.map { $0.name },
             "sshKeySet": (p.sshPublicKey?.isEmpty == false),
@@ -1071,6 +1092,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "cpuCount": UbuntuSandboxVM.runtimeCPUs,
                 "memoryGB": s.profile.memoryGB,
                 "networkMode": s.profile.networkMode.rawValue,
+                "macAddress": MACBindings.shared.macAddress(for: s.profileID),
                 "diskPath": diskURL.path,
                 "diskAllocatedBytes": diskAllocated,
                 "baseImageVersion": s.profile.baseImageVersionAtClone ?? "unknown",
@@ -1450,17 +1472,134 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return false
         }
 
-        // Closing a session window now *detaches* — the VM keeps running in the
-        // registry and can be reattached. The real stop (suspend/poweroff) is
-        // driven by `vm kill`, ⌘Q, the status item, or the guest closing its
-        // last shell. So there's nothing to prompt about here.
+        guard let session = sender as? TabbedSessionWindow else { return true }
+        // Resolve the profile's "When closing the window" preference (.ask is
+        // turned into a prompt). nil = the user cancelled → keep the window open.
+        guard let action = resolveCloseAction(for: session) else { return false }
+        session.closeIntent = action
         return true
     }
 
-    // NB: the former close-prompt methods (decideSessionClose / confirmShutdown
-    // / askCloseAction) were removed — window close is now a non-destructive
-    // detach, so there's nothing to confirm. The profile's closeAction is
-    // honored by the explicit stop path (`stopSession`) instead.
+    /// Resolve a session window's close action from its profile preference,
+    /// prompting when it's `.ask`. Returns nil if the user cancelled.
+    @MainActor private func resolveCloseAction(for session: TabbedSessionWindow) -> Profile.CloseAction? {
+        let pref = session.profile.closeAction
+        guard pref == .ask else { return pref }
+        return promptCloseAction(for: session)
+    }
+
+    /// Three-way prompt for `.ask` profiles (+ Cancel). Returns the chosen
+    /// action, or nil on cancel.
+    @MainActor private func promptCloseAction(for session: TabbedSessionWindow) -> Profile.CloseAction? {
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Close “%@”?", comment: ""), session.profile.name)
+        alert.informativeText = NSLocalizedString(
+            "Run in the background keeps the VM running so you can reattach later. Suspend saves its state to disk. Shut down powers it off.",
+            comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Run in the Background", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Suspend", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Shut Down", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:  return .background
+        case .alertSecondButtonReturn: return .suspend
+        case .alertThirdButtonReturn:  return .shutdown
+        default:                       return nil
+        }
+    }
+
+    // MARK: - `bromure-cli` command-line tool
+
+    /// Offer to symlink `/usr/local/bin/bromure-cli` → this app's binary so the
+    /// user can drive Bromure from the terminal. Prompts once; "Don't Ask Again"
+    /// is remembered. Skipped for the headless agent and dev (`swift run`) builds.
+    @MainActor private func offerCLISymlinkIfNeeded() {
+        guard !headless else { return }
+        let linkPath = "/usr/local/bin/bromure-cli"
+        guard !FileManager.default.fileExists(atPath: linkPath) else { return }
+        guard !UserDefaults.standard.bool(forKey: "cliSymlinkDeclined") else { return }
+        // Only when running from an installed .app, not a dev `swift run`.
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              let exe = Bundle.main.executableURL?.path else { return }
+
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString(
+            "Install the “bromure-cli” command-line tool?", comment: "")
+        alert.informativeText = NSLocalizedString(
+            "This creates a symlink at /usr/local/bin/bromure-cli so you can drive Bromure from the terminal (vm, exec, trace, …). It needs your admin password once.",
+            comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Install", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Not Now", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Don’t Ask Again", comment: ""))
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            installCLISymlink(target: exe, at: linkPath)
+        case .alertThirdButtonReturn:
+            UserDefaults.standard.set(true, forKey: "cliSymlinkDeclined")
+        default:
+            break   // Not Now — offer again next launch
+        }
+    }
+
+    /// Create the symlink via AppleScript so macOS shows the standard admin
+    /// authorization prompt (no embedded privileged helper needed).
+    @MainActor private func installCLISymlink(target: String, at linkPath: String) {
+        let cmd = "mkdir -p /usr/local/bin && ln -sf \\\"\(target)\\\" \(linkPath)"
+        let script = "do shell script \"\(cmd)\" with administrator privileges"
+        var error: NSDictionary?
+        NSAppleScript(source: script)?.executeAndReturnError(&error)
+        if let error {
+            // -128 = the user cancelled the admin prompt; anything else is a real
+            // failure worth logging (but never block startup over it).
+            let code = (error[NSAppleScript.errorNumber] as? Int) ?? 0
+            if code != -128 {
+                FileHandle.standardError.write(Data(
+                    "[cli] symlink install failed: \(error)\n".utf8))
+            }
+        } else {
+            FileHandle.standardError.write(Data(
+                "[cli] installed \(linkPath) → \(target)\n".utf8))
+        }
+    }
+
+    // MARK: - Boot at startup
+
+    /// Install/remove the login LaunchAgent to match whether any profile wants
+    /// startup boot. Called at launch and whenever a profile is saved.
+    @MainActor func reconcileBootLaunchAgent() {
+        BootLaunchAgent.reconcile(
+            wantsStartupBoot: profiles.contains { $0.bootAtStartup },
+            agentExecutable: Bundle.main.executableURL)
+    }
+
+    /// Boot every profile flagged `bootAtStartup`, detached (window-less). Only
+    /// the headless login agent does this: the GUI doesn't auto-boot when the
+    /// user opens it, and gating to the one process that the LaunchAgent starts
+    /// avoids two agents racing to boot the same profile onto the same disk.
+    @MainActor private func bootFlaggedProfilesAtStartup() {
+        guard headless else { return }
+        for profile in profiles where profile.bootAtStartup {
+            guard runningSessions[profile.id] == nil else { continue }
+            FileHandle.standardError.write(Data(
+                "[boot] starting '\(profile.name)' at login\n".utf8))
+            launch(profile)
+            detachAfterBoot(profile.id)   // login boots are always window-less
+        }
+    }
+
+    /// Once the session for `id` registers, close its (possibly never-shown)
+    /// window so the VM runs detached in the background. No-op if already
+    /// detached. Used by start-in-background launches and login boots.
+    @MainActor private func detachAfterBoot(_ id: Profile.ID) {
+        Task { @MainActor in
+            for _ in 0..<600 {   // up to ~60s for the first boot to register
+                if runningSessions[id] != nil { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            if let win = profileWindows[id] { win.close() }
+        }
+    }
 
     func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NSWindow else { return }
@@ -1497,13 +1636,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         if let session = win as? TabbedSessionWindow {
-            // DETACH (persistent-agent model): closing the window leaves the VM
-            // running in `runningSessions` so it can be reattached later. The VM
-            // is NOT stopped and the engine/ssh/shell registrations are NOT torn
-            // down here — those live until an explicit stop (`stopSession`,
-            // driven by `vm kill`, ⌘Q, the status item, or the guest closing its
-            // last shell). Capture a tab snapshot first so a reattaching window
-            // rebuilds the bar against the kittys still alive in the guest.
+            // Always tear down the window UI + snapshot tabs (so a reattaching
+            // window rebuilds the bar against the kittys still alive in the
+            // guest). Then act on the VM per the resolved close action.
             let id = session.profile.id
             if runningSessions[id] != nil {
                 runningSessions[id]?.lastTabsSnapshot = session.snapshotTabs()
@@ -1512,6 +1647,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             session.keyboardBridge = nil
             session.sandbox = nil
             profileWindows.removeValue(forKey: id)
+            // `.background` (and a programmatic close, closeIntent == nil) leave
+            // the VM running, detached. `.suspend` / `.shutdown` stop it via the
+            // explicit stop path. `.ask` was already resolved in
+            // windowShouldClose, so it never reaches here.
+            switch session.closeIntent {
+            case .suspend, .shutdown:
+                if let action = session.closeIntent, runningSessions[id]?.stopping != true {
+                    requestStopSession(id, action: action)
+                }
+            case .background, .ask, .none:
+                break
+            }
+            session.closeIntent = nil
             renderPicker()
             updateStatusMenu()
             updateActivationPolicy()
@@ -2420,6 +2568,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         profiles = store.loadAll()
         renderPicker()
+        reconcileBootLaunchAgent()   // a saved bootAtStartup change may flip the plist
         // The privateMode toggle and enrollment-gated streaming flag
         // both flow off `profiles`; resync the running session
         // toolbars now so a flip from public → private (or back)
@@ -3101,13 +3250,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // First session for this profile — create the tabbed window with
         // its single shared VM, then queue the first tab. Promote to a regular
         // app first in case we're launching from a headless/background agent.
-        NSApp.setActivationPolicy(.regular)
         let win = TabbedSessionWindow(profile: profile, acDelegate: self)
         win.delegate = self
         win.center()
-        win.makeKeyAndOrderFront(nil)
         win.isReleasedWhenClosed = false
         profileWindows[profile.id] = win
+        if profile.startInBackground {
+            // Start detached: build the window (the boot flow binds the VZ view
+            // through it) but never show it, then close it once the VM registers
+            // so the session runs in the background. Reattach via the menu-bar
+            // item or `vm attach`.
+            detachAfterBoot(profile.id)
+        } else {
+            NSApp.setActivationPolicy(.regular)
+            win.makeKeyAndOrderFront(nil)
+        }
         // Newly-registered window — sync its streaming indicator
         // with the current enrollment + privateMode state.
         refreshStreamingState()
@@ -3487,7 +3644,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // refuse to boot until the user wipes.
                 sandbox.sessionDisk?.markCompromised()
                 sandbox.sessionDisk?.clearSavedState()
-                window.pendingCloseAction = .shutdown
                 vm.stop(completionHandler: { _ in })
                 window.close()
 
@@ -3516,7 +3672,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
                 sandbox.sessionDisk?.markCompromised()
                 sandbox.sessionDisk?.clearSavedState()
-                window.pendingCloseAction = .shutdown
                 vm.stop(completionHandler: { _ in })
                 window.close()
 
@@ -3908,9 +4063,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let sandbox = session.sandbox
         session.stopping = true
         let name = session.profile.name
-        // `.ask` collapses to `.suspend` — a programmatic stop isn't the moment
-        // for a modal; suspend keeps state and the user decides at next launch.
-        let resolved: Profile.CloseAction = (action == .ask) ? .suspend : action
+        // `.ask` and `.background` both collapse to `.suspend` — a programmatic
+        // stop isn't the moment for a modal, and "background" can't survive the
+        // agent exiting, so suspend keeps state and the user decides next launch.
+        let resolved: Profile.CloseAction = (action == .ask || action == .background) ? .suspend : action
         switch resolved {
         case .suspend:
             sandbox.sessionDisk?.saveTabs(currentTabsSnapshot(for: profileID))
@@ -3939,8 +4095,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     "[ac] '\(name)' didn't poweroff in 15s — forcing stop\n".utf8))
                 await Self.forceStop(vm)
             }
-        case .ask:
-            break   // unreachable
+        case .ask, .background:
+            break   // unreachable: both collapse to .suspend above
         }
         // A clean guest poweroff fires onStopped → handleSessionStopped, but
         // suspend and a forced vm.stop() do NOT — so finish teardown here too.

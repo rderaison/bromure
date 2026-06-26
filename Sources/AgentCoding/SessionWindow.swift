@@ -109,11 +109,11 @@ final class TabbedSessionWindow: NSWindow {
     /// available yet.
     var keyboardBridge: KeyboardBridge?
 
-    /// What `windowShouldClose` decided to do with the VM. Read by
-    /// `windowWillClose` so it can pause+save vs. requestStop without
-    /// re-prompting the user.
-    enum PendingCloseAction { case suspend, shutdown }
-    var pendingCloseAction: PendingCloseAction = .shutdown
+    /// What `windowShouldClose` resolved from the profile's `closeAction`
+    /// (with `.ask` turned into a prompt). Read by `windowWillClose` to act on
+    /// the VM without re-prompting. nil for a programmatic close (compromise /
+    /// relaunch) — that path detaches the window UI without touching the VM.
+    var closeIntent: Profile.CloseAction?
 
     /// When true, the next `sandbox.onStopped` shouldn't close the
     /// window — instead, relaunch a fresh VM in the same window. Set

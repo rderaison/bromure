@@ -134,7 +134,9 @@ extension ACAppDelegate {
         win.delegate = self
         win.title = String(format: NSLocalizedString("Register with %@", comment: ""),
                            provider.displayName)
-        win.pendingCloseAction = .shutdown   // never snapshot a throwaway
+        // The registration throwaway window is intercepted in windowWillClose by
+        // the claudeRegistration check (teardownClaudeRegistration destroys the
+        // scratch VM), so it never reaches the session detach/stop path.
         win.center()
         win.makeKeyAndOrderFront(nil)
         win.isReleasedWhenClosed = false

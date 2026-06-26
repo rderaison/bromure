@@ -382,6 +382,7 @@ struct VMDescribe: ParsableCommand {
         row("vCPUs", (v["cpuCount"] as? Int).map(String.init))
         row("memory", (v["memoryGB"] as? Int).map { "\($0) GB allocated" })
         row("network", v["networkMode"] as? String)
+        row("mac", v["macAddress"] as? String)
         let fusionConfigurable = v["fusionConfigurable"] as? Bool ?? false
         let fusionEngaged = v["fusionEngaged"] as? Bool ?? false
         row("fusion", fusionConfigurable
@@ -489,7 +490,10 @@ struct ProfilesDescribe: ParsableCommand {
         row("api key", (v["apiKeySet"] as? Bool ?? false) ? "set" : "not set")
         row("memory", (v["memoryGB"] as? Int).map { "\($0) GB" })
         row("network", v["networkMode"] as? String)
+        row("mac", v["macAddress"] as? String)
         row("close action", v["closeAction"] as? String)
+        if v["bootAtStartup"] as? Bool == true { row("boot at login", "yes") }
+        if v["startInBackground"] as? Bool == true { row("start in bg", "yes") }
         row("color", v["color"] as? String)
         row("ssh key", (v["sshKeySet"] as? Bool ?? false) ? "set" : "not set")
         if let n = v["importedSSHKeys"] as? Int, n > 0 { row("imported keys", String(n)) }
