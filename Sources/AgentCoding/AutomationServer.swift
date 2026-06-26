@@ -64,6 +64,11 @@ final class ACAutomationServer {
     var onDescribeProfile: ((_ idOrName: String) -> [String: Any]?)?
     var onDeleteProfile: ((_ idOrName: String) -> [String: Any])?
 
+    // MITM trace inspection (CLI `trace …`) + fusion toggle (`vm fusion`).
+    var onListTrace: ((_ profileKey: String?) -> [[String: Any]])?
+    var onClearTrace: (() -> Int)?
+    var onSetFusion: ((_ idOrName: String, _ engaged: Bool) -> [String: Any])?
+
     init(port: UInt16 = 9223, bindAddress: String = "127.0.0.1") {
         // 9223 (one off from the browser's 9222) so both apps can run side
         // by side during development without conflicting.
@@ -344,6 +349,9 @@ final class ACAutomationServer {
         case (let m, let p) where p.hasPrefix("/profiles/"):
             handleProfileRoute(fd: fd, method: m, path: p)
 
+        case (let m, let p) where p == "/trace" || p.hasPrefix("/trace?"):
+            handleTraceRoute(fd: fd, method: m, path: p)
+
         // /sessions/{id} and /sessions/{id}/exec
         case (let m, let p) where p.hasPrefix("/sessions/"):
             handleSessionRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)
@@ -482,6 +490,18 @@ final class ACAutomationServer {
                          body: ok ? ["status": "attached"] : ["error": "VM not found"])
             return
         }
+        if rest.hasSuffix("/fusion") {
+            guard method == "POST" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let id = decode(String(rest.dropLast("/fusion".count)))
+            let engaged = (bodyJSON["engaged"] as? Bool) ?? false
+            let result = DispatchQueue.main.sync { self.onSetFusion?(id, engaged) }
+                ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 409, body: result)
+            return
+        }
         // /vms/{id}
         let id = decode(rest)
         switch method {
@@ -505,6 +525,33 @@ final class ACAutomationServer {
             } else {
                 sendResponse(fd: fd, status: 404, body: ["error": "VM not found"])
             }
+        default:
+            sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"])
+        }
+    }
+
+    private func handleTraceRoute(fd: Int32, method: String, path: String) {
+        guard debugEnabled || isTrustedLocal else {
+            sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+            return
+        }
+        // Optional ?profile=<key> filter.
+        var profileKey: String?
+        if let qIdx = path.firstIndex(of: "?") {
+            for pair in path[path.index(after: qIdx)...].split(separator: "&") {
+                let kv = pair.split(separator: "=", maxSplits: 1)
+                if kv.count == 2, kv[0] == "profile" {
+                    profileKey = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                }
+            }
+        }
+        switch method {
+        case "GET":
+            let recs = DispatchQueue.main.sync { self.onListTrace?(profileKey) ?? [] }
+            sendResponse(fd: fd, status: 200, body: ["trace": recs])
+        case "DELETE":
+            let n = DispatchQueue.main.sync { self.onClearTrace?() ?? 0 }
+            sendResponse(fd: fd, status: 200, body: ["cleared": n])
         default:
             sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"])
         }

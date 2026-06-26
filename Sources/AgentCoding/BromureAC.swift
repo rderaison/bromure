@@ -37,7 +37,7 @@ struct BromureAC: ParsableCommand {
             CommandGroup(name: "Profiles",
                          subcommands: [Profiles.self]),
             CommandGroup(name: "Running sessions",
-                         subcommands: [VM.self]),
+                         subcommands: [VM.self, Trace.self]),
             CommandGroup(name: "Enterprise features",
                          subcommands: [Enroll.self, Unenroll.self, Status.self]),
             CommandGroup(name: "Integration",
@@ -755,6 +755,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     self?.handleCompromise(event)
                 }
             }
+            // Warm the trace ring from disk so `bromure-ac trace` shows recent
+            // history right after the agent starts, not just live traffic.
+            engine.traceStore.reload()
         }
 
         // Headless agent (CLI autostart): no picker window — the control socket
@@ -941,6 +944,54 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         server.onDeleteProfile = { [weak self] key in
             self?.automationDeleteProfile(key) ?? ["ok": false, "error": "unavailable"]
         }
+        server.onListTrace = { [weak self] profileKey in self?.automationTraceList(profileKey) ?? [] }
+        server.onClearTrace = { [weak self] in self?.mitmEngine?.traceStore.clear() ?? 0 }
+        server.onSetFusion = { [weak self] idOrName, engaged in
+            self?.automationSetFusion(idOrName: idOrName, engaged: engaged)
+                ?? ["ok": false, "error": "unavailable"]
+        }
+    }
+
+    /// MITM trace records for `trace …`, optionally filtered to one profile.
+    /// Newest first; previews only (no secret values).
+    @MainActor private func automationTraceList(_ profileKey: String?) -> [[String: Any]] {
+        guard let engine = mitmEngine else { return [] }
+        let wantID: Profile.ID? = profileKey.flatMap { profileByNameOrID($0)?.id }
+        let iso = ISO8601DateFormatter()
+        return engine.traceStore.recent.compactMap { rec -> [String: Any]? in
+            if let wantID, rec.profileID != wantID { return nil }
+            return [
+                "id": rec.id.uuidString,
+                "time": iso.string(from: rec.timestamp),
+                "profileId": rec.profileID.uuidString,
+                "profileShort": Self.shortID(rec.profileID),
+                "host": rec.host,
+                "port": rec.port,
+                "method": rec.method,
+                "path": rec.path,
+                "status": rec.statusCode,
+                "requestBytes": rec.requestBytes,
+                "responseBytes": rec.responseBytes,
+                "latencyMs": rec.latencyMs,
+                "swaps": rec.swaps.count,
+                "leaks": rec.leaks.map {
+                    ["header": $0.header, "preview": $0.valuePreview, "suspicion": $0.suspicion.rawValue]
+                },
+                "conversation": rec.isConversation,
+            ]
+        }
+    }
+
+    /// Toggle Fusion for a running VM's profile (`vm fusion enable|disable`).
+    @MainActor private func automationSetFusion(idOrName: String, engaged: Bool) -> [String: Any] {
+        guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
+            return ["ok": false, "error": "VM not found: \(idOrName)"]
+        }
+        guard session.profile.fusionConfigurable else {
+            return ["ok": false, "error": "Fusion needs at least two usable model credentials on this profile."]
+        }
+        setFusionEngaged(engaged, for: session.profile)
+        return ["ok": true, "engaged": engaged]
     }
 
     /// Curated, secret-free view of a profile's settings for `profiles describe`.
@@ -1023,6 +1074,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "diskPath": diskURL.path,
                 "diskAllocatedBytes": diskAllocated,
                 "baseImageVersion": s.profile.baseImageVersionAtClone ?? "unknown",
+                "fusionConfigurable": s.profile.fusionConfigurable,
+                "fusionEngaged": mitmEngine?.fusionEngaged(for: s.profileID) ?? false,
             ]
         }
     }
@@ -1879,6 +1932,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func setFusionEngaged(_ engaged: Bool, for profile: Profile) {
         mitmEngine?.setFusionEngaged(engaged, for: profile.id)
         runningSessions[profile.id]?.fusionEngaged = engaged
+        // Keep the attached window's title-bar toggle in sync (e.g. when the
+        // change came from the CLI rather than the toggle itself).
+        profileWindows[profile.id]?.model.fusionEngaged = engaged
     }
 
     func openFileBrowser(for window: TabbedSessionWindow) {

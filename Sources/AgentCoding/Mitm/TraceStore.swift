@@ -154,6 +154,24 @@ public final class TraceStore {
         }
     }
 
+    /// Wipe the in-memory ring and the on-disk trace history. Returns the
+    /// number of in-memory records cleared.
+    @MainActor
+    @discardableResult
+    public func clear() -> Int {
+        let n = recent.count
+        recent.removeAll()
+        let root = rootDir
+        queue.async {
+            guard let dirs = try? FileManager.default.contentsOfDirectory(
+                at: root, includingPropertiesForKeys: nil) else { return }
+            for d in dirs where d.hasDirectoryPath {
+                try? FileManager.default.removeItem(at: d)
+            }
+        }
+        return n
+    }
+
     /// Decrypt and return the request body for a record, if it was
     /// captured. Returns nil if the body wasn't stored or decryption
     /// fails (e.g. master key was rotated since the record was written).

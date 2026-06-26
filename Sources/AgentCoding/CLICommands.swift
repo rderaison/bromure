@@ -199,7 +199,7 @@ struct VM: ParsableCommand {
         commandName: "vm",
         abstract: "Manage bromure-ac VMs (like `docker` for containers).",
         subcommands: [VMList.self, VMRun.self, VMKill.self, Exec.self,
-                      VMAttach.self, VMDescribe.self])
+                      VMFusion.self, VMAttach.self, VMDescribe.self])
 }
 
 struct VMRun: ParsableCommand {
@@ -382,6 +382,11 @@ struct VMDescribe: ParsableCommand {
         row("vCPUs", (v["cpuCount"] as? Int).map(String.init))
         row("memory", (v["memoryGB"] as? Int).map { "\($0) GB allocated" })
         row("network", v["networkMode"] as? String)
+        let fusionConfigurable = v["fusionConfigurable"] as? Bool ?? false
+        let fusionEngaged = v["fusionEngaged"] as? Bool ?? false
+        row("fusion", fusionConfigurable
+            ? (fusionEngaged ? "engaged" : "available (off)")
+            : "not configurable (needs ≥2 models)")
         row("base image", v["baseImageVersion"] as? String)
         if let bytes = v["diskAllocatedBytes"] as? Int {
             let sz = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
@@ -527,6 +532,191 @@ struct ProfilesRemove: ParsableCommand {
             throw ValidationError(resp.json["error"] as? String ?? "Couldn't delete \(profile).")
         }
         print("Deleted profile \(resp.json["name"] as? String ?? profile).")
+    }
+}
+
+// MARK: - `vm fusion`
+
+struct VMFusion: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "fusion",
+        abstract: "Enable or disable Fusion (multi-model synthesis) for a running VM.")
+
+    @Argument(help: "enable | disable")
+    var action: String
+
+    @Argument(help: "VM id or profile name.")
+    var vm: String
+
+    func run() throws {
+        let engaged: Bool
+        switch action.lowercased() {
+        case "enable", "on", "engage":    engaged = true
+        case "disable", "off", "disengage": engaged = false
+        default: throw ValidationError("Action must be 'enable' or 'disable'.")
+        }
+        let client = ControlClient()
+        try client.ensureAgentRunning()
+        let resp = try client.request("POST", "/vms/\(ControlClient.encodeSegment(vm))/fusion",
+                                      body: ["engaged": engaged])
+        guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
+            throw ValidationError(resp.json["error"] as? String ?? "Couldn't set fusion for \(vm).")
+        }
+        print("Fusion \(engaged ? "enabled" : "disabled") for \(vm).")
+    }
+}
+
+// MARK: - `trace` subcommand group
+
+struct Trace: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "trace",
+        abstract: "Inspect the MITM session traces (requests, token swaps, leaks).",
+        subcommands: [TraceList.self, TraceSummary.self, TraceHostnames.self,
+                      TraceLeaks.self, TraceClear.self])
+}
+
+private func traceRecords(_ client: ControlClient, profile: String?) throws -> [[String: Any]] {
+    var path = "/trace"
+    if let profile, !profile.isEmpty { path += "?profile=\(ControlClient.encodeSegment(profile))" }
+    return (try client.request("GET", path).json["trace"] as? [[String: Any]]) ?? []
+}
+
+/// "2026-06-26T15:30:05Z" → "15:30:05".
+private func hms(_ iso: String) -> String {
+    if let t = iso.split(separator: "T").last { return String(t.prefix(8)) }
+    return iso
+}
+
+private func kb(_ bytes: Int) -> String {
+    if bytes < 1024 { return "\(bytes)B" }
+    let k = Double(bytes) / 1024
+    return k < 1024 ? String(format: "%.1fK", k) : String(format: "%.1fM", k / 1024)
+}
+
+private func leakCount(_ r: [String: Any]) -> Int { (r["leaks"] as? [[String: Any]])?.count ?? 0 }
+
+struct TraceList: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ls", abstract: "List recent traced requests (newest first).")
+    @Argument(help: "Filter to one VM/profile (id or name).") var profile: String?
+    @Option(name: .long, help: "Max rows (default 50).") var limit: Int = 50
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let recs = try traceRecords(client, profile: profile)
+        guard !recs.isEmpty else {
+            print("No trace records. (Tracing is per-profile — enable it in the profile's settings.)")
+            return
+        }
+        print(pad("TIME", 10) + pad("HOST", 30) + pad("METHOD", 8) + pad("STATUS", 7)
+              + pad("REQ", 8) + pad("RESP", 8) + pad("LAT", 8) + "FLAGS")
+        for r in recs.prefix(limit) {
+            var flags: [String] = []
+            let swaps = r["swaps"] as? Int ?? 0
+            if swaps > 0 { flags.append("swap×\(swaps)") }
+            let leaks = leakCount(r)
+            if leaks > 0 { flags.append("LEAK×\(leaks)") }
+            if r["conversation"] as? Bool ?? false { flags.append("conv") }
+            print(pad(hms(r["time"] as? String ?? ""), 10)
+                  + pad(String((r["host"] as? String ?? "").prefix(28)), 30)
+                  + pad(r["method"] as? String ?? "", 8)
+                  + pad(String(r["status"] as? Int ?? 0), 7)
+                  + pad(kb(r["requestBytes"] as? Int ?? 0), 8)
+                  + pad(kb(r["responseBytes"] as? Int ?? 0), 8)
+                  + pad("\(Int(r["latencyMs"] as? Double ?? 0))ms", 8)
+                  + flags.joined(separator: " "))
+        }
+        if recs.count > limit { print("… \(recs.count - limit) more (use --limit).") }
+    }
+}
+
+struct TraceSummary: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "summary", abstract: "Summarize traced traffic (hosts, status, swaps, leaks).")
+    @Argument(help: "Filter to one VM/profile (id or name).") var profile: String?
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let recs = try traceRecords(client, profile: profile)
+        guard !recs.isEmpty else { print("No trace records."); return }
+        var byHost: [String: Int] = [:], byStatus: [Int: Int] = [:]
+        var swapReqs = 0, leakReqs = 0, convs = 0, up = 0, down = 0
+        for r in recs {
+            byHost[r["host"] as? String ?? "?", default: 0] += 1
+            byStatus[(r["status"] as? Int ?? 0) / 100, default: 0] += 1
+            if (r["swaps"] as? Int ?? 0) > 0 { swapReqs += 1 }
+            if leakCount(r) > 0 { leakReqs += 1 }
+            if r["conversation"] as? Bool ?? false { convs += 1 }
+            up += r["requestBytes"] as? Int ?? 0
+            down += r["responseBytes"] as? Int ?? 0
+        }
+        print("\(recs.count) requests across \(byHost.count) hosts  (\(kb(up)) up / \(kb(down)) down)")
+        let status = byStatus.sorted { $0.key < $1.key }.map { "\($0.key)xx×\($0.value)" }.joined(separator: "  ")
+        print("  status:  \(status)")
+        print("  swaps:   \(swapReqs) req     leaks: \(leakReqs) req\(leakReqs > 0 ? "  ⚠️" : "")     conversations: \(convs)")
+        print("  top hosts:")
+        for (h, c) in byHost.sorted(by: { $0.value > $1.value }).prefix(10) {
+            print("    " + pad(String(c), 6) + h)
+        }
+    }
+}
+
+struct TraceHostnames: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "hostnames", abstract: "List distinct hosts contacted (with request counts).")
+    @Argument(help: "Filter to one VM/profile (id or name).") var profile: String?
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let recs = try traceRecords(client, profile: profile)
+        var byHost: [String: Int] = [:]
+        for r in recs { byHost[r["host"] as? String ?? "?", default: 0] += 1 }
+        guard !byHost.isEmpty else { print("No trace records."); return }
+        for (h, c) in byHost.sorted(by: { $0.key < $1.key }) { print(pad(String(c), 7) + h) }
+    }
+}
+
+struct TraceLeaks: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "leaks", abstract: "Show requests with potential credential leaks.")
+    @Argument(help: "Filter to one VM/profile (id or name).") var profile: String?
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let leaky = try traceRecords(client, profile: profile).filter { leakCount($0) > 0 }
+        guard !leaky.isEmpty else { print("No leaks detected. ✓"); return }
+        print("\(leaky.count) request(s) with potential credential leaks:")
+        for r in leaky {
+            let host = r["host"] as? String ?? "?"
+            let path = String((r["path"] as? String ?? "").prefix(48))
+            print("  \(hms(r["time"] as? String ?? ""))  \(r["method"] as? String ?? "") \(host)\(path)")
+            for l in (r["leaks"] as? [[String: Any]]) ?? [] {
+                print("      ⚠️  \(l["header"] as? String ?? "?"): \(l["preview"] as? String ?? "") [\(l["suspicion"] as? String ?? "")]")
+            }
+        }
+    }
+}
+
+struct TraceClear: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "clear", abstract: "Clear all trace history (in-memory + on disk).")
+    @Flag(name: [.customShort("f"), .long], help: "Skip the confirmation prompt.") var force = false
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        if !force {
+            FileHandle.standardError.write(Data("Clear ALL trace history? [y/N] ".utf8))
+            let a = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+            guard a == "y" || a == "yes" else { print("Aborted."); return }
+        }
+        let resp = try client.request("DELETE", "/trace")
+        print("Cleared \(resp.json["cleared"] as? Int ?? 0) trace record(s).")
     }
 }
 
