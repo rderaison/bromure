@@ -199,7 +199,8 @@ struct VM: ParsableCommand {
         commandName: "vm",
         abstract: "Manage bromure-ac VMs (like `docker` for containers).",
         subcommands: [VMList.self, VMRun.self, VMKill.self, Exec.self,
-                      VMFusion.self, VMAttach.self, VMDescribe.self])
+                      VMFusion.self, VMRouting.self, VMHybrid.self,
+                      VMAttach.self, VMDescribe.self])
 }
 
 struct VMRun: ParsableCommand {

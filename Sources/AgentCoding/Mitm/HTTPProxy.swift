@@ -64,6 +64,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Per-profile Fusion config (legs + judge + auth modes). nil → not
     /// configured. Set by `MitmEngine.register`; same static-provider rationale.
     nonisolated(unsafe) static var fusionConfigProvider: (@Sendable (UUID) -> Fusion.Config?)?
+    /// Per-profile LLM routing context (Cloud/Local/Hybrid + hybrid policy
+    /// engine). nil → cloud pass-through. Set by `MitmEngine.register`;
+    /// same static-provider rationale as the Fusion providers above.
+    nonisolated(unsafe) static var routingProvider: (@Sendable (UUID) -> LLMRoutingContext?)?
     /// Reaches the host-owned Claude subscription store + refresher. nil →
     /// subscription auth off. Set once by `MitmEngine.register`; static, same
     /// rationale as the providers above.
@@ -900,7 +904,31 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // Engaged purely by the per-session UI toggle (the title-bar
         // lightning bolt). No env override — otherwise toggling Fusion
         // off in the UI wouldn't actually turn it off.
-        let fusionOn = Self.fusionEngagedProvider?(profileID) ?? false
+        // Local-inference routing (vLLM.md §4). For LLM hosts under
+        // Local/Hybrid routing, re-route this turn to the on-host engine,
+        // reached at the loopback splice the vsock-8446 bridge serves.
+        // Pure decision; cloud is an identity pass-through. The session
+        // key is the profile (one coding agent per VM) so a trajectory
+        // never switches backend mid-stream (coherence guard, Trap 2).
+        var upstreamHost = host
+        var upstreamPort = port
+        var routedBackend: Backend = .cloud
+        var servedByMarker: String? = nil
+        let routingCtx = Self.routingProvider?(profileID)
+        if let routingCtx, LLMRouting.isLLMHost(host) {
+            let target = LLMRouting.decide(
+                host: host, port: port, context: routingCtx,
+                sessionKey: profileID.uuidString,
+                now: Date().timeIntervalSince1970)
+            upstreamHost = target.host
+            upstreamPort = target.port
+            routedBackend = target.backend
+            servedByMarker = target.servedBy
+        }
+
+        // Fusion is a cloud, identity-side feature — skip it when this
+        // turn is routed local.
+        let fusionOn = routedBackend == .cloud && (Self.fusionEngagedProvider?(profileID) ?? false)
         if fusionOn,
            let fusionConfig = Self.fusionConfigProvider?(profileID),
            let outcome = try await Fusion.run(rawRequest: toForward,
@@ -937,9 +965,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
 
         let relay = try await relayUpstream(rawRequest: toForward,
-                                            host: host, port: port,
+                                            host: upstreamHost, port: upstreamPort,
                                             session: session,
                                             tls: tls)
+
+        // Hybrid hard-error fallback feed (§4.3 Trap 1). A cloud turn that
+        // came back 429/529/5xx pins the session local and trips the health
+        // gate so subsequent sessions skip the cloud penalty. The streaming
+        // relay already committed this response to the guest, so we can't
+        // replay *this* turn — but new sessions route correctly.
+        if let routingCtx, routingCtx.routing == .hybrid, routedBackend == .cloud,
+           LLMRouting.isHardErrorStatus(Self.parseStatusCode(relay.buffer)) {
+            routingCtx.hybrid.recordHardError(sessionID: profileID.uuidString,
+                                              now: Date().timeIntervalSince1970)
+        }
 
         // Claude subscription 401 self-heal. The streaming relay has already
         // committed the response to the guest, so we can't retry transparently
@@ -976,7 +1015,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         responseTruncated: relay.truncatedForTrace,
                         swaps: swap.swaps,
                         leaks: leaks,
-                        latencyMs: elapsed)
+                        latencyMs: elapsed,
+                        servedBy: servedByMarker)
     }
 
     /// True iff the request contains the HTTP/1.1 upgrade tokens for
@@ -1277,7 +1317,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                            responseTruncated: Bool,
                            swaps: [SwapRecord],
                            leaks: [LeakEntry],
-                           latencyMs: Double) async {
+                           latencyMs: Double,
+                           servedBy: String? = nil) async {
         guard let session = sessionTraceProvider(),
               session.level.recordsActivity else { return }
         let traceT0 = Date()
@@ -1407,7 +1448,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                          realPreview: $0.realPreview) },
             leaks: leaks,
             bodyStored: bodyStored,
-            isConversation: isConversation
+            isConversation: isConversation,
+            servedBy: servedBy
         )
 
         let store = traceStore

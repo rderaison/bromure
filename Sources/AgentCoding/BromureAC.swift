@@ -38,6 +38,8 @@ struct BromureAC: ParsableCommand {
                          subcommands: [Profiles.self]),
             CommandGroup(name: "Running sessions",
                          subcommands: [VM.self, Trace.self]),
+            CommandGroup(name: "Local inference",
+                         subcommands: [Model.self]),
             CommandGroup(name: "Enterprise features",
                          subcommands: [Enroll.self, Unenroll.self, Status.self]),
             CommandGroup(name: "Integration",
@@ -556,6 +558,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// selected set intersected with usable providers (falling back to all
     /// usable if the selection is too small); judge falls back to the first
     /// usable provider + engine default model.
+    /// Push the profile's routing mode + hybrid policy knobs into the MITM
+    /// engine at session launch (vLLM.md §4). The model label (catalog id
+    /// or repo) is what the `served-by` trace marker shows.
+    func applyRouting(_ engine: MitmEngine, for profile: Profile) {
+        engine.setRouting(profile.modelRouting,
+                          modelLabel: profile.activeModelID ?? "default",
+                          hybrid: HybridConfig(profile: profile),
+                          for: profile.id)
+    }
+
     func makeFusionConfig(for profile: Profile) -> Fusion.Config? {
         let usable = profile.fusionUsableProviders
         guard usable.count >= 2 else { return nil }
@@ -662,6 +674,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Offer to install the `bromure-cli` command-line tool (admin prompt).
         // Deferred so the main window appears first; no-op for the headless agent.
         DispatchQueue.main.async { [weak self] in self?.offerCLISymlinkIfNeeded() }
+
+        // Refresh the MLX model catalog from the hosted manifest in the
+        // background (vLLM.md §5.1). Non-fatal — falls back to the bundled
+        // catalog.json on any network failure, so this never blocks launch.
+        Task.detached(priority: .background) { await CatalogStore.shared.refresh() }
 
         // Keep the login LaunchAgent in sync, then (headless login agent only)
         // boot any profiles flagged "Start at login".
@@ -968,6 +985,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.automationSetFusion(idOrName: idOrName, engaged: engaged)
                 ?? ["ok": false, "error": "unavailable"]
         }
+        server.onSetRouting = { [weak self] idOrName, mode in
+            self?.automationSetRouting(idOrName: idOrName, mode: mode)
+                ?? ["ok": false, "error": "unavailable"]
+        }
+        server.onSetHybrid = { [weak self] idOrName, knob, value in
+            self?.automationSetHybrid(idOrName: idOrName, knob: knob, value: value)
+                ?? ["ok": false, "error": "unavailable"]
+        }
+        server.onSetModel = { [weak self] idOrName, modelID in
+            self?.automationSetModel(idOrName: idOrName, modelID: modelID)
+                ?? ["ok": false, "error": "unavailable"]
+        }
     }
 
     /// MITM trace records for `trace …`, optionally filtered to one profile.
@@ -1010,6 +1039,59 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         setFusionEngaged(engaged, for: session.profile)
         return ["ok": true, "engaged": engaged]
+    }
+
+    /// `vm routing cloud|local|hybrid` — set the per-profile backend
+    /// routing and push it live to the MITM engine (vLLM.md §4.2).
+    @MainActor private func automationSetRouting(idOrName: String, mode: String) -> [String: Any] {
+        guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
+            return ["ok": false, "error": "VM not found: \(idOrName)"]
+        }
+        guard let routing = Profile.Routing(rawValue: mode.lowercased()) else {
+            return ["ok": false, "error": "Routing must be 'cloud', 'local', or 'hybrid'."]
+        }
+        var profile = session.profile
+        profile.modelRouting = routing
+        session.profile = profile
+        try? store.save(profile)
+        if let engine = mitmEngine { applyRouting(engine, for: profile) }
+        return ["ok": true, "routing": routing.rawValue]
+    }
+
+    /// `vm hybrid budget|ttft|split <value>` — tune the hybrid policy
+    /// knobs (vLLM.md §4.3.1) and push them live.
+    @MainActor private func automationSetHybrid(idOrName: String, knob: String, value: Double) -> [String: Any] {
+        guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
+            return ["ok": false, "error": "VM not found: \(idOrName)"]
+        }
+        var profile = session.profile
+        switch knob {
+        case "budget": profile.hybridCloudTokenBudget = max(0, Int(value))
+        case "ttft":   profile.hybridSoftTTFTSeconds = max(0, value)
+        case "split":  profile.hybridLocalSplitPercent = max(0, min(100, Int(value)))
+        default: return ["ok": false, "error": "Unknown hybrid knob: \(knob)"]
+        }
+        session.profile = profile
+        try? store.save(profile)
+        if let engine = mitmEngine { applyRouting(engine, for: profile) }
+        return ["ok": true, "knob": knob, "value": value]
+    }
+
+    /// `model use <id>` — set the profile's active local model (drives the
+    /// served-by marker + which weights the engine loads under local/hybrid).
+    @MainActor private func automationSetModel(idOrName: String, modelID: String) -> [String: Any] {
+        guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
+            return ["ok": false, "error": "VM not found: \(idOrName)"]
+        }
+        guard let model = CatalogStore.shared.resolve(modelID) else {
+            return ["ok": false, "error": "Unknown model '\(modelID)'. Try `model catalog`."]
+        }
+        var profile = session.profile
+        profile.activeModelID = model.id
+        session.profile = profile
+        try? store.save(profile)
+        if let engine = mitmEngine { applyRouting(engine, for: profile) }
+        return ["ok": true, "model": model.id, "repo": model.repo]
     }
 
     /// Curated, secret-free view of a profile's settings for `profiles describe`.
@@ -3373,6 +3455,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 win.model.fusionEngaged = false
                 engine.setFusionEngaged(false, for: profile.id)
                 engine.setFusionConfig(self.makeFusionConfig(for: profile), for: profile.id)
+                self.applyRouting(engine, for: profile)
             }
             // Keyboard layout bridge — pushes the macOS layout into the
             // guest at boot and follows live changes (or pins an
@@ -4352,6 +4435,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 win.model.fusionEngaged = false
                 engine.setFusionEngaged(false, for: profile.id)
                 engine.setFusionConfig(self.makeFusionConfig(for: profile), for: profile.id)
+                self.applyRouting(engine, for: profile)
             }
             if let dev = sandbox.socketDevice {
                 win.keyboardBridge = KeyboardBridge(

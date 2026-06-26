@@ -552,6 +552,22 @@ public final class SessionDisk {
             ]
             proxyLines.append(contentsOf: ghEnv)
 
+            // Local inference (Path 1, vLLM.md §3.3). When routing is
+            // `.local`, pin the agent at the on-host engine via the vsock
+            // bridge (127.0.0.1:11434 → vsock 8446 → loopback engine).
+            // 127.0.0.1 is already in NO_PROXY above, so these requests
+            // bypass the MITM proxy and hit the bridge directly. Keys are
+            // dummies — the engine ignores them. `.hybrid` deliberately
+            // leaves the base URLs unset so traffic flows to the cloud
+            // host and the MITM routing/fallback engine decides per
+            // session; `.cloud` is today's behaviour (nothing injected).
+            if profile.modelRouting == .local {
+                proxyLines.append("export ANTHROPIC_BASE_URL=http://127.0.0.1:11434")
+                proxyLines.append("export ANTHROPIC_API_KEY=bromure-local")
+                proxyLines.append("export OPENAI_BASE_URL=http://127.0.0.1:11434/v1")
+                proxyLines.append("export OPENAI_API_KEY=bromure-local")
+            }
+
             // User-defined env vars from the profile. No substitution
             // — values land in the VM verbatim. Names are filtered to
             // POSIX shape at the boundary so an invalid character in

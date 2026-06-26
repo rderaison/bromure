@@ -98,13 +98,18 @@ public struct TraceRecord: Codable, Identifiable, Sendable {
     /// filter is a cheap boolean check (no on-disk parsing).
     /// Defaults false so old JSONL records (pre-flag) decode cleanly.
     public let isConversation: Bool
+    /// Which backend served this turn under transparent routing (§4.4):
+    /// `"cloud"` or `"local-<model>"`. nil for non-LLM hosts and for
+    /// records written before routing existed. Surfaced in the trace CLI.
+    public let servedBy: String?
 
     public init(id: UUID = UUID(), sessionID: UUID, profileID: UUID,
                 timestamp: Date = Date(), host: String, port: Int,
                 method: String, path: String, statusCode: Int,
                 requestBytes: Int, responseBytes: Int, latencyMs: Double,
                 swaps: [SwapEntry], leaks: [LeakEntry],
-                bodyStored: Bool, isConversation: Bool = false) {
+                bodyStored: Bool, isConversation: Bool = false,
+                servedBy: String? = nil) {
         self.id = id
         self.sessionID = sessionID
         self.profileID = profileID
@@ -121,12 +126,13 @@ public struct TraceRecord: Codable, Identifiable, Sendable {
         self.leaks = leaks
         self.bodyStored = bodyStored
         self.isConversation = isConversation
+        self.servedBy = servedBy
     }
 
     enum CodingKeys: String, CodingKey {
         case id, sessionID, profileID, timestamp, host, port, method, path
         case statusCode, requestBytes, responseBytes, latencyMs
-        case swaps, leaks, bodyStored, isConversation
+        case swaps, leaks, bodyStored, isConversation, servedBy
     }
 
     public init(from decoder: Decoder) throws {
@@ -148,6 +154,28 @@ public struct TraceRecord: Codable, Identifiable, Sendable {
         bodyStored = try c.decode(Bool.self, forKey: .bodyStored)
         // Default false: pre-flag JSONL records won't have it.
         isConversation = try c.decodeIfPresent(Bool.self, forKey: .isConversation) ?? false
+        servedBy = try c.decodeIfPresent(String.self, forKey: .servedBy)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(sessionID, forKey: .sessionID)
+        try c.encode(profileID, forKey: .profileID)
+        try c.encode(timestamp, forKey: .timestamp)
+        try c.encode(host, forKey: .host)
+        try c.encode(port, forKey: .port)
+        try c.encode(method, forKey: .method)
+        try c.encode(path, forKey: .path)
+        try c.encode(statusCode, forKey: .statusCode)
+        try c.encode(requestBytes, forKey: .requestBytes)
+        try c.encode(responseBytes, forKey: .responseBytes)
+        try c.encode(latencyMs, forKey: .latencyMs)
+        try c.encode(swaps, forKey: .swaps)
+        try c.encode(leaks, forKey: .leaks)
+        try c.encode(bodyStored, forKey: .bodyStored)
+        if isConversation { try c.encode(isConversation, forKey: .isConversation) }
+        try c.encodeIfPresent(servedBy, forKey: .servedBy)
     }
 }
 

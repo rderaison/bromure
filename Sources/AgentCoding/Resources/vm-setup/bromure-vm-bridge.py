@@ -8,6 +8,7 @@ the host's MITM engine over vsock:
   • HTTP proxy:  127.0.0.1:8080 (TCP)              →  vsock CID 2 port 8443
   • ssh-agent:   /tmp/bromure-agent.sock (Unix)    →  vsock CID 2 port 8444
   • AWS creds:   /tmp/bromure-aws-creds.sock (Unix) →  vsock CID 2 port 8445
+  • Local LLM:   127.0.0.1:11434 (TCP)             →  vsock CID 2 port 8446
 
 Bytes are pumped both directions per connection. No TLS, no inspection,
 no buffering — just a raw pipe.
@@ -35,6 +36,11 @@ SSH_AGENT_VSOCK_PORT = 8444
 SSH_AGENT_UNIX_PATH = "/tmp/bromure-agent.sock"
 AWS_CREDS_VSOCK_PORT = 8445
 AWS_CREDS_UNIX_PATH = "/tmp/bromure-aws-creds.sock"
+# Local inference engine (Path 1, vLLM.md §2.2). The coding agent reaches
+# the host's vllm-mlx server at 127.0.0.1:11434 via ANTHROPIC_BASE_URL /
+# OPENAI_BASE_URL; we splice that TCP to vsock 8446 → host loopback engine.
+LLM_ENGINE_TCP_PORT = 11434
+LLM_ENGINE_VSOCK_PORT = 8446
 
 LOG_PATH = "/tmp/bromure-vm-bridge.log"
 
@@ -138,6 +144,21 @@ def serve_aws_creds() -> None:
         ).start()
 
 
+def serve_llm_engine() -> None:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", LLM_ENGINE_TCP_PORT))
+    s.listen(64)
+    log(f"[llm] listening on 127.0.0.1:{LLM_ENGINE_TCP_PORT}")
+    while True:
+        conn, _addr = s.accept()
+        threading.Thread(
+            target=bridge,
+            args=(conn, LLM_ENGINE_VSOCK_PORT, "llm"),
+            daemon=True,
+        ).start()
+
+
 def main() -> None:
     # Truncate log on each run.
     try:
@@ -151,6 +172,7 @@ def main() -> None:
     threading.Thread(target=serve_http_proxy, daemon=True).start()
     threading.Thread(target=serve_ssh_agent, daemon=True).start()
     threading.Thread(target=serve_aws_creds, daemon=True).start()
+    threading.Thread(target=serve_llm_engine, daemon=True).start()
 
     # Park the main thread.
     signal.pause()

@@ -286,6 +286,7 @@ public extension Notification.Name {
 enum EditorCategory: String, CaseIterable, Identifiable {
     case general     = "General"
     case models      = "Agents"
+    case localModels = "Local Models"
     case fusion      = "Fusion"
     case folders     = "Folders"
     case credentials = "Credentials"
@@ -308,6 +309,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general:     "person.text.rectangle.fill"
         case .models:      "sparkles"
+        case .localModels: "cpu.fill"
         case .fusion:      "bolt.fill"
         case .folders:     "folder.fill"
         case .credentials: "key.fill"
@@ -327,6 +329,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general:     .indigo
         case .models:      .purple
+        case .localModels: .mint
         case .fusion:      .yellow
         case .folders:     .orange
         case .credentials: .green
@@ -605,6 +608,7 @@ struct ProfileEditorView: View {
         switch selectedCategory {
         case .general:     generalSection
         case .models:      modelsSection
+        case .localModels: localModelsSection
         case .fusion:      fusionSection
         case .folders:     foldersSection
         case .credentials: credentialsSection
@@ -637,6 +641,12 @@ struct ProfileEditorView: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.white)
         }
+    }
+
+    @ViewBuilder
+    private var localModelsSection: some View {
+        LocalModelsSettingsView(routing: $draft.modelRouting,
+                                activeModelID: $draft.activeModelID)
     }
 
     @ViewBuilder
@@ -2955,6 +2965,305 @@ struct ProfileEditorView: View {
     }
 
 
+}
+
+// MARK: - Local Models (vLLM.md)
+
+/// The "Local Models" settings pane: an "Enable local models" master
+/// toggle (prompts to install the vllm-mlx engine on first enable), a
+/// Local/Hybrid mode picker, and the curated MLX catalog with RAM-fit
+/// gating — models that won't fit this Mac are greyed out and
+/// unselectable (§5.3). Downloads + engine install are immediate side
+/// effects (global, not per-profile); the routing mode + active-model
+/// selection persist on Save.
+struct LocalModelsSettingsView: View {
+    @Binding var routing: Profile.Routing
+    @Binding var activeModelID: String?
+
+    private let hostGB = HostMemory.unifiedMemoryGB()
+    private let catalog = CatalogStore.shared.effective()
+
+    @State private var engineReady = EngineProvisioner.shared.isProvisioned
+    @State private var showInstallPrompt = false
+    @State private var engineState: EngineState = .idle
+    @State private var downloads: [String: DownloadState] = [:]
+
+    enum EngineState: Equatable {
+        case idle
+        case installing(Double, String)   // fraction 0–1, status line
+        case failed(String)
+    }
+    enum DownloadState: Equatable {
+        case downloading(Double, String)  // fraction 0–1, "X.X / Y GB"
+        case installed
+        case failed(String)
+    }
+
+    /// "Enable local models" ↔ routing ≠ cloud. Turning it on defaults to
+    /// Local and, if the engine isn't set up yet, asks to install it.
+    private var enableLocal: Binding<Bool> {
+        Binding(
+            get: { routing != .cloud },
+            set: { on in
+                if on {
+                    if routing == .cloud { routing = .local }
+                    if !engineReady { showInstallPrompt = true }
+                } else {
+                    routing = .cloud
+                }
+            })
+    }
+
+    private var modeSelection: Binding<Profile.Routing> {
+        Binding(get: { routing == .cloud ? .local : routing },
+                set: { routing = $0 })
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: enableLocal) {
+                    Text("Enable local models")
+                    Text("Run a coding model on this Mac instead of the cloud. macOS only; Apple Silicon.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            if routing != .cloud {
+                Section {
+                    Picker("Mode", selection: modeSelection) {
+                        Text("Local — always on-device").tag(Profile.Routing.local)
+                        Text("Hybrid — cloud, fall back to local").tag(Profile.Routing.hybrid)
+                    }
+                    .pickerStyle(.radioGroup)
+                }
+
+                Section("Engine") {
+                    engineRow
+                }
+
+                Section {
+                    ForEach(catalog.sortedForDisplay) { model in
+                        modelRow(model)
+                    }
+                } header: {
+                    Text("Models  ·  \(hostGB) GB unified memory")
+                } footer: {
+                    Text("Greyed-out models need more memory than this Mac has.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .alert("Install the local inference engine?", isPresented: $showInstallPrompt) {
+            Button("Install") { startEngineInstall() }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text("Bromure will download and set up the vllm-mlx engine (a one-time ~1 GB setup). You can also do this later from the engine row.")
+        }
+    }
+
+    // MARK: Engine row
+
+    @ViewBuilder private var engineRow: some View {
+        switch engineState {
+        case .installing(let frac, let log):
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Installing vllm-mlx…").font(.callout)
+                    Spacer()
+                    Text("\(Int(frac * 100))%").font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                ProgressView(value: frac).progressViewStyle(.linear)
+                if !log.isEmpty {
+                    Text(log).font(.caption2.monospaced())
+                        .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+            }
+        case .failed(let msg):
+            HStack {
+                Label("Engine install failed", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Spacer()
+                Button("Retry") { startEngineInstall() }
+            }
+            .help(msg)
+        case .idle:
+            if engineReady {
+                Label("vllm-mlx engine ready", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            } else {
+                HStack {
+                    Label("Engine not installed", systemImage: "cpu")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Install…") { showInstallPrompt = true }
+                }
+            }
+        }
+    }
+
+    // MARK: Model row
+
+    @ViewBuilder private func modelRow(_ model: CatalogModel) -> some View {
+        let fit = RAMFitGate.fit(model: model, hostUnifiedMemGB: hostGB)
+        let wontFit = (fit == .wontFit)
+        let isActive = (activeModelID == model.id)
+        let state = downloads[model.id]
+        let installed = (state == .installed) || CatalogStore.shared.isInstalled(repo: model.repo)
+
+        HStack(spacing: 10) {
+            // Active-model radio (only meaningful when it fits).
+            Image(systemName: isActive ? "largecircle.fill.circle" : "circle")
+                .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+                .onTapGesture { if !wontFit { activeModelID = model.id } }
+
+            tierBadge(ModelCatalog.tier(forMinMemGB: model.minUnifiedMemGB))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.name).font(.callout)
+                HStack(spacing: 6) {
+                    Text(fit.badge)
+                        .foregroundStyle(fit == .fits ? .green : (fit == .tight ? .orange : .secondary))
+                    Text("· \(Int(model.downloadGB)) GB")
+                    if model.toolCalling == .verified {
+                        Label("tools", systemImage: "checkmark.seal.fill").labelStyle(.titleAndIcon)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            modelAction(model: model, state: state, installed: installed, wontFit: wontFit)
+        }
+        .opacity(wontFit ? 0.45 : 1)
+        .disabled(wontFit)
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private func modelAction(model: CatalogModel, state: DownloadState?,
+                                          installed: Bool, wontFit: Bool) -> some View {
+        switch state {
+        case .downloading(let frac, let label):
+            VStack(alignment: .trailing, spacing: 2) {
+                ProgressView(value: frac).progressViewStyle(.linear).frame(width: 120)
+                Text(label).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+        case .failed:
+            Button("Retry") { startDownload(model) }.controlSize(.small)
+        default:
+            if installed {
+                Menu {
+                    Button("Remove", role: .destructive) { removeModel(model) }
+                } label: {
+                    Label("Installed", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+            } else {
+                Button("Download") { startDownload(model) }
+                    .controlSize(.small)
+                    .disabled(wontFit)
+            }
+        }
+    }
+
+    @ViewBuilder private func tierBadge(_ tier: String) -> some View {
+        Text(tier)
+            .font(.caption2.bold().monospaced())
+            .frame(width: 26, height: 18)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+    }
+
+    // MARK: Actions (immediate side effects)
+
+    private func startEngineInstall() {
+        engineState = .installing(0, "Starting…")
+        Task {
+            // Determinate progress: poll the venv dir size against the
+            // estimated install footprint while uv works. uv buffers its
+            // own bar when piped, so we drive the bar off real bytes on
+            // disk — it climbs smoothly instead of jumping 0 → 100.
+            let total = Double(EngineProvisioner.estimatedInstallBytes)
+            let poller = Task { @MainActor in
+                while true {
+                    try? await Task.sleep(nanoseconds: 600_000_000)
+                    if Task.isCancelled { break }
+                    let bytes = Double(EngineProvisioner.shared.installedBytes)
+                    let frac = min(0.97, bytes / total)
+                    if case .installing(_, let label) = engineState {
+                        engineState = .installing(frac, label)
+                    }
+                }
+            }
+            do {
+                try await EngineProvisioner.shared.ensureProvisioned { line in
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    Task { @MainActor in
+                        if case .installing(let f, _) = engineState {
+                            engineState = .installing(f, trimmed)
+                        }
+                    }
+                }
+                poller.cancel()
+                await MainActor.run { engineReady = true; engineState = .idle }
+            } catch {
+                poller.cancel()
+                await MainActor.run { engineState = .failed("\(error)") }
+            }
+        }
+    }
+
+    private func startDownload(_ model: CatalogModel) {
+        downloads[model.id] = .downloading(0, "Starting…")
+        let total = max(1, Int64(model.downloadGB * 1_000_000_000))
+        Task {
+            // `hf` lives in the engine venv — provision it first if needed.
+            if !EngineProvisioner.shared.isProvisioned {
+                do {
+                    try await EngineProvisioner.shared.ensureProvisioned()
+                    await MainActor.run { engineReady = true }
+                } catch {
+                    await MainActor.run { downloads[model.id] = .failed("engine: \(error)") }
+                    return
+                }
+            }
+            // Determinate progress from bytes-on-disk vs the known total —
+            // reliable regardless of how hf formats its tqdm output.
+            let repo = model.repo
+            let id = model.id
+            let poller = Task { @MainActor in
+                while true {
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    if Task.isCancelled { break }
+                    let bytes = CatalogStore.shared.installedBytes(repo: repo)
+                    let frac = min(0.99, Double(bytes) / Double(total))
+                    downloads[id] = .downloading(frac, ProgressBar.bytesLabel(bytes, total))
+                }
+            }
+            do {
+                try await ModelDownloader.pull(repo: repo, onProgress: { _ in })
+                poller.cancel()
+                await MainActor.run {
+                    downloads[id] = .installed
+                    if activeModelID == nil { activeModelID = id }
+                }
+            } catch {
+                poller.cancel()
+                await MainActor.run { downloads[id] = .failed("\(error)") }
+            }
+        }
+    }
+
+    private func removeModel(_ model: CatalogModel) {
+        try? CatalogStore.shared.removeInstalled(repo: model.repo)
+        downloads[model.id] = nil
+        if activeModelID == model.id { activeModelID = nil }
+    }
 }
 
 // MARK: - Manual token row (Advanced)

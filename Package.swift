@@ -42,7 +42,8 @@ let package = Package(
             ],
             path: "Sources/AgentCoding",
             exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef"],
-            resources: [.copy("Resources/vm-setup"), .copy("Resources/icons")],
+            resources: [.copy("Resources/vm-setup"), .copy("Resources/icons"),
+                        .copy("Resources/catalog.json")],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
             ]

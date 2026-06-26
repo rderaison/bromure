@@ -221,6 +221,41 @@ public final class MitmEngine {
         fusionConfigs.removeValue(forKey: profileID)
     }
 
+    /// Per-profile LLM routing context (Cloud/Local/Hybrid + hybrid policy
+    /// engine). Pushed at session launch and on `vm routing` changes; read
+    /// by the proxy's `routingProvider` on the hot path. Same lock + same
+    /// MainActor-write / hot-path-read rationale as Fusion above.
+    nonisolated(unsafe) private var routingContexts: [UUID: LLMRoutingContext] = [:]
+
+    public nonisolated func setRouting(_ routing: Profile.Routing,
+                                       modelLabel: String,
+                                       hybrid: HybridConfig,
+                                       for profileID: UUID) {
+        fusionLock.lock()
+        if let existing = routingContexts[profileID] {
+            existing.routing = routing
+            existing.localModelLabel = modelLabel
+            existing.hybrid.update(config: hybrid)
+        } else {
+            routingContexts[profileID] = LLMRoutingContext(
+                routing: routing, localModelLabel: modelLabel,
+                hybrid: HybridRouter(config: hybrid))
+        }
+        fusionLock.unlock()
+        SupplyChainLog.shared.record(
+            "[routing] \(routing.rawValue) for \(profileID.uuidString.prefix(8))")
+    }
+
+    nonisolated func routingContext(for profileID: UUID) -> LLMRoutingContext? {
+        fusionLock.lock(); defer { fusionLock.unlock() }
+        return routingContexts[profileID]
+    }
+
+    public nonisolated func clearRouting(for profileID: UUID) {
+        fusionLock.lock(); defer { fusionLock.unlock() }
+        routingContexts.removeValue(forKey: profileID)
+    }
+
     /// Per-install 32-byte salt for deriving fake tokens from real
     /// ones via HKDF. Generated once, persisted under app support so
     /// a given real key always maps to the same fake on this Mac —
@@ -235,6 +270,9 @@ public final class MitmEngine {
     /// Vsock port the in-VM AWS credential_process helper connects to.
     /// Host pushes a SDK-format JSON payload per connection.
     public static let awsCredsVsockPort: UInt32 = 8445
+    /// Vsock port the in-VM bridge connects to reach the local inference
+    /// engine (Path 1, §2.2). Spliced to 127.0.0.1:<enginePort> on host.
+    public static let inferenceVsockPort: UInt32 = 8446
 
     /// Per-VM listener delegates kept alive so they aren't GC'd while
     /// the VM is running. Keyed by profile UUID.
@@ -317,6 +355,9 @@ public final class MitmEngine {
         HTTPMitmConnection.fusionConfigProvider = { [weak self] pid in
             self?.fusionConfig(for: pid)
         }
+        HTTPMitmConnection.routingProvider = { [weak self] pid in
+            self?.routingContext(for: pid)
+        }
         // Claude subscription auth: one closure lets the proxy reach the shared
         // store (bogus-key lookup) + refresher (live access token).
         HTTPMitmConnection.claudeSubscriptionProvider = { [weak self] in
@@ -367,6 +408,8 @@ public final class MitmEngine {
                                        forPort: Self.sshAgentVsockPort)
         socketDevice.setSocketListener(holder.awsListener,
                                        forPort: Self.awsCredsVsockPort)
+        socketDevice.setSocketListener(holder.inferenceListener,
+                                       forPort: Self.inferenceVsockPort)
         listenerHolders[profileID] = holder
     }
 
@@ -375,6 +418,7 @@ public final class MitmEngine {
         clearGuardrailsConfig(for: profileID)
         clearSupplyChainPolicy(for: profileID)
         clearFusionEngaged(for: profileID)
+        clearRouting(for: profileID)
         swapper.clearMap(for: profileID)
         sshAgent.clearKeys(for: profileID)
         sshAgent.clearImportedKeyApprovals(for: profileID)
@@ -409,9 +453,11 @@ private final class ListenerHolder {
     let httpDelegate: HTTPListenerDelegate
     let sshDelegate: SSHListenerDelegate
     let awsDelegate: AWSCredsListenerDelegate
+    let inferenceDelegate: InferenceListenerDelegate
     let httpListener: VZVirtioSocketListener
     let sshListener: VZVirtioSocketListener
     let awsListener: VZVirtioSocketListener
+    let inferenceListener: VZVirtioSocketListener
 
     init(profileID: UUID,
          certCache: CertCache,
@@ -454,6 +500,8 @@ private final class ListenerHolder {
             profileID: profileID, sshAgent: sshAgent)
         self.awsDelegate = AWSCredsListenerDelegate(
             profileID: profileID, awsCreds: awsCreds)
+        self.inferenceDelegate = InferenceListenerDelegate(
+            enginePort: InferenceService.enginePort)
 
         self.httpListener = VZVirtioSocketListener()
         self.httpListener.delegate = httpDelegate
@@ -463,6 +511,9 @@ private final class ListenerHolder {
 
         self.awsListener = VZVirtioSocketListener()
         self.awsListener.delegate = awsDelegate
+
+        self.inferenceListener = VZVirtioSocketListener()
+        self.inferenceListener.delegate = inferenceDelegate
     }
 }
 

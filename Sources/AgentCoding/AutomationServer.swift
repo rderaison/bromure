@@ -68,6 +68,10 @@ final class ACAutomationServer {
     var onListTrace: ((_ profileKey: String?) -> [[String: Any]])?
     var onClearTrace: (() -> Int)?
     var onSetFusion: ((_ idOrName: String, _ engaged: Bool) -> [String: Any])?
+    // Local-inference routing (vLLM.md): `vm routing`, `vm hybrid`, `model use`.
+    var onSetRouting: ((_ idOrName: String, _ mode: String) -> [String: Any])?
+    var onSetHybrid: ((_ idOrName: String, _ knob: String, _ value: Double) -> [String: Any])?
+    var onSetModel: ((_ idOrName: String, _ modelID: String) -> [String: Any])?
 
     init(port: UInt16 = 9223, bindAddress: String = "127.0.0.1") {
         // 9223 (one off from the browser's 9222) so both apps can run side
@@ -497,6 +501,43 @@ final class ACAutomationServer {
             let id = decode(String(rest.dropLast("/fusion".count)))
             let engaged = (bodyJSON["engaged"] as? Bool) ?? false
             let result = DispatchQueue.main.sync { self.onSetFusion?(id, engaged) }
+                ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 409, body: result)
+            return
+        }
+        if rest.hasSuffix("/routing") {
+            guard method == "POST" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let id = decode(String(rest.dropLast("/routing".count)))
+            let mode = (bodyJSON["mode"] as? String) ?? "cloud"
+            let result = DispatchQueue.main.sync { self.onSetRouting?(id, mode) }
+                ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 409, body: result)
+            return
+        }
+        if rest.hasSuffix("/hybrid") {
+            guard method == "POST" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let id = decode(String(rest.dropLast("/hybrid".count)))
+            let knob = (bodyJSON["knob"] as? String) ?? ""
+            let value = (bodyJSON["value"] as? Double) ?? Double((bodyJSON["value"] as? Int) ?? 0)
+            let result = DispatchQueue.main.sync { self.onSetHybrid?(id, knob, value) }
+                ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 409, body: result)
+            return
+        }
+        if rest.hasSuffix("/model") {
+            guard method == "POST" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let id = decode(String(rest.dropLast("/model".count)))
+            let modelID = (bodyJSON["modelID"] as? String) ?? ""
+            let result = DispatchQueue.main.sync { self.onSetModel?(id, modelID) }
                 ?? ["ok": false, "error": "unavailable"]
             let ok = (result["ok"] as? Bool) ?? false
             sendResponse(fd: fd, status: ok ? 200 : 409, body: result)

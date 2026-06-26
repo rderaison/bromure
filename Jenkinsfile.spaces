@@ -1,0 +1,70 @@
+// Jenkinsfile.spaces — build the vllm-mlx engine wheel and publish it,
+// plus the model catalog, to the DigitalOcean Space the app pulls from at
+// runtime (https://dl.bromure.io/mlx/…). Independent of the app-release
+// pipelines (Jenkinsfile / Jenkinsfile.ac): models live on Hugging Face,
+// so this only ships the small engine wheel + catalog.json.
+pipeline {
+    agent { label 'macosx-builder' }
+
+    parameters {
+        string(
+            name: 'VLLM_MLX_REF',
+            defaultValue: '',
+            description: 'vllm-mlx git tag/sha to build (blank = default branch HEAD).'
+        )
+        booleanParam(
+            name: 'PUBLISH_CATALOG',
+            defaultValue: true,
+            description: 'Upload Sources/AgentCoding/Resources/catalog.json to mlx/catalog.json.'
+        )
+        booleanParam(
+            name: 'PUBLISH_WHEEL',
+            defaultValue: true,
+            description: 'Build the vllm-mlx wheel and publish it under mlx/simple/vllm-mlx/.'
+        )
+    }
+
+    environment {
+        // Same bucket + public base as the release pipelines; this just
+        // writes under the mlx/ prefix. Secrets come from Jenkins creds.
+        DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+        DO_SPACES_REGION      = 'nyc3'
+        DO_SPACES_BUCKET      = 'bromure-dl'
+        DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
+        VLLM_MLX_REPO         = 'https://github.com/waybarrios/vllm-mlx'
+    }
+
+    stages {
+        stage('Install release-tool deps') {
+            steps {
+                // Same socket.dev-wrapped install as the release pipelines;
+                // tools/spaces-put.mjs needs @aws-sdk/client-s3.
+                sh '''
+                    set -euo pipefail
+                    (cd tools && if [ -f package-lock.json ]; then \
+                                    npx --yes @socketsecurity/cli npm ci --silent; \
+                                 else \
+                                    npx --yes @socketsecurity/cli npm install --silent; \
+                                 fi)
+                '''
+            }
+        }
+
+        stage('Build + Publish') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DO_SPACES_KEY',    variable: 'DO_SPACES_KEY'),
+                    string(credentialsId: 'DO_SPACES_SECRET', variable: 'DO_SPACES_SECRET')
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export VLLM_MLX_REF="${VLLM_MLX_REF}"
+                        export PUBLISH_CATALOG="${PUBLISH_CATALOG}"
+                        export PUBLISH_WHEEL="${PUBLISH_WHEEL}"
+                        ./scripts/publish-spaces.sh
+                    '''
+                }
+            }
+        }
+    }
+}

@@ -913,6 +913,49 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// The judge model id (e.g. "claude-opus-4-8"). nil → engine default.
     public var fusionJudgeModel: String?
 
+    /// **Routing** — top-level, per-profile backend selection for the
+    /// coding agent's LLM traffic. Orthogonal to Fusion (which is an
+    /// *identity* concern). Selecting `.local` or `.hybrid` auto-engages
+    /// MITM interception; the user never flips a separate "mitm on" switch.
+    public enum Routing: String, Codable, CaseIterable, Sendable {
+        /// Pass-through to the real cloud upstream (today's behaviour).
+        case cloud
+        /// Always serve from the local on-host inference engine.
+        case local
+        /// Cloud by default, fall back to local on failure / budget /
+        /// split-ratio — the only mode where the policy engine runs.
+        case hybrid
+
+        public var displayName: String {
+            switch self {
+            case .cloud:  return "Cloud"
+            case .local:  return "Local"
+            case .hybrid: return "Hybrid"
+            }
+        }
+    }
+
+    /// Backend routing for this profile's agent LLM calls. Default `.cloud`.
+    public var modelRouting: Routing
+
+    /// Catalog id (or raw HF repo) of the model the local engine should
+    /// serve when routing is `.local`/`.hybrid`. nil → engine default /
+    /// no model selected yet.
+    public var activeModelID: String?
+
+    /// Hybrid-only policy knobs (ignored unless `modelRouting == .hybrid`).
+    /// Cloud token budget over a rolling 24 h wall-clock window; `0` =
+    /// unlimited. Once exceeded, new sessions route local until the
+    /// window slides back under cap.
+    public var hybridCloudTokenBudget: Int
+    /// Soft fallback threshold: if the cloud upstream emits no first
+    /// token within this many seconds, cancel and replay local. Default 5.
+    public var hybridSoftTTFTSeconds: Double
+    /// Percentage (0–100) of *new sessions* proactively pinned to local
+    /// even when cloud is healthy. Applied at session granularity so it
+    /// never swaps models mid-trajectory. Default 0.
+    public var hybridLocalSplitPercent: Int
+
     /// Whether the user has consented to swap the Claude subscription
     /// OAuth tokens (access + refresh) on disk for proxy-side fakes.
     /// `unset` = haven't asked yet (proxy will prompt on first clean
@@ -1175,6 +1218,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         fusionLegs: Set<Tool> = [],
         fusionJudgeProvider: Tool? = nil,
         fusionJudgeModel: String? = nil,
+        modelRouting: Routing = .cloud,
+        activeModelID: String? = nil,
+        hybridCloudTokenBudget: Int = 0,
+        hybridSoftTTFTSeconds: Double = 5,
+        hybridLocalSplitPercent: Int = 0,
         subscriptionTokenSwap: SubscriptionTokenSwapState = .unset,
         codexTokenSwap: SubscriptionTokenSwapState = .unset,
         defaultClaudeTokens: StoredOAuthTokens? = nil,
@@ -1235,6 +1283,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.fusionLegs = fusionLegs
         self.fusionJudgeProvider = fusionJudgeProvider
         self.fusionJudgeModel = fusionJudgeModel
+        self.modelRouting = modelRouting
+        self.activeModelID = activeModelID
+        self.hybridCloudTokenBudget = hybridCloudTokenBudget
+        self.hybridSoftTTFTSeconds = hybridSoftTTFTSeconds
+        self.hybridLocalSplitPercent = hybridLocalSplitPercent
         self.subscriptionTokenSwap = subscriptionTokenSwap
         self.codexTokenSwap = codexTokenSwap
         self.defaultClaudeTokens = defaultClaudeTokens
@@ -1302,6 +1355,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case fusionLegs
         case fusionJudgeProvider
         case fusionJudgeModel
+        case modelRouting
+        case activeModelID
+        case hybridCloudTokenBudget
+        case hybridSoftTTFTSeconds
+        case hybridLocalSplitPercent
         case subscriptionTokenSwap
         case codexTokenSwap
         case kubeconfigs
@@ -1388,6 +1446,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         fusionLegs = try c.decodeIfPresent(Set<Tool>.self, forKey: .fusionLegs) ?? []
         fusionJudgeProvider = try c.decodeIfPresent(Tool.self, forKey: .fusionJudgeProvider)
         fusionJudgeModel = try c.decodeIfPresent(String.self, forKey: .fusionJudgeModel)
+        modelRouting = try c.decodeIfPresent(Routing.self, forKey: .modelRouting) ?? .cloud
+        activeModelID = try c.decodeIfPresent(String.self, forKey: .activeModelID)
+        hybridCloudTokenBudget = try c.decodeIfPresent(Int.self, forKey: .hybridCloudTokenBudget) ?? 0
+        hybridSoftTTFTSeconds = try c.decodeIfPresent(Double.self, forKey: .hybridSoftTTFTSeconds) ?? 5
+        hybridLocalSplitPercent = try c.decodeIfPresent(Int.self, forKey: .hybridLocalSplitPercent) ?? 0
         subscriptionTokenSwap = try c.decodeIfPresent(SubscriptionTokenSwapState.self,
                                                       forKey: .subscriptionTokenSwap) ?? .unset
         codexTokenSwap = try c.decodeIfPresent(SubscriptionTokenSwapState.self,
@@ -1477,6 +1540,22 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if let fusionJudgeModel {
             try c.encode(fusionJudgeModel, forKey: .fusionJudgeModel)
+        }
+        // Routing: only emit when non-default so cloud-only profiles stay compact.
+        if modelRouting != .cloud {
+            try c.encode(modelRouting, forKey: .modelRouting)
+        }
+        if let activeModelID, !activeModelID.isEmpty {
+            try c.encode(activeModelID, forKey: .activeModelID)
+        }
+        if hybridCloudTokenBudget != 0 {
+            try c.encode(hybridCloudTokenBudget, forKey: .hybridCloudTokenBudget)
+        }
+        if hybridSoftTTFTSeconds != 5 {
+            try c.encode(hybridSoftTTFTSeconds, forKey: .hybridSoftTTFTSeconds)
+        }
+        if hybridLocalSplitPercent != 0 {
+            try c.encode(hybridLocalSplitPercent, forKey: .hybridLocalSplitPercent)
         }
         if subscriptionTokenSwap != .unset {
             try c.encode(subscriptionTokenSwap, forKey: .subscriptionTokenSwap)

@@ -147,6 +147,45 @@ if [ -d "$BUILD_DIR/$RESOURCE_BUNDLE_NAME" ]; then
     done
 fi
 
+# bromure-ac: bundle `uv` so the app can provision the vllm-mlx engine on
+# demand (vLLM.md §3.1). We ship the tiny static installer, not a ~1 GB
+# venv — the venv is built into Application Support on first local-inference
+# use. Best-effort: a dev machine without `uv` still builds; the app falls
+# back to `uv`/`vllm-mlx` on PATH. Sign uv before the outer app sign.
+if [ "$TARGET" = "bromure-ac" ]; then
+    mkdir -p "$RESOURCES_DIR/bin"
+    # Fetch a known uv release for arm64 macOS so the bundle is hermetic and
+    # doesn't depend on the build machine having uv. Pin with UV_VERSION
+    # (e.g. UV_VERSION=0.9.2 ./build.sh bromure-ac); default resolves the
+    # latest release tag at build time. uv ships its own standalone Python,
+    # so this is the *only* runtime the app needs to provision the engine.
+    UV_VERSION="${UV_VERSION:-}"
+    if [ -z "$UV_VERSION" ]; then
+        UV_VERSION=$(curl -fsSL https://api.github.com/repos/astral-sh/uv/releases/latest \
+            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+    fi
+    UV_TGZ="uv-aarch64-apple-darwin.tar.gz"
+    UV_URL="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_TGZ}"
+    UV_TMP=$(mktemp -d)
+    if [ -n "$UV_VERSION" ] && curl -fsSL "$UV_URL" -o "$UV_TMP/$UV_TGZ" 2>/dev/null \
+        && tar -xzf "$UV_TMP/$UV_TGZ" -C "$UV_TMP" 2>/dev/null; then
+        cp "$UV_TMP/uv-aarch64-apple-darwin/uv" "$RESOURCES_DIR/bin/uv"
+        echo "Bundled uv $UV_VERSION (arm64) from Astral releases."
+    elif command -v uv >/dev/null 2>&1; then
+        cp "$(command -v uv)" "$RESOURCES_DIR/bin/uv"
+        echo "warning: couldn't fetch uv release; bundled the build machine's uv ($(uv --version 2>/dev/null))." >&2
+    else
+        echo "warning: uv not fetched and none on PATH; not bundling. App will look for uv on the user's PATH." >&2
+        rmdir "$RESOURCES_DIR/bin" 2>/dev/null || true
+    fi
+    rm -rf "$UV_TMP"
+    # Re-sign the third-party uv with our identity + hardened runtime.
+    [ -f "$RESOURCES_DIR/bin/uv" ] && codesign --force --sign "$SIGN_ID" --options runtime "$RESOURCES_DIR/bin/uv"
+    # Optional pinned requirements override (else the in-binary default).
+    REQ_SRC="$SCRIPT_DIR/Sources/AgentCoding/Resources/engine-requirements.txt"
+    [ -f "$REQ_SRC" ] && cp "$REQ_SRC" "$RESOURCES_DIR/engine-requirements.txt"
+fi
+
 # Code sign with entitlements.
 # Virtualization.framework requires com.apple.security.virtualization.
 # Set CODESIGN_IDENTITY for Developer ID signing (required for iCloud,
