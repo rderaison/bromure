@@ -198,7 +198,8 @@ struct VM: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "vm",
         abstract: "Manage bromure-ac VMs (like `docker` for containers).",
-        subcommands: [VMList.self, VMRun.self, VMKill.self, VMAttach.self])
+        subcommands: [VMList.self, VMRun.self, VMKill.self, Exec.self,
+                      VMAttach.self, VMDescribe.self])
 }
 
 struct VMRun: ParsableCommand {
@@ -352,6 +353,64 @@ struct VMAttach: ParsableCommand {
     }
 }
 
+struct VMDescribe: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "describe",
+        abstract: "Show detailed information about a running VM.")
+
+    @Argument(help: "VM id or profile name.")
+    var vm: String
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let vms = (try client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
+        guard let v = vms.first(where: { matchesVM($0, vm) }) else {
+            throw ValidationError("VM not found: \(vm)")
+        }
+        func row(_ k: String, _ val: String?) {
+            guard let val, !val.isEmpty else { return }
+            print("  " + pad(k, 16) + val)
+        }
+        print("\(v["name"] as? String ?? "?")  (\(v["shortId"] as? String ?? ""))")
+        row("id", v["id"] as? String)
+        row("tool", v["tool"] as? String)
+        row("state", v["state"] as? String)
+        row("window", (v["attached"] as? Bool ?? false) ? "attached" : "detached")
+        row("uptime", formatUptime(v["uptimeSeconds"] as? Int ?? 0))
+        row("ip", (v["ip"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+        row("vCPUs", (v["cpuCount"] as? Int).map(String.init))
+        row("memory", (v["memoryGB"] as? Int).map { "\($0) GB allocated" })
+        row("network", v["networkMode"] as? String)
+        row("base image", v["baseImageVersion"] as? String)
+        if let bytes = v["diskAllocatedBytes"] as? Int {
+            let sz = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+            row("disk", "\(sz) used   \(v["diskPath"] as? String ?? "")")
+        }
+        if let mounts = v["mounts"] as? [String], !mounts.isEmpty {
+            print("  mounts:")
+            for m in mounts { print("    - \(m)") }
+        }
+        if let tabs = v["tabs"] as? [[String: Any]], !tabs.isEmpty {
+            print("  tabs:")
+            for t in tabs {
+                print("    \(t["index"] as? Int ?? 0). \(t["title"] as? String ?? "shell")")
+            }
+        }
+        // Best-effort in-guest memory usage (skips quietly if the shell agent
+        // isn't reachable yet).
+        let target = v["id"] as? String ?? vm
+        if let r = try? client.request(
+            "POST", "/vms/\(ControlClient.encodeSegment(target))/exec",
+            body: ["command": "free -m | awk 'NR==2{print $3\"/\"$2\" MB\"}'", "timeout": 4]),
+           r.status == 200,
+           let out = (r.json["stdout"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !out.isEmpty {
+            row("memory (in use)", out)
+        }
+    }
+}
+
 /// Match a `vm ls` entry against a user-supplied id / short-id-prefix / name.
 private func matchesVM(_ vm: [String: Any], _ key: String) -> Bool {
     let k = key.replacingOccurrences(of: "-", with: "").lowercased()
@@ -363,6 +422,113 @@ private func matchesVM(_ vm: [String: Any], _ key: String) -> Bool {
 }
 
 // MARK: - `exec`
+
+// MARK: - `profiles` subcommand group
+
+struct Profiles: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "profiles",
+        abstract: "Manage profiles (the templates VMs boot from).",
+        subcommands: [ProfilesList.self, ProfilesDescribe.self, ProfilesRemove.self])
+}
+
+struct ProfilesList: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ls", abstract: "List profiles.")
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let profs = (try client.request("GET", "/profiles").json["profiles"] as? [[String: Any]]) ?? []
+        if profs.isEmpty { print("No profiles."); return }
+        let running = Set(((try? client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? [])
+            .compactMap { $0["id"] as? String })
+        print(pad("PROFILE ID", 14) + pad("NAME", 24) + pad("TOOL", 9)
+              + pad("AUTH", 14) + pad("MCP", 5) + "STATE")
+        for p in profs.sorted(by: { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }) {
+            let id = p["id"] as? String ?? ""
+            let short = String(id.replacingOccurrences(of: "-", with: "").lowercased().prefix(12))
+            let name = p["name"] as? String ?? ""
+            let tool = p["tool"] as? String ?? ""
+            let auth = p["authMode"] as? String ?? ""
+            let mcp = String(p["mcpServerCount"] as? Int ?? 0)
+            let state = running.contains(id) ? "running" : "-"
+            print(pad(short, 14) + pad(name, 24) + pad(tool, 9) + pad(auth, 14) + pad(mcp, 5) + state)
+        }
+    }
+}
+
+struct ProfilesDescribe: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "describe", abstract: "Show a profile's settings.")
+
+    @Argument(help: "Profile id or name.")
+    var profile: String
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let resp = try client.request("GET", "/profiles/\(ControlClient.encodeSegment(profile))")
+        guard resp.status == 200 else {
+            throw ValidationError(resp.json["error"] as? String ?? "Profile not found: \(profile)")
+        }
+        let v = resp.json
+        func row(_ k: String, _ s: String?) {
+            guard let s, !s.isEmpty else { return }
+            print("  " + pad(k, 16) + s)
+        }
+        print("\(v["name"] as? String ?? "?")  (\(v["shortId"] as? String ?? ""))")
+        row("id", v["id"] as? String)
+        row("tool", v["tool"] as? String)
+        row("auth", v["authMode"] as? String)
+        row("api key", (v["apiKeySet"] as? Bool ?? false) ? "set" : "not set")
+        row("memory", (v["memoryGB"] as? Int).map { "\($0) GB" })
+        row("network", v["networkMode"] as? String)
+        row("close action", v["closeAction"] as? String)
+        row("color", v["color"] as? String)
+        row("ssh key", (v["sshKeySet"] as? Bool ?? false) ? "set" : "not set")
+        if let n = v["importedSSHKeys"] as? Int, n > 0 { row("imported keys", String(n)) }
+        row("running", (v["running"] as? Bool ?? false) ? "yes" : "no")
+        row("created", v["createdAt"] as? String)
+        row("last used", v["lastUsedAt"] as? String)
+        if let folders = v["folderPaths"] as? [String], !folders.isEmpty {
+            print("  shared folders:")
+            for f in folders { print("    - \(f)") }
+        }
+        if let mcp = v["mcpServers"] as? [String], !mcp.isEmpty {
+            print("  mcp servers:")
+            for m in mcp { print("    - \(m)") }
+        }
+        if let c = v["comments"] as? String, !c.isEmpty { print("  comments:        \(c)") }
+    }
+}
+
+struct ProfilesRemove: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rm", abstract: "Delete a profile and all its data (disk + home).")
+
+    @Argument(help: "Profile id or name.")
+    var profile: String
+
+    @Flag(name: [.customShort("f"), .long], help: "Skip the confirmation prompt.")
+    var force = false
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        if !force {
+            FileHandle.standardError.write(Data(
+                "Delete profile '\(profile)' and ALL its data (disk + home)? [y/N] ".utf8))
+            let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+            guard answer == "y" || answer == "yes" else { print("Aborted."); return }
+        }
+        let resp = try client.request("DELETE", "/profiles/\(ControlClient.encodeSegment(profile))")
+        guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
+            throw ValidationError(resp.json["error"] as? String ?? "Couldn't delete \(profile).")
+        }
+        print("Deleted profile \(resp.json["name"] as? String ?? profile).")
+    }
+}
 
 struct Exec: ParsableCommand {
     static let configuration = CommandConfiguration(

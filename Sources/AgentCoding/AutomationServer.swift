@@ -60,6 +60,10 @@ final class ACAutomationServer {
     /// the new VM's info dict, or nil on failure.
     var onCreateVM: ((_ spec: [String: Any]) async -> [String: Any]?)?
 
+    // Profile management (CLI `profiles …`).
+    var onDescribeProfile: ((_ idOrName: String) -> [String: Any]?)?
+    var onDeleteProfile: ((_ idOrName: String) -> [String: Any])?
+
     init(port: UInt16 = 9223, bindAddress: String = "127.0.0.1") {
         // 9223 (one off from the browser's 9222) so both apps can run side
         // by side during development without conflicting.
@@ -337,6 +341,9 @@ final class ACAutomationServer {
         case (let m, let p) where p.hasPrefix("/vms/"):
             handleVMRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)
 
+        case (let m, let p) where p.hasPrefix("/profiles/"):
+            handleProfileRoute(fd: fd, method: m, path: p)
+
         // /sessions/{id} and /sessions/{id}/exec
         case (let m, let p) where p.hasPrefix("/sessions/"):
             handleSessionRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)
@@ -498,6 +505,31 @@ final class ACAutomationServer {
             } else {
                 sendResponse(fd: fd, status: 404, body: ["error": "VM not found"])
             }
+        default:
+            sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"])
+        }
+    }
+
+    private func handleProfileRoute(fd: Int32, method: String, path: String) {
+        guard debugEnabled || isTrustedLocal else {
+            sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+            return
+        }
+        let noQuery = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        let raw = String(noQuery.dropFirst("/profiles/".count))
+        let id = raw.removingPercentEncoding ?? raw
+        switch method {
+        case "GET":
+            if let d = DispatchQueue.main.sync(execute: { self.onDescribeProfile?(id) }) {
+                sendResponse(fd: fd, status: 200, body: d)
+            } else {
+                sendResponse(fd: fd, status: 404, body: ["error": "Profile not found"])
+            }
+        case "DELETE":
+            let result = DispatchQueue.main.sync(execute: { self.onDeleteProfile?(id) })
+                ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 409, body: result)
         default:
             sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"])
         }

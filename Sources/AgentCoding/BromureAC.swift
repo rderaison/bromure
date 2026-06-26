@@ -27,11 +27,22 @@ struct BromureAC: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac",
         abstract: "Run Codex / Claude Code in an isolated, persistent VM.",
-        subcommands: [Init.self, Run.self, Reset.self, MCP.self, Enroll.self, Unenroll.self, Status.self,
-                      VM.self, Exec.self],
-        // No-arg invocation (double-click in Finder, `open` w/o args,
-        // bare `bromure-ac` in a terminal) opens the GUI. CLI users who
-        // want headless setup still have `bromure-ac init`.
+        // `run` is the default subcommand (bare `bromure-ac`, Finder
+        // double-click, `open` w/o args all open the GUI) but it's hidden from
+        // help — it's an implementation detail, not something to invoke by hand.
+        subcommands: [Run.self],
+        groupedSubcommands: [
+            CommandGroup(name: "Image management",
+                         subcommands: [Init.self, Info.self, Reset.self]),
+            CommandGroup(name: "Profiles",
+                         subcommands: [Profiles.self]),
+            CommandGroup(name: "Running sessions",
+                         subcommands: [VM.self]),
+            CommandGroup(name: "Enterprise features",
+                         subcommands: [Enroll.self, Unenroll.self, Status.self]),
+            CommandGroup(name: "Integration",
+                         subcommands: [MCP.self]),
+        ],
         defaultSubcommand: Run.self
     )
 
@@ -94,11 +105,41 @@ struct Init: ParsableCommand {
     }
 }
 
+// MARK: - info
+
+struct Info: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "info",
+        abstract: "Show information about the base image (version, size, path)."
+    )
+
+    func run() throws {
+        let im = try makeImageManager()
+        guard im.hasBaseImage else {
+            print("No base image yet. Build it with `bromure-ac init`.")
+            return
+        }
+        let version = (try? String(contentsOf: im.versionStampURL, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+        let url = im.baseDiskURL
+        let attrs = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
+        let apparent = (attrs[.size] as? NSNumber)?.int64Value
+        let onDisk = (try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize
+        func human(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
+        print("Base image")
+        print("  version:  \(version)")
+        if let apparent { print("  size:     \(human(apparent)) (virtual)") }
+        if let onDisk { print("  on disk:  \(human(Int64(onDisk)))") }
+        print("  path:     \(url.path)")
+    }
+}
+
 // MARK: - run
 
 struct Run: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Boot a session against the base image and open the display window."
+        abstract: "Boot a session against the base image and open the display window.",
+        shouldDisplay: false
     )
 
     @Flag(name: .long,
@@ -292,8 +333,6 @@ final class RunningSession {
     /// Fusion engaged state, mirrored from the engine so a reattaching
     /// window restores the toolbar toggle correctly.
     var fusionEngaged: Bool = false
-    /// Host folders mounted into this VM (display only, for `vm ls`).
-    var mounts: [String] = []
     /// True once an explicit stop is in flight, so the VM-stopped callback
     /// doesn't double-run teardown.
     var stopping: Bool = false
@@ -898,6 +937,55 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return nil }
             return await self.automationCreateVM(spec: spec)
         }
+        server.onDescribeProfile = { [weak self] key in self?.automationProfileDescribe(key) }
+        server.onDeleteProfile = { [weak self] key in
+            self?.automationDeleteProfile(key) ?? ["ok": false, "error": "unavailable"]
+        }
+    }
+
+    /// Curated, secret-free view of a profile's settings for `profiles describe`.
+    @MainActor private func automationProfileDescribe(_ key: String) -> [String: Any]? {
+        guard let p = profileByNameOrID(key) else { return nil }
+        let iso = ISO8601DateFormatter()
+        var d: [String: Any] = [
+            "id": p.id.uuidString,
+            "shortId": Self.shortID(p.id),
+            "name": p.name,
+            "color": p.color.rawValue,
+            "tool": p.tool.rawValue,
+            "authMode": p.authMode.rawValue,
+            "apiKeySet": (p.apiKey?.isEmpty == false),
+            "memoryGB": p.memoryGB,
+            "networkMode": p.networkMode.rawValue,
+            "closeAction": p.closeAction.rawValue,
+            "folderPaths": p.folderPaths,
+            "mcpServers": p.mcpServers.map { $0.name },
+            "sshKeySet": (p.sshPublicKey?.isEmpty == false),
+            "importedSSHKeys": p.importedSSHKeys.count,
+            "running": runningSessions[p.id] != nil,
+            "comments": p.comments,
+            "createdAt": iso.string(from: p.createdAt),
+        ]
+        if let last = p.lastUsedAt { d["lastUsedAt"] = iso.string(from: last) }
+        return d
+    }
+
+    /// Delete a profile (and its disk + home). Refuses while a VM is running.
+    @MainActor private func automationDeleteProfile(_ key: String) -> [String: Any] {
+        guard let p = profileByNameOrID(key) else {
+            return ["ok": false, "error": "Profile not found: \(key)"]
+        }
+        if runningSessions[p.id] != nil {
+            return ["ok": false, "error": "Profile '\(p.name)' has a running VM — `vm kill` it first."]
+        }
+        do {
+            try store.delete(p)
+            profiles = store.loadAll()
+            renderPicker()
+            return ["ok": true, "name": p.name]
+        } catch {
+            return ["ok": false, "error": "Couldn't delete '\(p.name)': \(error.localizedDescription)"]
+        }
     }
 
     /// Snapshot of running VMs for `vm ls`.
@@ -915,6 +1003,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let tabs: [[String: Any]] = s.tabOrder.enumerated().map { (i, id) in
                 ["index": i + 1, "id": id.uuidString, "title": s.tabTitles[id] ?? "shell"]
             }
+            let diskURL = store.diskURL(for: s.profile)
+            let diskAllocated = (try? diskURL.resourceValues(
+                forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0
             return [
                 "id": s.profileID.uuidString,
                 "shortId": Self.shortID(s.profileID),
@@ -924,8 +1015,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "attached": profileWindows[s.profileID] != nil,
                 "uptimeSeconds": Int(now.timeIntervalSince(s.startedAt)),
                 "ip": s.lastIP ?? "",
-                "mounts": s.mounts,
+                "mounts": s.profile.folderPaths,
                 "tabs": tabs,
+                "cpuCount": UbuntuSandboxVM.runtimeCPUs,
+                "memoryGB": s.profile.memoryGB,
+                "networkMode": s.profile.networkMode.rawValue,
+                "diskPath": diskURL.path,
+                "diskAllocatedBytes": diskAllocated,
+                "baseImageVersion": s.profile.baseImageVersionAtClone ?? "unknown",
             ]
         }
     }
@@ -1084,10 +1181,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @MainActor private func profileByNameOrID(_ key: String) -> Profile? {
-        if let uuid = UUID(uuidString: key) {
-            return profiles.first { $0.id == uuid }
+        if let uuid = UUID(uuidString: key) { return profiles.first { $0.id == uuid } }
+        if let byName = profiles.first(where: { $0.name.lowercased() == key.lowercased() }) {
+            return byName
         }
-        return profiles.first { $0.name.lowercased() == key.lowercased() }
+        // Docker-style short-id prefix (dash-insensitive).
+        let k = key.replacingOccurrences(of: "-", with: "").lowercased()
+        guard !k.isEmpty else { return nil }
+        let matches = profiles.filter {
+            $0.id.uuidString.replacingOccurrences(of: "-", with: "").lowercased().hasPrefix(k)
+        }
+        return matches.count == 1 ? matches.first : nil
     }
 
     private func interceptKey(_ event: NSEvent) -> NSEvent? {
@@ -3757,19 +3861,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             do {
                 try await sandbox.suspend()
                 FileHandle.standardError.write(Data("[ac] suspended '\(name)'\n".utf8))
-                handleSessionStopped(profileID: profileID)   // suspend fires no onStopped
             } catch {
                 FileHandle.standardError.write(Data(
                     "[ac] suspend '\(name)' failed (\(error)) — forcing stop\n".utf8))
                 sandbox.sessionDisk?.clearSavedState()
-                await Self.forceStop(vm)   // → guestDidStop → onStopped → handleSessionStopped
+                await Self.forceStop(vm)
             }
         case .shutdown:
             sandbox.sessionDisk?.clearSavedState()
             do { try vm.requestStop() }
             catch {
                 await Self.forceStop(vm)
-                return
+                break
             }
             let deadline = Date().addingTimeInterval(15)
             while vm.state == .running && Date() < deadline {
@@ -3780,10 +3883,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     "[ac] '\(name)' didn't poweroff in 15s — forcing stop\n".utf8))
                 await Self.forceStop(vm)
             }
-            // onStopped → handleSessionStopped finishes teardown.
         case .ask:
             break   // unreachable
         }
+        // A clean guest poweroff fires onStopped → handleSessionStopped, but
+        // suspend and a forced vm.stop() do NOT — so finish teardown here too.
+        // Idempotent: a no-op if onStopped already ran.
+        handleSessionStopped(profileID: profileID)
     }
 
     /// Fire-and-forget `stopSession` for non-async callers (the guest
