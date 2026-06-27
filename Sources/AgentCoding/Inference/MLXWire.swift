@@ -56,7 +56,8 @@ enum Wire {
                     "status": "completed",
                     "content": [["type": "output_text", "text": c.text, "annotations": []]],
                 ]],
-                "usage": ["input_tokens": c.promptTokens, "output_tokens": c.completionTokens],
+                "usage": ["input_tokens": c.promptTokens, "output_tokens": c.completionTokens,
+                          "total_tokens": c.promptTokens + c.completionTokens],
             ]
         }
     }

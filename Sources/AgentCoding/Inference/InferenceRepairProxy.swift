@@ -124,12 +124,23 @@ final class InferenceRepairProxy: @unchecked Sendable {
             }
         }
         /// Repair the buffered upstream message, then render it back as SSE.
-        func repairedSSE(_ message: [String: Any]) -> Data {
+        func repairedSSE(_ message: [String: Any], toolNames: Set<String>) -> Data {
             switch self {
-            case .messages: return ToolCallRepair.sse(message: ToolCallRepair.repair(message: message))
-            case .chat: return ToolCallRepair.chatSSE(ToolCallRepair.repairChat(message))
-            case .responses: return ToolCallRepair.responsesSSE(ToolCallRepair.repairResponses(message))
+            case .messages: return ToolCallRepair.sse(message: ToolCallRepair.repair(message: message, toolNames: toolNames))
+            case .chat: return ToolCallRepair.chatSSE(ToolCallRepair.repairChat(message, toolNames: toolNames))
+            case .responses: return ToolCallRepair.responsesSSE(ToolCallRepair.repairResponses(message, toolNames: toolNames))
             }
+        }
+
+        /// Tool names declared in the request body — Anthropic `tools[].name`
+        /// and OpenAI `tools[].function.name`.
+        static func toolNames(in payload: [String: Any]) -> Set<String> {
+            var names = Set<String>()
+            for t in (payload["tools"] as? [[String: Any]]) ?? [] {
+                if let n = t["name"] as? String { names.insert(n) }
+                if let fn = t["function"] as? [String: Any], let n = fn["name"] as? String { names.insert(n) }
+            }
+            return names
         }
     }
 
@@ -162,9 +173,23 @@ final class InferenceRepairProxy: @unchecked Sendable {
             return httpResponse(status: status, headers: [("Content-Type", "application/json")],
                                 body: data ?? Data())
         }
+        let toolNames = API.toolNames(in: payload)
+        if ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil {
+            let txt = ((message["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined())
+                ?? ((message["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any])?["content"] as? String
+                ?? ((message["output"] as? [[String: Any]])?.compactMap { item in
+                        (item["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined()
+                    }.joined())
+                ?? ""
+            let rescued = ToolCallRepair.rescue(text: txt, toolNames: toolNames).blocks.count
+            let line = "[repair] \(req.path) tools=\(toolNames.count) textlen=\(txt.count) rescued=\(rescued) :: \(txt.prefix(220).replacingOccurrences(of: "\n", with: "\\n"))\n"
+            if let h = FileHandle(forWritingAtPath: "/tmp/bromure-repair.log") {
+                h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
+            } else { try? line.write(toFile: "/tmp/bromure-repair.log", atomically: true, encoding: .utf8) }
+        }
         return httpResponse(status: 200,
                             headers: [("Content-Type", "text/event-stream"), ("Cache-Control", "no-cache")],
-                            body: api.repairedSSE(message))
+                            body: api.repairedSSE(message, toolNames: toolNames))
     }
 
     private static func passthrough(_ req: Request, base: String) -> Data {

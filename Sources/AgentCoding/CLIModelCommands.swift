@@ -146,7 +146,26 @@ struct Model: ParsableCommand {
         abstract: "Manage local MLX inference models (catalog, pull, use).",
         subcommands: [ModelCatalogList.self, ModelInstall.self, ModelPull.self,
                       ModelLS.self, ModelUse.self, ModelRM.self, RepairServe.self,
-                      MLXSelfTest.self, MLXServe.self, MLXEngineChild.self])
+                      MLXSelfTest.self, MLXServe.self, MLXEngineChild.self,
+                      ToolCallRepairTest.self])
+}
+
+/// Hidden: run ToolCallRepair.rescue on a text file's contents (`model
+/// _tc-test <path>`), to validate leaked-tool-call extraction in isolation.
+struct ToolCallRepairTest: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "_tc-test", shouldDisplay: false)
+    @Argument(help: "Path to a file containing the model's text output.") var path: String
+    func run() throws {
+        let text = try String(contentsOfFile: path, encoding: .utf8)
+        let (cleaned, blocks) = ToolCallRepair.rescue(text: text)
+        print("rescued \(blocks.count) tool_use block(s):")
+        for b in blocks {
+            print("  name=\(b["name"] ?? "?")")
+            print("  input=\(b["input"] ?? "?")")
+        }
+        print("--- cleaned text (\(cleaned.count) chars) ---")
+        print(cleaned.prefix(200))
+    }
 }
 
 /// Hidden: the supervised engine child the main app spawns
