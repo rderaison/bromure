@@ -146,7 +146,24 @@ struct Model: ParsableCommand {
         abstract: "Manage local MLX inference models (catalog, pull, use).",
         subcommands: [ModelCatalogList.self, ModelInstall.self, ModelPull.self,
                       ModelLS.self, ModelUse.self, ModelRM.self, RepairServe.self,
-                      MLXSelfTest.self])
+                      MLXSelfTest.self, MLXServe.self])
+}
+
+/// Hidden: start the in-process MLX HTTP server for a model and block, so the
+/// OpenAI/Anthropic/Responses + /metrics endpoints can be exercised over HTTP
+/// (`model _mlx-serve <repo>`). Prints the per-run API key for curl.
+struct MLXServe: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "_mlx-serve", shouldDisplay: false)
+    @Argument(help: "HF repo (must be in the models dir / hub cache).") var repo: String
+    func run() throws {
+        try blockingRun {
+            try await InferenceService.shared.ensureRunning(modelRepo: repo)
+        }
+        let line = "serving \(repo) on http://127.0.0.1:\(InferenceService.enginePort)\n" +
+                   "api-key: \(InferenceService.apiKey)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+        RunLoop.main.run()
+    }
 }
 
 /// Hidden: load a model through the in-process MLX engine and generate once,

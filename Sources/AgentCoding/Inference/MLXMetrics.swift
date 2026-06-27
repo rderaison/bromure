@@ -1,10 +1,11 @@
 import Foundation
+import MLX
 
-/// Cumulative engine counters, exposed at `/metrics` in Prometheus text using
-/// the same `vllm_mlx_*` names ``InferenceMetrics`` already parses — so the
-/// Local-inference window keeps working unchanged against the in-process
-/// engine. TTFT and request-duration are accumulated so the window can derive
-/// the true decode rate (completion ÷ (duration − ttft)).
+/// Cumulative engine counters, exposed at `/metrics` in Prometheus text under
+/// `mlx_*` names that ``InferenceMetrics`` parses — so the Local-inference
+/// window reflects the in-process MLX engine. TTFT and request-duration are
+/// accumulated so the window can derive the true decode rate
+/// (completion ÷ (duration − ttft)).
 final class EngineMetrics: @unchecked Sendable {
     static let shared = EngineMetrics()
     private let lock = NSLock()
@@ -36,20 +37,22 @@ final class EngineMetrics: @unchecked Sendable {
         let ts = ttftSum, tc = ttftCount, ds = durationSum, dc = durationCount
         let inf = inFlight, run = inFlight, total = requestsTotal
         lock.unlock()
+        let metalBytes = MLX.GPU.activeMemory
         return """
         # in-process MLX engine metrics
-        vllm_mlx_prompt_tokens_total \(pt)
-        vllm_mlx_completion_tokens_total \(ct)
-        vllm_mlx_inference_ttft_seconds_sum \(ts)
-        vllm_mlx_inference_ttft_seconds_count \(tc)
-        vllm_mlx_inference_request_duration_seconds_sum \(ds)
-        vllm_mlx_inference_request_duration_seconds_count \(dc)
-        vllm_mlx_inference_requests_total \(total)
-        vllm_mlx_http_requests_in_flight \(inf)
-        vllm_mlx_scheduler_running_requests \(run)
-        vllm_mlx_scheduler_waiting_requests 0
-        vllm_mlx_model_loaded \(loaded)
-        vllm_mlx_engine_uptime_seconds \(Int(uptime))
+        mlx_prompt_tokens_total \(pt)
+        mlx_completion_tokens_total \(ct)
+        mlx_inference_ttft_seconds_sum \(ts)
+        mlx_inference_ttft_seconds_count \(tc)
+        mlx_inference_request_duration_seconds_sum \(ds)
+        mlx_inference_request_duration_seconds_count \(dc)
+        mlx_inference_requests_total \(total)
+        mlx_http_requests_in_flight \(inf)
+        mlx_scheduler_running_requests \(run)
+        mlx_scheduler_waiting_requests 0
+        mlx_model_loaded \(loaded)
+        mlx_metal_memory_bytes \(metalBytes)
+        mlx_engine_uptime_seconds \(Int(uptime))
 
         """
     }

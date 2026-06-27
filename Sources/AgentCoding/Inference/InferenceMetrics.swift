@@ -36,33 +36,31 @@ public struct InferenceMetrics: Sendable, Equatable {
         return nil
     }
 
-    // Names as emitted by vllm-mlx (verified against v0.4.0rc1 /metrics),
-    // with the older `vllm:` variants kept as fallbacks.
-    public var promptTokens: Double?     { first(["vllm_mlx_prompt_tokens_total", "vllm:prompt_tokens_total", "prompt_tokens_total"]) }
-    public var generationTokens: Double? { first(["vllm_mlx_completion_tokens_total", "vllm:generation_tokens_total", "generation_tokens_total"]) }
-    public var requestsRunning: Double?  { first(["vllm_mlx_scheduler_running_requests", "vllm:num_requests_running", "num_requests_running"]) }
-    public var requestsWaiting: Double?  { first(["vllm_mlx_scheduler_waiting_requests", "vllm:num_requests_waiting", "num_requests_waiting"]) }
-    public var requestsInFlight: Double? { first(["vllm_mlx_http_requests_in_flight"]) }
-    public var cacheUsage: Double?       { first(["vllm_mlx_cache_utilization_ratio", "vllm:gpu_cache_usage_perc", "kv_cache_usage_perc"]) }
-    public var cacheHitRate: Double?     { first(["vllm_mlx_cache_hit_rate"]) }
-    public var metalMemoryBytes: Double? { first(["vllm_mlx_metal_memory_bytes"]) }
-    public var uptimeSeconds: Double?    { first(["vllm_mlx_engine_uptime_seconds"]) }
+    // Metric names emitted by the in-process MLX engine (see MLXMetrics).
+    public var promptTokens: Double?     { values["mlx_prompt_tokens_total"] }
+    public var generationTokens: Double? { values["mlx_completion_tokens_total"] }
+    public var requestsRunning: Double?  { values["mlx_scheduler_running_requests"] }
+    public var requestsWaiting: Double?  { values["mlx_scheduler_waiting_requests"] }
+    public var requestsInFlight: Double? { values["mlx_http_requests_in_flight"] }
+    public var cacheHitRate: Double?     { values["mlx_cache_hit_rate"] }
+    public var metalMemoryBytes: Double? { values["mlx_metal_memory_bytes"] }
+    public var uptimeSeconds: Double?    { values["mlx_engine_uptime_seconds"] }
     /// Mean inference latency (s) = duration sum / count.
     public var avgInferenceLatency: Double? {
-        guard let s = values["vllm_mlx_inference_request_duration_seconds_sum"],
-              let c = values["vllm_mlx_inference_request_duration_seconds_count"], c > 0 else { return nil }
+        guard let s = values["mlx_inference_request_duration_seconds_sum"],
+              let c = values["mlx_inference_request_duration_seconds_count"], c > 0 else { return nil }
         return s / c
     }
 
     /// Cumulative time-to-first-token seconds (≈ prompt prefill time).
-    public var ttftSeconds: Double? { values["vllm_mlx_inference_ttft_seconds_sum"] }
+    public var ttftSeconds: Double? { values["mlx_inference_ttft_seconds_sum"] }
 
     /// Cumulative *decode* seconds = total request duration minus the
     /// prefill (TTFT). Completion tokens ÷ this is the true generation rate;
     /// dividing by wall-clock (or by total duration, which includes prefill)
     /// is what made the throughput read 1–4 tok/s instead of tens.
     public var decodeSeconds: Double? {
-        guard let dur = values["vllm_mlx_inference_request_duration_seconds_sum"] else { return nil }
+        guard let dur = values["mlx_inference_request_duration_seconds_sum"] else { return nil }
         return max(0, dur - (ttftSeconds ?? 0))
     }
 }
