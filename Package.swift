@@ -55,10 +55,7 @@ let package = Package(
                 .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
             ],
             path: "Sources/AgentCoding",
-            exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef",
-                      // Staged into Contents/Resources by build.sh (read via
-                      // Bundle.main, not Bundle.module), so not an SPM resource.
-                      "Resources/engine-requirements.txt", "Resources/engine-requirements.in"],
+            exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef"],
             resources: [.copy("Resources/vm-setup"), .copy("Resources/icons"),
                         .copy("Resources/catalog.json")],
             linkerSettings: [
