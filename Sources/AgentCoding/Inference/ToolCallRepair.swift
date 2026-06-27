@@ -47,9 +47,16 @@ enum ToolCallRepair {
             blocks += xml.blocks
             cleaned = xml.cleaned
         }
-        // Drop now-empty code fences left behind by the markup removal.
+        // Qwen3-Coder native format: <function=Name><parameter=k>v</parameter>…</function>
+        let qfn = rescueQwenFunctionCalls(cleaned, toolNames: toolNames)
+        blocks += qfn.blocks
+        cleaned = qfn.cleaned
+        // Drop now-empty code fences + tool-call wrappers left behind by the
+        // markup removal (e.g. Qwen wraps <function=…> in <tool_call>…</tool_call>).
         cleaned = cleaned.replacingOccurrences(of: "```xml", with: "")
             .replacingOccurrences(of: "```", with: "")
+            .replacingOccurrences(of: "<tool_call>", with: "")
+            .replacingOccurrences(of: "</tool_call>", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (cleaned, blocks)
     }
@@ -348,6 +355,44 @@ enum ToolCallRepair {
             attrRe?.matches(in: attrsStr, range: NSRange(location: 0, length: ans.length)).forEach { a in
                 guard a.numberOfRanges >= 3 else { return }
                 input[ans.substring(with: a.range(at: 1))] = htmlDecode(ans.substring(with: a.range(at: 2)))
+            }
+            guard !input.isEmpty else { continue }
+            blocks.insert(["type": "tool_use",
+                "id": "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24).lowercased(),
+                "name": name, "input": input], at: 0)
+            cleaned = cleaned.replacingCharacters(in: m.range, with: "") as NSString
+        }
+        return (cleaned as String, blocks)
+    }
+
+    /// Rescue Qwen3-Coder native function calls:
+    /// `<function=Name>\n<parameter=key>value</parameter>…\n</function>`. Values
+    /// are raw (newlines/quotes/`<`) and delimited by the closing tags. Gated on
+    /// the request's declared tools when known.
+    static func rescueQwenFunctionCalls(_ text: String, toolNames: Set<String>) -> (cleaned: String, blocks: [[String: Any]]) {
+        guard let fnRe = try? NSRegularExpression(
+            pattern: #"<function=([^>\s]+)>(.*?)</function>"#, options: [.dotMatchesLineSeparators]) else {
+            return (text, [])
+        }
+        let paramRe = try? NSRegularExpression(
+            pattern: #"<parameter=([^>\s]+)>(.*?)</parameter>"#, options: [.dotMatchesLineSeparators])
+        var blocks: [[String: Any]] = []
+        var cleaned = text as NSString
+        for m in fnRe.matches(in: cleaned as String, range: NSRange(location: 0, length: cleaned.length)).reversed() {
+            guard m.numberOfRanges >= 3 else { continue }
+            let name = cleaned.substring(with: m.range(at: 1))
+            if !toolNames.isEmpty && !toolNames.contains(name) { continue }
+            let body = cleaned.substring(with: m.range(at: 2))
+            let bns = body as NSString
+            var input: [String: Any] = [:]
+            paramRe?.matches(in: body, range: NSRange(location: 0, length: bns.length)).forEach { p in
+                guard p.numberOfRanges >= 3 else { return }
+                let key = bns.substring(with: p.range(at: 1))
+                var val = bns.substring(with: p.range(at: 2))
+                // Strip one leading/trailing newline the format adds around values.
+                if val.hasPrefix("\n") { val.removeFirst() }
+                if val.hasSuffix("\n") { val.removeLast() }
+                input[key] = val
             }
             guard !input.isEmpty else { continue }
             blocks.insert(["type": "tool_use",
