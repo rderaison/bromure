@@ -54,6 +54,9 @@ struct ProfilePickerView: View {
     /// Profile IDs whose VM is currently running — shown as a green dot
     /// next to the row so the user knows which sessions are live.
     var runningProfiles: Set<Profile.ID>
+    /// Profile IDs whose VM is on screen (a pane attached). Running-but-not-
+    /// attached = detached, so "Connect" reads "Connect" vs "Show".
+    var attachedProfiles: Set<Profile.ID>
     /// Profile IDs flagged compromised by the MITM compromise detector.
     /// Shown with a red exclamation badge; launching one prompts a
     /// disk + home wipe before the VM will boot.
@@ -67,6 +70,9 @@ struct ProfilePickerView: View {
     let onDelete: (Profile) -> Void
     let onShowPublicKey: (Profile) -> Void
     let onDuplicate: (Profile) -> Void
+    let onStop: (Profile) -> Void
+    let onRestart: (Profile) -> Void
+    let onConnect: (Profile) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -98,8 +104,13 @@ struct ProfilePickerView: View {
                     ProfileRow(
                         profile: profile,
                         isRunning: runningProfiles.contains(profile.id),
+                        isAttached: attachedProfiles.contains(profile.id),
                         isCompromised: compromisedProfiles.contains(profile.id),
-                        onEdit: { onEdit(profile) }
+                        onEdit: { onEdit(profile) },
+                        onStart: { onLaunch(profile) },
+                        onStop: { onStop(profile) },
+                        onRestart: { onRestart(profile) },
+                        onConnect: { onConnect(profile) }
                     )
                     .tag(profile.id)
                     .contextMenu {
@@ -117,7 +128,7 @@ struct ProfilePickerView: View {
                 }
             }
             .listStyle(.bordered(alternatesRowBackgrounds: true))
-            .frame(minHeight: 180)
+            .frame(minHeight: 240)
 
             // + / - toolbar.
             HStack(spacing: 4) {
@@ -205,7 +216,7 @@ struct ProfilePickerView: View {
             }
             .padding(16)
         }
-        .frame(minWidth: 420, minHeight: 320)
+        .frame(minWidth: 520, minHeight: 400)
         .onAppear {
             if selectedID == nil { selectedID = profiles.first?.id }
         }
@@ -224,23 +235,43 @@ struct ProfilePickerView: View {
 private struct ProfileRow: View {
     let profile: Profile
     let isRunning: Bool
+    let isAttached: Bool
     let isCompromised: Bool
     let onEdit: () -> Void
+    let onStart: () -> Void
+    let onStop: () -> Void
+    let onRestart: () -> Void
+    let onConnect: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(profile.color.swiftUIColor.gradient)
-                .frame(width: 10, height: 10)
-
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    Text(profile.name).font(.body)
+        HStack(spacing: 12) {
+            // Accent tile + live badge — Parallels-style VM thumbnail.
+            RoundedRectangle(cornerRadius: 9)
+                .fill(profile.color.swiftUIColor.opacity(0.18))
+                .frame(width: 42, height: 42)
+                .overlay(
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: 19))
+                        .foregroundStyle(profile.color.swiftUIColor))
+                .overlay(alignment: .bottomTrailing) {
                     if isRunning {
                         Circle()
                             .fill(.green)
-                            .frame(width: 6, height: 6)
-                            .help("Session is running")
+                            .frame(width: 10, height: 10)
+                            .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
+                            .offset(x: 3, y: 3)
+                    }
+                }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(profile.name).font(.system(size: 14, weight: .semibold))
+                    if isRunning {
+                        Text(isAttached ? "Running" : "Detached")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.15)))
                     }
                     if isCompromised {
                         Image(systemName: "exclamationmark.octagon.fill")
@@ -249,23 +280,56 @@ private struct ProfileRow: View {
                             .help("Compromised — launching will prompt to wipe disk and home")
                     }
                 }
+
                 HStack(spacing: 4) {
-                    Image(systemName: profile.tool.sfSymbol)
-                        .font(.caption2)
-                    Text(profile.tool.displayName).font(.caption)
+                    Image(systemName: profile.tool.sfSymbol).font(.caption2)
+                    Text(profile.tool.displayName)
+                    Text("·").foregroundStyle(.tertiary)
+                    Text(profile.authMode.displayName)
+                    Text("·").foregroundStyle(.tertiary)
+                    Text("\(profile.memoryGB) GB")
                 }
+                .font(.caption)
                 .foregroundStyle(.secondary)
+
+                // Control cluster.
+                HStack(spacing: 6) {
+                    ProfileControl(icon: "gearshape", label: "Settings", action: onEdit)
+                    if isRunning {
+                        ProfileControl(icon: "stop.fill", label: "Stop", tint: .red, action: onStop)
+                        ProfileControl(icon: "arrow.clockwise", label: "Restart", action: onRestart)
+                        ProfileControl(icon: "display", label: isAttached ? "Show" : "Connect",
+                                       tint: .accentColor, action: onConnect)
+                    } else {
+                        ProfileControl(icon: "play.fill", label: "Start", tint: .green, action: onStart)
+                    }
+                }
+                .padding(.top, 3)
             }
 
             Spacer()
-
-            Button(action: onEdit) {
-                Image(systemName: "gearshape").font(.caption)
-            }
-            .buttonStyle(.borderless)
-            .help("Edit profile settings")
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 8)
+    }
+}
+
+/// Small bordered control button used in the picker rows.
+private struct ProfileControl: View {
+    let icon: String
+    let label: String
+    var tint: Color? = nil
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: icon).font(.system(size: 10, weight: .semibold))
+                Text(label).font(.system(size: 11, weight: .medium))
+            }
+            .padding(.horizontal, 4)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .tint(tint)
     }
 }
 

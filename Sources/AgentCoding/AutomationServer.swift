@@ -47,10 +47,10 @@ final class ACAutomationServer {
     var onCreateSession: ((_ profileNameOrID: String) async -> ACAutomationSessionInfo?)?
     var onDestroySession: ((_ profileNameOrID: String) async -> Bool)?
     var onGetAppState: (() -> [String: Any])?
-    /// Debug: render the unified window to a PNG at the given path and return a
-    /// dump of its subview frames. The app draws itself, so this needs no Screen
-    /// Recording permission.
-    var onUIShot: ((_ path: String) -> [String: Any])?
+    /// Debug: render a window (`which` = "unified" | "picker") to a PNG at the
+    /// given path and return a dump of its subview frames. The app draws itself,
+    /// so this needs no Screen Recording permission.
+    var onUIShot: ((_ path: String, _ which: String) -> [String: Any])?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -318,15 +318,17 @@ final class ACAutomationServer {
                 return
             }
             var pathParam = "/tmp/bromure-ui-shot.png"
+            var whichParam = "unified"
             if let q = p.split(separator: "?", maxSplits: 1).dropFirst().first {
                 for pair in q.split(separator: "&") {
                     let kv = pair.split(separator: "=", maxSplits: 1)
-                    if kv.first == "path", kv.count == 2 {
-                        pathParam = kv[1].removingPercentEncoding ?? String(kv[1])
-                    }
+                    guard kv.count == 2 else { continue }
+                    let v = kv[1].removingPercentEncoding ?? String(kv[1])
+                    if kv.first == "path" { pathParam = v }
+                    if kv.first == "which" { whichParam = v }
                 }
             }
-            let dump = DispatchQueue.main.sync { self.onUIShot?(pathParam) ?? ["error": "no handler"] }
+            let dump = DispatchQueue.main.sync { self.onUIShot?(pathParam, whichParam) ?? ["error": "no handler"] }
             sendResponse(fd: fd, status: 200, body: dump)
 
         // Run the prompt-injection detectors on supplied text and return a

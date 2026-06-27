@@ -146,8 +146,11 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
         pane.host = self
         title = profile.name
         titleVisibility = .hidden
-        titlebarAppearsTransparent = false
+        // Browser parity: transparent unified titlebar + movable-by-background
+        // makes the toolbar's empty/pill-capsule areas drag the window.
+        titlebarAppearsTransparent = true
         toolbarStyle = .unified
+        isMovableByWindowBackground = true
 
         contentView = pane.containerView
 
@@ -265,6 +268,11 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
     /// performKeyEquivalent and before the responder chain dispatches keyDown to
     /// the VZ view, so this catches the event even in focus states where the
     /// app-level NSEvent monitor failed to fire.
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        super.makeKeyAndOrderFront(sender)
+        installOpaqueTitlebarBacking()
+    }
+
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, handleACShortcut(event) { return }
         super.sendEvent(event)

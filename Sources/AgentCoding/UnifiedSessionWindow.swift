@@ -50,6 +50,31 @@ enum TabActivity {
     }
 }
 
+extension NSWindow {
+    /// Keep the titlebar opaque even when the window itself is non-opaque.
+    ///
+    /// Framebuffer transparency for translucent profiles needs `isOpaque = false`
+    /// so the alpha composites against the desktop — but combined with a
+    /// transparent titlebar (which we use for browser-style window dragging)
+    /// that would make the titlebar see-through too. Injecting a solid backing as
+    /// the rear-most subview of the titlebar container keeps the chrome solid
+    /// while leaving only the framebuffer translucent. Idempotent.
+    func installOpaqueTitlebarBacking() {
+        guard let themeFrame = contentView?.superview,
+              let titlebar = themeFrame.subviews.first(where: {
+                  $0.className == "NSTitlebarContainerView"
+              }) else { return }
+        let id = NSUserInterfaceItemIdentifier("io.bromure.opaqueTitlebar")
+        if titlebar.subviews.contains(where: { $0.identifier == id }) { return }
+        let backing = NSView(frame: titlebar.bounds)
+        backing.identifier = id
+        backing.autoresizingMask = [.width, .height]
+        backing.wantsLayer = true
+        backing.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        titlebar.addSubview(backing, positioned: .below, relativeTo: nil)
+    }
+}
+
 // MARK: - Unified window
 
 /// The shared, unpeel-style window: a left source-list of every running VM with
@@ -66,6 +91,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     /// Where the selected pane's framebuffer container is mounted.
     private let paneSlot: NSView
+    /// The right-hand container holding the framebuffer. Its backing flips to
+    /// clear for translucent profiles so the framebuffer blends to the desktop.
+    private let stage = NSView()
     /// Shown when no VM is hosted.
     private let emptyStateHost: NSHostingView<EmptyStageView>
     private var sidebarHost: NSHostingView<SessionSidebar>!
@@ -84,10 +112,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         )
         title = "Bromure"
         titleVisibility = .hidden
-        // A standard (non-full-size) titlebar keeps the stage header below the
-        // traffic-light strip so its buttons stay clickable; the split view
-        // fills everything beneath it.
-        isMovableByWindowBackground = false
+        // Browser parity for window dragging: a transparent unified titlebar +
+        // movable-by-background means clicks on the toolbar's empty areas (the
+        // grey capsule, gaps) drag the window, while the pills/buttons still
+        // receive their own clicks. The framebuffer and sidebar consume their
+        // own events, so they never initiate a drag.
+        titlebarAppearsTransparent = true
+        toolbarStyle = .unified
+        isMovableByWindowBackground = true
         animationBehavior = .none
 
         // ---- Sidebar (left) ----
@@ -108,7 +140,6 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
         // ---- Stage (right): just the framebuffer slot. The per-VM controls
         // live in the window toolbar now, so the framebuffer fills full height.
-        let stage = NSView()
         stage.translatesAutoresizingMaskIntoConstraints = false
         stage.wantsLayer = true
         stage.layer?.backgroundColor = NSColor.black.cgColor
@@ -235,7 +266,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     private func mountSelected(_ pane: SessionPane?) {
         for sub in paneSlot.subviews where sub !== emptyStateHost { sub.removeFromSuperview() }
-        guard let pane else { updateEmptyState(); return }
+        guard let pane else { applyOpacityChrome(for: nil); updateEmptyState(); return }
         let v = pane.containerView
         v.translatesAutoresizingMaskIntoConstraints = false
         paneSlot.addSubview(v)
@@ -246,11 +277,30 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             v.trailingAnchor.constraint(equalTo: paneSlot.trailingAnchor),
         ])
         makeFirstResponder(pane.vmView)
+        applyOpacityChrome(for: pane)
         updateEmptyState()
     }
 
     private func updateEmptyState() {
         emptyStateHost.isHidden = !hostedPanes.isEmpty
+    }
+
+    /// Honour the selected profile's terminal-transparency setting. The pane's
+    /// own container layer carries the alpha; here we flip the *window* to
+    /// non-opaque and clear the *stage* backing so that alpha composites against
+    /// the desktop — and ONLY the framebuffer: the sidebar/divider/titlebar stay
+    /// opaque. Opaque profiles keep the solid black stage (nice during boot).
+    private func applyOpacityChrome(for pane: SessionPane?) {
+        let opacity = pane.map { min(1.0, max(0.3, $0.profile.windowOpacity)) } ?? 1.0
+        if opacity < 1.0 {
+            isOpaque = false
+            backgroundColor = .clear
+            stage.layer?.backgroundColor = NSColor.clear.cgColor
+        } else {
+            isOpaque = true
+            backgroundColor = nil
+            stage.layer?.backgroundColor = NSColor.black.cgColor
+        }
     }
 
     // MARK: Tab actions (forward to the pane)
@@ -282,6 +332,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             entry.name = pane.profile.name
             entry.accentHex = pane.profile.color.hexInUI
         }
+        // A live opacity change on the visible VM re-applies the window chrome.
+        if pane.profile.id == selectedID { applyOpacityChrome(for: pane) }
     }
 
     // MARK: - Shortcut routing (selected pane)
@@ -298,6 +350,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if pane.vmHasKeyboardFocus { return false }
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
         return pane.performACShortcut(chars, isRepeat: event.isARepeat)
+    }
+
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        super.makeKeyAndOrderFront(sender)
+        installOpaqueTitlebarBacking()
     }
 
     override func sendEvent(_ event: NSEvent) {
@@ -361,24 +418,36 @@ private struct SessionSidebar: View {
 
             Divider().opacity(0.5)
             NewSessionButton(
+                model: model,
                 startableProfiles: startableProfiles,
                 onStartProfile: onStartProfile,
                 onOpenPicker: onOpenPicker)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(.ultraThinMaterial)
+        // Solid (opaque) so the window's transparency for translucent profiles
+        // only shows through the framebuffer, never the sidebar.
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
 /// "New session" dropdown — pick a profile to boot, or open the manager.
 private struct NewSessionButton: View {
+    /// Observed so the body (and thus the live profile list) re-evaluates when
+    /// VMs start/stop, instead of caching a stale list at first render.
+    @Bindable var model: SessionListModel
     let startableProfiles: () -> [(id: Profile.ID, name: String, accentHex: String)]
     let onStartProfile: (Profile.ID) -> Void
     let onOpenPicker: () -> Void
+    @State private var hovering = false
 
     var body: some View {
+        // Touch `model.entries` so SwiftUI re-runs body when the running set
+        // changes, then exclude anything already on screen as a belt-and-braces
+        // filter on top of the delegate's running-session filter.
+        let shownIDs = Set(model.entries.map(\.id))
+        let profiles = startableProfiles().filter { !shownIDs.contains($0.id) }
+
         Menu {
-            let profiles = startableProfiles()
             if profiles.isEmpty {
                 Text("All profiles are already running")
             } else {
@@ -391,21 +460,24 @@ private struct NewSessionButton: View {
             Divider()
             Button("Manage profiles…") { onOpenPicker() }
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "plus.circle.fill").font(.system(size: 15))
+            HStack(spacing: 9) {
+                Image(systemName: "plus.circle.fill").font(.system(size: 16))
                 Text("New session").font(.system(size: 13, weight: .medium))
                 Spacer()
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background(hovering ? Color.primary.opacity(0.06) : .clear)
             .contentShape(Rectangle())
-            .padding(.horizontal, 14)
-            .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .foregroundStyle(.secondary)
+        .frame(height: 68)
+        .onHover { hovering = $0 }
     }
 }
 

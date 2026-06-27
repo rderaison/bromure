@@ -502,8 +502,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// itself — no Screen Recording permission needed) and dump subview frames.
     /// Lets the layout be verified headlessly.
     func debugRenderUnifiedWindow(to path: String) -> [String: Any] {
-        guard let win = unifiedWindow, let contentView = win.contentView else {
-            return ["error": "no unified window"]
+        debugRenderWindow(unifiedWindow, to: path)
+    }
+
+    func debugRenderWindow(_ win: NSWindow?, to path: String) -> [String: Any] {
+        guard let win, let contentView = win.contentView else {
+            return ["error": "no such window"]
         }
         // Render the whole window frame view (incl. titlebar + toolbar), not just
         // the content area, so the toolbar controls are captured too.
@@ -570,6 +574,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func startProfile(_ id: Profile.ID) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
         launch(profile)
+    }
+
+    /// Picker "Stop": power the VM down, honoring `.shutdown` but mapping the
+    /// keep-running actions (`.background`/`.ask`) to `.suspend` so Stop always
+    /// actually stops.
+    func stopProfile(_ id: Profile.ID) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        let action: Profile.CloseAction = profile.closeAction == .shutdown ? .shutdown : .suspend
+        requestStopSession(id, action: action)
+    }
+
+    /// Picker "Restart": power off (clearing saved state) then boot fresh.
+    func restartProfile(_ id: Profile.ID) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        Task { @MainActor in
+            if runningSessions[id] != nil {
+                await stopSession(id, action: .shutdown)
+            }
+            launch(profile)
+        }
+    }
+
+    /// Picker "Connect/Show": surface a running VM — attaches a window if it's
+    /// detached, or brings the existing one to the front.
+    func connectProfile(_ id: Profile.ID) {
+        guard let session = runningSessions[id] else { return }
+        attachWindow(to: session)
     }
 
     /// The MITM proxy saw a model *conversation* request for this profile — the
@@ -650,6 +681,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let session = RunningSession(profileID: profile.id, profile: profile, sandbox: sandbox)
         runningSessions[profile.id] = session
         updateStatusMenu()
+        // Boot completes asynchronously after the launch path's initial render,
+        // so refresh the picker now that the VM is actually running (Start →
+        // Stop/Restart/Connect).
+        renderPicker()
         return session
     }
 
@@ -1144,7 +1179,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // handlers, automation, control socket) still runs.
         if !headless {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 540, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 500),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false
         )
@@ -1296,10 +1331,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "hasBaseImage": self.imageManager.hasBaseImage,
             ]
         }
-        server.onUIShot = { [weak self] path in
+        server.onUIShot = { [weak self] path, which in
             // The route already dispatches us onto main via `DispatchQueue.main.sync`,
             // so assume isolation rather than nesting another sync (which deadlocks).
-            MainActor.assumeIsolated { self?.debugRenderUnifiedWindow(to: path) ?? ["error": "no app"] }
+            MainActor.assumeIsolated {
+                guard let self else { return ["error": "no app"] }
+                let window: NSWindow? = which == "picker" ? self.mainWindow : self.unifiedWindow
+                return self.debugRenderWindow(window, to: path)
+            }
         }
 
         server.onGetShellConnection = { [weak self] idOrName in
@@ -2144,7 +2183,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.startInit()
         }))
         win.contentMinSize = .zero
-        win.setContentSize(NSSize(width: 540, height: 420))
+        win.setContentSize(NSSize(width: 560, height: 500))
         win.center()
     }
 
@@ -2500,7 +2539,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 540, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 500),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false
         )
@@ -2735,7 +2774,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func resizeMainWindowForPicker() {
         guard let win = mainWindow else { return }
         win.contentMinSize = .zero
-        win.setContentSize(NSSize(width: 540, height: 420))
+        win.setContentSize(NSSize(width: 560, height: 500))
         win.center()
     }
 
@@ -2743,7 +2782,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// are running). Idempotent; safe to call from anywhere.
     private func renderPicker() {
         guard let win = mainWindow else { return }
-        let runningIDs = Set(panes.keys)
+        // Running = every live VM (incl. detached); attached = the ones with a
+        // pane on screen. The picker's per-row controls key off both.
+        let runningIDs = Set(runningSessions.keys)
+        let attachedIDs = Set(panes.keys)
         // Cheap fs-stat per profile — the compromised badge is only
         // present when the marker file is on disk; profile.json on
         // its own can't tell us this.
@@ -2753,6 +2795,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let view = ProfilePickerView(
             profiles: Binding(get: { self.profiles }, set: { self.profiles = $0 }),
             runningProfiles: runningIDs,
+            attachedProfiles: attachedIDs,
             compromisedProfiles: compromisedIDs,
             onLaunch:        { self.launch($0) },
             onCreate:        { self.openEditorWindow(editing: nil) },
@@ -2760,7 +2803,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             onReset:         { self.resetProfile($0) },
             onDelete:        { self.deleteProfile($0) },
             onShowPublicKey: { self.openSSHWindow(for: $0) },
-            onDuplicate:     { self.duplicateProfile($0) }
+            onDuplicate:     { self.duplicateProfile($0) },
+            onStop:          { self.stopProfile($0.id) },
+            onRestart:       { self.restartProfile($0.id) },
+            onConnect:       { self.connectProfile($0.id) }
         )
         win.contentView = NSHostingView(rootView: view)
     }
