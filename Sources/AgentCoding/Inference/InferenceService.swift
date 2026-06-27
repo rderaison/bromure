@@ -122,19 +122,13 @@ public actor InferenceService {
     /// Synchronously terminate the engine if running. Safe from a signal
     /// handler (runs on the main queue) and from app teardown.
     nonisolated public static func killIfRunning() {
-        let pid = runningPID
-        if pid > 0 { kill(pid, SIGTERM); runningPID = 0 }
+        MLXServer.shared.stop()
+        runningPID = 0
     }
 
     public let engine: InferenceEngine
     private let catalog: CatalogStore
-    private var process: Process?
     private var activeModels: [String] = []   // repos currently served (sorted)
-    // Last launch, for auto-restart on an unexpected crash.
-    private var lastPlan: EngineLaunchPlan?
-    private var lastExe: URL?
-    private var lastRepos: [String] = []
-    private var restartCount = 0
 
     public init(engine: InferenceEngine = .vllmMLX, catalog: CatalogStore = .shared) {
         self.engine = engine
@@ -142,7 +136,7 @@ public actor InferenceService {
     }
 
     public var loadedModelRepos: [String] { activeModels }
-    public var isRunning: Bool { process?.isRunning ?? false }
+    public var isRunning: Bool { MLXServer.shared.isRunning }
 
     // MARK: - Binary resolution
 
@@ -208,20 +202,12 @@ public actor InferenceService {
     public func ensureRunning(modelRepo: String,
                               timeout: TimeInterval = 120,
                               onProvisionProgress: @escaping (String) -> Void = { _ in }) async throws -> EngineLaunchPlan {
-        // Provision the engine on first use (uv + on-demand venv, §3.1).
-        if Self.resolveExecutable() == nil {
-            try await EngineProvisioner.shared.ensureProvisioned(onProgress: onProvisionProgress)
-        }
-        guard let exe = Self.resolveExecutable() else {
-            throw InferenceServiceError.engineNotFound
-        }
-        let cached = catalog.isInstalled(repo: modelRepo)
         let m = catalog.resolve(modelRepo)
-        let plan = Self.makeLaunchPlan(engine: engine, executable: exe,
-                                       modelRepo: modelRepo, cached: cached,
-                                       toolParser: m?.toolParser ?? "auto",
-                                       reasoningParser: m?.reasoningParser)
-        return try await launch(plan: plan, exe: exe, repos: [modelRepo], timeout: timeout)
+        let model = InferenceModel(
+            name: modelRepo, repo: modelRepo,
+            estMemGB: m?.minUnifiedMemGB ?? 0,
+            toolParser: m?.toolParser ?? "auto", reasoningParser: m?.reasoningParser)
+        return try await startServing([model], memoryBudgetGB: 0)
     }
 
     /// Ensure the engine is serving *all* of `models` (parallel models, one
@@ -232,33 +218,21 @@ public actor InferenceService {
                               memoryBudgetGB: Int,
                               timeout: TimeInterval = 120,
                               onProvisionProgress: @escaping (String) -> Void = { _ in }) async throws -> EngineLaunchPlan {
-        if models.count <= 1, let only = models.first {
-            return try await ensureRunning(modelRepo: only.repo, timeout: timeout,
-                                           onProvisionProgress: onProvisionProgress)
-        }
-        if Self.resolveExecutable() == nil {
-            try await EngineProvisioner.shared.ensureProvisioned(onProgress: onProvisionProgress)
-        }
-        guard let exe = Self.resolveExecutable() else {
-            throw InferenceServiceError.engineNotFound
-        }
-        // Write the registry, then launch with --models-config.
-        let configURL = EngineProvisioner.shared.engineDir
-            .deletingLastPathComponent().appendingPathComponent("models.yaml")
-        try Self.makeModelsYAML(models: models, memoryBudgetGB: memoryBudgetGB)
-            .write(to: configURL, atomically: true, encoding: .utf8)
-        let allCached = models.allSatisfy { catalog.isInstalled(repo: $0.repo) }
-        var childEnv = ProcessInfo.processInfo.environment
-        childEnv["HF_HUB_DISABLE_TELEMETRY"] = "1"
-        if allCached { childEnv["HF_HUB_OFFLINE"] = "1" }
-        let plan = EngineLaunchPlan(
-            executableURL: exe,
-            arguments: engine.serverArgsMulti(configPath: configURL.path,
-                                              host: Self.engineHost, port: Self.enginePort,
-                                              apiKey: Self.apiKey),
-            environment: childEnv, host: Self.engineHost, port: Self.enginePort)
-        return try await launch(plan: plan, exe: exe,
-                                repos: models.map(\.repo).sorted(), timeout: timeout)
+        return try await startServing(models, memoryBudgetGB: memoryBudgetGB)
+    }
+
+    /// Start (or update) the in-process MLX server serving `models`, fronted by
+    /// the tool-call repair proxy. Replaces the old subprocess spawn — weights
+    /// load lazily in `MLXEngine` on first request, LRU-evicted under the
+    /// budget. Returns a stub plan (callers only use it for the readiness URL).
+    private func startServing(_ models: [InferenceModel], memoryBudgetGB: Int) async throws -> EngineLaunchPlan {
+        MLXServer.shared.start(models: models, memoryBudgetGB: memoryBudgetGB)
+        InferenceRepairProxy.shared.startIfNeeded(enginePort: Self.enginePort)
+        activeModels = models.map(\.repo).sorted()
+        return EngineLaunchPlan(
+            executableURL: URL(fileURLWithPath: "/dev/null"),
+            arguments: [], environment: [:],
+            host: Self.engineHost, port: Self.enginePort)
     }
 
     /// Serialize the model registry YAML (the §model-registry schema).
@@ -287,94 +261,15 @@ public actor InferenceService {
         return s
     }
 
-    /// Shared spawn + readiness for both single- and multi-model launches.
-    private func launch(plan: EngineLaunchPlan, exe: URL,
-                        repos: [String], timeout: TimeInterval) async throws -> EngineLaunchPlan {
-        if isRunning, activeModels == repos { return plan }
-        if isRunning { stop() }
-
-        let proc = Process()
-        proc.executableURL = exe
-        proc.arguments = plan.arguments
-        proc.environment = plan.environment
-        // Auto-restart on an unexpected exit (a crash / OOM-kill). Cleanly
-        // stopping or switching models clears `process` first, so the guard
-        // in `onProcessExit` ignores those.
-        proc.terminationHandler = { [weak self] p in
-            Task { await self?.onProcessExit(p) }
-        }
-        try proc.run()
-        self.process = proc
-        self.activeModels = repos
-        self.lastPlan = plan; self.lastExe = exe; self.lastRepos = repos
-        Self.runningPID = proc.processIdentifier
-
-        try await waitUntilReady(url: plan.readinessURL, deadline: Date().addingTimeInterval(timeout))
-        restartCount = 0   // healthy boot resets the crash-loop counter
-        // Front the engine with the tool-call repair proxy so leaked-as-text
-        // tool calls become real tool_use blocks before the agent sees them.
-        InferenceRepairProxy.shared.startIfNeeded(enginePort: Self.enginePort)
-        return plan
-    }
-
-    /// Called from the process termination handler. Restarts the engine on
-    /// an unexpected crash (bounded retries with backoff).
-    private func onProcessExit(_ exited: Process) async {
-        guard exited === process else { return }   // superseded by a clean stop/switch
-        process = nil
-        Self.runningPID = 0
-        guard let plan = lastPlan, let exe = lastExe, !lastRepos.isEmpty else { return }
-        guard restartCount < 3 else {
-            SupplyChainLog.shared.record("[inference] engine crashed repeatedly — giving up")
-            return
-        }
-        restartCount += 1
-        SupplyChainLog.shared.record("[inference] engine exited unexpectedly; restarting (\(restartCount)/3)")
-        try? await Task.sleep(nanoseconds: 1_500_000_000)
-        do { _ = try await launch(plan: plan, exe: exe, repos: lastRepos, timeout: 120) }
-        catch { SupplyChainLog.shared.record("[inference] engine restart failed: \(error)") }
-    }
-
-    private func waitUntilReady(url: URL, deadline: Date) async throws {
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 5
-        // The engine now requires --api-key; the readiness probe must
-        // authenticate or /v1/models 401s and we never see "ready".
-        req.setValue("Bearer \(Self.apiKey)", forHTTPHeaderField: "Authorization")
-        while Date() < deadline {
-            if (process?.isRunning ?? false) == false {
-                throw InferenceServiceError.startTimedOut
-            }
-            if let (_, resp) = try? await URLSession.shared.data(for: req),
-               (resp as? HTTPURLResponse)?.statusCode == 200 {
-                return
-            }
-            try? await Task.sleep(nanoseconds: 500_000_000)
-        }
-        throw InferenceServiceError.startTimedOut
-    }
-
-    /// Graceful teardown (called on app exit). Clears `process` first so the
-    /// termination handler doesn't treat this as a crash and restart.
+    /// Graceful teardown (called on app exit) — stop the in-process server and
+    /// unload the resident models.
     public func stop() {
-        let p = process
-        process = nil
         activeModels = []
-        lastPlan = nil; lastRepos = []
         Self.runningPID = 0
-        p?.terminate()
+        MLXServer.shared.stop()
     }
 
-    /// Reap leftover engine processes from a previous run (a SIGKILL / jetsam
-    /// kill leaves vllm-mlx orphaned, holding tens of GB). Run once at app
-    /// launch, before we start any engine of our own. Matches our venv's
-    /// vllm-mlx by path so it never touches an unrelated process.
-    nonisolated public static func reapOrphans() {
-        let exe = EngineProvisioner.shared.vllmExecutable.path
-        guard FileManager.default.fileExists(atPath: exe) else { return }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        p.arguments = ["-f", exe]
-        try? p.run(); p.waitUntilExit()
-    }
+    /// No subprocess to reap with the in-process engine — the weights die with
+    /// the app. Kept for call-site compatibility (run once at app launch).
+    nonisolated public static func reapOrphans() {}
 }
