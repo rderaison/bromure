@@ -579,6 +579,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// routing. Runs in the background so it warms while the VM boots; the
     /// guest reaches it once ready via the vsock-8446 bridge. No-op when the
     /// profile needs no local model. (Single-engine phase: one model.)
+    /// Refresh the engine wheel only when the app version changed since the
+    /// last successful refresh — i.e. right after a Sparkle update (which
+    /// bumps CFBundleVersion and relaunches) or a fresh install. A new app
+    /// build pins a newer engine, so this is when to pull it; gating on the
+    /// version avoids re-resolving on every ordinary launch. The stored
+    /// version is only advanced on success, so a failed refresh retries.
+    @MainActor func refreshEngineIfAppUpdated() {
+        let key = "bromure.lastEngineRefreshAppVersion"
+        let current = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+        guard current != UserDefaults.standard.string(forKey: key) else { return }
+        guard EngineProvisioner.shared.isProvisioned else {
+            // Nothing installed yet — the first `model install` fetches latest.
+            UserDefaults.standard.set(current, forKey: key)
+            return
+        }
+        Task.detached(priority: .background) {
+            do {
+                try await EngineProvisioner.shared.refreshToLatest()
+                UserDefaults.standard.set(current, forKey: key)
+                SupplyChainLog.shared.record("[inference] engine refreshed for app \(current)")
+            } catch {
+                SupplyChainLog.shared.record("[inference] post-update engine refresh failed: \(error)")
+            }
+        }
+    }
+
     @MainActor func startLocalEngineIfNeeded(for profile: Profile) {
         let ids = profile.distinctLocalModelIDs
         guard !ids.isEmpty else { return }
@@ -753,12 +779,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // start our own (it can hold tens of GB of unified memory).
         Task.detached(priority: .background) { InferenceService.reapOrphans() }
 
-        // Pull the newest engine wheel published on the find-links index, so a
-        // republished vllm-mlx (new release) is picked up without an app
-        // update. Background + non-fatal; runs before any engine starts.
-        Task.detached(priority: .background) {
-            try? await EngineProvisioner.shared.refreshToLatest()
-        }
+        // Refresh the engine wheel when the app itself was updated (Sparkle
+        // bumps CFBundleVersion + relaunches): a new app build ships a new
+        // pinned engine, so pull it then. Gated on the version changing so we
+        // don't re-resolve on every ordinary launch. Background + non-fatal.
+        refreshEngineIfAppUpdated()
 
         // Keep the login LaunchAgent in sync, then (headless login agent only)
         // boot any profiles flagged "Start at login".
