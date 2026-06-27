@@ -109,13 +109,36 @@ final class InferenceRepairProxy: @unchecked Sendable {
         return Request(method: String(parts[0]), path: String(parts[1]), headers: headers, body: body)
     }
 
+    /// The three agent inference endpoints we repair, each with its own
+    /// response/SSE shape. `rescue(text:)` underneath is shared.
+    private enum API {
+        case messages   // Anthropic /v1/messages (Claude)
+        case chat       // OpenAI /v1/chat/completions (Grok)
+        case responses  // OpenAI /v1/responses (Codex)
+        static func of(path: String) -> API? {
+            switch path.split(separator: "?").first.map(String.init) {
+            case "/v1/messages": return .messages
+            case "/v1/chat/completions": return .chat
+            case "/v1/responses": return .responses
+            default: return nil
+            }
+        }
+        /// Repair the buffered upstream message, then render it back as SSE.
+        func repairedSSE(_ message: [String: Any]) -> Data {
+            switch self {
+            case .messages: return ToolCallRepair.sse(message: ToolCallRepair.repair(message: message))
+            case .chat: return ToolCallRepair.chatSSE(ToolCallRepair.repairChat(message))
+            case .responses: return ToolCallRepair.responsesSSE(ToolCallRepair.repairResponses(message))
+            }
+        }
+    }
+
     /// Build the full HTTP response bytes for a request.
     static func respond(to req: Request, enginePort: Int) -> Data {
         let base = "http://127.0.0.1:\(enginePort)"
-        let isMessages = req.path.split(separator: "?").first.map(String.init) == "/v1/messages"
 
-        // Non-/v1/messages: transparent passthrough.
-        guard isMessages, req.method == "POST",
+        // Anything that isn't a repairable inference POST: transparent proxy.
+        guard let api = API.of(path: req.path), req.method == "POST",
               var payload = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] else {
             return passthrough(req, base: base)
         }
@@ -139,10 +162,9 @@ final class InferenceRepairProxy: @unchecked Sendable {
             return httpResponse(status: status, headers: [("Content-Type", "application/json")],
                                 body: data ?? Data())
         }
-        let sse = ToolCallRepair.sse(message: ToolCallRepair.repair(message: message))
         return httpResponse(status: 200,
                             headers: [("Content-Type", "text/event-stream"), ("Cache-Control", "no-cache")],
-                            body: sse)
+                            body: api.repairedSSE(message))
     }
 
     private static func passthrough(_ req: Request, base: String) -> Data {

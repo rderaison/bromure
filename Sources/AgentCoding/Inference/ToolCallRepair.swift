@@ -109,6 +109,148 @@ enum ToolCallRepair {
         return Data(out.utf8)
     }
 
+    // MARK: - OpenAI chat/completions (Grok)
+
+    /// Promote a tool call leaked into `choices[0].message.content` to
+    /// `message.tool_calls` (OpenAI shape). No-op when tool_calls is present.
+    static func repairChat(_ resp: [String: Any]) -> [String: Any] {
+        var r = resp
+        guard var choices = r["choices"] as? [[String: Any]], !choices.isEmpty else { return r }
+        var choice = choices[0]
+        var message = choice["message"] as? [String: Any] ?? [:]
+        if message["tool_calls"] != nil { return r }
+        guard let content = message["content"] as? String else { return r }
+        let (clean, blocks) = rescue(text: content)
+        guard !blocks.isEmpty else { return r }
+        message["tool_calls"] = blocks.map { b in
+            ["id": b["id"] ?? "call_x", "type": "function",
+             "function": ["name": b["name"] ?? "", "arguments": argsString(b["input"])]]
+        }
+        message["content"] = clean.isEmpty ? NSNull() : clean
+        choice["message"] = message
+        choice["finish_reason"] = "tool_calls"
+        choices[0] = choice
+        r["choices"] = choices
+        return r
+    }
+
+    /// Render an OpenAI chat.completion as the SSE chunk stream the client
+    /// (Grok / OpenAI-compatible) expects, terminated with `[DONE]`.
+    static func chatSSE(_ resp: [String: Any]) -> Data {
+        var out = ""
+        let id = resp["id"] as? String ?? "chatcmpl-" + UUID().uuidString.prefix(8)
+        let model = resp["model"] as? String ?? ""
+        let created = resp["created"] as? Int ?? 0
+        func chunk(_ delta: [String: Any], _ finish: Any) {
+            let obj: [String: Any] = ["id": id, "object": "chat.completion.chunk",
+                "created": created, "model": model,
+                "choices": [["index": 0, "delta": delta, "finish_reason": finish]]]
+            let d = (try? JSONSerialization.data(withJSONObject: obj)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            out += "data: \(d)\n\n"
+        }
+        let choice = (resp["choices"] as? [[String: Any]])?.first ?? [:]
+        let message = choice["message"] as? [String: Any] ?? [:]
+        chunk(["role": "assistant"], NSNull())
+        if let toolCalls = message["tool_calls"] as? [[String: Any]] {
+            for (i, tc) in toolCalls.enumerated() {
+                let fn = tc["function"] as? [String: Any] ?? [:]
+                chunk(["tool_calls": [["index": i, "id": tc["id"] ?? "", "type": "function",
+                    "function": ["name": fn["name"] ?? "", "arguments": ""]]]], NSNull())
+                chunk(["tool_calls": [["index": i, "function": ["arguments": fn["arguments"] ?? "{}"]]]], NSNull())
+            }
+            chunk([:], "tool_calls")
+        } else {
+            if let text = message["content"] as? String { chunk(["content": text], NSNull()) }
+            chunk([:], choice["finish_reason"] as? String ?? "stop")
+        }
+        out += "data: [DONE]\n\n"
+        return Data(out.utf8)
+    }
+
+    // MARK: - OpenAI Responses API (Codex)
+
+    /// Promote a tool call leaked into a `message`/`output_text` output item to
+    /// a `function_call` output item. No-op when a function_call is present.
+    static func repairResponses(_ resp: [String: Any]) -> [String: Any] {
+        var r = resp
+        guard let output = r["output"] as? [[String: Any]] else { return r }
+        if output.contains(where: { ($0["type"] as? String) == "function_call" }) { return r }
+        var texts: [[String: Any]] = []
+        var calls: [[String: Any]] = []
+        var rescued = false
+        for item in output {
+            guard (item["type"] as? String) == "message",
+                  let content = item["content"] as? [[String: Any]] else { texts.append(item); continue }
+            var keptParts: [[String: Any]] = []
+            for c in content {
+                guard (c["type"] as? String) == "output_text" else { keptParts.append(c); continue }
+                let (clean, blocks) = rescue(text: c["text"] as? String ?? "")
+                for b in blocks {
+                    rescued = true
+                    let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24).lowercased()
+                    calls.append(["type": "function_call", "id": "fc_\(suffix)", "call_id": "call_\(suffix)",
+                                  "name": b["name"] ?? "", "arguments": argsString(b["input"]), "status": "completed"])
+                }
+                if !clean.isEmpty { keptParts.append(["type": "output_text", "text": clean, "annotations": []]) }
+            }
+            if !keptParts.isEmpty { var m = item; m["content"] = keptParts; texts.append(m) }
+        }
+        guard rescued else { return r }
+        r["output"] = texts + calls   // any surviving text first, then the calls
+        return r
+    }
+
+    /// Render a Responses object as the typed SSE event stream Codex expects:
+    /// output_item.added → (function_call_arguments.delta/done | output_text)
+    /// → output_item.done, bracketed by response.created / response.completed.
+    static func responsesSSE(_ resp: [String: Any]) -> Data {
+        var out = ""
+        var seq = 0
+        func ev(_ type: String, _ payload: [String: Any]) {
+            var p = payload; p["type"] = type; p["sequence_number"] = seq; seq += 1
+            let d = (try? JSONSerialization.data(withJSONObject: p)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            out += "event: \(type)\ndata: \(d)\n\n"
+        }
+        // A minimal in-progress response envelope (no output yet).
+        var envelope = resp
+        envelope["output"] = []
+        envelope["status"] = "in_progress"
+        ev("response.created", ["response": envelope])
+        ev("response.in_progress", ["response": envelope])
+        let output = resp["output"] as? [[String: Any]] ?? []
+        for (i, item) in output.enumerated() {
+            ev("response.output_item.added", ["output_index": i, "item": item])
+            let itemID = item["id"] as? String ?? "item_\(i)"
+            if (item["type"] as? String) == "function_call" {
+                let args = item["arguments"] as? String ?? "{}"
+                ev("response.function_call_arguments.delta", ["item_id": itemID, "output_index": i, "delta": args])
+                ev("response.function_call_arguments.done", ["item_id": itemID, "output_index": i, "arguments": args])
+            } else if (item["type"] as? String) == "message" {
+                let parts = item["content"] as? [[String: Any]] ?? []
+                for (pi, part) in parts.enumerated() where (part["type"] as? String) == "output_text" {
+                    let text = part["text"] as? String ?? ""
+                    ev("response.content_part.added", ["item_id": itemID, "output_index": i, "content_index": pi,
+                        "part": ["type": "output_text", "text": "", "annotations": []]])
+                    ev("response.output_text.delta", ["item_id": itemID, "output_index": i, "content_index": pi, "delta": text])
+                    ev("response.output_text.done", ["item_id": itemID, "output_index": i, "content_index": pi, "text": text])
+                    ev("response.content_part.done", ["item_id": itemID, "output_index": i, "content_index": pi,
+                        "part": ["type": "output_text", "text": text, "annotations": []]])
+                }
+            }
+            ev("response.output_item.done", ["output_index": i, "item": item])
+        }
+        var done = resp; done["status"] = "completed"
+        ev("response.completed", ["response": done])
+        return Data(out.utf8)
+    }
+
+    /// Serialize a tool-call input value to the JSON *string* OpenAI/Responses
+    /// tool calls carry in their `arguments` field.
+    private static func argsString(_ input: Any?) -> String {
+        let obj = input ?? [:]
+        return (try? JSONSerialization.data(withJSONObject: obj)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+    }
+
     // MARK: - Leaked-call patterns
 
     private struct Pattern {

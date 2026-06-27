@@ -58,6 +58,46 @@ struct ToolCallRepairTests {
         #expect(blocks.isEmpty)
     }
 
+    @Test("repairChat promotes leaked content to OpenAI tool_calls")
+    func chatRepair() {
+        let resp: [String: Any] = ["choices": [["index": 0, "finish_reason": NSNull(),
+            "message": ["role": "assistant",
+                        "content": "```xml\n<function name=\"Write\" arguments='{\"file_path\":\"/a\",\"content\":\"b\"}'/>\n```"]]]]
+        let out = ToolCallRepair.repairChat(resp)
+        let msg = (out["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]
+        let tc = (msg?["tool_calls"] as? [[String: Any]])?.first
+        #expect((tc?["function"] as? [String: Any])?["name"] as? String == "Write")
+        #expect((out["choices"] as? [[String: Any]])?.first?["finish_reason"] as? String == "tool_calls")
+        let sse = String(data: ToolCallRepair.chatSSE(out), encoding: .utf8) ?? ""
+        #expect(sse.contains("tool_calls"))
+        #expect(sse.contains("[DONE]"))
+    }
+
+    @Test("repairChat leaves a real tool_calls response untouched")
+    func chatNoop() {
+        let resp: [String: Any] = ["choices": [["index": 0, "finish_reason": "tool_calls",
+            "message": ["role": "assistant", "tool_calls": [["id": "call_a", "type": "function",
+                "function": ["name": "Write", "arguments": "{}"]]]]]]]
+        let out = ToolCallRepair.repairChat(resp)
+        let msg = (out["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]
+        #expect((msg?["tool_calls"] as? [[String: Any]])?.count == 1)
+    }
+
+    @Test("repairResponses promotes leaked output_text to a function_call item")
+    func responsesRepair() {
+        let resp: [String: Any] = ["output": [["id": "msg_1", "type": "message", "role": "assistant",
+            "content": [["type": "output_text",
+                         "text": "<function name=\"Read\" arguments='{\"file_path\":\"/y\"}'/>"]]]]]
+        let out = ToolCallRepair.repairResponses(resp)
+        let fc = (out["output"] as? [[String: Any]])?.first { ($0["type"] as? String) == "function_call" }
+        #expect(fc?["name"] as? String == "Read")
+        #expect(fc?["call_id"] != nil)
+        let sse = String(data: ToolCallRepair.responsesSSE(out), encoding: .utf8) ?? ""
+        #expect(sse.contains("response.output_item.added"))
+        #expect(sse.contains("response.function_call_arguments.done"))
+        #expect(sse.contains("response.completed"))
+    }
+
     @Test("sse() emits a tool_use stream")
     func sseStream() {
         let msg = ToolCallRepair.repair(message: ["content": [
