@@ -216,7 +216,7 @@ struct ModelCatalogList: ParsableCommand {
             let line = String(format: "%-26@ %-7@ %-9@ %5.0f GB  %@%@",
                               m.id as NSString, fit.badge as NSString,
                               m.toolCalling.rawValue as NSString,
-                              m.downloadGB, m.name as NSString, installed as NSString)
+                              m.downloadGB, m.displayName as NSString, installed as NSString)
             print(line)
         }
         if !all { print("\nUse --all to include models that won't fit.") }

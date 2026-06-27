@@ -44,6 +44,13 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
     public var minChip: String?
     public var recommended: Bool
 
+    /// Name for display — strips the HF org prefix (`mlx-community/…`) since
+    /// every model carries one. Curated names (no slash) pass through.
+    public var displayName: String {
+        guard let slash = name.firstIndex(of: "/") else { return name }
+        return String(name[name.index(after: slash)...])
+    }
+
     public init(id: String, repo: String, engine: String = "vllm-mlx",
                 name: String, publisher: String? = nil, license: String? = nil,
                 paramsTotalB: Double? = nil, paramsActiveB: Double? = nil,

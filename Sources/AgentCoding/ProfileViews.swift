@@ -928,7 +928,7 @@ struct ProfileEditorView: View {
                     Picker("", selection: Binding(
                         get: { draft.fusionLocalLeg ?? localModels.first?.id ?? "" },
                         set: { draft.fusionLocalLeg = $0 })) {
-                        ForEach(localModels) { Text($0.name).tag($0.id) }
+                        ForEach(localModels) { Text($0.displayName).tag($0.id) }
                     }
                     .labelsHidden().frame(maxWidth: 220)
                 }
@@ -3235,7 +3235,7 @@ struct LocalModelsSettingsView: View {
             tierBadge(ModelCatalog.tier(forMinMemGB: model.minUnifiedMemGB))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(model.name).font(.callout)
+                Text(model.displayName).font(.callout)
                 HStack(spacing: 6) {
                     Text(fit.badge)
                         .foregroundStyle(fit == .fits ? .green : (fit == .tight ? .orange : .secondary))
@@ -4135,7 +4135,7 @@ private struct ToolConfigCard: View {
                         Picker(NSLocalizedString("Model", comment: ""), selection: Binding(
                             get: { spec.localModelID ?? localModels.first?.id ?? "" },
                             set: { spec.localModelID = $0 })) {
-                            ForEach(localModels) { m in Text(m.name).tag(m.id) }
+                            ForEach(localModels) { m in Text(m.displayName).tag(m.id) }
                         }
                         .pickerStyle(.menu)
                         Text("Runs on this Mac via the local engine — \(tool.displayName) is pointed at it through \(localBaseURLEnvName).")
