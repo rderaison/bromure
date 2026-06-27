@@ -28,7 +28,24 @@ final class SessionListModel {
         }
     }
 
+    /// Per-profile run state shown in the source list.
+    enum RunState { case off, booting, running, suspended }
+
+    /// One row per profile — running or not. Rebuilt wholesale by the
+    /// delegate's `refreshSidebar()`; a running row pairs (by id) with a
+    /// `VMEntry` that carries the live tab model for its nested tab rows.
+    struct ProfileRow: Identifiable, Equatable {
+        let id: Profile.ID
+        var name: String
+        var accentHex: String
+        var state: RunState
+        var compromised: Bool
+    }
+
+    /// Running, attached panes — carry live tab models.
     var entries: [VMEntry] = []
+    /// Every profile, in display order — the source list's top level.
+    var profileRows: [ProfileRow] = []
     var selectedID: Profile.ID?
 }
 
@@ -94,15 +111,17 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// The right-hand container holding the framebuffer. Its backing flips to
     /// clear for translucent profiles so the framebuffer blends to the desktop.
     private let stage = NSView()
-    /// Shown when no VM is hosted.
-    private let emptyStateHost: NSHostingView<EmptyStageView>
+    /// Shown when the selected profile has no mounted framebuffer — a Start
+    /// card for an off/suspended profile, or a generic empty state.
+    private var emptyStateHost: NSHostingView<EmptyStageView>!
     private var sidebarHost: NSHostingView<SessionSidebar>!
+    /// The pane currently mounted in the stage, if any. Drives the empty state.
+    private var mountedPane: SessionPane?
     private var toolbarDelegate: UnifiedToolbarDelegate?
 
     init(acDelegate: ACAppDelegate) {
         self.acDelegate = acDelegate
         self.paneSlot = NSView()
-        self.emptyStateHost = NSHostingView(rootView: EmptyStageView())
 
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 1320, height: 860),
@@ -125,18 +144,28 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // ---- Sidebar (left) ----
         let sidebar = SessionSidebar(
             model: listModel,
+            onSelect:    { [weak self] id in self?.selectRow(id) },
             onSelectTab: { [weak self] id, idx in self?.selectTab(profileID: id, index: idx) },
             onNewTab:    { [weak self] id in self?.newTab(profileID: id) },
             onCloseTab:  { [weak self] id, idx in self?.closeTab(profileID: id, index: idx) },
-            onSelectVM:  { [weak self] id in self?.select(profileID: id) },
             onDetachVM:  { [weak self] id in self?.acDelegate?.popOutVM(id) },
             onCloseVM:   { [weak self] id in self?.acDelegate?.closeVMFromSidebar(id) },
-            startableProfiles: { [weak self] in self?.acDelegate?.startableProfileList() ?? [] },
-            onStartProfile: { [weak self] id in self?.acDelegate?.startProfile(id) },
-            onOpenPicker: { [weak self] in self?.acDelegate?.openProfileManagerAction(nil) })
+            onStart:     { [weak self] id in self?.acDelegate?.startProfile(id) },
+            onStop:      { [weak self] id in self?.acDelegate?.stopProfile(id) },
+            onRestart:   { [weak self] id in self?.acDelegate?.restartProfile(id) },
+            onEdit:      { [weak self] id in self?.acDelegate?.sidebarEditProfile(id) },
+            onDuplicate: { [weak self] id in self?.acDelegate?.sidebarDuplicateProfile(id) },
+            onReset:     { [weak self] id in self?.acDelegate?.sidebarResetProfile(id) },
+            onDelete:    { [weak self] id in self?.acDelegate?.sidebarDeleteProfile(id) },
+            onNewProfile: { [weak self] in self?.acDelegate?.openEditorWindow(editing: nil) })
         let sidebarHost = NSHostingView(rootView: sidebar)
         sidebarHost.translatesAutoresizingMaskIntoConstraints = false
         self.sidebarHost = sidebarHost
+
+        // Empty stage — shows the selected off/suspended profile's Start card.
+        self.emptyStateHost = NSHostingView(rootView: EmptyStageView(
+            model: listModel,
+            onStart: { [weak self] id in self?.acDelegate?.startProfile(id) }))
 
         // ---- Stage (right): just the framebuffer slot. The per-VM controls
         // live in the window toolbar now, so the framebuffer fills full height.
@@ -226,6 +255,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             accentHex: pane.profile.color.hexInUI,
             model: pane.model))
         acDelegate?.registerPane(pane)
+        acDelegate?.refreshSidebar()
         if selectIt || selectedID == nil {
             select(profileID: pane.profile.id)
         }
@@ -240,15 +270,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if pane.host === self { pane.host = nil }
         listModel.entries.removeAll { $0.id == id }
         if selectedID == id {
-            selectedID = nil
-            // Select a neighbour if any remain.
-            if let next = hostedPanes.first {
-                select(profileID: next.profile.id)
-            } else {
-                listModel.selectedID = nil
-                mountSelected(nil)
-            }
+            // Keep the just-removed profile selected (now showing its Start
+            // card) rather than jumping to a neighbour — the row is still in
+            // the list, just no longer running.
+            mountSelected(nil)
         }
+        acDelegate?.refreshSidebar()
         updateEmptyState()
     }
 
@@ -264,8 +291,25 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         mountSelected(pane)
     }
 
+    /// Select any profile row — running or not. A running, attached profile
+    /// mounts its framebuffer; a running-but-detached one reattaches; an
+    /// off/suspended one shows its Start card in the stage.
+    func selectRow(_ id: Profile.ID) {
+        selectedID = id
+        listModel.selectedID = id
+        if let pane = pane(id) { mountSelected(pane); return }
+        let state = listModel.profileRows.first { $0.id == id }?.state ?? .off
+        switch state {
+        case .running, .booting:
+            acDelegate?.connectProfile(id)   // reattach a backgrounded VM
+        case .off, .suspended:
+            mountSelected(nil)               // Start card for this profile
+        }
+    }
+
     private func mountSelected(_ pane: SessionPane?) {
         for sub in paneSlot.subviews where sub !== emptyStateHost { sub.removeFromSuperview() }
+        mountedPane = pane
         guard let pane else { applyOpacityChrome(for: nil); updateEmptyState(); return }
         let v = pane.containerView
         v.translatesAutoresizingMaskIntoConstraints = false
@@ -282,7 +326,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     private func updateEmptyState() {
-        emptyStateHost.isHidden = !hostedPanes.isEmpty
+        // The empty/Start card shows whenever no framebuffer is mounted —
+        // i.e. nothing selected, or the selected profile is off/suspended.
+        emptyStateHost.isHidden = (mountedPane != nil)
     }
 
     /// Honour the selected profile's terminal-transparency setting. The pane's
@@ -372,21 +418,25 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
 private struct SessionSidebar: View {
     @Bindable var model: SessionListModel
+    let onSelect: (Profile.ID) -> Void
     let onSelectTab: (Profile.ID, Int) -> Void
     let onNewTab: (Profile.ID) -> Void
     let onCloseTab: (Profile.ID, Int) -> Void
-    let onSelectVM: (Profile.ID) -> Void
     let onDetachVM: (Profile.ID) -> Void
     let onCloseVM: (Profile.ID) -> Void
-    /// Live list of profiles that can be started, evaluated when the dropdown opens.
-    let startableProfiles: () -> [(id: Profile.ID, name: String, accentHex: String)]
-    let onStartProfile: (Profile.ID) -> Void
-    let onOpenPicker: () -> Void
+    let onStart: (Profile.ID) -> Void
+    let onStop: (Profile.ID) -> Void
+    let onRestart: (Profile.ID) -> Void
+    let onEdit: (Profile.ID) -> Void
+    let onDuplicate: (Profile.ID) -> Void
+    let onReset: (Profile.ID) -> Void
+    let onDelete: (Profile.ID) -> Void
+    let onNewProfile: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Sessions")
+                Text("Profiles")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
@@ -400,16 +450,24 @@ private struct SessionSidebar: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
-                    ForEach(model.entries) { entry in
+                    ForEach(model.profileRows) { row in
                         VMSection(
-                            entry: entry,
-                            isSelectedVM: model.selectedID == entry.id,
+                            row: row,
+                            entry: model.entries.first { $0.id == row.id },
+                            isSelected: model.selectedID == row.id,
+                            onSelect: onSelect,
                             onSelectTab: onSelectTab,
                             onNewTab: onNewTab,
                             onCloseTab: onCloseTab,
-                            onSelectVM: onSelectVM,
                             onDetachVM: onDetachVM,
-                            onCloseVM: onCloseVM)
+                            onCloseVM: onCloseVM,
+                            onStart: onStart,
+                            onStop: onStop,
+                            onRestart: onRestart,
+                            onEdit: onEdit,
+                            onDuplicate: onDuplicate,
+                            onReset: onReset,
+                            onDelete: onDelete)
                     }
                 }
                 .padding(.horizontal, 8)
@@ -417,11 +475,7 @@ private struct SessionSidebar: View {
             }
 
             Divider().opacity(0.5)
-            NewSessionButton(
-                model: model,
-                startableProfiles: startableProfiles,
-                onStartProfile: onStartProfile,
-                onOpenPicker: onOpenPicker)
+            PlusButton(onNewProfile: onNewProfile)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         // Solid (opaque) so the window's transparency for translucent profiles
@@ -430,131 +484,141 @@ private struct SessionSidebar: View {
     }
 }
 
-/// "New session" dropdown — pick a profile to boot, or open the manager.
-private struct NewSessionButton: View {
-    /// Observed so the body (and thus the live profile list) re-evaluates when
-    /// VMs start/stop, instead of caching a stale list at first render.
-    @Bindable var model: SessionListModel
-    let startableProfiles: () -> [(id: Profile.ID, name: String, accentHex: String)]
-    let onStartProfile: (Profile.ID) -> Void
-    let onOpenPicker: () -> Void
+/// "+" affordance at the bottom of the source list — creates a new profile.
+private struct PlusButton: View {
+    let onNewProfile: () -> Void
     @State private var hovering = false
 
     var body: some View {
-        // Touch `model.entries` so SwiftUI re-runs body when the running set
-        // changes, then exclude anything already on screen as a belt-and-braces
-        // filter on top of the delegate's running-session filter.
-        let shownIDs = Set(model.entries.map(\.id))
-        let profiles = startableProfiles().filter { !shownIDs.contains($0.id) }
-
-        Menu {
-            if profiles.isEmpty {
-                Text("All profiles are already running")
-            } else {
-                Section("Start a session") {
-                    ForEach(profiles, id: \.id) { p in
-                        Button(p.name) { onStartProfile(p.id) }
-                    }
-                }
-            }
-            Divider()
-            Button("Manage profiles…") { onOpenPicker() }
-        } label: {
-            HStack(spacing: 9) {
-                Image(systemName: "plus.circle.fill").font(.system(size: 16))
-                Text("New session").font(.system(size: 13, weight: .medium))
-                Spacer()
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .background(hovering ? Color.primary.opacity(0.06) : .clear)
-            .contentShape(Rectangle())
+        Button(action: onNewProfile) {
+            Image(systemName: "plus")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(
+                    Circle()
+                        .fill(Color.black.opacity(hovering ? 0.7 : 1.0))
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 1)))
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .foregroundStyle(.secondary)
-        .frame(height: 68)
+        .buttonStyle(.plain)
+        .help("New profile")
         .onHover { hovering = $0 }
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.vertical, 8)
     }
 }
 
-/// One VM (profile) and its nested tab rows — the source-list hierarchy.
+/// One profile row — its run state, controls, and (when running) nested tabs.
 private struct VMSection: View {
-    @Bindable var entry: SessionListModel.VMEntry
-    let isSelectedVM: Bool
+    let row: SessionListModel.ProfileRow
+    /// Live tab model when the VM is running AND attached; nil otherwise.
+    var entry: SessionListModel.VMEntry?
+    let isSelected: Bool
+    let onSelect: (Profile.ID) -> Void
     let onSelectTab: (Profile.ID, Int) -> Void
     let onNewTab: (Profile.ID) -> Void
     let onCloseTab: (Profile.ID, Int) -> Void
-    let onSelectVM: (Profile.ID) -> Void
     let onDetachVM: (Profile.ID) -> Void
     let onCloseVM: (Profile.ID) -> Void
+    let onStart: (Profile.ID) -> Void
+    let onStop: (Profile.ID) -> Void
+    let onRestart: (Profile.ID) -> Void
+    let onEdit: (Profile.ID) -> Void
+    let onDuplicate: (Profile.ID) -> Void
+    let onReset: (Profile.ID) -> Void
+    let onDelete: (Profile.ID) -> Void
 
     @State private var hovering = false
 
-    private var status: VMRowStatus {
-        if entry.model.tabs.isEmpty { return .booting }
-        return entry.model.ipAddress == nil ? .booting : .running
+    private var isLive: Bool { row.state == .running || row.state == .booting }
+
+    private var stateLabel: String? {
+        switch row.state {
+        case .off:       return "Off"
+        case .booting:   return "Starting…"
+        case .suspended: return "Suspended"
+        case .running:   return nil
+        }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            // Profile (VM) header
+            // Profile header
             HStack(spacing: 8) {
-                VMIcon(accentHex: entry.accentHex, status: status)
-                Text(entry.name)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                    .foregroundStyle(isSelectedVM ? .primary : .secondary)
-                Spacer(minLength: 4)
-                if hovering {
-                    IconButton(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") {
-                        onDetachVM(entry.id)
+                VMIcon(accentHex: row.accentHex, state: row.state)
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 5) {
+                        Text(row.name)
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
+                            .foregroundStyle(isSelected ? .primary : .secondary)
+                        if row.compromised {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.red)
+                        }
                     }
-                    IconButton(system: "xmark", help: "Close this VM") {
-                        onCloseVM(entry.id)
+                    if let stateLabel {
+                        Text(stateLabel)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
                     }
                 }
-                IconButton(system: "plus", help: "New tab (⌘T)") { onNewTab(entry.id) }
+                Spacer(minLength: 4)
+                if isLive && hovering {
+                    IconButton(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") {
+                        onDetachVM(row.id)
+                    }
+                    IconButton(system: "xmark", help: "Close this VM") {
+                        onCloseVM(row.id)
+                    }
+                }
+                if isLive {
+                    IconButton(system: "plus", help: "New tab (⌘T)") { onNewTab(row.id) }
+                }
+                ControlMenu(row: row,
+                            onStart: onStart, onStop: onStop, onRestart: onRestart,
+                            onEdit: onEdit, onDuplicate: onDuplicate,
+                            onReset: onReset, onDelete: onDelete)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: 7)
-                    .fill(isSelectedVM ? Color(hex: entry.accentHex).opacity(0.16)
-                                       : (hovering ? Color.primary.opacity(0.04) : .clear)))
+                    .fill(isSelected ? Color(hex: row.accentHex).opacity(0.16)
+                                     : (hovering ? Color.primary.opacity(0.04) : .clear)))
             .overlay(alignment: .leading) {
-                if isSelectedVM {
+                if isSelected {
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(Color(hex: entry.accentHex))
+                        .fill(Color(hex: row.accentHex))
                         .frame(width: 3, height: 18)
                         .offset(x: -5)
                 }
             }
             .contentShape(Rectangle())
-            .onTapGesture { onSelectVM(entry.id) }
+            .onTapGesture { onSelect(row.id) }
 
-            // Nested tab rows, indented with a hierarchy guide line.
-            VStack(alignment: .leading, spacing: 1) {
-                ForEach(Array(entry.model.tabs.enumerated()), id: \.element.id) { idx, tab in
-                    TabRow(
-                        label: tab.label,
-                        agentKind: BromureIcons.agentKind(forLabel: tab.label),
-                        thinking: entry.model.thinking,
-                        isActive: idx == entry.model.activeIndex && isSelectedVM,
-                        accentHex: entry.accentHex,
-                        onSelect: { onSelectTab(entry.id, idx) },
-                        onClose: { onCloseTab(entry.id, idx) })
+            // Nested tab rows for a running, attached VM.
+            if let entry {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(Array(entry.model.tabs.enumerated()), id: \.element.id) { idx, tab in
+                        TabRow(
+                            label: tab.label,
+                            agentKind: BromureIcons.agentKind(forLabel: tab.label),
+                            thinking: entry.model.thinking,
+                            isActive: idx == entry.model.activeIndex && isSelected,
+                            accentHex: row.accentHex,
+                            onSelect: { onSelectTab(row.id, idx) },
+                            onClose: { onCloseTab(row.id, idx) })
+                    }
                 }
-            }
-            .overlay(alignment: .leading) {
-                Rectangle()
-                    .fill(Color.primary.opacity(0.10))
-                    .frame(width: 1)
-                    .padding(.leading, 17)
-                    .padding(.vertical, 4)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.10))
+                        .frame(width: 1)
+                        .padding(.leading, 17)
+                        .padding(.vertical, 4)
+                }
             }
         }
         .padding(.bottom, 5)
@@ -562,40 +626,81 @@ private struct VMSection: View {
     }
 }
 
-private enum VMRowStatus { case booting, running, suspended }
+/// State-aware "⋯" control menu for a profile row: start/stop/restart plus
+/// edit / duplicate / reset / delete.
+private struct ControlMenu: View {
+    let row: SessionListModel.ProfileRow
+    let onStart: (Profile.ID) -> Void
+    let onStop: (Profile.ID) -> Void
+    let onRestart: (Profile.ID) -> Void
+    let onEdit: (Profile.ID) -> Void
+    let onDuplicate: (Profile.ID) -> Void
+    let onReset: (Profile.ID) -> Void
+    let onDelete: (Profile.ID) -> Void
 
-/// The profile's robot tile with a status badge.
+    var body: some View {
+        Menu {
+            switch row.state {
+            case .off:
+                Button("Start") { onStart(row.id) }
+            case .suspended:
+                Button("Resume") { onStart(row.id) }
+            case .running, .booting:
+                Button("Stop") { onStop(row.id) }
+                Button("Restart") { onRestart(row.id) }
+            }
+            Divider()
+            Button("Edit…") { onEdit(row.id) }
+            Button("Duplicate") { onDuplicate(row.id) }
+            Divider()
+            Button("Reset disk", role: .destructive) { onReset(row.id) }
+            Button("Delete profile", role: .destructive) { onDelete(row.id) }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 22, height: 20)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+}
+
+/// The profile's tile with a run-state badge.
 private struct VMIcon: View {
     let accentHex: String
-    let status: VMRowStatus
+    let state: SessionListModel.RunState
     @State private var pulse = false
     var body: some View {
         RoundedRectangle(cornerRadius: 6)
-            .fill(Color(hex: accentHex).opacity(0.18))
+            .fill(Color(hex: accentHex).opacity(state == .off ? 0.10 : 0.18))
             .frame(width: 24, height: 24)
             .overlay(
                 Image(systemName: "desktopcomputer")
                     .font(.system(size: 14))
-                    .foregroundStyle(Color(hex: accentHex)))
+                    .foregroundStyle(Color(hex: accentHex).opacity(state == .off ? 0.55 : 1)))
             .overlay(alignment: .bottomTrailing) {
                 Circle()
                     .fill(statusColor)
                     .frame(width: 8, height: 8)
                     .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 1.4))
-                    .opacity(status == .booting && pulse ? 0.4 : 1)
+                    .opacity(state == .booting && pulse ? 0.4 : 1)
                     .offset(x: 3, y: 3)
             }
             .onAppear {
-                if status == .booting {
+                if state == .booting {
                     withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { pulse = true }
                 }
             }
     }
     private var statusColor: Color {
-        switch status {
-        case .booting: return .orange
-        case .running: return .green
-        case .suspended: return .gray
+        switch state {
+        case .booting:   return .orange
+        case .running:   return .green
+        case .suspended: return .yellow
+        case .off:       return Color(nsColor: .tertiaryLabelColor)
         }
     }
 }
@@ -854,17 +959,49 @@ private struct EngineBadge: View {
 }
 
 private struct EmptyStageView: View {
+    @Bindable var model: SessionListModel
+    let onStart: (Profile.ID) -> Void
+
+    private var selectedRow: SessionListModel.ProfileRow? {
+        guard let id = model.selectedID else { return nil }
+        return model.profileRows.first { $0.id == id }
+    }
+
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "cube.transparent")
-                .font(.system(size: 40, weight: .thin))
-                .foregroundStyle(.secondary)
-            Text("No VM selected")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.secondary)
-            Text("Start a session with ⌘N")
-                .font(.system(size: 12))
-                .foregroundStyle(.tertiary)
+        VStack(spacing: 12) {
+            if let row = selectedRow, row.state == .off || row.state == .suspended {
+                VMIcon(accentHex: row.accentHex, state: row.state)
+                    .scaleEffect(2.0)
+                    .padding(.bottom, 10)
+                Text(row.name)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text(row.state == .suspended
+                     ? "Suspended — pick up where you left off"
+                     : "This profile isn't running")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.55))
+                Button { onStart(row.id) } label: {
+                    Label(row.state == .suspended ? "Resume" : "Start", systemImage: "play.fill")
+                        .frame(width: 150)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .tint(Color(hex: row.accentHex))
+                .padding(.top, 4)
+            } else {
+                Image(systemName: "cube.transparent")
+                    .font(.system(size: 40, weight: .thin))
+                    .foregroundStyle(.white.opacity(0.5))
+                Text(model.profileRows.isEmpty ? "No profiles yet" : "No profile selected")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.75))
+                Text(model.profileRows.isEmpty
+                     ? "Click + to create one"
+                     : "Select a profile on the left")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.opacity(0.001))

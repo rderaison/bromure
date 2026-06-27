@@ -479,7 +479,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             win.orderOut(nil)
         }
         unregisterPane(id, ifMatches: pane)
-        renderPicker()
+        refreshSidebar()
         updateStatusMenu()
         updateActivationPolicy()
     }
@@ -572,13 +572,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         openFileBrowser(profile: pane.profile)
     }
 
-    /// Profiles not currently running — the "New session" dropdown's contents.
-    func startableProfileList() -> [(id: Profile.ID, name: String, accentHex: String)] {
-        profiles
-            .filter { runningSessions[$0.id] == nil }
-            .map { (id: $0.id, name: $0.name, accentHex: $0.color.hexInUI) }
-    }
-
     /// Boot (or focus) the profile with this id — wired to the dropdown.
     func startProfile(_ id: Profile.ID) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
@@ -610,6 +603,54 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func connectProfile(_ id: Profile.ID) {
         guard let session = runningSessions[id] else { return }
         attachWindow(to: session)
+    }
+
+    // MARK: - Unified window source list
+
+    /// Rebuild the unified window's profile list (all profiles + run state).
+    /// Replaces the old picker render — called wherever the profile set or a
+    /// session's state changes. No-op until the unified window exists.
+    func refreshSidebar() {
+        guard let w = unifiedWindow else { return }
+        w.listModel.profileRows = profiles.map { p in
+            SessionListModel.ProfileRow(
+                id: p.id,
+                name: p.name,
+                accentHex: p.color.hexInUI,
+                state: runState(for: p),
+                compromised: SessionDisk.isCompromised(profile: p, store: store))
+        }
+    }
+
+    /// Coarse run state for a profile, for the source-list badge: a live VM is
+    /// running/booting; otherwise a saved snapshot on disk means suspended,
+    /// else it's off.
+    private func runState(for profile: Profile) -> SessionListModel.RunState {
+        if let session = runningSessions[profile.id] {
+            switch session.sandbox.state {
+            case .running:            return .running
+            case .starting, .created: return .booting
+            case .stopped, .error:    break   // fall through to the disk check
+            }
+        }
+        let disk = SessionDisk(profile: profile, store: store,
+                               baseDiskURL: imageManager.baseDiskURL)
+        return disk.hasSavedState ? .suspended : .off
+    }
+
+    // Id-based wrappers so the sidebar's ⋯ menu can drive the Profile-typed
+    // handlers without holding the Profile itself.
+    func sidebarEditProfile(_ id: Profile.ID) {
+        if let p = profiles.first(where: { $0.id == id }) { openEditorWindow(editing: p) }
+    }
+    func sidebarDuplicateProfile(_ id: Profile.ID) {
+        if let p = profiles.first(where: { $0.id == id }) { duplicateProfile(p) }
+    }
+    func sidebarResetProfile(_ id: Profile.ID) {
+        if let p = profiles.first(where: { $0.id == id }) { resetProfile(p) }
+    }
+    func sidebarDeleteProfile(_ id: Profile.ID) {
+        if let p = profiles.first(where: { $0.id == id }) { deleteProfile(p) }
     }
 
     /// The MITM proxy saw a model *conversation* request for this profile — the
@@ -693,7 +734,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Boot completes asynchronously after the launch path's initial render,
         // so refresh the picker now that the VM is actually running (Start →
         // Stop/Restart/Connect).
-        renderPicker()
+        refreshSidebar()
         return session
     }
 
@@ -1198,34 +1239,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // + status item are the only surfaces. Everything else (engine, signal
         // handlers, automation, control socket) still runs.
         if !headless {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 500),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
-            backing: .buffered, defer: false
-        )
-        window.title = "Bromure Agentic Coding"
-        window.delegate = self
-        window.titlebarAppearsTransparent = false
-        // See TabbedSessionWindow for the same fix: AppKit's window
-        // close animator can over-release captured block ivars when
-        // SwiftUI tears the contentView down concurrently (most
-        // visible when the user closes this window mid-rebuild while
-        // the InitProgressModel is still updating).
-        window.animationBehavior = .none
-        // We hold a strong reference (`self.mainWindow = window`).
-        // NSWindow defaults to `isReleasedWhenClosed = true` for
-        // non-controller windows, which would autorelease the window
-        // on close and double-free it against our strong ref —
-        // crashing in the next autorelease pool drain. Disable.
-        window.isReleasedWhenClosed = false
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        self.mainWindow = window
-
-        // Pick the right initial screen: setup if there's no base image
-        // yet, otherwise the profile picker.
+        // Pick the right initial home: with a base image, the unified window
+        // (the source list of every profile — the standalone picker is gone);
+        // before the base image exists, the setup window in `mainWindow`.
         if imageManager.hasBaseImage {
-            renderPicker()
+            showUnifiedWindowAsHome()
             if profiles.isEmpty { openEditorWindow(editing: nil) }
             // Stale image — nag (non-blocking) but let the user keep
             // working with the existing base.
@@ -1235,9 +1253,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
         } else {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 500),
+                styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                backing: .buffered, defer: false
+            )
+            window.title = "Bromure Agentic Coding"
+            window.delegate = self
+            window.titlebarAppearsTransparent = false
+            // See TabbedSessionWindow for the same fix: AppKit's window
+            // close animator can over-release captured block ivars when
+            // SwiftUI tears the contentView down concurrently (most
+            // visible when the user closes this window mid-rebuild while
+            // the InitProgressModel is still updating).
+            window.animationBehavior = .none
+            // We hold a strong reference (`self.mainWindow = window`).
+            // NSWindow defaults to `isReleasedWhenClosed = true` for
+            // non-controller windows, which would autorelease the window
+            // on close and double-free it against our strong ref —
+            // crashing in the next autorelease pool drain. Disable.
+            window.isReleasedWhenClosed = false
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+            self.mainWindow = window
             renderSetup()
+            NSApp.activate(ignoringOtherApps: true)
         }
-        NSApp.activate(ignoringOtherApps: true)
         }   // if !headless
 
         // ⌘T / ⌘W / ⌘1-9 / ⌘N must run BEFORE VZVirtualMachineView's
@@ -1661,7 +1702,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         do {
             try store.delete(p)
             profiles = store.loadAll()
-            renderPicker()
+            refreshSidebar()
             return ["ok": true, "name": p.name]
         } catch {
             return ["ok": false, "error": "Couldn't delete '\(p.name)': \(error.localizedDescription)"]
@@ -2087,11 +2128,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             initProgress.stop()
             initProgress.isRunning = false
             if imageManager.hasBaseImage {
-                renderPicker()
-                resizeMainWindowForPicker()
-            } else {
-                renderSetup()
+                // The previous base image is still usable — drop the installer
+                // window and return to the unified home.
+                self.mainWindow = nil
+                showUnifiedWindowAsHome()
+                return true
             }
+            renderSetup()
             return false
         }
 
@@ -2308,7 +2351,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 break
             }
             session.closeIntent = nil
-            renderPicker()
+            refreshSidebar()
             updateStatusMenu()
             updateActivationPolicy()
         }
@@ -2393,14 +2436,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 FileHandle.standardError.write(Data(
                     "[init] line count: \(self.initProgress.linesSeen)\n".utf8))
                 self.profiles = self.store.loadAll()
-                self.renderPicker()
-                // Resize AFTER the picker hosting view is in place.
-                // Resizing while the InitializingView is still
-                // contentView is defeated by its autolayout
-                // constraints — the window snaps back to the
-                // installer's 640×480 the instant `renderPicker`
-                // triggers a layout pass.
-                self.resizeMainWindowForPicker()
+                // Base image is ready — close the installer window and open the
+                // unified home (the standalone picker is gone).
+                if let w = self.mainWindow { w.close() }
+                self.mainWindow = nil
+                self.showUnifiedWindowAsHome()
                 if self.profiles.isEmpty { self.openEditorWindow(editing: nil) }
             } catch {
                 self.initProgress.stop()
@@ -2672,13 +2712,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Window menu → "Profile Manager". Brings the picker forward, or
-    /// recreates it if the user closed the window earlier in the
-    /// session (windowWillClose nils out `mainWindow`).
+    /// Window menu → "Profile Manager". With a base image this is the unified
+    /// window (the home — the standalone picker is gone); before the base
+    /// image exists it's the setup window, recreated if the user closed it.
     @objc func openProfileManagerAction(_ sender: Any?) {
         // Promote back to a regular (Dock-visible) app — we may be coming from
         // the status item while running as a background agent.
         NSApp.setActivationPolicy(.regular)
+        if imageManager.hasBaseImage {
+            showUnifiedWindowAsHome()
+            return
+        }
+        // No base image yet — show (or recreate) the setup window.
         if let win = mainWindow {
             win.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -2696,12 +2741,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         win.center()
         win.isReleasedWhenClosed = false
         self.mainWindow = win
-        if imageManager.hasBaseImage {
-            renderPicker()
-        } else {
-            renderSetup()
-        }
+        renderSetup()
         win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Open (or focus) the unified window as the app's home, populated with the
+    /// full profile list. Replaces the old standalone picker.
+    func showUnifiedWindowAsHome() {
+        NSApp.setActivationPolicy(.regular)
+        let w = ensureUnifiedWindow()
+        refreshSidebar()
+        // Pick a sensible initial selection so the stage isn't blank: a running
+        // attached pane keeps its own; otherwise show the first profile's card.
+        if w.selectedID == nil, let first = w.listModel.profileRows.first {
+            w.selectRow(first.id)
+        }
+        w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -2936,51 +2992,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Restore the main window to the picker's natural size after a
-    /// screen that resized it (currently only `renderInitializing`,
-    /// which sets 640×480 + a tighter min size for the install
-    /// console). Cold start with an existing image creates the
-    /// window at 540×420 already, so picker rendering there doesn't
-    /// hit this path.
-    private func resizeMainWindowForPicker() {
-        guard let win = mainWindow else { return }
-        win.contentMinSize = .zero
-        win.setContentSize(NSSize(width: 560, height: 500))
-        win.center()
-    }
-
-    /// Re-render the picker (reflecting current profiles + which sessions
-    /// are running). Idempotent; safe to call from anywhere.
-    private func renderPicker() {
-        guard let win = mainWindow else { return }
-        // Running = every live VM (incl. detached); attached = the ones with a
-        // pane on screen. The picker's per-row controls key off both.
-        let runningIDs = Set(runningSessions.keys)
-        let attachedIDs = Set(panes.keys)
-        // Cheap fs-stat per profile — the compromised badge is only
-        // present when the marker file is on disk; profile.json on
-        // its own can't tell us this.
-        let compromisedIDs = Set(profiles.lazy
-            .filter { SessionDisk.isCompromised(profile: $0, store: self.store) }
-            .map { $0.id })
-        let view = ProfilePickerView(
-            profiles: Binding(get: { self.profiles }, set: { self.profiles = $0 }),
-            runningProfiles: runningIDs,
-            attachedProfiles: attachedIDs,
-            compromisedProfiles: compromisedIDs,
-            onLaunch:        { self.launch($0) },
-            onCreate:        { self.openEditorWindow(editing: nil) },
-            onEdit:          { self.openEditorWindow(editing: $0) },
-            onReset:         { self.resetProfile($0) },
-            onDelete:        { self.deleteProfile($0) },
-            onShowPublicKey: { self.openSSHWindow(for: $0) },
-            onDuplicate:     { self.duplicateProfile($0) },
-            onStop:          { self.stopProfile($0.id) },
-            onRestart:       { self.restartProfile($0.id) },
-            onConnect:       { self.connectProfile($0.id) }
-        )
-        win.contentView = NSHostingView(rootView: view)
-    }
 
     /// Deep-copy a profile (new UUID, new MAC) using `ProfileStore.duplicate`.
     /// Includes the system disk + home dir via APFS clonefile, the encrypted
@@ -3011,7 +3022,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         profiles = store.loadAll()
-        renderPicker()
+        refreshSidebar()
     }
 
     /// editing == nil → create. editing != nil → modify in place.
@@ -3282,7 +3293,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         profiles = store.loadAll()
-        renderPicker()
+        refreshSidebar()
         reconcileBootLaunchAgent()   // a saved bootAtStartup change may flip the plist
         // The privateMode toggle and enrollment-gated streaming flag
         // both flow off `profiles`; resync the running session
@@ -3701,7 +3712,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 p.sshPublicKey = nil
                 try? store.save(p)
                 profiles = store.loadAll()
-                renderPicker()
+                refreshSidebar()
             }
         } catch {
             showError(error, message: "Couldn't erase the home folder.")
@@ -3728,7 +3739,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         do {
             try store.delete(profile)
             profiles = store.loadAll()
-            renderPicker()
+            refreshSidebar()
         } catch {
             showError(error, message: "Couldn't delete the profile.")
         }
@@ -4012,7 +4023,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Newly-registered window — sync its streaming indicator
         // with the current enrollment + privateMode state.
         refreshStreamingState()
-        renderPicker()
+        refreshSidebar()
 
         // Pre-load saved tabs alongside the saved RAM snapshot. If
         // both exist, the resumed VM already has matching kittys
@@ -4144,7 +4155,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 p.baseImageVersionAtClone = current
                 try? self.store.save(p)
                 self.profiles = self.store.loadAll()
-                self.renderPicker()
+                self.refreshSidebar()
             }
             self.wireSandboxCallbacks(sandbox)
             self.registerSession(sandbox, profile: profile)
@@ -4320,7 +4331,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Re-render so the badge disappears immediately. (`launch`
         // continues right after this, but the picker behind the
         // session window will reflect the change once focus returns.)
-        renderPicker()
+        refreshSidebar()
         return true
     }
 
@@ -4765,7 +4776,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             try? store.delete(p)
             profiles = store.loadAll()
         }
-        renderPicker()
+        refreshSidebar()
         updateStatusMenu()
         updateActivationPolicy()
     }
@@ -4882,7 +4893,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         unified.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         refreshStreamingState()
-        renderPicker()
+        refreshSidebar()
         updateStatusMenu()
     }
 
