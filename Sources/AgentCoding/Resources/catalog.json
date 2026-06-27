@@ -36,6 +36,7 @@
       "tags": ["coding", "tools", "agentic", "m"],
       "tool_calling": "verified",
       "tool_parser": "qwen3_coder",
+      "reasoning_parser": "qwen3",
       "min_chip": "M1 Pro",
       "recommended": true
     },

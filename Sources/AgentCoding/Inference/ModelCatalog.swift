@@ -99,7 +99,10 @@ public struct CatalogModel: Codable, Identifiable, Equatable, Sendable {
         id = try c.decode(String.self, forKey: .id)
         repo = try c.decode(String.self, forKey: .repo)
         engine = try c.decodeIfPresent(String.self, forKey: .engine) ?? "vllm-mlx"
-        name = try c.decodeIfPresent(String.self, forKey: .name) ?? id
+        // Optional in JSON — defaults to the repo's last path component
+        // (already prefix-free), so a catalog entry can omit `name`.
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+            ?? repo.split(separator: "/").last.map(String.init) ?? id
         publisher = try c.decodeIfPresent(String.self, forKey: .publisher)
         license = try c.decodeIfPresent(String.self, forKey: .license)
         paramsTotalB = try c.decodeIfPresent(Double.self, forKey: .paramsTotalB)
