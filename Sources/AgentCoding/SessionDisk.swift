@@ -711,17 +711,28 @@ public final class SessionDisk {
             )
         }
 
-        // Codex local inference: unlike Claude Code (env-driven) and Grok
-        // (GROK_BASE_URL), Codex uses the Responses API via a config-file
-        // provider, so env vars don't redirect it. Write a model_provider
-        // with wire_api="chat" that targets the OpenAI chat-completions
-        // endpoint vllm-mlx serves on the loopback (the guest init lays this
-        // down before the MCP block so the top-level keys stay valid TOML).
+        // Codex local inference: Codex uses the Responses API via a config-file
+        // provider, so env vars don't redirect it. Write a model_provider with
+        // wire_api="responses" targeting the endpoint vllm-mlx serves on the
+        // loopback (the guest init lays this down before the MCP block so the
+        // top-level keys stay valid TOML).
         if let codex = profile.allToolSpecs.first(where: { $0.tool == .codex && $0.authMode == .local }),
            let id = codex.localModelID, !id.isEmpty {
             let repo = CatalogStore.shared.resolve(id)?.repo ?? id
             try Self.codexLocalProviderTOML(model: repo).write(
                 to: tmp.appendingPathComponent("codex-local.toml"),
+                atomically: true, encoding: .utf8)
+        }
+
+        // Grok local inference: GROK_MODELS_BASE_URL + XAI_API_KEY (env) point
+        // grok at the engine, but grok still sends its default model id
+        // "grok-build" — which the engine 404s. A [model.grok-build] override
+        // in config.toml rewrites that to the served repo (guest init appends).
+        if let grok = profile.allToolSpecs.first(where: { $0.tool == .grok && $0.authMode == .local }),
+           let id = grok.localModelID, !id.isEmpty {
+            let repo = CatalogStore.shared.resolve(id)?.repo ?? id
+            try Self.grokLocalModelMapTOML(model: repo).write(
+                to: tmp.appendingPathComponent("grok-local.toml"),
                 atomically: true, encoding: .utf8)
         }
 
@@ -854,6 +865,21 @@ public final class SessionDisk {
         wire_api = "responses"
         env_key = "OPENAI_API_KEY"
 
+        """
+    }
+
+    /// Grok `~/.grok/config.toml` fragment mapping grok's default model id
+    /// (`grok-build`) to the served repo. The guest init APPENDS this (grok's
+    /// config already has [cli]/[ui]); the sentinel markers let re-boots strip
+    /// the prior block so it stays idempotent. Per grok's "Custom Models"
+    /// docs: when `model` is set on a `[model.*]` entry, that value is the id
+    /// sent to the API, so grok-build → the served repo.
+    static func grokLocalModelMapTOML(model: String) -> String {
+        """
+        # >>> bromure-local
+        [model.grok-build]
+        model = \(tomlQuote(model))
+        # <<< bromure-local
         """
     }
 

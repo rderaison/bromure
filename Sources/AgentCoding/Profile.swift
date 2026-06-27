@@ -3112,6 +3112,18 @@ public final class ProfileStore {
         cat /mnt/bromure-meta/codex-local.toml > "$HOME/.codex/config.toml"
     fi
 
+    # Grok local-inference. The grok CLI defaults its model id to "grok-build";
+    # without a map the engine 404s (it only serves the repo name). A
+    # [model.grok-build] override rewrites what's sent to the API. We APPEND
+    # (grok's config.toml already has [cli]/[ui]) and strip any prior bromure
+    # block first so re-boots stay idempotent.
+    if [ -r /mnt/bromure-meta/grok-local.toml ]; then
+        mkdir -p "$HOME/.grok"
+        touch "$HOME/.grok/config.toml"
+        sed -i '/# >>> bromure-local/,/# <<< bromure-local/d' "$HOME/.grok/config.toml" 2>/dev/null
+        cat /mnt/bromure-meta/grok-local.toml >> "$HOME/.grok/config.toml"
+    fi
+
     # MCP server configs from the profile. The host generates both
     # Claude Code and Codex formats; we install whichever matches
     # the active tool.
