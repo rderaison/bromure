@@ -102,6 +102,119 @@ public enum EcosystemTransforms {
         return rebuildHTTPResponse(originalHead: head, newBody: newBody)
     }
 
+    // MARK: - PyPI "simple" index (`/simple/<pkg>/`)
+
+    /// pip's *default* resolution path is the PEP 503/691 simple
+    /// index, NOT the `/pypi/<pkg>/json` API — so without this the
+    /// age gate silently no-ops for every normal `pip install`.
+    ///
+    /// Only the PEP 691 **JSON** form (`application/vnd.pypi.simple.v1+json`)
+    /// carries per-file `upload-time` (PEP 700); the legacy PEP 503
+    /// **HTML** index has no timestamps, so we can't age-gate it from
+    /// the response alone — those fetches fall through unchanged and
+    /// the artifact-fetch backstop (which does an on-demand
+    /// per-version lookup) enforces instead.
+    ///
+    /// The simple index lists *files*, not versions, and doesn't carry
+    /// a per-file version field — we derive the version from the
+    /// filename (wheel / sdist naming) and take the earliest
+    /// `upload-time` across a version's files as its publish time
+    /// (matching `filterPyPIJSON`). Too-fresh versions get their files
+    /// dropped from `files[]` and their entry pruned from `versions[]`.
+    public static func filterPyPISimple(rawResponse: Data,
+                                        packageName: String,
+                                        allowedAfter cutoff: Date,
+                                        allowlistedPackage: Bool,
+                                        publishTimeCache: PublishTimeCache?) async -> Data {
+        guard let parts = splitHTTPResponse(rawResponse) else { return rawResponse }
+        let (head, body) = parts
+        // Only the JSON form is age-gatable here. Sniff the declared
+        // content type; fall back to a tolerant JSON parse attempt.
+        let lowerHead = head.lowercased()
+        let declaredJSON = lowerHead.contains("application/vnd.pypi.simple.v1+json")
+            || lowerHead.contains("application/json")
+        guard declaredJSON,
+              let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              var files = json["files"] as? [[String: Any]] else {
+            return rawResponse
+        }
+        var manifest = json
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoNoFraction = ISO8601DateFormatter()
+        isoNoFraction.formatOptions = [.withInternetDateTime]
+
+        // Earliest publish time per version, derived from each file's
+        // PEP 700 `upload-time`. Files without an upload-time (older
+        // index snapshots) contribute no timing data — the artifact
+        // backstop catches those.
+        var earliestByVersion: [String: Date] = [:]
+        for f in files {
+            guard let filename = f["filename"] as? String,
+                  let version = pypiVersionFromFilename(filename),
+                  let t = f["upload-time"] as? String,
+                  let d = iso.date(from: t) ?? isoNoFraction.date(from: t) else { continue }
+            if let existing = earliestByVersion[version] {
+                if d < existing { earliestByVersion[version] = d }
+            } else {
+                earliestByVersion[version] = d
+            }
+        }
+
+        if let cache = publishTimeCache, !earliestByVersion.isEmpty {
+            await cache.record(ecosystem: "pypi", name: packageName,
+                               versions: earliestByVersion.map { ($0.key, $0.value) })
+        }
+
+        // Record-only for allowlisted packages (or when there's
+        // nothing too-fresh to drop) — leave the bytes untouched so
+        // pip sees PyPI's response verbatim.
+        guard !allowlistedPackage else { return rawResponse }
+        let blocked = Set(earliestByVersion.filter { $0.value > cutoff }.keys)
+        guard !blocked.isEmpty else { return rawResponse }
+
+        files.removeAll { f in
+            guard let filename = f["filename"] as? String,
+                  let version = pypiVersionFromFilename(filename) else { return false }
+            return blocked.contains(version)
+        }
+        manifest["files"] = files
+        if var versions = manifest["versions"] as? [String] {
+            versions.removeAll { blocked.contains($0) }
+            manifest["versions"] = versions
+        }
+
+        guard let newBody = try? JSONSerialization.data(withJSONObject: manifest,
+                                                        options: [.sortedKeys]) else {
+            return rawResponse
+        }
+        return rebuildHTTPResponse(originalHead: head, newBody: newBody)
+    }
+
+    /// Extract the version from a PyPI artifact filename. Wheels are
+    /// `<dist>-<version>(-<build>)?-<py>-<abi>-<plat>.whl`; sdists are
+    /// `<name>-<version>.<ext>` where the name may itself contain
+    /// hyphens (so we split on the *last* hyphen). Mirrors the
+    /// filename parsing in `SupplyChainRegistry.pypiArtifact`.
+    static func pypiVersionFromFilename(_ filename: String) -> String? {
+        if filename.hasSuffix(".whl") {
+            let stem = String(filename.dropLast(".whl".count))
+            let segs = stem.split(separator: "-", omittingEmptySubsequences: false)
+                .map(String.init)
+            return segs.count >= 2 ? segs[1] : nil
+        }
+        for ext in [".tar.gz", ".tar.bz2", ".tar.xz", ".zip", ".tgz"] {
+            if filename.hasSuffix(ext) {
+                let stem = String(filename.dropLast(ext.count))
+                guard let lastDash = stem.lastIndex(of: "-") else { return nil }
+                let version = String(stem[stem.index(after: lastDash)...])
+                return version.isEmpty ? nil : version
+            }
+        }
+        return nil
+    }
+
     // MARK: - Cargo (crates.io API)
 
     /// `https://crates.io/api/v1/crates/<crate>` returns

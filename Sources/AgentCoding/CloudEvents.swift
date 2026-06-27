@@ -166,6 +166,18 @@ public final class BACEventEmitter: @unchecked Sendable {
         }
     }
 
+    /// Cheap, lock-guarded "is this install enrolled and streaming?"
+    /// signal for hot paths (the MITM proxy) that want to emit
+    /// telemetry whenever enrolled — without paying the keychain /
+    /// disk read `emit()`'s hard gate does per call. The uploader is
+    /// stood up on enroll/launch and torn down on unenroll, so its
+    /// presence mirrors enrollment. `emit()` still applies the
+    /// authoritative enrollment + private-mode gates before upload.
+    public var isStreamingEnabled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return uploader != nil
+    }
+
     /// Drop any buffered events and tear down the uploader (called on
     /// unenroll so the next enrollment starts clean).
     public func reset() {

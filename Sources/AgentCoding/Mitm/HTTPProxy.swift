@@ -522,13 +522,36 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // complete normally, then breaks the retain cycle.
         defer { session.finishTasksAndInvalidate() }
 
-        // Supply-chain interception. Shares the same per-request URLSession
-        // the rest of the proxy uses.
-        if let policy = supplyChainProvider(), policy.isActive,
+        // Supply-chain interception + enterprise fetch telemetry.
+        // Shares the same per-request URLSession the rest of the proxy
+        // uses.
+        //
+        // We enter this block whenever there's something to *enforce*
+        // OR the install is enrolled — admins expect package-download
+        // visibility from enrollment alone, even with every
+        // enforcement layer off (the prior behaviour gated the whole
+        // block, telemetry included, on `policy.isActive`, so an
+        // enrolled-but-unconfigured workspace saw no pip/npm fetches
+        // at all). Enforcement work below still gates on `enforce`.
+        let scPolicy = supplyChainProvider()
+        let enforce = scPolicy?.isActive ?? false
+        if (enforce || BACEventEmitter.shared.isStreamingEnabled),
            let kind = SupplyChainRegistry.classify(host: host, path: reqPath) {
+            // Real policy when present; an all-off stand-in when we're
+            // here purely to observe (so the enforcement predicates
+            // below cleanly evaluate to "do nothing").
+            let policy = scPolicy ?? SupplyChainPolicy(ageGateEnabled: false)
             let cutoff = Date().addingTimeInterval(-Double(policy.ageGateDays) * 86400)
             switch kind {
             case .metadata(let ecosystem, let pkg):
+                // Observe-only: log the fetch and forward the response
+                // untouched (no buffering / no rewrite).
+                if !enforce {
+                    emitSupplyChainFetch(profileID: self.profileID,
+                        ecosystem: ecosystem.rawValue, package: pkg,
+                        version: nil, kind: "metadata", outcome: "allowed")
+                    break
+                }
                 // Age-gate the metadata JSON per-ecosystem. The
                 // matched transform also records every per-version
                 // publish time into PublishTimeCache so the
@@ -593,12 +616,26 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                 let allowed = ageOn ? cutoff : .distantPast
                                 switch ecosystem {
                                 case .pypi:
-                                    result = await EcosystemTransforms.filterPyPIJSON(
-                                        rawResponse: raw,
-                                        packageName: pkg,
-                                        allowedAfter: allowed,
-                                        allowlistedPackage: allowlisted || !ageOn,
-                                        publishTimeCache: cache)
+                                    // pip's default is the `/simple/`
+                                    // index (HTML or PEP 691 JSON), not
+                                    // the `/pypi/<pkg>/json` API — they
+                                    // have different shapes, so route by
+                                    // path.
+                                    if reqPath.hasPrefix("/simple/") {
+                                        result = await EcosystemTransforms.filterPyPISimple(
+                                            rawResponse: raw,
+                                            packageName: pkg,
+                                            allowedAfter: allowed,
+                                            allowlistedPackage: allowlisted || !ageOn,
+                                            publishTimeCache: cache)
+                                    } else {
+                                        result = await EcosystemTransforms.filterPyPIJSON(
+                                            rawResponse: raw,
+                                            packageName: pkg,
+                                            allowedAfter: allowed,
+                                            allowlistedPackage: allowlisted || !ageOn,
+                                            publishTimeCache: cache)
+                                    }
                                 case .cargo:
                                     result = await EcosystemTransforms.filterCargoAPI(
                                         rawResponse: raw,
@@ -649,6 +686,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 return
 
             case .artifact(let ecosystem, let pkg, let version):
+                // Observe-only: log the download and forward it
+                // untouched. This is the path that gives an enrolled-
+                // but-unconfigured workspace its package-download
+                // visibility (incl. pip wheels / sdists).
+                if !enforce {
+                    emitSupplyChainFetch(profileID: self.profileID,
+                        ecosystem: ecosystem.rawValue, package: pkg,
+                        version: version, kind: "artifact", outcome: "allowed")
+                    break
+                }
                 // Diagnostic breadcrumb: confirms the proxy actually
                 // saw the fetch. Without this, a clean install of an
                 // older-than-age-gate, OSV-clean, socket.dev-clean
@@ -684,25 +731,41 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 //    cached metadata from before age gate was on
                 //    and is fetching a too-fresh version directly".
                 if policy.ageGateEnabled,
-                   !policy.ageGateAllows(ecosystem: ecosystem.rawValue, name: pkg),
-                   let pub = await publishTimeCache.publishedAt(
-                        ecosystem: ecosystem.rawValue, name: pkg, version: version),
-                   pub > cutoff {
-                    let age = Date().timeIntervalSince(pub)
-                    let ageDesc: String
-                    if age < 3600 { ageDesc = "\(Int(age / 60)) minutes" }
-                    else if age < 86400 { ageDesc = "\(Int(age / 3600)) hours" }
-                    else { ageDesc = String(format: "%.1f days", age / 86400) }
-                    let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
-                        "published \(ageDesc) ago — " +
-                        "policy requires \(policy.ageGateDays) days minimum"
-                    try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                    SupplyChainLog.shared.record(
-                        "[supply-chain] age-gate 451: \(pkg)@\(version) — \(ageDesc) old, requires \(policy.ageGateDays)d")
-                    scOutcome = "blocked"
-                    scReasonKind = "age_gate"
-                    scReason = reason
-                    return
+                   !policy.ageGateAllows(ecosystem: ecosystem.rawValue, name: pkg) {
+                    var pub = await publishTimeCache.publishedAt(
+                        ecosystem: ecosystem.rawValue, name: pkg, version: version)
+                    // pip's default (HTML simple index) and any agent
+                    // replaying a pre-cached version list never populate
+                    // the cache — without an on-demand lookup the pip
+                    // age gate silently no-ops. Fetch the per-release
+                    // JSON directly, then pin it for the rest of this
+                    // install burst.
+                    if pub == nil, ecosystem == .pypi {
+                        pub = await PyPIMetadataClient.shared.publishTime(
+                            package: pkg, version: version)
+                        if let p = pub {
+                            await publishTimeCache.record(
+                                ecosystem: "pypi", name: pkg,
+                                versions: [(version, p)])
+                        }
+                    }
+                    if let pub, pub > cutoff {
+                        let age = Date().timeIntervalSince(pub)
+                        let ageDesc: String
+                        if age < 3600 { ageDesc = "\(Int(age / 60)) minutes" }
+                        else if age < 86400 { ageDesc = "\(Int(age / 3600)) hours" }
+                        else { ageDesc = String(format: "%.1f days", age / 86400) }
+                        let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
+                            "published \(ageDesc) ago — " +
+                            "policy requires \(policy.ageGateDays) days minimum"
+                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
+                        SupplyChainLog.shared.record(
+                            "[supply-chain] age-gate 451: \(pkg)@\(version) — \(ageDesc) old, requires \(policy.ageGateDays)d")
+                        scOutcome = "blocked"
+                        scReasonKind = "age_gate"
+                        scReason = reason
+                        return
+                    }
                 }
 
                 // 2. OSV check (free, no key, off by default).
