@@ -451,6 +451,33 @@ struct LocalToolAuthTests {
         #expect(m.promptTokens == nil)
     }
 
+    @Test("Accessors map to the real vllm-mlx metric names") func metricsRealNames() {
+        // Shape verified against vllm-mlx v0.4.0rc1 /metrics (labels included).
+        let text = """
+        vllm_mlx_completion_tokens_total{model="a"} 80
+        vllm_mlx_completion_tokens_total{model="b"} 40
+        vllm_mlx_prompt_tokens_total{model="a"} 200
+        vllm_mlx_scheduler_running_requests 1
+        vllm_mlx_scheduler_waiting_requests 3
+        vllm_mlx_http_requests_in_flight 2
+        vllm_mlx_cache_hit_rate 0.75
+        vllm_mlx_cache_utilization_ratio 0.4
+        vllm_mlx_metal_memory_bytes 8589934592
+        vllm_mlx_inference_request_duration_seconds_sum 5.0
+        vllm_mlx_inference_request_duration_seconds_count 10
+        """
+        let m = InferenceMetrics.parse(text)
+        #expect(m.generationTokens == 120)        // completion tokens, summed
+        #expect(m.promptTokens == 200)
+        #expect(m.requestsRunning == 1)
+        #expect(m.requestsWaiting == 3)
+        #expect(m.requestsInFlight == 2)
+        #expect(m.cacheHitRate == 0.75)
+        #expect(m.cacheUsage == 0.4)
+        #expect(m.metalMemoryBytes == 8589934592)
+        #expect(m.avgInferenceLatency == 0.5)     // 5.0 / 10
+    }
+
     @Test("Distinct local models gather across tools + fusion") func distinctModels() {
         var p = Profile(name: "t", tool: .claude, authMode: .local)
         p.activeModelID = "m1"
@@ -459,7 +486,7 @@ struct LocalToolAuthTests {
         #expect(Set(p.distinctLocalModelIDs) == ["m1", "m2", "m3"])
     }
 
-    @Test("Codex local provider TOML uses the chat wire API") func codexTOML() {
+    @Test("Codex local provider TOML uses the responses wire API") func codexTOML() {
         let toml = SessionDisk.codexLocalProviderTOML(model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
         #expect(toml.contains("model_provider = \"bromure-local\""))
         #expect(toml.contains("base_url = \"http://127.0.0.1:11434/v1\""))

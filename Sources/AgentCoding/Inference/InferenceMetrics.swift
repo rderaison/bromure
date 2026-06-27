@@ -36,11 +36,23 @@ public struct InferenceMetrics: Sendable, Equatable {
         return nil
     }
 
-    public var promptTokens: Double?     { first(["vllm:prompt_tokens_total", "prompt_tokens_total"]) }
-    public var generationTokens: Double? { first(["vllm:generation_tokens_total", "generation_tokens_total"]) }
-    public var requestsRunning: Double?  { first(["vllm:num_requests_running", "num_requests_running"]) }
-    public var requestsWaiting: Double?  { first(["vllm:num_requests_waiting", "num_requests_waiting"]) }
-    public var cacheUsage: Double?       { first(["vllm:gpu_cache_usage_perc", "kv_cache_usage_perc", "cache_usage_perc"]) }
+    // Names as emitted by vllm-mlx (verified against v0.4.0rc1 /metrics),
+    // with the older `vllm:` variants kept as fallbacks.
+    public var promptTokens: Double?     { first(["vllm_mlx_prompt_tokens_total", "vllm:prompt_tokens_total", "prompt_tokens_total"]) }
+    public var generationTokens: Double? { first(["vllm_mlx_completion_tokens_total", "vllm:generation_tokens_total", "generation_tokens_total"]) }
+    public var requestsRunning: Double?  { first(["vllm_mlx_scheduler_running_requests", "vllm:num_requests_running", "num_requests_running"]) }
+    public var requestsWaiting: Double?  { first(["vllm_mlx_scheduler_waiting_requests", "vllm:num_requests_waiting", "num_requests_waiting"]) }
+    public var requestsInFlight: Double? { first(["vllm_mlx_http_requests_in_flight"]) }
+    public var cacheUsage: Double?       { first(["vllm_mlx_cache_utilization_ratio", "vllm:gpu_cache_usage_perc", "kv_cache_usage_perc"]) }
+    public var cacheHitRate: Double?     { first(["vllm_mlx_cache_hit_rate"]) }
+    public var metalMemoryBytes: Double? { first(["vllm_mlx_metal_memory_bytes"]) }
+    public var uptimeSeconds: Double?    { first(["vllm_mlx_engine_uptime_seconds"]) }
+    /// Mean inference latency (s) = duration sum / count.
+    public var avgInferenceLatency: Double? {
+        guard let s = values["vllm_mlx_inference_request_duration_seconds_sum"],
+              let c = values["vllm_mlx_inference_request_duration_seconds_count"], c > 0 else { return nil }
+        return s / c
+    }
 }
 
 /// Polls the engine's `/metrics` endpoint and derives a live throughput.

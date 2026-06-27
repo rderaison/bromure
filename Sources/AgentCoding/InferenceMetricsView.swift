@@ -23,8 +23,12 @@ struct InferenceMetricsView: View {
                     card("Tokens / sec", fmt(model.tokensPerSecond, "%.1f"), "speedometer", .green)
                     card("Running", fmt(model.latest?.requestsRunning, "%.0f"), "play.circle", .blue)
                     card("Waiting", fmt(model.latest?.requestsWaiting, "%.0f"), "hourglass", .orange)
-                    card("KV cache", model.latest?.cacheUsage.map { String(format: "%.0f%%", $0 * (($0 <= 1) ? 100 : 1)) } ?? "—",
-                         "memorychip", .purple)
+                    card("In flight", fmt(model.latest?.requestsInFlight, "%.0f"), "arrow.left.arrow.right", .indigo)
+                    card("Avg latency", model.latest?.avgInferenceLatency.map { String(format: "%.2fs", $0) } ?? "—",
+                         "timer", .pink)
+                    card("Cache hit", model.latest?.cacheHitRate.map { String(format: "%.0f%%", $0 * (($0 <= 1) ? 100 : 1)) } ?? "—",
+                         "bolt.horizontal", .purple)
+                    card("Metal mem", model.latest?.metalMemoryBytes.map { gib($0) } ?? "—", "memorychip", .cyan)
                     card("Gen tokens", fmt(model.latest?.generationTokens, "%.0f"), "text.alignleft", .teal)
                     card("Prompt tokens", fmt(model.latest?.promptTokens, "%.0f"), "text.append", .gray)
                 }
@@ -92,5 +96,9 @@ struct InferenceMetricsView: View {
     private func fmt(_ v: Double?, _ f: String) -> String {
         guard let v else { return "—" }
         return String(format: f, v)
+    }
+
+    private func gib(_ bytes: Double) -> String {
+        String(format: "%.1f GB", bytes / 1_073_741_824)
     }
 }
