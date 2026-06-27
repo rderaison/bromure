@@ -127,9 +127,16 @@ public final class EngineProvisioner: @unchecked Sendable {
         ["venv", dir.path, "--python", python, "--python-preference", "only-managed"]
     }
 
-    /// `uv pip install --python <venv-python> -r <reqs>`.
-    public static func pipInstallArgs(venvPython: URL, requirementsFile: URL) -> [String] {
-        ["pip", "install", "--python", venvPython.path, "-r", requirementsFile.path]
+    /// `uv pip install --python <venv> --prerelease allow [--upgrade] -r <reqs>`.
+    /// `--prerelease allow` so prerelease wheels (e.g. `0.4.0rc1`) install;
+    /// `--upgrade` pulls the newest version from the find-links index even
+    /// when something is already installed (how a republished wheel lands).
+    public static func pipInstallArgs(venvPython: URL, requirementsFile: URL,
+                                      upgrade: Bool = false) -> [String] {
+        var a = ["pip", "install", "--python", venvPython.path, "--prerelease", "allow"]
+        if upgrade { a.append("--upgrade") }
+        a += ["-r", requirementsFile.path]
+        return a
     }
 
     // MARK: - Provision
@@ -159,8 +166,23 @@ public final class EngineProvisioner: @unchecked Sendable {
         try Self.run(uv, Self.venvArgs(dir: engineDir),
                      onProgress: onProgress, mapError: EngineProvisionError.venvFailed)
 
-        onProgress("Installing vllm-mlx + mlx (pinned)…\n")
+        onProgress("Installing vllm-mlx + mlx…\n")
         try Self.run(uv, Self.pipInstallArgs(venvPython: venvPython, requirementsFile: reqFile),
+                     onProgress: onProgress, mapError: EngineProvisionError.installFailed)
+    }
+
+    /// Upgrade an already-provisioned engine to the newest wheel published on
+    /// the find-links index — this is how a republished `vllm-mlx` wheel
+    /// (e.g. a new release) gets picked up *without* an app update. Run in the
+    /// background at app launch (before any engine is started). No-op / fast
+    /// when already current; non-fatal on network failure.
+    public func refreshToLatest(onProgress: @escaping (String) -> Void = { _ in }) async throws {
+        guard isProvisioned, let uv = Self.resolveUV() else { return }
+        let reqFile = engineDir.deletingLastPathComponent()
+            .appendingPathComponent("engine-requirements.lock")
+        try requirementsText().write(to: reqFile, atomically: true, encoding: .utf8)
+        try Self.run(uv, Self.pipInstallArgs(venvPython: venvPython,
+                                             requirementsFile: reqFile, upgrade: true),
                      onProgress: onProgress, mapError: EngineProvisionError.installFailed)
     }
 

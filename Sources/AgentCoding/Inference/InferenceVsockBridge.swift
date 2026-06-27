@@ -18,7 +18,9 @@ final class InferenceListenerDelegate: NSObject, VZVirtioSocketListenerDelegate 
                   shouldAcceptNewConnection connection: VZVirtioSocketConnection,
                   from socketDevice: VZVirtioSocketDevice) -> Bool {
         let fd = dup(connection.fileDescriptor)
-        let port = enginePort
+        // Splice to the tool-call repair proxy (which forwards to the engine),
+        // not the engine directly, so leaked-as-text tool calls get rescued.
+        let port = InferenceRepairProxy.listenPort
         Thread.detachNewThread {
             InferenceVsockBridge.pump(vsockFD: fd, host: "127.0.0.1", port: port)
         }

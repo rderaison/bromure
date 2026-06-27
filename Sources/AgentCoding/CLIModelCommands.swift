@@ -144,7 +144,19 @@ struct Model: ParsableCommand {
         commandName: "model",
         abstract: "Manage local MLX inference models (catalog, pull, use).",
         subcommands: [ModelCatalogList.self, ModelInstall.self, ModelPull.self,
-                      ModelLS.self, ModelUse.self, ModelRM.self])
+                      ModelLS.self, ModelUse.self, ModelRM.self, RepairServe.self])
+}
+
+/// Hidden: run the tool-call repair proxy standalone for testing against a
+/// running engine (`model _repair-serve --engine-port 11434`). Blocks.
+struct RepairServe: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "_repair-serve", shouldDisplay: false)
+    @Option(name: .long) var enginePort = InferenceService.enginePort
+    func run() throws {
+        InferenceRepairProxy.shared.startIfNeeded(enginePort: enginePort)
+        print("repair proxy on 127.0.0.1:\(InferenceRepairProxy.listenPort) -> engine :\(enginePort)")
+        RunLoop.main.run()
+    }
 }
 
 struct ModelInstall: ParsableCommand {
@@ -152,9 +164,28 @@ struct ModelInstall: ParsableCommand {
         commandName: "install",
         abstract: "Provision the local vllm-mlx engine (uv + pinned venv).")
 
+    @Flag(name: .long, help: "Upgrade an installed engine to the newest published wheel.")
+    var upgrade = false
+
     func run() throws {
+        guard EngineProvisioner.resolveUV() != nil else {
+            throw ValidationError("uv not found. The app bundles it; on a dev build, `brew install uv`.")
+        }
+        if upgrade {
+            guard EngineProvisioner.shared.isProvisioned else {
+                throw ValidationError("Engine isn't installed yet — run `model install` first.")
+            }
+            print("Upgrading vllm-mlx to the newest published wheel…")
+            try blockingRun {
+                try await EngineProvisioner.shared.refreshToLatest { line in
+                    FileHandle.standardError.write(Data(line.utf8))
+                }
+            }
+            print("Engine upgraded.")
+            return
+        }
         if EngineProvisioner.shared.isProvisioned {
-            print("Engine already provisioned at \(EngineProvisioner.shared.engineDir.path).")
+            print("Engine already provisioned at \(EngineProvisioner.shared.engineDir.path). Use --upgrade to refresh.")
             return
         }
         guard EngineProvisioner.resolveUV() != nil else {

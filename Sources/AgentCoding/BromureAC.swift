@@ -753,6 +753,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // start our own (it can hold tens of GB of unified memory).
         Task.detached(priority: .background) { InferenceService.reapOrphans() }
 
+        // Pull the newest engine wheel published on the find-links index, so a
+        // republished vllm-mlx (new release) is picked up without an app
+        // update. Background + non-fatal; runs before any engine starts.
+        Task.detached(priority: .background) {
+            try? await EngineProvisioner.shared.refreshToLatest()
+        }
+
         // Keep the login LaunchAgent in sync, then (headless login agent only)
         // boot any profiles flagged "Start at login".
         reconcileBootLaunchAgent()

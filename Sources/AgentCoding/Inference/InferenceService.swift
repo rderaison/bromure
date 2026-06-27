@@ -311,6 +311,9 @@ public actor InferenceService {
 
         try await waitUntilReady(url: plan.readinessURL, deadline: Date().addingTimeInterval(timeout))
         restartCount = 0   // healthy boot resets the crash-loop counter
+        // Front the engine with the tool-call repair proxy so leaked-as-text
+        // tool calls become real tool_use blocks before the agent sees them.
+        InferenceRepairProxy.shared.startIfNeeded(enginePort: Self.enginePort)
         return plan
     }
 

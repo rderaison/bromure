@@ -2,6 +2,74 @@ import Foundation
 import Testing
 @testable import bromure_ac
 
+// MARK: - Tool-call repair (rescuing leaked-as-text calls)
+
+@Suite("ToolCallRepair")
+struct ToolCallRepairTests {
+    @Test("Rescues <function name=… arguments=…> leaked as text")
+    func functionTag() {
+        let txt = "I'll do that.\n```xml\n<function name=\"Write\" arguments='{\"file_path\": \"/x/hello.txt\", \"content\": \"hi\"}'>\n```"
+        let (clean, blocks) = ToolCallRepair.rescue(text: txt)
+        #expect(blocks.count == 1)
+        #expect(blocks.first?["name"] as? String == "Write")
+        let input = blocks.first?["input"] as? [String: Any]
+        #expect(input?["file_path"] as? String == "/x/hello.txt")
+        #expect(!clean.contains("<function"))
+    }
+
+    @Test("Rescues the markdown [{name,parameters}](…) shape")
+    func markdownShape() {
+        let txt = "[{\"name\":\"Read\",\"parameters\":{\"file_path\":\"/y\"}}](/y)"
+        let (_, blocks) = ToolCallRepair.rescue(text: txt)
+        #expect(blocks.first?["name"] as? String == "Read")
+    }
+
+    @Test("Rescues a bare <tool_call>{…}</tool_call>")
+    func toolCallTag() {
+        let txt = "<tool_call>{\"name\": \"Bash\", \"arguments\": {\"command\": \"ls\"}}</tool_call>"
+        let (_, blocks) = ToolCallRepair.rescue(text: txt)
+        #expect(blocks.first?["name"] as? String == "Bash")
+        #expect((blocks.first?["input"] as? [String: Any])?["command"] as? String == "ls")
+    }
+
+    @Test("repair() promotes leaked text to tool_use + sets stop_reason")
+    func repairPromotes() {
+        let msg: [String: Any] = ["content": [
+            ["type": "text", "text": "<function name=\"Write\" arguments='{\"file_path\":\"/a\",\"content\":\"b\"}'>"]],
+            "stop_reason": "end_turn"]
+        let out = ToolCallRepair.repair(message: msg)
+        let content = out["content"] as? [[String: Any]] ?? []
+        #expect(content.contains { ($0["type"] as? String) == "tool_use" })
+        #expect(out["stop_reason"] as? String == "tool_use")
+    }
+
+    @Test("repair() leaves a real tool_use untouched")
+    func repairNoop() {
+        let msg: [String: Any] = ["content": [
+            ["type": "tool_use", "id": "call_x", "name": "Write", "input": ["a": 1]]],
+            "stop_reason": "tool_use"]
+        let out = ToolCallRepair.repair(message: msg)
+        #expect((out["content"] as? [[String: Any]])?.count == 1)
+    }
+
+    @Test("Clean text yields no rescued calls")
+    func cleanText() {
+        let (_, blocks) = ToolCallRepair.rescue(text: "Here is a summary of the change.")
+        #expect(blocks.isEmpty)
+    }
+
+    @Test("sse() emits a tool_use stream")
+    func sseStream() {
+        let msg = ToolCallRepair.repair(message: ["content": [
+            ["type": "text", "text": "<function name=\"Write\" arguments='{\"file_path\":\"/a\",\"content\":\"b\"}'>"]]])
+        let s = String(data: ToolCallRepair.sse(message: msg), encoding: .utf8) ?? ""
+        #expect(s.contains("message_start"))
+        #expect(s.contains("\"type\":\"tool_use\"") || s.contains("\"type\": \"tool_use\""))
+        #expect(s.contains("input_json_delta"))
+        #expect(s.contains("message_stop"))
+    }
+}
+
 // MARK: - Model catalog + RAM-fit gating (vLLM.md §5)
 
 @Suite("ModelCatalog")
@@ -265,7 +333,10 @@ struct EngineProvisionerTests {
         let py = URL(fileURLWithPath: "/tmp/eng/bin/python")
         let req = URL(fileURLWithPath: "/tmp/req.lock")
         #expect(EngineProvisioner.pipInstallArgs(venvPython: py, requirementsFile: req)
-                == ["pip", "install", "--python", "/tmp/eng/bin/python", "-r", "/tmp/req.lock"])
+                == ["pip", "install", "--python", "/tmp/eng/bin/python", "--prerelease", "allow", "-r", "/tmp/req.lock"])
+        // --upgrade pulls a republished wheel even when something's installed.
+        #expect(EngineProvisioner.pipInstallArgs(venvPython: py, requirementsFile: req, upgrade: true)
+                == ["pip", "install", "--python", "/tmp/eng/bin/python", "--prerelease", "allow", "--upgrade", "-r", "/tmp/req.lock"])
     }
 
     @Test("uv resolves from BROMURE_UV override first") func resolveUV() {
