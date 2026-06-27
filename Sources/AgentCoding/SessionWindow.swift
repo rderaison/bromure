@@ -130,30 +130,6 @@ final class TabbedSessionWindow: NSWindow {
     /// path. Distinguishes user-requested reboot from a real shutdown.
     var rebootRequested: Bool = false
 
-    /// Tabs whose pill has been added on the host but whose kitty
-    /// hasn't yet appeared in a guest-side `tabs-alive.txt` roster.
-    /// Each entry is dropped when the roster confirms the UUID OR
-    /// when the deadline expires (whichever comes first). Until then
-    /// the reconcile path won't reap the pill — that grace window
-    /// covers the time between us writing `cmd-spawn-kitty <UUID>` and
-    /// the agent actually launching kitty + the next title-loop tick.
-    private struct PendingSpawn {
-        let id: UUID
-        let deadline: Date
-    }
-    private var pendingSpawns: [PendingSpawn] = []
-    private static let spawnGraceInterval: TimeInterval = 8
-
-    /// Tab UUIDs the guest has reported alive in a roster at least once
-    /// this session. We only honour a "tab gone" signal (empty roster, or a
-    /// `closed-<uuid>` event) for a tab that has been confirmed alive — so a
-    /// still-booting initial kitty (empty roster while the cold boot is
-    /// still bringing X + kitty up, past the 8s grace) or a stale
-    /// `closed-<uuid>.txt` left in the outbox by a prior suspended session
-    /// (restored tabs reuse the same UUIDs) can't be mistaken for "the user
-    /// closed their last terminal" and power the VM off mid-boot.
-    private var confirmedTabs: Set<UUID> = []
-
     init(profile: Profile, acDelegate: ACAppDelegate) {
         self.profile = profile
         self.acDelegate = acDelegate
@@ -321,45 +297,17 @@ final class TabbedSessionWindow: NSWindow {
         }
     }
 
-    /// Called by ACAppDelegate when the in-VM agent reports the
-    /// foreground process for a kitty tab. Updates the matching
-    /// pill's label live (Terminal.app behaviour).
-    func handleTabTitleUpdate(id: UUID, title: String) {
-        guard let i = model.tabs.firstIndex(where: { $0.id == id }) else { return }
-        model.tabs[i].label = title
-    }
+    /// Has a populated tmux window list been seen yet this session. Until it
+    /// has, an empty list means "tmux not up yet" (don't power off), not "all
+    /// tabs closed".
+    private var sawTabList = false
 
-    /// Add a tab placeholder to the model. Caller follows up by sending a
-    /// spawn-kitty command to the in-VM agent for this tab's UUID.
-    @discardableResult
-    func appendTab() -> TabsModel.Tab {
-        let tab = TabsModel.Tab(label: "Session \(model.tabs.count + 1)")
-        model.tabs.append(tab)
-        model.activeIndex = model.tabs.count - 1
-        pendingSpawns.append(.init(
-            id: tab.id,
-            deadline: Date().addingTimeInterval(Self.spawnGraceInterval)))
-        return tab
-    }
-
-    /// Rebuild the tab bar from a saved-state snapshot. Used on
-    /// restore so the host's tab UUIDs match the kittys still
-    /// running inside the resumed VM (each kitty was started with
-    /// `--class bromure-<UUID>`). Called BEFORE the VM is up — the
-    /// raise-active-tab command goes out separately once it is.
+    /// Rebuild the tab bar from a saved-state snapshot on restore so pills show
+    /// instantly. The resumed VM's tmux session still holds its windows, so the
+    /// next roster tick (`applyTabList`) reconciles this to the truth.
     func rehydrateTabs(from state: SessionDisk.TabsState) {
         model.tabs = state.tabs.map { TabsModel.Tab(label: $0.label, id: $0.id) }
         model.activeIndex = max(0, min(state.activeIndex, model.tabs.count - 1))
-        // Restored kittys exist in the resumed VM but the host hasn't
-        // confirmed them via a roster yet — protect them from the
-        // reconcile reaper while the VM finishes restoring and the
-        // tab agent's title_loop ticks at least once.
-        let deadline = Date().addingTimeInterval(Self.spawnGraceInterval)
-        pendingSpawns = model.tabs.map { .init(id: $0.id, deadline: deadline) }
-        // Fresh session: restored tabs are not confirmed until the resumed
-        // guest's roster lists them again. Until then a stale closed-* for a
-        // reused UUID is ignored (see confirmedTabs).
-        confirmedTabs.removeAll()
     }
 
     /// Capture the current tab model into a snapshot for persistence.
@@ -372,113 +320,56 @@ final class TabbedSessionWindow: NSWindow {
         )
     }
 
+    /// Select a tab → tmux select-window. tmux's window index equals the bar
+    /// position (base-index 0 + renumber-windows on), so the array index is the
+    /// target. Highlight optimistically; the next roster tick confirms.
     func switchTo(index: Int) {
         guard model.tabs.indices.contains(index) else { return }
         model.activeIndex = index
-        if let tab = model.activeTab {
-            acDelegate?.requestRaiseTab(id: tab.id, in: self)
-        }
+        acDelegate?.requestSelectTab(index: index, in: self)
     }
 
+    /// Close a tab → tmux kill-window. The roster removes the pill. Closing the
+    /// last tab ends the session, so route through the profile's close-action
+    /// pipeline (suspend / background / shutdown).
     func closeTab(at index: Int) {
         guard model.tabs.indices.contains(index) else { return }
-        let tab = model.tabs.remove(at: index)
-        pendingSpawns.removeAll { $0.id == tab.id }
-        confirmedTabs.remove(tab.id)
-        acDelegate?.requestCloseTab(id: tab.id, in: self)
-        if model.tabs.isEmpty {
-            // Last-tab ⌘W: defer to the regular performClose pipeline
-            // so `windowShouldClose → decideSessionClose` reads the
-            // profile's `closeAction`. `close()` would bypass that
-            // check and force shutdown regardless of the profile's
-            // setting — which silently demoted .suspend profiles to
-            // .shutdown on every ⌘W. The xinitrc kitty-respawn loop
-            // already handles the "empty X session" case the prior
-            // shutdown-only behaviour was guarding against.
+        acDelegate?.requestCloseTab(index: index, in: self)
+        if model.tabs.count <= 1 {
             performClose(nil)
-            return
         }
-        let newIndex = max(0, min(index - 1, model.tabs.count - 1))
-        switchTo(index: newIndex)
     }
 
-    /// Tab whose kitty exited inside the VM (e.g. user hit Ctrl+D).
-    /// Idempotent: if the tab was already removed by an explicit ⌘W,
-    /// this no-ops.
-    func handleTabClosedFromGuest(id: UUID) {
-        // Same reboot guard as `reconcileTabRoster`: during a reboot the
-        // guest's kittys exit as it shuts down and emit closed-* events.
-        // Acting on them would remove the pills and close the window —
-        // turning the reboot into a shutdown. The relaunch rebuilds the
-        // tabs, so just ignore guest-side closes until then.
+    /// Mirror the guest's tmux window list as the tab bar. This is the WHOLE
+    /// tab model now — tmux is authoritative, so there's no liveness guessing,
+    /// grace periods, or reaping. Pill objects are reused by position so
+    /// SwiftUI keeps stable row identity (no flicker).
+    func applyTabList(_ tabs: [(index: Int, active: Bool, label: String)]) {
         if rebootRequested { return }
-        // Never act on a close for a tab the guest hasn't yet confirmed
-        // alive this session. It's either still coming up (initial kitty
-        // mid-boot) or a stale closed-* from a prior suspended session whose
-        // UUID was reused on restore. Honouring it would empty the bar and
-        // power off a perfectly healthy, still-booting VM. (Genuine
-        // guest-side closes always arrive after at least one roster tick
-        // that listed the tab, so this only drops the spurious ones.)
-        guard confirmedTabs.contains(id) else {
-            FileHandle.standardError.write(Data(
-                "[ac] ignoring close for unconfirmed tab \(id.uuidString) (still booting or stale event)\n".utf8))
+        guard !tabs.isEmpty else {
+            // tmux is gone — the last window was closed (or the VM is shutting
+            // down). Only act once we've seen a populated list this session, so
+            // a still-booting VM (tmux not up yet) isn't powered off early.
+            if sawTabList {
+                acDelegate?.requestStopSession(profile.id, action: .shutdown)
+            }
             return
         }
-        guard let idx = model.tabs.firstIndex(where: { $0.id == id }) else { return }
-        model.tabs.remove(at: idx)
-        pendingSpawns.removeAll { $0.id == id }
-        confirmedTabs.remove(id)
+        sawTabList = true
+        if model.tabs.count > tabs.count {
+            model.tabs.removeLast(model.tabs.count - tabs.count)
+        }
+        while model.tabs.count < tabs.count {
+            model.tabs.append(TabsModel.Tab(label: tabs[model.tabs.count].label))
+        }
+        for (i, t) in tabs.enumerated() where model.tabs[i].label != t.label {
+            model.tabs[i].label = t.label
+        }
+        if let activePos = tabs.firstIndex(where: { $0.active }), model.activeIndex != activePos {
+            model.activeIndex = activePos
+        }
         if model.activeIndex >= model.tabs.count {
             model.activeIndex = max(0, model.tabs.count - 1)
-        }
-        if model.tabs.isEmpty {
-            // Guest-side end-of-session: the user closed every kitty
-            // from inside the VM (Ctrl+D, `exit`, kitty crash). That
-            // signals "I'm done" — explicitly STOP the VM (closing the
-            // window would only detach now, leaving a shell-less VM
-            // running). Bypass the profile's closeAction and shut down:
-            // killing the last shell is itself the confirmation.
-            acDelegate?.requestStopSession(profile.id, action: .shutdown)
-        }
-    }
-
-    /// Reconcile the host's tab pills against the guest agent's
-    /// `tabs-alive.txt` roster. Reaps any pill whose UUID isn't in
-    /// the roster AND whose grace window has expired — that catches
-    /// the ⌘T → Ctrl+D race (pill appended but kitty never came up
-    /// because the spawn-kitty cmd was processed in a transient X
-    /// state and the closed-* event was lost) and any other drift
-    /// where a kitty died without sending closed-*. Pills inside
-    /// their `spawnGraceInterval` are protected so we don't reap a
-    /// freshly-added tab before the agent has had a chance to launch
-    /// kitty and the title loop has ticked once.
-    func reconcileTabRoster(alive: Set<UUID>) {
-        // A reboot in flight is tearing the guest down on purpose: its
-        // kittys are dying and the roster drains toward empty. Ignore
-        // it — `relaunchVM` rebuilds the tab set on the fresh VM once
-        // `onStopped` fires. Without this guard the empty roster reaps
-        // the last pill, closes the window, and the "soft reboot"
-        // silently becomes a shutdown.
-        if rebootRequested { return }
-        // Latch: any UUID the roster reports alive is confirmed for the rest
-        // of the session. Only confirmed tabs are eligible to be reaped when
-        // they later go absent — a tab that has never appeared alive is
-        // still booting (or its kitty genuinely never came up), and reaping
-        // it must not be allowed to empty the bar and shut the VM down.
-        confirmedTabs.formUnion(alive)
-        let now = Date()
-        // A pending spawn graduates as soon as the roster confirms it
-        // OR when the deadline lapses — after that, the roster's
-        // "absent" answer is trusted.
-        pendingSpawns.removeAll {
-            alive.contains($0.id) || $0.deadline < now
-        }
-        let pending = Set(pendingSpawns.map(\.id))
-        let toReap = model.tabs
-            .map(\.id)
-            .filter { !alive.contains($0) && !pending.contains($0) && confirmedTabs.contains($0) }
-        for id in toReap {
-            handleTabClosedFromGuest(id: id)
         }
     }
 

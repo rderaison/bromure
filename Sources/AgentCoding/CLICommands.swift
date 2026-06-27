@@ -281,12 +281,14 @@ struct VMList: ParsableCommand {
             let up = formatUptime(vm["uptimeSeconds"] as? Int ?? 0)
             let win = (vm["attached"] as? Bool ?? false) ? "attached" : "detached"
             print(pad(id, 14) + pad(name, 22) + pad(tool, 9) + pad(state, 11) + pad(up, 8) + win)
-            // Tabs (kitty terminals) as a tree; attach with `vm attach <id> <n>`.
+            // Tabs (tmux windows) as a tree; jump with `vm attach <id> <index>`.
+            // `*` marks the active window. The index is the tmux window index.
             let tabs = vm["tabs"] as? [[String: Any]] ?? []
             for t in tabs {
                 let idx = t["index"] as? Int ?? 0
                 let title = t["title"] as? String ?? "shell"
-                print("    └─ \(title) (\(idx))")
+                let active = (t["active"] as? Bool ?? false) ? " *" : ""
+                print("    └─ \(title) (\(idx))\(active)")
             }
         }
     }
@@ -317,40 +319,44 @@ struct VMKill: ParsableCommand {
 struct VMAttach: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "attach",
-        abstract: "Attach to a VM: open a window, or (with a tab number) attach your terminal to that tab, tmux-style.")
+        abstract: "Attach your terminal to a VM's tmux session (tmux-style). Same tabs as the GUI.")
 
     @Argument(help: "VM id or profile name.")
     var vm: String
 
-    @Argument(help: "Tab number from `vm ls` to attach your terminal to. Omit to open a window.")
+    @Argument(help: "Tab index from `vm ls` to jump to. Omit to attach to the current tab.")
     var tab: Int?
+
+    @Flag(name: .shortAndLong, help: "Open a GUI window instead of attaching your terminal.")
+    var window = false
 
     func run() throws {
         let client = ControlClient()
         try client.ensureAgentRunning()
 
-        // With a tab number: attach this terminal to that tab's tmux session.
-        if let tab {
-            let vms = (try client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
-            guard let vmObj = vms.first(where: { matchesVM($0, vm) }) else {
-                throw ValidationError("VM not found: \(vm)")
+        // --window: open / reattach a GUI window onto the VM.
+        if window {
+            let resp = try client.request("POST", "/vms/\(ControlClient.encodeSegment(vm))/attach")
+            guard resp.status == 200 else {
+                throw ValidationError(resp.json["error"] as? String ?? "Couldn't attach to \(vm).")
             }
-            let tabs = vmObj["tabs"] as? [[String: Any]] ?? []
-            guard tab >= 1, tab <= tabs.count, let uuid = tabs[tab - 1]["id"] as? String else {
-                throw ValidationError("No tab \(tab) — that VM has \(tabs.count) tab(s). Run `vm ls`.")
-            }
-            let target = (vmObj["id"] as? String) ?? vm
-            try InteractiveExec.run(client: client, vm: target,
-                                    command: "tmux attach -t bromure-\(uuid)")
+            print("Attached \(vm).")
             return
         }
 
-        // No tab: open a GUI window onto the VM.
-        let resp = try client.request("POST", "/vms/\(ControlClient.encodeSegment(vm))/attach")
-        guard resp.status == 200 else {
-            throw ValidationError(resp.json["error"] as? String ?? "Couldn't attach to \(vm).")
+        // Terminal attach to the one tmux session. The GUI kitty and this CLI
+        // client share it (lockstep), so a tab switch on either side moves both.
+        // With a tab index, jump to that tmux window first.
+        let vms = (try client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
+        guard let vmObj = vms.first(where: { matchesVM($0, vm) }) else {
+            throw ValidationError("VM not found: \(vm)")
         }
-        print("Attached \(vm).")
+        let target = (vmObj["id"] as? String) ?? vm
+        var cmd = "tmux attach -t bromure"
+        if let tab {
+            cmd += " \\; select-window -t bromure:\(tab)"
+        }
+        try InteractiveExec.run(client: client, vm: target, command: cmd)
     }
 }
 

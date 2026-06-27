@@ -329,15 +329,13 @@ final class RunningSession {
     /// Last tab snapshot, captured on detach so a reattaching window can
     /// rebuild its bar against the kittys still running inside the guest.
     var lastTabsSnapshot: SessionDisk.TabsState?
-    /// Last IP / kitty roster reported by the guest, mirrored here so a
-    /// reattaching (or headless) session can render them without a window.
+    /// Last IP reported by the guest, mirrored here so a reattaching (or
+    /// headless) session can render it without a window.
     var lastIP: String?
-    var lastRoster: Set<UUID> = []
-    /// Ordered live tab UUIDs and their last-known titles (the foreground
-    /// program, e.g. "bash"/"claude"), mirrored from the guest's roster/title
-    /// reports so `vm ls` can show the tabs even while the session is detached.
-    var tabOrder: [UUID] = []
-    var tabTitles: [UUID: String] = [:]
+    /// The guest's tmux window list (tabs), mirrored from the roster so
+    /// `vm ls` / the API can show tabs even while the session is detached.
+    /// Each entry is (window index, foreground command, is-active).
+    var tabs: [(index: Int, label: String, active: Bool)] = []
     /// Fusion engaged state, mirrored from the engine so a reattaching
     /// window restores the toolbar toggle correctly.
     var fusionEngaged: Bool = false
@@ -1259,8 +1257,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case .stopped:  stateStr = "stopped"
             case .error:    stateStr = "error"
             }
-            let tabs: [[String: Any]] = s.tabOrder.enumerated().map { (i, id) in
-                ["index": i + 1, "id": id.uuidString, "title": s.tabTitles[id] ?? "shell"]
+            // 1-based for display; `index` is the tmux window index the CLI
+            // passes back to `select-window`.
+            let tabs: [[String: Any]] = s.tabs.map { t in
+                ["index": t.index, "title": t.label.isEmpty ? "shell" : t.label, "active": t.active]
             }
             let diskURL = store.diskURL(for: s.profile)
             let diskAllocated = (try? diskURL.resourceValues(
@@ -3520,9 +3520,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let saved = savedTabs, !saved.tabs.isEmpty {
             win.rehydrateTabs(from: saved)
         } else {
-            // Fresh boot or no saved tabs: queue the placeholder up
-            // immediately so the user sees something while VZ boots.
-            win.appendTab()
+            // Fresh boot: show one placeholder pill while VZ + tmux come up.
+            // The agent auto-creates tmux window 0; the roster reconciles this
+            // placeholder to the real window list within a tick.
+            win.model.tabs = [TabsModel.Tab(label: "shell")]
         }
 
         Task { @MainActor in
@@ -3576,12 +3577,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         try sandbox.prepare()
                         win.vmView.virtualMachine = sandbox.vm
                         try await sandbox.start()
-                        // Rehydrated tabs reference kittys that don't
-                        // exist on a fresh boot — wipe the model and
-                        // queue a fresh placeholder for the spawn path.
-                        win.model.tabs.removeAll()
+                        // Restore failed → this is now a fresh boot. Drop the
+                        // rehydrated pills; the agent creates tmux window 0 and
+                        // the roster repopulates the bar.
+                        win.model.tabs = [TabsModel.Tab(label: "shell")]
                         win.model.activeIndex = 0
-                        win.appendTab()
                     }
                 } else {
                     try await sandbox.start()
@@ -3637,18 +3637,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.registerSession(sandbox, profile: profile)
             win.sandbox = sandbox
 
-            // Restored snapshots already have kittys running with
-            // matching `--class bromure-<UUID>` markers — just raise
-            // the previously-active one. Fresh boots (and restore
-            // failures that fell back to fresh boot, where the model
-            // was reset) need an actual spawn.
-            if let target = win.model.activeTab ?? win.model.tabs.first {
-                if restoredSnapshot {
-                    self.requestRaiseTab(id: target.id, in: win)
-                } else {
-                    self.requestSpawnKitty(id: target.id, in: win)
-                }
-            }
+            // No host-driven spawn/raise any more: the guest agent launches
+            // the one fullscreen kitty → tmux session at X start (fresh boot),
+            // and a restored snapshot already has that session with its windows
+            // and last-active window intact. The roster repopulates the bar.
 
             // NAT-only: watch for the in-guest IP reporter to land an
             // address. If nothing arrives within the timeout, vmnet's
@@ -3733,29 +3725,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Add another tab (= another kitty in the same VM). Wired from the
-    /// toolbar "+" button and ⌘T.
+    /// Add another tab (= a new tmux window). Wired from the toolbar "+"
+    /// button and ⌘T. The roster tick adds the pill — tmux is authoritative.
     func spawnNewTab(in window: TabbedSessionWindow) {
-        let tab = window.appendTab()
-        requestSpawnKitty(id: tab.id, in: window)
+        sendCommand("new-tab", in: window)
     }
 
-    /// Tell the in-VM tab agent to launch a kitty whose WM_CLASS encodes
-    /// this tab's UUID. Fire-and-forget — the agent picks up the file on
-    /// its next 200ms poll.
-    func requestSpawnKitty(id: UUID, in window: TabbedSessionWindow) {
-        sendCommand("spawn-kitty \(id.uuidString)", in: window)
+    /// Select a tab → tmux select-window at that index (index == bar position).
+    func requestSelectTab(index: Int, in window: TabbedSessionWindow) {
+        sendCommand("select-tab \(index)", in: window)
     }
 
-    /// Tell the in-VM tab agent to raise the kitty matching this UUID.
-    /// Requires xdotool inside the guest; silently no-ops if missing.
-    func requestRaiseTab(id: UUID, in window: TabbedSessionWindow) {
-        sendCommand("raise-kitty \(id.uuidString)", in: window)
-    }
-
-    /// Tell the in-VM tab agent to close the kitty matching this UUID.
-    func requestCloseTab(id: UUID, in window: TabbedSessionWindow) {
-        sendCommand("close-kitty \(id.uuidString)", in: window)
+    /// Close a tab → tmux kill-window at that index.
+    func requestCloseTab(index: Int, in window: TabbedSessionWindow) {
+        sendCommand("close-tab \(index)", in: window)
     }
 
     private func sendCommand(_ command: String, in window: TabbedSessionWindow) {
@@ -4190,38 +4173,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 NSWorkspace.shared.open(url)
             }
         }
-        sandbox.onTabClosed = { [weak self] id in
-            Task { @MainActor in self?.profileWindows[pid]?.handleTabClosedFromGuest(id: id) }
-        }
-        sandbox.onTabDiag = { id, diag in
-            // Surface why a kitty bailed right after spawning. Prefixed and
-            // indented so it stands out in the `bromure-ac` serial/stderr log.
-            let indented = diag.split(separator: "\n", omittingEmptySubsequences: false)
-                .map { "    \($0)" }.joined(separator: "\n")
-            FileHandle.standardError.write(Data(
-                "[ac] tab \(id.uuidString) bailed — kitty diagnostics:\n\(indented)\n".utf8))
-        }
-        sandbox.onTabRoster = { [weak self] alive in
+        sandbox.onTabList = { [weak self] tabs in
             Task { @MainActor in
                 guard let self else { return }
-                if let session = self.runningSessions[pid] {
-                    session.lastRoster = alive
-                    // Keep existing order for still-alive tabs; append newcomers
-                    // (sorted for determinism); drop titles for gone tabs.
-                    var order = session.tabOrder.filter { alive.contains($0) }
-                    for id in alive.sorted(by: { $0.uuidString < $1.uuidString })
-                    where !order.contains(id) { order.append(id) }
-                    session.tabOrder = order
-                    session.tabTitles = session.tabTitles.filter { alive.contains($0.key) }
+                // Mirror for detached `vm ls` / API, and drive the tab bar.
+                self.runningSessions[pid]?.tabs = tabs.map {
+                    (index: $0.index, label: $0.label, active: $0.active)
                 }
-                self.profileWindows[pid]?.reconcileTabRoster(alive: alive)
-            }
-        }
-        sandbox.onTabTitleUpdate = { [weak self] id, title in
-            Task { @MainActor in
-                guard let self else { return }
-                self.runningSessions[pid]?.tabTitles[id] = title
-                self.profileWindows[pid]?.handleTabTitleUpdate(id: id, title: title)
+                self.profileWindows[pid]?.applyTabList(tabs)
             }
         }
         sandbox.onIPUpdate = { [weak self] ip in
@@ -4383,22 +4342,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             win.keyboardBridge = KeyboardBridge(
                 socketDevice: dev, forcedLayout: profile.keyboardLayoutOverride)
         }
-        // Rebuild the tab bar from the last snapshot (or the live roster); the
-        // kittys already exist in the guest, so raise — never spawn.
-        var didSpawn = false
-        if let snap = session.lastTabsSnapshot, !snap.tabs.isEmpty {
-            win.rehydrateTabs(from: snap)
-        } else if !session.lastRoster.isEmpty {
-            let tabs = session.lastRoster.map {
-                SessionDisk.TabSnapshot(id: $0, label: "Session")
-            }
-            win.rehydrateTabs(from: SessionDisk.TabsState(tabs: tabs, activeIndex: 0))
+        // Rebuild the tab bar from the session's cached tmux window list; the
+        // live roster keeps it current. tmux is already running in the VM, so
+        // there's nothing to spawn or raise.
+        if !session.tabs.isEmpty {
+            win.model.tabs = session.tabs.map { TabsModel.Tab(label: $0.label) }
+            win.model.activeIndex = session.tabs.firstIndex(where: { $0.active }) ?? 0
         } else {
-            spawnNewTab(in: win)   // running VM with no known kitty — make one
-            didSpawn = true
-        }
-        if !didSpawn, let target = win.model.activeTab ?? win.model.tabs.first {
-            requestRaiseTab(id: target.id, in: win)
+            win.model.tabs = [TabsModel.Tab(label: "shell")]
+            win.model.activeIndex = 0
         }
         // Restore display state from the registry.
         win.model.ipAddress = session.lastIP
@@ -4521,10 +4473,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         unregisterSession(profile.id)
         win.sandbox = nil
         win.keyboardBridge = nil
-        win.model.tabs.removeAll()
         win.model.activeIndex = 0
         win.model.ipAddress = nil
-        let firstTab = win.appendTab()
+        // Placeholder pill while the fresh VM boots; the agent creates tmux
+        // window 0 and the roster repopulates the bar.
+        win.model.tabs = [TabsModel.Tab(label: "shell")]
 
         Task { @MainActor in
             // Brief settle before reusing the per-profile shared dirs
@@ -4604,7 +4557,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.wireSandboxCallbacks(sandbox)
             self.registerSession(sandbox, profile: profile)
             win.sandbox = sandbox
-            self.requestSpawnKitty(id: firstTab.id, in: win)
+            // The agent launches the kitty → tmux session itself; the roster
+            // fills the bar. No host-driven spawn.
         }
     }
 

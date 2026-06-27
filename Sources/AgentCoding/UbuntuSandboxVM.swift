@@ -17,26 +17,11 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// share. Wire this to NSWorkspace.shared.open in the GUI layer.
     public var onURLOpen: ((URL) -> Void)?
 
-    /// Called when the in-VM tab agent reports that a kitty process for
-    /// the given tab UUID has exited. Wire this to remove the tab pill.
-    public var onTabClosed: ((UUID) -> Void)?
-
-    /// Called when a kitty exited non-zero or bailed within ~3s of spawning,
-    /// with a diagnostic blob (exit code, runtime, kitty version, $DISPLAY,
-    /// and the tail of that kitty's log). Wire this to log/surface why a
-    /// session "started then vanished".
-    public var onTabDiag: ((UUID, String) -> Void)?
-
-    /// Called every ~1.5s with the set of UUIDs of every kitty
-    /// currently running in the guest. The host reconciles its tab
-    /// model against this so a pill whose kitty died without sending
-    /// closed-* (or never spawned) gets reaped instead of orphaned.
-    public var onTabRoster: ((Set<UUID>) -> Void)?
-
-    /// Called when the guest reports a fresh foreground-process name
-    /// for a kitty (every ~1.5s). Use this to drive Terminal.app-style
-    /// dynamic tab labels.
-    public var onTabTitleUpdate: ((UUID, String) -> Void)?
+    /// Called every ~0.7s with the current tmux window list — each entry is
+    /// (window index, whether it's the active window, foreground command).
+    /// tmux is the source of truth, so the host mirrors this directly as the
+    /// tab bar; there's no per-process liveness reconciliation.
+    public var onTabList: (([(index: Int, active: Bool, label: String)]) -> Void)?
 
     /// Called when the guest bounces a host-owned keychord (⌘T/⌘W/⌘N/⌘1-9)
     /// back to the host. While the VM holds keyboard focus the VZ view
@@ -47,10 +32,6 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// the same action the host key monitor runs — the two paths are mutually
     /// exclusive by focus, so a single press fires exactly one of them.
     public var onShortcut: ((String) -> Void)?
-
-    /// Most-recently-reported title per tab. Used to suppress redundant
-    /// callbacks when the title hasn't changed between polls.
-    private var lastReportedTitles: [UUID: String] = [:]
 
     /// Called whenever the guest writes a new primary IPv4 to the outbox
     /// (every 5s while the VM is up). Wire this to surface in the UI.
@@ -494,60 +475,22 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             self?.onURLOpen?(url)
                             continue
                         }
-                        // title-<uuid>.txt — guest agent's foreground-
-                        // process snapshot. Constantly rewritten;
-                        // don't delete. Only fire the callback when
-                        // the value actually changes.
-                        if name.hasPrefix("title-") {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8))?
-                                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                            let uuidPart = name
-                                .replacingOccurrences(of: "title-", with: "")
-                                .replacingOccurrences(of: ".txt", with: "")
-                            if let uuid = UUID(uuidString: uuidPart), !raw.isEmpty,
-                               self?.lastReportedTitles[uuid] != raw {
-                                self?.lastReportedTitles[uuid] = raw
-                                self?.onTabTitleUpdate?(uuid, raw)
-                            }
-                            continue
-                        }
-                        // tabs-alive.txt — guest agent's per-tick roster
-                        // of every running kitty's UUID, one per line.
-                        // Constantly rewritten atomically; don't delete.
-                        // The empty-file case is meaningful (no kittys
-                        // running → reap any orphan pill).
-                        if name == "tabs-alive.txt" {
+                        // tabs.txt — the tmux window list, one line per tab:
+                        // "<index>\t<active 0|1>\t<foreground command>".
+                        // Constantly rewritten atomically; don't delete. This
+                        // IS the tab model — tmux is the source of truth, so
+                        // the host mirrors it directly (no liveness guessing).
+                        if name == "tabs.txt" {
                             let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
-                            let alive = Set(raw
-                                .split(whereSeparator: \.isNewline)
-                                .compactMap { UUID(uuidString: String($0)) })
-                            self?.onTabRoster?(alive)
-                            continue
-                        }
-                        // diag-<uuid>.txt — guest agent's reason a kitty
-                        // exited non-zero or bailed within ~3s (exit code +
-                        // log tail). Surface it, then consume.
-                        if name.hasPrefix("diag-") {
-                            let body = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
-                            try? fm.removeItem(at: entry)
-                            let uuidPart = name
-                                .replacingOccurrences(of: "diag-", with: "")
-                                .replacingOccurrences(of: ".txt", with: "")
-                            if let uuid = UUID(uuidString: uuidPart), !body.isEmpty {
-                                self?.onTabDiag?(uuid, body)
+                            var tabs: [(index: Int, active: Bool, label: String)] = []
+                            for line in raw.split(whereSeparator: \.isNewline) {
+                                let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
+                                guard cols.count >= 3, let idx = Int(cols[0]) else { continue }
+                                tabs.append((index: idx, active: cols[1] == "1",
+                                             label: String(cols[2]).trimmingCharacters(in: .whitespaces)))
                             }
-                            continue
-                        }
-                        // closed-<uuid>.txt — guest agent reports a tab's
-                        // kitty has exited. Remove the matching pill.
-                        if name.hasPrefix("closed-") {
-                            try? fm.removeItem(at: entry)
-                            let uuidPart = name
-                                .replacingOccurrences(of: "closed-", with: "")
-                                .replacingOccurrences(of: ".txt", with: "")
-                            if let uuid = UUID(uuidString: uuidPart) {
-                                self?.onTabClosed?(uuid)
-                            }
+                            tabs.sort { $0.index < $1.index }
+                            self?.onTabList?(tabs)
                             continue
                         }
                         // shortcut-<key>.txt is handled by the fast path at the

@@ -141,7 +141,7 @@ extension ACAppDelegate {
         win.makeKeyAndOrderFront(nil)
         win.isReleasedWhenClosed = false
         state.window = win
-        let firstTab = win.appendTab()
+        win.model.tabs = [TabsModel.Tab(label: "shell")]
 
         let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
         state.sandbox = sandbox
@@ -171,9 +171,6 @@ extension ACAppDelegate {
             // so this profile id has an empty swap map and tokens pass through.
             engine.register(socketDevice: dev, profileID: scratch.id)
             self.wireRegistrationSandbox(sandbox)
-            // `requestSpawnKitty` resolves the outbox via `win.sandbox` — set it
-            // (and register the canonical session) before spawning or the
-            // command is silently dropped (black screen).
             self.registerSession(sandbox, profile: win.profile)
             win.sandbox = sandbox
 
@@ -183,9 +180,8 @@ extension ACAppDelegate {
             case .grok:   break  // no vsock agent — captured from the home-dir file
             }
 
-            // First kitty → the guest's .bashrc auto-runs the agent; with no
-            // credential it starts the OAuth login (URL → host browser).
-            self.requestSpawnKitty(id: firstTab.id, in: win)
+            // The guest agent auto-launches the kitty → tmux session, whose
+            // .bashrc runs the OAuth login (URL → host browser). No host spawn.
             self.pollForSubscriptionRegistration(state: state)
         }
     }
