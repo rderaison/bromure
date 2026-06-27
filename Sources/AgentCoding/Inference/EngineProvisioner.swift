@@ -106,8 +106,10 @@ public final class EngineProvisioner: @unchecked Sendable {
         return Self.defaultRequirements
     }
 
-    /// The Python version uv provisions for the engine.
-    public static let pythonVersion = "3.12"
+    /// The Python version uv provisions for the engine. Pinned to an exact
+    /// patch (not just "3.12") so every install gets the same standalone
+    /// interpreter build — matching the hash-locked engine-requirements.txt.
+    public static let pythonVersion = "3.12.13"
 
     // MARK: - uv command builders (pure / testable)
 
@@ -132,11 +134,23 @@ public final class EngineProvisioner: @unchecked Sendable {
     /// `--upgrade` pulls the newest version from the find-links index even
     /// when something is already installed (how a republished wheel lands).
     public static func pipInstallArgs(venvPython: URL, requirementsFile: URL,
-                                      upgrade: Bool = false) -> [String] {
+                                      upgrade: Bool = false,
+                                      requireHashes: Bool = false) -> [String] {
         var a = ["pip", "install", "--python", venvPython.path, "--prerelease", "allow"]
-        if upgrade { a.append("--upgrade") }
+        // A hash-locked requirements file (every entry pinned + hashed) makes
+        // installs fully deterministic: uv downloads exactly these artifacts or
+        // fails. Incompatible with --upgrade (which would resolve off-lock).
+        if requireHashes { a.append("--require-hashes") }
+        else if upgrade { a.append("--upgrade") }
         a += ["-r", requirementsFile.path]
         return a
+    }
+
+    /// True when the active requirements are a fully pinned, hash-locked file
+    /// (contains `--hash=`). In that mode we enforce hashes and never auto-
+    /// upgrade — the locked set is the source of truth.
+    public func isHashLocked(bundle: Bundle? = .main) -> Bool {
+        requirementsText(bundle: bundle).contains("--hash=")
     }
 
     // MARK: - Provision
@@ -167,7 +181,8 @@ public final class EngineProvisioner: @unchecked Sendable {
                      onProgress: onProgress, mapError: EngineProvisionError.venvFailed)
 
         onProgress("Installing vllm-mlx + mlx…\n")
-        try Self.run(uv, Self.pipInstallArgs(venvPython: venvPython, requirementsFile: reqFile),
+        try Self.run(uv, Self.pipInstallArgs(venvPython: venvPython, requirementsFile: reqFile,
+                                             requireHashes: isHashLocked()),
                      onProgress: onProgress, mapError: EngineProvisionError.installFailed)
     }
 
@@ -178,6 +193,13 @@ public final class EngineProvisioner: @unchecked Sendable {
     /// when already current; non-fatal on network failure.
     public func refreshToLatest(onProgress: @escaping (String) -> Void = { _ in }) async throws {
         guard isProvisioned, let uv = Self.resolveUV() else { return }
+        // Hash-locked = deterministic distribution: the pinned set is the source
+        // of truth, so don't auto-upgrade off-lock. Engine bumps ship with an
+        // app update that carries a regenerated lockfile.
+        if isHashLocked() {
+            onProgress("Engine is hash-locked; skipping auto-upgrade.\n")
+            return
+        }
         let reqFile = engineDir.deletingLastPathComponent()
             .appendingPathComponent("engine-requirements.lock")
         try requirementsText().write(to: reqFile, atomically: true, encoding: .utf8)

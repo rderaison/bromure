@@ -96,6 +96,12 @@ final class RemoteAccessServer {
             allowPubkey: config.pubkeyAuth,
             authorizedKeys: authorized)
 
+        // NOTE: swift-nio-ssh (0.13.0, latest) offers no post-quantum key
+        // exchange — only curve25519-sha256 and ecdh-sha2-nistp*, and the KEX
+        // list isn't configurable (SSHServerConfiguration only exposes the
+        // symmetric `transportProtectionSchemes`). So OpenSSH clients print a
+        // "not using a post-quantum key exchange" warning. Revisit (offer
+        // mlkem768x25519-sha256) once upstream adds PQ KEX.
         let bootstrap = ServerBootstrap(group: g)
             .serverChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .childChannelInitializer { channel in

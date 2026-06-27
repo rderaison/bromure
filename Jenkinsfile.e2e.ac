@@ -40,6 +40,24 @@ pipeline {
             }
         }
 
+        stage('Reinstall MLX engine (clean)') {
+            // Wipe the provisioned vllm-mlx venv so every run reinstalls the
+            // engine from scratch against the pinned, hash-locked
+            // engine-requirements.txt — exercising the deterministic install
+            // path (bundled uv + standalone Python + hash-verified wheels) on a
+            // clean machine. Fail hard if provisioning doesn't produce a usable
+            // engine.
+            steps {
+                sh '''
+                    APP_BUNDLE=$(cat .app_bundle_path)
+                    ENGINE="$HOME/Library/Application Support/BromureAC/engine"
+                    rm -rf "$ENGINE"
+                    "$APP_BUNDLE/Contents/MacOS/bromure-ac" model install 2>&1 | tee engine-install.log
+                    test -x "$ENGINE/bin/vllm-mlx" || { echo "engine not provisioned after model install"; exit 1; }
+                '''
+            }
+        }
+
         stage('Init Base Image') {
             // Needed for sections 6 (Session control) and 8 (VM-side via /exec).
             // Without it those sections gracefully skip but most of the test
@@ -243,6 +261,7 @@ pipeline {
                 security default-keychain -s login.keychain-db || true
             '''
             archiveArtifacts artifacts: '/tmp/bromure-ac.log', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'engine-install.log', allowEmptyArchive: true
         }
     }
 }

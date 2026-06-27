@@ -46,7 +46,10 @@ let package = Package(
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ],
             path: "Sources/AgentCoding",
-            exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef"],
+            exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef",
+                      // Staged into Contents/Resources by build.sh (read via
+                      // Bundle.main, not Bundle.module), so not an SPM resource.
+                      "Resources/engine-requirements.txt", "Resources/engine-requirements.in"],
             resources: [.copy("Resources/vm-setup"), .copy("Resources/icons"),
                         .copy("Resources/catalog.json")],
             linkerSettings: [
