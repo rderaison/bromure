@@ -827,12 +827,16 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                     ("OPENAI_API_KEY", key),
                 ]
             case .grok:
-                // Grok CLI reads GROK_* (not XAI_*) and speaks the
-                // OpenAI-compatible API at GROK_BASE_URL.
+                // The grok CLI's "Custom Models Endpoint" (verified against
+                // grok 0.2.x README): GROK_MODELS_BASE_URL + XAI_API_KEY.
+                // Setting models_base_url switches grok to API-key auth
+                // (Authorization: Bearer), so it never triggers the browser
+                // login. The model list is fetched from {base}/models.
+                // (The older GROK_BASE_URL/GROK_API_KEY are ignored by this
+                // CLI — they're what left grok stuck on the OAuth screen.)
                 return [
-                    ("GROK_BASE_URL", "\(base)/v1"),
-                    ("GROK_API_KEY", key),
-                    ("GROK_MODEL", model),
+                    ("GROK_MODELS_BASE_URL", "\(base)/v1"),
+                    ("XAI_API_KEY", key),
                 ]
             }
         }

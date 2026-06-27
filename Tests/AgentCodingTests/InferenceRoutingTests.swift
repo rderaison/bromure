@@ -436,13 +436,14 @@ struct LocalToolAuthTests {
         #expect(codex["OPENAI_BASE_URL"] == nil)
     }
 
-    @Test("Grok uses GROK_* env (not XAI_*)") func grokEnv() {
+    @Test("Grok uses the custom-models endpoint env (GROK_MODELS_BASE_URL + XAI_API_KEY)") func grokEnv() {
         let grok = Dictionary(uniqueKeysWithValues:
             Profile.Tool.grok.localEnvExports(model: "m").map { ($0.name, $0.value) })
-        #expect(grok["GROK_BASE_URL"] == "http://127.0.0.1:11434/v1")
-        #expect(grok["GROK_MODEL"] == "m")
-        #expect(grok["GROK_API_KEY"] == InferenceService.apiKey)
-        #expect(grok["XAI_BASE_URL"] == nil)
+        #expect(grok["GROK_MODELS_BASE_URL"] == "http://127.0.0.1:11434/v1")
+        #expect(grok["XAI_API_KEY"] == InferenceService.apiKey)
+        // The old names are ignored by the grok CLI — must not be set.
+        #expect(grok["GROK_BASE_URL"] == nil)
+        #expect(grok["GROK_API_KEY"] == nil)
     }
 
     @Test("Multi-model registry YAML lists each model + a memory budget") func modelsYAML() {
