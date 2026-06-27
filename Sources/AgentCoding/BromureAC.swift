@@ -470,6 +470,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         pane.vmView.virtualMachine = nil
         pane.keyboardBridge = nil
+        pane.scrollBridge = nil
         pane.sandbox = nil
         if let unified = pane.host as? UnifiedSessionWindow {
             unified.removePane(id)
@@ -784,6 +785,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         acResourceBundle.url(forResource: "vm-setup/scroll-agent",
                              withExtension: "py")
     }()
+
+    /// Build a `ScrollBridge` for a freshly-bound pane, honoring the
+    /// `vm.terminalScroll` kill switch (default on). nil → fall back to VZ's
+    /// native wheel path. Shared by every pane-binding site (warm boot,
+    /// reattach, reboot) so the behavior can't drift between them.
+    @MainActor private func makeScrollBridge(for sandbox: UbuntuSandboxVM) -> ScrollBridge? {
+        guard let dev = sandbox.socketDevice,
+              UserDefaults.standard.object(forKey: "vm.terminalScroll") as? Bool ?? true
+        else { return nil }
+        return ScrollBridge(socketDevice: dev)
+    }
 
     /// SPM-resource-bundle path to the AWS `credential_process` helper.
     /// Shipped to /mnt/bromure-meta and referenced from the per-profile
@@ -2279,6 +2291,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             session.vmView.virtualMachine = nil
             session.keyboardBridge = nil
+            session.scrollBridge = nil
             session.sandbox = nil
             profileWindows.removeValue(forKey: id)
             unregisterPane(id, ifMatches: session.pane)
@@ -3003,9 +3016,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// editing == nil → create. editing != nil → modify in place.
     func openEditorWindow(editing: Profile?) {
+        // Reuse the open editor ONLY when it's already editing this same
+        // profile; for a different profile (or a new-profile draft) tear the
+        // old one down and rebuild. The previous guard re-surfaced whatever
+        // editor was open regardless of `editing`, so once any profile's
+        // Settings had been opened, every later "Settings" click re-showed
+        // that same window — and since the editor isn't nil'd on a red-button
+        // close, it stuck to the first profile edited this session.
         if let existing = editorWindow {
-            existing.makeKeyAndOrderFront(nil)
-            return
+            if editorEditingProfile?.id == editing?.id {
+                existing.makeKeyAndOrderFront(nil)
+                return
+            }
+            closeEditorWindow()
         }
         editorEditingProfile = editing
 
@@ -4025,6 +4048,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
                     keyboardAgentURL: keyboardAgentURL,
+                    scrollAgentURL: scrollAgentURL,
                     awsCredsHelperURL: awsCredsHelperURL,
                     claudeTokenAgentURL: claudeTokenAgentURL,
                     codexTokenAgentURL: codexTokenAgentURL,
@@ -4106,6 +4130,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     socketDevice: dev,
                     forcedLayout: profile.keyboardLayoutOverride)
             }
+            win.scrollBridge = makeScrollBridge(for: sandbox)
             // Shell-exec bridge (vsock 5800). Always created now — powers
             // `bromure-ac exec` and the control socket's /exec route. The guest
             // ships shell-agent.py unconditionally; the surface is gated by the
@@ -4724,6 +4749,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let win = profileWindows[profileID] {
             win.vmView.virtualMachine = nil
             win.keyboardBridge = nil
+            win.scrollBridge = nil
             win.sandbox = nil
             profileWindows.removeValue(forKey: profileID)
             unregisterPane(profileID, ifMatches: win.pane)
@@ -4835,6 +4861,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             pane.keyboardBridge = KeyboardBridge(
                 socketDevice: dev, forcedLayout: profile.keyboardLayoutOverride)
         }
+        pane.scrollBridge = makeScrollBridge(for: sandbox)
         // Rebuild the tab bar from the session's cached tmux window list; the
         // live roster keeps it current. tmux is already running in the VM, so
         // there's nothing to spawn or raise.
@@ -4976,6 +5003,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         unregisterSession(profile.id)
         win.sandbox = nil
         win.keyboardBridge = nil
+        win.scrollBridge = nil
         win.model.activeIndex = 0
         win.model.ipAddress = nil
         // Placeholder pill while the fresh VM boots; the agent creates tmux
@@ -5013,6 +5041,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
                     keyboardAgentURL: keyboardAgentURL,
+                    scrollAgentURL: scrollAgentURL,
                     awsCredsHelperURL: awsCredsHelperURL,
                     claudeTokenAgentURL: claudeTokenAgentURL,
                     codexTokenAgentURL: codexTokenAgentURL,
@@ -5052,6 +5081,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     socketDevice: dev,
                     forcedLayout: profile.keyboardLayoutOverride)
             }
+            win.scrollBridge = makeScrollBridge(for: sandbox)
             // Shell-exec bridge — see the matching block on the warm-boot path.
             if let dev = sandbox.socketDevice {
                 let bridge = ShellBridge(socketDevice: dev)

@@ -77,7 +77,7 @@ struct InferenceMetricsView: View {
                 .background(.mint.gradient, in: RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 1) {
                 Text("Local inference").font(.title3.bold())
-                Text(verbatim: "vllm-mlx · 127.0.0.1:\(InferenceService.enginePort)")
+                Text(verbatim: "127.0.0.1:\(InferenceService.enginePort)")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

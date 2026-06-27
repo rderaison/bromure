@@ -846,6 +846,11 @@ struct ProfileEditorView: View {
             // "Local model" auth option is greyed out.
             let localModels = CatalogStore.shared.effective().models
                 .filter { CatalogStore.shared.isInstalled(repo: $0.repo) }
+            // The single model every "Local model" agent uses — the one
+            // selected in the Local Models pane. Agents no longer pick
+            // their own; this is shown read-only on each card.
+            let activeLocalModelName = localModels
+                .first(where: { $0.id == draft.activeModelID })?.displayName
 
             ForEach(Profile.Tool.allCases, id: \.self) { t in
                 let sub = subscriptionInfo(for: t)
@@ -855,6 +860,7 @@ struct ProfileEditorView: View {
                     isEnabled: isToolEnabled(t),
                     spec: bindingForTool(t),
                     localModels: localModels,
+                    activeLocalModelName: activeLocalModelName,
                     bedrockModelID: $draft.bedrockModelID,
                     onToggleEnabled: { setToolEnabled(t, enabled: $0) },
                     onMakePrimary: { setPrimary(t) },
@@ -3123,12 +3129,12 @@ struct ProfileEditorView: View {
 // MARK: - Local Models (vLLM.md)
 
 /// The "Local Models" settings pane: an "Enable local models" master
-/// toggle (prompts to install the vllm-mlx engine on first enable), a
-/// Local/Hybrid mode picker, and the curated MLX catalog with RAM-fit
-/// gating — models that won't fit this Mac are greyed out and
-/// unselectable (§5.3). Downloads + engine install are immediate side
-/// effects (global, not per-profile); the routing mode + active-model
-/// selection persist on Save.
+/// toggle, a Local/Hybrid mode picker, and the curated MLX catalog with
+/// RAM-fit gating — models that won't fit this Mac are greyed out and
+/// unselectable (§5.3). The inference engine is bundled (in-process MLX),
+/// so there's nothing to install. Downloads are immediate side effects
+/// (global, not per-profile); the routing mode + active-model selection
+/// persist on Save.
 struct LocalModelsSettingsView: View {
     @Binding var routing: Profile.Routing
     @Binding var activeModelID: String?
@@ -3144,28 +3150,17 @@ struct LocalModelsSettingsView: View {
         selectedModelIDs.reduce(0) { $0 + (CatalogStore.shared.resolve($1)?.minUnifiedMemGB ?? 0) }
     }
 
-    @State private var engineReady = EngineProvisioner.shared.isProvisioned
-    @State private var showInstallPrompt = false
-    @State private var engineState: EngineState = .idle
     // Download progress lives in the shared manager so it survives leaving
     // and re-entering this pane (and so the VM-launch path can see it).
     private let downloads = ModelDownloadManager.shared
 
-    enum EngineState: Equatable {
-        case idle
-        case installing(Double, String)   // fraction 0–1, status line
-        case failed(String)
-    }
-
-    /// "Enable local models" ↔ routing ≠ cloud. Turning it on defaults to
-    /// Local and, if the engine isn't set up yet, asks to install it.
+    /// "Enable local models" ↔ routing ≠ cloud. Turning it on defaults to Local.
     private var enableLocal: Binding<Bool> {
         Binding(
             get: { routing != .cloud },
             set: { on in
                 if on {
                     if routing == .cloud { routing = .local }
-                    if !engineReady { showInstallPrompt = true }
                 } else {
                     routing = .cloud
                 }
@@ -3182,7 +3177,7 @@ struct LocalModelsSettingsView: View {
             Section {
                 Toggle(isOn: enableLocal) {
                     Text("Enable local models")
-                    Text("Run a coding model on this Mac instead of the cloud. macOS only; Apple Silicon.")
+                    Text("Run a coding model on this Mac instead of the cloud.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -3194,10 +3189,12 @@ struct LocalModelsSettingsView: View {
                         Text("Hybrid — cloud, fall back to local").tag(Profile.Routing.hybrid)
                     }
                     .pickerStyle(.radioGroup)
-                }
-
-                Section("Engine") {
-                    engineRow
+                } footer: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("**Local** keeps every request on this Mac — nothing leaves the machine. Replies are private but slower, and bounded by the model you can fit in memory.")
+                        Text("**Hybrid** sends requests to the cloud as usual, falling back to the on-device model only when the cloud is unreachable — cloud speed and quality, with a local safety net.")
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
                 }
 
                 if combinedMemGB > 0, combinedMemGB > Int(Double(hostGB) * 0.85) {
@@ -3230,53 +3227,6 @@ struct LocalModelsSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .alert("Install the local inference engine?", isPresented: $showInstallPrompt) {
-            Button("Install") { startEngineInstall() }
-            Button("Not now", role: .cancel) {}
-        } message: {
-            Text("Bromure will download and set up the vllm-mlx engine (a one-time ~1 GB setup). You can also do this later from the engine row.")
-        }
-    }
-
-    // MARK: Engine row
-
-    @ViewBuilder private var engineRow: some View {
-        switch engineState {
-        case .installing(let frac, let log):
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Installing vllm-mlx…").font(.callout)
-                    Spacer()
-                    Text("\(Int(frac * 100))%").font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                ProgressView(value: frac).progressViewStyle(.linear)
-                if !log.isEmpty {
-                    Text(log).font(.caption2.monospaced())
-                        .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                }
-            }
-        case .failed(let msg):
-            HStack {
-                Label("Engine install failed", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Spacer()
-                Button("Retry") { startEngineInstall() }
-            }
-            .help(msg)
-        case .idle:
-            if engineReady {
-                Label("vllm-mlx engine ready", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                HStack {
-                    Label("Engine not installed", systemImage: "cpu")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Install…") { showInstallPrompt = true }
-                }
-            }
-        }
     }
 
     // MARK: Model row
@@ -3369,44 +3319,6 @@ struct LocalModelsSettingsView: View {
     }
 
     // MARK: Actions (immediate side effects)
-
-    private func startEngineInstall() {
-        engineState = .installing(0, "Starting…")
-        Task {
-            // Determinate progress: poll the venv dir size against the
-            // estimated install footprint while uv works. uv buffers its
-            // own bar when piped, so we drive the bar off real bytes on
-            // disk — it climbs smoothly instead of jumping 0 → 100.
-            let total = Double(EngineProvisioner.estimatedInstallBytes)
-            let poller = Task { @MainActor in
-                while true {
-                    try? await Task.sleep(nanoseconds: 600_000_000)
-                    if Task.isCancelled { break }
-                    let bytes = Double(EngineProvisioner.shared.installedBytes)
-                    let frac = min(0.97, bytes / total)
-                    if case .installing(_, let label) = engineState {
-                        engineState = .installing(frac, label)
-                    }
-                }
-            }
-            do {
-                try await EngineProvisioner.shared.ensureProvisioned { line in
-                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else { return }
-                    Task { @MainActor in
-                        if case .installing(let f, _) = engineState {
-                            engineState = .installing(f, trimmed)
-                        }
-                    }
-                }
-                poller.cancel()
-                await MainActor.run { engineReady = true; engineState = .idle }
-            } catch {
-                poller.cancel()
-                await MainActor.run { engineState = .failed("\(error)") }
-            }
-        }
-    }
 
     private func startDownload(_ model: CatalogModel) {
         downloads.start(repo: model.repo,
@@ -4060,9 +3972,12 @@ private struct ToolConfigCard: View {
     let isPrimary: Bool
     let isEnabled: Bool
     @Binding var spec: Profile.ToolSpec
-    /// Installed local models the user can pin this tool to. Empty → the
-    /// "Local model" option is greyed out.
+    /// Installed local models. Empty → the "Local model" option is greyed
+    /// out. Used only to gate the radio; agents don't pick from this list.
     let localModels: [CatalogModel]
+    /// Display name of the profile's active local model (chosen in the
+    /// Local Models pane). Every agent in `.local` mode runs on it.
+    let activeLocalModelName: String?
     @Binding var bedrockModelID: String
     let onToggleEnabled: (Bool) -> Void
     let onMakePrimary: () -> Void
@@ -4193,16 +4108,10 @@ private struct ToolConfigCard: View {
                         .foregroundStyle(.secondary)
                 case .local:
                     if localModels.isEmpty {
-                        Text("No local models installed yet. Enable and download one in the Local Models section, then pick it here.")
+                        Text("No local models installed yet. Enable and download one in the Local Models section.")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
-                        Picker(NSLocalizedString("Model", comment: ""), selection: Binding(
-                            get: { spec.localModelID ?? localModels.first?.id ?? "" },
-                            set: { spec.localModelID = $0 })) {
-                            ForEach(localModels) { m in Text(m.displayName).tag(m.id) }
-                        }
-                        .pickerStyle(.menu)
-                        Text("Runs on this Mac via the local engine — \(tool.displayName) is pointed at it through \(localBaseURLEnvName).")
+                        Text("Runs on this Mac via the local engine — \(tool.displayName) is pointed at it through \(localBaseURLEnvName). The model is the one selected in **Local Models**\(activeLocalModelName.map { ": \($0)" } ?? ".")")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }

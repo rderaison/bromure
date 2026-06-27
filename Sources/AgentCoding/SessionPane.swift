@@ -14,6 +14,22 @@ import SwiftUI
 /// while the toolbar still drags. Only the titlebar/toolbar moves the window.
 final class FramebufferView: VZVirtualMachineView {
     override var mouseDownCanMoveWindow: Bool { false }
+
+    /// When connected, the host owns the wheel: scroll deltas are routed to
+    /// the guest's tmux scrollback instead of being injected as VZ wheel
+    /// events (which kitty would turn into arrow keys — see `ScrollBridge`).
+    weak var scrollBridge: ScrollBridge?
+
+    override func scrollWheel(with event: NSEvent) {
+        if let bridge = scrollBridge, bridge.isConnected {
+            // Consume it: do NOT call super, so VZ never injects a wheel event
+            // into the guest. That's what kills the arrow-keys-through-history
+            // behavior. The guest scrolls tmux's history out-of-band instead.
+            bridge.handleScroll(deltaY: event.scrollingDeltaY)
+            return
+        }
+        super.scrollWheel(with: event)
+    }
 }
 
 // MARK: - Pane host
@@ -95,6 +111,13 @@ final class SessionPane {
     /// Keyboard-layout bridge that ferries macOS layout changes into the
     /// guest's setxkbmap. nil when no socket device is available yet.
     var keyboardBridge: KeyboardBridge?
+
+    /// Routes trackpad/wheel scroll to the guest's tmux scrollback. Held here
+    /// so it outlives the call that creates it; also wired into the
+    /// framebuffer view so its `scrollWheel` override can reach it.
+    var scrollBridge: ScrollBridge? {
+        didSet { (vmView as? FramebufferView)?.scrollBridge = scrollBridge }
+    }
 
     /// What the close pipeline resolved from the profile's `closeAction` (`.ask`
     /// turned into a prompt). nil for a programmatic close (compromise /

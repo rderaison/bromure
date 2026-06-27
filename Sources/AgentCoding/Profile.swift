@@ -1749,10 +1749,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// A tool explicitly in `.local` mode wins (primary first); otherwise
     /// Local/Hybrid routing needs the active model served too.
     public var localEngineModelID: String? {
-        if authMode == .local, let m = activeModelID, !m.isEmpty { return m }
-        for spec in additionalTools where spec.authMode == .local {
-            if let m = spec.localModelID, !m.isEmpty { return m }
-        }
+        // Any agent in `.local` mode serves the profile's single active model.
+        if allToolSpecs.contains(where: { $0.authMode == .local }),
+           let m = activeModelID, !m.isEmpty { return m }
         // A local Fusion leg or judge also needs the engine serving its model.
         if let m = fusionLocalLeg, !m.isEmpty { return m }
         if fusionJudgeLocal, let m = fusionJudgeModel, !m.isEmpty { return m }
@@ -1766,10 +1765,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// the engine can serve several at once (parallel models).
     public var distinctLocalModelIDs: [String] {
         var ids = Set<String>()
-        if authMode == .local, let m = activeModelID { ids.insert(m) }
-        for s in additionalTools where s.authMode == .local {
-            if let m = s.localModelID { ids.insert(m) }
-        }
+        // Every `.local` agent (primary or additional) serves activeModelID.
+        if allToolSpecs.contains(where: { $0.authMode == .local }),
+           let m = activeModelID { ids.insert(m) }
         if let m = fusionLocalLeg { ids.insert(m) }
         if fusionJudgeLocal, let m = fusionJudgeModel { ids.insert(m) }
         if modelRouting != .cloud, let m = activeModelID { ids.insert(m) }
@@ -3524,6 +3522,15 @@ public final class ProfileStore {
         echo "[xinit] keyboard-agent pid $!" >> /tmp/xinitrc.log
     fi
 
+    # Scroll agent — listens on vsock 5008 for coalesced line deltas from the
+    # host's ScrollBridge and drives the tmux scrollback (copy-mode) directly,
+    # so the trackpad scrolls the window instead of kitty turning the wheel
+    # into arrow keys (tmux mouse stays off → kitty keeps selection + ⌘C).
+    if [ -r /mnt/bromure-meta/scroll-agent.py ]; then
+        python3 /mnt/bromure-meta/scroll-agent.py &
+        echo "[xinit] scroll-agent pid $!" >> /tmp/xinitrc.log
+    fi
+
     # Shell-exec agent — proactively opens a vsock pool to host port
     # 5800 so the control socket's /vms/{id}/exec (and `bromure-ac exec`)
     # can dequeue a connection on demand. Always staged now; the exec
@@ -3763,12 +3770,14 @@ public final class ProfileStore {
     TMUX_S="bromure"
     KITTY_CONF="$HOME/.config/kitty/kitty.conf"
 
-    # The one terminal. `-A` create-or-attach. When the last window is closed
-    # tmux exits → kitty exits → the roster goes empty → the host powers the
-    # VM off per the close action (same end state as before).
-    kitty --config "$KITTY_CONF" --start-as=fullscreen --class bromure \
-          tmux new-session -A -s "$TMUX_S" >/tmp/kitty.log 2>&1 &
-    log "launched fullscreen kitty → tmux session $TMUX_S (pid $!)"
+    # The one fullscreen terminal is launched in the FOREGROUND at the END of
+    # this script — see the tail. The roster + command loops below are
+    # backgrounded so the foreground can OWN the terminal's lifetime: when the
+    # user closes the last tmux window (Ctrl-D), tmux destroys the session, the
+    # kitty client exits, and we power the VM off directly. This script is the
+    # X-session foreground process (xinitrc `exec bash` into it), so if it
+    # looped forever instead — as it used to — X would stay up with no terminal
+    # and the VM would hang. Halting here is the authoritative "session over".
 
     # Roster: every 0.7s publish the window list — index, active flag, and the
     # foreground command (tab label) per window. Atomic rename so the host
@@ -3779,6 +3788,17 @@ public final class ProfileStore {
                      -F '#{window_index}	#{?window_active,1,0}	#{pane_current_command}' 2>/dev/null); then
                 printf '%s' "$out" > "$INBOX/.tabs.tmp" 2>/dev/null \
                     && mv -f "$INBOX/.tabs.tmp" "$INBOX/tabs.txt" 2>/dev/null
+            elif ! tmux has-session -t "$TMUX_S" 2>/dev/null; then
+                # list-windows failed AND the session is genuinely gone — the
+                # user closed the last window (Ctrl-D) so tmux (and the kitty
+                # client) exited. Publish an EMPTY roster so the host's
+                # applyTabList([]) runs the close action (power off). Gating on
+                # has-session avoids a spurious shutdown from a transient
+                # list-windows hiccup while the server is still alive. Without
+                # this branch tabs.txt keeps its last non-empty value forever
+                # and the VM hangs with a live-but-empty X session.
+                : > "$INBOX/.tabs.tmp" 2>/dev/null \
+                    && mv -f "$INBOX/.tabs.tmp" "$INBOX/tabs.txt" 2>/dev/null
             fi
             sleep 0.7
         done
@@ -3786,33 +3806,69 @@ public final class ProfileStore {
     roster_loop &
 
     # Command loop: the host drops cmd-<action>.txt into the outbox. Every tab
-    # action is now just a tmux window op against the one session.
+    # action is now just a tmux window op against the one session. Backgrounded
+    # so the foreground (below) can own the terminal's lifetime.
+    command_loop() {
+        while :; do
+            if [ -d "$INBOX" ]; then
+                for f in "$INBOX"/cmd-*.txt; do
+                    [ -e "$f" ] || continue
+                    line=$(head -1 "$f" 2>/dev/null)
+                    rm -f "$f"
+                    action="${line%% *}"
+                    arg="${line#* }"
+                    log "got cmd action=$action arg=$arg"
+                    case "$action" in
+                        new-tab)      tmux new-window -t "$TMUX_S" 2>/dev/null || true ;;
+                        select-tab)   tmux select-window -t "$TMUX_S:$arg" 2>/dev/null || true ;;
+                        close-tab)    tmux kill-window -t "$TMUX_S:$arg" 2>/dev/null || true ;;
+                        # Halt, don't `reboot`. A guest-issued `sudo reboot`
+                        # restarts the VM *in place* — VZ never fires
+                        # guestDidStop, so the host's onStopped → relaunchVM
+                        # chain never runs (black screen). `poweroff` halts the
+                        # VM, which DOES fire guestDidStop; the host then builds a
+                        # fresh VM in the same window — a graceful restart.
+                        soft-reboot)  log "soft-reboot triggered (halt → host relaunch)"; sync; sudo poweroff ;;
+                        *)            log "unknown action '$action'" ;;
+                    esac
+                done
+            fi
+            sleep 0.2
+        done
+    }
+    command_loop &
+
+    # The one fullscreen terminal, in the FOREGROUND. kitty stays attached to
+    # the single tmux session ("bromure"); each tab is a window in it. `-A` is
+    # create-or-attach. This BLOCKS until kitty returns, then decides what that
+    # meant by asking tmux whether the session still exists:
+    #   • session GONE  → the user closed the last window (Ctrl-D / `exit`).
+    #     That's the authoritative "session over" signal — halt the VM. Using
+    #     `poweroff` (not `reboot`, and not a host roster round-trip) fires VZ
+    #     guestDidStop → the host's onStopped teardown.
+    #   • session ALIVE → kitty itself died (a GL/X hiccup), not the user.
+    #     Re-attach a fresh kitty so a crash doesn't strand a live session.
+    # Cap the re-attach retries so a kitty that can't stay up spins a few times
+    # and then halts rather than forever.
+    RETRIES=0
     while :; do
-        if [ -d "$INBOX" ]; then
-            for f in "$INBOX"/cmd-*.txt; do
-                [ -e "$f" ] || continue
-                line=$(head -1 "$f" 2>/dev/null)
-                rm -f "$f"
-                action="${line%% *}"
-                arg="${line#* }"
-                log "got cmd action=$action arg=$arg"
-                case "$action" in
-                    new-tab)      tmux new-window -t "$TMUX_S" 2>/dev/null || true ;;
-                    select-tab)   tmux select-window -t "$TMUX_S:$arg" 2>/dev/null || true ;;
-                    close-tab)    tmux kill-window -t "$TMUX_S:$arg" 2>/dev/null || true ;;
-                    # Halt, don't `reboot`. A guest-issued `sudo reboot`
-                    # restarts the VM *in place* — VZ never fires
-                    # guestDidStop, so the host's onStopped → relaunchVM
-                    # chain never runs (black screen). `poweroff` halts the
-                    # VM, which DOES fire guestDidStop; the host then builds a
-                    # fresh VM in the same window — a graceful restart.
-                    soft-reboot)  log "soft-reboot triggered (halt → host relaunch)"; sync; sudo poweroff ;;
-                    *)            log "unknown action '$action'" ;;
-                esac
-            done
+        kitty --config "$KITTY_CONF" --start-as=fullscreen --class bromure \
+              tmux new-session -A -s "$TMUX_S" >/tmp/kitty.log 2>&1
+        log "kitty/tmux exited with $? (attempt $((RETRIES+1)))"
+        if ! tmux has-session -t "$TMUX_S" 2>/dev/null; then
+            break   # session gone → user ended it → power off below
         fi
-        sleep 0.2
+        RETRIES=$((RETRIES+1))
+        if [ $RETRIES -ge 5 ]; then
+            log "kitty failed to stay up after 5 attempts — halting"
+            break
+        fi
+        sleep 1
     done
+
+    log "session over — powering off"
+    sync
+    sudo poweroff
     """#
 }
 

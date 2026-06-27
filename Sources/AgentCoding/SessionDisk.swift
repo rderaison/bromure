@@ -560,11 +560,14 @@ public final class SessionDisk {
             // hit the bridge directly; keys are dummies the engine ignores.
             // (This is the explicit per-tool path; transparent Hybrid routing
             // is handled separately by the MITM engine, not here.)
-            for spec in profile.allToolSpecs where spec.authMode == .local {
-                guard let id = spec.localModelID, !id.isEmpty else { continue }
-                let model = CatalogStore.shared.resolve(id)?.repo ?? id
-                for export in spec.tool.localEnvExports(model: model) {
-                    proxyLines.append("export \(export.name)=\(shellQuote(export.value))")
+            // Every "Local model" agent serves the profile's single active
+            // model (chosen in Local Models) — agents no longer pick their own.
+            if let activeID = profile.activeModelID, !activeID.isEmpty {
+                let model = CatalogStore.shared.resolve(activeID)?.repo ?? activeID
+                for spec in profile.allToolSpecs where spec.authMode == .local {
+                    for export in spec.tool.localEnvExports(model: model) {
+                        proxyLines.append("export \(export.name)=\(shellQuote(export.value))")
+                    }
                 }
             }
 
@@ -716,8 +719,8 @@ public final class SessionDisk {
         // wire_api="responses" targeting the endpoint vllm-mlx serves on the
         // loopback (the guest init lays this down before the MCP block so the
         // top-level keys stay valid TOML).
-        if let codex = profile.allToolSpecs.first(where: { $0.tool == .codex && $0.authMode == .local }),
-           let id = codex.localModelID, !id.isEmpty {
+        if profile.allToolSpecs.contains(where: { $0.tool == .codex && $0.authMode == .local }),
+           let id = profile.activeModelID, !id.isEmpty {
             let repo = CatalogStore.shared.resolve(id)?.repo ?? id
             try Self.codexLocalProviderTOML(model: repo).write(
                 to: tmp.appendingPathComponent("codex-local.toml"),
@@ -728,8 +731,8 @@ public final class SessionDisk {
         // grok at the engine, but grok still sends its default model id
         // "grok-build" — which the engine 404s. A [model.grok-build] override
         // in config.toml rewrites that to the served repo (guest init appends).
-        if let grok = profile.allToolSpecs.first(where: { $0.tool == .grok && $0.authMode == .local }),
-           let id = grok.localModelID, !id.isEmpty {
+        if profile.allToolSpecs.contains(where: { $0.tool == .grok && $0.authMode == .local }),
+           let id = profile.activeModelID, !id.isEmpty {
             let repo = CatalogStore.shared.resolve(id)?.repo ?? id
             try Self.grokLocalModelMapTOML(model: repo).write(
                 to: tmp.appendingPathComponent("grok-local.toml"),
