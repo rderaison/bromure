@@ -53,6 +53,18 @@ public struct InferenceMetrics: Sendable, Equatable {
               let c = values["vllm_mlx_inference_request_duration_seconds_count"], c > 0 else { return nil }
         return s / c
     }
+
+    /// Cumulative time-to-first-token seconds (≈ prompt prefill time).
+    public var ttftSeconds: Double? { values["vllm_mlx_inference_ttft_seconds_sum"] }
+
+    /// Cumulative *decode* seconds = total request duration minus the
+    /// prefill (TTFT). Completion tokens ÷ this is the true generation rate;
+    /// dividing by wall-clock (or by total duration, which includes prefill)
+    /// is what made the throughput read 1–4 tok/s instead of tens.
+    public var decodeSeconds: Double? {
+        guard let dur = values["vllm_mlx_inference_request_duration_seconds_sum"] else { return nil }
+        return max(0, dur - (ttftSeconds ?? 0))
+    }
 }
 
 /// Polls the engine's `/metrics` endpoint and derives a live throughput.
@@ -62,13 +74,15 @@ public struct InferenceMetrics: Sendable, Equatable {
 @Observable
 public final class InferenceMetricsModel {
     public private(set) var latest: InferenceMetrics?
+    /// Decode throughput (tokens generated per second of generation time).
     public private(set) var tokensPerSecond: Double?
+    /// Prompt-prefill throughput (tokens processed per second of TTFT). This is
+    /// the real bottleneck for big agent prompts — slow prefill, not decode.
+    public private(set) var prefillTokensPerSecond: Double?
     public private(set) var error: String?
     public private(set) var loadedModels: [String] = []
 
     private var task: Task<Void, Never>?
-    private var lastGen: Double?
-    private var lastAt: Date?
 
     public init() {}
 
@@ -76,7 +90,7 @@ public final class InferenceMetricsModel {
         URL(string: "http://\(InferenceService.engineHost):\(InferenceService.enginePort)/metrics")!
     }
 
-    public func start(interval: TimeInterval = 1.5) {
+    public func start(interval: TimeInterval = 5) {
         guard task == nil else { return }
         task = Task { [weak self] in
             while !Task.isCancelled {
@@ -104,18 +118,26 @@ public final class InferenceMetricsModel {
             }
             let m = InferenceMetrics.parse(text)
             error = nil
-            // Derive tokens/s from the generation-tokens counter delta.
-            let now = Date()
-            if let gen = m.generationTokens, let lg = lastGen, let la = lastAt {
-                let dt = now.timeIntervalSince(la)
-                if dt > 0, gen >= lg { tokensPerSecond = (gen - lg) / dt }
+            // Decode + prefill rates from CUMULATIVE counters, not windowed
+            // deltas. The engine observes ttft at first-token time but request
+            // duration at completion, so a poll landing between them desyncs the
+            // deltas and collapses decode tok/s to the total (prefill+decode)
+            // throughput — the ~7 tok/s artifact. Lifetime ratios stay
+            // self-consistent and report the true decode rate (verified: this
+            // recovers the streaming ground truth ~64 tok/s).
+            if let comp = m.generationTokens, let dec = m.decodeSeconds, dec > 0.05 {
+                tokensPerSecond = comp / dec
             }
-            lastGen = m.generationTokens
-            lastAt = now
+            if let prompt = m.promptTokens, let ttft = m.ttftSeconds, ttft > 0.05 {
+                prefillTokensPerSecond = prompt / ttft
+            }
             latest = m
             loadedModels = await InferenceService.shared.loadedModelRepos
         } catch {
-            self.error = "\(error)"
+            // Transient connection blips are normal while the engine (re)starts
+            // or is busy — show a short status, not the giant NSError dump.
+            self.error = (error as? URLError)?.code == .timedOut
+                ? "engine busy (timed out)" : "engine not reachable"
         }
     }
 }

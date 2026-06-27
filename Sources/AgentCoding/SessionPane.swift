@@ -3,6 +3,19 @@ import SandboxEngine
 import SwiftUI
 @preconcurrency import Virtualization
 
+// MARK: - Framebuffer view
+
+/// `VZVirtualMachineView` that never lets a drag move the host window. The
+/// unified / pop-out windows are `isMovableByWindowBackground` (so empty
+/// toolbar areas drag the window), but `VZVirtualMachineView` defaults
+/// `mouseDownCanMoveWindow` to `true` — which means a drag inside the
+/// framebuffer would move the window instead of selecting text in the guest.
+/// Returning `false` hands the drag to the VM (text selection, drag-to-select)
+/// while the toolbar still drags. Only the titlebar/toolbar moves the window.
+final class FramebufferView: VZVirtualMachineView {
+    override var mouseDownCanMoveWindow: Bool { false }
+}
+
 // MARK: - Pane host
 
 /// The window currently displaying a `SessionPane`. A pane is host-agnostic —
@@ -105,7 +118,7 @@ final class SessionPane {
         self.profile = profile
         self.acDelegate = acDelegate
 
-        let view = VZVirtualMachineView()
+        let view = FramebufferView()
         // capturesSystemKeys = false → macOS handles ⌘Tab/⌘H/⌘Space/⌘Q at the
         // WindowServer level instead of routing them to the guest. We lose
         // F-key forwarding but agent-coding workflows almost never use them and

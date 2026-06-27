@@ -20,7 +20,8 @@ struct InferenceMetricsView: View {
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)],
                           spacing: 12) {
-                    card("Tokens / sec", fmt(model.tokensPerSecond, "%.1f"), "speedometer", .green)
+                    card("Decode tok/s", fmt(model.tokensPerSecond, "%.1f"), "speedometer", .green)
+                    card("Prefill tok/s", fmt(model.prefillTokensPerSecond, "%.0f"), "gauge.medium", .yellow)
                     card("Running", fmt(model.latest?.requestsRunning, "%.0f"), "play.circle", .blue)
                     card("Waiting", fmt(model.latest?.requestsWaiting, "%.0f"), "hourglass", .orange)
                     card("In flight", fmt(model.latest?.requestsInFlight, "%.0f"), "arrow.left.arrow.right", .indigo)
@@ -76,7 +77,7 @@ struct InferenceMetricsView: View {
                 .background(.mint.gradient, in: RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 1) {
                 Text("Local inference").font(.title3.bold())
-                Text("vllm-mlx · 127.0.0.1:\(InferenceService.enginePort)")
+                Text(verbatim: "vllm-mlx · 127.0.0.1:\(InferenceService.enginePort)")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
