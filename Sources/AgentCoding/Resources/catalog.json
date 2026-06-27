@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "models": [
     {
       "id": "qwen2.5-coder-7b-mlx-4bit",
@@ -21,16 +21,16 @@
       "recommended": true
     },
     {
-      "id": "qwen3-coder-30b-a3b-mlx-3bit",
-      "repo": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-3bit",
+      "id": "qwen3-coder-30b-a3b-mlx-4bit-dwq",
+      "repo": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit-dwq-v2",
       "engine": "vllm-mlx",
-      "name": "Qwen3-Coder 30B-A3B (3-bit MLX)",
+      "name": "Qwen3-Coder 30B-A3B (4-bit DWQ MLX)",
       "publisher": "Alibaba",
       "license": "Apache-2.0",
       "params_total_b": 30,
       "params_active_b": 3,
-      "quant": "q3",
-      "download_gb": 13,
+      "quant": "q4",
+      "download_gb": 17,
       "min_unified_mem_gb": 32,
       "context": 256000,
       "tags": ["coding", "tools", "agentic", "m"],
@@ -39,25 +39,6 @@
       "reasoning_parser": "qwen3",
       "min_chip": "M1 Pro",
       "recommended": true
-    },
-    {
-      "id": "qwen2.5-coder-32b-mlx-8bit",
-      "repo": "mlx-community/Qwen2.5-Coder-32B-Instruct-8bit",
-      "engine": "vllm-mlx",
-      "name": "Qwen2.5-Coder 32B (8-bit MLX)",
-      "publisher": "Alibaba",
-      "license": "Apache-2.0",
-      "params_total_b": 32,
-      "params_active_b": 32,
-      "quant": "q8",
-      "download_gb": 35,
-      "min_unified_mem_gb": 64,
-      "context": 128000,
-      "tags": ["coding", "tools", "m"],
-      "tool_calling": "verified",
-      "tool_parser": "hermes",
-      "min_chip": "M2 Max",
-      "recommended": false
     },
     {
       "id": "qwen3-coder-next-mlx-mxfp4",
@@ -70,7 +51,7 @@
       "params_active_b": 3,
       "quant": "mxfp4",
       "download_gb": 42,
-      "min_unified_mem_gb": 64,
+      "min_unified_mem_gb": 96,
       "context": 256000,
       "tags": ["coding", "tools", "agentic", "l"],
       "tool_calling": "verified",
@@ -97,6 +78,25 @@
       "reasoning_parser": "glm4",
       "min_chip": "M3 Max",
       "recommended": true
+    },
+    {
+      "id": "qwen3-coder-480b-a35b-mlx-4bit",
+      "repo": "mlx-community/Qwen3-Coder-480B-A35B-Instruct-4bit",
+      "engine": "vllm-mlx",
+      "name": "Qwen3-Coder 480B-A35B (4-bit MLX)",
+      "publisher": "Alibaba",
+      "license": "Apache-2.0",
+      "params_total_b": 480,
+      "params_active_b": 35,
+      "quant": "q4",
+      "download_gb": 270,
+      "min_unified_mem_gb": 512,
+      "context": 256000,
+      "tags": ["coding", "tools", "agentic", "xl"],
+      "tool_calling": "verified",
+      "tool_parser": "qwen3_coder",
+      "min_chip": "M3 Ultra",
+      "recommended": false
     }
   ]
 }
