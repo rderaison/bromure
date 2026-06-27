@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import MLXLMCommon
 
 // MARK: - Async bridge for sync ParsableCommand.run()
 
@@ -144,7 +145,37 @@ struct Model: ParsableCommand {
         commandName: "model",
         abstract: "Manage local MLX inference models (catalog, pull, use).",
         subcommands: [ModelCatalogList.self, ModelInstall.self, ModelPull.self,
-                      ModelLS.self, ModelUse.self, ModelRM.self, RepairServe.self])
+                      ModelLS.self, ModelUse.self, ModelRM.self, RepairServe.self,
+                      MLXSelfTest.self])
+}
+
+/// Hidden: load a model through the in-process MLX engine and generate once,
+/// to validate end-to-end loading + decode speed without the GUI
+/// (`model _mlx-selftest <repo>`).
+struct MLXSelfTest: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "_mlx-selftest", shouldDisplay: false)
+    @Argument(help: "HF repo (must be in the hub cache).") var repo: String
+    @Option(name: .long) var prompt = "Write a Python function that reverses a string. Code only."
+    @Option(name: .long) var maxTokens = 128
+    func run() throws {
+        try blockingRun {
+            let t0 = Date()
+            FileHandle.standardError.write(Data("loading \(repo) …\n".utf8))
+            let c = try await MLXEngine.shared.generate(
+                repo: repo,
+                messages: [.user(prompt)],
+                params: MLXEngine.Params(maxTokens: maxTokens, temperature: 0)
+            ) { piece in
+                FileHandle.standardOutput.write(Data(piece.utf8))
+                return true
+            }
+            let decode = Double(c.completionTokens) / max(0.001, c.decodeSeconds)
+            let summary = String(
+                format: "\n\n--- prompt=%d tok  completion=%d tok\n--- TTFT=%.2fs  decode=%.1f tok/s  total=%.1fs\n",
+                c.promptTokens, c.completionTokens, c.ttft, decode, Date().timeIntervalSince(t0))
+            FileHandle.standardError.write(Data(summary.utf8))
+        }
+    }
 }
 
 /// Hidden: run the tool-call repair proxy standalone for testing against a
