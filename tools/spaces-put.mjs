@@ -45,6 +45,18 @@ function guessType(path) {
   return "application/octet-stream";
 }
 
+// Cache policy by object kind. Small mutable manifests/pointers (catalog.json,
+// the find-links index) are republished in place, so they get a short TTL —
+// otherwise a catalog edit takes the CDN's full TTL to surface. Versioned
+// binary artifacts (the engine wheel, and the DMGs uploaded by
+// release-upload.mjs) are immutable per filename, so they stay long-cached.
+function cacheControlFor(key) {
+  if (/\.(whl|zip|pkg|dmg|tar\.gz|tgz|bin)$/i.test(key)) {
+    return "public, max-age=86400";          // immutable artifacts — cache hard
+  }
+  return "public, max-age=60, must-revalidate"; // small mutable manifests
+}
+
 const { S3Client, PutObjectCommand } = await import("@aws-sdk/client-s3");
 const client = new S3Client({
   endpoint: DO_SPACES_ENDPOINT,
@@ -60,7 +72,7 @@ await client.send(new PutObjectCommand({
   Body: body,
   ContentType: CONTENT_TYPE || guessType(LOCAL),
   ACL: "public-read",
-  CacheControl: KEY.endsWith("catalog.json") ? "public, max-age=300" : "public, max-age=86400",
+  CacheControl: cacheControlFor(KEY),
 }));
 
 console.log(`  ↑ ${basename(LOCAL)} → ${DO_SPACES_PUBLIC_BASE}/${KEY}`);
