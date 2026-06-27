@@ -146,7 +146,25 @@ struct Model: ParsableCommand {
         abstract: "Manage local MLX inference models (catalog, pull, use).",
         subcommands: [ModelCatalogList.self, ModelInstall.self, ModelPull.self,
                       ModelLS.self, ModelUse.self, ModelRM.self, RepairServe.self,
-                      MLXSelfTest.self, MLXServe.self])
+                      MLXSelfTest.self, MLXServe.self, MLXEngineChild.self])
+}
+
+/// Hidden: the supervised engine child the main app spawns
+/// (`model _mlx-engine --config <path>`). Reads the model set + budget, starts
+/// MLXServer in-process, and blocks. Running here, out-of-process, is what gives
+/// the host OOM isolation: if a model load jetsams this process, the app and its
+/// VMs survive and the parent restarts it.
+struct MLXEngineChild: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "_mlx-engine", shouldDisplay: false)
+    @Option(name: .long, help: "Path to the engine spawn config JSON.") var config: String
+    func run() throws {
+        let data = try Data(contentsOf: URL(fileURLWithPath: config))
+        let cfg = try JSONDecoder().decode(EngineSpawnConfig.self, from: data)
+        MLXServer.shared.start(models: cfg.inferenceModels, memoryBudgetGB: cfg.memoryBudgetGB)
+        FileHandle.standardError.write(Data(
+            "mlx engine: serving \(cfg.models.count) model(s) on 127.0.0.1:\(InferenceService.enginePort)\n".utf8))
+        RunLoop.main.run()
+    }
 }
 
 /// Hidden: start the in-process MLX HTTP server for a model and block, so the
