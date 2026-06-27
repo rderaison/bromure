@@ -13,9 +13,14 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.7.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
-        .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.3"),
+        // Pinned to the range MLXLLM (mlx-swift-examples) requires; the classifier
+        // only uses the stable `Tokenizers` + `Hub` API, which is unchanged here.
+        .package(url: "https://github.com/huggingface/swift-transformers.git", "1.0.0" ..< "1.1.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.9.0"),
+        // In-process MLX inference engine (replaces the Python vllm-mlx subprocess).
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.21.0"),
+        .package(url: "https://github.com/ml-explore/mlx-swift-examples.git", "2.25.8" ..< "2.26.0"),
     ],
     targets: [
         .executableTarget(
@@ -43,7 +48,11 @@ let package = Package(
                 .product(name: "Yams", package: "Yams"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXLLM", package: "mlx-swift-examples"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
             ],
             path: "Sources/AgentCoding",
             exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef",
