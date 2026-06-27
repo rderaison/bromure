@@ -77,6 +77,12 @@ final class ACAutomationServer {
     var onSetHybrid: ((_ idOrName: String, _ knob: String, _ value: Double) -> [String: Any])?
     var onSetModel: ((_ idOrName: String, _ modelID: String) -> [String: Any])?
 
+    // Remote access (optional SSH front door) — CLI `remote …` + Preferences.
+    var onRemoteStatus: (() -> [String: Any])?
+    var onRemoteApply: ((_ spec: [String: Any]) -> [String: Any])?
+    var onRemoteAddKey: ((_ publicKey: String) -> [String: Any])?
+    var onRemoteRemoveKey: ((_ selector: String) -> [String: Any])?
+
     init(port: UInt16 = 9223, bindAddress: String = "127.0.0.1") {
         // 9223 (one off from the browser's 9222) so both apps can run side
         // by side during development without conflicting.
@@ -369,6 +375,42 @@ final class ACAutomationServer {
             } else {
                 sendResponse(fd: fd, status: 500, body: ["error": "Failed to create VM"])
             }
+
+        // Remote access control plane (CLI `remote …`). Owner-only socket.
+        case ("GET", "/remote"):
+            guard isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            let s = DispatchQueue.main.sync { self.onRemoteStatus?() ?? [:] }
+            sendResponse(fd: fd, status: 200, body: s)
+
+        case ("POST", "/remote"):
+            guard isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            let r = DispatchQueue.main.sync { self.onRemoteApply?(bodyJSON) ?? ["error": "unavailable"] }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        case ("POST", "/remote/keys"):
+            guard isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            let key = (bodyJSON["key"] as? String) ?? ""
+            let r = DispatchQueue.main.sync { self.onRemoteAddKey?(key) ?? ["error": "unavailable"] }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        case (let m, let p) where m == "DELETE" && p.hasPrefix("/remote/keys/"):
+            guard isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            let sel = String(p.dropFirst("/remote/keys/".count)).removingPercentEncoding
+                ?? String(p.dropFirst("/remote/keys/".count))
+            let r = DispatchQueue.main.sync { self.onRemoteRemoveKey?(sel) ?? ["error": "unavailable"] }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
         case (let m, let p) where p.hasPrefix("/vms/"):
             handleVMRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)

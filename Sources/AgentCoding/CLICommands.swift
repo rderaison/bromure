@@ -882,3 +882,151 @@ enum InteractiveExec {
         return [UInt8(c >> 8), UInt8(c & 0xff), UInt8(r >> 8), UInt8(r & 0xff)]
     }
 }
+
+// MARK: - Remote access (optional SSH front door)
+
+/// `bromure-ac remote …` — manage the optional SSH remote-access front door.
+/// Disabled by default. All operations go through the running app over the
+/// owner-only control socket, so the app stays the single source of truth.
+struct Remote: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "remote",
+        abstract: "Optional remote access to bromure-ac over SSH (disabled by default).",
+        subcommands: [RemoteStatus.self, RemoteEnable.self, RemoteDisable.self, RemoteKey.self],
+        defaultSubcommand: RemoteStatus.self)
+}
+
+private func printRemoteStatus(_ s: [String: Any]) {
+    let enabled = s["enabled"] as? Bool ?? false
+    let running = s["running"] as? Bool ?? false
+    print("Remote access: \(enabled ? "ENABLED" : "disabled")\(enabled ? (running ? " (sshd running)" : " (sshd not running)") : "")")
+    print("  Bind:     \(s["bindAddress"] as? String ?? "?"):\(s["port"] as? Int ?? 0)")
+    let pw = (s["passwordAuth"] as? Bool ?? false) ? "password" : nil
+    let pk = (s["pubkeyAuth"] as? Bool ?? false) ? "public-key" : nil
+    print("  Auth:     \([pw, pk].compactMap { $0 }.joined(separator: " + ").ifEmpty("none"))")
+    if let fp = s["fingerprint"] as? String { print("  Host key: \(fp)") }
+    if let user = s["user"] as? String, let connect = s["connect"] as? String {
+        print("  Login as: \(user)")
+        print("  Connect:  \(connect)")
+    }
+    let keys = s["authorizedKeys"] as? [[String: Any]] ?? []
+    print("  Keys:     \(keys.count) authorized")
+    for (i, k) in keys.enumerated() {
+        let c = (k["comment"] as? String ?? "")
+        print("    [\(i + 1)] \(k["fingerprint"] as? String ?? "?") \(c)")
+    }
+}
+
+private extension String {
+    func ifEmpty(_ fallback: String) -> String { isEmpty ? fallback : self }
+}
+
+struct RemoteStatus: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "status", abstract: "Show remote-access status and connection details.")
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let resp = try client.request("GET", "/remote")
+        guard resp.status == 200 else { throw ValidationError(resp.json["error"] as? String ?? "couldn't read status") }
+        printRemoteStatus(resp.json)
+    }
+}
+
+struct RemoteEnable: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "enable", abstract: "Enable remote SSH access.")
+
+    @Option(name: .long, help: "TCP port to listen on (default 2222).")
+    var port: Int?
+    @Option(name: .long, help: "IP to bind (default 0.0.0.0 = all interfaces).")
+    var bind: String?
+    @Flag(name: .customLong("password"), inversion: .prefixedNo,
+          help: "Accept the macOS account password (PAM).")
+    var password = true
+    @Flag(name: .customLong("pubkey"), inversion: .prefixedNo,
+          help: "Accept enrolled public keys.")
+    var pubkey = true
+
+    func run() throws {
+        guard password || pubkey else {
+            throw ValidationError("Enable at least one of --password / --pubkey.")
+        }
+        let client = ControlClient()
+        try client.ensureAgentRunning()
+        var spec: [String: Any] = ["enabled": true, "passwordAuth": password, "pubkeyAuth": pubkey]
+        if let port { spec["port"] = port }
+        if let bind { spec["bindAddress"] = bind }
+        let resp = try client.request("POST", "/remote", body: spec)
+        guard resp.status == 200 else { throw ValidationError(resp.json["error"] as? String ?? "couldn't enable") }
+        printRemoteStatus(resp.json)
+    }
+}
+
+struct RemoteDisable: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "disable", abstract: "Disable remote SSH access.")
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running (already off)."); return }
+        let resp = try client.request("POST", "/remote", body: ["enabled": false])
+        guard resp.status == 200 else { throw ValidationError(resp.json["error"] as? String ?? "couldn't disable") }
+        print("Remote access disabled.")
+    }
+}
+
+struct RemoteKey: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "key", abstract: "Manage authorized public keys.",
+        subcommands: [RemoteKeyAdd.self, RemoteKeyList.self, RemoteKeyRemove.self],
+        defaultSubcommand: RemoteKeyList.self)
+}
+
+struct RemoteKeyAdd: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "add", abstract: "Enroll a public key (path to a .pub file or the key text).")
+    @Argument(help: "Path to a public-key file, or the key text itself.")
+    var key: String
+    func run() throws {
+        // Accept a file path or the raw key string.
+        var material = key
+        if FileManager.default.fileExists(atPath: (key as NSString).expandingTildeInPath),
+           let body = try? String(contentsOfFile: (key as NSString).expandingTildeInPath, encoding: .utf8) {
+            material = body
+        }
+        let client = ControlClient()
+        try client.ensureAgentRunning()
+        let resp = try client.request("POST", "/remote/keys", body: ["key": material])
+        guard resp.status == 200 else { throw ValidationError(resp.json["error"] as? String ?? "couldn't add key") }
+        print("Added key: \(resp.json["fingerprint"] as? String ?? "ok")")
+    }
+}
+
+struct RemoteKeyList: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ls", abstract: "List authorized public keys.")
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let resp = try client.request("GET", "/remote")
+        let keys = resp.json["authorizedKeys"] as? [[String: Any]] ?? []
+        if keys.isEmpty { print("No authorized keys."); return }
+        for (i, k) in keys.enumerated() {
+            print("[\(i + 1)] \(k["fingerprint"] as? String ?? "?") \(k["comment"] as? String ?? "")")
+        }
+    }
+}
+
+struct RemoteKeyRemove: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rm", abstract: "Remove an authorized key by index (from `key ls`) or fingerprint.")
+    @Argument(help: "1-based index or fingerprint.")
+    var selector: String
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let resp = try client.request("DELETE", "/remote/keys/\(ControlClient.encodeSegment(selector))")
+        guard resp.status == 200 else { throw ValidationError(resp.json["error"] as? String ?? "couldn't remove key") }
+        print("Removed.")
+    }
+}

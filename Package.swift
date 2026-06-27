@@ -14,6 +14,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.7.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.3"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.9.0"),
     ],
     targets: [
         .executableTarget(
@@ -39,6 +41,9 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
                 .product(name: "Yams", package: "Yams"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ],
             path: "Sources/AgentCoding",
             exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef"],
@@ -46,6 +51,7 @@ let package = Package(
                         .copy("Resources/catalog.json")],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
+                .linkedFramework("OpenDirectory"),
             ]
         ),
         .systemLibrary(

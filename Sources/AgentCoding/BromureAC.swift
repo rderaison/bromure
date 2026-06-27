@@ -30,7 +30,9 @@ struct BromureAC: ParsableCommand {
         // `run` is the default subcommand (bare `bromure-ac`, Finder
         // double-click, `open` w/o args all open the GUI) but it's hidden from
         // help — it's an implementation detail, not something to invoke by hand.
-        subcommands: [Run.self],
+        // `__remote-menu` is hidden (shouldDisplay:false) — the SSH ForceCommand
+        // target, not a user-facing command.
+        subcommands: [Run.self, RemoteMenu.self],
         groupedSubcommands: [
             CommandGroup(name: "Image management",
                          subcommands: [Init.self, Info.self, Reset.self]),
@@ -43,7 +45,7 @@ struct BromureAC: ParsableCommand {
             CommandGroup(name: "Enterprise features",
                          subcommands: [Enroll.self, Unenroll.self, Status.self]),
             CommandGroup(name: "Integration",
-                         subcommands: [MCP.self]),
+                         subcommands: [MCP.self, Remote.self]),
         ],
         defaultSubcommand: Run.self
     )
@@ -204,6 +206,12 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                 keyEquivalent: ",")
     prefsItem.target = delegate
     appMenu.addItem(prefsItem)
+
+    let remoteItem = NSMenuItem(title: L("Remote Access…"),
+                                action: #selector(ACAppDelegate.openRemoteAccessAction(_:)),
+                                keyEquivalent: "")
+    remoteItem.target = delegate
+    appMenu.addItem(remoteItem)
 
     let rebuildItem = NSMenuItem(title: L("Rebuild Base Image…"),
                                  action: #selector(ACAppDelegate.rebuildBaseImageAction(_:)),
@@ -1237,6 +1245,110 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         startAutomationServerIfNeeded()
+        startRemoteAccessIfNeeded()
+    }
+
+    // MARK: - Remote access (optional SSH front door)
+
+    /// UserDefaults-backed remote config. Defaults: disabled, port 2222,
+    /// bind 0.0.0.0, both auth methods on.
+    func remoteAccessConfig() -> RemoteAccessServer.Config {
+        let d = UserDefaults.standard
+        var c = RemoteAccessServer.Config()
+        let p = d.integer(forKey: "remoteAccess.port")
+        if p > 0 { c.port = p }
+        c.bindAddress = d.string(forKey: "remoteAccess.bindAddress") ?? "0.0.0.0"
+        // `object(forKey:) == nil` → key never set → default on.
+        c.passwordAuth = d.object(forKey: "remoteAccess.passwordAuth") == nil ? true : d.bool(forKey: "remoteAccess.passwordAuth")
+        c.pubkeyAuth = d.object(forKey: "remoteAccess.pubkeyAuth") == nil ? true : d.bool(forKey: "remoteAccess.pubkeyAuth")
+        return c
+    }
+
+    /// Start the SSH front door iff `remoteAccess.enabled` (default OFF).
+    @MainActor func startRemoteAccessIfNeeded() {
+        guard UserDefaults.standard.bool(forKey: "remoteAccess.enabled") else { return }
+        do {
+            try RemoteAccessServer.shared.start(remoteAccessConfig())
+            SupplyChainLog.shared.record("[remote] SSH front door started.")
+        } catch {
+            SupplyChainLog.shared.record("[remote] start failed: \(error.localizedDescription)")
+        }
+    }
+
+    @MainActor func stopRemoteAccess() {
+        RemoteAccessServer.shared.stop()
+    }
+
+    /// Apply a config change coming from the CLI (`remote …`) or Preferences.
+    /// Persists to UserDefaults, then (re)starts or stops sshd. Returns a
+    /// status dict (same shape as `remoteAccessStatus`).
+    @MainActor func remoteAccessApply(_ spec: [String: Any]) -> [String: Any] {
+        let d = UserDefaults.standard
+        if let port = spec["port"] as? Int {
+            guard port > 0, port < 65536 else { return ["error": "port must be in 1..65535"] }
+            guard port >= 1024 else { return ["error": "port must be ≥ 1024 (non-root can't bind privileged ports)"] }
+            d.set(port, forKey: "remoteAccess.port")
+        }
+        if let bind = spec["bindAddress"] as? String, !bind.isEmpty {
+            d.set(bind, forKey: "remoteAccess.bindAddress")
+        }
+        if let pw = spec["passwordAuth"] as? Bool { d.set(pw, forKey: "remoteAccess.passwordAuth") }
+        if let pk = spec["pubkeyAuth"] as? Bool { d.set(pk, forKey: "remoteAccess.pubkeyAuth") }
+
+        if let enabled = spec["enabled"] as? Bool {
+            let cfg = remoteAccessConfig()
+            guard cfg.passwordAuth || cfg.pubkeyAuth else {
+                return ["error": "Enable at least one of password / public-key auth."]
+            }
+            d.set(enabled, forKey: "remoteAccess.enabled")
+            if enabled {
+                do { try RemoteAccessServer.shared.start(cfg) }
+                catch { return ["error": error.localizedDescription] }
+            } else {
+                RemoteAccessServer.shared.stop()
+            }
+        } else if d.bool(forKey: "remoteAccess.enabled") {
+            // No enable/disable in this call but we're on → apply live.
+            do { try RemoteAccessServer.shared.start(remoteAccessConfig()) }
+            catch { return ["error": error.localizedDescription] }
+        }
+        return remoteAccessStatus()
+    }
+
+    @MainActor func remoteAccessStatus() -> [String: Any] {
+        let d = UserDefaults.standard
+        let cfg = remoteAccessConfig()
+        let server = RemoteAccessServer.shared
+        let user = NSUserName()
+        let host = cfg.bindAddress == "0.0.0.0" ? "<this-mac-ip>" : cfg.bindAddress
+        let keys = server.listAuthorizedKeys().map { k in
+            ["type": k.type, "comment": k.comment, "fingerprint": k.fingerprint] as [String: Any]
+        }
+        return [
+            "enabled": d.bool(forKey: "remoteAccess.enabled"),
+            "running": server.isRunning,
+            "port": cfg.port,
+            "bindAddress": cfg.bindAddress,
+            "passwordAuth": cfg.passwordAuth,
+            "pubkeyAuth": cfg.pubkeyAuth,
+            "fingerprint": server.hostKeyFingerprint() ?? "(not generated yet)",
+            "user": user,
+            "connect": "ssh -p \(cfg.port) \(user)@\(host)",
+            "authorizedKeys": keys,
+        ]
+    }
+
+    @MainActor func remoteAccessAddKey(_ pub: String) -> [String: Any] {
+        do {
+            try RemoteAccessServer.shared.addAuthorizedKey(pub)
+            let added = RemoteAccessServer.shared.listAuthorizedKeys().last
+            return ["ok": true, "fingerprint": added?.fingerprint ?? "ok"]
+        } catch { return ["error": error.localizedDescription] }
+    }
+
+    @MainActor func remoteAccessRemoveKey(_ selector: String) -> [String: Any] {
+        do { try RemoteAccessServer.shared.removeAuthorizedKey(selector); return ["ok": true] }
+        catch { return ["error": error.localizedDescription] }
     }
 
     // MARK: - Automation server
@@ -1384,6 +1496,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         server.onSetModel = { [weak self] idOrName, modelID in
             self?.automationSetModel(idOrName: idOrName, modelID: modelID)
                 ?? ["ok": false, "error": "unavailable"]
+        }
+
+        // Remote access (optional SSH front door) — owner-only control socket.
+        server.onRemoteStatus = { [weak self] in
+            MainActor.assumeIsolated { self?.remoteAccessStatus() ?? [:] }
+        }
+        server.onRemoteApply = { [weak self] spec in
+            MainActor.assumeIsolated { self?.remoteAccessApply(spec) ?? ["error": "unavailable"] }
+        }
+        server.onRemoteAddKey = { [weak self] key in
+            MainActor.assumeIsolated { self?.remoteAccessAddKey(key) ?? ["error": "unavailable"] }
+        }
+        server.onRemoteRemoveKey = { [weak self] sel in
+            MainActor.assumeIsolated { self?.remoteAccessRemoveKey(sel) ?? ["error": "unavailable"] }
         }
     }
 
@@ -1881,6 +2007,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Task wouldn't run before the process exits, orphaning vllm-mlx
         // (and its large RAM footprint).
         InferenceService.killIfRunning()
+        // Tear down the optional SSH front door so we don't orphan sshd.
+        RemoteAccessServer.shared.stop()
     }
 
     /// Catch the catchable abnormal-termination signals so we still
@@ -2369,6 +2497,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var credentialApprovalsWindow: NSWindow?
     private var enrollmentWindow: NSWindow?
     private var preferencesWindow: NSWindow?
+    private var remoteAccessWindow: NSWindow?
     private var supplyChainLogWindow: NSWindow?
     /// File-browser panels, one per profile (keyed by profile id) so each
     /// session window gets its own, reused on subsequent clicks.
@@ -2731,6 +2860,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         preferencesWindow = win
+    }
+
+    @objc func openRemoteAccessAction(_ sender: Any?) {
+        if let win = remoteAccessWindow {
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false)
+        win.title = NSLocalizedString("Remote Access", comment: "Remote access window title")
+        win.center()
+        win.isReleasedWhenClosed = false
+        win.delegate = self
+        win.contentView = NSHostingView(rootView: RemoteAccessSettingsView(
+            status: { [weak self] in MainActor.assumeIsolated { self?.remoteAccessStatus() ?? [:] } },
+            apply: { [weak self] spec in MainActor.assumeIsolated { self?.remoteAccessApply(spec) ?? ["error": "unavailable"] } },
+            addKey: { [weak self] key in MainActor.assumeIsolated { self?.remoteAccessAddKey(key) ?? ["error": "unavailable"] } },
+            removeKey: { [weak self] sel in MainActor.assumeIsolated { self?.remoteAccessRemoveKey(sel) ?? ["error": "unavailable"] } }
+        ))
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        remoteAccessWindow = win
     }
 
     @objc func rebuildBaseImageAction(_ sender: Any?) {

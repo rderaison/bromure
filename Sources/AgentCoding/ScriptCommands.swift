@@ -379,6 +379,9 @@ private let acAppSettingDefaults: [String: () -> String] = [
     "automation.bindAddress": { UserDefaults.standard.string(forKey: "automation.bindAddress") ?? "127.0.0.1" },
     "managed.serverURL":      { UserDefaults.standard.string(forKey: "managed.serverURL") ?? "" },
     "managed.acIngestURL":    { UserDefaults.standard.string(forKey: "managed.acIngestURL") ?? "" },
+    "remoteAccess.enabled":   { String(UserDefaults.standard.bool(forKey: "remoteAccess.enabled")) },
+    "remoteAccess.port":      { String(UserDefaults.standard.integer(forKey: "remoteAccess.port")) },
+    "remoteAccess.bindAddress": { UserDefaults.standard.string(forKey: "remoteAccess.bindAddress") ?? "0.0.0.0" },
 ]
 
 @objc(BromureACGetAppSettingCommand)
@@ -413,6 +416,14 @@ final class BromureACSetAppSettingCommand: NSScriptCommand {
                 std.set(v.isEmpty ? "127.0.0.1" : v, forKey: key)
             case "managed.serverURL", "managed.acIngestURL":
                 std.set(v, forKey: key)
+            case "remoteAccess.enabled":
+                let on = (v == "true" || v == "1" || v == "yes")
+                _ = d.remoteAccessApply(["enabled": on])
+            case "remoteAccess.port":
+                guard let n = Int(v), n >= 1024, n < 65536 else { return "error: port must be in 1024..65535" as Any }
+                _ = d.remoteAccessApply(["port": n])
+            case "remoteAccess.bindAddress":
+                _ = d.remoteAccessApply(["bindAddress": v.isEmpty ? "0.0.0.0" : v])
             default:
                 return "error: unknown app setting '\(key)'" as Any
             }
