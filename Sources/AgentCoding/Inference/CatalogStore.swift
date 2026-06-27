@@ -11,8 +11,12 @@ public final class CatalogStore: @unchecked Sendable {
 
     /// Where the refreshed manifest is cached on disk.
     private let cacheURL: URL
-    /// HF hub cache root where pulled weights land (§5.6).
+    /// Legacy HF hub cache (`models--org--name/snapshots/<rev>`) — read-only
+    /// fallback so models pulled by the old `hf` CLI still resolve.
     private let hubCacheURL: URL
+    /// Where the in-process engine's models live now: a flat per-repo dir,
+    /// `…/BromureAC/models/<org>--<name>/`. New downloads land here.
+    public let modelsDir: URL
     private let lock = NSLock()
     private var cachedRemote: ModelCatalog?
 
@@ -25,6 +29,7 @@ public final class CatalogStore: @unchecked Sendable {
         self.hubCacheURL = hubCacheDir ?? FileManager.default
             .homeDirectoryForCurrentUser
             .appendingPathComponent(".cache/huggingface/hub", isDirectory: true)
+        self.modelsDir = support.appendingPathComponent("models", isDirectory: true)
         if let data = try? Data(contentsOf: cacheURL) {
             self.cachedRemote = try? ModelCatalog.parse(data)
         }
@@ -66,16 +71,24 @@ public final class CatalogStore: @unchecked Sendable {
         return ModelCatalog(version: cat.version, models: cat.models + extras)
     }
 
-    /// HF repos fully downloaded in the hub cache (`models--org--name`).
+    /// Fully-downloaded repos — the new local models dir plus any still in the
+    /// legacy hub cache.
     public func installedRepos() -> [String] {
-        guard let names = try? FileManager.default
-            .contentsOfDirectory(atPath: hubCacheURL.path) else { return [] }
-        return names.compactMap { name -> String? in
-            guard name.hasPrefix("models--") else { return nil }
-            let repo = String(name.dropFirst("models--".count))
-                .replacingOccurrences(of: "--", with: "/")
-            return isInstalled(repo: repo) ? repo : nil
-        }.sorted()
+        let fm = FileManager.default
+        var repos = Set<String>()
+        if let names = try? fm.contentsOfDirectory(atPath: modelsDir.path) {
+            for n in names where n.contains("--") {
+                let repo = n.replacingOccurrences(of: "--", with: "/")
+                if isInstalled(repo: repo) { repos.insert(repo) }
+            }
+        }
+        if let names = try? fm.contentsOfDirectory(atPath: hubCacheURL.path) {
+            for n in names where n.hasPrefix("models--") {
+                let repo = String(n.dropFirst("models--".count)).replacingOccurrences(of: "--", with: "/")
+                if isInstalled(repo: repo) { repos.insert(repo) }
+            }
+        }
+        return repos.sorted()
     }
 
     /// Resolve a user-supplied selector to a catalog entry. Accepts a
@@ -122,48 +135,70 @@ public final class CatalogStore: @unchecked Sendable {
 
     // MARK: - Installed tracking
 
-    /// HF caches a repo `org/name` under `models--org--name`.
-    public func installDirectory(for repo: String) -> URL {
-        let slug = "models--" + repo.replacingOccurrences(of: "/", with: "--")
-        return hubCacheURL.appendingPathComponent(slug, isDirectory: true)
+    private func slug(_ repo: String) -> String {
+        repo.replacingOccurrences(of: "/", with: "--")
     }
 
-    /// True only when the repo is **fully** downloaded — not merely that
-    /// the cache dir exists (it appears the moment a pull starts, with
-    /// partial `.incomplete` blobs). A complete pull has no `.incomplete`
-    /// files and a snapshot containing `config.json` (a loadable model).
-    public func isInstalled(repo: String) -> Bool {
+    /// The flat per-repo directory a download writes into (new layout):
+    /// `…/BromureAC/models/<org>--<name>/`.
+    public func localModelDirectory(for repo: String) -> URL {
+        modelsDir.appendingPathComponent(slug(repo), isDirectory: true)
+    }
+
+    /// Where this repo's loadable `config.json` lives, if downloaded — the new
+    /// local models dir first, then the legacy hub-cache snapshot. nil if absent
+    /// or still downloading. This is what `MLXEngine` loads from.
+    public func resolvedModelDirectory(for repo: String) -> URL? {
         let fm = FileManager.default
-        let dir = installDirectory(for: repo)
-        guard fm.fileExists(atPath: dir.path) else { return false }
-        // Any in-flight blob → not done.
-        if let en = fm.enumerator(at: dir, includingPropertiesForKeys: nil) {
-            for case let url as URL in en where url.lastPathComponent.hasSuffix(".incomplete") {
-                return false
-            }
+        let local = localModelDirectory(for: repo)
+        if fm.fileExists(atPath: local.appendingPathComponent("config.json").path),
+           !hasSuffixFile(local, ".partial") {
+            return local
         }
-        // A usable snapshot must carry config.json.
-        let snapshots = dir.appendingPathComponent("snapshots", isDirectory: true)
-        guard let revs = try? fm.contentsOfDirectory(
-            at: snapshots, includingPropertiesForKeys: nil) else { return false }
-        return revs.contains { fm.fileExists(atPath: $0.appendingPathComponent("config.json").path) }
+        // Legacy: models--org--name/snapshots/<rev>/config.json (from the old hf CLI).
+        let legacy = hubCacheURL.appendingPathComponent("models--" + slug(repo), isDirectory: true)
+        let snapshots = legacy.appendingPathComponent("snapshots", isDirectory: true)
+        if !hasSuffixFile(legacy, ".incomplete"),
+           let revs = try? fm.contentsOfDirectory(at: snapshots, includingPropertiesForKeys: nil) {
+            return revs.first { fm.fileExists(atPath: $0.appendingPathComponent("config.json").path) }
+        }
+        return nil
     }
 
-    /// Bytes on disk for an installed repo (best-effort recursive sum).
+    private func hasSuffixFile(_ dir: URL, _ suffix: String) -> Bool {
+        guard let en = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil)
+        else { return false }
+        for case let url as URL in en where url.lastPathComponent.hasSuffix(suffix) { return true }
+        return false
+    }
+
+    /// Directory a download writes into (always the new local layout).
+    public func installDirectory(for repo: String) -> URL { localModelDirectory(for: repo) }
+
+    /// Fully downloaded and loadable.
+    public func isInstalled(repo: String) -> Bool { resolvedModelDirectory(for: repo) != nil }
+
+    /// Bytes on disk for a repo (best-effort recursive sum). Prefers the local
+    /// dir even mid-download so the progress poller sees it grow.
     public func installedBytes(repo: String) -> Int64 {
-        let dir = installDirectory(for: repo)
-        guard let en = FileManager.default.enumerator(
-            at: dir, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+        let fm = FileManager.default
+        let local = localModelDirectory(for: repo)
+        let dir = fm.fileExists(atPath: local.path)
+            ? local : (resolvedModelDirectory(for: repo) ?? local)
+        guard let en = fm.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
         var total: Int64 = 0
         for case let url as URL in en {
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            total += Int64(size)
+            total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
         }
         return total
     }
 
-    /// Remove a pulled repo's weights from the hub cache.
+    /// Remove a repo's weights from wherever they live (new dir and/or legacy cache).
     public func removeInstalled(repo: String) throws {
-        try FileManager.default.removeItem(at: installDirectory(for: repo))
+        let fm = FileManager.default
+        let local = localModelDirectory(for: repo)
+        if fm.fileExists(atPath: local.path) { try fm.removeItem(at: local) }
+        let legacy = hubCacheURL.appendingPathComponent("models--" + slug(repo), isDirectory: true)
+        if fm.fileExists(atPath: legacy.path) { try? fm.removeItem(at: legacy) }
     }
 }

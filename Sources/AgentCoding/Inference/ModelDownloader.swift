@@ -63,33 +63,10 @@ public enum ModelDownloader {
 
     // MARK: - Pull
 
-    /// Resolve the `huggingface-cli` / `hf` downloader. Prefers the
-    /// provisioned engine venv (`hf` ships as an `mlx-lm` dependency), then
-    /// `PATH`.
-    public static func resolveDownloader(
-        env: [String: String] = ProcessInfo.processInfo.environment,
-        provisioner: EngineProvisioner = .shared,
-        fileExists: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
-    ) -> URL? {
-        let venvBin = provisioner.venvBin.path
-        for name in ["hf", "huggingface-cli"] where fileExists("\(venvBin)/\(name)") {
-            return URL(fileURLWithPath: "\(venvBin)/\(name)")
-        }
-        for dir in (env["PATH"] ?? "/usr/local/bin:/usr/bin:/opt/homebrew/bin").split(separator: ":") {
-            for name in ["hf", "huggingface-cli"] where fileExists("\(dir)/\(name)") {
-                return URL(fileURLWithPath: "\(dir)/\(name)")
-            }
-        }
-        return nil
-    }
-
-    /// Download args for the resolved tool. `hf download <repo>` (new CLI)
-    /// and `huggingface-cli download <repo>` (legacy) share the verb.
-    public static func downloadArgs(repo: String) -> [String] {
-        ["download", repo]
-    }
-
-    /// Validate then pull. `onProgress` receives raw CLI progress lines.
+    /// Validate, then pull the repo's weights into the local models dir via the
+    /// pure-Swift `HubDownloader` (no Python `hf` CLI). `onProgress` receives
+    /// status lines; fine-grained progress is read off disk by the download
+    /// manager. Cancellable via the enclosing Task.
     public static func pull(repo: String,
                             validating: Bool = true,
                             session: URLSession = .shared,
@@ -98,42 +75,8 @@ public enum ModelDownloader {
             let kind = try await validate(repo: repo, session: session)
             guard kind.loadable else { throw DownloadError.notMLX(kind) }
         }
-        guard let tool = resolveDownloader() else { throw DownloadError.toolMissing }
-
-        let proc = Process()
-        proc.executableURL = tool
-        proc.arguments = downloadArgs(repo: repo)
-        // Unbuffered so the tqdm progress lines stream live (otherwise the
-        // pipe buffers and progress appears to jump 0 → 100 at the end).
-        var env = ProcessInfo.processInfo.environment
-        env["PYTHONUNBUFFERED"] = "1"
-        proc.environment = env
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { fh in
-            let chunk = fh.availableData
-            guard !chunk.isEmpty, let s = String(data: chunk, encoding: .utf8) else { return }
-            onProgress(s)
-        }
-        try proc.run()
-        // Wait for exit in a cancellable way: cancelling the enclosing Task
-        // terminates the `hf` process (so the UI's Cancel button actually
-        // stops the bytes), then we surface CancellationError.
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                DispatchQueue.global(qos: .utility).async {
-                    proc.waitUntilExit()
-                    cont.resume()
-                }
-            }
-        } onCancel: {
-            proc.terminate()
-        }
-        pipe.fileHandleForReading.readabilityHandler = nil
-        if Task.isCancelled { throw CancellationError() }
-        guard proc.terminationStatus == 0 else {
-            throw DownloadError.downloadFailed("exit \(proc.terminationStatus)")
-        }
+        let dest = CatalogStore.shared.localModelDirectory(for: repo)
+        try await HubDownloader.downloadModel(
+            repo: repo, into: dest, session: session, onProgress: onProgress)
     }
 }

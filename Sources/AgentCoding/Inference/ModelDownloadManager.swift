@@ -39,14 +39,7 @@ public final class ModelDownloadManager {
         states[repo] = .downloading(0, "Starting…")
         let total = max(1, totalBytes)
         let task = Task { [weak self] in
-            // `hf` lives in the engine venv — provision it first if needed.
-            if !EngineProvisioner.shared.isProvisioned {
-                do { try await EngineProvisioner.shared.ensureProvisioned() }
-                catch {
-                    self?.finishFailed(repo, "engine: \(error)")
-                    return
-                }
-            }
+            // Pure-Swift download (HubDownloader) — no venv to provision.
             // Determinate progress from bytes-on-disk vs the known total.
             let poller = Task { @MainActor [weak self] in
                 while !Task.isCancelled {
