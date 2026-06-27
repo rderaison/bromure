@@ -109,8 +109,28 @@ final class RemoteMenuApp {
         guard let pick = tui.menu(title: "New session — pick a profile",
                                   items: labels, footer: "Enter: boot · q: cancel") else { return }
         let name = profiles[pick]["name"] as? String ?? ""
+        // Boot window-less (-d), then hand the remote terminal straight to the
+        // new session's tmux — no need to bounce back through the list.
         let out = runSelf(["vm", "run", "--profile", name, "--detach"])
-        tui.pager(title: "New session", body: out + "\n\nPick the session from the list to attach.")
+        guard let vm = fetchVMs().first(where: { ($0["name"] as? String) == name }) else {
+            tui.pager(title: "New session", body: out + "\n\nCouldn't find the new session to attach.")
+            return
+        }
+        // Fresh boot: wait for the guest's `bromure` tmux session before handing
+        // the terminal over, otherwise `tmux attach` races the agent's setup.
+        waitForTmux(vmID: vmID(vm))
+        attach(vmID: vmID(vm))
+    }
+
+    /// Poll the guest until its `bromure` tmux session exists (or we give up).
+    private func waitForTmux(vmID: String) {
+        for _ in 0..<100 {   // up to ~20s
+            let resp = try? client.request(
+                "POST", "/vms/\(ControlClient.encodeSegment(vmID))/exec",
+                body: ["command": "tmux has-session -t bromure", "timeout": 5])
+            if resp?.status == 200, (resp?.json["exitCode"] as? Int ?? 1) == 0 { return }
+            usleep(200_000)
+        }
     }
 
     /// Hand the terminal over to the guest's tmux. Prints the required banner,

@@ -230,7 +230,8 @@ struct VMRun: ParsableCommand {
     @Option(name: .long, help: "VM RAM in GB.")
     var memory: Int?
 
-    @Flag(name: [.customShort("d"), .long], help: "Detached: boot headless, no window.")
+    @Flag(name: [.customShort("d"), .long],
+          help: "Detached: boot and return without attaching your terminal (docker-style).")
     var detach = false
 
     @Flag(name: .long, help: "Delete the profile + disk when the VM stops (ephemeral).")
@@ -239,7 +240,9 @@ struct VMRun: ParsableCommand {
     func run() throws {
         let client = ControlClient()
         try client.ensureAgentRunning()
-        var spec: [String: Any] = ["detach": detach, "rm": rm]
+        // CLI-created sessions always boot window-less — the terminal is the UI.
+        // The GUI is opt-in afterwards via `vm attach --window`.
+        var spec: [String: Any] = ["detach": true, "rm": rm]
         if let profile { spec["profile"] = profile }
         if let name { spec["name"] = name }
         if let tool { spec["tool"] = tool }
@@ -254,8 +257,35 @@ struct VMRun: ParsableCommand {
             throw ValidationError(resp.json["error"] as? String ?? "vm run failed (HTTP \(resp.status))")
         }
         let id = resp.json["shortId"] as? String ?? String((resp.json["id"] as? String ?? "?").prefix(12))
+        let fullID = (resp.json["id"] as? String) ?? id
         let nm = resp.json["name"] as? String ?? "?"
-        print("Started VM \(nm) (\(id))\(detach ? " [detached]" : "").")
+
+        // -d, or no terminal to hand over (piped/scripted) → boot-and-return.
+        if detach || isatty(STDIN_FILENO) == 0 {
+            print("Started VM \(nm) (\(id))\(detach ? " [detached]" : "").")
+            return
+        }
+
+        // Default (docker-style): hand the terminal to the VM's tmux session.
+        // Wait for the guest agent to bring `bromure` up first — on a fresh boot
+        // the session doesn't exist the instant the VM registers.
+        FileHandle.standardError.write(Data(
+            "Started VM \(nm) (\(id)). Attaching… (Ctrl-b d to detach, leaves it running)\n".utf8))
+        Self.waitForTmux(client: client, vm: fullID)
+        try InteractiveExec.run(client: client, vm: fullID, command: "tmux attach -t bromure")
+    }
+
+    /// Poll the guest until its `bromure` tmux session exists (or we give up).
+    /// `tmux attach` to a missing session exits immediately, so without this the
+    /// attach would race the agent's session setup on a cold boot.
+    private static func waitForTmux(client: ControlClient, vm: String) {
+        for _ in 0..<100 {   // up to ~20s
+            let resp = try? client.request(
+                "POST", "/vms/\(ControlClient.encodeSegment(vm))/exec",
+                body: ["command": "tmux has-session -t bromure", "timeout": 5])
+            if resp?.status == 200, (resp?.json["exitCode"] as? Int ?? 1) == 0 { return }
+            usleep(200_000)
+        }
     }
 }
 

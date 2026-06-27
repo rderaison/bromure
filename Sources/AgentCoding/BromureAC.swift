@@ -1788,8 +1788,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let saved = profiles.first { $0.id == profile.id } ?? profile
         if spec["rm"] as? Bool == true { ephemeralProfiles.insert(saved.id) }
 
-        // 4. Boot via the shared launch path (unless already running).
-        if runningSessions[saved.id] == nil { launch(saved) }
+        // 4. Boot via the shared launch path. A headless `-d` run boots
+        //    window-less from the start (no pane is ever hosted) so no window
+        //    flashes up during boot. If the session is already running, `launch`
+        //    detaches it instead.
+        let detach = spec["detach"] as? Bool == true
+        if runningSessions[saved.id] == nil {
+            launch(saved, detached: detach)
+        } else if detach {
+            detachSession(saved.id)
+        }
 
         // 5. Wait for the VM to register (first boot can take a while).
         var ready = false
@@ -1798,10 +1806,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         guard ready else { return nil }
-
-        // 6. Detach for a headless `-d` run — the VM keeps running window-less.
-        let detach = spec["detach"] as? Bool == true
-        if detach { detachSession(saved.id) }
 
         return [
             "id": saved.id.uuidString,
@@ -3707,16 +3711,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    func launch(_ profile: Profile) {
-        // Already shown → just focus + select it.
+    /// Boot (or reveal) a profile's session. When `detached` is true the VM
+    /// boots window-less — no pane is hosted, the session runs headless from the
+    /// start (the `vm run -d` / remote-menu path), reattachable later. This is
+    /// distinct from the persistent `profile.startInBackground` setting, which
+    /// has the same effect but is a per-profile default rather than a one-shot.
+    func launch(_ profile: Profile, detached: Bool = false) {
+        // Already shown → just focus + select it (unless we were asked to detach,
+        // in which case drop the window and leave the VM running headless).
         if isAttached(profile.id) {
-            revealSession(profile.id)
+            if detached { detachSession(profile.id) } else { revealSession(profile.id) }
             return
         }
-        // Running but detached (window was closed, VM kept alive) → reattach a
-        // fresh window onto the live VM, with its tabs intact.
+        // Running but detached (window was closed, VM kept alive). Asked to
+        // detach → it already is, nothing to do. Otherwise reattach a fresh
+        // window onto the live VM, with its tabs intact.
         if let session = runningSessions[profile.id] {
-            attachWindow(to: session)
+            if !detached { attachWindow(to: session) }
             return
         }
 
@@ -3965,7 +3976,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // session lives on detached. Promote to a regular app first in case
         // we're launching from a headless/background agent.
         let win = SessionPane(profile: profile, acDelegate: self)
-        if profile.startInBackground {
+        if profile.startInBackground || detached {
             // Boots window-less: the pane binds the VZ view through boot, then
             // drops once the VM registers, leaving the session running detached.
             // Reattach via the menu-bar item or `vm attach`.
