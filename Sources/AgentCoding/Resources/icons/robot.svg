@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
+  <title>Robot menu bar template icon</title>
+  <g stroke="currentColor" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <!-- antenna -->
+    <circle cx="128" cy="42" r="17"/>
+    <path d="M128 59v24"/>
+    <path d="M111 88h34"/>
+
+    <!-- ears -->
+    <path d="M54 117h-5c-8 0-14 6-14 14v25c0 8 6 14 14 14h5"/>
+    <path d="M202 117h5c8 0 14 6 14 14v25c0 8-6 14-14 14h-5"/>
+
+    <!-- head outer and face -->
+    <rect x="54" y="92" width="148" height="94" rx="37"/>
+    <rect x="77" y="114" width="102" height="48" rx="20"/>
+
+    <!-- eyes -->
+    <path d="M104 131v16"/>
+    <path d="M152 131v16"/>
+
+    <!-- code mark -->
+    <path d="M93 204l-25 16 25 16"/>
+    <path d="M163 204l25 16-25 16"/>
+    <path d="M139 199l-22 44"/>
+  </g>
+</svg>

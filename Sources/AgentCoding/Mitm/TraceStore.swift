@@ -33,6 +33,11 @@ public final class TraceStore {
     /// disk write completes. nil = no streaming.
     public var uploader: TraceUploader?
 
+    /// Fired on the main actor for every *conversation* request recorded (a
+    /// model API call) — the host-side "this agent is working right now" signal,
+    /// keyed by profile id. The UI uses it to animate the sidebar's thinking dots.
+    @MainActor public var onConversationActivity: ((UUID) -> Void)?
+
     private let rootDir: URL
     private let queue = DispatchQueue(label: "io.bromure.ac.trace-store",
                                       qos: .utility)
@@ -82,6 +87,15 @@ public final class TraceStore {
                 self.recent.insert(record, at: 0)
                 if self.recent.count > self.ringCapacity {
                     self.recent.removeLast(self.recent.count - self.ringCapacity)
+                }
+                // "Agent is working" = any request to a known model host (or a
+                // parsed conversation). Using the host (not just `isConversation`,
+                // which needs body capture at a high trace level) keeps the
+                // signal working at the default level too.
+                let host = record.host.lowercased()
+                if record.isConversation
+                    || TraceLevel.aiHosts.contains(where: { host.contains($0) }) {
+                    self.onConversationActivity?(record.profileID)
                 }
             }
         }

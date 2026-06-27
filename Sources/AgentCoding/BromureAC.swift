@@ -383,7 +383,243 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// One *attached* window per profile. Each window holds N tabs, all
     /// rendering the same VM. Note this is only the windows currently on
     /// screen — a running VM with no window lives in `runningSessions`.
+    ///
+    /// Holds only *popped-out* single-VM windows now; panes shown in the
+    /// shared `unifiedWindow` are tracked by `panes` instead. Most lookups go
+    /// through `pane(for:)`, which spans both hosts.
     private var profileWindows: [Profile.ID: TabbedSessionWindow] = [:]
+
+    /// The shared multi-VM window (unpeel-style: a source-list of every running
+    /// VM with its tabs nested, and one framebuffer stage). Created lazily on
+    /// the first non-detached launch. Popped-out VMs leave it for their own
+    /// `TabbedSessionWindow`.
+    var unifiedWindow: UnifiedSessionWindow?
+
+    /// Every `SessionPane` currently displayed somewhere — in `unifiedWindow`
+    /// or a popped-out `profileWindows` entry. This is the dispatch target for
+    /// guest events (tab list, IP, shortcuts, tint), so it works regardless of
+    /// which window draws the pane. nil for a detached/headless session.
+    private var panes: [Profile.ID: SessionPane] = [:]
+
+    /// Per-VM auto-clear timers for the `thinking` animation (re-armed on each
+    /// model conversation request, fires a few seconds after the last one).
+    private var thinkingClearTasks: [Profile.ID: Task<Void, Never>] = [:]
+
+    /// The pane currently showing `id`'s VM, in whichever window hosts it.
+    func pane(for id: Profile.ID) -> SessionPane? { panes[id] }
+
+    /// Register a pane as the live UI surface for its profile. Called by every
+    /// host (the unified window and popped-out windows) when it starts drawing
+    /// a pane.
+    func registerPane(_ pane: SessionPane) {
+        panes[pane.profile.id] = pane
+    }
+
+    /// Drop a pane from the dispatch registry — but only if it's still the
+    /// registered one (a re-host may have already replaced it).
+    func unregisterPane(_ id: Profile.ID, ifMatches pane: SessionPane? = nil) {
+        if let pane, panes[id] !== pane { return }
+        panes.removeValue(forKey: id)
+    }
+
+    /// True when the profile has a visible UI surface (a hosted pane), whether
+    /// in the unified window or a popped-out one. Replaces the old
+    /// `profileWindows[id] != nil` "is it on screen" check.
+    func isAttached(_ id: Profile.ID) -> Bool { panes[id] != nil }
+
+    /// The window currently drawing `id`'s pane (unified or popped-out), if any.
+    func hostWindow(for id: Profile.ID) -> NSWindow? {
+        panes[id]?.host?.paneHostWindow
+    }
+
+    /// Lazily build the shared unified (multi-VM) window.
+    func ensureUnifiedWindow() -> UnifiedSessionWindow {
+        if let w = unifiedWindow { return w }
+        let w = UnifiedSessionWindow(acDelegate: self)
+        w.delegate = self
+        w.center()
+        w.isReleasedWhenClosed = false
+        unifiedWindow = w
+        return w
+    }
+
+    /// Bring the profile's host window forward and select its pane.
+    func revealSession(_ id: Profile.ID) {
+        guard let pane = panes[id], let host = pane.host?.paneHostWindow else { return }
+        (host as? UnifiedSessionWindow)?.select(profileID: id)
+        NSApp.setActivationPolicy(.regular)
+        host.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Detach a profile's pane to headless — the VM keeps running, the UI goes
+    /// away. Snapshots the tab bar so a later reattach rebuilds it. This is the
+    /// "close the window but keep the agent" path of the persistent-agent model.
+    func detachSession(_ id: Profile.ID) {
+        guard let pane = panes[id] else { return }
+        if runningSessions[id] != nil {
+            runningSessions[id]?.lastTabsSnapshot = pane.snapshotTabs()
+        }
+        pane.vmView.virtualMachine = nil
+        pane.keyboardBridge = nil
+        pane.sandbox = nil
+        if let unified = pane.host as? UnifiedSessionWindow {
+            unified.removePane(id)
+        } else if let win = profileWindows[id] {
+            profileWindows.removeValue(forKey: id)
+            win.orderOut(nil)
+        }
+        unregisterPane(id, ifMatches: pane)
+        renderPicker()
+        updateStatusMenu()
+        updateActivationPolicy()
+    }
+
+    /// Close a VM from the sidebar's × / last-tab close: resolve the profile's
+    /// close action (prompting for `.ask`) and either detach (background) or
+    /// stop the VM (suspend / shutdown).
+    func closeVMFromSidebar(_ id: Profile.ID) {
+        guard let pane = panes[id] else { return }
+        let pref = pane.profile.closeAction
+        let action: Profile.CloseAction
+        if pref == .ask {
+            guard let chosen = promptCloseAction(forName: pane.profile.name) else { return }
+            action = chosen
+        } else {
+            action = pref
+        }
+        switch action {
+        case .background:
+            detachSession(id)
+        case .suspend, .shutdown:
+            requestStopSession(id, action: action)
+        case .ask:
+            break
+        }
+    }
+
+    /// Debug: render the unified window's content to a PNG (the app drawing
+    /// itself — no Screen Recording permission needed) and dump subview frames.
+    /// Lets the layout be verified headlessly.
+    func debugRenderUnifiedWindow(to path: String) -> [String: Any] {
+        guard let win = unifiedWindow, let contentView = win.contentView else {
+            return ["error": "no unified window"]
+        }
+        // Render the whole window frame view (incl. titlebar + toolbar), not just
+        // the content area, so the toolbar controls are captured too.
+        let content = contentView.superview ?? contentView
+        func frameDict(_ v: NSView) -> [String: Any] {
+            ["x": Int(v.frame.minX), "y": Int(v.frame.minY),
+             "w": Int(v.frame.width), "h": Int(v.frame.height)]
+        }
+        var dump: [String: Any] = [
+            "windowVisible": win.isVisible,
+            "windowFrame": ["w": Int(win.frame.width), "h": Int(win.frame.height)],
+            "content": frameDict(content),
+            "subviews": content.subviews.map { sv -> [String: Any] in
+                var d = frameDict(sv)
+                d["class"] = String(describing: type(of: sv))
+                return d
+            },
+        ]
+        let bounds = content.bounds
+        if bounds.width > 0, bounds.height > 0,
+           let rep = content.bitmapImageRepForCachingDisplay(in: bounds) {
+            content.cacheDisplay(in: bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try? data.write(to: URL(fileURLWithPath: path))
+                dump["png"] = path
+                dump["pngBytes"] = data.count
+            }
+        }
+        return dump
+    }
+
+    /// AppleScript bridge: sessions currently on screen (hosted pane whose
+    /// window is visible), spanning the unified window + any pop-outs.
+    func scriptVisibleSessions() -> [(profileID: UUID, name: String, windowID: Int, visible: Bool)] {
+        runningSessions.values.compactMap { s in
+            guard let host = hostWindow(for: s.profileID), host.isVisible else { return nil }
+            return (s.profileID, s.profile.name, host.windowNumber, true)
+        }
+    }
+
+    /// AppleScript bridge: close the on-screen session for a profile. Returns
+    /// false when nothing is shown for it.
+    @discardableResult
+    func scriptCloseSession(_ id: Profile.ID) -> Bool {
+        guard isAttached(id) else { return false }
+        closeVMFromSidebar(id)
+        return true
+    }
+
+    /// File browser opened from the unified window's header (per selected VM).
+    func openFileBrowserForUnified(_ id: Profile.ID) {
+        guard let pane = panes[id] else { return }
+        openFileBrowser(profile: pane.profile)
+    }
+
+    /// Profiles not currently running — the "New session" dropdown's contents.
+    func startableProfileList() -> [(id: Profile.ID, name: String, accentHex: String)] {
+        profiles
+            .filter { runningSessions[$0.id] == nil }
+            .map { (id: $0.id, name: $0.name, accentHex: $0.color.hexInUI) }
+    }
+
+    /// Boot (or focus) the profile with this id — wired to the dropdown.
+    func startProfile(_ id: Profile.ID) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        launch(profile)
+    }
+
+    /// The MITM proxy saw a model *conversation* request for this profile — the
+    /// agent is working. Flip the VM's `thinking` flag (driving the animated
+    /// sidebar dots) and re-arm a timer to clear it once calls stop.
+    func noteAgentActivity(_ id: Profile.ID) {
+        pane(for: id)?.model.thinking = true
+        thinkingClearTasks[id]?.cancel()
+        thinkingClearTasks[id] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            self?.pane(for: id)?.model.thinking = false
+            self?.thinkingClearTasks[id] = nil
+        }
+    }
+
+    /// Pop a VM out of the unified window into its own standalone window. The
+    /// pane keeps the same VM (no teardown); it just changes host. Implemented
+    /// in the pop-out phase.
+    func popOutVM(_ id: Profile.ID) {
+        guard let pane = panes[id], pane.host is UnifiedSessionWindow else { return }
+        // Move the pane's view out of the unified window first (keeps the VM +
+        // dispatch registration; just unmounts the container view).
+        unifiedWindow?.removePane(id)
+        let win = TabbedSessionWindow(adopting: pane, acDelegate: self)
+        win.delegate = self
+        win.center()
+        win.isReleasedWhenClosed = false
+        profileWindows[id] = win
+        registerPane(pane)   // host changed; keep dispatch pointed at this pane
+        NSApp.setActivationPolicy(.regular)
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        updateStatusMenu()
+    }
+
+    /// Re-dock a popped-out VM back into the unified window.
+    func redockVM(_ id: Profile.ID) {
+        guard let win = profileWindows[id] else { return }
+        let pane = win.pane
+        profileWindows.removeValue(forKey: id)
+        win.releasePaneForRedock()
+        win.close()
+        let unified = ensureUnifiedWindow()
+        unified.addPane(pane)
+        NSApp.setActivationPolicy(.regular)
+        unified.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        updateStatusMenu()
+    }
 
     /// VM sessions that are *running*, keyed by profile id — the canonical
     /// owner of each `UbuntuSandboxVM`. Distinct from `profileWindows`
@@ -469,6 +705,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     lazy var mitmEngine: MitmEngine? = {
         do {
             let e = try MitmEngine()
+            // The proxy's conversation-request signal drives the sidebar's
+            // animated "thinking" dots.
+            e.traceStore.onConversationActivity = { [weak self] pid in
+                self?.noteAgentActivity(pid)
+            }
             return e
         }
         catch {
@@ -622,21 +863,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let budget = max(8, HostMemory.unifiedMemoryGB() - 16)
         let pid = profile.id
         let label = models.first.map { CatalogStore.shared.resolve($0.repo)?.name ?? $0.repo } ?? ""
-        profileWindows[pid]?.model.engineStatus = .starting("Starting local engine…")
+        pane(for: pid)?.model.engineStatus = .starting("Starting local engine…")
         Task.detached(priority: .userInitiated) {
             do {
                 try await InferenceService.shared.ensureRunning(
                     models: models, memoryBudgetGB: budget,
                     onProvisionProgress: { _ in
                         Task { @MainActor in
-                            self.profileWindows[pid]?.model.engineStatus = .starting("Setting up engine…")
+                            self.pane(for: pid)?.model.engineStatus = .starting("Setting up engine…")
                         }
                     })
-                await MainActor.run { self.profileWindows[pid]?.model.engineStatus = .ready(label) }
+                await MainActor.run { self.pane(for: pid)?.model.engineStatus = .ready(label) }
                 SupplyChainLog.shared.record(
                     "[inference] engine serving \(models.map(\.repo).joined(separator: ", "))")
             } catch {
-                await MainActor.run { self.profileWindows[pid]?.model.engineStatus = .failed("\(error)") }
+                await MainActor.run { self.pane(for: pid)?.model.engineStatus = .failed("\(error)") }
                 SupplyChainLog.shared.record("[inference] engine start failed: \(error)")
             }
         }
@@ -1024,12 +1265,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         server.onListSessions = { [weak self] in
             guard let self else { return [] }
             return self.runningSessions.values.map { s in
-                let win = self.profileWindows[s.profileID]
+                let host = self.hostWindow(for: s.profileID)
                 return ACAutomationSessionInfo(
                     profileID: s.profileID.uuidString,
                     profileName: s.profile.name,
-                    windowID: win?.windowNumber ?? 0,
-                    visible: win?.isVisible ?? false
+                    windowID: host?.windowNumber ?? 0,
+                    visible: host?.isVisible ?? false
                 )
             }
         }
@@ -1054,6 +1295,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "sessionCount": self.runningSessions.count,
                 "hasBaseImage": self.imageManager.hasBaseImage,
             ]
+        }
+        server.onUIShot = { [weak self] path in
+            // The route already dispatches us onto main via `DispatchQueue.main.sync`,
+            // so assume isolation rather than nesting another sync (which deadlocks).
+            MainActor.assumeIsolated { self?.debugRenderUnifiedWindow(to: path) ?? ["error": "no app"] }
         }
 
         server.onGetShellConnection = { [weak self] idOrName in
@@ -1271,7 +1517,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "name": s.profile.name,
                 "tool": s.profile.tool.rawValue,
                 "state": stateStr,
-                "attached": profileWindows[s.profileID] != nil,
+                "attached": isAttached(s.profileID),
                 "uptimeSeconds": Int(now.timeIntervalSince(s.startedAt)),
                 "ip": s.lastIP ?? "",
                 "mounts": s.profile.folderPaths,
@@ -1390,7 +1636,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // 6. Detach for a headless `-d` run — the VM keeps running window-less.
         let detach = spec["detach"] as? Bool == true
-        if detach, let win = profileWindows[saved.id] { win.close() }
+        if detach { detachSession(saved.id) }
 
         return [
             "id": saved.id.uuidString,
@@ -1403,26 +1649,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @MainActor private func automationCreateSession(profileNameOrID: String) async -> ACAutomationSessionInfo? {
         guard let profile = profileByNameOrID(profileNameOrID) else { return nil }
-        // If a session is already open for this profile, just return its info.
-        if let existing = profileWindows[profile.id] {
+        // If a session is already shown for this profile, just return its info.
+        if isAttached(profile.id) {
+            let host = hostWindow(for: profile.id)
             return ACAutomationSessionInfo(
                 profileID: profile.id.uuidString,
                 profileName: profile.name,
-                windowID: existing.windowNumber,
-                visible: existing.isVisible
+                windowID: host?.windowNumber ?? 0,
+                visible: host?.isVisible ?? false
             )
         }
         launch(profile)
-        // launch() is fire-and-forget; the window appears asynchronously
-        // when the VM pool warms up. Wait up to 30s for the window to
-        // register so the API caller gets a meaningful response.
+        // launch() is fire-and-forget; the pane appears asynchronously when the
+        // VM pool warms up. Wait up to 30s for it to register so the API caller
+        // gets a meaningful response.
         for _ in 0..<300 {
-            if let win = profileWindows[profile.id] {
+            if isAttached(profile.id) {
+                let host = hostWindow(for: profile.id)
                 return ACAutomationSessionInfo(
                     profileID: profile.id.uuidString,
                     profileName: profile.name,
-                    windowID: win.windowNumber,
-                    visible: win.isVisible
+                    windowID: host?.windowNumber ?? 0,
+                    visible: host?.isVisible ?? false
                 )
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -1432,14 +1680,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @MainActor private func automationDestroySession(profileNameOrID: String) async -> Bool {
         guard let profile = profileByNameOrID(profileNameOrID) else { return false }
-        guard let win = profileWindows[profile.id] else { return false }
-        win.performClose(nil)
+        guard isAttached(profile.id) else { return false }
+        closeVMFromSidebar(profile.id)
         // Wait briefly for the close to take effect.
         for _ in 0..<50 {
-            if profileWindows[profile.id] == nil { return true }
+            if !isAttached(profile.id) { return true }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        return profileWindows[profile.id] == nil
+        return !isAttached(profile.id)
     }
 
     @MainActor private func profileByNameOrID(_ key: String) -> Profile? {
@@ -1683,9 +1931,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Three-way prompt for `.ask` profiles (+ Cancel). Returns the chosen
     /// action, or nil on cancel.
     @MainActor private func promptCloseAction(for session: TabbedSessionWindow) -> Profile.CloseAction? {
+        promptCloseAction(forName: session.profile.name)
+    }
+
+    @MainActor private func promptCloseAction(forName name: String) -> Profile.CloseAction? {
         let alert = NSAlert()
         alert.messageText = String(
-            format: NSLocalizedString("Close “%@”?", comment: ""), session.profile.name)
+            format: NSLocalizedString("Close “%@”?", comment: ""), name)
         alert.informativeText = NSLocalizedString(
             "Run in the background keeps the VM running so you can reattach later. Suspend saves its state to disk. Shut down powers it off.",
             comment: "")
@@ -1827,7 +2079,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             fileBrowserWindows[key] = nil
             return
         }
+        if win === unifiedWindow {
+            // Closing the shared window detaches every hosted VM to the
+            // background (persistent-agent model): the VMs keep running and are
+            // reattachable via the menu bar / `vm attach`. Per-VM stop happens
+            // via the sidebar's × control, not by closing the whole window.
+            let ids = panes.values
+                .filter { $0.host === unifiedWindow }
+                .map { $0.profile.id }
+            for id in ids { detachSession(id) }
+            updateActivationPolicy()
+            return
+        }
         if let session = win as? TabbedSessionWindow {
+            // Re-dock in flight: the pane was already handed back to the unified
+            // window. Don't touch the VM — just forget the popped-out window.
+            if session.redocking {
+                profileWindows.removeValue(forKey: session.profile.id)
+                updateActivationPolicy()
+                return
+            }
             // Always tear down the window UI + snapshot tabs (so a reattaching
             // window rebuilds the bar against the kittys still alive in the
             // guest). Then act on the VM per the resolved close action.
@@ -1839,6 +2110,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             session.keyboardBridge = nil
             session.sandbox = nil
             profileWindows.removeValue(forKey: id)
+            unregisterPane(id, ifMatches: session.pane)
             // `.background` (and a programmatic close, closeIntent == nil) leave
             // the VM running, detached. `.suspend` / `.shutdown` stop it via the
             // explicit stop path. `.ask` was already resolved in
@@ -2197,8 +2469,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let privateIDs = Set(profiles.filter { $0.privateMode }.map { $0.id })
         BACEventEmitter.shared.setPrivateProfiles(privateIDs)
         let enrolled = BACEnrollmentStore.load() != nil
-        for (profileID, window) in profileWindows {
-            window.model.streamingActive = enrolled && !privateIDs.contains(profileID)
+        for (profileID, pane) in panes {
+            pane.model.streamingActive = enrolled && !privateIDs.contains(profileID)
         }
     }
 
@@ -2295,11 +2567,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         runningSessions[profile.id]?.fusionEngaged = engaged
         // Keep the attached window's title-bar toggle in sync (e.g. when the
         // change came from the CLI rather than the toggle itself).
-        profileWindows[profile.id]?.model.fusionEngaged = engaged
+        pane(for: profile.id)?.model.fusionEngaged = engaged
     }
 
     func openFileBrowser(for window: TabbedSessionWindow) {
-        let profile = window.profile
+        openFileBrowser(profile: window.profile)
+    }
+
+    func openFileBrowser(profile: Profile) {
         if let win = fileBrowserWindows[profile.id] {
             win.makeKeyAndOrderFront(nil)
             return
@@ -2468,7 +2743,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// are running). Idempotent; safe to call from anywhere.
     private func renderPicker() {
         guard let win = mainWindow else { return }
-        let runningIDs = Set(profileWindows.keys)
+        let runningIDs = Set(panes.keys)
         // Cheap fs-stat per profile — the compromised badge is only
         // present when the marker file is on disk; profile.json on
         // its own can't tell us this.
@@ -2657,7 +2932,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             baseImageBuildDate: buildDate,
             profileDiskURL: store.diskURL(for: editing),
             profileHomeURL: store.homeDirectory(for: editing),
-            isRunning: profileWindows[editing.id] != nil,
+            isRunning: isAttached(editing.id),
             onResetDisk: { [weak self] in self?.resetProfile(editing) },
             onResetHome: { [weak self] in self?.resetHomeProfile(editing) }
         )
@@ -2798,7 +3073,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // anything that's baked into the booted VM or its host home
         // dir. Without this, settings appear to "not stick" until the
         // user closes and reopens the session.
-        if editing != nil, let win = profileWindows[profile.id] {
+        if editing != nil, let win = pane(for: profile.id) {
             let runningProfile = win.profile
             win.applyLiveProfileUpdates(profile)
             // Push env vars, credentials (wire-swap map + guest-side
@@ -2997,7 +3272,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// and the common file/header credentials do not.
     private func applyLiveSessionRefresh(from old: Profile, to new: Profile,
                                          terminalDefaults: TerminalAppDefaults,
-                                         window win: TabbedSessionWindow) {
+                                         window win: SessionPane) {
         // Fusion config can change without tripping the session-refresh guard
         // below (e.g. editing legs/judge), so reconcile it first and
         // unconditionally. Engagement is the user's per-session choice via the
@@ -3085,7 +3360,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// alone — the next time it cold-boots it'll inherit the new
     /// values from the saved profile JSON.
     @MainActor
-    private func promptRestartForChanges(items: [String], window: TabbedSessionWindow) {
+    private func promptRestartForChanges(items: [String], window: SessionPane) {
         let alert = NSAlert()
         alert.messageText = String(
             format: NSLocalizedString(
@@ -3100,7 +3375,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.alertStyle = .informational
         alert.addButton(withTitle: NSLocalizedString("Restart Now…", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
-        alert.beginSheetModal(for: window) { [weak self, weak window] response in
+        guard let host = window.host?.paneHostWindow else {
+            // No window to anchor a sheet (headless) — fall back to a modal.
+            if alert.runModal() == .alertFirstButtonReturn { requestReboot(for: window) }
+            return
+        }
+        alert.beginSheetModal(for: host) { [weak self, weak window] response in
             guard response == .alertFirstButtonReturn,
                   let self, let window else { return }
             self.requestReboot(for: window)
@@ -3129,7 +3409,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func resetProfile(_ profile: Profile) {
-        if profileWindows[profile.id] != nil {
+        if runningSessions[profile.id] != nil {
             showRunningRefusal(profile: profile, what: "system disk")
             return
         }
@@ -3161,7 +3441,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// `resetProfile`: system layer survives, but everything personal
     /// the user accumulated under /home/ubuntu is gone.
     private func resetHomeProfile(_ profile: Profile) {
-        if profileWindows[profile.id] != nil {
+        if runningSessions[profile.id] != nil {
             showRunningRefusal(profile: profile, what: "home folder")
             return
         }
@@ -3228,11 +3508,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func launch(_ profile: Profile) {
-        // Already attached → just focus the window.
-        if let existing = profileWindows[profile.id] {
-            NSApp.setActivationPolicy(.regular)
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+        // Already shown → just focus + select it.
+        if isAttached(profile.id) {
+            revealSession(profile.id)
             return
         }
         // Running but detached (window was closed, VM kept alive) → reattach a
@@ -3481,23 +3759,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "[mitm] session launch for '\(profile.name)': MITM ENGINE IS NIL — nothing will be wired\n".utf8))
         }
 
-        // First session for this profile — create the tabbed window with
-        // its single shared VM, then queue the first tab. Promote to a regular
-        // app first in case we're launching from a headless/background agent.
-        let win = TabbedSessionWindow(profile: profile, acDelegate: self)
-        win.delegate = self
-        win.center()
-        win.isReleasedWhenClosed = false
-        profileWindows[profile.id] = win
+        // Create the pane that draws this VM. It's hosted in the shared unified
+        // window (the unpeel-style source-list of every running VM) unless the
+        // profile starts in the background — then it boots window-less and the
+        // session lives on detached. Promote to a regular app first in case
+        // we're launching from a headless/background agent.
+        let win = SessionPane(profile: profile, acDelegate: self)
         if profile.startInBackground {
-            // Start detached: build the window (the boot flow binds the VZ view
-            // through it) but never show it, then close it once the VM registers
-            // so the session runs in the background. Reattach via the menu-bar
-            // item or `vm attach`.
-            detachAfterBoot(profile.id)
+            // Boots window-less: the pane binds the VZ view through boot, then
+            // drops once the VM registers, leaving the session running detached.
+            // Reattach via the menu-bar item or `vm attach`.
         } else {
+            let unified = ensureUnifiedWindow()
+            unified.addPane(win)
             NSApp.setActivationPolicy(.regular)
-            win.makeKeyAndOrderFront(nil)
+            unified.makeKeyAndOrderFront(nil)
         }
         // Newly-registered window — sync its streaming indicator
         // with the current enrollment + privateMode state.
@@ -3588,7 +3864,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             } catch {
                 self.showError(error, message: "Couldn't start the VM for “\(profile.name)”.")
-                win.close()
+                self.unifiedWindow?.removePane(profile.id)
+                self.unregisterPane(profile.id, ifMatches: win)
                 return
             }
             // Register the per-VM vsock listeners on the freshly-booted
@@ -3647,7 +3924,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // shared NAT path is likely wedged — offer to repair via
             // the same NetworkHealer the browser uses.
             if profile.networkMode == .nat {
-                self.startNetworkHealerWatch(profile: profile, window: win)
+                self.startNetworkHealerWatch(profile: profile, pane: win)
             }
         }
     }
@@ -3659,27 +3936,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// session against a fresh VM.
     @MainActor
     private func startNetworkHealerWatch(profile: Profile,
-                                         window: TabbedSessionWindow) {
-        Task { @MainActor [weak self, weak window] in
+                                         pane: SessionPane) {
+        Task { @MainActor [weak self, weak pane] in
             // 25 polls × 1s = 25s window. xinitrc reports the address
             // on a 5s loop, so we expect it well within this budget on
             // a healthy install (typically 4-8s after boot).
             for _ in 0..<25 {
                 try? await Task.sleep(for: .seconds(1))
-                if window == nil { return }
-                if window?.model.ipAddress?.isEmpty == false { return }
+                if pane == nil { return }
+                if pane?.model.ipAddress?.isEmpty == false { return }
             }
-            guard let self, let window, window.isVisible else { return }
+            guard let self, let pane,
+                  pane.host?.paneHostWindow?.isVisible == true else { return }
             // Re-check inside the @MainActor isolation in case the IP
             // landed during the last sleep tick.
-            if window.model.ipAddress?.isEmpty == false { return }
-            await self.presentNetworkHealerPrompt(profile: profile, window: window)
+            if pane.model.ipAddress?.isEmpty == false { return }
+            await self.presentNetworkHealerPrompt(profile: profile, pane: pane)
         }
     }
 
     @MainActor
     private func presentNetworkHealerPrompt(profile: Profile,
-                                            window: TabbedSessionWindow) async {
+                                            pane: SessionPane) async {
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Network Issue", comment: "")
         alert.informativeText = NSLocalizedString(
@@ -3700,7 +3978,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Tear down the wedged session before kickstarting — the
             // VM's NIC needs a fresh DHCP exchange after the daemon
             // restart, easier from a clean boot than mid-session.
-            window.close()
+            detachSession(profile.id)
             let ok = await NetworkHealer.shared.repair(.both)
             if !ok {
                 let failed = NSAlert()
@@ -3720,29 +3998,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Continue with the broken VM — user opted out of repair.
             return
         default:
-            // Cancel: just close the wedged session.
-            window.close()
+            // Cancel: just detach the wedged session (VM keeps running).
+            detachSession(profile.id)
         }
     }
 
     /// Add another tab (= a new tmux window). Wired from the toolbar "+"
     /// button and ⌘T. The roster tick adds the pill — tmux is authoritative.
-    func spawnNewTab(in window: TabbedSessionWindow) {
-        sendCommand("new-tab", in: window)
+    func spawnNewTab(in pane: SessionPane) {
+        sendCommand("new-tab", in: pane)
     }
 
     /// Select a tab → tmux select-window at that index (index == bar position).
-    func requestSelectTab(index: Int, in window: TabbedSessionWindow) {
-        sendCommand("select-tab \(index)", in: window)
+    func requestSelectTab(index: Int, in pane: SessionPane) {
+        sendCommand("select-tab \(index)", in: pane)
     }
 
     /// Close a tab → tmux kill-window at that index.
-    func requestCloseTab(index: Int, in window: TabbedSessionWindow) {
-        sendCommand("close-tab \(index)", in: window)
+    func requestCloseTab(index: Int, in pane: SessionPane) {
+        sendCommand("close-tab \(index)", in: pane)
     }
 
-    private func sendCommand(_ command: String, in window: TabbedSessionWindow) {
-        guard let outbox = window.sandbox?.sessionDisk?.outboxDirectory else { return }
+    private func sendCommand(_ command: String, in pane: SessionPane) {
+        guard let outbox = pane.sandbox?.sessionDisk?.outboxDirectory else { return }
         let file = outbox.appendingPathComponent("cmd-\(UUID().uuidString).txt")
         try? (command + "\n").write(to: file, atomically: true, encoding: .utf8)
     }
@@ -3823,16 +4101,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @MainActor
     func handleCompromise(_ event: CompromiseEvent) {
         if compromiseAlertActive { return }
-        // The VM may be detached (window closed, VM still running). A compromise
-        // must still pause it and surface the alert, so force a reattach first
-        // — that binds a view to the live VM so the user sees the frozen frame.
-        if profileWindows[event.profileID] == nil,
+        // The VM may be detached (no pane, VM still running). A compromise must
+        // still pause it and surface the alert, so force a reattach first — that
+        // binds a view to the live VM so the user sees the frozen frame.
+        if !isAttached(event.profileID),
            let session = runningSessions[event.profileID] {
             attachWindow(to: session)
         }
-        guard let window = profileWindows[event.profileID],
+        guard let window = pane(for: event.profileID),
               let sandbox = window.sandbox,
               let vm = sandbox.vm else { return }
+        // Surface the compromised VM (select it in the unified window / bring
+        // its pop-out forward) so the frozen frame is actually on screen.
+        revealSession(event.profileID)
 
         compromiseAlertActive = true
 
@@ -3864,7 +4145,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 sandbox.sessionDisk?.markCompromised()
                 sandbox.sessionDisk?.clearSavedState()
                 vm.stop(completionHandler: { _ in })
-                window.close()
+                self.detachSession(event.profileID)
 
             case .saveForInvestigation:
                 // Pick a destination folder, then bundle (1) the disk
@@ -3892,7 +4173,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 sandbox.sessionDisk?.markCompromised()
                 sandbox.sessionDisk?.clearSavedState()
                 vm.stop(completionHandler: { _ in })
-                window.close()
+                self.detachSession(event.profileID)
 
             case .continueAnyway:
                 // User accepted the risk. Resume the VM. The proxy
@@ -4080,7 +4361,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// post-stop relaunch is a clean fresh boot, not a restore that
     /// would put us right back where we were.
     @MainActor
-    func requestReboot(for window: TabbedSessionWindow) {
+    func requestReboot(for window: SessionPane) {
         let alert = NSAlert()
         alert.messageText = String(
             format: NSLocalizedString("Reboot “%@”?", comment: ""),
@@ -4146,9 +4427,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             Task { @MainActor in
                 guard let self else { return }
                 // A user-requested reboot rebuilds the VM in the same window.
-                if let win = self.profileWindows[pid], win.rebootRequested {
-                    win.rebootRequested = false
-                    self.relaunchVM(in: win)
+                if let pane = self.pane(for: pid), pane.rebootRequested {
+                    pane.rebootRequested = false
+                    self.relaunchVM(in: pane)
                 } else {
                     // Real stop (guest poweroff, crash, or our requestStop):
                     // tear the session down and close any attached window.
@@ -4180,14 +4461,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.runningSessions[pid]?.tabs = tabs.map {
                     (index: $0.index, label: $0.label, active: $0.active)
                 }
-                self.profileWindows[pid]?.applyTabList(tabs)
+                self.pane(for: pid)?.applyTabList(tabs)
             }
         }
         sandbox.onIPUpdate = { [weak self] ip in
             Task { @MainActor in
                 guard let self else { return }
                 self.runningSessions[pid]?.lastIP = ip
-                self.profileWindows[pid]?.model.ipAddress = ip
+                self.pane(for: pid)?.model.ipAddress = ip
             }
         }
         sandbox.onShortcut = { [weak self] key in
@@ -4195,7 +4476,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // guest and bounced back because the VM held keyboard focus. Run
             // the same action the key monitor would — performACShortcut is the
             // shared sink, so the two paths can't drift. No-op when detached.
-            Task { @MainActor in self?.profileWindows[pid]?.performACShortcut(key) }
+            Task { @MainActor in self?.pane(for: pid)?.performACShortcut(key) }
         }
     }
 
@@ -4234,8 +4515,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             win.keyboardBridge = nil
             win.sandbox = nil
             profileWindows.removeValue(forKey: profileID)
+            unregisterPane(profileID, ifMatches: win.pane)
             win.orderOut(nil)
         }
+        // Drop the pane regardless of host (unified-window teardown removes its
+        // own view in `removePane`, wired in the unified-window phase).
+        unifiedWindow?.removePane(profileID)
+        unregisterPane(profileID)
         // `vm run --rm`: delete the ephemeral profile + its disk now it stopped.
         if ephemeralProfiles.remove(profileID) != nil,
            let p = profiles.first(where: { $0.id == profileID }) {
@@ -4310,7 +4596,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// live model when attached, else the last snapshot captured on detach.
     @MainActor
     private func currentTabsSnapshot(for profileID: Profile.ID) -> SessionDisk.TabsState {
-        if let win = profileWindows[profileID] { return win.snapshotTabs() }
+        if let pane = pane(for: profileID) { return pane.snapshotTabs() }
         return runningSessions[profileID]?.lastTabsSnapshot
             ?? SessionDisk.TabsState(tabs: [], activeIndex: 0)
     }
@@ -4320,44 +4606,42 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// (window closed, VM kept running) and by the control plane's attach.
     @MainActor
     func attachWindow(to session: RunningSession) {
-        // Already attached → focus.
-        if let existing = profileWindows[session.profileID] {
-            NSApp.setActivationPolicy(.regular)
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+        // Already shown somewhere → focus + select it.
+        if isAttached(session.profileID) {
+            revealSession(session.profileID)
             return
         }
         let profile = session.profile
         let sandbox = session.sandbox
-        let win = TabbedSessionWindow(profile: profile, acDelegate: self)
-        win.delegate = self
-        win.center()
-        win.isReleasedWhenClosed = false
-        profileWindows[profile.id] = win
-        win.sandbox = sandbox
+        // Build a fresh pane onto the already-running VM and host it in the
+        // shared unified window.
+        let pane = SessionPane(profile: profile, acDelegate: self)
+        pane.sandbox = sandbox
         // Bind the fresh view to the already-running VM (the guest keeps
         // rendering into the virtio framebuffer regardless of any host view).
-        win.vmView.virtualMachine = sandbox.vm
+        pane.vmView.virtualMachine = sandbox.vm
         if let dev = sandbox.socketDevice {
-            win.keyboardBridge = KeyboardBridge(
+            pane.keyboardBridge = KeyboardBridge(
                 socketDevice: dev, forcedLayout: profile.keyboardLayoutOverride)
         }
         // Rebuild the tab bar from the session's cached tmux window list; the
         // live roster keeps it current. tmux is already running in the VM, so
         // there's nothing to spawn or raise.
         if !session.tabs.isEmpty {
-            win.model.tabs = session.tabs.map { TabsModel.Tab(label: $0.label) }
-            win.model.activeIndex = session.tabs.firstIndex(where: { $0.active }) ?? 0
+            pane.model.tabs = session.tabs.map { TabsModel.Tab(label: $0.label) }
+            pane.model.activeIndex = session.tabs.firstIndex(where: { $0.active }) ?? 0
         } else {
-            win.model.tabs = [TabsModel.Tab(label: "shell")]
-            win.model.activeIndex = 0
+            pane.model.tabs = [TabsModel.Tab(label: "shell")]
+            pane.model.activeIndex = 0
         }
         // Restore display state from the registry.
-        win.model.ipAddress = session.lastIP
-        win.model.fusionConfigurable = profile.fusionConfigurable
-        win.model.fusionEngaged = session.fusionEngaged
+        pane.model.ipAddress = session.lastIP
+        pane.model.fusionConfigurable = profile.fusionConfigurable
+        pane.model.fusionEngaged = session.fusionEngaged
+        let unified = ensureUnifiedWindow()
+        unified.addPane(pane)
         NSApp.setActivationPolicy(.regular)
-        win.makeKeyAndOrderFront(nil)
+        unified.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         refreshStreamingState()
         renderPicker()
@@ -4369,7 +4653,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// at the window-show sites (`attachWindow`, the picker opener).
     @MainActor
     func updateActivationPolicy() {
-        if profileWindows.isEmpty && mainWindow == nil {
+        let hasSessionUI = (unifiedWindow?.isVisible == true) || !profileWindows.isEmpty
+        if !hasSessionUI && mainWindow == nil {
             NSApp.setActivationPolicy(.accessory)
         } else {
             NSApp.setActivationPolicy(.regular)
@@ -4385,9 +4670,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            button.image = NSImage(systemSymbolName: "shippingbox",
-                                   accessibilityDescription: "Bromure Agentic Coding")
-            button.image?.isTemplate = true
+            if let robot = BromureIcons.image("robot") {
+                let icon = robot.copy() as! NSImage
+                icon.size = NSSize(width: 18, height: 18)
+                icon.isTemplate = true
+                button.image = icon
+            } else {
+                button.image = NSImage(systemSymbolName: "shippingbox",
+                                       accessibilityDescription: "Bromure Agentic Coding")
+                button.image?.isTemplate = true
+            }
         }
         statusItem = item
         updateStatusMenu()
@@ -4406,7 +4698,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             menu.addItem(none)
         } else {
             for session in sessions {
-                let attached = profileWindows[session.profileID] != nil
+                let attached = isAttached(session.profileID)
                 let title = "\(session.profile.name)\(attached ? "" : " — detached")"
                 let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
                 header.isEnabled = false
@@ -4459,7 +4751,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// network-healer watch — both are first-launch concerns; the
     /// disk + base image version are unchanged across a reboot.
     @MainActor
-    private func relaunchVM(in win: TabbedSessionWindow) {
+    private func relaunchVM(in win: SessionPane) {
         let profile = win.profile
         // Cancel the outgoing sandbox's outbox poller explicitly. A
         // dropped Task keeps running in Swift — without this the old
@@ -4525,7 +4817,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } catch {
                 self.showError(error, message:
                     "Couldn't restart the VM for “\(profile.name)”.")
-                win.close()
+                win.host?.paneRequestsClose(win)
                 return
             }
             if let engine = self.mitmEngine, let dev = sandbox.socketDevice {

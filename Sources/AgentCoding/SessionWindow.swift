@@ -45,6 +45,11 @@ final class TabsModel {
     /// the MITM engine so the proxy hot path sees the change.
     var fusionEngaged: Bool = false
 
+    /// True while the agent is actively calling the model (driven by the MITM
+    /// proxy's conversation-request signal, auto-cleared a few seconds after the
+    /// last call). Drives the animated "thinking" dots in the sidebar.
+    var thinking: Bool = false
+
     /// Local-inference engine status for this session's title-bar badge.
     /// nil = no local model (cloud session), so the badge is hidden.
     var engineStatus: EngineStatus?
@@ -61,93 +66,76 @@ final class TabsModel {
 
 // MARK: - Window
 
-/// One window per profile, holding multiple kitty *processes inside the
-/// same VM* as macOS-native tabs in the unified titlebar. The shared
-/// VZVirtualMachineView is the contentView; tab clicks are forwarded to
-/// the in-VM agent (via the bromure-outbox channel) which raises the
-/// matching kitty window.
+/// A standalone window hosting a *single* `SessionPane` — its VM's framebuffer
+/// in the content area and that VM's tabs as a pill strip in the unified
+/// titlebar. Used as the popped-out ("detach to its own window") host and by
+/// the registration coordinator's headless scratch session. The unified
+/// multi-VM window (`UnifiedSessionWindow`) hosts panes directly instead.
+///
+/// All the per-VM state and logic lives on `pane`; this class keeps its old
+/// public surface as thin forwards so existing call sites are unchanged.
 @MainActor
-final class TabbedSessionWindow: NSWindow {
-    /// The profile the running VM was launched with. `applyLiveProfileUpdates`
-    /// rebinds this when the user saves the editor; everything in-flight
-    /// (close action, MITM lookups keyed off `profile.id`, etc.) sees the
-    /// new values without needing a restart.
-    var profile: Profile
-    let model = TabsModel()
+final class TabbedSessionWindow: NSWindow, SessionPaneHost {
+    /// The one pane this window draws. Created in `init`; owns the VZ view, the
+    /// tab model, and all tab/shortcut logic.
+    let pane: SessionPane
     weak var acDelegate: ACAppDelegate?
     private var toolbarChromeDelegate: TabsToolbarDelegate?
 
-    /// The single shared VM display — all kittys for this window render
-    /// into this view because they all live in the same X session.
-    let vmView: VZVirtualMachineView
+    // MARK: Forwards to the pane (preserve the historical public API)
 
-    /// Wraps `vmView` so we can toggle decorations (currently the
-    /// investigation-mode red frame and the suspended-VM tint) without
-    /// touching the VZ view's own layer — see the long comment in
-    /// `init` about why we don't poke VZVirtualMachineView's layer
-    /// directly.
-    private let vmContainer: NSView
+    var profile: Profile {
+        get { pane.profile }
+        set { pane.profile = newValue }
+    }
+    var model: TabsModel { pane.model }
+    var vmView: VZVirtualMachineView { pane.vmView }
+    var sandbox: UbuntuSandboxVM? {
+        get { pane.sandbox }
+        set { pane.sandbox = newValue }
+    }
+    var keyboardBridge: KeyboardBridge? {
+        get { pane.keyboardBridge }
+        set { pane.keyboardBridge = newValue }
+    }
+    var closeIntent: Profile.CloseAction? {
+        get { pane.closeIntent }
+        set { pane.closeIntent = newValue }
+    }
+    var rebootRequested: Bool {
+        get { pane.rebootRequested }
+        set { pane.rebootRequested = newValue }
+    }
+    var vmHasKeyboardFocus: Bool { pane.vmHasKeyboardFocus }
 
-    /// Red translucent overlay sat on top of the VZ framebuffer while
-    /// the VM is paused for a compromise alert. Built once, hidden by
-    /// default; the compromise handler toggles its visibility.
-    private let suspendedTintView: NSView = {
-        let v = NSView()
-        v.wantsLayer = true
-        // Apple's systemRed in 35% alpha — visible enough that the
-        // user can't miss "the framebuffer is frozen and tinted",
-        // light enough that the underlying console output is still
-        // legible for forensics.
-        v.layer?.backgroundColor = NSColor.systemRed
-            .withAlphaComponent(0.35).cgColor
-        v.translatesAutoresizingMaskIntoConstraints = false
-        v.isHidden = true
-        return v
-    }()
+    func setSuspendedTint(_ on: Bool) { pane.setSuspendedTint(on) }
+    func applyLiveProfileUpdates(_ newProfile: Profile) { pane.applyLiveProfileUpdates(newProfile) }
+    func rehydrateTabs(from state: SessionDisk.TabsState) { pane.rehydrateTabs(from: state) }
+    func snapshotTabs() -> SessionDisk.TabsState { pane.snapshotTabs() }
+    func switchTo(index: Int) { pane.switchTo(index: index) }
+    func closeTab(at index: Int) { pane.closeTab(at: index) }
+    func applyTabList(_ tabs: [(index: Int, active: Bool, label: String)]) { pane.applyTabList(tabs) }
+    @discardableResult
+    func performACShortcut(_ key: String, isRepeat: Bool = false) -> Bool {
+        pane.performACShortcut(key, isRepeat: isRepeat)
+    }
 
-    /// The single sandbox backing this whole window, set by ACAppDelegate
-    /// after the VM starts; nil while booting. The *canonical* owner is
-    /// ACAppDelegate's `runningSessions` registry (keyed by profile id) — this
-    /// is just a per-window borrow, so when the window closes/detaches its ref
-    /// drops but the registry keeps the VM alive (the persistent-agent model).
-    var sandbox: UbuntuSandboxVM?
+    /// When true, `windowWillClose` must NOT tear the VM down — the pane is
+    /// being moved back into the unified window, not closed.
+    var redocking = false
 
-    /// Keyboard-layout bridge that ferries macOS layout changes into
-    /// the guest's setxkbmap. Owned by the window so its observer
-    /// lifetime matches the VM session. nil when no socket device is
-    /// available yet.
-    var keyboardBridge: KeyboardBridge?
+    convenience init(profile: Profile, acDelegate: ACAppDelegate) {
+        self.init(adopting: SessionPane(profile: profile, acDelegate: acDelegate),
+                  acDelegate: acDelegate)
+    }
 
-    /// What `windowShouldClose` resolved from the profile's `closeAction`
-    /// (with `.ask` turned into a prompt). Read by `windowWillClose` to act on
-    /// the VM without re-prompting. nil for a programmatic close (compromise /
-    /// relaunch) — that path detaches the window UI without touching the VM.
-    var closeIntent: Profile.CloseAction?
-
-    /// When true, the next `sandbox.onStopped` shouldn't close the
-    /// window — instead, relaunch a fresh VM in the same window. Set
-    /// by the toolbar's Reboot action; cleared inside the relaunch
-    /// path. Distinguishes user-requested reboot from a real shutdown.
-    var rebootRequested: Bool = false
-
-    init(profile: Profile, acDelegate: ACAppDelegate) {
-        self.profile = profile
+    /// Adopt an existing pane (pop-out): the pane keeps its VM + tab model; only
+    /// its host window changes. The caller must have unmounted the pane's
+    /// `containerView` from its previous superview first.
+    init(adopting pane: SessionPane, acDelegate: ACAppDelegate) {
+        self.pane = pane
         self.acDelegate = acDelegate
-
-        let view = VZVirtualMachineView()
-        // capturesSystemKeys = false means macOS handles ⌘Tab, ⌘H,
-        // ⌘Space, ⌘Q etc. at the WindowServer level instead of
-        // routing them to the guest. We lose F-key forwarding into
-        // the VM, but agent-coding workflows almost never use F-keys
-        // and ⌘Tab is constant — that trade-off is the right one.
-        view.capturesSystemKeys = false
-        view.automaticallyReconfiguresDisplay = true
-        self.vmView = view
-
-        // Container has to exist before super.init so the stored
-        // property is non-nil. The constraints + child view hookup
-        // happen after super.init below.
-        self.vmContainer = NSView()
+        let profile = pane.profile
 
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
@@ -155,87 +143,39 @@ final class TabbedSessionWindow: NSWindow {
             backing: .buffered,
             defer: false
         )
+        pane.host = self
         title = profile.name
         titleVisibility = .hidden
         titlebarAppearsTransparent = false
         toolbarStyle = .unified
-        model.accentHex = profile.color.hexInUI
 
-        // Wrap the VZ view in a plain NSView container (created above
-        // pre-super.init). We apply the user's opacity to the
-        // *container's* layer, not the VZ view itself — touching
-        // VZVirtualMachineView's own wantsLayer / layer.opacity has
-        // been observed to crash AppKit's window transform animator
-        // (see the animationBehavior comment below). The container
-        // takes the layer alpha cleanly; the VZ framebuffer renders
-        // into the container at full opacity and inherits the alpha
-        // when composited. The titlebar paints separately via the
-        // window chrome and is unaffected.
-        let container = vmContainer
-        container.wantsLayer = true
-        container.layer?.backgroundColor = .clear
-        view.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(view)
-        NSLayoutConstraint.activate([
-            view.topAnchor.constraint(equalTo: container.topAnchor),
-            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-        ])
-        // Tint overlay sits ABOVE the VZ view so it composites on top
-        // of whatever the framebuffer is showing. Hidden by default;
-        // the compromise handler reveals it the moment the VM is
-        // paused so the frozen frame visibly reads as "stopped, do
-        // not trust this".
-        container.addSubview(suspendedTintView)
-        NSLayoutConstraint.activate([
-            suspendedTintView.topAnchor.constraint(equalTo: container.topAnchor),
-            suspendedTintView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            suspendedTintView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            suspendedTintView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-        ])
-        contentView = container
+        contentView = pane.containerView
 
         // Disable AppKit's default window animations. AppKit's
-        // _NSWindowTransformAnimation has been observed to over-release
-        // its block ivar inside the autorelease pool drain when the
-        // contentView is a layer-hosted VZVirtualMachineView (crash:
-        // `objc_release` from `-[NSConcretePointerArray dealloc]` on
-        // the main thread during `CA::Context::commit_transaction`).
-        // Disabling the implicit animation skips that animator path
-        // entirely. The browser sets the same flag for the same reason.
+        // _NSWindowTransformAnimation has been observed to over-release its
+        // block ivar inside the autorelease pool drain when the contentView is a
+        // layer-hosted VZVirtualMachineView. Disabling the implicit animation
+        // skips that animator path entirely.
         animationBehavior = .none
 
-        // Apply the requested opacity to the wrapper layer, not the
-        // window's alphaValue — that way only the framebuffer area
-        // (below the toolbar) blends with whatever's behind, and the
-        // titlebar / toolbar stays fully opaque. The window must
-        // still be non-opaque + clear-background for the alpha to
-        // actually composite against the desktop instead of an opaque
-        // window backing.
-        let opacity = min(1.0, max(0.3, profile.windowOpacity))
-        container.layer?.opacity = Float(opacity)
-        if opacity < 1.0 {
-            isOpaque = false
-            backgroundColor = .clear
-        }
+        applyOpacityChrome(for: profile)
 
         let delegate = TabsToolbarDelegate(
-            model: model,
+            model: pane.model,
             sharedFolderPaths: profile.folderPaths,
-            onSelect: { [weak self] in self?.switchTo(index: $0) },
-            onClose:  { [weak self] in self?.closeTab(at: $0) },
+            onSelect: { [weak self] in self?.pane.switchTo(index: $0) },
+            onClose:  { [weak self] in self?.pane.closeTab(at: $0) },
             onNew:    { [weak self] in
                 guard let self else { return }
-                self.acDelegate?.spawnNewTab(in: self)
+                self.acDelegate?.spawnNewTab(in: self.pane)
             },
             onInspectTrace: { [weak self] in
                 guard let self else { return }
-                self.acDelegate?.openTraceInspector(for: self.profile)
+                self.acDelegate?.openTraceInspector(for: self.pane.profile)
             },
             onReboot: { [weak self] in
                 guard let self else { return }
-                self.acDelegate?.requestReboot(for: self)
+                self.acDelegate?.requestReboot(for: self.pane)
             },
             onFiles: { [weak self] in
                 guard let self else { return }
@@ -243,11 +183,15 @@ final class TabbedSessionWindow: NSWindow {
             },
             onEditProfile: { [weak self] in
                 guard let self else { return }
-                self.acDelegate?.openEditorWindow(editing: self.profile)
+                self.acDelegate?.openEditorWindow(editing: self.pane.profile)
             },
             onToggleFusion: { [weak self] engaged in
                 guard let self else { return }
-                self.acDelegate?.setFusionEngaged(engaged, for: self.profile)
+                self.acDelegate?.setFusionEngaged(engaged, for: self.pane.profile)
+            },
+            onRedock: { [weak self] in
+                guard let self else { return }
+                self.acDelegate?.redockVM(self.pane.profile.id)
             })
         toolbarChromeDelegate = delegate
 
@@ -260,221 +204,67 @@ final class TabbedSessionWindow: NSWindow {
         self.toolbar = bar
     }
 
-    /// Show / hide the red tint overlay on the framebuffer. Called
-    /// by the compromise handler around the pause + alert window so
-    /// the user sees the frame is frozen and tainted, not just
-    /// happens-to-be-still.
-    func setSuspendedTint(_ on: Bool) {
-        suspendedTintView.isHidden = !on
-    }
-
-    /// Re-bind `profile` to a freshly-saved version and re-apply the
-    /// host-side window state that depends on it. Call this whenever
-    /// the user saves the profile editor while a session is open —
-    /// settings that don't affect the booted VM (window title /
-    /// tint / opacity, accent color, close-on-quit behaviour, comments)
-    /// pick up the change without a restart. Settings baked into the
-    /// VM image (memory, network, kitty font, gitconfig, env vars,
-    /// shared folders, …) are out of reach here; the caller is
-    /// responsible for prompting the user to restart for those.
-    func applyLiveProfileUpdates(_ newProfile: Profile) {
-        profile = newProfile
-
-        title = newProfile.name
-        model.accentHex = newProfile.color.hexInUI
-
-        let opacity = min(1.0, max(0.3, newProfile.windowOpacity))
-        vmContainer.layer?.opacity = Float(opacity)
+    /// Apply the profile's window opacity to the chrome. The framebuffer alpha
+    /// itself lives on the pane's container layer; this only flips the window
+    /// to non-opaque/clear so that alpha composites against the desktop rather
+    /// than an opaque backing.
+    private func applyOpacityChrome(for profile: Profile) {
+        let opacity = min(1.0, max(0.3, profile.windowOpacity))
         if opacity < 1.0 {
             isOpaque = false
             backgroundColor = .clear
         } else {
-            // Restore the standard opaque chrome so the framebuffer
-            // doesn't keep blending with the desktop after the user
-            // dialled opacity back to 1.0.
             isOpaque = true
             backgroundColor = nil
         }
     }
 
-    /// Has a populated tmux window list been seen yet this session. Until it
-    /// has, an empty list means "tmux not up yet" (don't power off), not "all
-    /// tabs closed".
-    private var sawTabList = false
-
-    /// Rebuild the tab bar from a saved-state snapshot on restore so pills show
-    /// instantly. The resumed VM's tmux session still holds its windows, so the
-    /// next roster tick (`applyTabList`) reconciles this to the truth.
-    func rehydrateTabs(from state: SessionDisk.TabsState) {
-        model.tabs = state.tabs.map { TabsModel.Tab(label: $0.label, id: $0.id) }
-        model.activeIndex = max(0, min(state.activeIndex, model.tabs.count - 1))
+    /// Hand the pane back so it can be re-mounted in the unified window. Unmounts
+    /// the framebuffer container and detaches host ownership; the subsequent
+    /// `close()` is guarded by `redocking` so the VM isn't torn down.
+    func releasePaneForRedock() {
+        redocking = true
+        if pane.containerView.superview != nil { pane.containerView.removeFromSuperview() }
+        if pane.host === self { pane.host = nil }
+        contentView = NSView()
     }
 
-    /// Capture the current tab model into a snapshot for persistence.
-    func snapshotTabs() -> SessionDisk.TabsState {
-        SessionDisk.TabsState(
-            tabs: model.tabs.map {
-                SessionDisk.TabSnapshot(id: $0.id, label: $0.label)
-            },
-            activeIndex: model.activeIndex
-        )
+    // MARK: - SessionPaneHost
+
+    var paneHostWindow: NSWindow? { self }
+
+    func paneRequestsClose(_ pane: SessionPane) {
+        // Last-tab ⌘W / relaunch failure: defer to the regular performClose
+        // pipeline so `windowShouldClose` reads the profile's `closeAction`.
+        performClose(nil)
     }
 
-    /// Select a tab → tmux select-window. tmux's window index equals the bar
-    /// position (base-index 0 + renumber-windows on), so the array index is the
-    /// target. Highlight optimistically; the next roster tick confirms.
-    func switchTo(index: Int) {
-        guard model.tabs.indices.contains(index) else { return }
-        model.activeIndex = index
-        acDelegate?.requestSelectTab(index: index, in: self)
+    func paneDidUpdateProfile(_ pane: SessionPane) {
+        title = pane.profile.name
+        applyOpacityChrome(for: pane.profile)
     }
 
-    /// Close a tab → tmux kill-window. The roster removes the pill. Closing the
-    /// last tab ends the session, so route through the profile's close-action
-    /// pipeline (suspend / background / shutdown).
-    func closeTab(at index: Int) {
-        guard model.tabs.indices.contains(index) else { return }
-        acDelegate?.requestCloseTab(index: index, in: self)
-        if model.tabs.count <= 1 {
-            performClose(nil)
-        }
-    }
+    // MARK: - Shortcut interception
 
-    /// Mirror the guest's tmux window list as the tab bar. This is the WHOLE
-    /// tab model now — tmux is authoritative, so there's no liveness guessing,
-    /// grace periods, or reaping. Pill objects are reused by position so
-    /// SwiftUI keeps stable row identity (no flicker).
-    func applyTabList(_ tabs: [(index: Int, active: Bool, label: String)]) {
-        if rebootRequested { return }
-        guard !tabs.isEmpty else {
-            // tmux is gone — the last window was closed (or the VM is shutting
-            // down). Only act once we've seen a populated list this session, so
-            // a still-booting VM (tmux not up yet) isn't powered off early.
-            if sawTabList {
-                acDelegate?.requestStopSession(profile.id, action: .shutdown)
-            }
-            return
-        }
-        sawTabList = true
-        if model.tabs.count > tabs.count {
-            model.tabs.removeLast(model.tabs.count - tabs.count)
-        }
-        while model.tabs.count < tabs.count {
-            model.tabs.append(TabsModel.Tab(label: tabs[model.tabs.count].label))
-        }
-        for (i, t) in tabs.enumerated() where model.tabs[i].label != t.label {
-            model.tabs[i].label = t.label
-        }
-        if let activePos = tabs.firstIndex(where: { $0.active }), model.activeIndex != activePos {
-            model.activeIndex = activePos
-        }
-        if model.activeIndex >= model.tabs.count {
-            model.activeIndex = max(0, model.tabs.count - 1)
-        }
-    }
-
-    /// Per-key timestamp of the last host-owned chord *seen* — whether it
-    /// fired or was suppressed — feeding `acAutorepeatGuard`. Cross-path
-    /// duplicates are handled structurally by `vmHasKeyboardFocus` gating, not
-    /// here; this only collapses a single path's autorepeat.
-    private var lastShortcutAt: [String: Date] = [:]
-
-    /// True when this window is key AND the embedded VZ view holds keyboard
-    /// focus — i.e. a keystroke is being delivered into the guest. In that
-    /// state host-owned chords (⌘T/⌘W/⌘N/⌘1-9) must NOT be acted on by the
-    /// host key monitor / `sendEvent`: the chord reaches the guest, Openbox
-    /// grabs it, and the bounce (`UbuntuSandboxVM.onShortcut` →
-    /// `performACShortcut`) runs the action. Acting in BOTH places double-
-    /// processes one press — e.g. ⌘T spawning two kittys that then race on X
-    /// startup (one bails with a BadWindow), or ⌘W closing two tabs. When a
-    /// native control holds focus instead, the chord never reaches the guest,
-    /// so this is false and the monitor/sendEvent path is the one that acts.
-    var vmHasKeyboardFocus: Bool {
-        guard isKeyWindow, let fr = firstResponder as? NSView else { return false }
-        return fr === vmView || fr.isDescendant(of: vmView)
-    }
-
-    /// Run a host-owned keychord by its bare key ("t" / "w" / "n" / "1"…"9").
-    /// Single sink shared by BOTH routes that can deliver one:
-    ///   • the host key monitor / `sendEvent` (when a native control in the
-    ///     session window holds focus), and
-    ///   • the guest bounce via `UbuntuSandboxVM.onShortcut` (when the VM
-    ///     holds focus and Openbox grabbed the chord).
-    /// Funnelling them through one method is what stops the ⌘T action from
-    /// drifting between paths. Returns true when the key matched (and the
-    /// event, if any, should be consumed).
-    @discardableResult
-    func performACShortcut(_ key: String, isRepeat: Bool = false) -> Bool {
-        // `isRepeat` is only known on the native NSEvent path; the guest bounce
-        // can't carry it, so `acAutorepeatGuard` is the backstop there. Either
-        // way the chord is still *consumed* (we return true for an owned key) —
-        // only the action is gated, so a suppressed repeat never leaks to the
-        // guest's kitty.
-        let fire = !isRepeat && acAutorepeatGuard(key)
-        switch key {
-        case "t":
-            if fire { acDelegate?.spawnNewTab(in: self) }
-            return true
-        case "w":
-            if fire { closeTab(at: model.activeIndex) }
-            return true
-        case "n":
-            // ⌘N → profile picker / "new session".
-            if fire { acDelegate?.openProfileManagerAction(nil) }
-            return true
-        default:
-            guard let n = Int(key), (1...9).contains(n),
-                  model.tabs.indices.contains(n - 1) else { return false }
-            if fire { switchTo(index: n - 1) }
-            return true
-        }
-    }
-
-    /// Leading-edge autorepeat filter for the guest-bounce path, which — unlike
-    /// the native NSEvent path's `isARepeat` — has no flag distinguishing a
-    /// held chord from a deliberate re-press. X11 repeats a held chord ~every
-    /// 40ms; a deliberate re-press is ≥~120ms apart, so an 80ms window passes
-    /// real presses but swallows autorepeat. The per-key timestamp is refreshed
-    /// on EVERY call — including suppressed ones — so a held key keeps resetting
-    /// the window and fires once, rather than re-firing every 80ms.
-    private func acAutorepeatGuard(_ key: String) -> Bool {
-        let now = Date()
-        defer { lastShortcutAt[key] = now }
-        guard let prev = lastShortcutAt[key] else { return true }
-        return now.timeIntervalSince(prev) >= 0.08
-    }
-
-    /// ⌘T / ⌘W / ⌘1-9 / ⌘N dispatch for `sendEvent`, `performKeyEquivalent`
-    /// and the app delegate's NSEvent monitor (the native-focus path; the VM-
-    /// focus path comes through the guest bounce → `performACShortcut`).
-    /// Returns true when the shortcut matched and the event should be consumed.
-    ///
-    /// The relaxed-modifier mask matches ACAppDelegate.interceptKey:
-    /// capsLock / numericPad / help / function leak in unrelated bits
-    /// that a strict `== [.command]` would reject, which made ⌘T / ⌘W
-    /// appear intermittent in the past.
+    /// ⌘T / ⌘W / ⌘1-9 / ⌘N dispatch for `sendEvent`, `performKeyEquivalent` and
+    /// the app delegate's NSEvent monitor (the native-focus path; the VM-focus
+    /// path comes through the guest bounce → `pane.performACShortcut`). Returns
+    /// true when the shortcut matched and the event should be consumed.
     func handleACShortcut(_ event: NSEvent) -> Bool {
         let userMods: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
         let mods = event.modifierFlags.intersection(userMods)
         guard mods == [.command] else { return false }
         // VM has focus → the chord reaches the guest and comes back via the
-        // bounce. Don't also act here (return false → fall through to the VZ
-        // view). See `vmHasKeyboardFocus`.
-        if vmHasKeyboardFocus { return false }
+        // bounce. Don't also act here.
+        if pane.vmHasKeyboardFocus { return false }
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
-        return performACShortcut(chars, isRepeat: event.isARepeat)
+        return pane.performACShortcut(chars, isRepeat: event.isARepeat)
     }
 
-    /// Last-resort intercept for ⌘T / ⌘W / ⌘1-9. NSWindow.sendEvent
-    /// runs before performKeyEquivalent and before the responder chain
-    /// dispatches keyDown to the VZ view, so this catches the event
-    /// even in focus states where the app-level NSEvent monitor failed
-    /// to fire (observed when VZVirtualMachineView has just captured
-    /// input — the keystroke reaches the window but bypasses earlier
-    /// hooks). Without this, ⌘T sometimes leaked through to the guest's
-    /// kitty (which maps super+t → new_tab inside the terminal) and
-    /// the user saw "Cmd-T did nothing" until they clicked the titlebar
-    /// to break VZ's capture state.
+    /// Last-resort intercept for ⌘T / ⌘W / ⌘1-9. NSWindow.sendEvent runs before
+    /// performKeyEquivalent and before the responder chain dispatches keyDown to
+    /// the VZ view, so this catches the event even in focus states where the
+    /// app-level NSEvent monitor failed to fire.
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, handleACShortcut(event) { return }
         super.sendEvent(event)
@@ -502,6 +292,7 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
     let onFiles:  () -> Void
     let onEditProfile: () -> Void
     let onToggleFusion: (Bool) -> Void
+    let onRedock: () -> Void
 
     init(model: TabsModel,
          sharedFolderPaths: [String],
@@ -512,7 +303,8 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
          onReboot: @escaping () -> Void,
          onFiles:  @escaping () -> Void,
          onEditProfile: @escaping () -> Void,
-         onToggleFusion: @escaping (Bool) -> Void) {
+         onToggleFusion: @escaping (Bool) -> Void,
+         onRedock: @escaping () -> Void) {
         self.model = model
         self.sharedFolderPaths = sharedFolderPaths
         self.onSelect = onSelect
@@ -523,6 +315,7 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
         self.onFiles = onFiles
         self.onEditProfile = onEditProfile
         self.onToggleFusion = onToggleFusion
+        self.onRedock = onRedock
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -551,7 +344,8 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
             onReboot: onReboot,
             onFiles:  onFiles,
             onEditProfile: onEditProfile,
-            onToggleFusion: onToggleFusion
+            onToggleFusion: onToggleFusion,
+            onRedock: onRedock
         ))
         host.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(host)
@@ -593,6 +387,7 @@ private struct TabsBar: View {
     let onFiles:  () -> Void
     let onEditProfile: () -> Void
     let onToggleFusion: (Bool) -> Void
+    let onRedock: () -> Void
 
     @State private var foldersPopoverShown = false
 
@@ -730,6 +525,14 @@ private struct TabsBar: View {
             }
             .buttonStyle(.borderless)
             .help(NSLocalizedString("Edit this profile's settings", comment: ""))
+
+            // Re-dock — fold this popped-out VM back into the unified window.
+            Button(action: onRedock) {
+                Image(systemName: "arrow.down.right.and.arrow.up.left.rectangle")
+                    .frame(width: 24, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .help(NSLocalizedString("Move this VM back into the main window", comment: ""))
         }
     }
 }

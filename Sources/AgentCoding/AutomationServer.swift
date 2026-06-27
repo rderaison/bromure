@@ -47,6 +47,10 @@ final class ACAutomationServer {
     var onCreateSession: ((_ profileNameOrID: String) async -> ACAutomationSessionInfo?)?
     var onDestroySession: ((_ profileNameOrID: String) async -> Bool)?
     var onGetAppState: (() -> [String: Any])?
+    /// Debug: render the unified window to a PNG at the given path and return a
+    /// dump of its subview frames. The app draws itself, so this needs no Screen
+    /// Recording permission.
+    var onUIShot: ((_ path: String) -> [String: Any])?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -307,6 +311,23 @@ final class ACAutomationServer {
             var state = DispatchQueue.main.sync { self.onGetAppState?() ?? [:] }
             state["debugEnabled"] = true
             sendResponse(fd: fd, status: 200, body: state)
+
+        case (_, let p) where p == "/debug/ui-shot" || p.hasPrefix("/debug/ui-shot?"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Local only"])
+                return
+            }
+            var pathParam = "/tmp/bromure-ui-shot.png"
+            if let q = p.split(separator: "?", maxSplits: 1).dropFirst().first {
+                for pair in q.split(separator: "&") {
+                    let kv = pair.split(separator: "=", maxSplits: 1)
+                    if kv.first == "path", kv.count == 2 {
+                        pathParam = kv[1].removingPercentEncoding ?? String(kv[1])
+                    }
+                }
+            }
+            let dump = DispatchQueue.main.sync { self.onUIShot?(pathParam) ?? ["error": "no handler"] }
+            sendResponse(fd: fd, status: 200, body: dump)
 
         // Run the prompt-injection detectors on supplied text and return a
         // verdict — a test/introspection hook so the e2e suite can exercise

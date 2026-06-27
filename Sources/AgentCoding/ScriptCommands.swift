@@ -333,23 +333,13 @@ final class BromureACOpenSessionCommand: NSScriptCommand {
 final class BromureACCloseSessionCommand: NSScriptCommand {
     override func performDefaultImplementation() -> Any? {
         onMain {
-            guard NSApp.delegate is ACAppDelegate else { return "error: app not ready" as Any }
+            guard let delegate = NSApp.delegate as? ACAppDelegate else { return "error: app not ready" as Any }
             let key = directParameter as? String ?? ""
             guard let profile = findProfile(key) else { return "error: profile not found" as Any }
-            // Find the open session window for this profile and close it.
-            // `isReleasedWhenClosed = false` keeps closed windows in
-            // NSApp.windows until they fully deallocate, so filter to
-            // visible ones — otherwise we can pick a stale hidden
-            // window and performClose silently no-ops.
-            for win in NSApp.windows {
-                if let session = win as? TabbedSessionWindow,
-                   session.profile.id == profile.id,
-                   session.isVisible {
-                    session.performClose(nil)
-                    return "ok" as Any
-                }
-            }
-            return "error: no active session for profile" as Any
+            // Close the on-screen session for this profile (unified window or a
+            // pop-out) via the close-action pipeline.
+            return delegate.scriptCloseSession(profile.id) ? ("ok" as Any)
+                : ("error: no active session for profile" as Any)
         }
     }
 }
@@ -358,21 +348,17 @@ final class BromureACCloseSessionCommand: NSScriptCommand {
 final class BromureACListSessionsCommand: NSScriptCommand {
     override func performDefaultImplementation() -> Any? {
         onMain {
-            // Filter to visible windows: TabbedSessionWindow uses
-            // `isReleasedWhenClosed = false`, so a closed session
-            // stays in NSApp.windows (hidden) until its strong refs
-            // drop. From a scripting perspective those sessions are
-            // gone — exposing them surprises clients (and breaks the
-            // close/list round-trip in the e2e suite).
-            let sessions = NSApp.windows
-                .compactMap { $0 as? TabbedSessionWindow }
-                .filter { $0.isVisible }
-            let arr: [[String: Any]] = sessions.map { s in
+            guard let delegate = NSApp.delegate as? ACAppDelegate else { return encodeJSON([[String: Any]]()) as Any }
+            // On-screen sessions only (hosted pane + visible host window),
+            // spanning the unified window and any pop-outs. Detached/headless
+            // VMs are "gone" from a scripting perspective, matching the prior
+            // visible-window filter the e2e suite relies on.
+            let arr: [[String: Any]] = delegate.scriptVisibleSessions().map { s in
                 [
-                    "profileId":   s.profile.id.uuidString,
-                    "profileName": s.profile.name,
-                    "windowId":    s.windowNumber,
-                    "visible":     s.isVisible,
+                    "profileId":   s.profileID.uuidString,
+                    "profileName": s.name,
+                    "windowId":    s.windowID,
+                    "visible":     s.visible,
                 ]
             }
             return encodeJSON(arr) as Any
