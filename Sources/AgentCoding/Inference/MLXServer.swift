@@ -37,7 +37,16 @@ final class MLXServer: @unchecked Sendable {
         let alreadyRunning = running
         lock.unlock()
 
-        Task { await MLXEngine.shared.setMemoryBudget(memoryBudgetGB) }
+        // Set the budget, then EAGERLY load the served model(s) so the first
+        // request doesn't eat the multi-second weight-load latency (~7s for an
+        // 8B, measured). Background so the accept loop / readiness probe is up
+        // immediately; requests that arrive mid-load just await the same load.
+        Task {
+            await MLXEngine.shared.setMemoryBudget(memoryBudgetGB)
+            for m in models {
+                _ = try? await MLXEngine.shared.ensureLoaded(repo: m.repo, estMemGB: m.estMemGB)
+            }
+        }
         if alreadyRunning { return }
 
         let fd = socket(AF_INET, SOCK_STREAM, 0)
@@ -133,10 +142,14 @@ final class MLXServer: @unchecked Sendable {
         var result: Result<MLXEngine.Completion, Error>!
         Task {
             do {
+                // Thinking off by default for the agent path (speed); opt back
+                // in with BROMURE_THINKING=1 for harder one-shot reasoning.
+                let thinking = ProcessInfo.processInfo.environment["BROMURE_THINKING"] == "1"
                 let params = MLXEngine.Params(
                     maxTokens: parsed.maxTokens ?? 2048,
                     temperature: parsed.temperature ?? 0.6,
-                    topP: parsed.topP ?? 1.0)
+                    topP: parsed.topP ?? 1.0,
+                    enableThinking: thinking)
                 let completion = try await MLXEngine.shared.generate(
                     repo: repo, messages: parsed.messages, tools: parsed.tools,
                     params: params, estMemGB: estMem[repo] ?? 0) { _ in true }

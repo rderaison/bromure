@@ -46,6 +46,61 @@ actor MLXEngine {
     /// Resident-set memory budget (GB). 0 = unbounded (single-model use).
     private var memoryBudgetGB: Int = 0
 
+    /// A reusable KV cache for one conversation: the cache arrays plus the exact
+    /// token sequence they encode (cache offset == `tokens.count`). Reused across
+    /// requests by matching the longest common token prefix, so each agent turn
+    /// prefills only the *newly appended* tokens instead of re-prefilling the
+    /// whole transcript. This is the single biggest win for an agent like Claude
+    /// Code, whose prompt (system + tools + growing history) is re-sent in full
+    /// every turn — without reuse that's O(transcript) prefill per turn (a
+    /// quadratic blow-up over a session); with it, O(new tokens).
+    private final class SessionCache {
+        var cache: [KVCache] = []
+        var tokens: [Int] = []
+        var lastUsed = Date()
+    }
+
+    /// One session cache per served repo. A single conversation per model is the
+    /// common case (one agent in one VM). Multiple concurrent conversations on
+    /// the same model share this and degrade to per-turn prefill — correctness
+    /// holds because the engine serializes generation on the model container.
+    private var sessionCaches: [String: SessionCache] = [:]
+
+    private func sessionCache(for repo: String) -> SessionCache {
+        if let s = sessionCaches[repo] { s.lastUsed = Date(); return s }
+        let s = SessionCache()
+        sessionCaches[repo] = s
+        return s
+    }
+
+    /// Length of the shared leading run of two token sequences.
+    private static func commonPrefix(_ a: [Int], _ b: [Int]) -> Int {
+        let n = min(a.count, b.count)
+        var i = 0
+        while i < n && a[i] == b[i] { i += 1 }
+        return i
+    }
+
+    /// Drop `<think>…</think>` spans from a model's text. A safety net for
+    /// reasoning models even when `enable_thinking=false` is passed — without
+    /// it the raw chain-of-thought leaks into the agent's visible output and
+    /// gets re-sent verbatim in the next turn's transcript.
+    static func stripThinking(_ s: String) -> String {
+        guard s.contains("<think>") else { return s }
+        var out = ""
+        var rest = Substring(s)
+        while let open = rest.range(of: "<think>") {
+            out += rest[..<open.lowerBound]
+            if let close = rest.range(of: "</think>", range: open.upperBound..<rest.endIndex) {
+                rest = rest[close.upperBound...]
+            } else {
+                rest = ""   // unterminated think block → drop the remainder
+            }
+        }
+        out += rest
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// The repos currently held resident — mirrors vllm-mlx's `loadedModelRepos`.
     var loadedRepos: [String] { Array(residents.keys).sorted() }
 
@@ -111,12 +166,14 @@ actor MLXEngine {
                 .min { $0.lastUsed < $1.lastUsed }
             guard let victim else { break }
             residents[victim.repo] = nil
+            sessionCaches[victim.repo] = nil   // drop its KV cache too
         }
     }
 
     /// Unload everything (engine stop).
     func unloadAll() {
         residents.removeAll()
+        sessionCaches.removeAll()
         MLX.GPU.clearCache()
     }
 
@@ -130,6 +187,13 @@ actor MLXEngine {
         var repetitionPenalty: Float?
         /// Cap the KV cache to bound memory on long contexts (RotatingKVCache).
         var maxKVSize: Int?
+        /// Pass `enable_thinking` to the chat template. Reasoning models (Qwen3)
+        /// otherwise emit a large `<think>` block on every turn — for an agent
+        /// doing many tool-call round-trips that's the dominant cost (hundreds
+        /// of tokens/turn at ~85 tok/s) and it leaks into the visible answer +
+        /// bloats the next turn's transcript. Off by default for the local
+        /// agent path; flip on for harder one-shot reasoning.
+        var enableThinking: Bool = false
 
         func toGenerateParameters() -> GenerateParameters {
             GenerateParameters(
@@ -167,42 +231,96 @@ actor MLXEngine {
     ) async throws -> Completion {
         let container = try await ensureLoaded(repo: repo, estMemGB: estMemGB)
         let gp = params.toGenerateParameters()
+        let session = sessionCache(for: repo)
+        let maxTokens = params.maxTokens
+        let enableThinking = params.enableThinking
 
-        return try await container.perform { (context: ModelContext) in
+        return try await container.perform { [session] (context: ModelContext) in
             let input = try await context.processor.prepare(
-                input: UserInput(chat: messages, tools: tools?.map(\.asToolSpec)))
+                input: UserInput(chat: messages, tools: tools?.map(\.asToolSpec),
+                                 additionalContext: ["enable_thinking": enableThinking]))
+            // The full prompt as token ids — what we prefix-match the cache on.
+            let promptIds = input.text.tokens.asArray(Int32.self).map(Int.init)
+
+            // --- Prefix-cache reuse -------------------------------------------
+            // Reuse the longest leading run of tokens already in the KV cache and
+            // prefill only the divergent suffix. For an agent re-sending its whole
+            // transcript each turn, the shared prefix is everything up to the new
+            // turn, so prefill collapses from O(transcript) to O(new tokens).
+            if session.cache.isEmpty {
+                session.cache = context.model.newCache(parameters: gp)
+                session.tokens = []
+            }
+            var reuse = max(0, min(MLXEngine.commonPrefix(session.tokens, promptIds),
+                                   promptIds.count - 1))
+            let drop = session.tokens.count - reuse
+            if drop > 0 {
+                if session.cache.allSatisfy({ $0.isTrimmable }) {
+                    for c in session.cache { _ = c.trim(drop) }
+                } else {
+                    // Non-trimmable cache (e.g. RotatingKVCache from maxKVSize) —
+                    // can't rewind, so start fresh and prefill the whole prompt.
+                    session.cache = context.model.newCache(parameters: gp)
+                    reuse = 0
+                }
+            }
+            let suffix = Array(promptIds[reuse...]).map { Int32($0) }
+            let lmInput = LMInput(tokens: MLXArray(suffix))
+            let reusedCount = reuse
+
+            let iterator = try TokenIterator(
+                input: lmInput, model: context.model, cache: session.cache, parameters: gp)
 
             var detok = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
             var text = ""
-            var completionTokens = 0
+            var generatedIds: [Int] = []
             var cancelled = false
 
             let start = Date()
             var firstTokenAt: Date?
 
-            let info = try MLXLMCommon.generate(
-                input: input, parameters: gp, context: context
-            ) { token in
+            let info = MLXLMCommon.generate(
+                input: lmInput, context: context, iterator: iterator
+            ) { (token: Int) in
                 if firstTokenAt == nil { firstTokenAt = Date() }
-                completionTokens += 1
+                generatedIds.append(token)
                 detok.append(token: token)
                 if let piece = detok.next(), !piece.isEmpty {
                     text += piece
                     if !onDelta(piece) { cancelled = true; return .stop }
                 }
+                if generatedIds.count >= maxTokens { return .stop }
                 return .more
             }
+            _ = info
+
+            // Keep the ledger exactly aligned with the cache offset: the iterator
+            // may advance the cache past the tokens we counted (the EOS step / an
+            // in-flight lookahead). Trim the excess so the next prefix match is
+            // sound; clamp the ledger if the cache somehow came up short.
+            session.tokens = promptIds + generatedIds
+            if let off = session.cache.first?.offset {
+                if off > session.tokens.count, session.cache.allSatisfy({ $0.isTrimmable }) {
+                    for c in session.cache { _ = c.trim(off - session.tokens.count) }
+                } else if off < session.tokens.count {
+                    session.tokens = Array(session.tokens.prefix(off))
+                }
+            }
+            session.lastUsed = Date()
 
             let ttft = (firstTokenAt ?? Date()).timeIntervalSince(start)
             let decode = Date().timeIntervalSince(firstTokenAt ?? start)
-            let promptTokens = input.text.tokens.size
-            let reachedCap = completionTokens >= (params.maxTokens)
+            let reachedCap = generatedIds.count >= maxTokens
             let finish = (cancelled || reachedCap) ? "length" : "stop"
-            _ = info
+            if ProcessInfo.processInfo.environment["BROMURE_INFER_DEBUG"] != nil {
+                let tps = Double(generatedIds.count) / max(decode, 0.001)
+                FileHandle.standardError.write(Data(
+                    "[mlx] prompt=\(promptIds.count) reused=\(reusedCount) prefilled=\(suffix.count) gen=\(generatedIds.count) ttft=\(String(format: "%.2f", ttft))s \(String(format: "%.1f", tps)) tok/s\n".utf8))
+            }
             return Completion(
-                text: text,
-                promptTokens: promptTokens,
-                completionTokens: completionTokens,
+                text: MLXEngine.stripThinking(text),
+                promptTokens: promptIds.count,
+                completionTokens: generatedIds.count,
                 ttft: ttft,
                 decodeSeconds: decode,
                 finishReason: finish)
