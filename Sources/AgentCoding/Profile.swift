@@ -3128,7 +3128,18 @@ public final class ProfileStore {
     if [ -r /mnt/bromure-meta/grok-local.toml ]; then
         mkdir -p "$HOME/.grok"
         touch "$HOME/.grok/config.toml"
-        sed -i '/# >>> bromure-local/,/# <<< bromure-local/d' "$HOME/.grok/config.toml" 2>/dev/null
+        # Strip our prior block AND any stray [model.grok-build] section (older
+        # builds — or grok itself — may leave an unmarked one, which collides
+        # with ours as a duplicate TOML key and breaks config parsing).
+        awk '
+            /^\\[model\\.grok-build\\]/ { drop=1; next }
+            /^\\[/ { drop=0 }
+            /^# >>> bromure-local$/ { next }
+            /^# <<< bromure-local$/ { next }
+            drop { next }
+            { print }
+        ' "$HOME/.grok/config.toml" > "$HOME/.grok/config.toml.tmp" \\
+            && mv "$HOME/.grok/config.toml.tmp" "$HOME/.grok/config.toml"
         cat /mnt/bromure-meta/grok-local.toml >> "$HOME/.grok/config.toml"
     fi
 

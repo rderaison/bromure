@@ -182,7 +182,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
                     }.joined())
                 ?? ""
             let rescued = ToolCallRepair.rescue(text: txt, toolNames: toolNames).blocks.count
-            let line = "[repair] \(req.path) tools=\(toolNames.count) textlen=\(txt.count) rescued=\(rescued) :: \(txt.prefix(220).replacingOccurrences(of: "\n", with: "\\n"))\n"
+            let line = "[repair] \(req.path) tools=\(toolNames.sorted()) textlen=\(txt.count) rescued=\(rescued) :: \(txt.prefix(220).replacingOccurrences(of: "\n", with: "\\n"))\n"
             if let h = FileHandle(forWritingAtPath: "/tmp/bromure-repair.log") {
                 h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
             } else { try? line.write(toFile: "/tmp/bromure-repair.log", atomically: true, encoding: .utf8) }

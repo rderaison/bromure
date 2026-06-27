@@ -169,8 +169,10 @@ struct WireRequest {
 
     private static func openAITools(_ raw: Any?) -> [ToolDef]? {
         (raw as? [[String: Any]])?.compactMap { t in
-            guard let fn = t["function"] as? [String: Any],
-                  let name = fn["name"] as? String else { return nil }
+            // Chat Completions nests under `function`; the Responses API (Codex)
+            // puts name/description/parameters flat on the tool. Accept both.
+            let fn = (t["function"] as? [String: Any]) ?? t
+            guard let name = fn["name"] as? String else { return nil }
             return ToolDef(name: name,
                            description: fn["description"] as? String ?? "",
                            parametersJSONString: jsonString(fn["parameters"]))

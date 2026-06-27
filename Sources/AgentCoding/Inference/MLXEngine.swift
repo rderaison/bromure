@@ -49,7 +49,18 @@ actor MLXEngine {
     /// The repos currently held resident — mirrors vllm-mlx's `loadedModelRepos`.
     var loadedRepos: [String] { Array(residents.keys).sorted() }
 
-    func setMemoryBudget(_ gb: Int) { memoryBudgetGB = gb }
+    func setMemoryBudget(_ gb: Int) {
+        memoryBudgetGB = gb
+        // Bound MLX's GPU buffer cache. The default is unbounded, so the large
+        // transient allocations of prefilling a big agent prompt (system prompt
+        // + many tool defs + a growing conversation, plus thinking-mode output)
+        // stay cached and pile up — filling the macOS compressor (the "40 GB on
+        // an 8 GB model" symptom). 1 GB keeps reuse benefits without the bloat.
+        _ = MLX.GPU.set(cacheLimit: 1 << 30)
+        // A soft overall ceiling when a budget is set, so the engine sheds cache
+        // instead of OOM-killing this out-of-process child.
+        if gb > 0 { _ = MLX.GPU.set(memoryLimit: gb << 30, relaxed: true) }
+    }
 
     // MARK: - Model resolution & loading
 
@@ -212,8 +223,12 @@ struct ToolDef: Sendable {
 
     /// `Tokenizers.ToolSpec` (`[String: Any]`) the chat template consumes.
     var asToolSpec: [String: Any] {
-        let params = (try? JSONSerialization.jsonObject(
+        let raw = (try? JSONSerialization.jsonObject(
             with: Data(parametersJSONString.utf8))) as? [String: Any] ?? [:]
+        // Drop JSON `null`s — swift-jinja can't convert NSNull and aborts the
+        // whole chat-template render ("Cannot convert Optional<Any> to Jinja
+        // Value"), 500ing any request whose tool schema has a null field.
+        let params = (Self.stripNulls(raw) as? [String: Any]) ?? [:]
         return [
             "type": "function",
             "function": [
@@ -222,5 +237,16 @@ struct ToolDef: Sendable {
                 "parameters": params,
             ],
         ]
+    }
+
+    static func stripNulls(_ v: Any) -> Any? {
+        if v is NSNull { return nil }
+        if let d = v as? [String: Any] {
+            var out: [String: Any] = [:]
+            for (k, val) in d { if let s = stripNulls(val) { out[k] = s } }
+            return out
+        }
+        if let a = v as? [Any] { return a.compactMap { stripNulls($0) } }
+        return v
     }
 }
