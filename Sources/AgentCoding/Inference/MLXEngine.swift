@@ -53,25 +53,16 @@ actor MLXEngine {
 
     // MARK: - Model resolution & loading
 
-    /// The directory holding a loadable `config.json` for a repo, if present.
-    /// Checks the new flat models dir
-    /// (`…/BromureAC/models/<org>--<name>/`) first, then the legacy HF hub
-    /// cache (`models--org--name/snapshots/<rev>/`) so old downloads still load.
+    /// The directory holding a loadable `config.json` for a repo, if present —
+    /// the flat local models dir (`…/BromureAC/models/<org>--<name>/`). Legacy
+    /// hub-cache models are migrated here once at startup, so the engine never
+    /// loads out of `~/.cache`.
     private func snapshotDirectory(repo: String) -> URL? {
         let fm = FileManager.default
         let slug = repo.replacingOccurrences(of: "/", with: "--")
         let local = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("BromureAC/models/\(slug)", isDirectory: true)
-        if fm.fileExists(atPath: local.appendingPathComponent("config.json").path) {
-            return local
-        }
-        let snapshots = fm.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/huggingface/hub/models--\(slug)/snapshots", isDirectory: true)
-        guard let revs = try? fm.contentsOfDirectory(
-            at: snapshots, includingPropertiesForKeys: [.isDirectoryKey]) else { return nil }
-        return revs.first {
-            fm.fileExists(atPath: $0.appendingPathComponent("config.json").path)
-        }
+        return fm.fileExists(atPath: local.appendingPathComponent("config.json").path) ? local : nil
     }
 
     /// Load (or return cached) the model for `repo`. Concurrent callers for the

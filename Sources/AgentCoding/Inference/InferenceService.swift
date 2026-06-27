@@ -260,6 +260,9 @@ public actor InferenceService {
     /// tool-call repair proxy. Restarts the child if the model set changed.
     /// Returns a stub plan (callers use it only for the readiness URL).
     private func startServing(_ models: [InferenceModel], memoryBudgetGB: Int) async throws -> EngineLaunchPlan {
+        // Move any models the old hf CLI left in ~/.cache into the local layout
+        // (once, idempotent) so the engine child loads only from there.
+        catalog.migrateLegacyHubCache()
         let repos = models.map(\.repo).sorted()
         if isRunning, activeModels == repos { return stubPlan() }
         if isRunning { stop() }

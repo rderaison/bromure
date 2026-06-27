@@ -74,21 +74,12 @@ public final class CatalogStore: @unchecked Sendable {
     /// Fully-downloaded repos — the new local models dir plus any still in the
     /// legacy hub cache.
     public func installedRepos() -> [String] {
-        let fm = FileManager.default
-        var repos = Set<String>()
-        if let names = try? fm.contentsOfDirectory(atPath: modelsDir.path) {
-            for n in names where n.contains("--") {
-                let repo = n.replacingOccurrences(of: "--", with: "/")
-                if isInstalled(repo: repo) { repos.insert(repo) }
-            }
-        }
-        if let names = try? fm.contentsOfDirectory(atPath: hubCacheURL.path) {
-            for n in names where n.hasPrefix("models--") {
-                let repo = String(n.dropFirst("models--".count)).replacingOccurrences(of: "--", with: "/")
-                if isInstalled(repo: repo) { repos.insert(repo) }
-            }
-        }
-        return repos.sorted()
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: modelsDir.path)
+        else { return [] }
+        return names.filter { $0.contains("--") }
+            .map { $0.replacingOccurrences(of: "--", with: "/") }
+            .filter { isInstalled(repo: $0) }
+            .sorted()
     }
 
     /// Resolve a user-supplied selector to a catalog entry. Accepts a
@@ -145,24 +136,47 @@ public final class CatalogStore: @unchecked Sendable {
         modelsDir.appendingPathComponent(slug(repo), isDirectory: true)
     }
 
-    /// Where this repo's loadable `config.json` lives, if downloaded — the new
-    /// local models dir first, then the legacy hub-cache snapshot. nil if absent
-    /// or still downloading. This is what `MLXEngine` loads from.
+    /// Where this repo's loadable `config.json` lives, if downloaded — the local
+    /// models dir only. nil if absent or still downloading. This is what
+    /// `MLXEngine` loads from. Legacy hub-cache models are moved here once by
+    /// `migrateLegacyHubCache()`, so nothing is loaded out of `~/.cache` at runtime.
     public func resolvedModelDirectory(for repo: String) -> URL? {
-        let fm = FileManager.default
         let local = localModelDirectory(for: repo)
-        if fm.fileExists(atPath: local.appendingPathComponent("config.json").path),
+        if FileManager.default.fileExists(atPath: local.appendingPathComponent("config.json").path),
            !hasSuffixFile(local, ".partial") {
             return local
         }
-        // Legacy: models--org--name/snapshots/<rev>/config.json (from the old hf CLI).
-        let legacy = hubCacheURL.appendingPathComponent("models--" + slug(repo), isDirectory: true)
-        let snapshots = legacy.appendingPathComponent("snapshots", isDirectory: true)
-        if !hasSuffixFile(legacy, ".incomplete"),
-           let revs = try? fm.contentsOfDirectory(at: snapshots, includingPropertiesForKeys: nil) {
-            return revs.first { fm.fileExists(atPath: $0.appendingPathComponent("config.json").path) }
-        }
         return nil
+    }
+
+    /// One-time move of models the old `hf` CLI left in the HF hub cache
+    /// (`~/.cache/huggingface/hub/models--org--name/snapshots/<rev>/`) into the
+    /// new flat layout. Hardlinks the resolved blobs (instant, no extra disk),
+    /// so existing downloads aren't re-fetched and `~/.cache` can be deleted
+    /// afterwards. Idempotent: skips a repo already present in the new layout.
+    public func migrateLegacyHubCache() {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: hubCacheURL.path) else { return }
+        for entry in entries where entry.hasPrefix("models--") {
+            let repo = String(entry.dropFirst("models--".count)).replacingOccurrences(of: "--", with: "/")
+            let dest = localModelDirectory(for: repo)
+            if fm.fileExists(atPath: dest.appendingPathComponent("config.json").path) { continue }
+            let snapshots = hubCacheURL.appendingPathComponent(entry).appendingPathComponent("snapshots")
+            guard let revs = try? fm.contentsOfDirectory(at: snapshots, includingPropertiesForKeys: nil),
+                  let rev = revs.first(where: { fm.fileExists(atPath: $0.appendingPathComponent("config.json").path) }),
+                  let files = try? fm.contentsOfDirectory(at: rev, includingPropertiesForKeys: nil),
+                  (try? fm.createDirectory(at: dest, withIntermediateDirectories: true)) != nil
+            else { continue }
+            for f in files {
+                let target = dest.appendingPathComponent(f.lastPathComponent)
+                if fm.fileExists(atPath: target.path) { continue }
+                // Resolve the snapshot symlink to the real blob, then hardlink it.
+                let real = (try? fm.destinationOfSymbolicLink(atPath: f.path))
+                    .map { URL(fileURLWithPath: $0, relativeTo: rev).standardizedFileURL } ?? f
+                do { try fm.linkItem(at: real, to: target) }
+                catch { try? fm.copyItem(at: real, to: target) }   // cross-volume fallback
+            }
+        }
     }
 
     private func hasSuffixFile(_ dir: URL, _ suffix: String) -> Bool {
