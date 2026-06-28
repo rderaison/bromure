@@ -771,8 +771,8 @@ struct Exec: ParsableCommand {
     @Flag(name: [.customShort("t"), .long], help: "Allocate a pseudo-tty.")
     var tty = false
 
-    @Option(name: .long, help: "Timeout in seconds (non-interactive only).")
-    var timeout: Int = 60
+    @Option(name: .long, help: "Timeout in seconds (non-interactive only). Default 600.")
+    var timeout: Int = 600
 
     @Argument(help: "VM id or profile name.")
     var vm: String
