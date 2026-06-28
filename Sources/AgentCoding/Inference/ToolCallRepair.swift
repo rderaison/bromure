@@ -394,7 +394,12 @@ enum ToolCallRepair {
                 if val.hasSuffix("\n") { val.removeLast() }
                 input[key] = val
             }
-            guard !input.isEmpty else { continue }
+            // Empty input is legitimate for no-argument tools (EnterPlanMode,
+            // ExitPlanMode, TaskList, …). Only treat an arg-less <function=X>
+            // as stray text when we CAN'T confirm the name against the
+            // request's declared tools — when we can (the name passed the
+            // toolNames gate above), rescue it even with no parameters.
+            guard !input.isEmpty || !toolNames.isEmpty else { continue }
             blocks.insert(["type": "tool_use",
                 "id": "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24).lowercased(),
                 "name": name, "input": input], at: 0)

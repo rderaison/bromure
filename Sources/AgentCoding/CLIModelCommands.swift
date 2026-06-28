@@ -155,9 +155,11 @@ struct Model: ParsableCommand {
 struct ToolCallRepairTest: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "_tc-test", shouldDisplay: false)
     @Argument(help: "Path to a file containing the model's text output.") var path: String
+    @Option(name: .long, help: "Comma-separated declared tool names (gates the rescue).") var tools = ""
     func run() throws {
         let text = try String(contentsOfFile: path, encoding: .utf8)
-        let (cleaned, blocks) = ToolCallRepair.rescue(text: text)
+        let names = Set(tools.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+        let (cleaned, blocks) = ToolCallRepair.rescue(text: text, toolNames: names)
         print("rescued \(blocks.count) tool_use block(s):")
         for b in blocks {
             print("  name=\(b["name"] ?? "?")")
