@@ -47,10 +47,14 @@ final class ACAutomationServer {
     var onCreateSession: ((_ profileNameOrID: String) async -> ACAutomationSessionInfo?)?
     var onDestroySession: ((_ profileNameOrID: String) async -> Bool)?
     var onGetAppState: (() -> [String: Any])?
-    /// Debug: render a window (`which` = "unified" | "picker") to a PNG at the
-    /// given path and return a dump of its subview frames. The app draws itself,
-    /// so this needs no Screen Recording permission.
+    /// Debug: render a window (`which` = "unified" | "picker" | "editor") to a
+    /// PNG at the given path and return a dump of its subview frames. The app
+    /// draws itself, so this needs no Screen Recording permission.
     var onUIShot: ((_ path: String, _ which: String) -> [String: Any])?
+    /// Debug: drive the settings editor for the screenshot tool — `action` is
+    /// "ensure-profile" | "open" | "category" | "close". Lets the doc-screenshot
+    /// script navigate over the control socket instead of AppleScript.
+    var onEditorDebug: ((_ params: [String: Any]) -> [String: Any])?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -336,6 +340,14 @@ final class ACAutomationServer {
             }
             let dump = DispatchQueue.main.sync { self.onUIShot?(pathParam, whichParam) ?? ["error": "no handler"] }
             sendResponse(fd: fd, status: 200, body: dump)
+
+        case ("POST", "/debug/editor"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Local only"])
+                return
+            }
+            let r = DispatchQueue.main.sync { self.onEditorDebug?(bodyJSON) ?? ["error": "no handler"] }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
         // Run the prompt-injection detectors on supplied text and return a
         // verdict — a test/introspection hook so the e2e suite can exercise

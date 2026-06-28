@@ -1511,8 +1511,55 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // so assume isolation rather than nesting another sync (which deadlocks).
             MainActor.assumeIsolated {
                 guard let self else { return ["error": "no app"] }
-                let window: NSWindow? = which == "picker" ? self.mainWindow : self.unifiedWindow
+                let window: NSWindow?
+                switch which {
+                case "picker": window = self.mainWindow
+                case "editor": window = self.editorWindow
+                default:       window = self.unifiedWindow
+                }
                 return self.debugRenderWindow(window, to: path)
+            }
+        }
+        // Drive the settings editor over the control socket (doc-screenshot
+        // tool) — replaces the old AppleScript bridge so the script needs no
+        // scripting terminology, LaunchServices registration, or Screen
+        // Recording permission.
+        server.onEditorDebug = { [weak self] params in
+            MainActor.assumeIsolated {
+                guard let self else { return ["error": "no app"] }
+                let action = params["action"] as? String ?? ""
+                switch action {
+                case "ensure-profile":
+                    let name = (params["name"] as? String) ?? "Screenshot"
+                    if let existing = self.profiles.first(where: { $0.name.lowercased() == name.lowercased() }) {
+                        return ["id": existing.id.uuidString, "created": false]
+                    }
+                    let p = Profile(name: name, tool: .claude, authMode: .token, color: .blue)
+                    do {
+                        try self.store.save(p)
+                        self.profiles = self.store.loadAll()
+                        return ["id": p.id.uuidString, "created": true]
+                    } catch { return ["error": "create failed: \(error.localizedDescription)"] }
+                case "open":
+                    let key = (params["profile"] as? String) ?? ""
+                    let profile: Profile?
+                    if let uuid = UUID(uuidString: key) { profile = self.profiles.first { $0.id == uuid } }
+                    else { profile = self.profiles.first { $0.name.lowercased() == key.lowercased() } }
+                    guard let profile else { return ["error": "profile not found: \(key)"] }
+                    self.openEditorWindow(editing: profile)
+                    return ["editorOpen": self.editorWindow?.isVisible ?? false,
+                            "windowId": self.editorWindow?.windowNumber ?? 0]
+                case "category":
+                    let raw = (params["category"] as? String ?? "").lowercased()
+                    guard !raw.isEmpty else { return ["error": "category required"] }
+                    NotificationCenter.default.post(name: .bromureACSelectEditorCategory, object: raw)
+                    return ["ok": true]
+                case "close":
+                    self.closeEditorWindow()
+                    return ["ok": true]
+                default:
+                    return ["error": "unknown action: \(action)"]
+                }
             }
         }
 
