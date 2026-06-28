@@ -1922,6 +1922,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             profile = p
         }
 
+        // 1b. Refuse to start while a selected local model is still downloading —
+        //     booting now would point the agent at an engine that can't load it
+        //     yet. Surface a clear error (the /vms route turns this into 409) so
+        //     `vm run` prints it instead of hanging until the boot-wait times out.
+        if let dl = downloadingModel(for: profile) {
+            return ["error": "“\(dl.name)” is still downloading — wait for it to finish, then start “\(profile.name)”."]
+        }
+
         // 2. Apply `-v` mounts (host paths → ~/<basename> in the guest), capped
         //    at the base image's 8 fstab slots.
         if let mounts = spec["mounts"] as? [String], !mounts.isEmpty {
@@ -3863,6 +3871,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// If any local model this profile would load is still downloading, returns
+    /// its display name + repo so callers can refuse to boot. nil once every
+    /// selected model is fully present. The single source of truth for the
+    /// "don't boot mid-download" guard (GUI `launch` + CLI `vm run`).
+    @MainActor func downloadingModel(for profile: Profile) -> (name: String, repo: String)? {
+        for modelID in profile.distinctLocalModelIDs {
+            let resolved = CatalogStore.shared.resolve(modelID)
+            let repo = resolved?.repo ?? modelID
+            if ModelDownloadManager.shared.isDownloading(repo: repo) {
+                return (resolved?.name ?? repo, repo)
+            }
+        }
+        return nil
+    }
+
     /// Boot (or reveal) a profile's session. When `detached` is true the VM
     /// boots window-less — no pane is hosted, the session runs headless from the
     /// start (the `vm run -d` / login-boot / remote-menu path), reattachable
@@ -3882,25 +3905,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
-        // Refuse to boot while the local model this profile needs is still
+        // Refuse to boot while any local model this profile needs is still
         // downloading — the agent would come up pointed at an engine that
         // can't load yet, producing a wall of connection errors.
-        if let modelID = profile.localEngineModelID {
-            let resolved = CatalogStore.shared.resolve(modelID)
-            let repo = resolved?.repo ?? modelID
-            if ModelDownloadManager.shared.isDownloading(repo: repo) {
-                let alert = NSAlert()
-                alert.messageText = NSLocalizedString("Model still downloading", comment: "")
-                alert.informativeText = String(
-                    format: NSLocalizedString(
-                        "“%@” is still downloading. Wait for it to finish, then launch “%@”.",
-                        comment: ""),
-                    resolved?.name ?? repo, profile.name)
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
-                alert.runModal()
-                return
-            }
+        if let dl = downloadingModel(for: profile) {
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString("Model still downloading", comment: "")
+            alert.informativeText = String(
+                format: NSLocalizedString(
+                    "“%@” is still downloading. Wait for it to finish, then launch “%@”.",
+                    comment: ""),
+                dl.name, profile.name)
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            alert.runModal()
+            return
         }
 
         // Compromised profiles refuse to boot until the user confirms

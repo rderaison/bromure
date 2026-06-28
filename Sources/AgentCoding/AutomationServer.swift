@@ -383,7 +383,13 @@ final class ACAutomationServer {
             }
             semaphore.wait()
             if let info = result {
-                sendResponse(fd: fd, status: 201, body: info)
+                // A handler that returns an `error` key is a clean refusal
+                // (e.g. the workspace's local model is still downloading).
+                if let err = info["error"] as? String {
+                    sendResponse(fd: fd, status: 409, body: ["error": err])
+                } else {
+                    sendResponse(fd: fd, status: 201, body: info)
+                }
             } else {
                 sendResponse(fd: fd, status: 500, body: ["error": "Failed to create VM"])
             }
