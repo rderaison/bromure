@@ -25,6 +25,11 @@ final class InferenceRepairProxy: @unchecked Sendable {
     /// The proxy runs in the parent process, so it records directly (no IPC).
     var onLocalTrace: ((_ event: [String: Any]) -> Void)?
 
+    /// Set by the app: the given profile's agent is mid local-inference call —
+    /// drives the "thinking" indicator. Fired at request start and re-fired
+    /// while the (possibly long) generation is in flight.
+    var onLocalActivity: ((_ profileID: UUID) -> Void)?
+
     /// Start the accept loop if not already running. Idempotent.
     func startIfNeeded(enginePort: Int = InferenceService.enginePort) {
         lock.lock(); defer { lock.unlock() }
@@ -170,12 +175,28 @@ final class InferenceRepairProxy: @unchecked Sendable {
         }
         ur.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        // Identify the calling VM from its per-VM key (nil for admin/internal).
+        let rawAuth = req.headerValue("authorization") ?? ""
+        let pid = EngineKey.profileID(forKey: rawAuth.hasPrefix("Bearer ") ? String(rawAuth.dropFirst(7)) : rawAuth)
+
+        // Drive the "thinking" indicator for the whole generation: fire now and
+        // keep re-firing (a single local call can outlast the indicator's clear
+        // timer), stopping once the engine responds.
+        var ticker: DispatchSourceTimer?
+        if let pid, let activity = shared.onLocalActivity {
+            activity(pid)
+            let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+            t.schedule(deadline: .now() + 2.5, repeating: 2.5)
+            t.setEventHandler { activity(pid) }
+            t.resume()
+            ticker = t
+        }
+
         let t0 = Date()
         let (data, status) = syncData(ur)
-        // Trace this call back to the parent, tagged with the calling VM (the
-        // profileID recovered from its per-VM key). Async + best-effort so it
-        // never delays or fails the guest's response.
-        shipTrace(authHeader: req.headerValue("authorization"),
+        ticker?.cancel()
+        // Trace this call back to the parent, tagged with the calling VM.
+        shipTrace(profileID: pid,
                   model: payload["model"] as? String ?? "?", path: req.path, status: status,
                   requestBytes: req.body.count, responseBytes: data?.count ?? 0,
                   latencyMs: Date().timeIntervalSince(t0) * 1000, responseData: data)
@@ -224,13 +245,10 @@ final class InferenceRepairProxy: @unchecked Sendable {
     /// tagged with the calling VM — the profileID recovered from its per-VM key.
     /// No-op for the admin key / internal probes (only requests bearing a valid
     /// per-VM key are traced).
-    private static func shipTrace(authHeader: String?, model: String, path: String,
+    private static func shipTrace(profileID: UUID?, model: String, path: String,
                                   status: Int, requestBytes: Int, responseBytes: Int,
                                   latencyMs: Double, responseData: Data?) {
-        guard let cb = shared.onLocalTrace else { return }
-        let raw = authHeader ?? ""
-        let token = raw.hasPrefix("Bearer ") ? String(raw.dropFirst(7)) : raw
-        guard let pid = EngineKey.profileID(forKey: token) else { return }
+        guard let cb = shared.onLocalTrace, let pid = profileID else { return }
 
         var prompt = 0, completion = 0
         if let d = responseData, let m = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],

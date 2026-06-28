@@ -1539,6 +1539,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         InferenceRepairProxy.shared.onLocalTrace = { [weak self] event in
             DispatchQueue.main.async { self?.automationIngestLocalTrace(event) }
         }
+        // Local inference also drives the "thinking" indicator (cloud gets this
+        // from the MITM's conversation signal; local calls bypass the MITM).
+        InferenceRepairProxy.shared.onLocalActivity = { [weak self] pid in
+            DispatchQueue.main.async { self?.noteAgentActivity(pid) }
+        }
         server.onSetFusion = { [weak self] idOrName, engaged in
             self?.automationSetFusion(idOrName: idOrName, engaged: engaged)
                 ?? ["ok": false, "error": "unavailable"]
