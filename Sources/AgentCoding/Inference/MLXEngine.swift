@@ -73,6 +73,29 @@ actor MLXEngine {
         return s
     }
 
+    // MARK: - Generation serialization
+    //
+    // Generation mutates the per-repo prefix KV cache (trim + prefill + decode).
+    // `container.perform`'s closure `await`s (e.g. `processor.prepare`), and the
+    // ModelContainer is an actor — so a second concurrent `generate` RE-ENTERS
+    // the container at that await and interleaves with the first, both mutating
+    // the same KVCache. The result is an off-by-one cache offset and an MLX
+    // shape-broadcast crash that kills the engine child (seen as 502s).
+    // Interactive Claude triggers this constantly: it fires the conversation
+    // title sidechain alongside the main request. Serialize so exactly one
+    // generation runs at a time; the GPU is single-model anyway, so this costs
+    // nothing real and makes the cache safe.
+    private var genBusy = false
+    private var genWaiters: [CheckedContinuation<Void, Never>] = []
+    private func genLock() async {
+        if !genBusy { genBusy = true; return }
+        await withCheckedContinuation { genWaiters.append($0) }
+    }
+    private func genUnlock() {
+        if genWaiters.isEmpty { genBusy = false }
+        else { genWaiters.removeFirst().resume() }
+    }
+
     /// Length of the shared leading run of two token sequences.
     private static func commonPrefix(_ a: [Int], _ b: [Int]) -> Int {
         let n = min(a.count, b.count)
@@ -239,6 +262,10 @@ actor MLXEngine {
         estMemGB: Int = 0,
         onDelta: @Sendable @escaping (String) -> Bool
     ) async throws -> Completion {
+        // One generation at a time — the prefix KV cache can't be shared by
+        // concurrent (re-entrant) generations. See genLock above.
+        await genLock()
+        defer { genUnlock() }
         let container = try await ensureLoaded(repo: repo, estMemGB: estMemGB)
         let gp = params.toGenerateParameters()
         let session = sessionCache(for: repo)
