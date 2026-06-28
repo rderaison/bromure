@@ -2253,8 +2253,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard runningSessions[profile.id] == nil else { continue }
             FileHandle.standardError.write(Data(
                 "[boot] starting '\(profile.name)' at login\n".utf8))
-            launch(profile)
-            detachAfterBoot(profile.id)   // login boots are always window-less
+            // `detached: true` boots window-less and leaves the app in its
+            // `.accessory` (menu-bar-only) state — without it the unified window
+            // pops up at login and promotes the app to a regular Dock app.
+            launch(profile, detached: true)
+            detachAfterBoot(profile.id)   // belt-and-suspenders; no window to close now
         }
     }
 
