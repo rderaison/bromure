@@ -1653,6 +1653,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
               let profile = profiles.first(where: { $0.id == pid }),
               profile.traceLevel.recordsActivity else { return }
         let model = event["model"] as? String ?? "?"
+        // Local inference is an AI request, so persist its prompt/tools +
+        // response at the same trace levels the MITM captures cloud LLM bodies
+        // (AI request details / Everything) — otherwise the inspector has only
+        // metadata to show.
+        let capture = profile.traceLevel == .aiDetails || profile.traceLevel == .all
+        let reqBody = capture ? (event["requestBody"] as? Data) : nil
+        let resBody = capture ? (event["responseBody"] as? Data) : nil
+        let stored = (reqBody?.isEmpty == false) || (resBody?.isEmpty == false)
         let rec = TraceRecord(
             sessionID: pid, profileID: pid,
             host: "local-engine", port: InferenceService.enginePort,
@@ -1661,9 +1669,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             requestBytes: (event["requestBytes"] as? NSNumber)?.intValue ?? 0,
             responseBytes: (event["responseBytes"] as? NSNumber)?.intValue ?? 0,
             latencyMs: (event["latencyMs"] as? NSNumber)?.doubleValue ?? 0,
-            swaps: [], leaks: [], bodyStored: false, isConversation: true,
+            swaps: [], leaks: [], bodyStored: stored, isConversation: true,
             servedBy: "local-\(model)")
-        store.record(rec)
+        store.record(rec, requestBody: reqBody, responseBody: resBody)
     }
 
     /// Newest first; previews only (no secret values).

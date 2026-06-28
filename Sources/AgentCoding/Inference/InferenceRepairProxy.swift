@@ -199,7 +199,8 @@ final class InferenceRepairProxy: @unchecked Sendable {
         shipTrace(profileID: pid,
                   model: payload["model"] as? String ?? "?", path: req.path, status: status,
                   requestBytes: req.body.count, responseBytes: data?.count ?? 0,
-                  latencyMs: Date().timeIntervalSince(t0) * 1000, responseData: data)
+                  latencyMs: Date().timeIntervalSince(t0) * 1000,
+                  requestBody: req.body, responseData: data)
         guard status == 200, let data,
               let message = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             // Upstream error — relay status + body verbatim.
@@ -247,7 +248,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
     /// per-VM key are traced).
     private static func shipTrace(profileID: UUID?, model: String, path: String,
                                   status: Int, requestBytes: Int, responseBytes: Int,
-                                  latencyMs: Double, responseData: Data?) {
+                                  latencyMs: Double, requestBody: Data, responseData: Data?) {
         guard let cb = shared.onLocalTrace, let pid = profileID else { return }
 
         var prompt = 0, completion = 0
@@ -256,9 +257,13 @@ final class InferenceRepairProxy: @unchecked Sendable {
             prompt = (u["input_tokens"] as? Int) ?? (u["prompt_tokens"] as? Int) ?? 0
             completion = (u["output_tokens"] as? Int) ?? (u["completion_tokens"] as? Int) ?? 0
         }
+        // Carry the full request (prompt + tools) and response so the trace
+        // inspector can show them — the parent decides whether to persist them,
+        // gated on the workspace's trace level (same as the MITM does for cloud).
         cb(["profileID": pid.uuidString, "model": model, "path": path, "status": status,
             "requestBytes": requestBytes, "responseBytes": responseBytes, "latencyMs": latencyMs,
-            "promptTokens": prompt, "completionTokens": completion])
+            "promptTokens": prompt, "completionTokens": completion,
+            "requestBody": requestBody, "responseBody": responseData ?? Data()])
     }
 
     /// Synchronous URLSession fetch (we're on a dedicated connection thread).

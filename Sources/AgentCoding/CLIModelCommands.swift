@@ -147,7 +147,37 @@ struct Model: ParsableCommand {
         subcommands: [ModelCatalogList.self, ModelInstall.self, ModelPull.self,
                       ModelLS.self, ModelUse.self, ModelRM.self, RepairServe.self,
                       MLXSelfTest.self, MLXServe.self, MLXEngineChild.self,
-                      ToolCallRepairTest.self, EngineKeyPrint.self])
+                      ToolCallRepairTest.self, EngineKeyPrint.self, ConvParseTest.self])
+}
+
+/// Hidden: run the trace inspector's ConversationParser on request/response
+/// JSON files — verifies what a stored body renders as (e.g. a local-engine
+/// call). `model _conv-test --req r.json [--res s.json] [--host local-engine]`.
+struct ConvParseTest: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "_conv-test", shouldDisplay: false)
+    @Option(name: .long, help: "Request body JSON file.") var req: String
+    @Option(name: .long, help: "Response body JSON file.") var res: String?
+    @Option(name: .long, help: "Host to route the parser (default local-engine).") var host = "local-engine"
+    func run() throws {
+        let reqData = try? Data(contentsOf: URL(fileURLWithPath: req))
+        let resData = res.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) }
+        guard let conv = ConversationParser.parse(host: host, requestBody: reqData, responseBody: resData) else {
+            print("parse → nil (no conversation recognized)"); return
+        }
+        print("provider=\(conv.provider.rawValue) model=\(conv.model ?? "?") "
+              + "system=\(conv.systemPrompt != nil ? "yes" : "no") messages=\(conv.messages.count)")
+        for m in conv.messages {
+            let parts = m.content.map { b -> String in
+                switch b {
+                case .text(let t): return "text(\(t.prefix(40).replacingOccurrences(of: "\n", with: " ")))"
+                case .toolUse(let name, _): return "tool_use(\(name))"
+                case .toolResult: return "tool_result"
+                case .image: return "image"
+                }
+            }
+            print("  \(m.role.rawValue): \(parts.joined(separator: ", "))")
+        }
+    }
 }
 
 /// Hidden: print the persistent per-VM engine key for a profile id, and (if

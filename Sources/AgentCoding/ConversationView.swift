@@ -109,7 +109,13 @@ enum ConversationParser {
         if h.contains("cohere.com") {
             return parseCohere(req: req, res: res)
         }
-        return nil
+        // Unrecognized host — notably the local engine ("local-engine"), which
+        // serves Anthropic / OpenAI / Responses shapes depending on the tool.
+        // The wire shape tells us which: try each parser, take the first that
+        // yields a conversation (parsers return nil when the body isn't theirs).
+        return parseAnthropic(req: req, res: res)
+            ?? parseOpenAI(req: req, res: res)
+            ?? parseGemini(req: req, res: res)
     }
 
     /// Result of pulling apart a WebSocket trace transcript so the
