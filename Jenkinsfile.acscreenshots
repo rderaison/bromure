@@ -36,6 +36,12 @@ pipeline {
         }
 
         stage('Take Screenshots') {
+            // The script drives the app entirely over its loopback control
+            // server and renders each editor window with the app's built-in
+            // renderer (/debug/ui-shot). It needs NO Screen Recording /
+            // Accessibility / Automation TCC grant, no AppleScript, and no
+            // LaunchServices registration — so the agent no longer has to keep
+            // those permissions granted to the Jenkins user for this job.
             steps {
                 sh './scripts/take-ac-screenshots.sh'
             }

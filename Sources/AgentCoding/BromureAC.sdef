@@ -14,7 +14,7 @@
         <!-- Inspection                                                   -->
         <!-- ============================================================ -->
 
-        <command name="get app state" code="BrAcGtSt" description="Returns a JSON object: { locale, mainWindowOpen, editorOpen, editorCategory, profiles: [...] }.">
+        <command name="get app state" code="BrAcGtSt" description="Returns a JSON object: { locale, mainWindowOpen (the unified window), setupWindowOpen, editorOpen, profileCount }.">
             <cocoa class="BromureACGetAppStateCommand"/>
             <result type="text" description="JSON object"/>
         </command>
@@ -44,7 +44,7 @@
         <!-- Window navigation (driven by the screenshot script)          -->
         <!-- ============================================================ -->
 
-        <command name="open profile manager" code="BrAcOpPm" description="Bring the profile picker (main window) to the front.">
+        <command name="open profile manager" code="BrAcOpPm" description="Bring the app's main (unified) window to the front.">
             <cocoa class="BromureACOpenProfileManagerCommand"/>
         </command>
 
@@ -70,7 +70,7 @@
             <result type="integer" description="CGWindowID"/>
         </command>
 
-        <command name="get main window id" code="BrAcGtMI" description="Returns the CGWindowID of the picker (main) window, or 0 if not open.">
+        <command name="get main window id" code="BrAcGtMI" description="Returns the CGWindowID of the main (unified) window, or 0 if not open.">
             <cocoa class="BromureACGetMainWindowIDCommand"/>
             <result type="integer" description="CGWindowID"/>
         </command>
@@ -111,19 +111,19 @@
         <!-- Session control                                              -->
         <!-- ============================================================ -->
 
-        <command name="open ac session" code="BrAcOpSe" description="Launch a session window for the given profile. Returns the profile UUID (sessions are 1:1 with profiles in AC).">
+        <command name="open ac session" code="BrAcOpSe" description="Launch a session for the given profile — a pane in the unified window. Returns the profile UUID (sessions are 1:1 with profiles in AC).">
             <cocoa class="BromureACOpenSessionCommand"/>
             <direct-parameter type="text" description="Profile name or UUID"/>
             <result type="text" description="Profile UUID, or 'error: …'"/>
         </command>
 
-        <command name="close ac session" code="BrAcClSe" description="Close any active session window for the given profile.">
+        <command name="close ac session" code="BrAcClSe" description="Close the active session for the given profile (its unified-window pane or pop-out).">
             <cocoa class="BromureACCloseSessionCommand"/>
             <direct-parameter type="text" description="Profile name or UUID"/>
             <result type="text" description="'ok' or 'error: …'"/>
         </command>
 
-        <command name="list ac sessions" code="BrAcLsSe" description="JSON array of currently-open session windows: { profileId, profileName, windowId, visible }.">
+        <command name="list ac sessions" code="BrAcLsSe" description="JSON array of on-screen sessions across the unified window and any pop-outs: { profileId, profileName, windowId, visible }.">
             <cocoa class="BromureACListSessionsCommand"/>
             <result type="text" description="JSON array"/>
         </command>

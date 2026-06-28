@@ -38,7 +38,11 @@ final class BromureACGetAppStateCommand: NSScriptCommand {
             let d = NSApp.delegate as? ACAppDelegate
             let state: [String: Any] = [
                 "locale":          (UserDefaults.standard.array(forKey: "AppleLanguages") as? [String])?.first ?? "system",
-                "mainWindowOpen":  (d?.mainWindow?.isVisible ?? false) as Any,
+                // The unified window is the app's main window now (the old
+                // profile picker was folded into it); `mainWindow` only ever
+                // holds the transient setup/onboarding window.
+                "mainWindowOpen":  (d?.unifiedWindow?.isVisible ?? false) as Any,
+                "setupWindowOpen": (d?.mainWindow?.isVisible ?? false) as Any,
                 "editorOpen":      (d?.editorWindow?.isVisible ?? false) as Any,
                 "profileCount":    d?.profiles.count ?? 0,
             ]
@@ -161,7 +165,11 @@ final class BromureACGetEditorWindowIDCommand: NSScriptCommand {
 final class BromureACGetMainWindowIDCommand: NSScriptCommand {
     override func performDefaultImplementation() -> Any? {
         onMain {
-            let id = (NSApp.delegate as? ACAppDelegate)?.mainWindow?.windowNumber ?? 0
+            // The unified window is the app's main window now (the picker was
+            // folded into it). Fall back to the setup window if that's all
+            // that's open (first-run, before any base image).
+            let d = NSApp.delegate as? ACAppDelegate
+            let id = d?.unifiedWindow?.windowNumber ?? d?.mainWindow?.windowNumber ?? 0
             return id as Any
         }
     }
