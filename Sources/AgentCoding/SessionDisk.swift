@@ -557,15 +557,20 @@ public final class SessionDisk {
             // vsock bridge (127.0.0.1:11434 → vsock 8446 → loopback engine)
             // and point every model slot at the selected model. 127.0.0.1 is
             // already in NO_PROXY above, so these bypass the MITM proxy and
-            // hit the bridge directly; keys are dummies the engine ignores.
+            // hit the bridge directly. The auth token is this profile's
+            // persistent per-VM engine key — it authenticates the call and
+            // identifies the VM to the engine (for per-VM tracing), and is
+            // stable across reboots/suspend-reset so a resumed VM's baked key
+            // still validates after the app relaunches.
             // (This is the explicit per-tool path; transparent Hybrid routing
             // is handled separately by the MITM engine, not here.)
             // Every "Local model" agent serves the profile's single active
             // model (chosen in Local Models) — agents no longer pick their own.
             if let activeID = profile.activeModelID, !activeID.isEmpty {
                 let model = CatalogStore.shared.resolve(activeID)?.repo ?? activeID
+                let key = EngineKey.perVM(profileID: profile.id)
                 for spec in profile.allToolSpecs where spec.authMode == .local {
-                    for export in spec.tool.localEnvExports(model: model) {
+                    for export in spec.tool.localEnvExports(model: model, key: key) {
                         proxyLines.append("export \(export.name)=\(shellQuote(export.value))")
                     }
                 }

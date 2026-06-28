@@ -147,7 +147,24 @@ struct Model: ParsableCommand {
         subcommands: [ModelCatalogList.self, ModelInstall.self, ModelPull.self,
                       ModelLS.self, ModelUse.self, ModelRM.self, RepairServe.self,
                       MLXSelfTest.self, MLXServe.self, MLXEngineChild.self,
-                      ToolCallRepairTest.self])
+                      ToolCallRepairTest.self, EngineKeyPrint.self])
+}
+
+/// Hidden: print the persistent per-VM engine key for a profile id, and (if
+/// given a second arg) verify a key round-trips. `model _enginekey <uuid> [key]`.
+struct EngineKeyPrint: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "_enginekey", shouldDisplay: false)
+    @Argument(help: "Profile UUID.") var profileID: String
+    @Argument(help: "Optional key to validate against the master.") var verify: String?
+    func run() throws {
+        guard let id = UUID(uuidString: profileID) else { throw ValidationError("not a UUID") }
+        print(EngineKey.perVM(profileID: id))
+        if let v = verify {
+            if let got = EngineKey.profileID(forKey: v) {
+                print("verified -> \(got.uuidString)\(got == id ? " (matches)" : " (MISMATCH)")")
+            } else { print("invalid key") }
+        }
+    }
 }
 
 /// Hidden: run ToolCallRepair.rescue on a text file's contents (`model

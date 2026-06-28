@@ -291,7 +291,8 @@ public actor InferenceService {
         proc.executableURL = exe
         proc.arguments = ["model", "_mlx-engine", "--config", cfgURL.path]
         var env = ProcessInfo.processInfo.environment
-        env[Self.engineKeyEnvVar] = Self.apiKey       // share the parent's key
+        env[Self.engineKeyEnvVar] = Self.apiKey            // parent's admin key
+        env[EngineKey.masterEnvVar] = EngineKey.masterHex  // so the child can verify per-VM keys
         proc.environment = env
         proc.terminationHandler = { [weak self] p in
             Task { await self?.onEngineExit(p) }

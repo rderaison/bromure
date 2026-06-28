@@ -21,6 +21,10 @@ final class InferenceRepairProxy: @unchecked Sendable {
     private var running = false
     private let lock = NSLock()
 
+    /// Set by the app: record a per-VM local-inference call into the TraceStore.
+    /// The proxy runs in the parent process, so it records directly (no IPC).
+    var onLocalTrace: ((_ event: [String: Any]) -> Void)?
+
     /// Start the accept loop if not already running. Idempotent.
     func startIfNeeded(enginePort: Int = InferenceService.enginePort) {
         lock.lock(); defer { lock.unlock() }
@@ -166,7 +170,15 @@ final class InferenceRepairProxy: @unchecked Sendable {
         }
         ur.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        let t0 = Date()
         let (data, status) = syncData(ur)
+        // Trace this call back to the parent, tagged with the calling VM (the
+        // profileID recovered from its per-VM key). Async + best-effort so it
+        // never delays or fails the guest's response.
+        shipTrace(authHeader: req.headerValue("authorization"),
+                  model: payload["model"] as? String ?? "?", path: req.path, status: status,
+                  requestBytes: req.body.count, responseBytes: data?.count ?? 0,
+                  latencyMs: Date().timeIntervalSince(t0) * 1000, responseData: data)
         guard status == 200, let data,
               let message = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             // Upstream error — relay status + body verbatim.
@@ -204,6 +216,31 @@ final class InferenceRepairProxy: @unchecked Sendable {
         }
         let (data, status) = syncData(ur)
         return httpResponse(status: status, headers: [("Content-Type", "application/json")], body: data ?? Data())
+    }
+
+    // MARK: - Per-VM trace recording
+
+    /// Record one inference call into the TraceStore (via the app's callback),
+    /// tagged with the calling VM — the profileID recovered from its per-VM key.
+    /// No-op for the admin key / internal probes (only requests bearing a valid
+    /// per-VM key are traced).
+    private static func shipTrace(authHeader: String?, model: String, path: String,
+                                  status: Int, requestBytes: Int, responseBytes: Int,
+                                  latencyMs: Double, responseData: Data?) {
+        guard let cb = shared.onLocalTrace else { return }
+        let raw = authHeader ?? ""
+        let token = raw.hasPrefix("Bearer ") ? String(raw.dropFirst(7)) : raw
+        guard let pid = EngineKey.profileID(forKey: token) else { return }
+
+        var prompt = 0, completion = 0
+        if let d = responseData, let m = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+           let u = m["usage"] as? [String: Any] {
+            prompt = (u["input_tokens"] as? Int) ?? (u["prompt_tokens"] as? Int) ?? 0
+            completion = (u["output_tokens"] as? Int) ?? (u["completion_tokens"] as? Int) ?? 0
+        }
+        cb(["profileID": pid.uuidString, "model": model, "path": path, "status": status,
+            "requestBytes": requestBytes, "responseBytes": responseBytes, "latencyMs": latencyMs,
+            "promptTokens": prompt, "completionTokens": completion])
     }
 
     /// Synchronous URLSession fetch (we're on a dedicated connection thread).

@@ -795,9 +795,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         /// the opus/sonnet/haiku aliases the `/model` picker maps to); we
         /// point every slot at the one local model so no slot falls back to
         /// a cloud model the engine doesn't serve.
-        public func localEnvExports(model: String) -> [(name: String, value: String)] {
+        public func localEnvExports(model: String, key: String) -> [(name: String, value: String)] {
             let base = Self.localEngineBaseURL
-            let key = InferenceService.apiKey
             switch self {
             case .claude:
                 // ANTHROPIC_AUTH_TOKEN (sent as `Authorization: Bearer`),

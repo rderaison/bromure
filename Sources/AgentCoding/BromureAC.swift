@@ -1534,6 +1534,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         server.onListTrace = { [weak self] profileKey in self?.automationTraceList(profileKey) ?? [] }
         server.onClearTrace = { [weak self] in self?.mitmEngine?.traceStore.clear() ?? 0 }
+        // The repair proxy runs in this (parent) process, so it records local
+        // per-VM inference calls straight into the TraceStore via this callback.
+        InferenceRepairProxy.shared.onLocalTrace = { [weak self] event in
+            DispatchQueue.main.async { self?.automationIngestLocalTrace(event) }
+        }
         server.onSetFusion = { [weak self] idOrName, engaged in
             self?.automationSetFusion(idOrName: idOrName, engaged: engaged)
                 ?? ["ok": false, "error": "unavailable"]
@@ -1567,6 +1572,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// MITM trace records for `trace …`, optionally filtered to one profile.
+    /// Record a per-VM local-inference call (shipped by the engine child's
+    /// repair proxy) into the TraceStore, so local LLM calls show up in `trace`
+    /// next to cloud calls, tagged with the profile that made them. Respects the
+    /// profile's trace level the same way the MITM does.
+    @MainActor private func automationIngestLocalTrace(_ event: [String: Any]) {
+        guard let pidStr = event["profileID"] as? String, let pid = UUID(uuidString: pidStr),
+              let store = mitmEngine?.traceStore,
+              let profile = profiles.first(where: { $0.id == pid }),
+              profile.traceLevel.recordsActivity else { return }
+        let model = event["model"] as? String ?? "?"
+        let rec = TraceRecord(
+            sessionID: pid, profileID: pid,
+            host: "local-engine", port: InferenceService.enginePort,
+            method: "POST", path: event["path"] as? String ?? "/v1/messages",
+            statusCode: (event["status"] as? NSNumber)?.intValue ?? 0,
+            requestBytes: (event["requestBytes"] as? NSNumber)?.intValue ?? 0,
+            responseBytes: (event["responseBytes"] as? NSNumber)?.intValue ?? 0,
+            latencyMs: (event["latencyMs"] as? NSNumber)?.doubleValue ?? 0,
+            swaps: [], leaks: [], bodyStored: false, isConversation: true,
+            servedBy: "local-\(model)")
+        store.record(rec)
+    }
+
     /// Newest first; previews only (no secret values).
     @MainActor private func automationTraceList(_ profileKey: String?) -> [[String: Any]] {
         guard let engine = mitmEngine else { return [] }

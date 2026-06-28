@@ -95,9 +95,11 @@ final class MLXServer: @unchecked Sendable {
     }
 
     private func respond(to req: Request) -> Data {
-        // Bearer auth — same per-run key the engine used.
+        // Bearer auth: the parent's admin key (internal probes) or a valid
+        // persistent per-VM key (a guest VM — also identifies which profile).
         let auth = req.headerValue("authorization") ?? ""
-        guard auth == "Bearer \(InferenceService.apiKey)" else {
+        let token = auth.hasPrefix("Bearer ") ? String(auth.dropFirst(7)) : auth
+        guard token == InferenceService.apiKey || EngineKey.profileID(forKey: token) != nil else {
             return Self.json(status: 401, object: ["error": ["message": "unauthorized"]])
         }
 
