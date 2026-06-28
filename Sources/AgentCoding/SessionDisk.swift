@@ -1079,7 +1079,7 @@ public final class SessionDisk {
     }
 
     private func makeWelcomeMessage() -> String {
-        var s = "Bromure Agentic Coding — profile: \(profile.name)\n"
+        var s = "Bromure Agentic Coding — workspace: \(profile.name)\n"
         let specs = profile.allToolSpecs
         if specs.count == 1 {
             let spec = specs[0]

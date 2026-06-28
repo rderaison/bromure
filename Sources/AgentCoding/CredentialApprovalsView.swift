@@ -83,7 +83,7 @@ struct CredentialApprovalsView: View {
                     .font(.body)
                     .lineLimit(1)
                 HStack(spacing: 8) {
-                    Text(profileNames[entry.profileID] ?? "(unknown profile)")
+                    Text(profileNames[entry.profileID] ?? "(unknown workspace)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("·").foregroundStyle(.tertiary)

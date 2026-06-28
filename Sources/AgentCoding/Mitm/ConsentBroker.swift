@@ -170,7 +170,7 @@ public actor ConsentBroker {
         }
         pending[key] = []
 
-        let profileName = profileNames[profileID] ?? "(unknown profile)"
+        let profileName = profileNames[profileID] ?? "(unknown workspace)"
         let decision = await Self.askUser(profileName: profileName,
                                           credentialDisplayName: credentialDisplayName,
                                           scopeHint: scopeHint)

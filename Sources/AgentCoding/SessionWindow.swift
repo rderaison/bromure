@@ -526,7 +526,7 @@ private struct TabsBar: View {
                     .frame(width: 24, height: 22)
             }
             .buttonStyle(.borderless)
-            .help(NSLocalizedString("Inspect this profile's session trace (⇧⌘I)", comment: ""))
+            .help(NSLocalizedString("Inspect this workspace's session trace (⇧⌘I)", comment: ""))
 
             // Settings — opens the profile editor for the running VM's
             // profile. Edits to host-side settings apply live; settings
@@ -536,7 +536,7 @@ private struct TabsBar: View {
                     .frame(width: 24, height: 22)
             }
             .buttonStyle(.borderless)
-            .help(NSLocalizedString("Edit this profile's settings", comment: ""))
+            .help(NSLocalizedString("Edit this workspace's settings", comment: ""))
 
             // Re-dock — fold this popped-out VM back into the unified window.
             Button(action: onRedock) {
@@ -652,7 +652,7 @@ private struct StreamingIndicator: View {
             .opacity(pulse ? 1.0 : 0.55)
             .shadow(color: .red.opacity(0.6), radius: pulse ? 3 : 0)
             .help(NSLocalizedString(
-                "Session metadata is being sent to bromure.io. Toggle the profile's Private Mode to stop streaming.",
+                "Session metadata is being sent to bromure.io. Toggle the workspace's Private Mode to stop streaming.",
                 comment: "BAC streaming indicator tooltip"))
             .padding(.horizontal, 4)
             .accessibilityLabel(NSLocalizedString(

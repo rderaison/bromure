@@ -95,7 +95,7 @@ extension ACAppDelegate {
         explainer.messageText = String(format: NSLocalizedString("Register with %@", comment: ""),
                                        provider.displayName)
         explainer.informativeText = String(format: NSLocalizedString(
-            "Bromure will open a temporary, isolated VM with no access to your profiles or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM.",
+            "Bromure will open a temporary, isolated VM with no access to your workspaces or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM.",
             comment: ""), provider.displayName)
         explainer.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
         explainer.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
@@ -307,10 +307,10 @@ extension ACAppDelegate {
             let ask = NSAlert()
             ask.messageText = NSLocalizedString("Share with every session?", comment: "")
             ask.informativeText = String(format: NSLocalizedString(
-                "Use this %@ sign-in for every Bromure session, or only for this profile?",
+                "Use this %@ sign-in for every Bromure session, or only for this workspace?",
                 comment: ""), state.provider.displayName)
             ask.addButton(withTitle: NSLocalizedString("Every session", comment: ""))
-            ask.addButton(withTitle: NSLocalizedString("Just this profile", comment: ""))
+            ask.addButton(withTitle: NSLocalizedString("Just this workspace", comment: ""))
             sharedEverywhere = (ask.runModal() == .alertFirstButtonReturn)
             if !sharedEverywhere { overrideProfile = pid }
         }
@@ -353,7 +353,7 @@ extension ACAppDelegate {
         done.messageText = String(format: NSLocalizedString("Registered with %@", comment: ""), providerName)
         done.informativeText = sharedEverywhere
             ? NSLocalizedString("Saved for all sessions. New sessions will use it automatically.", comment: "")
-            : NSLocalizedString("Saved for this profile.", comment: "")
+            : NSLocalizedString("Saved for this workspace.", comment: "")
         done.runModal()
     }
 

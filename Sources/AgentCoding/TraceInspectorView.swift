@@ -155,7 +155,7 @@ struct TraceInspectorView: View {
         VStack(spacing: 6) {
             HStack {
                 Picker(selection: $profileFilter) {
-                    Text(NSLocalizedString("All profiles", comment: "")).tag(UUID?.none)
+                    Text(NSLocalizedString("All workspaces", comment: "")).tag(UUID?.none)
                     ForEach(profiles) { p in
                         Text(p.name).tag(UUID?.some(p.id))
                     }
@@ -343,7 +343,7 @@ struct TraceInspectorView: View {
             }
             // Meta row
             HStack(spacing: 16) {
-                metaCell(NSLocalizedString("Profile", comment: ""),
+                metaCell(NSLocalizedString("Workspace", comment: ""),
                          profileName(for: rec.profileID))
                 metaCell(NSLocalizedString("Latency", comment: ""),
                          String(format: "%.0f ms", rec.latencyMs))

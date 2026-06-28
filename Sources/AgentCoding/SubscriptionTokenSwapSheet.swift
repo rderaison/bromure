@@ -54,7 +54,7 @@ struct SubscriptionTokenSwapSheet: View {
             .foregroundStyle(.primary)
 
             HStack {
-                Button(NSLocalizedString("Never for this profile",
+                Button(NSLocalizedString("Never for this workspace",
                                          comment: "Subscription-token swap — permanent decline")) {
                     onDecision(.never)
                 }

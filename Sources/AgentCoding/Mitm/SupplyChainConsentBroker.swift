@@ -200,7 +200,7 @@ public actor SupplyChainConsentBroker {
         let alert = NSAlert()
         alert.messageText = String(
             format: NSLocalizedString(
-                "Pass through %@ from profile “%@”?",
+                "Pass through %@ from workspace “%@”?",
                 comment: "Supply-chain bypass prompt"),
             scopeDisplayName, profileName)
         alert.informativeText = detail

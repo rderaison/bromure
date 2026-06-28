@@ -206,22 +206,22 @@ struct VM: ParsableCommand {
 struct VMRun: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "run",
-        abstract: "Create and boot a VM, optionally from an on-the-fly profile (like `docker run`).")
+        abstract: "Create and boot a VM, optionally from an on-the-fly workspace (like `docker run`).")
 
     @Option(name: [.customShort("v"), .long],
             help: "Mount a host folder into the VM at ~/<basename>. Repeatable (max 8). e.g. -v ~/project")
     var volume: [String] = []
 
-    @Option(name: .long, help: "Use an existing profile (name or id) instead of creating one.")
+    @Option(name: .long, help: "Use an existing workspace (name or id) instead of creating one.")
     var profile: String?
 
-    @Option(name: .long, help: "Name for an on-the-fly profile (default: cli-XXXX).")
+    @Option(name: .long, help: "Name for an on-the-fly workspace (default: cli-XXXX).")
     var name: String?
 
-    @Option(name: .long, help: "Tool for an on-the-fly profile: claude | codex | grok.")
+    @Option(name: .long, help: "Tool for an on-the-fly workspace: claude | codex | grok.")
     var tool: String?
 
-    @Option(name: .long, help: "Auth mode for an on-the-fly profile: token | subscription | bedrock.")
+    @Option(name: .long, help: "Auth mode for an on-the-fly workspace: token | subscription | bedrock.")
     var auth: String?
 
     @Option(name: .long, help: "API key (for --auth token).")
@@ -234,7 +234,7 @@ struct VMRun: ParsableCommand {
           help: "Detached: boot and return without attaching your terminal (docker-style).")
     var detach = false
 
-    @Flag(name: .long, help: "Delete the profile + disk when the VM stops (ephemeral).")
+    @Flag(name: .long, help: "Delete the workspace + disk when the VM stops (ephemeral).")
     var rm = false
 
     func run() throws {
@@ -328,7 +328,7 @@ struct VMKill: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "kill", abstract: "Stop a VM (shut down, or suspend with --suspend).")
 
-    @Argument(help: "VM id or profile name.")
+    @Argument(help: "VM id or workspace name.")
     var vm: String
 
     @Flag(name: .long, help: "Suspend (save RAM to disk) instead of powering off.")
@@ -351,7 +351,7 @@ struct VMAttach: ParsableCommand {
         commandName: "attach",
         abstract: "Attach your terminal to a VM's tmux session (tmux-style). Same tabs as the GUI.")
 
-    @Argument(help: "VM id or profile name.")
+    @Argument(help: "VM id or workspace name.")
     var vm: String
 
     @Argument(help: "Tab index from `vm ls` to jump to. Omit to attach to the current tab.")
@@ -395,7 +395,7 @@ struct VMDescribe: ParsableCommand {
         commandName: "describe",
         abstract: "Show detailed information about a running VM.")
 
-    @Argument(help: "VM id or profile name.")
+    @Argument(help: "VM id or workspace name.")
     var vm: String
 
     func run() throws {
@@ -470,23 +470,23 @@ private func matchesVM(_ vm: [String: Any], _ key: String) -> Bool {
 
 struct Profiles: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "profiles",
-        abstract: "Manage profiles (the templates VMs boot from).",
+        commandName: "workspaces",
+        abstract: "Manage workspaces (the templates VMs boot from).",
         subcommands: [ProfilesList.self, ProfilesDescribe.self, ProfilesRemove.self])
 }
 
 struct ProfilesList: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "ls", abstract: "List profiles.")
+        commandName: "ls", abstract: "List workspaces.")
 
     func run() throws {
         let client = ControlClient()
         guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
         let profs = (try client.request("GET", "/profiles").json["profiles"] as? [[String: Any]]) ?? []
-        if profs.isEmpty { print("No profiles."); return }
+        if profs.isEmpty { print("No workspaces."); return }
         let running = Set(((try? client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? [])
             .compactMap { $0["id"] as? String })
-        print(pad("PROFILE ID", 14) + pad("NAME", 24) + pad("TOOL", 9)
+        print(pad("WORKSPACE ID", 14) + pad("NAME", 24) + pad("TOOL", 9)
               + pad("AUTH", 14) + pad("MCP", 5) + "STATE")
         for p in profs.sorted(by: { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }) {
             let id = p["id"] as? String ?? ""
@@ -503,17 +503,17 @@ struct ProfilesList: ParsableCommand {
 
 struct ProfilesDescribe: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "describe", abstract: "Show a profile's settings.")
+        commandName: "describe", abstract: "Show a workspace's settings.")
 
-    @Argument(help: "Profile id or name.")
-    var profile: String
+    @Argument(help: "Workspace id or name.")
+    var workspace: String
 
     func run() throws {
         let client = ControlClient()
         guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
-        let resp = try client.request("GET", "/profiles/\(ControlClient.encodeSegment(profile))")
+        let resp = try client.request("GET", "/profiles/\(ControlClient.encodeSegment(workspace))")
         guard resp.status == 200 else {
-            throw ValidationError(resp.json["error"] as? String ?? "Profile not found: \(profile)")
+            throw ValidationError(resp.json["error"] as? String ?? "Workspace not found: \(workspace)")
         }
         let v = resp.json
         func row(_ k: String, _ s: String?) {
@@ -550,10 +550,10 @@ struct ProfilesDescribe: ParsableCommand {
 
 struct ProfilesRemove: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "rm", abstract: "Delete a profile and all its data (disk + home).")
+        commandName: "rm", abstract: "Delete a workspace and all its data (disk + home).")
 
-    @Argument(help: "Profile id or name.")
-    var profile: String
+    @Argument(help: "Workspace id or name.")
+    var workspace: String
 
     @Flag(name: [.customShort("f"), .long], help: "Skip the confirmation prompt.")
     var force = false
@@ -563,15 +563,15 @@ struct ProfilesRemove: ParsableCommand {
         guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
         if !force {
             FileHandle.standardError.write(Data(
-                "Delete profile '\(profile)' and ALL its data (disk + home)? [y/N] ".utf8))
+                "Delete workspace '\(workspace)' and ALL its data (disk + home)? [y/N] ".utf8))
             let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
             guard answer == "y" || answer == "yes" else { print("Aborted."); return }
         }
-        let resp = try client.request("DELETE", "/profiles/\(ControlClient.encodeSegment(profile))")
+        let resp = try client.request("DELETE", "/profiles/\(ControlClient.encodeSegment(workspace))")
         guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
-            throw ValidationError(resp.json["error"] as? String ?? "Couldn't delete \(profile).")
+            throw ValidationError(resp.json["error"] as? String ?? "Couldn't delete \(workspace).")
         }
-        print("Deleted profile \(resp.json["name"] as? String ?? profile).")
+        print("Deleted workspace \(resp.json["name"] as? String ?? workspace).")
     }
 }
 
@@ -585,7 +585,7 @@ struct VMFusion: ParsableCommand {
     @Argument(help: "enable | disable")
     var action: String
 
-    @Argument(help: "VM id or profile name.")
+    @Argument(help: "VM id or workspace name.")
     var vm: String
 
     func run() throws {
@@ -639,15 +639,15 @@ private func leakCount(_ r: [String: Any]) -> Int { (r["leaks"] as? [[String: An
 struct TraceList: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ls", abstract: "List recent traced requests (newest first).")
-    @Argument(help: "Filter to one VM/profile (id or name).") var profile: String?
+    @Argument(help: "Filter to one VM/workspace (id or name).") var workspace: String?
     @Option(name: .long, help: "Max rows (default 50).") var limit: Int = 50
 
     func run() throws {
         let client = ControlClient()
         guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
-        let recs = try traceRecords(client, profile: profile)
+        let recs = try traceRecords(client, profile: workspace)
         guard !recs.isEmpty else {
-            print("No trace records. (Tracing is per-profile — enable it in the profile's settings.)")
+            print("No trace records. (Tracing is per-workspace — enable it in the workspace's settings.)")
             return
         }
         print(pad("TIME", 10) + pad("HOST", 30) + pad("METHOD", 8) + pad("STATUS", 7)
@@ -675,12 +675,12 @@ struct TraceList: ParsableCommand {
 struct TraceSummary: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "summary", abstract: "Summarize traced traffic (hosts, status, swaps, leaks).")
-    @Argument(help: "Filter to one VM/profile (id or name).") var profile: String?
+    @Argument(help: "Filter to one VM/workspace (id or name).") var workspace: String?
 
     func run() throws {
         let client = ControlClient()
         guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
-        let recs = try traceRecords(client, profile: profile)
+        let recs = try traceRecords(client, profile: workspace)
         guard !recs.isEmpty else { print("No trace records."); return }
         var byHost: [String: Int] = [:], byStatus: [Int: Int] = [:]
         var swapReqs = 0, leakReqs = 0, convs = 0, up = 0, down = 0
@@ -707,12 +707,12 @@ struct TraceSummary: ParsableCommand {
 struct TraceHostnames: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "hostnames", abstract: "List distinct hosts contacted (with request counts).")
-    @Argument(help: "Filter to one VM/profile (id or name).") var profile: String?
+    @Argument(help: "Filter to one VM/workspace (id or name).") var workspace: String?
 
     func run() throws {
         let client = ControlClient()
         guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
-        let recs = try traceRecords(client, profile: profile)
+        let recs = try traceRecords(client, profile: workspace)
         var byHost: [String: Int] = [:]
         for r in recs { byHost[r["host"] as? String ?? "?", default: 0] += 1 }
         guard !byHost.isEmpty else { print("No trace records."); return }
@@ -723,12 +723,12 @@ struct TraceHostnames: ParsableCommand {
 struct TraceLeaks: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "leaks", abstract: "Show requests with potential credential leaks.")
-    @Argument(help: "Filter to one VM/profile (id or name).") var profile: String?
+    @Argument(help: "Filter to one VM/workspace (id or name).") var workspace: String?
 
     func run() throws {
         let client = ControlClient()
         guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
-        let leaky = try traceRecords(client, profile: profile).filter { leakCount($0) > 0 }
+        let leaky = try traceRecords(client, profile: workspace).filter { leakCount($0) > 0 }
         guard !leaky.isEmpty else { print("No leaks detected. ✓"); return }
         print("\(leaky.count) request(s) with potential credential leaks:")
         for r in leaky {
@@ -773,7 +773,7 @@ struct Exec: ParsableCommand {
     @Option(name: .long, help: "Timeout in seconds (non-interactive only). Default 600.")
     var timeout: Int = 600
 
-    @Argument(help: "VM id or profile name.")
+    @Argument(help: "VM id or workspace name.")
     var vm: String
 
     @Argument(parsing: .captureForPassthrough,

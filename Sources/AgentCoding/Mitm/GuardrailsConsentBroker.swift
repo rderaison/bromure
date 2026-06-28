@@ -242,7 +242,7 @@ public actor GuardrailsConsentBroker {
         let alert = NSAlert()
         alert.messageText = String(
             format: NSLocalizedString(
-                "Allow write on “%@” from profile “%@”?",
+                "Allow write on “%@” from workspace “%@”?",
                 comment: "Guardrails write prompt: scope display name + profile name"),
             scopeDisplayName, profileName)
         // The operation goes in the body verbatim so the user sees

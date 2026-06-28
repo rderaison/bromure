@@ -24,7 +24,7 @@ public actor PromptInjectionConsentBroker {
             return await withCheckedContinuation { c in pending[key, default: []].append(c) }
         }
         pending[key] = []
-        let name = profileNames[profileID] ?? "this profile"
+        let name = profileNames[profileID] ?? "this workspace"
         let allow = await Self.ask(profileName: name, detectorName: detectorName,
                                    source: source, flaggedText: flaggedText)
         decisions[key] = allow

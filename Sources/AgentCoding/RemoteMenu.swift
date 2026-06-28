@@ -41,7 +41,7 @@ final class RemoteMenuApp {
     // MARK: - Top level
 
     private func topMenu() {
-        let items = ["Sessions", "Profiles", "Models", "Trace", "Status",
+        let items = ["Sessions", "Workspaces", "Models", "Trace", "Status",
                      "Exit (disconnect)"]
         while true {
             guard let sel = tui.menu(title: "bromure-ac · remote",
@@ -101,12 +101,12 @@ final class RemoteMenuApp {
         let profiles = fetchProfiles()
         guard !profiles.isEmpty else {
             tui.pager(title: "New session",
-                      body: "No profiles found. Create one in the bromure-ac app first.")
+                      body: "No workspaces found. Create one in the bromure-ac app first.")
             return
         }
         let labels = profiles.map { ($0["name"] as? String ?? "?") +
             "  (" + ($0["tool"] as? String ?? "") + ")" }
-        guard let pick = tui.menu(title: "New session — pick a profile",
+        guard let pick = tui.menu(title: "New session — pick a workspace",
                                   items: labels, footer: "Enter: boot · q: cancel") else { return }
         let name = profiles[pick]["name"] as? String ?? ""
         // Boot window-less (-d), then hand the remote terminal straight to the
@@ -162,13 +162,13 @@ final class RemoteMenuApp {
         let profiles = fetchProfiles()
         var labels = profiles.map { ($0["name"] as? String ?? "?") }
         labels.append("List (raw)")
-        guard let sel = tui.menu(title: "Profiles", items: labels,
+        guard let sel = tui.menu(title: "Workspaces", items: labels,
                                  footer: "Enter: describe · q: back") else { return }
         if sel == profiles.count {
-            showOutput("profiles ls", ["profiles", "ls"]); return
+            showOutput("workspaces ls", ["workspaces", "ls"]); return
         }
         let name = profiles[sel]["name"] as? String ?? ""
-        showOutput("profile \(name)", ["profiles", "describe", name])
+        showOutput("workspace \(name)", ["workspaces", "describe", name])
     }
 
     private func modelsMenu() {

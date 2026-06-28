@@ -436,7 +436,7 @@ private struct SessionSidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Profiles")
+                Text("Workspaces")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
@@ -501,7 +501,7 @@ private struct PlusButton: View {
                         .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 1)))
         }
         .buttonStyle(.plain)
-        .help("New profile")
+        .help("New workspace")
         .onHover { hovering = $0 }
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.vertical, 8)
@@ -654,7 +654,7 @@ private struct ControlMenu: View {
             Button("Duplicate") { onDuplicate(row.id) }
             Divider()
             Button("Reset disk", role: .destructive) { onReset(row.id) }
-            Button("Delete profile", role: .destructive) { onDelete(row.id) }
+            Button("Delete workspace", role: .destructive) { onDelete(row.id) }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 12, weight: .semibold))
@@ -859,7 +859,7 @@ struct UnifiedToolbarBar: View {
                 HeaderIcon(system: "folder", help: "Browse files") { onFiles(entry.id) }
                 HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
                 HeaderIcon(system: "doc.text.magnifyingglass", help: "Inspect trace (⇧⌘I)") { onTrace(entry.id) }
-                HeaderIcon(system: "gearshape", help: "Edit profile") { onSettings(entry.id) }
+                HeaderIcon(system: "gearshape", help: "Edit workspace") { onSettings(entry.id) }
                 HeaderIcon(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") { onDetach(entry.id) }
             }
         }
@@ -978,7 +978,7 @@ private struct EmptyStageView: View {
                     .foregroundStyle(.white)
                 Text(row.state == .suspended
                      ? "Suspended — pick up where you left off"
-                     : "This profile isn't running")
+                     : "This workspace isn't running")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.55))
                 Button { onStart(row.id) } label: {
@@ -993,12 +993,12 @@ private struct EmptyStageView: View {
                 Image(systemName: "cube.transparent")
                     .font(.system(size: 40, weight: .thin))
                     .foregroundStyle(.white.opacity(0.5))
-                Text(model.profileRows.isEmpty ? "No profiles yet" : "No profile selected")
+                Text(model.profileRows.isEmpty ? "No workspaces yet" : "No workspace selected")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.white.opacity(0.75))
                 Text(model.profileRows.isEmpty
                      ? "Click + to create one"
-                     : "Select a profile on the left")
+                     : "Select a workspace on the left")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.45))
             }

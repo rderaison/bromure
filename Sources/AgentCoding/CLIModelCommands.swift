@@ -61,7 +61,7 @@ struct VMRouting: ParsableCommand {
     @Argument(help: "cloud | local | hybrid")
     var mode: String
 
-    @Argument(help: "VM id or profile name.")
+    @Argument(help: "VM id or workspace name.")
     var vm: String
 
     func run() throws {
@@ -104,7 +104,7 @@ struct VMHybridBudget: ParsableCommand {
         commandName: "budget",
         abstract: "Cloud token cap per rolling 24 h window (0 = unlimited).")
     @Argument(help: "Max cloud tokens per window (0 = unlimited).") var tokens: Int
-    @Argument(help: "VM id or profile name.") var vm: String
+    @Argument(help: "VM id or workspace name.") var vm: String
     func run() throws {
         try setHybrid(knob: "budget", value: Double(tokens), vm: vm)
         print("Hybrid cloud token budget set to \(tokens == 0 ? "unlimited" : String(tokens)) for \(vm).")
@@ -116,7 +116,7 @@ struct VMHybridTTFT: ParsableCommand {
         commandName: "ttft",
         abstract: "Soft fallback threshold in seconds (default 5).")
     @Argument(help: "Seconds before falling back to local.") var seconds: Double
-    @Argument(help: "VM id or profile name.") var vm: String
+    @Argument(help: "VM id or workspace name.") var vm: String
     func run() throws {
         try setHybrid(knob: "ttft", value: seconds, vm: vm)
         print("Hybrid soft TTFT set to \(seconds)s for \(vm).")
@@ -128,7 +128,7 @@ struct VMHybridSplit: ParsableCommand {
         commandName: "split",
         abstract: "Percentage (0–100) of new sessions pinned to local.")
     @Argument(help: "Percent of new sessions to route local (0–100).") var percent: Int
-    @Argument(help: "VM id or profile name.") var vm: String
+    @Argument(help: "VM id or workspace name.") var vm: String
     func run() throws {
         guard (0...100).contains(percent) else {
             throw ValidationError("Split must be between 0 and 100.")
@@ -436,12 +436,12 @@ struct ModelRM: ParsableCommand {
 struct ModelUse: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "use",
-        abstract: "Set the active local model for a running VM's profile.")
+        abstract: "Set the active local model for a running VM's workspace.")
 
     @Argument(help: "Catalog id or org/repo.")
     var model: String
 
-    @Argument(help: "VM id or profile name.")
+    @Argument(help: "VM id or workspace name.")
     var vm: String
 
     func run() throws {

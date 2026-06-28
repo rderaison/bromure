@@ -328,7 +328,7 @@ struct ProfileEditorView: View {
                 // Detail
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        Text(isNew ? "New profile" : draft.name.isEmpty ? "Edit profile" : draft.name)
+                        Text(isNew ? "New workspace" : draft.name.isEmpty ? "Edit workspace" : draft.name)
                             .font(.title2.bold())
                         detailContent
                     }
@@ -548,7 +548,7 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var modelsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab.")
+            Text("Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -881,7 +881,7 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var foldersSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per profile.")
+            Text("Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per workspace.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -1140,7 +1140,7 @@ struct ProfileEditorView: View {
                     .font(.subheadline.weight(.semibold))
                 if isNew {
                     Toggle("Generate an ed25519 keypair", isOn: $generateSSH)
-                    Text("The public key will be displayed below after the profile is saved.")
+                    Text("The public key will be displayed below after the workspace is saved.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else if let pub = draft.sshPublicKey {
@@ -1766,7 +1766,7 @@ struct ProfileEditorView: View {
                 .buttonStyle(.borderless)
                 .disabled(onImportSSHKey == nil)
             }
-            Text("Point bromure at any existing SSH private key (RSA, ed25519, ecdsa) — encrypted ones included. The key is loaded into the per-profile bromure ssh-agent at every session launch; passphrases are stored in the macOS Keychain.")
+            Text("Point bromure at any existing SSH private key (RSA, ed25519, ecdsa) — encrypted ones included. The key is loaded into the per-workspace bromure ssh-agent at every session launch; passphrases are stored in the macOS Keychain.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -1970,7 +1970,7 @@ struct ProfileEditorView: View {
                     .pickerStyle(.menu)
                     .frame(width: 200)
                 }
-                Text("Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as profile secrets. View at App → Trace Inspector (⇧⌘I).")
+                Text("Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as workspace secrets. View at App → Trace Inspector (⇧⌘I).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1990,7 +1990,7 @@ struct ProfileEditorView: View {
                             .font(.subheadline.weight(.semibold))
                     }
                     .toggleStyle(.switch)
-                    Text("Sessions running under this profile normally stream metadata (tools, files, commands, token usage) to your workspace. Turn this on to keep this profile's activity local — neither the title-bar indicator nor the admin's session list will see anything from this profile. The local trace inspector is unaffected.")
+                    Text("Sessions running under this workspace normally stream metadata (tools, files, commands, token usage) to your workspace. Turn this on to keep this workspace's activity local — neither the title-bar indicator nor the admin's session list will see anything from this workspace. The local trace inspector is unaffected.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2039,7 +2039,7 @@ struct ProfileEditorView: View {
             }
             Text(state == .accepted
                  ? "The proxy is keeping the real OAuth tokens on this Mac and serving fakes inside the VM."
-                 : "You said \u{201C}Never\u{201D} on the swap prompt for this profile. Reset to be asked again next time the VM sends a real token to \(outboundHost).")
+                 : "You said \u{201C}Never\u{201D} on the swap prompt for this workspace. Reset to be asked again next time the VM sends a real token to \(outboundHost).")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2060,7 +2060,7 @@ struct ProfileEditorView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Storage")
                     .font(.headline)
-                Text("Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently.")
+                Text("Three layers stack to make this workspace's environment. The bottom is shared and immutable; the top two are yours and can be erased independently.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let storageContext {
@@ -2069,7 +2069,7 @@ struct ProfileEditorView: View {
                         context: storageContext
                     )
                 } else {
-                    Text("Storage controls only apply to real profiles. They appear in each profile's editor when you create or edit one.")
+                    Text("Storage controls only apply to real workspaces. They appear in each workspace's editor when you create or edit one.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2179,7 +2179,7 @@ struct ProfileEditorView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Automation API & MCP server")
                 .font(.headline)
-            Text("Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide.")
+            Text("Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage workspaces and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2346,9 +2346,9 @@ struct ProfileEditorView: View {
 
                 guardrailRow("Kubernetes", systemImage: "shippingbox.fill",
                              mode: $draft.guardrails.kubernetes,
-                             detail: "\(draft.guardrails.kubernetes.detail) \(NSLocalizedString("Applies to the kube API servers from this profile's kubeconfigs (e.g. `kubectl delete` fails cleanly).", comment: ""))")
+                             detail: "\(draft.guardrails.kubernetes.detail) \(NSLocalizedString("Applies to the kube API servers from this workspace's kubeconfigs (e.g. `kubectl delete` fails cleanly).", comment: ""))")
                 if draft.kubeconfigs.isEmpty && draft.guardrails.kubernetes != .off {
-                    Label("No kubeconfigs on this profile — add one under Credentials for this to take effect.",
+                    Label("No kubeconfigs on this workspace — add one under Credentials for this to take effect.",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2363,7 +2363,7 @@ struct ProfileEditorView: View {
                 guardrailRow(NSLocalizedString("Docker registries", comment: ""), systemImage: "cube.box.fill", mode: $draft.guardrails.docker,
                              detail: "\(draft.guardrails.docker.detail) \(NSLocalizedString("Registries you've added under Credentials — pull = read, push = write, delete = destructive.", comment: ""))")
                 if draft.dockerRegistries.isEmpty && draft.guardrails.docker != .off {
-                    Label("No registries on this profile — add one under Credentials for this to take effect.",
+                    Label("No registries on this workspace — add one under Credentials for this to take effect.",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -3441,8 +3441,8 @@ private struct StorageStackView: View {
             StorageLayerRow(
                 accent: .blue,
                 symbol: "internaldrive.fill",
-                title: "Profile system disk",
-                subtitle: "A read-write copy of the base OS, just for this profile. Holds anything you `sudo apt install`, edits to /etc and /var, system-level config.",
+                title: "Workspace system disk",
+                subtitle: "A read-write copy of the base OS, just for this workspace. Holds anything you `sudo apt install`, edits to /etc and /var, system-level config.",
                 metadata: diskMetadata,
                 size: diskBytes,
                 action: isNewProfile
@@ -3467,12 +3467,12 @@ private struct StorageStackView: View {
                 accent: .gray,
                 symbol: "cube.fill",
                 title: "Base OS image",
-                subtitle: "Ubuntu Noble + Node, Claude Code, Codex, kitty, gh, glab, fonts. Shared by every profile, immutable at runtime.",
+                subtitle: "Ubuntu Noble + Node, Claude Code, Codex, kitty, gh, glab, fonts. Shared by every workspace, immutable at runtime.",
                 metadata: baseMetadata,
                 size: baseBytes,
                 action: nil,
                 bottomNote: "Rebuild via the app menu (∼5–10 min).",
-                noteHelp: "Affects every profile, so it's parked outside this editor."
+                noteHelp: "Affects every workspace, so it's parked outside this editor."
             )
         }
         .background(Color(nsColor: .windowBackgroundColor),
@@ -4345,7 +4345,7 @@ struct SSHKeyView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("SSH public key — \(profileName)")
                 .font(.title3.bold())
-            Text("Paste this into github.com/settings/keys (or your hosting provider's equivalent). The matching private key lives only inside this profile.")
+            Text("Paste this into github.com/settings/keys (or your hosting provider's equivalent). The matching private key lives only inside this workspace.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

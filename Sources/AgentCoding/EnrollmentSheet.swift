@@ -21,7 +21,7 @@ struct BACEnrollmentSheet: View {
                 Text(NSLocalizedString("Enroll in bromure.io",
                                        comment: "BAC enrollment sheet title"))
                     .font(.title2).bold()
-                Text(NSLocalizedString("Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Profiles in private mode never stream.",
+                Text(NSLocalizedString("Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream.",
                                        comment: "BAC enrollment sheet subtitle"))
                     .font(.callout)
                     .foregroundStyle(.secondary)

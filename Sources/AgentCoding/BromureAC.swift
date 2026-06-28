@@ -36,7 +36,7 @@ struct BromureAC: ParsableCommand {
         groupedSubcommands: [
             CommandGroup(name: "Image management",
                          subcommands: [Init.self, Info.self, Reset.self]),
-            CommandGroup(name: "Profiles",
+            CommandGroup(name: "Workspaces",
                          subcommands: [Profiles.self]),
             CommandGroup(name: "Running sessions",
                          subcommands: [VM.self, Trace.self]),
@@ -277,7 +277,7 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                        action: #selector(NSWindow.performClose(_:)),
                        keyEquivalent: "w")
     windowMenu.addItem(NSMenuItem.separator())
-    let pickerItem = NSMenuItem(title: L("Profile Manager"),
+    let pickerItem = NSMenuItem(title: L("Workspace Manager"),
                                 action: #selector(ACAppDelegate.openProfileManagerAction(_:)),
                                 keyEquivalent: "0")
     pickerItem.target = delegate
@@ -1645,7 +1645,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return ["ok": false, "error": "VM not found: \(idOrName)"]
         }
         guard session.profile.fusionConfigurable else {
-            return ["ok": false, "error": "Fusion needs at least two usable model credentials on this profile."]
+            return ["ok": false, "error": "Fusion needs at least two usable model credentials on this workspace."]
         }
         setFusionEngaged(engaged, for: session.profile)
         return ["ok": true, "engaged": engaged]
@@ -1736,10 +1736,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Delete a profile (and its disk + home). Refuses while a VM is running.
     @MainActor private func automationDeleteProfile(_ key: String) -> [String: Any] {
         guard let p = profileByNameOrID(key) else {
-            return ["ok": false, "error": "Profile not found: \(key)"]
+            return ["ok": false, "error": "Workspace not found: \(key)"]
         }
         if runningSessions[p.id] != nil {
-            return ["ok": false, "error": "Profile '\(p.name)' has a running VM — `vm kill` it first."]
+            return ["ok": false, "error": "Workspace '\(p.name)' has a running VM — `vm kill` it first."]
         }
         do {
             try store.delete(p)
@@ -2058,7 +2058,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let names = running.map { $0.profile.name }.joined(separator: ", ")
         alert.informativeText = String(
             format: NSLocalizedString(
-                "%d VM(s) currently running (%@) will be closed according to each profile's close action.",
+                "%d VM(s) currently running (%@) will be closed according to each workspace's close action.",
                 comment: ""),
             running.count, names)
         alert.alertStyle = .warning
@@ -3008,7 +3008,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func rebuildBaseImageAction(_ sender: Any?) {
         let alert = NSAlert()
         alert.messageText = "Rebuild the base image?"
-        alert.informativeText = "Re-runs the full Ubuntu installer (~5–10 min) using the current setup.sh. Existing profiles' disks aren't touched — on next launch each one's drift prompt will offer to reset to the new base."
+        alert.informativeText = "Re-runs the full Ubuntu installer (~5–10 min) using the current setup.sh. Existing workspaces' disks aren't touched — on next launch each one's drift prompt will offer to reset to the new base."
         alert.addButton(withTitle: "Rebuild")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
@@ -3049,7 +3049,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// first one not currently taken (case-insensitive comparison so
     /// users typing "default profile" don't get an unexpected dupe).
     private func nextDefaultProfileName() -> String {
-        let base = NSLocalizedString("Default profile",
+        let base = NSLocalizedString("Default workspace",
                                       comment: "Placeholder name for a new profile")
         let existing = Set(profiles.map { $0.name.lowercased() })
         if !existing.contains(base.lowercased()) { return base }
@@ -3093,7 +3093,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false
         )
-        win.title = editing == nil ? "New profile" : "Edit profile"
+        win.title = editing == nil ? "New workspace" : "Edit workspace"
         win.center()
         // For new profiles, hand the editor a draft pre-populated from
         // the user's preferences template (Bromure → Preferences…)
@@ -3290,7 +3290,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     format: NSLocalizedString("Discard suspended VM for “%@”?", comment: ""),
                     profile.name)
                 alert.informativeText = NSLocalizedString(
-                    "The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected.",
+                    "The shared folders changed since this workspace was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-workspace home directory and on the shared folders themselves are unaffected.",
                     comment: "")
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: NSLocalizedString("Discard & save", comment: ""))
@@ -3333,8 +3333,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         } catch {
             showError(error, message: editing == nil
-                      ? "Couldn't create the profile."
-                      : "Couldn't save the profile.")
+                      ? "Couldn't create the workspace."
+                      : "Couldn't save the workspace.")
             return
         }
         profiles = store.loadAll()
@@ -3784,7 +3784,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func deleteProfile(_ profile: Profile) {
         let alert = NSAlert()
-        alert.messageText = "Delete profile “\(profile.name)”?"
+        alert.messageText = "Delete workspace “\(profile.name)”?"
         alert.informativeText = "Removes its disk, settings, and SSH key. The mounted host folder is untouched."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
@@ -3795,7 +3795,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             profiles = store.loadAll()
             refreshSidebar()
         } catch {
-            showError(error, message: "Couldn't delete the profile.")
+            showError(error, message: "Couldn't delete the workspace.")
         }
     }
 
@@ -3863,8 +3863,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
            let current = currentBaseVersion,
            recorded != current {
             let alert = NSAlert()
-            alert.messageText = "Base image updated since this profile was created."
-            alert.informativeText = "This profile is on base v\(recorded); the current base is v\(current). Reset the profile disk to pick up the new base? (Resetting wipes anything you've installed inside the VM. Your project folder is untouched.)"
+            alert.messageText = "Base image updated since this workspace was created."
+            alert.informativeText = "This workspace is on base v\(recorded); the current base is v\(current). Reset the workspace disk to pick up the new base? (Resetting wipes anything you've installed inside the VM. Your project folder is untouched.)"
             alert.addButton(withTitle: "Reset and launch")
             alert.addButton(withTitle: "Launch as-is")
             alert.addButton(withTitle: "Cancel")
@@ -4348,7 +4348,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             comment: "")
         info += "\n\n"
         info += NSLocalizedString(
-            "To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and profile settings are preserved.",
+            "To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and workspace settings are preserved.",
             comment: "")
         // Surface the shared-folder warning. Listing the paths
         // explicitly is cheap and makes "where do I look?" obvious.
@@ -4467,7 +4467,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         FileHandle.standardError.write(Data(
                             "[ac] investigation export failed: \(error)\n".utf8))
                         self.showError(error,
-                                       message: "Couldn't export the VM for investigation. The profile will still be marked compromised.")
+                                       message: "Couldn't export the VM for investigation. The workspace will still be marked compromised.")
                     }
                 }
                 sandbox.sessionDisk?.markCompromised()
@@ -4631,7 +4631,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 leak.observedHost)
         }
         info += "\n" + NSLocalizedString(
-            "Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the profile is marked compromised.",
+            "Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the workspace is marked compromised.",
             comment: "")
         alert.informativeText = info
         // Order: dismissive default first would let an enter-press hide
