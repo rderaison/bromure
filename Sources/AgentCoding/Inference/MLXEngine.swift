@@ -96,6 +96,47 @@ actor MLXEngine {
         else { genWaiters.removeFirst().resume() }
     }
 
+    /// A firm, format-exact reminder appended to the system prompt whenever the
+    /// request declares tools. The chat template already documents the format,
+    /// but local models (esp. quantized, at long context) drift — emitting tool
+    /// calls as malformed JSON or mixed shapes that leak as text. This pins them
+    /// to the one shape `ToolCallRepair` and the template agree on.
+    static let toolFormatReminder = """
+    ──────────────────────────────────────────────
+    TOOL-CALL FORMAT — follow this EXACTLY, every time.
+    To call a tool, emit ONLY this structure (nothing else inside it):
+    <tool_call>
+    <function=ExactToolName>
+    <parameter=first_param_name>
+    value
+    </parameter>
+    <parameter=second_param_name>
+    value
+    </parameter>
+    </function>
+    </tool_call>
+    Rules:
+    - One <function=…> per call; close it with </function>.
+    - Each argument is its own <parameter=name>…</parameter> block.
+    - NEVER emit a tool call as JSON ({"name":…,"arguments":…}) or any other shape.
+    - Use exact tool names as declared. No extra prose inside <tool_call>.
+    ──────────────────────────────────────────────
+    """
+
+    /// Append `toolFormatReminder` to the (first) system message when the request
+    /// declares tools — keeping it in the stable prompt prefix so the KV cache
+    /// still reuses across turns.
+    static func withToolReminder(_ messages: [Chat.Message], hasTools: Bool) -> [Chat.Message] {
+        guard hasTools else { return messages }
+        var msgs = messages
+        if let i = msgs.firstIndex(where: { $0.role == .system }) {
+            msgs[i].content += "\n\n" + toolFormatReminder
+        } else {
+            msgs.insert(.system(toolFormatReminder), at: 0)
+        }
+        return msgs
+    }
+
     /// Length of the shared leading run of two token sequences.
     private static func commonPrefix(_ a: [Int], _ b: [Int]) -> Int {
         let n = min(a.count, b.count)
@@ -274,7 +315,8 @@ actor MLXEngine {
 
         return try await container.perform { [session] (context: ModelContext) in
             let input = try await context.processor.prepare(
-                input: UserInput(chat: messages, tools: tools?.map(\.asToolSpec),
+                input: UserInput(chat: MLXEngine.withToolReminder(messages, hasTools: tools?.isEmpty == false),
+                                 tools: tools?.map(\.asToolSpec),
                                  additionalContext: ["enable_thinking": enableThinking]))
             // The full prompt as token ids — what we prefix-match the cache on.
             let promptIds = input.text.tokens.asArray(Int32.self).map(Int.init)
