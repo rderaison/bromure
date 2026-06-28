@@ -187,6 +187,14 @@ actor MLXEngine {
         var repetitionPenalty: Float?
         /// Cap the KV cache to bound memory on long contexts (RotatingKVCache).
         var maxKVSize: Int?
+        /// Quantize the KV cache to this many bits (8 or 4). At an agent's real
+        /// context (Claude Code sends ~20k-token prompts), decode is bound by
+        /// reading the KV cache during attention; quantizing it speeds those
+        /// reads (and halves/quarters its memory) for a small quality cost.
+        /// nil = full-precision cache. `kvBitsStartAt` defers quantization until
+        /// the context passes a threshold so short prompts stay exact.
+        var kvBits: Int?
+        var kvBitsStartAt: Int = 0
         /// Pass `enable_thinking` to the chat template. When on, the reasoning
         /// model (Qwen3) thinks before answering — but the `<think>` block is
         /// always stripped from the returned text (`stripThinking`), so the
@@ -199,6 +207,8 @@ actor MLXEngine {
             GenerateParameters(
                 maxTokens: maxTokens,
                 maxKVSize: maxKVSize,
+                kvBits: kvBits,
+                quantizedKVStart: kvBitsStartAt,
                 temperature: temperature,
                 topP: topP,
                 repetitionPenalty: repetitionPenalty)

@@ -149,10 +149,15 @@ final class MLXServer: @unchecked Sendable {
                 // skip thinking entirely when you'd rather have the speed.
                 let thinkEnv = ProcessInfo.processInfo.environment["BROMURE_THINKING"]
                 let thinking = !(thinkEnv == "0" || thinkEnv?.lowercased() == "false")
+                let env = ProcessInfo.processInfo.environment
+                let kvBits = env["BROMURE_KVBITS"].flatMap { Int($0) }
+                let kvStart = env["BROMURE_KVBITS_START"].flatMap { Int($0) } ?? 4096
                 let params = MLXEngine.Params(
                     maxTokens: parsed.maxTokens ?? 2048,
                     temperature: parsed.temperature ?? 0.6,
                     topP: parsed.topP ?? 1.0,
+                    kvBits: kvBits,
+                    kvBitsStartAt: kvStart,
                     enableThinking: thinking)
                 let completion = try await MLXEngine.shared.generate(
                     repo: repo, messages: parsed.messages, tools: parsed.tools,
