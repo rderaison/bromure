@@ -171,11 +171,14 @@ actor MLXEngine {
     func setMemoryBudget(_ gb: Int) {
         memoryBudgetGB = gb
         // Bound MLX's GPU buffer cache. The default is unbounded, so the large
-        // transient allocations of prefilling a big agent prompt (system prompt
-        // + many tool defs + a growing conversation, plus thinking-mode output)
-        // stay cached and pile up — filling the macOS compressor (the "40 GB on
-        // an 8 GB model" symptom). 1 GB keeps reuse benefits without the bloat.
-        _ = MLX.GPU.set(cacheLimit: 1 << 30)
+        // transient allocations of prefilling a big agent prompt could pile up
+        // and fill the macOS compressor (the old "40 GB on an 8 GB model").
+        // Prefix-caching now keeps per-turn prefill small, so the cap that used
+        // to be 1 GB was throttling buffer reuse — raise it (still bounded so a
+        // fresh full prefill can't run away). Tunable: BROMURE_GPU_CACHE_GB.
+        let cacheGB = ProcessInfo.processInfo.environment["BROMURE_GPU_CACHE_GB"]
+            .flatMap { Int($0) } ?? 4
+        _ = MLX.GPU.set(cacheLimit: cacheGB << 30)
         // A soft overall ceiling when a budget is set, so the engine sheds cache
         // instead of OOM-killing this out-of-process child.
         if gb > 0 { _ = MLX.GPU.set(memoryLimit: gb << 30, relaxed: true) }
@@ -313,7 +316,13 @@ actor MLXEngine {
         let maxTokens = params.maxTokens
         let enableThinking = params.enableThinking
 
-        return try await container.perform { [session] (context: ModelContext) in
+        // Pin this model's working set as non-pageable for the run — Apple's
+        // recommendation for LLM serving (WWDC25 298) so a memory-pressured host
+        // (the VMs share unified memory) can't page weights out mid-decode.
+        // Scoped: the previous limit is restored when generation returns.
+        let wiredBytes = (estMemGB > 0 ? estMemGB : max(memoryBudgetGB, 1)) << 30
+        return try await MLX.GPU.withWiredLimit(wiredBytes) {
+        try await container.perform { [session] (context: ModelContext) in
             let input = try await context.processor.prepare(
                 input: UserInput(chat: MLXEngine.withToolReminder(messages, hasTools: tools?.isEmpty == false),
                                  tools: tools?.map(\.asToolSpec),
@@ -403,6 +412,7 @@ actor MLXEngine {
                 ttft: ttft,
                 decodeSeconds: decode,
                 finishReason: finish)
+        }
         }
     }
 }
