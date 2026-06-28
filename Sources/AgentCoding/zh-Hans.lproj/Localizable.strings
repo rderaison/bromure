@@ -14,7 +14,7 @@
 "Edit…" = "编辑…";
 "SSH public key…" = "SSH 公钥…";
 "Reset disk" = "重置磁盘";
-"Delete profile" = "删除配置";
+"Delete workspace" = "删除工作区";
 "SSH key" = "SSH 密钥";
 
 /* Setup */
@@ -39,14 +39,14 @@
 "Resources" = "资源";
 
 /* Editor — General */
-"New profile" = "新建配置";
+"New workspace" = "新建工作区";
 "Edit profile" = "编辑配置";
 "Name" = "名称";
 "Color" = "颜色";
 "Notes (optional)" = "备注 (可选)";
 
 /* Editor — Agent */
-"Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "启用您希望在此配置中可用的每个代理。标记为 **主要** 的代理将在第一个 kitty 标签页中自动启动;其他启用的代理已安装并完成认证,但您需要在新标签页中按需运行它们。";
+"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "启用您希望在此工作区中可用的每个代理。标记为 **主要** 的代理将在第一个 kitty 标签页中自动启动;其他启用的代理已安装并完成认证,但您需要在新标签页中按需运行它们。";
 "Primary" = "主要";
 "Make primary" = "设为主要";
 "Auth" = "认证";
@@ -56,7 +56,7 @@
 "OpenAI API key" = "OpenAI API 密钥";
 
 /* Editor — Folders */
-"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per profile." = "每个文件夹按其真实名称挂载到虚拟机中 (例如 ~/Documents → ~ubuntu/Documents)。每个配置最多 8 个文件夹。";
+"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per workspace." = "每个文件夹按其真实名称挂载到虚拟机中 (例如 ~/Documents → ~ubuntu/Documents)。每个工作区最多 8 个文件夹。";
 "No folders shared." = "未共享任何文件夹。";
 "Add folder…" = "添加文件夹…";
 
@@ -64,7 +64,7 @@
 "Git Identity" = "Git 身份";
 "Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults." = "写入虚拟机中的 ~/.gitconfig。保持两者为空以使用 git 的默认值。";
 "Generate an ed25519 keypair" = "生成 ed25519 密钥对";
-"The public key will be displayed below after the profile is saved." = "保存配置后,公钥将显示在下方。";
+"The public key will be displayed below after the workspace is saved." = "保存工作区后,公钥将显示在下方。";
 "ed25519 keypair on file." = "已记录 ed25519 密钥对。";
 "Regenerate" = "重新生成";
 "Public key (paste into github.com/settings/keys):" = "公钥 (粘贴到 github.com/settings/keys):";
@@ -80,9 +80,9 @@
 
 /* Editor — Resources */
 "Storage" = "存储";
-"Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "三层叠加构成此配置的环境。底层为共享且不可更改;上面两层属于您,可以独立清除。";
+"Three layers stack to make this workspace's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "三层叠加构成此工作区的环境。底层为共享且不可更改;上面两层属于您,可以独立清除。";
 "Your home folder" = "您的主目录";
-"Profile system disk" = "配置系统磁盘";
+"Workspace system disk" = "工作区系统磁盘";
 "Base OS image" = "基础 OS 镜像";
 "Erase home…" = "清除主目录…";
 "Reset to base…" = "重置为基础…";
@@ -152,7 +152,7 @@
 
 /* Alert: shared folders changed while a saved VM state exists */
 "Discard suspended VM for “%@”?" = "丢弃“%@”的已挂起虚拟机？";
-"The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "自该配置文件挂起以来，共享文件夹已发生变化。快照是基于旧的共享集保存的，无法安全地以新的共享集恢复。\n\n保存将丢弃挂起状态。下次启动将冷启动。配置文件的个人主目录及共享文件夹中的文件不受影响。";
+"The shared folders changed since this workspace was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-workspace home directory and on the shared folders themselves are unaffected." = "自该工作区挂起以来，共享文件夹已发生变化。快照是基于旧的共享集保存的，无法安全地以新的共享集恢复。\n\n保存将丢弃挂起状态。下次启动将冷启动。工作区的个人主目录及共享文件夹中的文件不受影响。";
 "Discard & save" = "丢弃并保存";
 
 /* Editor — Credentials → Container Registries */
@@ -216,14 +216,14 @@
 "Bromure detected an outbound attempt to leak a session credential to a host it was not minted for. The VM has been paused." = "Bromure 检测到向非授权主机外发会话凭据的尝试。虚拟机已暂停。";
 "Detected leaks:" = "检测到的泄露:";
 "  • %1$@ (%2$@) — expected %3$@, sent to %4$@\n" = "  • %1$@(%2$@)— 应为 %3$@,发送至 %4$@\n";
-"Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the profile is marked compromised." = "“保存以供调查”允许您选择一个文件夹,Bromure 会将磁盘映像、主目录和共享文件夹的 gzip 归档复制到其中。虚拟机的内存状态将被丢弃。随后虚拟机会关机,该配置文件将被标记为已入侵。";
+"Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the workspace is marked compromised." = "“保存以供调查”允许您选择一个文件夹,Bromure 会将磁盘映像、主目录和共享文件夹的 gzip 归档复制到其中。虚拟机的内存状态将被丢弃。随后虚拟机会关机,该工作区将被标记为已入侵。";
 "Save for Investigation" = "保存以供调查";
 "Continue" = "继续";
 "Save Investigation Here" = "在此保存调查内容";
 "Choose a folder to receive the disk image, home archive, and shared-folder archives for “%@”." = "请选择一个文件夹用于保存“%@”的磁盘映像、主目录归档以及共享文件夹归档。";
 "⛔ “%@” is marked as compromised" = "⛔ “%@”已被标记为已入侵";
 "Bromure refused to boot this VM because the proxy detected an outbound credential leak in a previous session." = "Bromure 拒绝启动此虚拟机,因为代理在之前的会话中检测到了外发凭据泄露。";
-"To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and profile settings are preserved." = "若要继续,必须清除虚拟机的磁盘映像和持久化的主目录。您的令牌、SSH 密钥和配置文件设置将保留。";
+"To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and workspace settings are preserved." = "若要继续,必须清除虚拟机的磁盘映像和持久化的主目录。您的令牌、SSH 密钥和工作区设置将保留。";
 "WARNING: shared folders are NOT wiped. Compromised packages or files may still be present in:" = "警告:共享文件夹不会被清除。被入侵的软件包或文件可能仍存在于:";
 "Inspect those folders before launching anything that re-uses them." = "在启动任何重用这些文件夹的程序之前,请先检查它们。";
 "Wipe and Launch" = "清除并启动";
@@ -287,7 +287,7 @@
 "No Kubernetes contexts configured." = "未配置 Kubernetes 上下文。";
 "No bridged interfaces available. Bromure AC will fall back to NAT at launch." = "没有可用的桥接接口。Bromure AC 启动时将回退到 NAT。";
 "No other API tokens configured." = "未配置其他 API 令牌。";
-"Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as profile secrets. View at App → Trace Inspector (⇧⌘I)." = "关闭 → 不记录任何内容。活动 → 仅元数据（主机、状态、延迟、替换报告、泄漏警告）。AI 请求详情 → 同时捕获已知 LLM 主机（Anthropic、OpenAI、Google、Cohere、Mistral、Perplexity、x.ai、Groq、Replicate、HuggingFace）的请求体。全部 → 所有主机的请求体。请求体使用与配置文件机密相同的钥匙串密钥进行 AES-GCM 加密。请在 App → Trace Inspector (⇧⌘I) 中查看。";
+"Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as workspace secrets. View at App → Trace Inspector (⇧⌘I)." = "关闭 → 不记录任何内容。活动 → 仅元数据（主机、状态、延迟、替换报告、泄漏警告）。AI 请求详情 → 同时捕获已知 LLM 主机（Anthropic、OpenAI、Google、Cohere、Mistral、Perplexity、x.ai、Groq、Replicate、HuggingFace）的请求体。全部 → 所有主机的请求体。请求体使用与工作区机密相同的钥匙串密钥进行 AES-GCM 加密。请在 App → Trace Inspector (⇧⌘I) 中查看。";
 "Open DigitalOcean token page in your browser" = "在浏览器中打开 DigitalOcean 令牌页面";
 "Open this host's token-creation page in your browser" = "在浏览器中打开此主机的令牌创建页面";
 "Optional. Leave blank to trust the Bromure CA only (the proxy still validates the upstream)." = "可选。留空则仅信任 Bromure CA（代理仍会验证上游）。";
@@ -295,10 +295,10 @@
 "Passphrase is in your macOS Keychain." = "口令保存在您的 macOS 钥匙串中。";
 "Passphrases (if any) are stored in the macOS Keychain — bromure-ac fetches via SSH_ASKPASS at session launch and never logs the value." = "口令（如有）保存在 macOS 钥匙串中 — bromure-ac 在会话启动时通过 SSH_ASKPASS 获取，绝不会记录该值。";
 "Password / token" = "密码 / 令牌";
-"Paste this into github.com/settings/keys (or your hosting provider's equivalent). The matching private key lives only inside this profile." = "将此粘贴到 github.com/settings/keys（或您的托管商对应页面）。对应的私钥仅存在于该配置文件内。";
+"Paste this into github.com/settings/keys (or your hosting provider's equivalent). The matching private key lives only inside this workspace." = "将此粘贴到 github.com/settings/keys（或您的托管商对应页面）。对应的私钥仅存在于该工作区内。";
 "Personal access token from cloud.digitalocean.com → API → Generate New Token. Injected into the VM as `DIGITALOCEAN_ACCESS_TOKEN` env + `~/.config/doctl/config.yaml` — `doctl auth init` is unnecessary, you're already logged in." = "来自 cloud.digitalocean.com → API → Generate New Token 的个人访问令牌。会作为 `DIGITALOCEAN_ACCESS_TOKEN` 环境变量并写入 `~/.config/doctl/config.yaml` 注入到虚拟机中 — 无需再执行 `doctl auth init`，您已登录。";
 "Personal access tokens for git over HTTPS. Stored encrypted on the host; the proxy swaps them onto outbound requests so the VM only ever holds the fake. `gh` and `glab` pick up GH_TOKEN / GITLAB_TOKEN env automatically." = "用于通过 HTTPS 访问 git 的个人访问令牌。在主机上加密存储；代理在出站请求时进行替换，因此虚拟机只持有伪造的令牌。`gh` 与 `glab` 会自动读取 GH_TOKEN / GITLAB_TOKEN 环境变量。";
-"Point bromure at any existing SSH private key (RSA, ed25519, ecdsa) — encrypted ones included. The key is loaded into the per-profile bromure ssh-agent at every session launch; passphrases are stored in the macOS Keychain." = "将 bromure 指向任意现有的 SSH 私钥（RSA、ed25519、ecdsa — 加密的也支持）。每次会话启动时密钥会加载到该配置文件专属的 bromure ssh-agent；口令保存在 macOS 钥匙串中。";
+"Point bromure at any existing SSH private key (RSA, ed25519, ecdsa) — encrypted ones included. The key is loaded into the per-workspace bromure ssh-agent at every session launch; passphrases are stored in the macOS Keychain." = "将 bromure 指向任意现有的 SSH 私钥（RSA、ed25519、ecdsa — 加密的也支持）。每次会话启动时密钥会加载到该工作区专属的 bromure ssh-agent；口令保存在 macOS 钥匙串中。";
 "Private mode" = "私密模式";
 "Quay (quay.io)" = "Quay (quay.io)";
 "Real value" = "真实值";
@@ -307,8 +307,8 @@
 "Remove this token rule" = "移除此令牌规则";
 "Server" = "服务器";
 "Session trace" = "会话跟踪";
-"Sessions running under this profile normally stream metadata (tools, files, commands, token usage) to your workspace. Turn this on to keep this profile's activity local — neither the title-bar indicator nor the admin's session list will see anything from this profile. The local trace inspector is unaffected." = "在该配置文件下运行的会话通常会将元数据（工具、文件、命令、令牌用量）流式发送到您的工作区。启用此项可将该配置文件的活动保留在本地 — 标题栏指示器和管理员的会话列表都将看不到该配置文件的任何信息。本地跟踪检查器不受影响。";
-"Storage controls only apply to real profiles. They appear in each profile's editor when you create or edit one." = "存储控制仅对实际配置文件生效。在您创建或编辑配置文件时会显示在该配置文件的编辑器中。";
+"Sessions running under this workspace normally stream metadata (tools, files, commands, token usage) to your workspace. Turn this on to keep this workspace's activity local — neither the title-bar indicator nor the admin's session list will see anything from this workspace. The local trace inspector is unaffected." = "在该工作区下运行的会话通常会将元数据（工具、文件、命令、令牌用量）流式发送到您的工作区。启用此项可将该工作区的活动保留在本地 — 标题栏指示器和管理员的会话列表都将看不到该工作区的任何信息。本地跟踪检查器不受影响。";
+"Storage controls only apply to real workspaces. They appear in each workspace's editor when you create or edit one." = "存储控制仅对实际工作区生效。在您创建或编辑工作区时会显示在该工作区的编辑器中。";
 "Stripe sandbox" = "Stripe 沙盒";
 "The VM gets a LAN-routable IP via DHCP on the chosen interface." = "虚拟机通过所选接口的 DHCP 获取一个可在局域网内路由的 IP 地址。";
 "Username" = "用户名";
@@ -319,7 +319,7 @@
 /* Preferences — Automation pane */
 "Automation" = "自动化";
 "Automation API & MCP server" = "自动化 API 与 MCP 服务器";
-"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "Bromure AC 在回环接口上公开一个 HTTP API，允许外部工具管理配置文件和会话。随附的 `bromure-ac mcp` 子命令为 AI 智能体（Claude Code、Claude Desktop）包装了相同的接口。这些设置在整个应用范围内生效。";
+"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage workspaces and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "Bromure AC 在回环接口上公开一个 HTTP API，允许外部工具管理工作区和会话。随附的 `bromure-ac mcp` 子命令为 AI 智能体（Claude Code、Claude Desktop）包装了相同的接口。这些设置在整个应用范围内生效。";
 "Enable automation server" = "启用自动化服务器";
 "Listening on %@:%@. Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app." = "正在监听 %@:%@。关闭此项将立即停止服务器，MCP 子命令将无法访问该应用。";
 "Off — the HTTP API and the MCP subcommand are unavailable." = "已关闭 — HTTP API 与 MCP 子命令均不可用。";
@@ -342,8 +342,8 @@
 "Guardrails strips destructive operations from the protocols this agent speaks. It's enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it. Blocked calls return a hard error the agent sees." = "防护栏会从该智能体所使用的协议中剥离破坏性操作。它在主机端（代理内部）强制执行，因此 VM 中行为异常或被入侵的智能体无法绕过。被阻止的调用会向智能体返回一个明确的错误。";
 "Databases" = "数据库";
 "No database endpoints configured. Add MongoDB, ClickHouse, or Elasticsearch endpoints under Credentials to guard them here." = "未配置数据库端点。请在“凭据”中添加 MongoDB、ClickHouse 或 Elasticsearch 端点以在此处加以防护。";
-"No kubeconfigs on this profile — add one under Credentials for this to take effect." = "此配置文件没有 kubeconfig — 请在“凭据”中添加一个以使其生效。";
-"No registries on this profile — add one under Credentials for this to take effect." = "此配置文件没有镜像仓库 — 请在“凭据”中添加一个以使其生效。";
+"No kubeconfigs on this workspace — add one under Credentials for this to take effect." = "此工作区没有 kubeconfig — 请在“凭据”中添加一个以使其生效。";
+"No registries on this workspace — add one under Credentials for this to take effect." = "此工作区没有镜像仓库 — 请在“凭据”中添加一个以使其生效。";
 "Set this endpoint's host under Credentials for the guard to take effect." = "请在“凭据”中设置此端点的主机，以使防护生效。";
 "Off" = "关闭";
 "Block destructive" = "阻止破坏性操作";
@@ -378,20 +378,20 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "退出 Bromure Agentic Coding？";
-"%d VM(s) currently running (%@) will be closed according to each profile's close action." = "%d 个正在运行的 VM (%@) 将根据每个配置文件的关闭操作而关闭。";
+"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "%d 个正在运行的 VM (%@) 将根据每个工作区的关闭操作而关闭。";
 "Quit" = "退出";
 
 /* Guardrails: new prompt-on-write mode */
 "Prompt before write" = "每次写入前提示";
 "Reads pass through; writes ask you each time." = "读取请求直接通过；写入请求每次都会询问。";
 /* Guardrails consent prompt */
-"Allow write on “%@” from profile “%@”?" = "允许配置文件“%@”对“%@”执行一次写入？";
+"Allow write on “%@” from workspace “%@”?" = "允许工作区“%@”对“%@”执行一次写入？";
 "Allow for 15 minutes" = "允许 15 分钟";
 "Allow once" = "仅允许一次";
 
 /* Supply Chain category */
 "Supply Chain" = "供应链";
-"Pass through %@ from profile “%@”?" = "允许来自配置文件“%@”的 %@ 通过？";
+"Pass through %@ from workspace “%@”?" = "允许来自工作区“%@”的 %@ 通过？";
 "Get an API key" = "获取 API 密钥";
 "Add entry" = "添加条目";
 
@@ -526,7 +526,7 @@
 "Bromure detected a real %@ subscription token going out to %@ from “%@”. We can replace it inside the VM with a fake — the real token stays on this Mac and the proxy substitutes it on the wire only when needed." = "Bromure 检测到一个真实的 %@ 订阅令牌从“%@”发往 %@。我们可以在 VM 内将其替换为伪造令牌——真实令牌保留在本机 Mac 上，proxy 仅在需要时才在传输链路上将其替换回来。";
 "Both the access and refresh tokens are swapped together." = "访问令牌和刷新令牌会一并替换。";
 "The VM never receives any real credential — only the fake replacements." = "VM 永远不会收到任何真实凭据——只会收到伪造的替换令牌。";
-"Never for this profile" = "对此配置文件永不";
+"Never for this workspace" = "对此工作区永不";
 "Not now" = "暂不";
 "Swap" = "替换";
 
@@ -534,22 +534,22 @@
 "Proxy unavailable" = "proxy 不可用";
 "The Bromure proxy isn't running, so registration can't capture your tokens." = "Bromure proxy 未运行，因此注册无法捕获您的令牌。";
 "Register with %@" = "通过 %@ 注册";
-"Bromure will open a temporary, isolated VM with no access to your profiles or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM." = "Bromure 将打开一个临时的隔离 VM，它无法访问您的配置文件或已保存的机密。%@ 会在您 Mac 的浏览器中打开其登录页面。您登录后，Bromure 会捕获凭据，随后关闭并删除该 VM。";
+"Bromure will open a temporary, isolated VM with no access to your workspaces or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM." = "Bromure 将打开一个临时的隔离 VM，它无法访问您的工作区或已保存的机密。%@ 会在您 Mac 的浏览器中打开其登录页面。您登录后，Bromure 会捕获凭据，随后关闭并删除该 VM。";
 "Couldn't start the registration VM." = "无法启动注册 VM。";
 "Registration timed out" = "注册超时";
 "Bromure didn't receive a %@ sign-in in time. You can try again." = "Bromure 未能及时收到 %@ 登录。您可以重试。";
 "Share with every session?" = "与每个会话共享？";
-"Use this %@ sign-in for every Bromure session, or only for this profile?" = "将此 %@ 登录用于每个 Bromure 会话，还是仅用于此配置文件？";
+"Use this %@ sign-in for every Bromure session, or only for this workspace?" = "将此 %@ 登录用于每个 Bromure 会话，还是仅用于此工作区？";
 "Every session" = "每个会话";
-"Just this profile" = "仅此配置文件";
+"Just this workspace" = "仅此工作区";
 "Couldn't save the captured credentials." = "无法保存已捕获的凭据。";
 "Registered with %@" = "已通过 %@ 注册";
 "Saved for all sessions. New sessions will use it automatically." = "已为所有会话保存。新会话将自动使用它。";
-"Saved for this profile." = "已为此配置文件保存。";
+"Saved for this workspace." = "已为此工作区保存。";
 
 /* bromure.io enrollment sheet */
 "Enroll in bromure.io" = "注册到 bromure.io";
-"Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Profiles in private mode never stream." = "您的管理员会给您一个 6 个单词的注册码。注册后，Bromure Agentic Coding 会将会话元数据（工具、文件、命令、令牌用量）发送到您的工作区，以便管理员审查活动。处于私密模式的配置文件永远不会上传。";
+"Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream." = "您的管理员会给您一个 6 个单词的注册码。注册后，Bromure Agentic Coding 会将会话元数据（工具、文件、命令、令牌用量）发送到您的工作区，以便管理员审查活动。处于私密模式的工作区永远不会上传。";
 "Enrollment Code" = "注册码";
 "Device Name" = "设备名称";
 "Shown to your administrator so they can recognize this Mac." = "向您的管理员显示，以便其识别这台 Mac。";
@@ -571,3 +571,105 @@
 "Your administrator revoked this install. Sign out and enroll again with a new code to resume managed mode." = "您的管理员已撤销此安装。请退出登录并使用新的注册码重新注册以恢复托管模式。";
 "Enrollment no longer accepted" = "注册不再被接受";
 "The server rejected this install's credentials — they may have expired or been reset. Sign out and enroll again with a new code." = "服务器拒绝了此安装的凭据——它们可能已过期或被重置。请退出登录并使用新的注册码重新注册。";
+
+/* Workspace rename + new settings */
+"(unknown workspace)" = "(未知工作区)";
+"A read-write copy of the base OS, just for this workspace. Holds anything you `sudo apt install`, edits to /etc and /var, system-level config." = "基础操作系统的可读写副本，仅供此工作区使用。保存您 `sudo apt install` 安装的所有内容、对 /etc 和 /var 的修改以及系统级配置。";
+"Affects every workspace, so it's parked outside this editor." = "影响每个工作区，因此放在此编辑器之外。";
+"All workspaces" = "所有工作区";
+"Auth mode for an on-the-fly workspace: token | subscription | bedrock." = "即时工作区的认证模式：token | subscription | bedrock。";
+"Base image updated since this workspace was created." = "自创建此工作区以来，基础镜像已更新。";
+"Couldn't create the workspace." = "无法创建工作区。";
+"Couldn't delete the workspace." = "无法删除工作区。";
+"Couldn't export the VM for investigation. The workspace will still be marked compromised." = "无法导出虚拟机以供调查。该工作区仍将被标记为已入侵。";
+"Couldn't save the workspace." = "无法保存工作区。";
+"Create and boot a VM, optionally from an on-the-fly workspace (like `docker run`)." = "创建并启动一个虚拟机，可选择从即时工作区启动（类似 `docker run`）。";
+"Default workspace" = "默认工作区";
+"Delete the workspace + disk when the VM stops (ephemeral)." = "虚拟机停止时删除工作区及磁盘（临时性）。";
+"Edit this workspace's settings" = "编辑此工作区的设置";
+"Filter to one VM/workspace (id or name)." = "筛选到单个 VM/工作区（id 或名称）。";
+"Inspect this workspace's session trace (⇧⌘I)" = "检查此工作区的会话跟踪 (⇧⌘I)";
+"Manage workspaces (the templates VMs boot from)." = "管理工作区（虚拟机启动所用的模板）。";
+"Name for an on-the-fly workspace (default: cli-XXXX)." = "即时工作区的名称（默认：cli-XXXX）。";
+"New session — pick a workspace" = "新建会话 — 选择一个工作区";
+"No workspaces found. Create one in the bromure-ac app first." = "未找到工作区。请先在 bromure-ac 应用中创建一个。";
+"No workspaces yet" = "尚无工作区";
+"No workspaces." = "无工作区。";
+"No trace records. (Tracing is per-workspace — enable it in the workspace's settings.)" = "无跟踪记录。（跟踪按工作区设置 — 请在该工作区的设置中启用。）";
+"Workspace Manager" = "工作区管理器";
+"Workspace id or name." = "工作区 id 或名称。";
+"Workspaces" = "工作区";
+"Re-runs the full Ubuntu installer (~5–10 min) using the current setup.sh. Existing workspaces' disks aren't touched — on next launch each one's drift prompt will offer to reset to the new base." = "使用当前的 setup.sh 重新运行完整的 Ubuntu 安装程序（约 5–10 分钟）。现有工作区的磁盘不会受影响 — 下次启动时，每个工作区的偏移提示都会提供重置到新基础镜像的选项。";
+"Select a workspace on the left" = "在左侧选择一个工作区";
+"Session metadata is being sent to bromure.io. Toggle the workspace's Private Mode to stop streaming." = "会话元数据正在发送到 bromure.io。切换该工作区的私密模式可停止流式传输。";
+"Set the active local model for a running VM's workspace." = "为正在运行的虚拟机的工作区设置当前本地模型。";
+"This workspace isn't running" = "此工作区未在运行";
+"Tool for an on-the-fly workspace: claude | codex | grok." = "即时工作区的工具：claude | codex | grok。";
+"Ubuntu Noble + Node, Claude Code, Codex, kitty, gh, glab, fonts. Shared by every workspace, immutable at runtime." = "Ubuntu Noble + Node、Claude Code、Codex、kitty、gh、glab、字体。由每个工作区共享，运行时不可更改。";
+"Use an existing workspace (name or id) instead of creating one." = "使用现有工作区（名称或 id）而非创建新的。";
+"VM id or workspace name." = "VM id 或工作区名称。";
+"workspaces" = "工作区";
+"workspaces ls" = "workspaces ls";
+"this workspace" = "此工作区";
+"**Hybrid** sends requests to the cloud as usual, falling back to the on-device model only when the cloud is unreachable — cloud speed and quality, with a local safety net." = "**混合** 像往常一样将请求发送到云端，仅当云端无法访问时才回退到设备端模型 —— 兼具云端的速度与质量，并有本地兜底。";
+"**Local** keeps every request on this Mac — nothing leaves the machine. Replies are private but slower, and bounded by the model you can fit in memory." = "**本地** 将每个请求都保留在这台 Mac 上 —— 任何数据都不会离开本机。回复是私密的，但速度较慢，且受限于您内存能容纳的模型。";
+"Access key ID" = "访问密钥 ID";
+"Applies to the kube API servers from this workspace's kubeconfigs (e.g. `kubectl delete` fails cleanly)." = "适用于此工作区 kubeconfig 中的 kube API 服务器（例如 `kubectl delete` 会干净地失败）。";
+"Auto (match macOS)" = "自动（匹配 macOS）";
+"Bitbucket Tokens" = "Bitbucket 令牌";
+"Claude subscription token swap" = "Claude 订阅令牌替换";
+"ClickHouse" = "ClickHouse";
+"Codex subscription token swap" = "Codex 订阅令牌替换";
+"Couldn't import kubeconfig" = "无法导入 kubeconfig";
+"Default region" = "默认区域";
+"DigitalOcean" = "DigitalOcean";
+"Elasticsearch" = "Elasticsearch";
+"Enable local models" = "启用本地模型";
+"Env var(s)" = "环境变量";
+"Environment variable(s) the fake secret is exported under in the VM (comma-separated for more than one). Reference these from your code / connection string." = "伪造的机密在虚拟机中导出时所用的环境变量名（多个用逗号分隔）。请在您的代码 / 连接字符串中引用它们。";
+"GitHub Tokens" = "GitHub 令牌";
+"GitLab Tokens" = "GitLab 令牌";
+"Greyed-out models need more memory than this Mac has." = "灰显的模型所需内存超过这台 Mac 的容量。";
+"Hide secret" = "隐藏机密";
+"Hybrid — cloud, fall back to local" = "混合 — 云端，回退到本地";
+"Import kubeconfig" = "导入 kubeconfig";
+"Installed" = "已安装";
+"Key repeat delay" = "按键重复延迟";
+"Key repeat rate" = "按键重复速率";
+"Keyboard layout" = "键盘布局";
+"Kubernetes" = "Kubernetes";
+"Ligatures" = "连字";
+"Local" = "本地";
+"Local model" = "本地模型";
+"Local — always on-device" = "本地 — 始终在设备端";
+"Mode" = "模式";
+"Models to fuse" = "要融合的模型";
+"MongoDB" = "MongoDB";
+"Name (optional)" = "名称（可选）";
+"No endpoints configured." = "未配置任何端点。";
+"No local models installed yet. Enable and download one in the Local Models section." = "尚未安装任何本地模型。请在“本地模型”部分启用并下载一个。";
+"Open IAM credentials page" = "打开 IAM 凭证页面";
+"Optional — STS only" = "可选 — 仅 STS";
+"Other API keys" = "其他 API 密钥";
+"Pick at least two models to fuse — your Claude Code session counts as one, so add one more (a cloud agent or a local model)." = "请至少选择两个要融合的模型 —— 您的 Claude Code 会话算作一个，因此请再添加一个（一个云端代理或一个本地模型）。";
+"Production cluster" = "生产集群";
+"Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history, anything in /home/ubuntu." = "项目克隆、dotfiles、.ssh 密钥、npm-global、.cargo、shell 历史记录，以及 /home/ubuntu 中的所有内容。";
+"Public key text wasn't captured at import time — re-import with the matching .pub file alongside the private key to enable per-key gating." = "导入时未捕获公钥文本 —— 请将匹配的 .pub 文件与私钥一起重新导入，以启用按密钥的访问控制。";
+"Remove" = "移除";
+"Remove this endpoint" = "移除此端点";
+"Retry" = "重试";
+"Run a coding model on this Mac instead of the cloud." = "在这台 Mac 上运行编码模型，而非使用云端。";
+"SSH Keys" = "SSH 密钥";
+"Secret" = "机密";
+"Secret access key" = "秘密访问密钥";
+"Session token" = "会话令牌";
+"Show secret" = "显示机密";
+"Start this VM at login" = "登录时启动此虚拟机";
+"Stop download" = "停止下载";
+"The hostname the agent connects to (no scheme). Both the credential swap and Guardrails scope to this host, so self-hosted instances work." = "代理所连接的主机名（不含协议）。凭证替换与防护栏都以此主机为作用域，因此自托管实例也能正常工作。";
+"They run in parallel (one engine, several models), so their memory adds up. Drop one, or pick smaller models." = "它们并行运行（一个引擎，多个模型），因此内存占用会累加。请去掉一个，或选择更小的模型。";
+"When closing the window" = "关闭窗口时";
+"Your Claude Code session is always one of the fused models; pick the others." = "您的 Claude Code 会话始终是被融合的模型之一；请选择其余的模型。";
+"— download a model in Local Models" = "— 在“本地模型”中下载一个模型";
+"— download one in Local Models" = "— 在“本地模型”中下载一个";
+"— no cloud credential (configure it in Agents)" = "— 无云端凭据（请在“代理”中配置）";

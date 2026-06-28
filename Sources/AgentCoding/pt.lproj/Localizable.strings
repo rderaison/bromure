@@ -14,7 +14,7 @@
 "Edit…" = "Editar…";
 "SSH public key…" = "Chave pública SSH…";
 "Reset disk" = "Redefinir disco";
-"Delete profile" = "Excluir perfil";
+"Delete workspace" = "Excluir espaço de trabalho";
 "SSH key" = "Chave SSH";
 
 /* Setup */
@@ -39,14 +39,14 @@
 "Resources" = "Recursos";
 
 /* Editor — General */
-"New profile" = "Novo perfil";
+"New workspace" = "Novo espaço de trabalho";
 "Edit profile" = "Editar perfil";
 "Name" = "Nome";
 "Color" = "Cor";
 "Notes (optional)" = "Notas (opcional)";
 
 /* Editor — Agent */
-"Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Ative cada agente que deseja ter neste perfil. O marcado como **Principal** inicia automaticamente na primeira aba do kitty; os demais agentes ativados são instalados e autenticados mas você os executa sob demanda em uma nova aba.";
+"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Ative cada agente que deseja ter neste espaço de trabalho. O marcado como **Principal** inicia automaticamente na primeira aba do kitty; os demais agentes ativados são instalados e autenticados mas você os executa sob demanda em uma nova aba.";
 "Primary" = "Principal";
 "Make primary" = "Definir como principal";
 "Auth" = "Autenticação";
@@ -56,7 +56,7 @@
 "OpenAI API key" = "Chave da API OpenAI";
 
 /* Editor — Folders */
-"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per profile." = "Cada pasta é montada na VM com seu nome real (ex.: ~/Documents → ~ubuntu/Documents). Limite de 8 pastas por perfil.";
+"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per workspace." = "Cada pasta é montada na VM com seu nome real (ex.: ~/Documents → ~ubuntu/Documents). Limite de 8 pastas por espaço de trabalho.";
 "No folders shared." = "Nenhuma pasta compartilhada.";
 "Add folder…" = "Adicionar pasta…";
 
@@ -64,7 +64,7 @@
 "Git Identity" = "Identidade do Git";
 "Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults." = "Gravado em ~/.gitconfig na VM. Deixe em branco para manter os padrões do git.";
 "Generate an ed25519 keypair" = "Gerar um par de chaves ed25519";
-"The public key will be displayed below after the profile is saved." = "A chave pública será exibida abaixo após salvar o perfil.";
+"The public key will be displayed below after the workspace is saved." = "A chave pública será exibida abaixo após salvar o espaço de trabalho.";
 "ed25519 keypair on file." = "Par de chaves ed25519 registrado.";
 "Regenerate" = "Regenerar";
 "Public key (paste into github.com/settings/keys):" = "Chave pública (cole em github.com/settings/keys):";
@@ -80,9 +80,9 @@
 
 /* Editor — Resources */
 "Storage" = "Armazenamento";
-"Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "Três camadas formam o ambiente deste perfil. A inferior é compartilhada e imutável; as duas superiores são suas e podem ser apagadas independentemente.";
+"Three layers stack to make this workspace's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "Três camadas formam o ambiente deste espaço de trabalho. A inferior é compartilhada e imutável; as duas superiores são suas e podem ser apagadas independentemente.";
 "Your home folder" = "Sua pasta pessoal";
-"Profile system disk" = "Disco do sistema do perfil";
+"Workspace system disk" = "Disco do sistema do espaço de trabalho";
 "Base OS image" = "Imagem do SO base";
 "Erase home…" = "Apagar pasta pessoal…";
 "Reset to base…" = "Redefinir para a base…";
@@ -152,7 +152,7 @@
 
 /* Alert: shared folders changed while a saved VM state exists */
 "Discard suspended VM for “%@”?" = "Descartar a VM suspensa de “%@”?";
-"The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "As pastas compartilhadas mudaram desde que este perfil foi suspenso. O snapshot foi salvo com o conjunto antigo de pastas e não pode ser retomado com segurança com o novo.\n\nSalvar descartará o estado suspenso. A próxima execução iniciará a frio. Os arquivos da pasta pessoal do perfil e das pastas compartilhadas não são afetados.";
+"The shared folders changed since this workspace was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-workspace home directory and on the shared folders themselves are unaffected." = "As pastas compartilhadas mudaram desde que este espaço de trabalho foi suspenso. O snapshot foi salvo com o conjunto antigo de pastas e não pode ser retomado com segurança com o novo.\n\nSalvar descartará o estado suspenso. A próxima execução iniciará a frio. Os arquivos da pasta pessoal do espaço de trabalho e das pastas compartilhadas não são afetados.";
 "Discard & save" = "Descartar e salvar";
 
 /* Editor — Credentials → Container Registries */
@@ -216,14 +216,14 @@
 "Bromure detected an outbound attempt to leak a session credential to a host it was not minted for. The VM has been paused." = "O Bromure detectou uma tentativa de saída para vazar uma credencial de sessão para um host para o qual ela não foi emitida. A VM foi pausada.";
 "Detected leaks:" = "Vazamentos detectados:";
 "  • %1$@ (%2$@) — expected %3$@, sent to %4$@\n" = "  • %1$@ (%2$@) — esperado %3$@, enviado para %4$@\n";
-"Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the profile is marked compromised." = "“Salvar para investigação” permite escolher uma pasta onde o Bromure copiará a imagem do disco e arquivos gzip do diretório pessoal e das pastas compartilhadas. O estado da RAM da VM é descartado. A VM é então desligada e o perfil é marcado como comprometido.";
+"Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the workspace is marked compromised." = "“Salvar para investigação” permite escolher uma pasta onde o Bromure copiará a imagem do disco e arquivos gzip do diretório pessoal e das pastas compartilhadas. O estado da RAM da VM é descartado. A VM é então desligada e o espaço de trabalho é marcado como comprometido.";
 "Save for Investigation" = "Salvar para investigação";
 "Continue" = "Continuar";
 "Save Investigation Here" = "Salvar investigação aqui";
 "Choose a folder to receive the disk image, home archive, and shared-folder archives for “%@”." = "Escolha uma pasta para receber a imagem do disco, o arquivo do diretório pessoal e os arquivos das pastas compartilhadas de “%@”.";
 "⛔ “%@” is marked as compromised" = "⛔ “%@” está marcado como comprometido";
 "Bromure refused to boot this VM because the proxy detected an outbound credential leak in a previous session." = "O Bromure se recusou a inicializar esta VM porque o proxy detectou um vazamento de credencial de saída em uma sessão anterior.";
-"To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and profile settings are preserved." = "Para continuar, a imagem do disco da VM e a pasta pessoal persistente precisam ser apagadas. Seus tokens, chaves SSH e configurações de perfil são preservados.";
+"To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and workspace settings are preserved." = "Para continuar, a imagem do disco da VM e a pasta pessoal persistente precisam ser apagadas. Seus tokens, chaves SSH e configurações de espaço de trabalho são preservados.";
 "WARNING: shared folders are NOT wiped. Compromised packages or files may still be present in:" = "AVISO: as pastas compartilhadas NÃO são apagadas. Pacotes ou arquivos comprometidos ainda podem estar presentes em:";
 "Inspect those folders before launching anything that re-uses them." = "Inspecione essas pastas antes de iniciar qualquer coisa que as reutilize.";
 "Wipe and Launch" = "Apagar e iniciar";
@@ -287,7 +287,7 @@
 "No Kubernetes contexts configured." = "Nenhum contexto do Kubernetes configurado.";
 "No bridged interfaces available. Bromure AC will fall back to NAT at launch." = "Nenhuma interface em ponte disponível. O Bromure AC voltará a usar NAT na inicialização.";
 "No other API tokens configured." = "Nenhum outro token de API configurado.";
-"Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as profile secrets. View at App → Trace Inspector (⇧⌘I)." = "Desligado → nada é registrado. Atividade → apenas metadados (host, status, latência, relatório de swap, avisos de vazamento). Detalhes da requisição de IA → também captura corpos de hosts LLM conhecidos (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Tudo → corpos de todos os hosts. Os corpos são criptografados em AES-GCM com a mesma chave do chaveiro usada para os segredos do perfil. Veja em App → Trace Inspector (⇧⌘I).";
+"Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as workspace secrets. View at App → Trace Inspector (⇧⌘I)." = "Desligado → nada é registrado. Atividade → apenas metadados (host, status, latência, relatório de swap, avisos de vazamento). Detalhes da requisição de IA → também captura corpos de hosts LLM conhecidos (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Tudo → corpos de todos os hosts. Os corpos são criptografados em AES-GCM com a mesma chave do chaveiro usada para os segredos do espaço de trabalho. Veja em App → Trace Inspector (⇧⌘I).";
 "Open DigitalOcean token page in your browser" = "Abrir a página de tokens da DigitalOcean no navegador";
 "Open this host's token-creation page in your browser" = "Abrir a página de criação de tokens deste host no navegador";
 "Optional. Leave blank to trust the Bromure CA only (the proxy still validates the upstream)." = "Opcional. Deixe em branco para confiar apenas na CA do Bromure (o proxy continua validando o upstream).";
@@ -295,10 +295,10 @@
 "Passphrase is in your macOS Keychain." = "A frase-senha está no seu chaveiro do macOS.";
 "Passphrases (if any) are stored in the macOS Keychain — bromure-ac fetches via SSH_ASKPASS at session launch and never logs the value." = "As frases-senha (se houver) ficam armazenadas no chaveiro do macOS — o bromure-ac as obtém via SSH_ASKPASS no início da sessão e nunca registra o valor.";
 "Password / token" = "Senha / token";
-"Paste this into github.com/settings/keys (or your hosting provider's equivalent). The matching private key lives only inside this profile." = "Cole isto em github.com/settings/keys (ou no equivalente do seu provedor). A chave privada correspondente vive apenas dentro deste perfil.";
+"Paste this into github.com/settings/keys (or your hosting provider's equivalent). The matching private key lives only inside this workspace." = "Cole isto em github.com/settings/keys (ou no equivalente do seu provedor). A chave privada correspondente vive apenas dentro deste espaço de trabalho.";
 "Personal access token from cloud.digitalocean.com → API → Generate New Token. Injected into the VM as `DIGITALOCEAN_ACCESS_TOKEN` env + `~/.config/doctl/config.yaml` — `doctl auth init` is unnecessary, you're already logged in." = "Token de acesso pessoal de cloud.digitalocean.com → API → Generate New Token. É injetado na VM como a variável de ambiente `DIGITALOCEAN_ACCESS_TOKEN` e em `~/.config/doctl/config.yaml` — `doctl auth init` é desnecessário, você já está autenticado.";
 "Personal access tokens for git over HTTPS. Stored encrypted on the host; the proxy swaps them onto outbound requests so the VM only ever holds the fake. `gh` and `glab` pick up GH_TOKEN / GITLAB_TOKEN env automatically." = "Tokens de acesso pessoal para git via HTTPS. Armazenados criptografados no host; o proxy os troca nas requisições de saída para que a VM contenha apenas o falso. `gh` e `glab` lêem GH_TOKEN / GITLAB_TOKEN do ambiente automaticamente.";
-"Point bromure at any existing SSH private key (RSA, ed25519, ecdsa) — encrypted ones included. The key is loaded into the per-profile bromure ssh-agent at every session launch; passphrases are stored in the macOS Keychain." = "Aponte o bromure para qualquer chave SSH privada existente (RSA, ed25519, ecdsa) — incluindo as criptografadas. A chave é carregada no ssh-agent do bromure por perfil a cada início de sessão; as frases-senha ficam no chaveiro do macOS.";
+"Point bromure at any existing SSH private key (RSA, ed25519, ecdsa) — encrypted ones included. The key is loaded into the per-workspace bromure ssh-agent at every session launch; passphrases are stored in the macOS Keychain." = "Aponte o bromure para qualquer chave SSH privada existente (RSA, ed25519, ecdsa) — incluindo as criptografadas. A chave é carregada no ssh-agent do bromure por espaço de trabalho a cada início de sessão; as frases-senha ficam no chaveiro do macOS.";
 "Private mode" = "Modo privado";
 "Quay (quay.io)" = "Quay (quay.io)";
 "Real value" = "Valor real";
@@ -307,8 +307,8 @@
 "Remove this token rule" = "Remover esta regra de token";
 "Server" = "Servidor";
 "Session trace" = "Traço da sessão";
-"Sessions running under this profile normally stream metadata (tools, files, commands, token usage) to your workspace. Turn this on to keep this profile's activity local — neither the title-bar indicator nor the admin's session list will see anything from this profile. The local trace inspector is unaffected." = "As sessões executadas sob este perfil normalmente transmitem metadados (ferramentas, arquivos, comandos, uso de tokens) para o seu workspace. Ative para manter a atividade deste perfil local — nem o indicador da barra de título nem a lista de sessões do admin verão qualquer coisa deste perfil. O inspetor de traços local não é afetado.";
-"Storage controls only apply to real profiles. They appear in each profile's editor when you create or edit one." = "Os controles de armazenamento só se aplicam a perfis reais. Eles aparecem no editor de cada perfil quando você cria ou edita um.";
+"Sessions running under this workspace normally stream metadata (tools, files, commands, token usage) to your workspace. Turn this on to keep this workspace's activity local — neither the title-bar indicator nor the admin's session list will see anything from this workspace. The local trace inspector is unaffected." = "As sessões executadas sob este espaço de trabalho normalmente transmitem metadados (ferramentas, arquivos, comandos, uso de tokens) para o seu workspace. Ative para manter a atividade deste espaço de trabalho local — nem o indicador da barra de título nem a lista de sessões do admin verão qualquer coisa deste espaço de trabalho. O inspetor de traços local não é afetado.";
+"Storage controls only apply to real workspaces. They appear in each workspace's editor when you create or edit one." = "Os controles de armazenamento só se aplicam a espaços de trabalho reais. Eles aparecem no editor de cada espaço de trabalho quando você cria ou edita um.";
 "Stripe sandbox" = "Sandbox da Stripe";
 "The VM gets a LAN-routable IP via DHCP on the chosen interface." = "A VM obtém um IP roteável na LAN via DHCP na interface escolhida.";
 "Username" = "Nome de usuário";
@@ -319,7 +319,7 @@
 /* Preferences — Automation pane */
 "Automation" = "Automação";
 "Automation API & MCP server" = "API de automação e servidor MCP";
-"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "O Bromure AC expõe uma API HTTP na interface de loopback que permite a ferramentas externas gerenciar perfis e sessões. O subcomando `bromure-ac mcp` incluído envolve a mesma superfície para agentes de IA (Claude Code, Claude Desktop). Estas configurações se aplicam a todo o app.";
+"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage workspaces and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "O Bromure AC expõe uma API HTTP na interface de loopback que permite a ferramentas externas gerenciar espaços de trabalho e sessões. O subcomando `bromure-ac mcp` incluído envolve a mesma superfície para agentes de IA (Claude Code, Claude Desktop). Estas configurações se aplicam a todo o app.";
 "Enable automation server" = "Ativar servidor de automação";
 "Listening on %@:%@. Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app." = "Escutando em %@:%@. Desativar interrompe o servidor imediatamente; o subcomando MCP deixa de alcançar o app.";
 "Off — the HTTP API and the MCP subcommand are unavailable." = "Desligado — a API HTTP e o subcomando MCP estão indisponíveis.";
@@ -342,8 +342,8 @@
 "Guardrails strips destructive operations from the protocols this agent speaks. It's enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it. Blocked calls return a hard error the agent sees." = "As proteções removem operações destrutivas dos protocolos que este agente fala. São aplicadas no host — dentro do proxy — para que um agente com mau comportamento ou comprometido na VM não consiga contorná-las. As chamadas bloqueadas retornam um erro definitivo que o agente vê.";
 "Databases" = "Bancos de dados";
 "No database endpoints configured. Add MongoDB, ClickHouse, or Elasticsearch endpoints under Credentials to guard them here." = "Nenhum endpoint de banco de dados configurado. Adicione endpoints MongoDB, ClickHouse ou Elasticsearch em Credenciais para protegê-los aqui.";
-"No kubeconfigs on this profile — add one under Credentials for this to take effect." = "Nenhum kubeconfig neste perfil — adicione um em Credenciais para que isto tenha efeito.";
-"No registries on this profile — add one under Credentials for this to take effect." = "Nenhum registro neste perfil — adicione um em Credenciais para que isto tenha efeito.";
+"No kubeconfigs on this workspace — add one under Credentials for this to take effect." = "Nenhum kubeconfig neste espaço de trabalho — adicione um em Credenciais para que isto tenha efeito.";
+"No registries on this workspace — add one under Credentials for this to take effect." = "Nenhum registro neste espaço de trabalho — adicione um em Credenciais para que isto tenha efeito.";
 "Set this endpoint's host under Credentials for the guard to take effect." = "Defina o host deste endpoint em Credenciais para que a proteção tenha efeito.";
 "Off" = "Desativado";
 "Block destructive" = "Bloquear destrutivas";
@@ -378,20 +378,20 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "Sair do Bromure Agentic Coding?";
-"%d VM(s) currently running (%@) will be closed according to each profile's close action." = "%d VM(s) em execução (%@) serão fechadas conforme a ação de fechamento de cada perfil.";
+"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "%d VM(s) em execução (%@) serão fechadas conforme a ação de fechamento de cada espaço de trabalho.";
 "Quit" = "Sair";
 
 /* Guardrails: new prompt-on-write mode */
 "Prompt before write" = "Perguntar antes de cada escrita";
 "Reads pass through; writes ask you each time." = "Leituras passam; cada escrita pede confirmação.";
 /* Guardrails consent prompt */
-"Allow write on “%@” from profile “%@”?" = "Permitir uma escrita em “%@” do perfil “%@”?";
+"Allow write on “%@” from workspace “%@”?" = "Permitir uma escrita em “%@” do espaço de trabalho “%@”?";
 "Allow for 15 minutes" = "Permitir por 15 minutos";
 "Allow once" = "Permitir uma vez";
 
 /* Supply Chain category */
 "Supply Chain" = "Cadeia de suprimentos";
-"Pass through %@ from profile “%@”?" = "Permitir %@ do perfil “%@”?";
+"Pass through %@ from workspace “%@”?" = "Permitir %@ do espaço de trabalho “%@”?";
 "Get an API key" = "Obter chave de API";
 "Add entry" = "Adicionar entrada";
 
@@ -526,7 +526,7 @@
 "Bromure detected a real %@ subscription token going out to %@ from “%@”. We can replace it inside the VM with a fake — the real token stays on this Mac and the proxy substitutes it on the wire only when needed." = "O Bromure detectou um token de assinatura real do %@ saindo para %@ a partir de “%@”. Podemos substituí-lo dentro da VM por um falso — o token real permanece neste Mac e o proxy o substitui no fio apenas quando necessário.";
 "Both the access and refresh tokens are swapped together." = "Os tokens de acesso e de atualização são substituídos juntos.";
 "The VM never receives any real credential — only the fake replacements." = "A VM nunca recebe nenhuma credencial real — apenas os substitutos falsos.";
-"Never for this profile" = "Nunca para este perfil";
+"Never for this workspace" = "Nunca para este espaço de trabalho";
 "Not now" = "Agora não";
 "Swap" = "Substituir";
 
@@ -534,22 +534,22 @@
 "Proxy unavailable" = "Proxy indisponível";
 "The Bromure proxy isn't running, so registration can't capture your tokens." = "O proxy do Bromure não está em execução, então o registro não consegue capturar seus tokens.";
 "Register with %@" = "Registrar com %@";
-"Bromure will open a temporary, isolated VM with no access to your profiles or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM." = "O Bromure abrirá uma VM temporária e isolada, sem acesso aos seus perfis nem aos segredos salvos. %@ abrirá sua página de login no navegador do seu Mac. Depois de você fazer login, o Bromure captura as credenciais e então desliga e exclui a VM.";
+"Bromure will open a temporary, isolated VM with no access to your workspaces or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM." = "O Bromure abrirá uma VM temporária e isolada, sem acesso aos seus espaços de trabalho nem aos segredos salvos. %@ abrirá sua página de login no navegador do seu Mac. Depois de você fazer login, o Bromure captura as credenciais e então desliga e exclui a VM.";
 "Couldn't start the registration VM." = "Não foi possível iniciar a VM de registro.";
 "Registration timed out" = "Tempo de registro esgotado";
 "Bromure didn't receive a %@ sign-in in time. You can try again." = "O Bromure não recebeu um login do %@ a tempo. Você pode tentar novamente.";
 "Share with every session?" = "Compartilhar com todas as sessões?";
-"Use this %@ sign-in for every Bromure session, or only for this profile?" = "Usar este login do %@ em todas as sessões do Bromure, ou apenas neste perfil?";
+"Use this %@ sign-in for every Bromure session, or only for this workspace?" = "Usar este login do %@ em todas as sessões do Bromure, ou apenas neste espaço de trabalho?";
 "Every session" = "Todas as sessões";
-"Just this profile" = "Apenas este perfil";
+"Just this workspace" = "Apenas este espaço de trabalho";
 "Couldn't save the captured credentials." = "Não foi possível salvar as credenciais capturadas.";
 "Registered with %@" = "Registrado com %@";
 "Saved for all sessions. New sessions will use it automatically." = "Salvo para todas as sessões. Novas sessões o usarão automaticamente.";
-"Saved for this profile." = "Salvo para este perfil.";
+"Saved for this workspace." = "Salvo para este espaço de trabalho.";
 
 /* bromure.io enrollment sheet */
 "Enroll in bromure.io" = "Inscrever-se no bromure.io";
-"Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Profiles in private mode never stream." = "Seu administrador fornecerá um código de inscrição de 6 palavras. Após a inscrição, o Bromure Agentic Coding envia metadados de sessão (ferramentas, arquivos, comandos, uso de tokens) para o seu workspace para que os admins possam revisar a atividade. Perfis em modo privado nunca transmitem.";
+"Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream." = "Seu administrador fornecerá um código de inscrição de 6 palavras. Após a inscrição, o Bromure Agentic Coding envia metadados de sessão (ferramentas, arquivos, comandos, uso de tokens) para o seu workspace para que os admins possam revisar a atividade. Espaços de trabalho em modo privado nunca transmitem.";
 "Enrollment Code" = "Código de inscrição";
 "Device Name" = "Nome do dispositivo";
 "Shown to your administrator so they can recognize this Mac." = "Mostrado ao seu administrador para que ele possa reconhecer este Mac.";
@@ -571,3 +571,105 @@
 "Your administrator revoked this install. Sign out and enroll again with a new code to resume managed mode." = "Seu administrador revogou esta instalação. Saia da conta e inscreva-se novamente com um novo código para retomar o modo gerenciado.";
 "Enrollment no longer accepted" = "Inscrição não mais aceita";
 "The server rejected this install's credentials — they may have expired or been reset. Sign out and enroll again with a new code." = "O servidor rejeitou as credenciais desta instalação — elas podem ter expirado ou sido redefinidas. Saia da conta e inscreva-se novamente com um novo código.";
+
+/* Workspace rename + new settings */
+"(unknown workspace)" = "(espaço de trabalho desconhecido)";
+"A read-write copy of the base OS, just for this workspace. Holds anything you `sudo apt install`, edits to /etc and /var, system-level config." = "Uma cópia de leitura e escrita do SO base, só para este espaço de trabalho. Guarda tudo o que você `sudo apt install`, edições em /etc e /var, configurações de nível de sistema.";
+"Affects every workspace, so it's parked outside this editor." = "Afeta todos os espaços de trabalho, por isso fica fora deste editor.";
+"All workspaces" = "Todos os espaços de trabalho";
+"Auth mode for an on-the-fly workspace: token | subscription | bedrock." = "Modo de autenticação para um espaço de trabalho instantâneo: token | subscription | bedrock.";
+"Base image updated since this workspace was created." = "A imagem base foi atualizada desde que este espaço de trabalho foi criado.";
+"Couldn't create the workspace." = "Não foi possível criar o espaço de trabalho.";
+"Couldn't delete the workspace." = "Não foi possível excluir o espaço de trabalho.";
+"Couldn't export the VM for investigation. The workspace will still be marked compromised." = "Não foi possível exportar a VM para investigação. O espaço de trabalho ainda será marcado como comprometido.";
+"Couldn't save the workspace." = "Não foi possível salvar o espaço de trabalho.";
+"Create and boot a VM, optionally from an on-the-fly workspace (like `docker run`)." = "Cria e inicia uma VM, opcionalmente a partir de um espaço de trabalho instantâneo (como `docker run`).";
+"Default workspace" = "Espaço de trabalho padrão";
+"Delete the workspace + disk when the VM stops (ephemeral)." = "Excluir o espaço de trabalho + disco quando a VM parar (efêmero).";
+"Edit this workspace's settings" = "Editar as configurações deste espaço de trabalho";
+"Filter to one VM/workspace (id or name)." = "Filtrar para uma VM/espaço de trabalho (id ou nome).";
+"Inspect this workspace's session trace (⇧⌘I)" = "Inspecionar o traço de sessão deste espaço de trabalho (⇧⌘I)";
+"Manage workspaces (the templates VMs boot from)." = "Gerenciar espaços de trabalho (os modelos a partir dos quais as VMs iniciam).";
+"Name for an on-the-fly workspace (default: cli-XXXX)." = "Nome para um espaço de trabalho instantâneo (padrão: cli-XXXX).";
+"New session — pick a workspace" = "Nova sessão — escolha um espaço de trabalho";
+"No workspaces found. Create one in the bromure-ac app first." = "Nenhum espaço de trabalho encontrado. Crie um no app bromure-ac primeiro.";
+"No workspaces yet" = "Ainda sem espaços de trabalho";
+"No workspaces." = "Nenhum espaço de trabalho.";
+"No trace records. (Tracing is per-workspace — enable it in the workspace's settings.)" = "Nenhum registro de traço. (O rastreamento é por espaço de trabalho — ative-o nas configurações do espaço de trabalho.)";
+"Workspace Manager" = "Gerenciador de espaços de trabalho";
+"Workspace id or name." = "ID ou nome do espaço de trabalho.";
+"Workspaces" = "Espaços de trabalho";
+"Re-runs the full Ubuntu installer (~5–10 min) using the current setup.sh. Existing workspaces' disks aren't touched — on next launch each one's drift prompt will offer to reset to the new base." = "Reexecuta o instalador completo do Ubuntu (~5–10 min) usando o setup.sh atual. Os discos dos espaços de trabalho existentes não são alterados — na próxima inicialização, o aviso de desvio de cada um oferecerá redefinir para a nova base.";
+"Select a workspace on the left" = "Selecione um espaço de trabalho à esquerda";
+"Session metadata is being sent to bromure.io. Toggle the workspace's Private Mode to stop streaming." = "Os metadados da sessão estão sendo enviados para bromure.io. Ative o Modo privado do espaço de trabalho para interromper a transmissão.";
+"Set the active local model for a running VM's workspace." = "Define o modelo local ativo para o espaço de trabalho de uma VM em execução.";
+"This workspace isn't running" = "Este espaço de trabalho não está em execução";
+"Tool for an on-the-fly workspace: claude | codex | grok." = "Ferramenta para um espaço de trabalho instantâneo: claude | codex | grok.";
+"Ubuntu Noble + Node, Claude Code, Codex, kitty, gh, glab, fonts. Shared by every workspace, immutable at runtime." = "Ubuntu Noble + Node, Claude Code, Codex, kitty, gh, glab, fontes. Compartilhado por todos os espaços de trabalho, imutável em tempo de execução.";
+"Use an existing workspace (name or id) instead of creating one." = "Usa um espaço de trabalho existente (nome ou id) em vez de criar um.";
+"VM id or workspace name." = "ID da VM ou nome do espaço de trabalho.";
+"workspaces" = "espaços de trabalho";
+"workspaces ls" = "workspaces ls";
+"this workspace" = "este espaço de trabalho";
+"**Hybrid** sends requests to the cloud as usual, falling back to the on-device model only when the cloud is unreachable — cloud speed and quality, with a local safety net." = "O **Híbrido** envia as solicitações para a nuvem normalmente, recorrendo ao modelo no dispositivo apenas quando a nuvem está inacessível — velocidade e qualidade da nuvem, com uma rede de segurança local.";
+"**Local** keeps every request on this Mac — nothing leaves the machine. Replies are private but slower, and bounded by the model you can fit in memory." = "O **Local** mantém todas as solicitações neste Mac — nada sai da máquina. As respostas são privadas, porém mais lentas, e limitadas pelo modelo que você consegue manter na memória.";
+"Access key ID" = "ID da chave de acesso";
+"Applies to the kube API servers from this workspace's kubeconfigs (e.g. `kubectl delete` fails cleanly)." = "Aplica-se aos servidores da API kube dos kubeconfigs deste espaço de trabalho (por exemplo, `kubectl delete` falha de forma limpa).";
+"Auto (match macOS)" = "Automático (acompanhar o macOS)";
+"Bitbucket Tokens" = "Tokens do Bitbucket";
+"Claude subscription token swap" = "Substituição de token de assinatura do Claude";
+"ClickHouse" = "ClickHouse";
+"Codex subscription token swap" = "Substituição de token de assinatura do Codex";
+"Couldn't import kubeconfig" = "Não foi possível importar o kubeconfig";
+"Default region" = "Região padrão";
+"DigitalOcean" = "DigitalOcean";
+"Elasticsearch" = "Elasticsearch";
+"Enable local models" = "Ativar modelos locais";
+"Env var(s)" = "Variável(eis) de ambiente";
+"Environment variable(s) the fake secret is exported under in the VM (comma-separated for more than one). Reference these from your code / connection string." = "Variável(eis) de ambiente sob a(s) qual(is) o segredo falso é exportado na VM (separadas por vírgula para mais de uma). Referencie-as no seu código / string de conexão.";
+"GitHub Tokens" = "Tokens do GitHub";
+"GitLab Tokens" = "Tokens do GitLab";
+"Greyed-out models need more memory than this Mac has." = "Os modelos esmaecidos precisam de mais memória do que este Mac tem.";
+"Hide secret" = "Ocultar segredo";
+"Hybrid — cloud, fall back to local" = "Híbrido — nuvem, com recurso ao local";
+"Import kubeconfig" = "Importar kubeconfig";
+"Installed" = "Instalado";
+"Key repeat delay" = "Atraso de repetição de teclas";
+"Key repeat rate" = "Taxa de repetição de teclas";
+"Keyboard layout" = "Layout do teclado";
+"Kubernetes" = "Kubernetes";
+"Ligatures" = "Ligaduras";
+"Local" = "Local";
+"Local model" = "Modelo local";
+"Local — always on-device" = "Local — sempre no dispositivo";
+"Mode" = "Modo";
+"Models to fuse" = "Modelos a fundir";
+"MongoDB" = "MongoDB";
+"Name (optional)" = "Nome (opcional)";
+"No endpoints configured." = "Nenhum endpoint configurado.";
+"No local models installed yet. Enable and download one in the Local Models section." = "Nenhum modelo local instalado ainda. Ative e baixe um na seção Modelos locais.";
+"Open IAM credentials page" = "Abrir a página de credenciais do IAM";
+"Optional — STS only" = "Opcional — apenas STS";
+"Other API keys" = "Outras chaves de API";
+"Pick at least two models to fuse — your Claude Code session counts as one, so add one more (a cloud agent or a local model)." = "Escolha pelo menos dois modelos a fundir — sua sessão do Claude Code conta como um, então adicione mais um (um agente na nuvem ou um modelo local).";
+"Production cluster" = "Cluster de produção";
+"Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history, anything in /home/ubuntu." = "Clones de projetos, dotfiles, chaves .ssh, npm-global, .cargo, histórico do shell, qualquer coisa em /home/ubuntu.";
+"Public key text wasn't captured at import time — re-import with the matching .pub file alongside the private key to enable per-key gating." = "O texto da chave pública não foi capturado na importação — reimporte com o arquivo .pub correspondente junto à chave privada para ativar o controle por chave.";
+"Remove" = "Remover";
+"Remove this endpoint" = "Remover este endpoint";
+"Retry" = "Tentar novamente";
+"Run a coding model on this Mac instead of the cloud." = "Execute um modelo de programação neste Mac em vez da nuvem.";
+"SSH Keys" = "Chaves SSH";
+"Secret" = "Segredo";
+"Secret access key" = "Chave de acesso secreta";
+"Session token" = "Token de sessão";
+"Show secret" = "Mostrar segredo";
+"Start this VM at login" = "Iniciar esta VM no login";
+"Stop download" = "Parar download";
+"The hostname the agent connects to (no scheme). Both the credential swap and Guardrails scope to this host, so self-hosted instances work." = "O hostname ao qual o agente se conecta (sem esquema). Tanto a substituição de credenciais quanto as Proteções se aplicam a este host, então instâncias auto-hospedadas funcionam.";
+"They run in parallel (one engine, several models), so their memory adds up. Drop one, or pick smaller models." = "Eles rodam em paralelo (um motor, vários modelos), então a memória deles se soma. Remova um, ou escolha modelos menores.";
+"When closing the window" = "Ao fechar a janela";
+"Your Claude Code session is always one of the fused models; pick the others." = "Sua sessão do Claude Code é sempre um dos modelos fundidos; escolha os demais.";
+"— download a model in Local Models" = "— baixe um modelo em Modelos locais";
+"— download one in Local Models" = "— baixe um em Modelos locais";
+"— no cloud credential (configure it in Agents)" = "— sem credencial na nuvem (configure em Agentes)";

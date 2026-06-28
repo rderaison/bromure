@@ -14,7 +14,7 @@
 "Edit…" = "編集…";
 "SSH public key…" = "SSH 公開鍵…";
 "Reset disk" = "ディスクをリセット";
-"Delete profile" = "プロファイルを削除";
+"Delete workspace" = "ワークスペースを削除";
 "SSH key" = "SSH 鍵";
 
 /* Setup */
@@ -39,14 +39,14 @@
 "Resources" = "リソース";
 
 /* Editor — General */
-"New profile" = "新規プロファイル";
+"New workspace" = "新規ワークスペース";
 "Edit profile" = "プロファイルを編集";
 "Name" = "名前";
 "Color" = "カラー";
 "Notes (optional)" = "メモ (任意)";
 
 /* Editor — Agent */
-"Enable each agent you want available in this profile. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "このプロファイルで使用したい各エージェントを有効にします。**プライマリ** に指定されたものは最初の kitty タブで自動起動し、他の有効化されたエージェントはインストールおよび認証されますが、新しいタブから必要に応じて実行します。";
+"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "このワークスペースで使用したい各エージェントを有効にします。**プライマリ** に指定されたものは最初の kitty タブで自動起動し、他の有効化されたエージェントはインストールおよび認証されますが、新しいタブから必要に応じて実行します。";
 "Primary" = "プライマリ";
 "Make primary" = "プライマリに設定";
 "Auth" = "認証";
@@ -56,7 +56,7 @@
 "OpenAI API key" = "OpenAI API キー";
 
 /* Editor — Folders */
-"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per profile." = "各フォルダは実際の名前のまま VM にマウントされます (例: ~/Documents → ~ubuntu/Documents)。プロファイルあたり最大 8 フォルダまで。";
+"Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per workspace." = "各フォルダは実際の名前のまま VM にマウントされます (例: ~/Documents → ~ubuntu/Documents)。ワークスペースあたり最大 8 フォルダまで。";
 "No folders shared." = "共有フォルダはありません。";
 "Add folder…" = "フォルダを追加…";
 
@@ -64,7 +64,7 @@
 "Git Identity" = "Git のアイデンティティ";
 "Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults." = "VM の ~/.gitconfig に書き込まれます。両方空のままにすると git のデフォルトを保持します。";
 "Generate an ed25519 keypair" = "ed25519 鍵ペアを生成";
-"The public key will be displayed below after the profile is saved." = "プロファイルを保存すると、公開鍵が下に表示されます。";
+"The public key will be displayed below after the workspace is saved." = "ワークスペースを保存すると、公開鍵が下に表示されます。";
 "ed25519 keypair on file." = "ed25519 鍵ペアが登録されています。";
 "Regenerate" = "再生成";
 "Public key (paste into github.com/settings/keys):" = "公開鍵 (github.com/settings/keys に貼り付け):";
@@ -80,9 +80,9 @@
 
 /* Editor — Resources */
 "Storage" = "ストレージ";
-"Three layers stack to make this profile's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "3 つのレイヤーがこのプロファイルの環境を構成します。下層は共有され変更不可で、上の 2 層はあなたのものであり、独立して消去できます。";
+"Three layers stack to make this workspace's environment. The bottom is shared and immutable; the top two are yours and can be erased independently." = "3 つのレイヤーがこのワークスペースの環境を構成します。下層は共有され変更不可で、上の 2 層はあなたのものであり、独立して消去できます。";
 "Your home folder" = "ホームフォルダ";
-"Profile system disk" = "プロファイルのシステムディスク";
+"Workspace system disk" = "ワークスペースのシステムディスク";
 "Base OS image" = "ベース OS イメージ";
 "Erase home…" = "ホームを消去…";
 "Reset to base…" = "ベースにリセット…";
@@ -152,7 +152,7 @@
 
 /* Alert: shared folders changed while a saved VM state exists */
 "Discard suspended VM for “%@”?" = "「%@」の中断中の VM を破棄しますか？";
-"The shared folders changed since this profile was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-profile home directory and on the shared folders themselves are unaffected." = "このプロファイルが中断されてから、共有フォルダが変更されました。スナップショットは以前の共有セットに対して保存されているため、新しい共有セットでは安全に再開できません。\n\n保存すると中断状態は破棄されます。次回の起動はコールドブートになります。プロファイルのホームディレクトリと共有フォルダ内のファイルは影響を受けません。";
+"The shared folders changed since this workspace was suspended. The snapshot was saved against the old share set, so it can't be safely resumed with the new one.\n\nSaving will discard the suspended state. The next launch will cold-boot. Files in the per-workspace home directory and on the shared folders themselves are unaffected." = "このワークスペースが中断されてから、共有フォルダが変更されました。スナップショットは以前の共有セットに対して保存されているため、新しい共有セットでは安全に再開できません。\n\n保存すると中断状態は破棄されます。次回の起動はコールドブートになります。ワークスペースのホームディレクトリと共有フォルダ内のファイルは影響を受けません。";
 "Discard & save" = "破棄して保存";
 
 /* Editor — Credentials → Container Registries */
@@ -216,14 +216,14 @@
 "Bromure detected an outbound attempt to leak a session credential to a host it was not minted for. The VM has been paused." = "Bromureは、発行先ではないホストへセッション資格情報を流出させようとする外向き通信を検知しました。VMは一時停止されました。";
 "Detected leaks:" = "検出された漏えい:";
 "  • %1$@ (%2$@) — expected %3$@, sent to %4$@\n" = "  • %1$@(%2$@)— 想定: %3$@、送信先: %4$@\n";
-"Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the profile is marked compromised." = "「調査用に保存」を選ぶと、Bromureがディスクイメージと、ホームディレクトリおよび共有フォルダのgzip圧縮アーカイブをコピーするフォルダを指定できます。VMのRAMの状態は破棄されます。その後VMはシャットダウンされ、プロファイルは侵害ありとしてマークされます。";
+"Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the workspace is marked compromised." = "「調査用に保存」を選ぶと、Bromureがディスクイメージと、ホームディレクトリおよび共有フォルダのgzip圧縮アーカイブをコピーするフォルダを指定できます。VMのRAMの状態は破棄されます。その後VMはシャットダウンされ、ワークスペースは侵害ありとしてマークされます。";
 "Save for Investigation" = "調査用に保存";
 "Continue" = "続行";
 "Save Investigation Here" = "ここに調査結果を保存";
 "Choose a folder to receive the disk image, home archive, and shared-folder archives for “%@”." = "「%@」のディスクイメージ、ホームアーカイブ、共有フォルダのアーカイブを保存するフォルダを選択してください。";
 "⛔ “%@” is marked as compromised" = "⛔「%@」は侵害ありとしてマークされています";
 "Bromure refused to boot this VM because the proxy detected an outbound credential leak in a previous session." = "前回のセッションで外向きの資格情報漏えいをプロキシが検知したため、BromureはこのVMの起動を拒否しました。";
-"To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and profile settings are preserved." = "続行するには、VMのディスクイメージと永続ホームフォルダを消去する必要があります。トークン、SSHキー、プロファイル設定は保持されます。";
+"To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and workspace settings are preserved." = "続行するには、VMのディスクイメージと永続ホームフォルダを消去する必要があります。トークン、SSHキー、ワークスペース設定は保持されます。";
 "WARNING: shared folders are NOT wiped. Compromised packages or files may still be present in:" = "警告: 共有フォルダは消去されません。侵害されたパッケージやファイルが以下に残っている可能性があります:";
 "Inspect those folders before launching anything that re-uses them." = "それらを再利用するものを起動する前に、これらのフォルダを確認してください。";
 "Wipe and Launch" = "消去して起動";
@@ -287,7 +287,7 @@
 "No Kubernetes contexts configured." = "Kubernetes コンテキストが構成されていません。";
 "No bridged interfaces available. Bromure AC will fall back to NAT at launch." = "ブリッジ可能なインターフェイスがありません。Bromure AC は起動時に NAT にフォールバックします。";
 "No other API tokens configured." = "他の API トークンは構成されていません。";
-"Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as profile secrets. View at App → Trace Inspector (⇧⌘I)." = "オフ → 記録なし。アクティビティ → メタデータのみ（ホスト、ステータス、レイテンシ、スワップレポート、漏洩警告）。AI リクエスト詳細 → 既知の LLM ホスト（Anthropic、OpenAI、Google、Cohere、Mistral、Perplexity、x.ai、Groq、Replicate、HuggingFace）のボディも取得します。すべて → 全ホストのボディを取得します。ボディはプロファイル秘密と同じキーチェーン鍵で AES-GCM 暗号化されます。App → Trace Inspector（⇧⌘I）で確認します。";
+"Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as workspace secrets. View at App → Trace Inspector (⇧⌘I)." = "オフ → 記録なし。アクティビティ → メタデータのみ（ホスト、ステータス、レイテンシ、スワップレポート、漏洩警告）。AI リクエスト詳細 → 既知の LLM ホスト（Anthropic、OpenAI、Google、Cohere、Mistral、Perplexity、x.ai、Groq、Replicate、HuggingFace）のボディも取得します。すべて → 全ホストのボディを取得します。ボディはワークスペース秘密と同じキーチェーン鍵で AES-GCM 暗号化されます。App → Trace Inspector（⇧⌘I）で確認します。";
 "Open DigitalOcean token page in your browser" = "DigitalOcean のトークンページをブラウザで開く";
 "Open this host's token-creation page in your browser" = "このホストのトークン作成ページをブラウザで開く";
 "Optional. Leave blank to trust the Bromure CA only (the proxy still validates the upstream)." = "任意。空欄のままにすると Bromure CA のみが信頼されます（プロキシは引き続き上流を検証します）。";
@@ -295,10 +295,10 @@
 "Passphrase is in your macOS Keychain." = "パスフレーズは macOS キーチェーンに保存されています。";
 "Passphrases (if any) are stored in the macOS Keychain — bromure-ac fetches via SSH_ASKPASS at session launch and never logs the value." = "パスフレーズ（ある場合）は macOS キーチェーンに保存され、bromure-ac はセッション開始時に SSH_ASKPASS 経由で取得します。値はログに残しません。";
 "Password / token" = "パスワード／トークン";
-"Paste this into github.com/settings/keys (or your hosting provider's equivalent). The matching private key lives only inside this profile." = "これを github.com/settings/keys（またはホスティングプロバイダーの同等のページ）に貼り付けてください。対応する秘密鍵はこのプロファイル内にのみ存在します。";
+"Paste this into github.com/settings/keys (or your hosting provider's equivalent). The matching private key lives only inside this workspace." = "これを github.com/settings/keys（またはホスティングプロバイダーの同等のページ）に貼り付けてください。対応する秘密鍵はこのワークスペース内にのみ存在します。";
 "Personal access token from cloud.digitalocean.com → API → Generate New Token. Injected into the VM as `DIGITALOCEAN_ACCESS_TOKEN` env + `~/.config/doctl/config.yaml` — `doctl auth init` is unnecessary, you're already logged in." = "cloud.digitalocean.com → API → Generate New Token から取得した個人アクセストークンです。VM には `DIGITALOCEAN_ACCESS_TOKEN` 環境変数と `~/.config/doctl/config.yaml` の両方に注入されます — `doctl auth init` は不要で、すでにログイン済みです。";
 "Personal access tokens for git over HTTPS. Stored encrypted on the host; the proxy swaps them onto outbound requests so the VM only ever holds the fake. `gh` and `glab` pick up GH_TOKEN / GITLAB_TOKEN env automatically." = "HTTPS 経由の git 用個人アクセストークンです。ホスト上で暗号化して保存され、プロキシが送信リクエストに差し替えるため、VM は偽のトークンしか保持しません。`gh` と `glab` は環境変数 GH_TOKEN / GITLAB_TOKEN を自動で読み取ります。";
-"Point bromure at any existing SSH private key (RSA, ed25519, ecdsa) — encrypted ones included. The key is loaded into the per-profile bromure ssh-agent at every session launch; passphrases are stored in the macOS Keychain." = "既存の SSH 秘密鍵（RSA、ed25519、ecdsa — 暗号化済みのものを含む）に bromure を向けます。鍵はセッション開始ごとにプロファイル専用の bromure ssh-agent に読み込まれ、パスフレーズは macOS キーチェーンに保存されます。";
+"Point bromure at any existing SSH private key (RSA, ed25519, ecdsa) — encrypted ones included. The key is loaded into the per-workspace bromure ssh-agent at every session launch; passphrases are stored in the macOS Keychain." = "既存の SSH 秘密鍵（RSA、ed25519、ecdsa — 暗号化済みのものを含む）に bromure を向けます。鍵はセッション開始ごとにワークスペース専用の bromure ssh-agent に読み込まれ、パスフレーズは macOS キーチェーンに保存されます。";
 "Private mode" = "プライベートモード";
 "Quay (quay.io)" = "Quay (quay.io)";
 "Real value" = "実際の値";
@@ -307,8 +307,8 @@
 "Remove this token rule" = "このトークンルールを削除";
 "Server" = "サーバー";
 "Session trace" = "セッショントレース";
-"Sessions running under this profile normally stream metadata (tools, files, commands, token usage) to your workspace. Turn this on to keep this profile's activity local — neither the title-bar indicator nor the admin's session list will see anything from this profile. The local trace inspector is unaffected." = "このプロファイルで実行中のセッションは通常、メタデータ（ツール、ファイル、コマンド、トークン使用量）をワークスペースに送信します。これを有効にするとアクティビティはローカルにとどまり、タイトルバーのインジケーターや管理者のセッション一覧にはこのプロファイルの情報が一切表示されません。ローカルのトレースインスペクターは影響を受けません。";
-"Storage controls only apply to real profiles. They appear in each profile's editor when you create or edit one." = "ストレージ設定は実プロファイルにのみ適用されます。プロファイルを作成・編集するときにそのエディター内で表示されます。";
+"Sessions running under this workspace normally stream metadata (tools, files, commands, token usage) to your workspace. Turn this on to keep this workspace's activity local — neither the title-bar indicator nor the admin's session list will see anything from this workspace. The local trace inspector is unaffected." = "このワークスペースで実行中のセッションは通常、メタデータ（ツール、ファイル、コマンド、トークン使用量）をワークスペースに送信します。これを有効にするとアクティビティはローカルにとどまり、タイトルバーのインジケーターや管理者のセッション一覧にはこのワークスペースの情報が一切表示されません。ローカルのトレースインスペクターは影響を受けません。";
+"Storage controls only apply to real workspaces. They appear in each workspace's editor when you create or edit one." = "ストレージ設定は実ワークスペースにのみ適用されます。ワークスペースを作成・編集するときにそのエディター内で表示されます。";
 "Stripe sandbox" = "Stripe サンドボックス";
 "The VM gets a LAN-routable IP via DHCP on the chosen interface." = "VM は選択したインターフェイス上で DHCP により LAN ルータブルな IP アドレスを取得します。";
 "Username" = "ユーザー名";
@@ -319,7 +319,7 @@
 /* Preferences — Automation pane */
 "Automation" = "オートメーション";
 "Automation API & MCP server" = "オートメーション API と MCP サーバー";
-"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage profiles and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "Bromure AC はループバックインターフェイス上に HTTP API を公開し、外部ツールがプロファイルとセッションを管理できるようにします。同梱のサブコマンド `bromure-ac mcp` は同じ機能を AI エージェント（Claude Code、Claude Desktop）向けにラップします。これらの設定はアプリ全体に適用されます。";
+"Bromure AC exposes an HTTP API on the loopback interface that lets external tools manage workspaces and sessions. The bundled `bromure-ac mcp` subcommand wraps the same surface for AI agents (Claude Code, Claude Desktop). These settings apply app-wide." = "Bromure AC はループバックインターフェイス上に HTTP API を公開し、外部ツールがワークスペースとセッションを管理できるようにします。同梱のサブコマンド `bromure-ac mcp` は同じ機能を AI エージェント（Claude Code、Claude Desktop）向けにラップします。これらの設定はアプリ全体に適用されます。";
 "Enable automation server" = "オートメーションサーバーを有効にする";
 "Listening on %@:%@. Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app." = "%@:%@ で待ち受け中。オフにするとサーバーは即座に停止し、MCP サブコマンドはアプリに到達できなくなります。";
 "Off — the HTTP API and the MCP subcommand are unavailable." = "オフ — HTTP API および MCP サブコマンドは利用できません。";
@@ -342,8 +342,8 @@
 "Guardrails strips destructive operations from the protocols this agent speaks. It's enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it. Blocked calls return a hard error the agent sees." = "ガードレールは、このエージェントが扱うプロトコルから破壊的な操作を取り除きます。ホスト側（プロキシ内）で強制されるため、VM 内の不正な、または侵害されたエージェントが回避することはできません。ブロックされた呼び出しは、エージェントが認識する明確なエラーを返します。";
 "Databases" = "データベース";
 "No database endpoints configured. Add MongoDB, ClickHouse, or Elasticsearch endpoints under Credentials to guard them here." = "データベースのエンドポイントが設定されていません。ここで保護するには、「資格情報」で MongoDB、ClickHouse、または Elasticsearch のエンドポイントを追加してください。";
-"No kubeconfigs on this profile — add one under Credentials for this to take effect." = "このプロファイルには kubeconfig がありません。有効にするには「資格情報」で追加してください。";
-"No registries on this profile — add one under Credentials for this to take effect." = "このプロファイルにはレジストリがありません。有効にするには「資格情報」で追加してください。";
+"No kubeconfigs on this workspace — add one under Credentials for this to take effect." = "このワークスペースには kubeconfig がありません。有効にするには「資格情報」で追加してください。";
+"No registries on this workspace — add one under Credentials for this to take effect." = "このワークスペースにはレジストリがありません。有効にするには「資格情報」で追加してください。";
 "Set this endpoint's host under Credentials for the guard to take effect." = "このガードを有効にするには、「資格情報」でこのエンドポイントのホストを設定してください。";
 "Off" = "オフ";
 "Block destructive" = "破壊的操作をブロック";
@@ -378,20 +378,20 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "Bromure Agentic Coding を終了しますか？";
-"%d VM(s) currently running (%@) will be closed according to each profile's close action." = "現在実行中の %d 個の VM (%@) は、各プロファイルの終了動作に従って閉じられます。";
+"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "現在実行中の %d 個の VM (%@) は、各ワークスペースの終了動作に従って閉じられます。";
 "Quit" = "終了";
 
 /* Guardrails: new prompt-on-write mode */
 "Prompt before write" = "書き込みのたびに確認";
 "Reads pass through; writes ask you each time." = "読み取りは通過します。書き込みは毎回確認します。";
 /* Guardrails consent prompt */
-"Allow write on “%@” from profile “%@”?" = "プロファイル「%@」から「%@」への書き込みを許可しますか？";
+"Allow write on “%@” from workspace “%@”?" = "ワークスペース「%@」から「%@」への書き込みを許可しますか？";
 "Allow for 15 minutes" = "15 分間許可";
 "Allow once" = "今回のみ許可";
 
 /* Supply Chain category */
 "Supply Chain" = "サプライチェーン";
-"Pass through %@ from profile “%@”?" = "プロファイル「%@」から %@ を通過させますか？";
+"Pass through %@ from workspace “%@”?" = "ワークスペース「%@」から %@ を通過させますか？";
 "Get an API key" = "API キーを取得";
 "Add entry" = "エントリを追加";
 
@@ -526,7 +526,7 @@
 "Bromure detected a real %@ subscription token going out to %@ from “%@”. We can replace it inside the VM with a fake — the real token stays on this Mac and the proxy substitutes it on the wire only when needed." = "Bromure は「%@」から %@ へ送信される本物の %@ サブスクリプショントークンを検出しました。VM 内ではダミーに置き換えられます — 本物のトークンはこの Mac に留まり、proxy が必要なときだけ通信経路上で差し替えます。";
 "Both the access and refresh tokens are swapped together." = "アクセストークンとリフレッシュトークンはまとめて差し替えられます。";
 "The VM never receives any real credential — only the fake replacements." = "VM が本物の認証情報を受け取ることはありません — ダミーの置き換えのみです。";
-"Never for this profile" = "このプロファイルでは今後しない";
+"Never for this workspace" = "このワークスペースでは今後しない";
 "Not now" = "今はしない";
 "Swap" = "差し替える";
 
@@ -534,22 +534,22 @@
 "Proxy unavailable" = "proxy を利用できません";
 "The Bromure proxy isn't running, so registration can't capture your tokens." = "Bromure の proxy が実行されていないため、登録時にトークンを取得できません。";
 "Register with %@" = "%@ に登録";
-"Bromure will open a temporary, isolated VM with no access to your profiles or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM." = "Bromure は、あなたのプロファイルや保存済みのシークレットにアクセスできない一時的な隔離 VM を起動します。%@ はサインインページを Mac のブラウザで開きます。サインイン後、Bromure が認証情報を取得し、その VM を停止して削除します。";
+"Bromure will open a temporary, isolated VM with no access to your workspaces or saved secrets. %@ will open its sign-in page in your Mac's browser. After you sign in, Bromure captures the credentials, then shuts down and deletes the VM." = "Bromure は、あなたのワークスペースや保存済みのシークレットにアクセスできない一時的な隔離 VM を起動します。%@ はサインインページを Mac のブラウザで開きます。サインイン後、Bromure が認証情報を取得し、その VM を停止して削除します。";
 "Couldn't start the registration VM." = "登録用 VM を起動できませんでした。";
 "Registration timed out" = "登録がタイムアウトしました";
 "Bromure didn't receive a %@ sign-in in time. You can try again." = "Bromure は %@ のサインインを時間内に受け取れませんでした。もう一度お試しください。";
 "Share with every session?" = "すべてのセッションで共有しますか？";
-"Use this %@ sign-in for every Bromure session, or only for this profile?" = "この %@ のサインインを、すべての Bromure セッションで使用しますか、それともこのプロファイルのみで使用しますか？";
+"Use this %@ sign-in for every Bromure session, or only for this workspace?" = "この %@ のサインインを、すべての Bromure セッションで使用しますか、それともこのワークスペースのみで使用しますか？";
 "Every session" = "すべてのセッション";
-"Just this profile" = "このプロファイルのみ";
+"Just this workspace" = "このワークスペースのみ";
 "Couldn't save the captured credentials." = "取得した認証情報を保存できませんでした。";
 "Registered with %@" = "%@ に登録しました";
 "Saved for all sessions. New sessions will use it automatically." = "すべてのセッション用に保存しました。新しいセッションでは自動的に使用されます。";
-"Saved for this profile." = "このプロファイル用に保存しました。";
+"Saved for this workspace." = "このワークスペース用に保存しました。";
 
 /* bromure.io enrollment sheet */
 "Enroll in bromure.io" = "bromure.io に登録";
-"Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Profiles in private mode never stream." = "管理者から 6 単語の登録コードが渡されます。登録すると、Bromure Agentic Coding はセッションのメタデータ (ツール、ファイル、コマンド、トークン使用量) をワークスペースに送信し、管理者がアクティビティを確認できるようになります。プライベートモードのプロファイルは送信されません。";
+"Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream." = "管理者から 6 単語の登録コードが渡されます。登録すると、Bromure Agentic Coding はセッションのメタデータ (ツール、ファイル、コマンド、トークン使用量) をワークスペースに送信し、管理者がアクティビティを確認できるようになります。プライベートモードのワークスペースは送信されません。";
 "Enrollment Code" = "登録コード";
 "Device Name" = "デバイス名";
 "Shown to your administrator so they can recognize this Mac." = "この Mac を識別できるよう、管理者に表示されます。";
@@ -571,3 +571,105 @@
 "Your administrator revoked this install. Sign out and enroll again with a new code to resume managed mode." = "管理者がこのインストールを取り消しました。管理モードを再開するには、サインアウトして新しいコードで再登録してください。";
 "Enrollment no longer accepted" = "登録は受け付けられなくなりました";
 "The server rejected this install's credentials — they may have expired or been reset. Sign out and enroll again with a new code." = "サーバーがこのインストールの認証情報を拒否しました — 期限切れかリセットされた可能性があります。サインアウトして新しいコードで再登録してください。";
+
+/* Workspace rename + new settings */
+"(unknown workspace)" = "(不明なワークスペース)";
+"A read-write copy of the base OS, just for this workspace. Holds anything you `sudo apt install`, edits to /etc and /var, system-level config." = "ベース OS の読み書き可能なコピーで、このワークスペース専用です。`sudo apt install` でインストールしたもの、/etc や /var への変更、システムレベルの設定などを保持します。";
+"Affects every workspace, so it's parked outside this editor." = "すべてのワークスペースに影響するため、このエディターの外に配置されています。";
+"All workspaces" = "すべてのワークスペース";
+"Auth mode for an on-the-fly workspace: token | subscription | bedrock." = "オンザフライのワークスペースの認証モード: token | subscription | bedrock。";
+"Base image updated since this workspace was created." = "このワークスペースの作成後にベースイメージが更新されました。";
+"Couldn't create the workspace." = "ワークスペースを作成できませんでした。";
+"Couldn't delete the workspace." = "ワークスペースを削除できませんでした。";
+"Couldn't export the VM for investigation. The workspace will still be marked compromised." = "調査用に VM をエクスポートできませんでした。ワークスペースは引き続き侵害ありとしてマークされます。";
+"Couldn't save the workspace." = "ワークスペースを保存できませんでした。";
+"Create and boot a VM, optionally from an on-the-fly workspace (like `docker run`)." = "VM を作成して起動します。必要に応じてオンザフライのワークスペースから起動します（`docker run` のように）。";
+"Default workspace" = "デフォルトのワークスペース";
+"Delete the workspace + disk when the VM stops (ephemeral)." = "VM 停止時にワークスペースとディスクを削除します（一時的）。";
+"Edit this workspace's settings" = "このワークスペースの設定を編集";
+"Filter to one VM/workspace (id or name)." = "1 つの VM／ワークスペースに絞り込みます（id または名前）。";
+"Inspect this workspace's session trace (⇧⌘I)" = "このワークスペースのセッショントレースを確認 (⇧⌘I)";
+"Manage workspaces (the templates VMs boot from)." = "ワークスペース（VM の起動元テンプレート）を管理します。";
+"Name for an on-the-fly workspace (default: cli-XXXX)." = "オンザフライのワークスペースの名前（デフォルト: cli-XXXX）。";
+"New session — pick a workspace" = "新しいセッション — ワークスペースを選択";
+"No workspaces found. Create one in the bromure-ac app first." = "ワークスペースが見つかりません。まず bromure-ac アプリで作成してください。";
+"No workspaces yet" = "ワークスペースはまだありません";
+"No workspaces." = "ワークスペースがありません。";
+"No trace records. (Tracing is per-workspace — enable it in the workspace's settings.)" = "トレース記録はありません。（トレースはワークスペースごとです — ワークスペースの設定で有効にしてください。）";
+"Workspace Manager" = "ワークスペースマネージャー";
+"Workspace id or name." = "ワークスペースの id または名前。";
+"Workspaces" = "ワークスペース";
+"Re-runs the full Ubuntu installer (~5–10 min) using the current setup.sh. Existing workspaces' disks aren't touched — on next launch each one's drift prompt will offer to reset to the new base." = "現在の setup.sh を使って Ubuntu インストーラー全体を再実行します（約 5〜10 分）。既存のワークスペースのディスクは変更されません — 次回起動時に各ワークスペースのドリフト確認で新しいベースへのリセットを提案します。";
+"Select a workspace on the left" = "左側でワークスペースを選択";
+"Session metadata is being sent to bromure.io. Toggle the workspace's Private Mode to stop streaming." = "セッションのメタデータが bromure.io に送信されています。送信を停止するにはワークスペースのプライベートモードを切り替えてください。";
+"Set the active local model for a running VM's workspace." = "実行中の VM のワークスペースのアクティブなローカルモデルを設定します。";
+"This workspace isn't running" = "このワークスペースは実行されていません";
+"Tool for an on-the-fly workspace: claude | codex | grok." = "オンザフライのワークスペースのツール: claude | codex | grok。";
+"Ubuntu Noble + Node, Claude Code, Codex, kitty, gh, glab, fonts. Shared by every workspace, immutable at runtime." = "Ubuntu Noble + Node、Claude Code、Codex、kitty、gh、glab、フォント。すべてのワークスペースで共有され、実行時は変更不可です。";
+"Use an existing workspace (name or id) instead of creating one." = "新規作成する代わりに既存のワークスペース（名前または id）を使用します。";
+"VM id or workspace name." = "VM の id またはワークスペース名。";
+"workspaces" = "ワークスペース";
+"workspaces ls" = "workspaces ls";
+"this workspace" = "このワークスペース";
+"**Hybrid** sends requests to the cloud as usual, falling back to the on-device model only when the cloud is unreachable — cloud speed and quality, with a local safety net." = "**Hybrid** は通常どおりクラウドにリクエストを送り、クラウドに到達できないときだけ端末上のモデルにフォールバックします — クラウドの速度と品質を保ちつつ、ローカルの安全網を備えます。";
+"**Local** keeps every request on this Mac — nothing leaves the machine. Replies are private but slower, and bounded by the model you can fit in memory." = "**Local** はすべてのリクエストをこの Mac 上にとどめます — 何もマシンの外に出ません。応答はプライベートですが遅く、メモリに収まるモデルの範囲に制限されます。";
+"Access key ID" = "アクセスキー ID";
+"Applies to the kube API servers from this workspace's kubeconfigs (e.g. `kubectl delete` fails cleanly)." = "このワークスペースの kubeconfig にある kube API サーバーに適用されます（例: `kubectl delete` は正常に失敗します）。";
+"Auto (match macOS)" = "自動 (macOS に合わせる)";
+"Bitbucket Tokens" = "Bitbucket トークン";
+"Claude subscription token swap" = "Claude サブスクリプショントークンの差し替え";
+"ClickHouse" = "ClickHouse";
+"Codex subscription token swap" = "Codex サブスクリプショントークンの差し替え";
+"Couldn't import kubeconfig" = "kubeconfig を読み込めませんでした";
+"Default region" = "デフォルトリージョン";
+"DigitalOcean" = "DigitalOcean";
+"Elasticsearch" = "Elasticsearch";
+"Enable local models" = "ローカルモデルを有効にする";
+"Env var(s)" = "環境変数";
+"Environment variable(s) the fake secret is exported under in the VM (comma-separated for more than one). Reference these from your code / connection string." = "ニセのシークレットが VM 内で公開される環境変数（複数の場合はカンマ区切り）。コードや接続文字列からこれらを参照してください。";
+"GitHub Tokens" = "GitHub トークン";
+"GitLab Tokens" = "GitLab トークン";
+"Greyed-out models need more memory than this Mac has." = "グレー表示のモデルは、この Mac の搭載メモリより多くのメモリを必要とします。";
+"Hide secret" = "シークレットを隠す";
+"Hybrid — cloud, fall back to local" = "Hybrid — クラウド、必要時にローカルへフォールバック";
+"Import kubeconfig" = "kubeconfig を読み込む";
+"Installed" = "インストール済み";
+"Key repeat delay" = "キーリピート開始までの遅延";
+"Key repeat rate" = "キーリピート速度";
+"Keyboard layout" = "キーボードレイアウト";
+"Kubernetes" = "Kubernetes";
+"Ligatures" = "合字";
+"Local" = "ローカル";
+"Local model" = "ローカルモデル";
+"Local — always on-device" = "Local — 常に端末上";
+"Mode" = "モード";
+"Models to fuse" = "統合するモデル";
+"MongoDB" = "MongoDB";
+"Name (optional)" = "名前 (任意)";
+"No endpoints configured." = "エンドポイントが設定されていません。";
+"No local models installed yet. Enable and download one in the Local Models section." = "ローカルモデルはまだインストールされていません。「ローカルモデル」セクションで有効にしてダウンロードしてください。";
+"Open IAM credentials page" = "IAM 認証情報ページを開く";
+"Optional — STS only" = "任意 — STS のみ";
+"Other API keys" = "その他の API キー";
+"Pick at least two models to fuse — your Claude Code session counts as one, so add one more (a cloud agent or a local model)." = "統合するモデルを少なくとも 2 つ選んでください — Claude Code のセッションが 1 つに数えられるので、あと 1 つ（クラウドエージェントまたはローカルモデル）を追加してください。";
+"Production cluster" = "本番クラスター";
+"Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history, anything in /home/ubuntu." = "プロジェクトのクローン、dotfiles、.ssh の鍵、npm-global、.cargo、シェル履歴など、/home/ubuntu 内のすべて。";
+"Public key text wasn't captured at import time — re-import with the matching .pub file alongside the private key to enable per-key gating." = "インポート時に公開鍵テキストが取得されませんでした — 鍵ごとのゲートを有効にするには、対応する .pub ファイルを秘密鍵とともに再インポートしてください。";
+"Remove" = "削除";
+"Remove this endpoint" = "このエンドポイントを削除";
+"Retry" = "再試行";
+"Run a coding model on this Mac instead of the cloud." = "クラウドの代わりに、この Mac でコーディングモデルを実行します。";
+"SSH Keys" = "SSH 鍵";
+"Secret" = "シークレット";
+"Secret access key" = "シークレットアクセスキー";
+"Session token" = "セッショントークン";
+"Show secret" = "シークレットを表示";
+"Start this VM at login" = "ログイン時にこの VM を起動";
+"Stop download" = "ダウンロードを停止";
+"The hostname the agent connects to (no scheme). Both the credential swap and Guardrails scope to this host, so self-hosted instances work." = "エージェントが接続するホスト名（スキームなし）。認証情報の差し替えとガードレールはどちらもこのホストを対象とするため、セルフホスト型のインスタンスでも動作します。";
+"They run in parallel (one engine, several models), so their memory adds up. Drop one, or pick smaller models." = "これらは並列で実行されるため（1 つのエンジンで複数のモデル）、メモリ使用量が合算されます。1 つ減らすか、より小さいモデルを選んでください。";
+"When closing the window" = "ウインドウを閉じるとき";
+"Your Claude Code session is always one of the fused models; pick the others." = "Claude Code のセッションは常に統合するモデルの 1 つです。残りを選んでください。";
+"— download a model in Local Models" = "— 「ローカルモデル」でモデルをダウンロード";
+"— download one in Local Models" = "— 「ローカルモデル」でダウンロード";
+"— no cloud credential (configure it in Agents)" = "— クラウド認証情報なし（エージェントで設定してください）";
