@@ -51,6 +51,15 @@ enum ToolCallRepair {
         let qfn = rescueQwenFunctionCalls(cleaned, toolNames: toolNames)
         blocks += qfn.blocks
         cleaned = qfn.cleaned
+        // Last resort: a <tool_call>…</tool_call> wrapper whose JSON is malformed
+        // enough that the structured parsers above gave up — e.g. the model
+        // closes the object early and leaves "name" dangling
+        // (`{"arguments":{…}}, "name":"Bash"}`). Pull the declared tool name and
+        // the arguments object out of the wrapper directly. Gated on declared
+        // tools so prose isn't misread.
+        let wrap = rescueToolCallWrapper(cleaned, toolNames: toolNames)
+        blocks += wrap.blocks
+        cleaned = wrap.cleaned
         // Drop now-empty code fences + tool-call wrappers left behind by the
         // markup removal (e.g. Qwen wraps <function=…> in <tool_call>…</tool_call>).
         cleaned = cleaned.replacingOccurrences(of: "```xml", with: "")
@@ -330,6 +339,71 @@ enum ToolCallRepair {
         var out = chars
         for (s, e) in spans.reversed() { out.removeSubrange(s...e) }
         return (String(out), blocks)
+    }
+
+    /// Rescue a `<tool_call>…</tool_call>` wrapper whose inner JSON is malformed
+    /// (the model closed the object early / put "name" outside it). We don't
+    /// trust the object structure: pull the first declared-tool `"name":"X"` and
+    /// the first `"arguments"`/`"parameters"` object out of the wrapper directly.
+    /// Gated on declared tool names so prose isn't misread as a call.
+    static func rescueToolCallWrapper(_ text: String, toolNames: Set<String>) -> (cleaned: String, blocks: [[String: Any]]) {
+        guard !toolNames.isEmpty,
+              let re = try? NSRegularExpression(
+                pattern: #"<tool_call>(.*?)</tool_call>"#, options: [.dotMatchesLineSeparators]) else {
+            return (text, [])
+        }
+        var blocks: [[String: Any]] = []
+        var cleaned = text as NSString
+        for m in re.matches(in: cleaned as String,
+                            range: NSRange(location: 0, length: cleaned.length)).reversed() {
+            let inner = cleaned.substring(with: m.range(at: 1))
+            guard let name = firstNamedTool(in: inner, toolNames: toolNames) else { continue }
+            let input = extractArgsObject(in: inner) ?? [:]
+            blocks.insert(["type": "tool_use",
+                "id": "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24).lowercased(),
+                "name": name, "input": input], at: 0)
+            cleaned = cleaned.replacingCharacters(in: m.range, with: "") as NSString
+        }
+        return (cleaned as String, blocks)
+    }
+
+    /// First `"name":"X"` in `s` where X is a declared tool.
+    private static func firstNamedTool(in s: String, toolNames: Set<String>) -> String? {
+        guard let re = try? NSRegularExpression(pattern: #""name"\s*:\s*"([^"]+)""#) else { return nil }
+        let ns = s as NSString
+        for m in re.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
+            let n = ns.substring(with: m.range(at: 1))
+            if toolNames.contains(n) { return n }
+        }
+        return nil
+    }
+
+    /// The first `"arguments"`/`"parameters"` value as a parsed object, located by
+    /// a string-aware balanced-brace scan (robust to the surrounding JSON being
+    /// broken).
+    private static func extractArgsObject(in s: String) -> [String: Any]? {
+        let chars = Array(s)
+        for key in ["\"arguments\"", "\"parameters\""] {
+            guard let r = s.range(of: key) else { continue }
+            var idx = s.distance(from: s.startIndex, to: r.upperBound)
+            while idx < chars.count, chars[idx] != "{" {
+                if chars[idx] == "}" { break }   // value isn't an object
+                idx += 1
+            }
+            guard idx < chars.count, chars[idx] == "{" else { continue }
+            var depth = 0, j = idx, inStr = false, esc = false
+            while j < chars.count {
+                let c = chars[j]
+                if inStr { if esc { esc = false } else if c == "\\" { esc = true } else if c == "\"" { inStr = false } }
+                else if c == "\"" { inStr = true }
+                else if c == "{" { depth += 1 }
+                else if c == "}" { depth -= 1; if depth == 0 { break } }
+                j += 1
+            }
+            guard depth == 0, j < chars.count else { continue }
+            if let obj = parseJSONObject(String(chars[idx...j])) as? [String: Any] { return obj }
+        }
+        return nil
     }
 
     /// Rescue `<ToolName attr="val" …/>` element tool calls — the element name is
