@@ -530,7 +530,6 @@ struct ProfilesDescribe: ParsableCommand {
         row("mac", v["macAddress"] as? String)
         row("close action", v["closeAction"] as? String)
         if v["bootAtStartup"] as? Bool == true { row("boot at login", "yes") }
-        if v["startInBackground"] as? Bool == true { row("start in bg", "yes") }
         row("color", v["color"] as? String)
         row("ssh key", (v["sshKeySet"] as? Bool ?? false) ? "set" : "not set")
         if let n = v["importedSSHKeys"] as? Int, n > 0 { row("imported keys", String(n)) }

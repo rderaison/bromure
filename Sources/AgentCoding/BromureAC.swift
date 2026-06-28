@@ -1711,7 +1711,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "macAddress": MACBindings.shared.macAddress(for: p.id),
             "closeAction": p.closeAction.rawValue,
             "bootAtStartup": p.bootAtStartup,
-            "startInBackground": p.startInBackground,
             "folderPaths": p.folderPaths,
             "mcpServers": p.mcpServers.map { $0.name },
             "sshKeySet": (p.sshPublicKey?.isEmpty == false),
@@ -3783,9 +3782,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Boot (or reveal) a profile's session. When `detached` is true the VM
     /// boots window-less — no pane is hosted, the session runs headless from the
-    /// start (the `vm run -d` / remote-menu path), reattachable later. This is
-    /// distinct from the persistent `profile.startInBackground` setting, which
-    /// has the same effect but is a per-profile default rather than a one-shot.
+    /// start (the `vm run -d` / login-boot / remote-menu path), reattachable
+    /// later.
     func launch(_ profile: Profile, detached: Bool = false) {
         // Already shown → just focus + select it (unless we were asked to detach,
         // in which case drop the window and leave the VM running headless).
@@ -4041,12 +4039,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         // Create the pane that draws this VM. It's hosted in the shared unified
-        // window (the unpeel-style source-list of every running VM) unless the
-        // profile starts in the background — then it boots window-less and the
-        // session lives on detached. Promote to a regular app first in case
-        // we're launching from a headless/background agent.
+        // window (the unpeel-style source-list of every running VM) unless this
+        // is a detached login-boot — then it boots window-less and the session
+        // lives on detached. Promote to a regular app first in case we're
+        // launching from a headless/background agent.
         let win = SessionPane(profile: profile, acDelegate: self)
-        if profile.startInBackground || detached {
+        if detached {
             // Boots window-less: the pane binds the VZ view through boot, then
             // drops once the VM registers, leaving the session running detached.
             // Reattach via the menu-bar item or `vm attach`.

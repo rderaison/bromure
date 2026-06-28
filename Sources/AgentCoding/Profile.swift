@@ -1189,10 +1189,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// via the LaunchAgent installed while any profile has this on). Default off.
     public var bootAtStartup: Bool
 
-    /// Start this profile's VM detached (no window) — it boots and runs in the
-    /// background; reattach via the menu-bar item or `vm attach`. Default off.
-    public var startInBackground: Bool
-
     public enum NetworkMode: String, Codable, CaseIterable, Sendable {
         case nat
         case bridged
@@ -1342,7 +1338,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         keyRepeatRateHz: Int? = nil,
         closeAction: CloseAction = .ask,
         bootAtStartup: Bool = false,
-        startInBackground: Bool = false,
         mcpServers: [MCPServer] = []
     ) {
         self.id = id
@@ -1409,7 +1404,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.fontLigatures = fontLigatures
         self.closeAction = closeAction
         self.bootAtStartup = bootAtStartup
-        self.startInBackground = startInBackground
         self.mcpServers = mcpServers
     }
 
@@ -1459,7 +1453,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case sshKeyRequiresApproval
         case closeAction
         case bootAtStartup
-        case startInBackground
         case mcpServers
     }
 
@@ -1555,7 +1548,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         sshKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .sshKeyRequiresApproval) ?? false
         closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .ask
         bootAtStartup = try c.decodeIfPresent(Bool.self, forKey: .bootAtStartup) ?? false
-        startInBackground = try c.decodeIfPresent(Bool.self, forKey: .startInBackground) ?? false
         mcpServers = try c.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
     }
 
@@ -1692,7 +1684,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if sshKeyRequiresApproval { try c.encode(true, forKey: .sshKeyRequiresApproval) }
         try c.encode(closeAction, forKey: .closeAction)
         if bootAtStartup { try c.encode(bootAtStartup, forKey: .bootAtStartup) }
-        if startInBackground { try c.encode(startInBackground, forKey: .startInBackground) }
         if !mcpServers.isEmpty {
             try c.encode(mcpServers, forKey: .mcpServers)
         }

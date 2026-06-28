@@ -465,9 +465,6 @@ struct ProfileEditorView: View {
             Toggle(NSLocalizedString("Start this VM at login", comment: ""),
                    isOn: $draft.bootAtStartup)
 
-            Toggle(NSLocalizedString("Start in the background (no window)", comment: ""),
-                   isOn: $draft.startInBackground)
-
             TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
                       text: $draft.comments, axis: .vertical)
                 .lineLimit(2...6)
