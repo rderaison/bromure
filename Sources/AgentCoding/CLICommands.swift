@@ -192,16 +192,11 @@ private func formatUptime(_ seconds: Int) -> String {
     return "\(h)h\(m % 60)m"
 }
 
-// MARK: - `vm` subcommand group
-
-struct VM: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "vm",
-        abstract: "Manage bromure-ac VMs (like `docker` for containers).",
-        subcommands: [VMList.self, VMRun.self, VMKill.self, Exec.self,
-                      VMFusion.self, VMRouting.self, VMHybrid.self,
-                      VMAttach.self, VMDescribe.self])
-}
+// MARK: - workspace / VM lifecycle subcommands
+//
+// These live under the unified `workspaces` command (aliased `vm`). The old
+// separate `vm` group and its `ls`/`describe` were folded in: `WorkspacesList`
+// replaces both list commands, and `ProfilesDescribe` is the single `describe`.
 
 struct VMRun: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -289,41 +284,6 @@ struct VMRun: ParsableCommand {
     }
 }
 
-struct VMList: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "ls", abstract: "List running VMs (attached or detached).")
-
-    func run() throws {
-        let client = ControlClient()
-        guard client.isAgentRunning() else {
-            print("No bromure-ac agent running.")
-            return
-        }
-        let vms = (try client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
-        if vms.isEmpty { print("No running VMs."); return }
-        print(pad("VM ID", 14) + pad("NAME", 22) + pad("TOOL", 9)
-              + pad("STATE", 11) + pad("UP", 8) + "WINDOW")
-        for vm in vms.sorted(by: { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }) {
-            let id = vm["shortId"] as? String ?? String((vm["id"] as? String ?? "").prefix(12))
-            let name = vm["name"] as? String ?? ""
-            let tool = vm["tool"] as? String ?? ""
-            let state = vm["state"] as? String ?? ""
-            let up = formatUptime(vm["uptimeSeconds"] as? Int ?? 0)
-            let win = (vm["attached"] as? Bool ?? false) ? "attached" : "detached"
-            print(pad(id, 14) + pad(name, 22) + pad(tool, 9) + pad(state, 11) + pad(up, 8) + win)
-            // Tabs (tmux windows) as a tree; jump with `vm attach <id> <index>`.
-            // `*` marks the active window. The index is the tmux window index.
-            let tabs = vm["tabs"] as? [[String: Any]] ?? []
-            for t in tabs {
-                let idx = t["index"] as? Int ?? 0
-                let title = t["title"] as? String ?? "shell"
-                let active = (t["active"] as? Bool ?? false) ? " *" : ""
-                print("    └─ \(title) (\(idx))\(active)")
-            }
-        }
-    }
-}
-
 struct VMKill: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "kill", abstract: "Stop a VM (shut down, or suspend with --suspend).")
@@ -390,70 +350,6 @@ struct VMAttach: ParsableCommand {
     }
 }
 
-struct VMDescribe: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "describe",
-        abstract: "Show detailed information about a running VM.")
-
-    @Argument(help: "VM id or workspace name.")
-    var vm: String
-
-    func run() throws {
-        let client = ControlClient()
-        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
-        let vms = (try client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
-        guard let v = vms.first(where: { matchesVM($0, vm) }) else {
-            throw ValidationError("VM not found: \(vm)")
-        }
-        func row(_ k: String, _ val: String?) {
-            guard let val, !val.isEmpty else { return }
-            print("  " + pad(k, 16) + val)
-        }
-        print("\(v["name"] as? String ?? "?")  (\(v["shortId"] as? String ?? ""))")
-        row("id", v["id"] as? String)
-        row("tool", v["tool"] as? String)
-        row("state", v["state"] as? String)
-        row("window", (v["attached"] as? Bool ?? false) ? "attached" : "detached")
-        row("uptime", formatUptime(v["uptimeSeconds"] as? Int ?? 0))
-        row("ip", (v["ip"] as? String).flatMap { $0.isEmpty ? nil : $0 })
-        row("vCPUs", (v["cpuCount"] as? Int).map(String.init))
-        row("memory", (v["memoryGB"] as? Int).map { "\($0) GB allocated" })
-        row("network", v["networkMode"] as? String)
-        row("mac", v["macAddress"] as? String)
-        let fusionConfigurable = v["fusionConfigurable"] as? Bool ?? false
-        let fusionEngaged = v["fusionEngaged"] as? Bool ?? false
-        row("fusion", fusionConfigurable
-            ? (fusionEngaged ? "engaged" : "available (off)")
-            : "not configurable (needs ≥2 models)")
-        row("base image", v["baseImageVersion"] as? String)
-        if let bytes = v["diskAllocatedBytes"] as? Int {
-            let sz = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
-            row("disk", "\(sz) used   \(v["diskPath"] as? String ?? "")")
-        }
-        if let mounts = v["mounts"] as? [String], !mounts.isEmpty {
-            print("  mounts:")
-            for m in mounts { print("    - \(m)") }
-        }
-        if let tabs = v["tabs"] as? [[String: Any]], !tabs.isEmpty {
-            print("  tabs:")
-            for t in tabs {
-                print("    \(t["index"] as? Int ?? 0). \(t["title"] as? String ?? "shell")")
-            }
-        }
-        // Best-effort in-guest memory usage (skips quietly if the shell agent
-        // isn't reachable yet).
-        let target = v["id"] as? String ?? vm
-        if let r = try? client.request(
-            "POST", "/vms/\(ControlClient.encodeSegment(target))/exec",
-            body: ["command": "free -m | awk 'NR==2{print $3\"/\"$2\" MB\"}'", "timeout": 4]),
-           r.status == 200,
-           let out = (r.json["stdout"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !out.isEmpty {
-            row("memory (in use)", out)
-        }
-    }
-}
-
 /// Match a `vm ls` entry against a user-supplied id / short-id-prefix / name.
 private func matchesVM(_ vm: [String: Any], _ key: String) -> Bool {
     let k = key.replacingOccurrences(of: "-", with: "").lowercased()
@@ -471,32 +367,53 @@ private func matchesVM(_ vm: [String: Any], _ key: String) -> Bool {
 struct Profiles: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "workspaces",
-        abstract: "Manage workspaces (the templates VMs boot from).",
-        subcommands: [ProfilesList.self, ProfilesDescribe.self, ProfilesRemove.self])
+        abstract: "Manage workspaces — list (live + off), boot, exec, and lifecycle. Also available as `vm`.",
+        subcommands: [WorkspacesList.self, VMRun.self, VMKill.self, Exec.self,
+                      VMAttach.self, ProfilesDescribe.self, ProfilesRemove.self,
+                      VMFusion.self, VMRouting.self, VMHybrid.self],
+        aliases: ["vm"])
 }
 
-struct ProfilesList: ParsableCommand {
+/// Unified listing: every workspace and its live state — off, suspended,
+/// booting, or running — mirroring the app's unified window. Running ones also
+/// show uptime, whether a window is attached, and their tmux tabs.
+struct WorkspacesList: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "ls", abstract: "List workspaces.")
+        commandName: "ls", abstract: "List all workspaces and their live state (off / suspended / running).")
 
     func run() throws {
         let client = ControlClient()
         guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
-        let profs = (try client.request("GET", "/profiles").json["profiles"] as? [[String: Any]]) ?? []
-        if profs.isEmpty { print("No workspaces."); return }
-        let running = Set(((try? client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? [])
-            .compactMap { $0["id"] as? String })
-        print(pad("WORKSPACE ID", 14) + pad("NAME", 24) + pad("TOOL", 9)
-              + pad("AUTH", 14) + pad("MCP", 5) + "STATE")
-        for p in profs.sorted(by: { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }) {
-            let id = p["id"] as? String ?? ""
-            let short = String(id.replacingOccurrences(of: "-", with: "").lowercased().prefix(12))
-            let name = p["name"] as? String ?? ""
-            let tool = p["tool"] as? String ?? ""
-            let auth = p["authMode"] as? String ?? ""
-            let mcp = String(p["mcpServerCount"] as? Int ?? 0)
-            let state = running.contains(id) ? "running" : "-"
-            print(pad(short, 14) + pad(name, 24) + pad(tool, 9) + pad(auth, 14) + pad(mcp, 5) + state)
+        let workspaces = (try client.request("GET", "/profiles").json["profiles"] as? [[String: Any]]) ?? []
+        if workspaces.isEmpty { print("No workspaces. Create one in the bromure-ac app first."); return }
+        // Running details (uptime, window, tabs) keyed by full id.
+        let vms = (try? client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
+        var running: [String: [String: Any]] = [:]
+        for vm in (vms ?? []) { if let id = vm["id"] as? String { running[id] = vm } }
+
+        print(pad("WORKSPACE ID", 14) + pad("NAME", 22) + pad("TOOL", 9)
+              + pad("AUTH", 14) + pad("STATE", 11) + pad("UP", 8) + "WINDOW")
+        for w in workspaces.sorted(by: { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }) {
+            let id = w["id"] as? String ?? ""
+            let short = w["shortId"] as? String
+                ?? String(id.replacingOccurrences(of: "-", with: "").lowercased().prefix(12))
+            let name = w["name"] as? String ?? ""
+            let tool = w["tool"] as? String ?? ""
+            let auth = w["authMode"] as? String ?? ""
+            let state = w["state"] as? String ?? "off"
+            let vm = running[id]
+            let live = (state == "running" || state == "booting")
+            let up  = live ? formatUptime(vm?["uptimeSeconds"] as? Int ?? 0) : "-"
+            let win = live ? ((vm?["attached"] as? Bool ?? false) ? "attached" : "detached") : "-"
+            print(pad(short, 14) + pad(name, 22) + pad(tool, 9) + pad(auth, 14)
+                  + pad(state, 11) + pad(up, 8) + win)
+            // tmux tabs as a tree for running workspaces; `*` marks the active one.
+            for t in (vm?["tabs"] as? [[String: Any]] ?? []) {
+                let idx = t["index"] as? Int ?? 0
+                let title = t["title"] as? String ?? "shell"
+                let active = (t["active"] as? Bool ?? false) ? " *" : ""
+                print("    └─ \(title) (\(idx))\(active)")
+            }
         }
     }
 }
@@ -545,6 +462,42 @@ struct ProfilesDescribe: ParsableCommand {
             for m in mcp { print("    - \(m)") }
         }
         if let c = v["comments"] as? String, !c.isEmpty { print("  comments:        \(c)") }
+
+        // When the workspace is running, append its live runtime details (what
+        // the old `vm describe` showed) — pulled from the running-VM listing.
+        if v["running"] as? Bool == true {
+            let vms = (try? client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
+            if let vm = (vms ?? []).first(where: { ($0["id"] as? String) == (v["id"] as? String) }) {
+                print("  ── runtime ──")
+                row("state", vm["state"] as? String)
+                row("window", (vm["attached"] as? Bool ?? false) ? "attached" : "detached")
+                row("uptime", formatUptime(vm["uptimeSeconds"] as? Int ?? 0))
+                row("ip", (vm["ip"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+                row("vCPUs", (vm["cpuCount"] as? Int).map(String.init))
+                let fc = vm["fusionConfigurable"] as? Bool ?? false
+                let fe = vm["fusionEngaged"] as? Bool ?? false
+                row("fusion", fc ? (fe ? "engaged" : "available (off)")
+                                 : "not configurable (needs ≥2 models)")
+                row("base image", vm["baseImageVersion"] as? String)
+                if let bytes = vm["diskAllocatedBytes"] as? Int {
+                    let sz = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+                    row("disk", "\(sz) used")
+                }
+                if let tabs = vm["tabs"] as? [[String: Any]], !tabs.isEmpty {
+                    print("  tabs:")
+                    for t in tabs { print("    \(t["index"] as? Int ?? 0). \(t["title"] as? String ?? "shell")") }
+                }
+                let target = vm["id"] as? String ?? workspace
+                if let r = try? client.request(
+                    "POST", "/vms/\(ControlClient.encodeSegment(target))/exec",
+                    body: ["command": "free -m | awk 'NR==2{print $3\"/\"$2\" MB\"}'", "timeout": 4]),
+                   r.status == 200,
+                   let out = (r.json["stdout"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !out.isEmpty {
+                    row("memory (in use)", out)
+                }
+            }
+        }
     }
 }
 

@@ -910,20 +910,25 @@ final class ACAutomationServer {
 
 struct ACAutomationProfileInfo {
     let id: String
+    let shortId: String
     let name: String
     let color: String
     let tool: String
     let authMode: String
     let mcpServerCount: Int
+    /// Live lifecycle state: "off" | "suspended" | "booting" | "running".
+    let state: String
 
     func toDict() -> [String: Any] {
         [
             "id": id,
+            "shortId": shortId,
             "name": name,
             "color": color,
             "tool": tool,
             "authMode": authMode,
             "mcpServerCount": mcpServerCount,
+            "state": state,
         ]
     }
 }

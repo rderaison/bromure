@@ -38,8 +38,8 @@ struct BromureAC: ParsableCommand {
                          subcommands: [Init.self, Info.self, Reset.self]),
             CommandGroup(name: "Workspaces",
                          subcommands: [Profiles.self]),
-            CommandGroup(name: "Running sessions",
-                         subcommands: [VM.self, Trace.self]),
+            CommandGroup(name: "Tracing",
+                         subcommands: [Trace.self]),
             CommandGroup(name: "Local inference",
                          subcommands: [Model.self]),
             CommandGroup(name: "Enterprise features",
@@ -1460,13 +1460,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         server.onListProfiles = { [weak self] in
             guard let self else { return [] }
             return self.profiles.map { p in
-                ACAutomationProfileInfo(
+                let stateStr: String
+                switch self.runState(for: p) {
+                case .running:   stateStr = "running"
+                case .booting:   stateStr = "booting"
+                case .suspended: stateStr = "suspended"
+                case .off:       stateStr = "off"
+                }
+                return ACAutomationProfileInfo(
                     id: p.id.uuidString,
+                    shortId: Self.shortID(p.id),
                     name: p.name,
                     color: p.color.rawValue,
                     tool: p.tool.rawValue,
                     authMode: p.authMode.rawValue,
-                    mcpServerCount: p.mcpServers.count
+                    mcpServerCount: p.mcpServers.count,
+                    state: stateStr
                 )
             }
         }
