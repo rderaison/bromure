@@ -142,9 +142,13 @@ final class MLXServer: @unchecked Sendable {
         var result: Result<MLXEngine.Completion, Error>!
         Task {
             do {
-                // Thinking off by default for the agent path (speed); opt back
-                // in with BROMURE_THINKING=1 for harder one-shot reasoning.
-                let thinking = ProcessInfo.processInfo.environment["BROMURE_THINKING"] == "1"
+                // Silent thinking: let the model reason (quality), but the
+                // <think> block is always stripped from the reply
+                // (MLXEngine.stripThinking) so it never reaches the agent or
+                // bloats the next turn's transcript. Set BROMURE_THINKING=0 to
+                // skip thinking entirely when you'd rather have the speed.
+                let thinkEnv = ProcessInfo.processInfo.environment["BROMURE_THINKING"]
+                let thinking = !(thinkEnv == "0" || thinkEnv?.lowercased() == "false")
                 let params = MLXEngine.Params(
                     maxTokens: parsed.maxTokens ?? 2048,
                     temperature: parsed.temperature ?? 0.6,

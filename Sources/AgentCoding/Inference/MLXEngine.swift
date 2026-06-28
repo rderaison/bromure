@@ -187,13 +187,13 @@ actor MLXEngine {
         var repetitionPenalty: Float?
         /// Cap the KV cache to bound memory on long contexts (RotatingKVCache).
         var maxKVSize: Int?
-        /// Pass `enable_thinking` to the chat template. Reasoning models (Qwen3)
-        /// otherwise emit a large `<think>` block on every turn — for an agent
-        /// doing many tool-call round-trips that's the dominant cost (hundreds
-        /// of tokens/turn at ~85 tok/s) and it leaks into the visible answer +
-        /// bloats the next turn's transcript. Off by default for the local
-        /// agent path; flip on for harder one-shot reasoning.
-        var enableThinking: Bool = false
+        /// Pass `enable_thinking` to the chat template. When on, the reasoning
+        /// model (Qwen3) thinks before answering — but the `<think>` block is
+        /// always stripped from the returned text (`stripThinking`), so the
+        /// reasoning stays *silent*: it never reaches the agent or bloats the
+        /// next turn's transcript. The cost is the extra tokens it spends
+        /// thinking (hundreds/turn at ~85 tok/s); turn it off for raw speed.
+        var enableThinking: Bool = true
 
         func toGenerateParameters() -> GenerateParameters {
             GenerateParameters(
