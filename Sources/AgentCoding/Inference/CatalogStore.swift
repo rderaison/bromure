@@ -89,6 +89,13 @@ public final class CatalogStore: @unchecked Sendable {
         let cat = effective()
         if let m = cat.model(id: selector) { return m }
         if let m = cat.models.first(where: { $0.repo == selector }) { return m }
+        // The published (remote) catalog fully replaces the bundled baseline and
+        // can lag this build — a model shipped in THIS app's baseline may be
+        // absent from a stale fetched catalog. Fall back to the baseline so a
+        // bundled catalog id always resolves to its real repo; otherwise the id
+        // leaks through as a bogus "repo" and the engine can't find the weights.
+        if let m = ModelCatalog.baseline.model(id: selector) { return m }
+        if let m = ModelCatalog.baseline.models.first(where: { $0.repo == selector }) { return m }
         if Self.looksLikeHFRepo(selector) {
             return CatalogModel(
                 id: selector, repo: selector,
