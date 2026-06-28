@@ -41,8 +41,7 @@ final class RemoteMenuApp {
     // MARK: - Top level
 
     private func topMenu() {
-        let items = ["Sessions", "Workspaces", "Models", "Trace", "Status",
-                     "Exit (disconnect)"]
+        let items = ["Workspaces", "Models", "Trace", "Status", "Exit (disconnect)"]
         while true {
             guard let sel = tui.menu(title: "bromure-ac · remote",
                                      items: items,
@@ -50,76 +49,78 @@ final class RemoteMenuApp {
                 return                         // Esc/q at top level = disconnect
             }
             switch sel {
-            case 0: sessionsMenu()
-            case 1: profilesMenu()
-            case 2: modelsMenu()
-            case 3: traceMenu()
-            case 4: showOutput("Status", ["status"])
+            case 0: workspacesMenu()
+            case 1: modelsMenu()
+            case 2: traceMenu()
+            case 3: showOutput("Status", ["status"])
             default: return                    // Exit
             }
         }
     }
 
-    // MARK: - Sessions
+    // MARK: - Workspaces (unified — live + off, mirroring the app's window)
 
-    private func sessionsMenu() {
+    /// One list of every workspace with its live state; selecting one offers the
+    /// state-appropriate actions (start an off one, attach/kill a running one).
+    private func workspacesMenu() {
         while true {
-            let vms = fetchVMs()
-            var labels = ["＋ New session…"]
-            for v in vms { labels.append(vmLabel(v)) }
-            if vms.isEmpty { labels.append("(no running sessions)") }
-
-            guard let sel = tui.menu(title: "Sessions", items: labels,
+            let ws = fetchProfiles()
+            var labels = ws.map { workspaceLabel($0) }
+            labels.append("List (raw table)")
+            let rawIndex = labels.count - 1
+            guard let sel = tui.menu(title: "Workspaces", items: labels,
                                      footer: "Enter: open · q: back") else { return }
-            if sel == 0 { newSession(); continue }
-            let idx = sel - 1
-            guard idx >= 0, idx < vms.count else { continue }   // the "(no running)" row
-            vmActions(vms[idx])
+            if sel == rawIndex { showOutput("workspaces ls", ["workspaces", "ls"]); continue }
+            if sel >= 0, sel < ws.count { workspaceActions(ws[sel]) }
         }
     }
 
-    private func vmActions(_ vm: [String: Any]) {
-        let id = vmID(vm)
-        let name = vm["name"] as? String ?? id
+    private func workspaceActions(_ ws: [String: Any]) {
+        let id = (ws["id"] as? String) ?? (ws["shortId"] as? String) ?? ""
+        let name = ws["name"] as? String ?? id
+        let state = ws["state"] as? String ?? "off"
+        let live = (state == "running" || state == "booting")
         while true {
-            guard let sel = tui.menu(title: "Session: \(name)",
-                                     items: ["Attach", "Describe", "Kill", "Back"],
-                                     footer: "Enter select · q back") else { return }
-            switch sel {
-            case 0: attach(vmID: id); return         // back to list after detach
-            case 1: showOutput("describe \(name)", ["vm", "describe", id])
-            case 2:
-                if tui.confirm("Kill session \(name)?") {
-                    showOutput("kill \(name)", ["vm", "kill", id]); return
+            let items = live ? ["Attach", "Describe", "Kill", "Back"]
+                             : ["Start", "Describe", "Back"]
+            guard let sel = tui.menu(title: "Workspace: \(name)  ·  \(state)",
+                                     items: items, footer: "Enter select · q back") else { return }
+            if live {
+                switch sel {
+                case 0: attach(vmID: id); return         // back to list after detach
+                case 1: showOutput("describe \(name)", ["workspaces", "describe", id])
+                case 2:
+                    if tui.confirm("Kill \(name)?") {
+                        showOutput("kill \(name)", ["vm", "kill", id]); return
+                    }
+                default: return
                 }
-            default: return
+            } else {
+                switch sel {
+                case 0: startWorkspace(id: id, name: name); return
+                case 1: showOutput("describe \(name)", ["workspaces", "describe", id])
+                default: return
+                }
             }
         }
     }
 
-    private func newSession() {
-        let profiles = fetchProfiles()
-        guard !profiles.isEmpty else {
-            tui.pager(title: "New session",
-                      body: "No workspaces found. Create one in the bromure-ac app first.")
-            return
+    /// Boot an off/suspended workspace window-less, then hand the remote terminal
+    /// straight to its tmux — no need to bounce back through the list.
+    private func startWorkspace(id: String, name: String) {
+        let out = runSelf(["vm", "run", id, "--detach"])
+        // The VM id equals the workspace id once booted. Confirm it actually came
+        // up before attaching — boot can be refused (e.g. a model still
+        // downloading), in which case `out` carries the reason.
+        let up = fetchProfiles().contains {
+            ($0["id"] as? String) == id &&
+            (($0["state"] as? String) == "running" || ($0["state"] as? String) == "booting")
         }
-        let labels = profiles.map { ($0["name"] as? String ?? "?") +
-            "  (" + ($0["tool"] as? String ?? "") + ")" }
-        guard let pick = tui.menu(title: "New session — pick a workspace",
-                                  items: labels, footer: "Enter: boot · q: cancel") else { return }
-        let name = profiles[pick]["name"] as? String ?? ""
-        // Boot window-less (-d), then hand the remote terminal straight to the
-        // new session's tmux — no need to bounce back through the list.
-        let out = runSelf(["vm", "run", "--profile", name, "--detach"])
-        guard let vm = fetchVMs().first(where: { ($0["name"] as? String) == name }) else {
-            tui.pager(title: "New session", body: out + "\n\nCouldn't find the new session to attach.")
-            return
-        }
+        guard up else { tui.pager(title: "Start \(name)", body: out); return }
         // Fresh boot: wait for the guest's `bromure` tmux session before handing
         // the terminal over, otherwise `tmux attach` races the agent's setup.
-        waitForTmux(vmID: vmID(vm))
-        attach(vmID: vmID(vm))
+        waitForTmux(vmID: id)
+        attach(vmID: id)
     }
 
     /// Poll the guest until its `bromure` tmux session exists (or we give up).
@@ -156,20 +157,7 @@ final class RemoteMenuApp {
         }
     }
 
-    // MARK: - Profiles / Models / Trace
-
-    private func profilesMenu() {
-        let profiles = fetchProfiles()
-        var labels = profiles.map { ($0["name"] as? String ?? "?") }
-        labels.append("List (raw)")
-        guard let sel = tui.menu(title: "Workspaces", items: labels,
-                                 footer: "Enter: describe · q: back") else { return }
-        if sel == profiles.count {
-            showOutput("workspaces ls", ["workspaces", "ls"]); return
-        }
-        let name = profiles[sel]["name"] as? String ?? ""
-        showOutput("workspace \(name)", ["workspaces", "describe", name])
-    }
+    // MARK: - Models / Trace
 
     private func modelsMenu() {
         guard let sel = tui.menu(title: "Models",
@@ -197,13 +185,6 @@ final class RemoteMenuApp {
 
     // MARK: - Data helpers
 
-    private func fetchVMs() -> [[String: Any]] {
-        guard client.isAgentRunning(),
-              let vms = try? client.request("GET", "/vms").json["vms"] as? [[String: Any]]
-        else { return [] }
-        return vms.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
-    }
-
     private func fetchProfiles() -> [[String: Any]] {
         guard client.isAgentRunning(),
               let ps = try? client.request("GET", "/profiles").json["profiles"] as? [[String: Any]]
@@ -211,16 +192,23 @@ final class RemoteMenuApp {
         return ps.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
     }
 
-    private func vmID(_ vm: [String: Any]) -> String {
-        (vm["id"] as? String) ?? (vm["shortId"] as? String) ?? ""
+    /// A list row: name, tool, and a glyph for the live state — the same
+    /// off/suspended/booting/running vocabulary as the app's unified window.
+    private func workspaceLabel(_ ws: [String: Any]) -> String {
+        let name = ws["name"] as? String ?? "?"
+        let tool = ws["tool"] as? String ?? ""
+        let mark: String
+        switch ws["state"] as? String ?? "off" {
+        case "running":   mark = "● running"
+        case "booting":   mark = "◌ booting"
+        case "suspended": mark = "⏸ suspended"
+        default:          mark = "○ off"
+        }
+        return "\(pad(name, 22)) \(pad(tool, 7))  \(mark)"
     }
 
-    private func vmLabel(_ vm: [String: Any]) -> String {
-        let name = vm["name"] as? String ?? "?"
-        let id = vm["shortId"] as? String ?? String(vmID(vm).prefix(12))
-        let state = vm["state"] as? String ?? ""
-        let attached = (vm["attached"] as? Bool ?? false) ? " ⦿" : ""
-        return "\(name)  (\(id))  \(state)\(attached)"
+    private func pad(_ s: String, _ w: Int) -> String {
+        s.count >= w ? s : s + String(repeating: " ", count: w - s.count)
     }
 
     /// Run a non-interactive `bromure-ac` subcommand and show its output in the
