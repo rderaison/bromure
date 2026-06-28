@@ -201,14 +201,14 @@ private func formatUptime(_ seconds: Int) -> String {
 struct VMRun: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "run",
-        abstract: "Create and boot a VM, optionally from an on-the-fly workspace (like `docker run`).")
+        abstract: "Start a workspace's VM — or create a throwaway one (docker-style) with --name/--tool.")
+
+    @Argument(help: "Workspace to start — id or name (see `vm ls`). Omit only to create a throwaway VM with --name/--tool.")
+    var workspace: String?
 
     @Option(name: [.customShort("v"), .long],
             help: "Mount a host folder into the VM at ~/<basename>. Repeatable (max 8). e.g. -v ~/project")
     var volume: [String] = []
-
-    @Option(name: .long, help: "Use an existing workspace (name or id) instead of creating one.")
-    var profile: String?
 
     @Option(name: .long, help: "Name for an on-the-fly workspace (default: cli-XXXX).")
     var name: String?
@@ -238,11 +238,18 @@ struct VMRun: ParsableCommand {
         // CLI-created sessions always boot window-less — the terminal is the UI.
         // The GUI is opt-in afterwards via `vm attach --window`.
         var spec: [String: Any] = ["detach": true, "rm": rm]
-        if let profile { spec["profile"] = profile }
-        if let name { spec["name"] = name }
-        if let tool { spec["tool"] = tool }
-        if let auth { spec["auth"] = auth }
-        if let apiKey { spec["apiKey"] = apiKey }
+        if let workspace {
+            spec["profile"] = workspace                        // start an existing workspace
+        } else if name != nil || tool != nil || auth != nil {  // create a throwaway on-the-fly
+            if let name { spec["name"] = name }
+            if let tool { spec["tool"] = tool }
+            if let auth { spec["auth"] = auth }
+            if let apiKey { spec["apiKey"] = apiKey }
+        } else {
+            throw ValidationError(
+                "Specify a workspace to start (e.g. `vm run iptest2` — see `vm ls`), "
+                + "or pass --name/--tool to create a throwaway one.")
+        }
         if let memory { spec["memoryGB"] = memory }
         if !volume.isEmpty {
             spec["mounts"] = volume.map { ($0 as NSString).expandingTildeInPath }
