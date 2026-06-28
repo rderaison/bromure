@@ -191,7 +191,7 @@ actor MLXEngine {
     /// the flat local models dir (`…/BromureAC/models/<org>--<name>/`). Legacy
     /// hub-cache models are migrated here once at startup, so the engine never
     /// loads out of `~/.cache`.
-    private func snapshotDirectory(repo: String) -> URL? {
+    func snapshotDirectory(repo: String) -> URL? {
         let fm = FileManager.default
         let slug = repo.replacingOccurrences(of: "/", with: "--")
         let local = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!

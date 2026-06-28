@@ -1,6 +1,9 @@
 import ArgumentParser
 import Foundation
+import MLXLLM
 import MLXLMCommon
+import MLXHuggingFace
+import Tokenizers
 
 // MARK: - Async bridge for sync ParsableCommand.run()
 
@@ -147,7 +150,60 @@ struct Model: ParsableCommand {
         subcommands: [ModelCatalogList.self, ModelInstall.self, ModelPull.self,
                       ModelLS.self, ModelUse.self, ModelRM.self, RepairServe.self,
                       MLXSelfTest.self, MLXServe.self, MLXEngineChild.self,
-                      ToolCallRepairTest.self, EngineKeyPrint.self, ConvParseTest.self])
+                      ToolCallRepairTest.self, EngineKeyPrint.self, ConvParseTest.self,
+                      SpecBench.self])
+}
+
+/// Hidden: benchmark speculative decoding (mlx-swift-lm's SpeculativeTokenIterator)
+/// OFF vs ON for a main+draft model pair. Reports decode tok/s (prefill excluded).
+/// `model _spec-bench <main-repo> --draft <draft-repo> [--num-draft 3] [--max-tokens 256]`.
+struct SpecBench: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "_spec-bench", shouldDisplay: false)
+    @Argument(help: "Main model HF repo (in hub cache).") var repo: String
+    @Option(name: .long, help: "Draft model HF repo (must share the tokenizer).") var draft: String
+    @Option(name: .long) var prompt = "Write a Python function that reverses a string, then explain step by step how it works and discuss edge cases."
+    @Option(name: .long) var maxTokens = 256
+    @Option(name: .long) var numDraft = 3
+    func run() throws {
+        let rlabel = repo, dlabel = draft, p = prompt, mt = maxTokens, nd = numDraft
+        try blockingRun {
+            guard let mainDir = await MLXEngine.shared.snapshotDirectory(repo: rlabel) else {
+                throw ValidationError("not downloaded: \(rlabel)")
+            }
+            guard let draftDir = await MLXEngine.shared.snapshotDirectory(repo: dlabel) else {
+                throw ValidationError("not downloaded: \(dlabel)")
+            }
+            FileHandle.standardError.write(Data("loading main \(rlabel) + draft \(dlabel) …\n".utf8))
+            let mainC = try await loadModelContainer(from: mainDir, using: #huggingFaceTokenizerLoader())
+            let draftC = try await loadModelContainer(from: draftDir, using: #huggingFaceTokenizerLoader())
+            let draftModel = try await draftC.perform { (c: ModelContext) in c.model }
+            let gp = GenerateParameters(maxTokens: mt, temperature: 0)
+            try await mainC.perform { (ctx: ModelContext) in
+                let input = try await ctx.processor.prepare(input: UserInput(chat: [.user(p)]))
+                // Decode-only timing: start the clock at the first generated token
+                // (excludes prefill, which is identical for both paths).
+                func measure(_ stream: AsyncStream<TokenGeneration>) async -> (Int, Double) {
+                    var n = 0; var first: Date?
+                    for await g in stream where g.token != nil {
+                        if first == nil { first = Date() }
+                        n += 1
+                        if n >= mt { break }
+                    }
+                    return (n, Date().timeIntervalSince(first ?? Date()))
+                }
+                let (offN, offS) = await measure(try generateTokens(input: input, parameters: gp, context: ctx))
+                let (onN, onS) = await measure(try generateTokens(
+                    input: input, parameters: gp, context: ctx,
+                    draftModel: draftModel, numDraftTokens: nd))
+                let offTps = Double(max(0, offN - 1)) / max(0.001, offS)
+                let onTps = Double(max(0, onN - 1)) / max(0.001, onS)
+                let r = String(
+                    format: "\n=== %@  (draft %@, k=%d) ===\nOFF: %3d tok  %.2fs  %6.1f tok/s\nON : %3d tok  %.2fs  %6.1f tok/s\nspeedup: %.2fx\n",
+                    rlabel, dlabel, nd, offN, offS, offTps, onN, onS, onTps, onTps / max(0.001, offTps))
+                FileHandle.standardError.write(Data(r.utf8))
+            }
+        }
+    }
 }
 
 /// Hidden: run the trace inspector's ConversationParser on request/response
