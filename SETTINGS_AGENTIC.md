@@ -20,6 +20,7 @@ Basic identity and behavior for the profile.
 | **Key repeat delay** | Time in milliseconds before a held key starts repeating inside the VM. Defaults to your macOS value; change it to override the X11 key-repeat cadence independently of the host. |
 | **Key repeat rate** | Repeat frequency in Hz once the delay has elapsed. Defaults to your macOS value. Useful when the X-server pipeline makes typing feel laggier than in a Cocoa app — bumping the rate 2× the macOS value is a common fix. |
 | **When closing the window** | What happens to the VM when you close a session window: **Suspend** (saves RAM to disk for instant resume — default), **Shut down** (clean ACPI poweroff), or **Ask** (prompt each time). |
+| **Start this VM at login** | When enabled, installs a per-user macOS LaunchAgent (`io.bromure.agentic-coding.boot`) that starts `bromure-ac` headless at login and boots this profile automatically — no admin password required. The LaunchAgent is removed automatically if no profiles have this on. Takes effect at the next macOS login. Off by default. |
 | **Notes (optional)** | A short note about the profile. Shown as a tooltip when you hover over the profile in the list. |
 
 ---
@@ -36,7 +37,7 @@ Choose which coding agents are available in this profile and how they authentica
 |---|---|
 | **Claude Code** | Enable or disable the Claude Code agent for this profile. Toggle on to configure. |
 | **Claude Code — Primary** | Mark Claude Code as the primary agent (auto-launched on session start). Click "Primary" on any enabled agent to promote it. |
-| **Claude Code — Auth** | Authentication method for Claude Code: **API token** (paste an `ANTHROPIC_API_KEY` — injected as an env var, never written into the VM directly), **Subscription (interactive login)** (run `claude login` once inside the VM), or **Bedrock (AWS)** (use your AWS credentials via the Bedrock runtime — requires AWS credentials configured in the Credentials tab). |
+| **Claude Code — Auth** | Authentication method for Claude Code: **API token** (paste an `ANTHROPIC_API_KEY` — injected as an env var, never written into the VM directly), **Subscription (interactive login)** (run `claude login` once inside the VM), **Bedrock (AWS)** (use your AWS credentials via the Bedrock runtime — requires AWS credentials configured in the Credentials tab), or **Local model** (route Claude Code's inference calls to an on-device MLX model running on the host; the active model is selected in the **Local Models** panel — greyed out until at least one model is installed there). |
 | **Claude Code — Require approval to use** | (Token mode only.) When enabled, every fake→real swap of the Anthropic API key shows a host-side consent dialog before the key is forwarded. Off by default. |
 | **Claude Code — Default Model ID** | (Bedrock mode only.) Override the Bedrock model ID Claude Code uses, e.g. `us.anthropic.claude-sonnet-4-6-v1:0`. Leave empty to use Claude Code's built-in default. |
 | **Codex** | Enable or disable the OpenAI Codex agent for this profile. Toggle on to configure authentication. |
@@ -58,7 +59,7 @@ Choose which coding agents are available in this profile and how they authentica
 
 | Setting | Description |
 |---|---|
-| **Agents to fuse** | The agents whose drafts are fused. Each agent with a usable credential (configured in the Agents pane) gets a checkbox; agents without a credential are shown disabled with a "— no credential" hint. At least two agents must be enabled with a credential for Fusion to be usable. |
+| **Models to fuse** | The models whose drafts are fused. Your Claude Code session is always one of the fused models; pick the others. Each cloud agent with a usable credential (configured in the Agents pane) gets a checkbox; agents without a credential are shown disabled with a "— no cloud credential" hint. A **Local model** checkbox is also available to fuse in the on-device MLX model as an additional leg (requires a model downloaded in the **Local Models** panel). At least two models must be enabled for Fusion to be usable. |
 | **Judge — Provider** | Which configured agent's model acts as the judge that weighs the drafts and writes the final answer. Defaults to the first usable agent. |
 | **Judge — Model** | The specific model used for judging, fetched live for the chosen provider. Leave on **(default)** to let the provider pick, or select a specific model; a previously-saved custom model stays selectable even if it is not in the fetched list. |
 
@@ -266,7 +267,7 @@ Three layers stack to make the profile's environment. The bottom layer is shared
 | Setting | Description |
 |---|---|
 | **Your home folder** | The per-profile `/home/ubuntu` directory — dotfiles, `.ssh` keys, `npm-global`, `.cargo`, shell history, and anything else the agent writes to home. Shows last-active time and current size. **Erase home…** wipes this layer and resets the home directory to its post-clone state. |
-| **Profile system disk** | A read-write copy of the base OS cloned specifically for this profile. Holds anything installed via `sudo apt install`, edits to `/etc`, `/var`, and system-level config. **Reset to base…** discards all system-level changes and re-clones from the current base image. |
+| **Workspace system disk** | A read-write copy of the base OS cloned specifically for this workspace. Holds anything installed via `sudo apt install`, edits to `/etc`, `/var`, and system-level config. **Reset to base…** discards all system-level changes and re-clones from the current base image. |
 | **Base OS image** | The shared, immutable base image: Ubuntu Noble + Node, Claude Code, Codex, kitty, gh, glab, fonts. Shared by every profile; read-only at runtime. Shows the current version stamp and build date. Rebuilt via the app menu (takes ~5–10 minutes). |
 
 ### Memory
