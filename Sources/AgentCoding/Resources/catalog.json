@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "models": [
     {
       "id": "qwen3-8b-mlx-4bit-dwq",
@@ -70,15 +70,15 @@
       "params_total_b": 744,
       "params_active_b": 40,
       "quant": "mxfp4",
-      "download_gb": 95,
-      "min_unified_mem_gb": 128,
+      "download_gb": 395,
+      "min_unified_mem_gb": 512,
       "context": 1000000,
       "tags": ["coding", "tools", "reasoning", "xl"],
       "tool_calling": "verified",
       "tool_parser": "glm47",
       "reasoning_parser": "glm4",
-      "min_chip": "M3 Max",
-      "recommended": true
+      "min_chip": "M3 Ultra",
+      "recommended": false
     },
     {
       "id": "qwen3-coder-480b-a35b-mlx-4bit",
