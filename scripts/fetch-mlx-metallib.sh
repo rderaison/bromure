@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Resolve the mlx version mlx-swift vendors, so the metallib tracks the SPM pin.
 # Falls back to the known-good version if the checkout isn't resolved yet.
-FALLBACK_VER="0.24.2"
+FALLBACK_VER="0.31.1"
 MLX_PKG="$SCRIPT_DIR/.build/checkouts/mlx-swift/Package.swift"
 if [ -f "$MLX_PKG" ]; then
     VER="$(sed -nE 's/.*MLX_VERSION", to: "\\?"?([0-9]+\.[0-9]+\.[0-9]+)\\?"?.*/\1/p' "$MLX_PKG" | head -1)"
@@ -39,6 +39,7 @@ VER="${VER:-$FALLBACK_VER}"
 metallib_sha256() {
     case "$1" in
         0.24.2) echo "0ebd8924001cec43f38e1f9e7882596e269fa2dc497d6e9626fd454ab151df62" ;;
+        0.31.1) echo "58851101cd4afc56d3080255fe4db366cbd87d654ce5e0651436e4970cd209d1" ;;
         *)      echo "" ;;
     esac
 }
@@ -47,22 +48,30 @@ CACHE_DIR="${BROMURE_MLX_CACHE:-$HOME/Library/Caches/io.bromure.build/mlx}"
 CACHED="$CACHE_DIR/mlx-$VER.metallib"
 
 if [ ! -f "$CACHED" ]; then
-    echo "fetch-mlx-metallib: downloading prebuilt mlx.metallib for mlx==$VER…" >&2
+    echo "fetch-mlx-metallib: downloading prebuilt mlx.metallib for mlx==${VER}…" >&2
     mkdir -p "$CACHE_DIR"
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' EXIT
-    # Find a macOS arm64 wheel for this exact version (any cpXX — the metallib
-    # is the same compiled Metal library in all of them).
-    URL="$(curl -fsSL "https://pypi.org/pypi/mlx/$VER/json" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for f in d['urls']:
-    n = f['filename']
-    if 'macosx' in n and 'arm64' in n and n.endswith('.whl'):
-        print(f['url']); break
+    # Find a macOS arm64 wheel for this exact version. The compiled Metal library
+    # moved out of the `mlx` wheel into a separate `mlx-metal` wheel as of mlx
+    # 0.28+, so try the new package first and fall back to the old one. Prefer the
+    # lowest macOS tag (our deployment target is macOS 14); the metallib is
+    # identical across cpXX tags for a given version.
+    URL=""
+    for pkg in mlx-metal mlx; do
+        URL="$(curl -fsSL "https://pypi.org/pypi/$pkg/$VER/json" 2>/dev/null | python3 -c "
+import sys, json, re
+try: d = json.load(sys.stdin)
+except Exception: sys.exit()
+cands = [f['url'] for f in d.get('urls', [])
+         if 'macosx' in f['filename'] and 'arm64' in f['filename'] and f['filename'].endswith('.whl')]
+cands.sort(key=lambda u: int((re.search(r'macosx_(\d+)_', u) or [0, 999])[1]))
+print(cands[0] if cands else '')
 ")"
+        [ -n "$URL" ] && break
+    done
     if [ -z "$URL" ]; then
-        echo "fetch-mlx-metallib: no macOS arm64 wheel found for mlx==$VER" >&2
+        echo "fetch-mlx-metallib: no macOS arm64 wheel found for mlx==$VER (tried mlx-metal, mlx)" >&2
         exit 1
     fi
     curl -fsSL "$URL" -o "$TMP/mlx.whl"

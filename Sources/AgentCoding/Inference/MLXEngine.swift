@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXLLM
+import MLXHuggingFace
 import Tokenizers
 
 /// In-process MLX inference engine — the Swift-native replacement for the
@@ -209,7 +210,7 @@ actor MLXEngine {
         }
         let task = Task<ModelContainer, Error> {
             do {
-                return try await loadModelContainer(directory: dir)
+                return try await loadModelContainer(from: dir, using: #huggingFaceTokenizerLoader())
             } catch {
                 throw EngineError.loadFailed(repo, underlying: "\(error)")
             }

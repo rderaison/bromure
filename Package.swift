@@ -13,14 +13,17 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.7.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
-        // Pinned to the range MLXLLM (mlx-swift-examples) requires; the classifier
-        // only uses the stable `Tokenizers` + `Hub` API, which is unchanged here.
-        .package(url: "https://github.com/huggingface/swift-transformers.git", "1.0.0" ..< "1.1.0"),
+        // Pinned to the range MLXLLM (mlx-swift-lm) requires; the classifier
+        // only uses the stable `Tokenizers` + `Hub` API. 1.1+ declares package
+        // traits (the Xet opt-in), which the newer SwiftPM toolchain requires.
+        .package(url: "https://github.com/huggingface/swift-transformers.git", "1.2.0" ..< "1.3.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.9.0"),
         // In-process MLX inference engine (replaces the Python vllm-mlx subprocess).
-        .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.21.0"),
-        .package(url: "https://github.com/ml-explore/mlx-swift-examples.git", "2.25.8" ..< "2.26.0"),
+        // mlx-swift-examples was renamed mlx-swift-lm; track the latest (3.x adds
+        // the SpeculativeTokenIterator API).
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", .upToNextMinor(from: "0.31.3")),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", "3.31.0" ..< "3.32.0"),
     ],
     targets: [
         .executableTarget(
@@ -51,8 +54,11 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
                 .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXLLM", package: "mlx-swift-examples"),
-                .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                // HuggingFace tokenizer/downloader integration (split out of
+                // MLXLMCommon in 3.x); provides #huggingFaceTokenizerLoader().
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
             ],
             path: "Sources/AgentCoding",
             exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef"],
