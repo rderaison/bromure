@@ -1368,12 +1368,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return remoteAccessStatus()
     }
 
+    /// "<ip>:<port>" a remote client would use: the bound address, or — when
+    /// bound to all interfaces (0.0.0.0) — this Mac's primary LAN IPv4.
+    @MainActor func remoteReachableAddress() -> String {
+        let cfg = remoteAccessConfig()
+        let ip = cfg.bindAddress == "0.0.0.0"
+            ? (HostNetwork.primaryIPv4() ?? "this Mac's IP") : cfg.bindAddress
+        return "\(ip):\(cfg.port)"
+    }
+
     @MainActor func remoteAccessStatus() -> [String: Any] {
         let d = UserDefaults.standard
         let cfg = remoteAccessConfig()
         let server = RemoteAccessServer.shared
         let user = NSUserName()
-        let host = cfg.bindAddress == "0.0.0.0" ? "<this-mac-ip>" : cfg.bindAddress
+        let host = cfg.bindAddress == "0.0.0.0"
+            ? (HostNetwork.primaryIPv4() ?? "<this-mac-ip>") : cfg.bindAddress
         let keys = server.listAuthorizedKeys().map { k in
             ["type": k.type, "comment": k.comment, "fingerprint": k.fingerprint] as [String: Any]
         }
@@ -5013,6 +5023,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
         menu.addItem(.separator())
+
+        // Remote access (embedded SSH front door) — toggle + where to reach it.
+        let remoteOn = RemoteAccessServer.shared.isRunning
+        let remote = NSMenuItem(title: NSLocalizedString("Remote Access", comment: ""),
+                                action: #selector(statusToggleRemoteAccess(_:)), keyEquivalent: "")
+        remote.target = self
+        remote.state = remoteOn ? .on : .off
+        menu.addItem(remote)
+        if remoteOn {
+            let reach = NSMenuItem(
+                title: String(format: NSLocalizedString("    Bromure is reachable at %@", comment: ""),
+                              remoteReachableAddress()),
+                action: nil, keyEquivalent: "")
+            reach.isEnabled = false
+            menu.addItem(reach)
+        }
+        menu.addItem(.separator())
+
         let picker = NSMenuItem(title: NSLocalizedString("Open Bromure Agentic Coding", comment: ""),
                                 action: #selector(openProfileManagerAction(_:)), keyEquivalent: "")
         picker.target = self
@@ -5035,6 +5063,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
               let id = UUID(uuidString: raw) else { return }
         let action = runningSessions[id]?.profile.closeAction ?? .shutdown
         Task { @MainActor in await self.stopSession(id, action: action) }
+    }
+
+    /// Toggle the embedded SSH front door from the menu-bar item.
+    @MainActor @objc private func statusToggleRemoteAccess(_ sender: NSMenuItem) {
+        let result = remoteAccessApply(["enabled": !RemoteAccessServer.shared.isRunning])
+        if let err = result["error"] as? String {
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString("Remote Access", comment: "")
+            alert.informativeText = err
+            alert.runModal()
+        }
+        updateStatusMenu()
     }
 
     /// Build a fresh sandbox in `win` after the previous one stopped.
