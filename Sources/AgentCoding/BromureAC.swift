@@ -3461,10 +3461,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Applied live by applyLiveSessionRefresh — no restart needed:
         //   env vars, guardrails (incl. per-endpoint HTTPS-database modes),
         //   the primary API key, manual tokens, HTTPS git credentials,
-        //   DigitalOcean PAT, container-registry creds, and git identity.
+        //   DigitalOcean PAT, container-registry creds, git identity, and the
+        //   trace level (the proxy re-reads the per-session level live).
         // All of these are header/env/file credentials that re-read live
         // off the meta + home virtiofs shares and the swap map.
-        if old.traceLevel != new.traceLevel { changes.append(.traceLevel) }
         // Kube + AWS keep their prompt: the engine-side client-identity /
         // cluster-CA / exec-poller and AWS-SSO refresh-loop wiring is only
         // set up on cold boot, even though their config files refresh live.
@@ -3558,6 +3558,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !nowConfigurable {
             win.model.fusionEngaged = false
             mitmEngine?.setFusionEngaged(false, for: new.id)
+        }
+
+        // Trace level is consulted live by the proxy on every request, so update
+        // the running session's level in place (keeping its session id so the
+        // trace grouping isn't fragmented). Done unconditionally — a trace-level
+        // change on its own doesn't trip the credential/env guard below.
+        if old.traceLevel != new.traceLevel, let engine = mitmEngine {
+            let sid = engine.sessionTrace(for: new.id)?.sessionID ?? UUID()
+            engine.setSessionTrace(.init(sessionID: sid, level: new.traceLevel), for: new.id)
         }
 
         guard sessionRefreshAffectingChange(from: old, to: new) else { return }
