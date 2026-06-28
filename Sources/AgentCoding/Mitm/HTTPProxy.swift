@@ -236,6 +236,33 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
 
+        // Short-circuit Claude Code's non-LLM cloud calls when this profile
+        // runs on the LOCAL model. The CLI fires onboarding / OAuth-eligibility
+        // / telemetry requests to the real cloud on startup; forwarding them
+        // through the MITM blocks the agent (a 36s connect to api.anthropic.com
+        // on first run was measured) and leaks usage from the sandbox. The LLM
+        // endpoints (/v1/messages*) are rerouted to the on-host engine below; a
+        // local agent needs nothing else from the cloud, so answer the rest with
+        // a fast empty 200 and never touch the network. Strictly-local only —
+        // cloud/hybrid profiles keep their real account/telemetry traffic.
+        if let rctx = Self.routingProvider?(profileID), rctx.routing == .local {
+            let h = host.lowercased()
+            let anthropicMgmt = (h == "api.anthropic.com" || h.hasSuffix(".anthropic.com"))
+                && !reqPath.hasPrefix("/v1/")            // keep /v1/messages*, /v1/models, count_tokens
+            let telemetry = ["api.mixpanel.com", "api.statsig.com",
+                             "statsig.anthropic.com", "events.statsigapi.net"].contains(h)
+                || h.hasSuffix(".sentry.io") || h.hasSuffix(".datadoghq.com")
+            if anthropicMgmt || telemetry {
+                let body = "{}"
+                var resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                resp += "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+                try? tls.write(Data(resp.utf8))
+                FileHandle.standardError.write(Data(
+                    "[mitm] short-circuited non-LLM \(h)\(reqPath) (local routing)\n".utf8))
+                return
+            }
+        }
+
         // Pre-swap: scan for unswapped Bearer / x-api-key tokens. The
         // trace store records these as `LeakEntry` values so the user
         // sees exactly which secrets escaped the swap pipeline.

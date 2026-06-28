@@ -149,8 +149,15 @@ final class MLXServer: @unchecked Sendable {
                 // skip thinking entirely when you'd rather have the speed.
                 let thinkEnv = ProcessInfo.processInfo.environment["BROMURE_THINKING"]
                 let thinking = !(thinkEnv == "0" || thinkEnv?.lowercased() == "false")
+                // KV-cache quantization on by default: at an agent's real
+                // context (~20k tokens) decode is bound by reading the KV cache,
+                // so 8-bit quantizing it speeds decode ~10% and halves its
+                // memory, for a negligible quality cost. Only kicks in past
+                // `kvStart` tokens so short prompts stay exact. BROMURE_KVBITS=0
+                // disables; set 4 for more aggressive quant.
                 let env = ProcessInfo.processInfo.environment
-                let kvBits = env["BROMURE_KVBITS"].flatMap { Int($0) }
+                let kvBitsRaw = env["BROMURE_KVBITS"].flatMap { Int($0) } ?? 8
+                let kvBits = kvBitsRaw > 0 ? kvBitsRaw : nil
                 let kvStart = env["BROMURE_KVBITS_START"].flatMap { Int($0) } ?? 4096
                 let params = MLXEngine.Params(
                     maxTokens: parsed.maxTokens ?? 2048,
