@@ -1637,19 +1637,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return MainActor.assumeIsolated { self.resolveRunningSessionID(idOrName)?.uuidString }
         }
 
-        // Remote (SSH/CLI) consent prompts: a session with no GUI window can't
-        // show an NSAlert anyone would see, so the MITM consent brokers present
-        // in the workspace's tmux instead. execInVM drives the popup via the
-        // shell agent; isRemoteSession = "running but no GUI pane".
-        RemoteConsent.execInVM = { [weak server] pid, cmd, timeout in
-            server?.vmExec(profileID: pid.uuidString, command: cmd, timeoutSeconds: timeout)
-        }
-        // "Remote" = a live CLI/SSH interactive attach (tmux), regardless of
-        // whether a GUI pane also exists (the unified window has a pane for every
-        // running VM, so a pane check is useless here).
-        RemoteConsent.isRemoteSession = { [weak server] pid in
-            server?.isInteractivelyAttached(pid.uuidString) ?? false
-        }
+        // (Consent for CLI/SSH-attached sessions is rendered host-side on the
+        // user's terminal by the pump — see RemoteConsent + ACAutomationServer's
+        // PumpConsentGate. No wiring needed here beyond the UUID resolver above.)
 
         // docker-style VM control plane.
         server.onListVMs = { [weak self] in self?.automationVMList() ?? [] }

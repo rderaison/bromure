@@ -765,29 +765,137 @@ final class ACAutomationServer {
         return Self.executeShellCommand(fd: conn.fd, command: command, timeout: timeoutSeconds)?.stdout
     }
 
-    // Sessions currently attached interactively over CLI/SSH (profileID → count;
-    // a session can have more than one attach). SHARED (static) across every
-    // AutomationServer instance: the attach is handled by `controlServer` (Unix
-    // socket) but the consent broker may query via `automationServer` (TCP), so
-    // per-instance state would never match (that was the `marked=[]` bug).
+    // Active interactive (CLI/SSH) attaches → the gate the host uses to present a
+    // consent prompt on the USER's side of the pump (never in the guest). SHARED
+    // (static) across all AutomationServer instances (control-socket + TCP); one
+    // gate per profile (the most recent attach wins).
     private static let attachLock = NSLock()
-    nonisolated(unsafe) private static var attachedCounts: [String: Int] = [:]
+    nonisolated(unsafe) private static var consentGates: [String: PumpConsentGate] = [:]
 
-    /// True while `profileID` has at least one live interactive (CLI/SSH) attach.
-    public func isInteractivelyAttached(_ profileID: String) -> Bool {
-        Self.attachLock.lock(); defer { Self.attachLock.unlock() }
-        let hit = (Self.attachedCounts[profileID] ?? 0) > 0
-        FileHandle.standardError.write(Data(
-            "[consent] attached? q=\(profileID.prefix(8)) marked=\(Self.attachedCounts.keys.map { String($0.prefix(8)) }) → \(hit)\n".utf8))
-        return hit
+    /// True while `profileID` has a live interactive (CLI/SSH) attach — i.e. a
+    /// consent prompt can be shown on the user's terminal instead of an NSAlert.
+    static func isInteractivelyAttached(_ profileID: String) -> Bool {
+        attachLock.lock(); defer { attachLock.unlock() }
+        return consentGates[profileID] != nil
     }
-    private func markAttached(_ profileID: String) {
-        Self.attachLock.lock(); Self.attachedCounts[profileID, default: 0] += 1; Self.attachLock.unlock()
+
+    /// Present a consent prompt on the attached user's terminal (host side of the
+    /// pump) and return the chosen 0-based index — or nil (no live attach / the
+    /// user dismissed / timed out), which every broker maps to deny.
+    static func presentConsentViaPump(profileID: String, prompt: String,
+                                      choices: [String], timeoutSeconds: TimeInterval) -> Int? {
+        attachLock.lock(); let gate = consentGates[profileID]; attachLock.unlock()
+        return gate?.ask(prompt: prompt, choices: choices, timeout: timeoutSeconds)
     }
-    private func unmarkAttached(_ profileID: String) {
-        Self.attachLock.lock()
-        if let c = Self.attachedCounts[profileID] { Self.attachedCounts[profileID] = c <= 1 ? nil : c - 1 }
-        Self.attachLock.unlock()
+
+    private static func registerGate(_ gate: PumpConsentGate, for profileID: String) {
+        attachLock.lock(); consentGates[profileID] = gate; attachLock.unlock()
+    }
+    private static func unregisterGate(_ gate: PumpConsentGate, for profileID: String) {
+        attachLock.lock()
+        if consentGates[profileID] === gate { consentGates[profileID] = nil }
+        attachLock.unlock()
+        // Detached while a prompt was outstanding → wake the blocked broker now
+        // (deny) instead of letting it wait out the full timeout. The gate is
+        // discarded after this, so the signal can't affect a future prompt.
+        gate.deliver(nil)
+    }
+
+    /// Hand-off between a broker (any thread) and the pump that owns the user's
+    /// terminal: the broker sets a prompt and blocks on `ask`; the pump claims it
+    /// via `takePending`, renders it, and `deliver`s the chosen index.
+    final class PumpConsentGate {
+        private let lock = NSLock()
+        private var prompt: String?
+        private var choices: [String] = []
+        private var promptTimeout: TimeInterval = 120
+        private var answerIdx: Int?
+        private let answered = DispatchSemaphore(value: 0)
+
+        func ask(prompt: String, choices: [String], timeout: TimeInterval) -> Int? {
+            lock.lock()
+            self.prompt = prompt; self.choices = choices
+            self.promptTimeout = timeout; self.answerIdx = nil
+            lock.unlock()
+            // Wait a little past the in-terminal read so the pump delivers first.
+            let r = answered.wait(timeout: .now() + timeout + 10)
+            lock.lock(); defer { lock.unlock() }
+            self.prompt = nil; self.choices = []
+            return r == .timedOut ? nil : answerIdx
+        }
+        /// Pump side: claim a pending prompt to render (once).
+        func takePending() -> (String, [String], TimeInterval)? {
+            lock.lock(); defer { lock.unlock() }
+            guard let p = prompt else { return nil }
+            prompt = nil
+            return (p, choices, promptTimeout)
+        }
+        /// Pump side: hand the chosen index (or nil) back to the waiting broker.
+        func deliver(_ idx: Int?) {
+            lock.lock(); answerIdx = idx; lock.unlock()
+            answered.signal()
+        }
+    }
+
+    /// Render a consent prompt on the user's terminal `clientFD` (host side; the
+    /// guest never sees it) and read a single-digit choice. The interactive attach
+    /// is a framed pty protocol ([type:u8][len:u32-BE][payload]; type 0=data,
+    /// 1=resize, 2=exit, 3=stdin-EOF), so we MUST frame our output (type-0) and
+    /// decode the client's framed keystrokes — raw bytes wouldn't render. Clears
+    /// in place (no nested alt screen); the caller forces a `tmux refresh-client`
+    /// repaint afterward. Returns the 0-based index, or nil (Enter/timeout/EOF →
+    /// deny).
+    private static func presentConsent(clientFD a: Int32, prompt: String,
+                                       choices: [String], timeout: TimeInterval) -> Int? {
+        var s = "\u{1b}[2J\u{1b}[H"                                 // clear, home
+        s += "\u{1b}[1;33m🔒 Bromure — approval required\u{1b}[0m\r\n\r\n"
+        s += prompt.replacingOccurrences(of: "\n", with: "\r\n") + "\r\n\r\n"
+        for (i, c) in choices.enumerated() { s += "  \u{1b}[1m\(i + 1)\u{1b}[0m) \(c)\r\n" }
+        s += "\r\nChoice [1-\(choices.count)]  (Enter or timeout = deny): "
+        writeFrame(a, 0, Array(s.utf8))
+
+        let deadline = Date().addingTimeInterval(timeout)
+        var inbuf = [UInt8](); inbuf.reserveCapacity(256)
+        var buf = [UInt8](repeating: 0, count: 1024)
+        var choice: Int? = nil
+        readLoop: while true {
+            let remMs = Int32(max(0, deadline.timeIntervalSinceNow * 1000))
+            if remMs == 0 { break }
+            var fds = [pollfd(fd: a, events: Int16(POLLIN), revents: 0)]
+            let n = poll(&fds, 1, remMs)
+            if n <= 0 { break }                                     // timeout / error → deny
+            let r = Darwin.read(a, &buf, buf.count)
+            if r <= 0 { break }                                     // client closed → deny
+            inbuf.append(contentsOf: buf[0..<r])
+            while inbuf.count >= 5 {
+                let ftype = inbuf[0]
+                let flen = (Int(inbuf[1]) << 24) | (Int(inbuf[2]) << 16)
+                         | (Int(inbuf[3]) << 8) | Int(inbuf[4])
+                if inbuf.count < 5 + flen { break }                 // partial frame; wait for more
+                let payload = Array(inbuf[5 ..< 5 + flen])
+                inbuf.removeFirst(5 + flen)
+                if ftype == 3 { break readLoop }                    // stdin EOF → deny
+                guard ftype == 0 else { continue }                  // ignore resize (1) etc.
+                for ch in payload {
+                    if ch == 0x0d || ch == 0x0a { break readLoop }  // Enter → deny
+                    if ch >= 0x31, ch <= 0x39 {                     // '1'..'9'
+                        let d = Int(ch - 0x30)
+                        if d >= 1, d <= choices.count { choice = d - 1; break readLoop }
+                    }
+                }
+            }
+        }
+        writeFrame(a, 0, Array("\u{1b}[2J\u{1b}[H".utf8))           // clear; caller repaints tmux next
+        return choice
+    }
+
+    /// Write one pty-protocol frame ([type:u8][len:u32-BE][payload]) to `fd`.
+    private static func writeFrame(_ fd: Int32, _ type: UInt8, _ payload: [UInt8]) {
+        var out: [UInt8] = [type,
+            UInt8((UInt32(payload.count) >> 24) & 0xff), UInt8((UInt32(payload.count) >> 16) & 0xff),
+            UInt8((UInt32(payload.count) >> 8) & 0xff),  UInt8(UInt32(payload.count) & 0xff)]
+        out.append(contentsOf: payload)
+        _ = out.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, out.count) }
     }
 
     /// Interactive pty session: dequeue a guest shell connection, tell the
@@ -833,23 +941,38 @@ final class ACAutomationServer {
         // Key by the canonical UUID (the CLI may pass a name/short id) so the
         // consent broker, which queries by UUID, actually matches.
         let attachKey = (DispatchQueue.main.sync { self.onResolveProfileID?(profileID) }) ?? profileID
-        FileHandle.standardError.write(Data(
-            "[consent] attach START raw=\(profileID) key=\(attachKey.prefix(8))\n".utf8))
-        markAttached(attachKey)
-        defer { unmarkAttached(attachKey) }
-        Self.pump(clientFD, vsockFD)
+        // Register a consent gate for the life of this attach: a gate firing for
+        // this profile renders its prompt on THIS user's terminal (clientFD),
+        // never in the guest, so a compromised guest can't forge approval.
+        let gate = PumpConsentGate()
+        Self.registerGate(gate, for: attachKey)
+        defer { Self.unregisterGate(gate, for: attachKey) }
+        Self.pump(clientFD, vsockFD, gate: gate, afterConsent: { [weak self] in
+            // Repaint the guest's tmux over where the prompt was — a tmux command,
+            // not pane input, so we never inject keystrokes into the agent.
+            _ = self?.vmExec(profileID: attachKey,
+                             command: "tmux refresh-client 2>/dev/null || true", timeoutSeconds: 5)
+        })
         _ = conn.conn   // keep the vsock connection alive for the whole pump
         Darwin.close(clientFD)
     }
 
     /// Bidirectional raw byte pump between two fds until either closes.
-    private static func pump(_ a: Int32, _ b: Int32) {
+    private static func pump(_ a: Int32, _ b: Int32, gate: PumpConsentGate? = nil,
+                             afterConsent: (() -> Void)? = nil) {
         var buf = [UInt8](repeating: 0, count: 65536)
         let bad = Int16(POLLHUP | POLLERR | POLLNVAL)
         while true {
+            // Host-side consent: if a gate fired for this session, render its
+            // prompt on the user's side (a) and read the answer here — the guest
+            // (b) never sees it, so a compromised guest can't forge consent.
+            if let g = gate, let (prompt, choices, t) = g.takePending() {
+                g.deliver(presentConsent(clientFD: a, prompt: prompt, choices: choices, timeout: t))
+                afterConsent?()   // repaint the guest's tmux over where the prompt was
+            }
             var fds = [pollfd(fd: a, events: Int16(POLLIN), revents: 0),
                        pollfd(fd: b, events: Int16(POLLIN), revents: 0)]
-            let n = poll(&fds, 2, -1)
+            let n = poll(&fds, 2, gate == nil ? -1 : 200)
             if n < 0 { if errno == EINTR { continue }; break }
             if n == 0 { continue }
             if fds[0].revents & Int16(POLLIN) != 0 {
