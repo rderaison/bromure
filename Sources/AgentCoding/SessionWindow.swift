@@ -41,6 +41,22 @@ public struct DockerContainer: Identifiable, Equatable {
     }
 }
 
+/// Progress of an in-flight detached `docker run` (image pull → start), shown
+/// as a banner in the dashboard so a pull doesn't look like a hang.
+public struct DockerRunStatus: Equatable {
+    public var state: String     // "pulling" | "starting"
+    public var image: String
+    public var done: Int
+    public var total: Int
+    public init(state: String, image: String, done: Int, total: Int) {
+        self.state = state; self.image = image; self.done = done; self.total = total
+    }
+    /// 0…1 when layer counts are known, else nil (indeterminate).
+    public var fraction: Double? {
+        total > 0 ? min(1, Double(done) / Double(total)) : nil
+    }
+}
+
 /// One local docker image, from `docker images` — feeds the dashboard's Images
 /// view and the new-container picker.
 public struct DockerImage: Identifiable, Equatable {
@@ -105,6 +121,8 @@ final class TabsModel {
     /// Most recent docker action failure (run/start/stop/remove), shown as a
     /// banner in the dashboard until dismissed.
     var dockerError: String?
+    /// In-flight detached `docker run` progress (pull/start), nil when idle.
+    var dockerRunStatus: DockerRunStatus?
     /// qemu arch suffixes currently emulated (binfmt_misc), dashboard-only.
     var binfmtArches: [String] = []
     /// True once we've received a binfmt probe (distinguishes "none" from

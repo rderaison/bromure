@@ -30,8 +30,9 @@ struct DockerDashboardView: View {
     let onRemove: (String) -> Void
     /// (containerID, shell)
     let onAttach: (String, String) -> Void
-    /// Install cross-arch QEMU emulation in the workspace.
+    /// Install / uninstall cross-arch QEMU emulation in the workspace.
     let onInstallBinfmt: () -> Void
+    let onUninstallBinfmt: () -> Void
     /// When set, open straight into this container's detail view.
     var initialContainerID: String? = nil
 
@@ -62,6 +63,9 @@ struct DockerDashboardView: View {
             Divider()
             if let err = model.dockerError {
                 ErrorBanner(message: err) { model.dockerError = nil }
+            }
+            if let run = model.dockerRunStatus {
+                RunProgressBanner(status: run)
             }
             Group {
                 switch pane {
@@ -123,7 +127,7 @@ struct DockerDashboardView: View {
             }
             Spacer()
             EmulationControl(probed: model.binfmtProbed, arches: model.binfmtArches,
-                             onInstall: onInstallBinfmt)
+                             onInstall: onInstallBinfmt, onUninstall: onUninstallBinfmt)
             SearchField(text: $query, prompt: pane == .containers ? "Search containers" : "Search images")
                 .frame(width: 200)
             Picker("", selection: $pane) {
@@ -618,33 +622,71 @@ private struct EmulationControl: View {
     let probed: Bool
     let arches: [String]    // qemu suffixes, e.g. "x86_64"
     let onInstall: () -> Void
-    @State private var installing = false
+    let onUninstall: () -> Void
+    @State private var busy = false
 
     var body: some View {
         Group {
             if !probed {
                 Color.clear.frame(width: 0, height: 0)
             } else if arches.isEmpty {
-                Button { installing = true; onInstall() } label: {
-                    Label(installing ? "Enabling…" : "Enable emulation", systemImage: "cpu")
+                Button { busy = true; onInstall() } label: {
+                    Label(busy ? "Enabling…" : "Enable emulation", systemImage: "cpu")
                         .font(.system(size: 12))
                 }
                 .buttonStyle(.bordered)
-                .disabled(installing)
+                .disabled(busy)
                 .help("Install QEMU binfmt handlers so this workspace can run other-arch images (amd64, etc.)")
             } else {
-                HStack(spacing: 5) {
-                    Image(systemName: "cpu").font(.system(size: 11))
-                    Text("Emulation").font(.system(size: 11, weight: .medium))
+                Menu {
+                    Button("Disable emulation", role: .destructive) { busy = true; onUninstall() }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "cpu").font(.system(size: 11))
+                        Text(busy ? "Disabling…" : "Emulation").font(.system(size: 11, weight: .medium))
+                        Image(systemName: "chevron.down").font(.system(size: 8))
+                    }
+                    .padding(.horizontal, 9).padding(.vertical, 4)
+                    .background(Capsule().fill(Color.green.opacity(0.16)))
+                    .foregroundStyle(.green)
                 }
-                .padding(.horizontal, 9).padding(.vertical, 4)
-                .background(Capsule().fill(Color.green.opacity(0.16)))
-                .foregroundStyle(.green)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
                 .help("Cross-arch emulation enabled: "
                       + arches.map(friendlyArch).sorted().joined(separator: ", "))
             }
         }
-        .onChange(of: arches.isEmpty) { _, isEmpty in if !isEmpty { installing = false } }
+        .onChange(of: arches.isEmpty) { _, _ in busy = false }   // settled either way
+    }
+}
+
+/// Banner shown while a detached `docker run` is pulling/starting an image.
+private struct RunProgressBanner: View {
+    let status: DockerRunStatus
+    var body: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(status.state == "pulling"
+                     ? "Pulling \(status.image)…"
+                     : "Starting \(status.image)…")
+                    .font(.system(size: 12, weight: .medium))
+                if status.state == "pulling" {
+                    if let f = status.fraction {
+                        ProgressView(value: f).frame(maxWidth: 260)
+                        Text("\(status.done)/\(status.total) layers")
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                    } else {
+                        ProgressView().frame(maxWidth: 260)   // indeterminate until layers known
+                    }
+                }
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(DockerDashboardView.dockerBlue.opacity(0.10))
+        .overlay(alignment: .bottom) { Divider() }
     }
 }
 
@@ -911,6 +953,7 @@ private struct NewContainerSheet: View {
     @State private var vols: [KV] = []
     @State private var inheritEnv = true
     @State private var inheritProxy = true
+    @State private var interactive = false
     @State private var showAdvanced = false
 
     private var imageRefs: [String] { Array(Set(images.map(\.ref))).sorted() }
@@ -975,6 +1018,13 @@ private struct NewContainerSheet: View {
                                     .font(.system(size: 11)).foregroundStyle(.secondary)
                             }
                         }
+                        Toggle(isOn: $interactive) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Run interactively")
+                                Text("Allocate a TTY (-it) and open it in a new tab — for images that drop into a shell/REPL (e.g. gdb).")
+                                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                            }
+                        }
                     }
                     .toggleStyle(.checkbox)
 
@@ -984,12 +1034,14 @@ private struct NewContainerSheet: View {
                             kvEditor("Environment variables", $envs, "KEY", "value", "=", add: "Add variable")
                             kvEditor("Volumes", $vols, "host path", "container path", "→", add: "Add volume")
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 8)
                     } label: {
                         Text("Advanced options").font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(20)
             }
 
@@ -1050,6 +1102,7 @@ private struct NewContainerSheet: View {
             env: joinPairs(envs, "="),
             volumes: joinPairs(vols, ":"),
             inheritEnv: inheritEnv,
-            inheritProxy: inheritProxy))
+            inheritProxy: inheritProxy,
+            interactive: interactive))
     }
 }

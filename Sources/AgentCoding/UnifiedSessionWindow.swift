@@ -372,12 +372,18 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let view = DockerDashboardView(
             model: selPane.model,
             accentHex: selPane.profile.color.hexInUI,
-            onRun:    { [weak self] spec in if let p = self?.pane(id) { self?.acDelegate?.requestDockerRun(spec: spec, in: p) } },
+            onRun:    { [weak self] spec in
+                guard let self, let p = self.pane(id) else { return }
+                self.acDelegate?.requestDockerRun(spec: spec, in: p)
+                // Interactive runs open a tmux tab — surface it by dropping the dashboard.
+                if spec.interactive { self.clearDockerDashboard() }
+            },
             onStart:  { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerStart(containerID: cid, in: p) } },
             onStop:   { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerStop(containerID: cid, in: p) } },
             onRemove: { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerRemove(containerID: cid, in: p) } },
             onAttach: { [weak self] cid, shell in self?.dockerAttach(profileID: id, containerID: cid, shell: shell) },
             onInstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtInstall(in: p) } },
+            onUninstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtUninstall(in: p) } },
             initialContainerID: container)
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -713,6 +719,7 @@ private struct VMSection: View {
                                 thinking: entry.model.thinking,
                                 isActive: tab.id == entry.model.activeTab?.id && isSelected,
                                 accentHex: row.accentHex,
+                                chord: (isSelected && idx < 9) ? idx + 1 : nil,
                                 onSelect: { onSelectTab(row.id, idx) },
                                 onClose: { onCloseTab(row.id, idx) })
                         }
@@ -826,6 +833,8 @@ private struct TabRow: View {
     let thinking: Bool
     let isActive: Bool
     let accentHex: String
+    /// ⌘-number for this tab (1–9), or nil for tabs past 9 / unfocused VMs.
+    let chord: Int?
     let onSelect: () -> Void
     let onClose: () -> Void
     @State private var hovering = false
@@ -856,6 +865,8 @@ private struct TabRow: View {
             Spacer(minLength: 2)
             if hovering {
                 IconButton(system: "xmark", help: "Close tab (⌘W)", size: 9) { onClose() }
+            } else if let chord {
+                ChordLabel(chord)
             }
         }
         .padding(.leading, 26)
@@ -867,6 +878,18 @@ private struct TabRow: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovering = $0 }
+    }
+}
+
+/// Right-aligned ⌘-number affordance shown next to a tab, à la unpeel.
+private struct ChordLabel: View {
+    let n: Int
+    init(_ n: Int) { self.n = n }
+    var body: some View {
+        Text("⌘\(n)")
+            .font(.system(size: 11))
+            .foregroundStyle(.tertiary)
+            .monospacedDigit()
     }
 }
 
@@ -913,7 +936,7 @@ private struct DockerSection: View {
                     .background(Capsule().fill(Color.primary.opacity(0.08)))
                 Spacer(minLength: 2)
             }
-            .padding(.leading, 16)
+            .padding(.leading, 20)   // clear of the tree rule at x≈17
             .padding(.trailing, 8)
             .padding(.vertical, 4)
             .background(
@@ -942,8 +965,10 @@ private struct DockerSection: View {
 
     /// (model position, tab) for the attach tabs belonging to a container.
     private func tabRows(for c: DockerContainer) -> [(pos: Int, tab: TabsModel.Tab)] {
+        // Attach tabs tag with the container id; interactive `docker run -it`
+        // tabs tag with the container name (the id isn't known when launched).
         model.tabs.enumerated()
-            .filter { $0.element.containerID == c.id }
+            .filter { $0.element.containerID == c.id || $0.element.containerID == c.name }
             .map { (pos: $0.offset, tab: $0.element) }
     }
 }
@@ -994,6 +1019,7 @@ private struct DockerContainerRow: View {
                     label: entry.tab.label,
                     isActive: entry.tab.id == activeTabID && isSelected,
                     accentHex: accentHex,
+                    chord: (isSelected && entry.pos < 9) ? entry.pos + 1 : nil,
                     onSelect: { onSelectTab(entry.pos) },
                     onClose: { onCloseTab(entry.pos) })
             }
@@ -1006,6 +1032,7 @@ private struct DockerTabRow: View {
     let label: String
     let isActive: Bool
     let accentHex: String
+    let chord: Int?
     let onSelect: () -> Void
     let onClose: () -> Void
     @State private var hovering = false
@@ -1024,6 +1051,8 @@ private struct DockerTabRow: View {
             Spacer(minLength: 2)
             if hovering {
                 IconButton(system: "xmark", help: "Close tab (⌘W)", size: 8) { onClose() }
+            } else if let chord {
+                ChordLabel(chord)
             }
         }
         .padding(.leading, 48)

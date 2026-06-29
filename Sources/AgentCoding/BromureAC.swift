@@ -4543,6 +4543,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sendCommand("docker-binfmt", in: pane)
     }
 
+    /// Disable cross-arch emulation (unregister binfmt + drop the marker).
+    func requestDockerBinfmtUninstall(in pane: SessionPane) {
+        sendCommand("docker-binfmt-off", in: pane)
+    }
+
     /// User-supplied fields for the "new container" dialog.
     struct DockerRunSpec {
         var image: String
@@ -4554,6 +4559,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var inheritEnv: Bool = false
         /// Pass just the HTTP(S) proxy vars (covered by inheritEnv when set).
         var inheritProxy: Bool = false
+        /// Run with a TTY (-it) in a fresh tmux tab instead of detached (-d).
+        var interactive: Bool = false
     }
 
     /// Launch a new container. The whole `docker run -d …` command is assembled
@@ -4566,9 +4573,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         func q(_ s: String) -> String {
             "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
         }
-        var cmd = "docker run -d"
-        if !spec.name.trimmingCharacters(in: .whitespaces).isEmpty {
-            cmd += " --name \(q(spec.name.trimmingCharacters(in: .whitespaces)))"
+        var cmd = spec.interactive ? "docker run -it" : "docker run -d"
+        // For interactive runs we need a known container name so the guest can
+        // tag the tmux tab and the sidebar can nest it under its container —
+        // generate one when the user didn't supply it.
+        var name = spec.name.trimmingCharacters(in: .whitespaces)
+        if spec.interactive && name.isEmpty {
+            name = "bromure-" + UUID().uuidString.prefix(6).lowercased()
+        }
+        if !name.isEmpty {
+            cmd += " --name \(q(name))"
         }
         for p in spec.ports where !p.trimmingCharacters(in: .whitespaces).isEmpty {
             cmd += " -p \(q(p.trimmingCharacters(in: .whitespaces)))"
@@ -4588,7 +4602,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let mode = spec.inheritEnv
             ? (spec.inheritProxy ? "both" : "env")
             : (spec.inheritProxy ? "proxy" : "none")
-        sendCommand("docker-run \(mode) \(cmd)", in: pane)
+        // <mode> <interactive 0|1> <tag> <image> <command>. <tag> is the
+        // container name interactive tabs nest under ("-" otherwise); <image> is
+        // the bare ref the guest pre-pulls (with progress) for detached runs.
+        let tag = (spec.interactive && !name.isEmpty) ? name : "-"
+        sendCommand("docker-run \(mode) \(spec.interactive ? "1" : "0") \(tag) \(image) \(cmd)", in: pane)
     }
 
     /// Toggle the guest's expensive dashboard polling (CPU/mem + images) by
@@ -5077,6 +5095,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sandbox.onDockerArch = { [weak self] list in
             Task { @MainActor in
                 self?.pane(for: pid)?.applyDockerArch(list)
+            }
+        }
+        sandbox.onDockerRunStatus = { [weak self] s in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyDockerRunStatus(s)
             }
         }
         sandbox.onIPUpdate = { [weak self] ip in

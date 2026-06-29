@@ -318,6 +318,13 @@ final class SessionPane {
         model.dockerError = message
     }
 
+    func applyDockerRunStatus(_ s: (state: String, image: String, done: Int, total: Int)) {
+        let new = s.state.isEmpty
+            ? nil
+            : DockerRunStatus(state: s.state, image: s.image, done: s.done, total: s.total)
+        if model.dockerRunStatus != new { model.dockerRunStatus = new }
+    }
+
     func applyDockerBinfmt(_ arches: [String]) {
         if !model.binfmtProbed { model.binfmtProbed = true }
         if model.binfmtArches != arches { model.binfmtArches = arches }

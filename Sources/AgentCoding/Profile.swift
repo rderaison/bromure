@@ -3509,6 +3509,20 @@ public final class ProfileStore {
                 >> /tmp/xinitrc.log
     fi
 
+    # Re-apply cross-arch emulation if the user enabled it in a prior session.
+    # binfmt_misc registrations live in the kernel and are wiped on reboot, so
+    # "Enable emulation" would otherwise be needed every launch. The
+    # tonistiigi/binfmt image is cached on the persistent disk, so re-running is
+    # fast and offline. Backgrounded after waiting for dockerd so it never
+    # delays the session.
+    if [ -f "$HOME/.bromure-binfmt-enabled" ] && command -v docker >/dev/null 2>&1; then
+        (
+            for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+            docker run --privileged --rm tonistiigi/binfmt --install all >/dev/null 2>&1 \
+                && echo "[xinit] re-applied binfmt emulation" >> /tmp/xinitrc.log
+        ) &
+    fi
+
     # Claude subscription-token agent — connects to host vsock 8446
     # and answers read/write RPCs against ~/.claude/.credentials.json.
     # Owns the on-disk fake↔real swap when the user accepts the
@@ -3723,6 +3737,17 @@ public final class ProfileStore {
             && mv -f "$INBOX/.docker-error.tmp" "$INBOX/docker-error.txt" 2>/dev/null
     }
 
+    # Publish "run job" progress (state\timage\tdone\ttotal) for the dashboard,
+    # so a detached `docker run` that's pulling layers doesn't look stuck.
+    docker_run_status() {
+        printf '%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4" > "$INBOX/.docker-run-status.tmp" 2>/dev/null \
+            && mv -f "$INBOX/.docker-run-status.tmp" "$INBOX/docker-run-status.txt" 2>/dev/null
+    }
+    docker_run_status_clear() {
+        : > "$INBOX/.docker-run-status.tmp" 2>/dev/null \
+            && mv -f "$INBOX/.docker-run-status.tmp" "$INBOX/docker-run-status.txt" 2>/dev/null
+    }
+
     log "starting"
 
     # --- Host-owned keychords: ⌘T / ⌘W / ⌘N / ⌘1-9 ----------------------------
@@ -3922,10 +3947,17 @@ public final class ProfileStore {
                         docker-stop)   ( e=$(docker stop "$arg" 2>&1 >/dev/null) || docker_err "$e" ) & ;;
                         docker-remove) ( e=$(docker rm -f "$arg" 2>&1 >/dev/null) || docker_err "$e" ) & ;;
                         # Install cross-arch emulation (QEMU binfmt handlers) the
-                        # docker-native way. Backgrounded — it pulls an image and
-                        # registers binfmt; the docker-binfmt.txt poll reflects it.
+                        # docker-native way. A persistent marker records the user's
+                        # choice so xinitrc re-applies it on every boot (binfmt_misc
+                        # registrations are kernel-runtime and don't survive reboot).
                         docker-binfmt)
-                            ( e=$(docker run --privileged --rm tonistiigi/binfmt --install all 2>&1 >/dev/null) || docker_err "$e" ) & ;;
+                            ( touch "$HOME/.bromure-binfmt-enabled" 2>/dev/null
+                              e=$(docker run --privileged --rm tonistiigi/binfmt --install all 2>&1 >/dev/null) || docker_err "$e" ) & ;;
+                        # Disable cross-arch emulation: drop the persistence marker
+                        # and unregister the QEMU binfmt handlers.
+                        docker-binfmt-off)
+                            ( rm -f "$HOME/.bromure-binfmt-enabled" 2>/dev/null
+                              e=$(docker run --privileged --rm tonistiigi/binfmt --uninstall qemu-'*' 2>&1 >/dev/null) || docker_err "$e" ) & ;;
                         # Launch a new container. arg is "<mode> <full docker run -d …>"
                         # where mode ∈ none|env|proxy|both selects which HOST-INJECTED
                         # env to forward — NOT the whole shell environment. The host
@@ -3939,9 +3971,14 @@ public final class ProfileStore {
                         # vars (the CA paths point at the VM's filesystem). The whole
                         # thing is BACKGROUNDED; failures surface via docker_err.
                         docker-run)
-                            rmode="${arg%% *}"; rcmd="${arg#* }"
+                            rmode="${arg%% *}"; rrest="${arg#* }"
+                            rit="${rrest%% *}"; rrest2="${rrest#* }"
+                            rtag="${rrest2%% *}"; rrest3="${rrest2#* }"
+                            rimg="${rrest3%% *}"; rcmd="${rrest3#* }"
                             (
-                                ef=""
+                                ef=""; extra=""
+                                # env/both: forward the host-injected TOKENS (their
+                                # values are dynamic fakes), sourced from api_key.env.
                                 case "$rmode" in
                                     env|both)
                                         ef=$(mktemp)
@@ -3950,20 +3987,74 @@ public final class ProfileStore {
                                             | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
                                             | grep -vE '^(PATH|PWD|SHLVL|_|SHELL|HOME|HOSTNAME)=' >> "$ef" ;;
                                 esac
+                                # proxy/both: route the container through the VM's
+                                # MITM proxy via the docker bridge gateway
+                                # (host.docker.internal → host-gateway; the bridge
+                                # daemon listens on 0.0.0.0:8080), and trust its CA
+                                # by bind-mounting the PEM and pointing every TLS
+                                # client's CA env at it. NO_PROXY keeps loopback
+                                # direct. Constants mirror SessionDisk.proxy.env.
                                 case "$rmode" in
                                     proxy|both)
                                         [ -n "$ef" ] || ef=$(mktemp)
-                                        timeout 5 env -i PATH=/usr/bin:/bin bash -c \
-                                            '[ -r /mnt/bromure-meta/proxy.env ] && . /mnt/bromure-meta/proxy.env 2>/dev/null; env' 2>/dev/null \
-                                            | grep -iE '^(http_proxy|https_proxy|no_proxy|all_proxy|ftp_proxy)=' >> "$ef" ;;
+                                        printf '%s\n' \
+                                            'http_proxy=http://host.docker.internal:8080' \
+                                            'https_proxy=http://host.docker.internal:8080' \
+                                            'HTTP_PROXY=http://host.docker.internal:8080' \
+                                            'HTTPS_PROXY=http://host.docker.internal:8080' \
+                                            'no_proxy=localhost,127.0.0.1,::1' \
+                                            'NO_PROXY=localhost,127.0.0.1,::1' \
+                                            'NODE_EXTRA_CA_CERTS=/etc/ssl/certs/bromure-ca.pem' \
+                                            'REQUESTS_CA_BUNDLE=/etc/ssl/certs/bromure-ca.pem' \
+                                            'SSL_CERT_FILE=/etc/ssl/certs/bromure-ca.pem' \
+                                            'CURL_CA_BUNDLE=/etc/ssl/certs/bromure-ca.pem' \
+                                            'GIT_SSL_CAINFO=/etc/ssl/certs/bromure-ca.pem' \
+                                            'PIP_CERT=/etc/ssl/certs/bromure-ca.pem' >> "$ef"
+                                        extra="$extra --add-host=host.docker.internal:host-gateway"
+                                        [ -r /etc/ssl/certs/bromure-ca.pem ] \
+                                            && extra="$extra -v /etc/ssl/certs/bromure-ca.pem:/etc/ssl/certs/bromure-ca.pem:ro"
+                                        ;;
                                 esac
-                                if [ -n "$ef" ]; then
-                                    full="${rcmd/docker run -d/docker run -d --env-file $ef}"
+                                [ -n "$ef" ] && extra="--env-file $ef $extra"
+                                if [ -n "$extra" ]; then
+                                    full="${rcmd/docker run /docker run $extra }"
                                 else
                                     full="$rcmd"
                                 fi
-                                e=$(bash -c "$full" 2>&1 >/dev/null) || docker_err "$e"
-                                [ -n "$ef" ] && rm -f "$ef"
+                                if [ "$rit" = "1" ]; then
+                                    # Interactive (-it): run inside a fresh tmux
+                                    # window so the user drives it (e.g. gdb). Tag
+                                    # the window with the container name so the host
+                                    # nests it under its container in the source-list.
+                                    # The env-file is consumed at container start;
+                                    # leave it (disposable VM) since the window
+                                    # outlives us.
+                                    win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" "$full" 2>/dev/null)
+                                    if [ -n "$win" ]; then
+                                        [ "$rtag" != "-" ] && tmux set-option -w -t "$win" @container "$rtag" 2>/dev/null
+                                    else
+                                        docker_err "failed to open interactive container"
+                                    fi
+                                else
+                                    # Detached: if the image isn't local, pull it
+                                    # first and report layer progress so it doesn't
+                                    # look stuck. (-it pulls visibly in its own tab.)
+                                    if [ "$rimg" != "-" ] \
+                                       && ! docker image inspect "$rimg" >/dev/null 2>&1; then
+                                        docker_run_status pulling "$rimg" 0 0
+                                        dl=0; tot=0
+                                        docker pull "$rimg" 2>&1 | while IFS= read -r pl; do
+                                            case "$pl" in
+                                                *"Pulling fs layer"*) tot=$((tot+1)); docker_run_status pulling "$rimg" "$dl" "$tot" ;;
+                                                *"Pull complete"*)     dl=$((dl+1));   docker_run_status pulling "$rimg" "$dl" "$tot" ;;
+                                            esac
+                                        done
+                                    fi
+                                    docker_run_status starting "$rimg" 0 0
+                                    e=$(bash -c "$full" 2>&1 >/dev/null) || docker_err "$e"
+                                    docker_run_status_clear
+                                    [ -n "$ef" ] && rm -f "$ef"
+                                fi
                             ) & ;;
                         # Halt, don't `reboot`. A guest-issued `sudo reboot`
                         # restarts the VM *in place* — VZ never fires

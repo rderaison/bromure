@@ -80,6 +80,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// (id, arch e.g. "amd64"/"arm64"/"arm/v7").
     public var onDockerArch: (([(id: String, arch: String)]) -> Void)?
 
+    /// Called with the current "run job" progress while a detached `docker run`
+    /// is pulling/starting — (state, image, done, total). state is "" when idle.
+    public var onDockerRunStatus: (((state: String, image: String, done: Int, total: Int)) -> Void)?
+
     /// Called when the guest bounces a host-owned keychord (⌘T/⌘W/⌘N/⌘1-9)
     /// back to the host. While the VM holds keyboard focus the VZ view
     /// forwards every chord to the guest before AppKit can intercept it, so
@@ -621,6 +625,20 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                                             arch: String(cols[1]).trimmingCharacters(in: .whitespaces)))
                             }
                             self?.onDockerArch?(out)
+                            continue
+                        }
+                        // docker-run-status.txt — "state\timage\tdone\ttotal" while
+                        // a detached run pulls/starts; empty when idle.
+                        if name == "docker-run-status.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let cols = raw.split(separator: "\t", omittingEmptySubsequences: false)
+                            if cols.count >= 4, !cols[0].isEmpty {
+                                self?.onDockerRunStatus?((
+                                    state: String(cols[0]), image: String(cols[1]),
+                                    done: Int(cols[2]) ?? 0, total: Int(cols[3]) ?? 0))
+                            } else {
+                                self?.onDockerRunStatus?((state: "", image: "", done: 0, total: 0))
+                            }
                             continue
                         }
                         // docker-error.txt — one-shot: a failed docker action's
