@@ -110,6 +110,16 @@ final class InferenceRepairProxy: @unchecked Sendable {
         }
     }
 
+    /// Hard ceilings on what we'll buffer from a single request. This proxy
+    /// runs in the **parent app process** and the vsock bridge splices *any*
+    /// guest connection straight to it, so an attacker-controlled
+    /// `Content-Length` (or an endless header stream) would otherwise grow
+    /// these buffers until the host app OOMs — before the upstream engine ever
+    /// checks the per-VM bearer. Real inference requests (prompt + tools) are
+    /// comfortably under the body cap; anything larger is dropped.
+    static let maxHeaderBytes = 256 * 1024          // 256 KB of request headers
+    static let maxBodyBytes   = 64 * 1024 * 1024    // 64 MB request body
+
     /// Read one HTTP/1.1 request (request line + headers + Content-Length body).
     static func readRequest(fd: Int32) -> Request? {
         var buf = Data()
@@ -121,6 +131,9 @@ final class InferenceRepairProxy: @unchecked Sendable {
             if n <= 0 { return nil }
             buf.append(contentsOf: tmp[0..<n])
             headerEnd = buf.range(of: Data("\r\n\r\n".utf8))
+            // Bound the header scan — a guest that never sends CRLFCRLF must
+            // not be able to grow `buf` without limit.
+            if headerEnd == nil && buf.count > maxHeaderBytes { return nil }
         }
         guard let he = headerEnd,
               let head = String(data: buf.subdata(in: 0..<he.lowerBound), encoding: .utf8) else { return nil }
@@ -137,10 +150,13 @@ final class InferenceRepairProxy: @unchecked Sendable {
         var body = buf.subdata(in: he.upperBound..<buf.endIndex)
         let contentLength = headers.first { $0.0.lowercased() == "content-length" }
             .flatMap { Int($0.1) } ?? 0
+        // Reject an oversized declared body before draining a single byte of it.
+        if contentLength > maxBodyBytes { return nil }
         while body.count < contentLength {
             let n = read(fd, &tmp, tmp.count)
             if n <= 0 { break }
             body.append(contentsOf: tmp[0..<n])
+            if body.count > maxBodyBytes { return nil }
         }
         return Request(method: String(parts[0]), path: String(parts[1]), headers: headers, body: body)
     }

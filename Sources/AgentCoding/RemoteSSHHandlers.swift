@@ -43,14 +43,21 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
     private let allowPassword: Bool
     private let allowPubkey: Bool
     private let authorizedKeys: Set<NIOSSHPublicKey>
-    private let pwQueue = DispatchQueue(label: "io.bromure.remote.pw")
+    /// Shared across every connection; rate-limits password attempts per
+    /// source IP. See `RemoteAuthThrottle`.
+    private let throttle: RemoteAuthThrottle
+    /// This connection's source IP, for the per-IP bucket.
+    private let peerIP: String
 
     init(username: String, allowPassword: Bool, allowPubkey: Bool,
-         authorizedKeys: Set<NIOSSHPublicKey>) {
+         authorizedKeys: Set<NIOSSHPublicKey>,
+         throttle: RemoteAuthThrottle, peerIP: String) {
         self.username = username
         self.allowPassword = allowPassword
         self.allowPubkey = allowPubkey
         self.authorizedKeys = authorizedKeys
+        self.throttle = throttle
+        self.peerIP = peerIP
     }
 
     var supportedAuthenticationMethods: NIOSSHAvailableUserAuthenticationMethods {
@@ -78,12 +85,121 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
             guard allowPassword else { responsePromise.succeed(.failure); return }
             let user = username
             let password = pw.password
-            pwQueue.async {
+            // Per-IP rate limit. `reserve` returns how long this attempt must
+            // wait for a token; 0 while the per-IP burst budget lasts, then a
+            // short (capped) delay under sustained guessing. Each attempt is
+            // scheduled independently on a concurrent queue, so one IP's
+            // backoff never stalls another IP's login — the owner is unaffected
+            // by an attacker elsewhere. Nothing is ever refused outright; the
+            // door stays open, just slow to hammer.
+            let delay = throttle.reserve(ip: peerIP)
+            let work: @Sendable () -> Void = {
                 let ok = SystemPassword.verify(user: user, password: password)
                 responsePromise.succeed(ok ? .success : .failure)
             }
+            let q = DispatchQueue.global(qos: .utility)
+            if delay > 0 { q.asyncAfter(deadline: .now() + delay, execute: work) }
+            else { q.async(execute: work) }
         default:
             responsePromise.succeed(.failure)
+        }
+    }
+}
+
+/// Builds a per-connection `RemoteAuthDelegate` (each carries its peer's IP for
+/// the rate limiter) from the listener-wide config + shared throttle. Wrapping
+/// the non-Sendable `authorizedKeys` here keeps it out of the bootstrap's
+/// `@Sendable` child-channel closure.
+final class RemoteAuthDelegateFactory: @unchecked Sendable {
+    private let username: String
+    private let allowPassword: Bool
+    private let allowPubkey: Bool
+    private let authorizedKeys: Set<NIOSSHPublicKey>
+    private let throttle: RemoteAuthThrottle
+
+    init(username: String, allowPassword: Bool, allowPubkey: Bool,
+         authorizedKeys: Set<NIOSSHPublicKey>, throttle: RemoteAuthThrottle) {
+        self.username = username
+        self.allowPassword = allowPassword
+        self.allowPubkey = allowPubkey
+        self.authorizedKeys = authorizedKeys
+        self.throttle = throttle
+    }
+
+    func make(peerIP: String) -> RemoteAuthDelegate {
+        RemoteAuthDelegate(username: username, allowPassword: allowPassword,
+                           allowPubkey: allowPubkey, authorizedKeys: authorizedKeys,
+                           throttle: throttle, peerIP: peerIP)
+    }
+}
+
+// MARK: - Password brute-force rate limiter
+
+/// Per-source-IP token bucket for password authentication, shared across every
+/// connection to the listener.
+///
+/// Design goals, in order: (1) make online password guessing slow enough to be
+/// useless, (2) never lock anyone out — an over-budget attempt just waits its
+/// turn, the door is never shut, and (3) isolate IPs from each other so a flood
+/// from one address can't slow the legitimate owner connecting from another.
+///
+/// Each IP gets a small burst (`capacity` attempts at full speed), then refills
+/// at `refillPerSec`. When the bucket is empty an attempt is delayed until the
+/// next token (capped at `maxDelay`), so sustained guessing from one IP settles
+/// to roughly `refillPerSec` attempts/second — ~7–8 attempts/minute at the cap.
+/// Public-key auth is never throttled.
+final class RemoteAuthThrottle: @unchecked Sendable {
+    private let lock = NSLock()
+    private struct Bucket { var tokens: Double; var last: Date }
+    private var buckets: [String: Bucket] = [:]
+    private let capacity: Double
+    private let refillPerSec: Double
+    private let maxDelay: TimeInterval
+    private var lastPrune = Date.distantPast
+
+    init(capacity: Double = 5, refillPerSec: Double = 0.5, maxDelay: TimeInterval = 8) {
+        self.capacity = capacity
+        self.refillPerSec = refillPerSec
+        self.maxDelay = maxDelay
+    }
+
+    /// Reserve one attempt for `ip`. Returns the delay (seconds) the caller
+    /// should wait before performing the password check — 0 when a token is
+    /// immediately available.
+    func reserve(ip: String) -> TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        let now = Date()
+        prune(now: now)
+        var b = buckets[ip] ?? Bucket(tokens: capacity, last: now)
+        // Refill proportional to elapsed time, capped at capacity.
+        b.tokens = min(capacity, b.tokens + now.timeIntervalSince(b.last) * refillPerSec)
+        b.last = now
+        let delay: TimeInterval
+        if b.tokens >= 1 {
+            delay = 0
+        } else {
+            // Wait for the next token. Cap the per-attempt wait so the bucket
+            // can't push the delay arbitrarily high.
+            delay = min(maxDelay, (1 - b.tokens) / refillPerSec)
+        }
+        // Consume a token; floor at -capacity so a long flood can't drive the
+        // recovery time unbounded (sustained rate stays ~refillPerSec).
+        b.tokens = max(-capacity, b.tokens - 1)
+        buckets[ip] = b
+        return delay
+    }
+
+    /// Drop idle, fully-refilled buckets and hard-cap the map so an IP-spray
+    /// flood can't grow memory without bound.
+    private func prune(now: Date) {
+        guard now.timeIntervalSince(lastPrune) > 300 else { return }
+        lastPrune = now
+        buckets = buckets.filter { _, b in
+            now.timeIntervalSince(b.last) < 600 || b.tokens < capacity
+        }
+        if buckets.count > 8192 {
+            let keep = buckets.sorted { $0.value.last > $1.value.last }.prefix(4096)
+            buckets = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
         }
     }
 }

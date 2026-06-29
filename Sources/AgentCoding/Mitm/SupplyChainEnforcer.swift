@@ -251,7 +251,14 @@ public enum SupplyChainRegistry {
     /// for age-gate purposes.
     private static func npmMetadataPackage(path: String) -> String? {
         guard path.hasPrefix("/") else { return nil }
-        let trimmed = String(path.dropFirst())
+        // npm addresses scoped-package metadata with the slash
+        // percent-encoded (`GET /@scope%2fpkg`). Decode just that sequence so
+        // the scope split below sees a normal two-segment path; otherwise
+        // `@scope%2fpkg` parses as a single `@`-prefixed blob, returns nil →
+        // `.passthrough`, and the package skips the age gate entirely.
+        let decoded = path.replacingOccurrences(of: "%2F", with: "/")
+                          .replacingOccurrences(of: "%2f", with: "/")
+        let trimmed = String(decoded.dropFirst())
         if trimmed.isEmpty { return nil }
         let parts = trimmed.split(separator: "/", omittingEmptySubsequences: false)
             .map(String.init)

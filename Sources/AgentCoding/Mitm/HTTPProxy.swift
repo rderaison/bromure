@@ -602,8 +602,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         package: pkg, version: nil,
                         kind: "metadata", outcome: metaOutcome)
                 }
+                // For npm, force the full packument so the age gate actually
+                // sees publish times (the install path otherwise omits `time`).
+                let metaForward = ecosystem == .npm
+                    ? Self.forceFullNpmPackument(toForward) : toForward
                 let relay = try await relayUpstreamBuffered(
-                    rawRequest: toForward, host: host, port: port,
+                    rawRequest: metaForward, host: host, port: port,
                     session: session, tls: tls,
                     rewrite: { raw in
                         switch ecosystem {
@@ -795,31 +799,40 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     }
                 }
 
+                // Accumulates the enabled reputation sources we couldn't reach
+                // for this package — drives the fail-closed hold below.
+                var verifyGaps: [String] = []
+
                 // 2. OSV check (free, no key, off by default).
-                if policy.osvEnabled,
-                   let result = await osvClient.check(
-                        ecosystem: ecosystem.rawValue, name: pkg, version: version) {
-                    let blocking = result.vulnerabilities.filter {
-                        $0.severity.rank >= OSVClient.Severity(rawValue: policy.osvSeverity.rawValue)!.rank
-                    }
-                    if let v = blocking.first {
-                        let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
-                            "has \(blocking.count) vulnerabilit\(blocking.count == 1 ? "y" : "ies") " +
-                            "at \(policy.osvSeverity.displayName.lowercased()): " +
-                            "\(v.id) — \(v.summary)"
-                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                        SupplyChainLog.shared.record(
-                            "[supply-chain] OSV 451: \(pkg)@\(version) → \(v.id)")
-                        scOutcome = "blocked"
-                        scReasonKind = "osv"
-                        scReason = reason
-                        return
+                if policy.osvEnabled {
+                    if let result = await osvClient.check(
+                            ecosystem: ecosystem.rawValue, name: pkg, version: version) {
+                        let blocking = result.vulnerabilities.filter {
+                            $0.severity.rank >= OSVClient.Severity(rawValue: policy.osvSeverity.rawValue)!.rank
+                        }
+                        if let v = blocking.first {
+                            let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
+                                "has \(blocking.count) vulnerabilit\(blocking.count == 1 ? "y" : "ies") " +
+                                "at \(policy.osvSeverity.displayName.lowercased()): " +
+                                "\(v.id) — \(v.summary)"
+                            try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
+                            SupplyChainLog.shared.record(
+                                "[supply-chain] OSV 451: \(pkg)@\(version) → \(v.id)")
+                            scOutcome = "blocked"
+                            scReasonKind = "osv"
+                            scReason = reason
+                            return
+                        }
+                    } else {
+                        // Lookup failed (network error, non-200, 429 rate-limit,
+                        // parse error). No verdict — don't silently allow.
+                        verifyGaps.append("the OSV vulnerability database")
                     }
                 }
 
                 // 3. socket.dev check (BYO key).
-                if policy.socketActive,
-                   let result = await socketClient.check(
+                if policy.socketActive {
+                  if let result = await socketClient.check(
                         ecosystem: ecosystem.rawValue, name: pkg, version: version,
                         apiKey: policy.socketAPIKey) {
                     if policy.socketBlockCompromised, let bad = result.compromised.first {
@@ -849,6 +862,41 @@ final class HTTPMitmConnection: @unchecked Sendable {
                             scReason = reason
                             return
                         }
+                    }
+                  } else {
+                    // socket.dev unreachable / non-200 / 429 / auth failure /
+                    // parse error → no verdict. Don't silently allow.
+                    verifyGaps.append("socket.dev")
+                  }
+                }
+
+                // 3b. Fail closed. An enabled reputation check couldn't reach
+                //     its source, so this package has NO verdict — and a
+                //     compromised agent can *induce* that (flood OSV / socket.dev
+                //     with a large install graph until they rate-limit). Rather
+                //     than the documented fail-open, hold the install and ask
+                //     the host user; deny (incl. no GUI / timeout) blocks. Keyed
+                //     per package@version so one approval can't blanket the
+                //     whole dependency graph.
+                if !verifyGaps.isEmpty {
+                    let gaps = verifyGaps.joined(separator: " and ")
+                    let allowed = await supplyChainBroker.consent(
+                        profileID: profileID,
+                        scope: "verify-unavailable:\(ecosystem.rawValue):\(pkg):\(version)",
+                        scopeDisplayName: NSLocalizedString("an unverified package", comment: ""),
+                        detail: String(format: NSLocalizedString(
+                            "Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?",
+                            comment: ""), gaps, ecosystem.rawValue, pkg, version))
+                    if !allowed {
+                        let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) blocked — " +
+                            "reputation lookup unavailable (\(gaps)); user denied the unverified install"
+                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
+                        SupplyChainLog.shared.record(
+                            "[supply-chain] verify-unavailable 451: \(pkg)@\(version) — \(gaps)")
+                        scOutcome = "blocked"
+                        scReasonKind = "verify_unavailable"
+                        scReason = reason
+                        return
                     }
                 }
 
@@ -1748,6 +1796,32 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
         return nil
+    }
+
+    /// Downgrade an npm packument request's `Accept` to plain JSON.
+    ///
+    /// `npm install` asks for the abbreviated "corgi" packument
+    /// (`Accept: application/vnd.npm.install-v1+json`), which the registry
+    /// returns WITHOUT the `time` map. The age gate keys every drop/record
+    /// decision off `time`, so on the exact path it's meant to protect it
+    /// silently no-ops — a normal install of a brand-new (or just-published,
+    /// likely-malicious) version sails straight through. Forcing the full
+    /// packument restores `time`, so `filterMetadata` records publish times
+    /// AND filters too-fresh versions out of what npm resolves against. npm
+    /// accepts the full document fine; the only cost is a larger response.
+    static func forceFullNpmPackument(_ rawRequest: Data) -> Data {
+        guard let headerEnd = rawRequest.range(of: Data("\r\n\r\n".utf8)),
+              var header = String(data: rawRequest.subdata(in: rawRequest.startIndex..<headerEnd.lowerBound),
+                                  encoding: .isoLatin1),
+              header.lowercased().contains("vnd.npm.install") else { return rawRequest }
+        var lines = header.components(separatedBy: "\r\n")
+        for idx in lines.indices where lines[idx].lowercased().hasPrefix("accept:") {
+            lines[idx] = "Accept: application/json"
+        }
+        header = lines.joined(separator: "\r\n")
+        var out = Data(header.utf8)
+        out.append(rawRequest.subdata(in: headerEnd.lowerBound..<rawRequest.endIndex))
+        return out
     }
 
     /// The header block of a raw HTTP request (request line + headers, up to

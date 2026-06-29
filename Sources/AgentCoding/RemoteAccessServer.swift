@@ -43,6 +43,10 @@ final class RemoteAccessServer {
     /// User-facing knobs, sourced from UserDefaults by the caller.
     struct Config: Equatable {
         var port: Int = 2222
+        // All interfaces by default — this is an SSH server; being reachable
+        // is the whole point. Password brute force is mitigated by the
+        // per-source-IP rate limiter (`RemoteAuthThrottle`), not by hiding the
+        // listener or locking the account.
         var bindAddress: String = "0.0.0.0"
         var passwordAuth: Bool = true
         var pubkeyAuth: Bool = true
@@ -90,11 +94,16 @@ final class RemoteAccessServer {
         let user = NSUserName()
 
         let g = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let delegate = RemoteAuthDelegate(
+        // Shared across all connections: the per-source-IP password rate
+        // limiter and the delegate factory (which stamps each connection's
+        // peer IP into its delegate).
+        let throttle = RemoteAuthThrottle()
+        let authFactory = RemoteAuthDelegateFactory(
             username: user,
             allowPassword: config.passwordAuth,
             allowPubkey: config.pubkeyAuth,
-            authorizedKeys: authorized)
+            authorizedKeys: authorized,
+            throttle: throttle)
 
         // NOTE: swift-nio-ssh (0.13.0, latest) offers no post-quantum key
         // exchange — only curve25519-sha256 and ecdh-sha2-nistp*, and the KEX
@@ -105,7 +114,11 @@ final class RemoteAccessServer {
         let bootstrap = ServerBootstrap(group: g)
             .serverChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .childChannelInitializer { channel in
-                channel.eventLoop.makeCompletedFuture {
+                // Per-connection delegate carrying this peer's IP for the
+                // rate limiter; the throttle state itself is shared.
+                let peerIP = channel.remoteAddress?.ipAddress ?? "unknown"
+                let delegate = authFactory.make(peerIP: peerIP)
+                return channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandlers([
                         NIOSSHHandler(
                             role: .server(.init(

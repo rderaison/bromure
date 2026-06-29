@@ -41,15 +41,20 @@ public actor OSVClient {
             guard let arr = severities else { return .unknown }
             var maxScore: Double = 0
             for entry in arr {
-                if let v = entry["score"] as? String,
-                   let dot = v.lastIndex(of: "/") {
-                    // CVSS vector format — pluck the BaseScore by
-                    // computing from the vector is complex; fall
-                    // back to parsing a literal number if present.
-                    let _ = dot
-                }
                 if let s = entry["score"] as? Double {
                     maxScore = max(maxScore, s)
+                } else if let v = entry["score"] as? String {
+                    // OSV puts the CVSS *vector* string in `score` (e.g.
+                    // "CVSS:3.1/AV:N/…"), not a number. Compute the base
+                    // score from the vector so advisories without a GHSA
+                    // label still rank — previously this branch was a no-op,
+                    // leaving every such advisory at `.unknown` (rank −1),
+                    // which is below every threshold → never blocked.
+                    if let base = Self.cvssBaseScore(fromVector: v) {
+                        maxScore = max(maxScore, base)
+                    } else if let num = Double(v.trimmingCharacters(in: .whitespaces)) {
+                        maxScore = max(maxScore, num)
+                    }
                 }
             }
             switch maxScore {
@@ -59,6 +64,48 @@ public actor OSVClient {
             case 7.0..<9.0: return .high
             default:        return .critical
             }
+        }
+
+        /// Compute the CVSS v3.0/3.1 Base Score from a vector string
+        /// ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"). Returns nil for
+        /// non-v3 vectors (v2 / v4 use different formulas) or malformed input.
+        /// Formula per the CVSS v3.1 specification, section 7.
+        static func cvssBaseScore(fromVector vector: String) -> Double? {
+            var m: [String: String] = [:]
+            for part in vector.split(separator: "/") {
+                let kv = part.split(separator: ":", maxSplits: 1)
+                if kv.count == 2 { m[kv[0].uppercased()] = kv[1].uppercased() }
+            }
+            guard (m["CVSS"] ?? "").hasPrefix("3") else { return nil }
+            let scopeChanged = (m["S"] == "C")
+            func weight(_ key: String, _ table: [String: Double]) -> Double? {
+                m[key].flatMap { table[$0] }
+            }
+            guard let av = weight("AV", ["N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2]),
+                  let ac = weight("AC", ["L": 0.77, "H": 0.44]),
+                  let ui = weight("UI", ["N": 0.85, "R": 0.62]),
+                  let c = weight("C", ["H": 0.56, "L": 0.22, "N": 0]),
+                  let i = weight("I", ["H": 0.56, "L": 0.22, "N": 0]),
+                  let a = weight("A", ["H": 0.56, "L": 0.22, "N": 0]),
+                  let prRaw = m["PR"] else { return nil }
+            // Privileges-Required weight depends on Scope.
+            let pr: Double
+            switch prRaw {
+            case "N": pr = 0.85
+            case "L": pr = scopeChanged ? 0.68 : 0.62
+            case "H": pr = scopeChanged ? 0.50 : 0.27
+            default:  return nil
+            }
+            let iss = 1 - (1 - c) * (1 - i) * (1 - a)
+            let impact = scopeChanged
+                ? 7.52 * (iss - 0.029) - 3.25 * pow(iss - 0.02, 15)
+                : 6.42 * iss
+            if impact <= 0 { return 0 }
+            let exploitability = 8.22 * av * ac * pr * ui
+            let combined = impact + exploitability
+            let raw = scopeChanged ? min(1.08 * combined, 10) : min(combined, 10)
+            // CVSS "Roundup": smallest 1-decimal number ≥ raw.
+            return (ceil(raw * 10) / 10)
         }
     }
 

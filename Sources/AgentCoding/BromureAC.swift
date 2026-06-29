@@ -4616,7 +4616,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let outbox = pane.sandbox?.sessionDisk?.outboxDirectory else { return }
         let marker = outbox.appendingPathComponent(".docker-watch")
         if on {
-            try? Data().write(to: marker)
+            // The outbox is a read-write share the (untrusted) guest writes to.
+            // `.docker-watch` is the only host write here with a fixed,
+            // guest-predictable name, so a non-atomic write would follow a
+            // symlink the guest plants in its place (e.g. → ~/.ssh/authorized_keys)
+            // and truncate that host file. `.atomic` writes a temp file and
+            // renames it into place, replacing any planted symlink instead of
+            // following it — matching the safe pattern `sendCommand` uses below.
+            try? Data().write(to: marker, options: .atomic)
         } else {
             try? FileManager.default.removeItem(at: marker)
         }
