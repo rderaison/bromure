@@ -121,6 +121,11 @@ public actor InferenceService {
     /// 127.0.0.1:11434 via the vsock 8446 bridge → here.
     public static let enginePort = 11434
     public static let engineHost = "127.0.0.1"
+    /// Stable model id the guest agents are pinned to (`ANTHROPIC_MODEL` etc.).
+    /// The repair proxy maps it to each workspace's currently-active model, so
+    /// switching the local model is a host-side remap — no guest reconfigure and
+    /// no agent restart.
+    public static let localModelSentinel = "bromure-local"
 
     /// Process-wide engine. Single shared instance (one model loaded) for
     /// now; the per-model pool + single-port model router come next.
@@ -167,6 +172,12 @@ public actor InferenceService {
     /// Tees the engine child's stdout/stderr into the Inference Engine Log.
     /// Retained for the child's lifetime; replaced on each (re)spawn.
     private var engineLogReader: PipeLineReader?
+    /// Models requested per workspace (profile id → its local models). The engine
+    /// serves the UNION across all open workspaces; closing one drops its entry.
+    /// This is what lets two workspaces with different models share one engine.
+    private var workspaceModels: [UUID: [InferenceModel]] = [:]
+    /// Latest memory budget (host − headroom), pushed to the engine on reconcile.
+    private var engineBudgetGB: Int = 0
 
     public init(engine: InferenceEngine = .vllmMLX, catalog: CatalogStore = .shared) {
         self.engine = engine
@@ -259,6 +270,80 @@ public actor InferenceService {
         return try await startServing(models, memoryBudgetGB: memoryBudgetGB)
     }
 
+    // MARK: - Multi-workspace model set (dynamic load/unload, no restart)
+
+    /// Register (or replace) a workspace's local models and reconcile the engine
+    /// to the union of ALL open workspaces — WITHOUT restarting a running engine.
+    /// Spawns the engine if it's down; otherwise hot-reconfigures it (adds the
+    /// new model, keeps the others). Fixes "launching a 2nd workspace killed the
+    /// 1st's engine".
+    public func setWorkspaceModels(_ profileID: UUID, _ models: [InferenceModel],
+                                   memoryBudgetGB: Int) async throws {
+        workspaceModels[profileID] = models
+        engineBudgetGB = memoryBudgetGB
+        try await reconcile()
+    }
+
+    /// Drop a workspace's models (it closed) and reconcile — unloads any model no
+    /// longer wanted by an open workspace (stops the engine if none remain).
+    public func clearWorkspace(_ profileID: UUID) async {
+        guard workspaceModels.removeValue(forKey: profileID) != nil else { return }
+        try? await reconcile()
+    }
+
+    /// Union of all workspaces' models, deduped by repo (largest estMem wins),
+    /// sorted for a stable set comparison.
+    private func unionModels() -> [InferenceModel] {
+        var byRepo: [String: InferenceModel] = [:]
+        for models in workspaceModels.values {
+            for m in models {
+                if let cur = byRepo[m.repo], cur.estMemGB >= m.estMemGB { continue }
+                byRepo[m.repo] = m
+            }
+        }
+        return byRepo.values.sorted { $0.repo < $1.repo }
+    }
+
+    /// Bring the engine in line with the union: stop if empty, spawn if down,
+    /// else hot-reconfigure the running engine (no restart).
+    private func reconcile() async throws {
+        let union = unionModels()
+        if union.isEmpty { stop(); return }
+        let cfg = EngineSpawnConfig(
+            memoryBudgetGB: engineBudgetGB,
+            models: union.map { .init(repo: $0.repo, estMemGB: $0.estMemGB,
+                                      toolParser: $0.toolParser, reasoningParser: $0.reasoningParser) })
+        if process == nil {
+            try await spawnEngine(config: cfg, repos: union.map(\.repo).sorted(), timeout: 120)
+        } else {
+            try await pushReconfigure(cfg)
+        }
+    }
+
+    /// Tell the running engine (admin endpoint) to serve exactly `cfg`'s models.
+    /// Updates `activeModels`/`lastConfig` so a crash-restart respawns the union.
+    private func pushReconfigure(_ cfg: EngineSpawnConfig) async throws {
+        activeModels = cfg.models.map(\.repo).sorted()
+        lastConfig = cfg
+        var req = URLRequest(url: URL(string: "http://\(Self.engineHost):\(Self.enginePort)/admin/serve")!)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 15
+        req.setValue("Bearer \(Self.apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "budget": cfg.memoryBudgetGB,
+            "models": cfg.models.map { m -> [String: Any] in
+                var d: [String: Any] = ["repo": m.repo, "estMemGB": m.estMemGB, "toolParser": m.toolParser]
+                if let rp = m.reasoningParser { d["reasoningParser"] = rp }
+                return d
+            },
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        InferenceLog.shared.record(
+            "[inference] reconfiguring engine — serving \(cfg.models.count) model(s): \(activeModels.joined(separator: ", "))")
+        _ = try? await URLSession.shared.data(for: req)
+    }
+
     /// Start (or update) the engine child serving `models`, fronted by the
     /// tool-call repair proxy. Restarts the child if the model set changed.
     /// Returns a stub plan (callers use it only for the readiness URL).
@@ -268,7 +353,15 @@ public actor InferenceService {
         catalog.migrateLegacyHubCache()
         let repos = models.map(\.repo).sorted()
         if isRunning, activeModels == repos { return stubPlan() }
-        if isRunning { stop() }
+        if let old = process {
+            // Switching models: stop the current engine and WAIT for it to exit
+            // so it releases port 11434 before the new child binds. Without this
+            // wait the new engine raced the old one for the port, the bind
+            // failed, and startup timed out ("switch model -> startTimedOut").
+            InferenceLog.shared.record("[inference] switching models — stopping the current engine first…")
+            stop()
+            await Self.waitForExit(old, timeout: 12)
+        }
         let cfg = EngineSpawnConfig(
             memoryBudgetGB: memoryBudgetGB,
             models: models.map { .init(repo: $0.repo, estMemGB: $0.estMemGB,
@@ -356,6 +449,16 @@ public actor InferenceService {
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
         throw InferenceServiceError.startTimedOut
+    }
+
+    /// Wait (bounded) for a stopped engine child to actually exit so its port is
+    /// free before a respawn; SIGKILL it if it overstays the grace period.
+    private static func waitForExit(_ p: Process, timeout: TimeInterval) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while p.isRunning && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        if p.isRunning { kill(p.processIdentifier, SIGKILL) }
     }
 
     private func stubPlan() -> EngineLaunchPlan {

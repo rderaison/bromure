@@ -284,7 +284,13 @@ struct MLXEngineChild: ParsableCommand {
     func run() throws {
         let data = try Data(contentsOf: URL(fileURLWithPath: config))
         let cfg = try JSONDecoder().decode(EngineSpawnConfig.self, from: data)
-        MLXServer.shared.start(models: cfg.inferenceModels, memoryBudgetGB: cfg.memoryBudgetGB)
+        guard MLXServer.shared.start(models: cfg.inferenceModels, memoryBudgetGB: cfg.memoryBudgetGB) else {
+            // Couldn't bind the port — exit non-zero so the parent's readiness
+            // wait fails fast (and clearly) instead of polling a dead port.
+            FileHandle.standardError.write(Data(
+                "[engine] exiting — HTTP server could not start on port \(InferenceService.enginePort)\n".utf8))
+            Foundation.exit(1)
+        }
         FileHandle.standardError.write(Data(
             "mlx engine: serving \(cfg.models.count) model(s) on 127.0.0.1:\(InferenceService.enginePort)\n".utf8))
         RunLoop.main.run()

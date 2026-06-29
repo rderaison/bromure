@@ -30,6 +30,22 @@ final class InferenceRepairProxy: @unchecked Sendable {
     /// while the (possibly long) generation is in flight.
     var onLocalActivity: ((_ profileID: UUID) -> Void)?
 
+    /// profile id → the repo the `bromure-local` sentinel resolves to for that
+    /// workspace. The guest's agents are pinned to the sentinel; switching the
+    /// workspace's model just updates this map, so no agent restart is needed.
+    private let modelMapLock = NSLock()
+    private var activeModelByProfile: [UUID: String] = [:]
+
+    func setActiveModel(_ profileID: UUID, repo: String) {
+        modelMapLock.lock(); activeModelByProfile[profileID] = repo; modelMapLock.unlock()
+    }
+    func clearActiveModel(_ profileID: UUID) {
+        modelMapLock.lock(); activeModelByProfile[profileID] = nil; modelMapLock.unlock()
+    }
+    func activeModel(for profileID: UUID) -> String? {
+        modelMapLock.lock(); defer { modelMapLock.unlock() }; return activeModelByProfile[profileID]
+    }
+
     /// Start the accept loop if not already running. Idempotent.
     func startIfNeeded(enginePort: Int = InferenceService.enginePort) {
         lock.lock(); defer { lock.unlock() }
@@ -132,6 +148,18 @@ final class InferenceRepairProxy: @unchecked Sendable {
             default: return nil
             }
         }
+        /// A wire-native error body so the agent surfaces the reason instead of
+        /// a blank response. Anthropic needs `{"type":"error","error":{…}}`; the
+        /// OpenAI surfaces use `{"error":{…}}`. Mirrors `Wire.errorJSON`.
+        func errorBody(message: String) -> [String: Any] {
+            switch self {
+            case .messages:
+                return ["type": "error", "error": ["type": "api_error", "message": message]]
+            case .chat, .responses:
+                return ["error": ["message": message, "type": "api_error", "code": NSNull()]]
+            }
+        }
+
         /// Repair the buffered upstream message, then render it back as SSE.
         func repairedSSE(_ message: [String: Any], toolNames: Set<String>) -> Data {
             switch self {
@@ -163,6 +191,19 @@ final class InferenceRepairProxy: @unchecked Sendable {
             return passthrough(req, base: base)
         }
 
+        // Identify the calling VM from its per-VM key (nil for admin/internal).
+        let rawAuth = req.headerValue("authorization") ?? ""
+        let pid = EngineKey.profileID(forKey: rawAuth.hasPrefix("Bearer ") ? String(rawAuth.dropFirst(7)) : rawAuth)
+
+        // Resolve the local-model sentinel: the guest always sends
+        // "bromure-local"; map it to this workspace's currently-active repo so
+        // switching the model is a host-side remap (no agent restart). Any
+        // explicit model is left untouched.
+        if let pid, (payload["model"] as? String) == InferenceService.localModelSentinel,
+           let repo = shared.activeModel(for: pid) {
+            payload["model"] = repo
+        }
+
         // Force non-streaming upstream so we can inspect + repair the message.
         payload["stream"] = false
         let upstreamBody = (try? JSONSerialization.data(withJSONObject: payload)) ?? req.body
@@ -174,10 +215,6 @@ final class InferenceRepairProxy: @unchecked Sendable {
             ur.setValue(v, forHTTPHeaderField: k)
         }
         ur.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        // Identify the calling VM from its per-VM key (nil for admin/internal).
-        let rawAuth = req.headerValue("authorization") ?? ""
-        let pid = EngineKey.profileID(forKey: rawAuth.hasPrefix("Bearer ") ? String(rawAuth.dropFirst(7)) : rawAuth)
 
         // Drive the "thinking" indicator for the whole generation: fire now and
         // keep re-firing (a single local call can outlast the indicator's clear
@@ -201,11 +238,20 @@ final class InferenceRepairProxy: @unchecked Sendable {
                   requestBytes: req.body.count, responseBytes: data?.count ?? 0,
                   latencyMs: Date().timeIntervalSince(t0) * 1000,
                   requestBody: req.body, responseData: data)
-        guard status == 200, let data,
+        guard status == 200, let data, !data.isEmpty,
               let message = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            // Upstream error — relay status + body verbatim.
-            return httpResponse(status: status, headers: [("Content-Type", "application/json")],
-                                body: data ?? Data())
+            // Upstream error. If the engine returned a body (already wire-shaped
+            // by MLXServer, e.g. a model-load failure), relay it verbatim. If it
+            // sent nothing — engine unreachable / reloading / stopped — the agent
+            // would otherwise see a blank 502; synthesize a clear wire-shaped
+            // error so it shows *why* (and the trace carries a reason).
+            if let data, !data.isEmpty {
+                return httpResponse(status: status, headers: [("Content-Type", "application/json")], body: data)
+            }
+            let msg = "Local inference engine unreachable (starting up, reloading a model, or stopped) — retry in a moment."
+            let body = (try? JSONSerialization.data(withJSONObject: api.errorBody(message: msg))) ?? Data()
+            return httpResponse(status: status == 200 ? 503 : status,
+                                headers: [("Content-Type", "application/json")], body: body)
         }
         let toolNames = API.toolNames(in: payload)
         if ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil {

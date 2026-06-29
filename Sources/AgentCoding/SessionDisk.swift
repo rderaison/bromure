@@ -567,10 +567,12 @@ public final class SessionDisk {
             // Every "Local model" agent serves the profile's single active
             // model (chosen in Local Models) — agents no longer pick their own.
             if let activeID = profile.activeModelID, !activeID.isEmpty {
-                let model = CatalogStore.shared.resolve(activeID)?.repo ?? activeID
+                // Pin agents to the stable sentinel, not the concrete repo: the
+                // repair proxy maps it to this workspace's active model, so
+                // switching the model is a host-side remap with no agent restart.
                 let key = EngineKey.perVM(profileID: profile.id)
                 for spec in profile.allToolSpecs where spec.authMode == .local {
-                    for export in spec.tool.localEnvExports(model: model, key: key) {
+                    for export in spec.tool.localEnvExports(model: InferenceService.localModelSentinel, key: key) {
                         proxyLines.append("export \(export.name)=\(shellQuote(export.value))")
                     }
                 }

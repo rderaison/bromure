@@ -24,31 +24,43 @@ let acResourceBundle: Bundle = {
 
 @main
 struct BromureAC: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "bromure-ac",
-        abstract: "Run Codex / Claude Code in an isolated, persistent VM.",
-        // `run` is the default subcommand (bare `bromure-ac`, Finder
-        // double-click, `open` w/o args all open the GUI) but it's hidden from
-        // help — it's an implementation detail, not something to invoke by hand.
-        // `__remote-menu` is hidden (shouldDisplay:false) — the SSH ForceCommand
-        // target, not a user-facing command.
-        subcommands: [Run.self, RemoteMenu.self],
-        groupedSubcommands: [
-            CommandGroup(name: "Image management",
-                         subcommands: [Init.self, Info.self, Reset.self]),
-            CommandGroup(name: "Workspaces",
-                         subcommands: [Profiles.self]),
-            CommandGroup(name: "Tracing",
-                         subcommands: [Trace.self]),
-            CommandGroup(name: "Local inference",
-                         subcommands: [Model.self]),
-            CommandGroup(name: "Enterprise features",
-                         subcommands: [Enroll.self, Unenroll.self, Status.self]),
-            CommandGroup(name: "Integration",
-                         subcommands: [MCP.self, Remote.self]),
-        ],
-        defaultSubcommand: Run.self
-    )
+    /// Built from the invocation name (argv[0]). Invoked as `bromure-cli` we
+    /// hide the app-internal commands — Image management (init/info/reset, which
+    /// can bounce into the in-app GUI setup flow) and the `mcp` stdio server —
+    /// and expose no GUI default, so a bare or unknown invocation prints help
+    /// instead of trapping while NSApplication tries to start. Invoked as
+    /// `bromure-ac` (the app binary and every child it spawns) everything is
+    /// available. `commandName` echoes the actual argv[0] so USAGE reads right.
+    static var configuration: CommandConfiguration {
+        let argv0 = URL(fileURLWithPath: CommandLine.arguments.first ?? "").lastPathComponent
+        let name = argv0.isEmpty ? "bromure-ac" : argv0
+        let asCLI = (name == "bromure-cli")
+
+        // Qualified: `CommandGroup` is ambiguous here (SwiftUI also defines one).
+        var groups: [ArgumentParser.CommandGroup] = []
+        if !asCLI {
+            groups.append(ArgumentParser.CommandGroup(name: "Image management",
+                                       subcommands: [Init.self, Info.self, Reset.self]))
+        }
+        groups.append(ArgumentParser.CommandGroup(name: "Workspaces", subcommands: [Profiles.self]))
+        groups.append(ArgumentParser.CommandGroup(name: "Tracing", subcommands: [Trace.self]))
+        groups.append(ArgumentParser.CommandGroup(name: "Local inference", subcommands: [Model.self]))
+        groups.append(ArgumentParser.CommandGroup(name: "Enterprise features",
+                                   subcommands: [Enroll.self, Unenroll.self, Status.self]))
+        groups.append(ArgumentParser.CommandGroup(name: "Integration",
+                                   subcommands: asCLI ? [Remote.self] : [MCP.self, Remote.self]))
+
+        // `run` (the GUI) + `__remote-menu` (SSH ForceCommand target) are
+        // app-internal; bromure-cli exposes neither and has no GUI default.
+        let topLevel: [ParsableCommand.Type] = asCLI ? [] : [Run.self, RemoteMenu.self]
+        let defaultCmd: ParsableCommand.Type? = asCLI ? nil : Run.self
+        return CommandConfiguration(
+            commandName: name,
+            abstract: "Run Codex / Claude Code in an isolated, persistent VM.",
+            subcommands: topLevel,
+            groupedSubcommands: groups,
+            defaultSubcommand: defaultCmd)
+    }
 
     /// Strip Apple-internal flags (e.g. -AppleLanguages, -AppleLocale) from
     /// CommandLine.arguments so ArgumentParser doesn't reject them. Without
@@ -974,22 +986,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let budget = max(8, HostMemory.unifiedMemoryGB() - 16)
         let pid = profile.id
         let label = models.first.map { CatalogStore.shared.resolve($0.repo)?.name ?? $0.repo } ?? ""
+        // Map the `bromure-local` sentinel → this workspace's active model so the
+        // guest agents resolve to it without a restart. Set synchronously (before
+        // the engine warms) so a request that races the load still routes right.
+        if let activeID = profile.activeModelID,
+           let activeRepo = CatalogStore.shared.resolve(activeID)?.repo {
+            InferenceRepairProxy.shared.setActiveModel(pid, repo: activeRepo)
+        }
         pane(for: pid)?.model.engineStatus = .starting("Starting local engine…")
         Task.detached(priority: .userInitiated) {
             do {
-                try await InferenceService.shared.ensureRunning(
-                    models: models, memoryBudgetGB: budget,
-                    onProvisionProgress: { _ in
-                        Task { @MainActor in
-                            self.pane(for: pid)?.model.engineStatus = .starting("Setting up engine…")
-                        }
-                    })
+                // Register this workspace's models; the engine serves the UNION
+                // of all open workspaces. If an engine is already up for another
+                // workspace, this adds our model to it (hot reconfigure) instead
+                // of restarting and dropping the others.
+                try await InferenceService.shared.setWorkspaceModels(
+                    pid, models, memoryBudgetGB: budget)
                 await MainActor.run { self.pane(for: pid)?.model.engineStatus = .ready(label) }
-                SupplyChainLog.shared.record(
+                InferenceLog.shared.record(
                     "[inference] engine serving \(models.map(\.repo).joined(separator: ", "))")
             } catch {
                 await MainActor.run { self.pane(for: pid)?.model.engineStatus = .failed("\(error)") }
-                SupplyChainLog.shared.record("[inference] engine start failed: \(error)")
+                InferenceLog.shared.record(
+                    "[inference] engine start failed: \(error) — see the Inference Engine Log above for the reason")
             }
         }
     }
@@ -1786,6 +1805,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         session.profile = profile
         try? store.save(profile)
         if let engine = mitmEngine { applyRouting(engine, for: profile) }
+        // Re-point the sentinel + make the engine serve the new model. The guest
+        // keeps its env (ANTHROPIC_MODEL = bromure-local), so the switch takes
+        // effect on the next request with no agent restart.
+        startLocalEngineIfNeeded(for: profile)
         return ["ok": true, "model": model.id, "repo": model.repo]
     }
 
@@ -3701,6 +3724,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             engine.setSessionTrace(.init(sessionID: sid, level: new.traceLevel), for: new.id)
         }
 
+        // Local model / routing: agents are pinned to the `bromure-local`
+        // sentinel, so switching the active model (or routing mode) is a
+        // host-side remap — re-point the sentinel + engine and update routing,
+        // with no reboot and no agent restart. Done unconditionally (before the
+        // guard) since neither field trips the credential/env diff below.
+        if old.activeModelID != new.activeModelID || old.modelRouting != new.modelRouting {
+            if let engine = mitmEngine { applyRouting(engine, for: new) }
+            startLocalEngineIfNeeded(for: new)
+        }
+
         guard sessionRefreshAffectingChange(from: old, to: new) else { return }
 
         // Guardrail config is consulted live on every proxied request —
@@ -4933,6 +4966,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: profile.id)
         shellBridges[profile.id]?.stop()
         shellBridges.removeValue(forKey: profile.id)
+        // Drop this workspace's local models from the engine's union, unloading
+        // any no longer wanted by an open workspace (stops the engine if none
+        // remain). The engine keeps serving the others.
+        Task { await InferenceService.shared.clearWorkspace(profile.id) }
+        InferenceRepairProxy.shared.clearActiveModel(profile.id)
     }
 
     /// The VM for `profileID` stopped (guest poweroff, crash, or the tail of an

@@ -245,6 +245,18 @@ actor MLXEngine {
         MLX.GPU.clearCache()
     }
 
+    /// Unload any resident model not in `keep` — used when a workspace closes
+    /// and its model is no longer wanted by any open workspace. LRU eviction
+    /// still bounds memory for the survivors; this just frees dropped ones
+    /// promptly instead of waiting for pressure.
+    func retain(only keep: Set<String>) {
+        for repo in residents.keys where !keep.contains(repo) {
+            residents[repo] = nil
+            sessionCaches[repo] = nil
+        }
+        MLX.GPU.clearCache()
+    }
+
     // MARK: - Generation
 
     /// Sampling + cache knobs, mapped from a request / catalog entry.

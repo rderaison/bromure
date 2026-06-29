@@ -96,6 +96,7 @@ struct Unenroll: ParsableCommand {
 
 struct Status: ParsableCommand {
     static let configuration = CommandConfiguration(
+        commandName: "enrollment-status",
         abstract: "Print the current bromure.io enrollment state."
     )
 
