@@ -30,13 +30,48 @@ public enum SecretsVault {
         cacheLock.lock(); defer { cacheLock.unlock() }
         if let k = cachedKey { return k }
 
-        if let existing = try fetchFromKeychain() {
-            cachedKey = existing
-            return existing
+        // Preferred: the Data Protection Keychain (at-rest protected, no prompt).
+        if let fetched = (try? fetchFromKeychain()) ?? nil {
+            cachedKey = fetched
+            return fetched
         }
         let fresh = SymmetricKey(size: .bits256)
-        try storeInKeychain(fresh)
-        cachedKey = fresh
+        if (try? storeInKeychain(fresh)) != nil {
+            cachedKey = fresh
+            return fresh
+        }
+
+        // Fallback: a 0600 key file under Application Support. The Data
+        // Protection Keychain is unreachable to a signed-but-not-notarized /
+        // no-provisioning-profile build, which *silently* broke every at-rest
+        // feature — notably trace-body capture (encrypt threw, writeBody skipped
+        // the write, and the inspector showed "not captured"). The file key is
+        // weaker (it sits beside the ciphertext), but it keeps the feature
+        // working; a fully-provisioned release still uses the keychain.
+        let key = try fileFallbackKey()
+        FileHandle.standardError.write(Data(
+            "[secrets] keychain unavailable — using file-backed master key (trace/secret encryption is local-key only)\n".utf8))
+        cachedKey = key
+        return key
+    }
+
+    /// Master key in a 0600 file under Application Support — the fallback when
+    /// the keychain is unavailable.
+    private static func fileFallbackKey() throws -> SymmetricKey {
+        let url = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("BromureAC", isDirectory: true)
+            .appendingPathComponent("secrets-master.key")
+        if let data = try? Data(contentsOf: url), data.count == 32 {
+            return SymmetricKey(data: data)
+        }
+        let fresh = SymmetricKey(size: .bits256)
+        let bytes: Data = fresh.withUnsafeBytes { Data($0) }
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try bytes.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
         return fresh
     }
 
