@@ -87,7 +87,7 @@ final class RemoteMenuApp {
                                      items: items, footer: "Enter select · q back") else { return }
             if live {
                 switch sel {
-                case 0: attach(vmID: id); return         // back to list after detach
+                case 0: attachMenu(vmID: id, name: name)  // pick a tab or container
                 case 1: showOutput("describe \(name)", ["workspaces", "describe", id])
                 case 2:
                     if tui.confirm("Kill \(name)?") {
@@ -131,6 +131,55 @@ final class RemoteMenuApp {
                 body: ["command": "tmux has-session -t bromure", "timeout": 5])
             if resp?.status == 200, (resp?.json["exitCode"] as? Int ?? 1) == 0 { return }
             usleep(200_000)
+        }
+    }
+
+    /// Pick what to attach to in a running workspace: a tmux tab (session) or a
+    /// running docker container. Loops so detaching returns here, not the top.
+    private func attachMenu(vmID: String, name: String) {
+        while true {
+            let tabs = (fetchVM(vmID)?["tabs"] as? [[String: Any]]) ?? []
+            let containers = runningContainers(vmID: vmID)
+            // Nothing to choose from yet → just hand over the current tmux tab.
+            if tabs.isEmpty && containers.isEmpty { attach(vmID: vmID); return }
+
+            var labels: [String] = []
+            var actions: [() -> Void] = []
+            for t in tabs {
+                let idx = t["index"] as? Int ?? 0
+                let title = t["title"] as? String ?? "shell"
+                let active = (t["active"] as? Bool ?? false) ? " *" : ""
+                labels.append("Tab \(idx): \(title)\(active)")
+                actions.append { self.attach(vmID: vmID, tab: idx) }
+            }
+            for c in containers {
+                labels.append("🐳 \(c.name)  (\(c.image))")
+                actions.append { self.attachContainer(vmID: vmID, container: c.name) }
+            }
+            labels.append("Back")
+
+            guard let sel = tui.menu(title: "Attach · \(name)", items: labels,
+                                     footer: "Enter attach · q back") else { return }
+            if sel >= 0, sel < actions.count { actions[sel]() } else { return }
+        }
+    }
+
+    /// docker exec -it into a running container, à la `vm attach … containers:…`.
+    private func attachContainer(vmID: String, container: String) {
+        tui.end()
+        defer { tui.begin() }
+        let banner = "\u{1B}[2J\u{1B}[H" +
+            "\u{1B}[1m  Type `exit` (or Ctrl-d) to leave the container\u{1B}[0m\r\n\r\n" +
+            "  Attaching to \(container)…\r\n"
+        FileHandle.standardOutput.write(Data(banner.utf8))
+        Thread.sleep(forTimeInterval: 1.0)
+        do {
+            try InteractiveExec.run(client: client, vm: vmID,
+                                    command: "docker exec -it \(container) bash")
+        } catch {
+            let msg = "\r\nCouldn't attach: \(error.localizedDescription)\r\nPress Enter…"
+            FileHandle.standardOutput.write(Data(msg.utf8))
+            _ = readLine()
         }
     }
 
@@ -190,6 +239,28 @@ final class RemoteMenuApp {
               let ps = try? client.request("GET", "/profiles").json["profiles"] as? [[String: Any]]
         else { return [] }
         return ps.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+    }
+
+    /// The running-VM record (carries `tabs`) for a workspace id.
+    private func fetchVM(_ id: String) -> [String: Any]? {
+        guard let vms = try? client.request("GET", "/vms").json["vms"] as? [[String: Any]]
+        else { return nil }
+        return vms.first { ($0["id"] as? String) == id }
+    }
+
+    /// Running docker containers in a VM, via `docker ps` over the exec bridge.
+    private func runningContainers(vmID: String) -> [(name: String, image: String, status: String)] {
+        guard let r = try? client.request(
+            "POST", "/vms/\(ControlClient.encodeSegment(vmID))/exec",
+            body: ["command": "docker ps --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}' 2>/dev/null",
+                   "timeout": 5]),
+            r.status == 200, let out = r.json["stdout"] as? String else { return [] }
+        return out.split(whereSeparator: \.isNewline).compactMap { line in
+            let c = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard c.count >= 2 else { return nil }
+            return (name: String(c[0]), image: String(c[1]),
+                    status: c.count >= 3 ? String(c[2]) : "")
+        }
     }
 
     /// A list row: name, tool, and a glyph for the live state — the same
