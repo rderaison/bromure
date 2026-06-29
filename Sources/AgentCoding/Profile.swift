@@ -3990,10 +3990,17 @@ public final class ProfileStore {
                                 # proxy/both: route the container through the VM's
                                 # MITM proxy via the docker bridge gateway
                                 # (host.docker.internal → host-gateway; the bridge
-                                # daemon listens on 0.0.0.0:8080), and trust its CA
-                                # by bind-mounting the PEM and pointing every TLS
-                                # client's CA env at it. NO_PROXY keeps loopback
-                                # direct. Constants mirror SessionDisk.proxy.env.
+                                # daemon listens on 0.0.0.0:8080) and make it TRUST
+                                # the MITM CA at the SYSTEM level. The key is the
+                                # combined bundle: the VM's ca-certificates.crt is
+                                # the full public CA set WITH the Bromure CA appended
+                                # (by update-ca-certificates). Bind-mounting it over
+                                # the container's system bundle is what lets apt /
+                                # openssl-based tools (which ignore the *_CA env
+                                # vars) verify the proxy's forged certs — fixing e.g.
+                                # `apt-get update`. The env vars (for node/python/
+                                # curl/etc.) point at the same bundle; node wants the
+                                # raw PEM via NODE_EXTRA_CA_CERTS. Mirrors proxy.env.
                                 case "$rmode" in
                                     proxy|both)
                                         [ -n "$ef" ] || ef=$(mktemp)
@@ -4005,12 +4012,17 @@ public final class ProfileStore {
                                             'no_proxy=localhost,127.0.0.1,::1' \
                                             'NO_PROXY=localhost,127.0.0.1,::1' \
                                             'NODE_EXTRA_CA_CERTS=/etc/ssl/certs/bromure-ca.pem' \
-                                            'REQUESTS_CA_BUNDLE=/etc/ssl/certs/bromure-ca.pem' \
-                                            'SSL_CERT_FILE=/etc/ssl/certs/bromure-ca.pem' \
-                                            'CURL_CA_BUNDLE=/etc/ssl/certs/bromure-ca.pem' \
-                                            'GIT_SSL_CAINFO=/etc/ssl/certs/bromure-ca.pem' \
-                                            'PIP_CERT=/etc/ssl/certs/bromure-ca.pem' >> "$ef"
+                                            'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt' \
+                                            'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+                                            'CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt' \
+                                            'GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt' \
+                                            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' \
+                                            'AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt' >> "$ef"
                                         extra="$extra --add-host=host.docker.internal:host-gateway"
+                                        # The combined bundle is what makes apt trust
+                                        # the proxy; the raw PEM is for NODE_EXTRA_CA_CERTS.
+                                        [ -r /etc/ssl/certs/ca-certificates.crt ] \
+                                            && extra="$extra -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro"
                                         [ -r /etc/ssl/certs/bromure-ca.pem ] \
                                             && extra="$extra -v /etc/ssl/certs/bromure-ca.pem:/etc/ssl/certs/bromure-ca.pem:ro"
                                         ;;
