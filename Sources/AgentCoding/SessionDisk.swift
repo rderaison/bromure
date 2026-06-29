@@ -728,8 +728,10 @@ public final class SessionDisk {
         // top-level keys stay valid TOML).
         if profile.allToolSpecs.contains(where: { $0.tool == .codex && $0.authMode == .local }),
            let id = profile.activeModelID, !id.isEmpty {
-            let repo = CatalogStore.shared.resolve(id)?.repo ?? id
-            try Self.codexLocalProviderTOML(model: repo).write(
+            // Send the bromure-local sentinel (the proxy resolves it to this
+            // workspace's active model), so switching the model needs no codex
+            // restart — same as Claude/Grok.
+            try Self.codexLocalProviderTOML(model: InferenceService.localModelSentinel).write(
                 to: tmp.appendingPathComponent("codex-local.toml"),
                 atomically: true, encoding: .utf8)
         }
@@ -740,8 +742,9 @@ public final class SessionDisk {
         // in config.toml rewrites that to the served repo (guest init appends).
         if profile.allToolSpecs.contains(where: { $0.tool == .grok && $0.authMode == .local }),
            let id = profile.activeModelID, !id.isEmpty {
-            let repo = CatalogStore.shared.resolve(id)?.repo ?? id
-            try Self.grokLocalModelMapTOML(model: repo).write(
+            // Map grok-build → the bromure-local sentinel (proxy-resolved per
+            // workspace), so switching the model needs no grok restart.
+            try Self.grokLocalModelMapTOML(model: InferenceService.localModelSentinel).write(
                 to: tmp.appendingPathComponent("grok-local.toml"),
                 atomically: true, encoding: .utf8)
         }
@@ -871,7 +874,7 @@ public final class SessionDisk {
 
         [model_providers.bromure-local]
         name = "Bromure Local"
-        base_url = "http://127.0.0.1:11434/v1"
+        base_url = "https://\(InferenceService.localMitmHost)/v1"
         wire_api = "responses"
         env_key = "OPENAI_API_KEY"
 

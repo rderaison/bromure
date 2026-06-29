@@ -1640,13 +1640,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         server.onListTrace = { [weak self] profileKey in self?.automationTraceList(profileKey) ?? [] }
         server.onClearTrace = { [weak self] in self?.mitmEngine?.traceStore.clear() ?? 0 }
-        // The repair proxy runs in this (parent) process, so it records local
-        // per-VM inference calls straight into the TraceStore via this callback.
-        InferenceRepairProxy.shared.onLocalTrace = { [weak self] event in
-            DispatchQueue.main.async { self?.automationIngestLocalTrace(event) }
-        }
-        // Local inference also drives the "thinking" indicator (cloud gets this
-        // from the MITM's conversation signal; local calls bypass the MITM).
+        // Local inference now flows through the MITM (guest → https://bromure.llm
+        // → MITM → engine), so the MITM records the trace + drives the thinking
+        // indicator exactly like cloud — no separate local trace path (which is
+        // why local bodies weren't captured before). We keep this activity hook
+        // as a downstream backstop for the "thinking" indicator.
         InferenceRepairProxy.shared.onLocalActivity = { [weak self] pid in
             DispatchQueue.main.async { self?.noteAgentActivity(pid) }
         }

@@ -121,11 +121,22 @@ public actor InferenceService {
     /// 127.0.0.1:11434 via the vsock 8446 bridge → here.
     public static let enginePort = 11434
     public static let engineHost = "127.0.0.1"
+    /// Loopback port of the tool-call-repair proxy that fronts the engine —
+    /// public mirror of `InferenceRepairProxy.listenPort` so routing defaults
+    /// can name it without exposing the proxy type.
+    public static let repairProxyPort = InferenceRepairProxy.listenPort
     /// Stable model id the guest agents are pinned to (`ANTHROPIC_MODEL` etc.).
     /// The repair proxy maps it to each workspace's currently-active model, so
     /// switching the local model is a host-side remap — no guest reconfigure and
     /// no agent restart.
     public static let localModelSentinel = "bromure-local"
+    /// Synthetic host the guest agents target for local inference. Not a real
+    /// domain (no DNS): the in-VM HTTPS proxy *is* the MITM, which intercepts
+    /// `CONNECT bromure.llm`, runs the same injection-detection + trace pipeline
+    /// as cloud, then forwards to the on-host engine over plain HTTP. This gives
+    /// local + cloud one unified path — a single place for logging and
+    /// prompt-injection defense.
+    public static let localMitmHost = "bromure.llm"
 
     /// Process-wide engine. Single shared instance (one model loaded) for
     /// now; the per-model pool + single-port model router come next.

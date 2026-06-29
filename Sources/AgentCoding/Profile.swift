@@ -796,7 +796,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         /// point every slot at the one local model so no slot falls back to
         /// a cloud model the engine doesn't serve.
         public func localEnvExports(model: String, key: String) -> [(name: String, value: String)] {
-            let base = Self.localEngineBaseURL
+            // Target the MITM sentinel host (not loopback): the request goes
+            // through the proxy, so local inference gets the same prompt-injection
+            // detection + trace capture as cloud. The MITM forwards to the on-host
+            // engine. (Codex configures its base URL via config.toml separately.)
+            let base = "https://\(InferenceService.localMitmHost)"
             switch self {
             case .claude:
                 // ANTHROPIC_AUTH_TOKEN (sent as `Authorization: Bearer`),

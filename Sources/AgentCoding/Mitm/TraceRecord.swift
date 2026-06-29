@@ -43,6 +43,7 @@ public enum TraceLevel: String, Codable, CaseIterable, Sendable {
         "groq.com",
         "replicate.com",
         "huggingface.co",
+        InferenceService.localMitmHost,  // local-inference sentinel (routed via the MITM)
     ]
 
     /// True if a request to `host` should have its body captured at

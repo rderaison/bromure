@@ -2367,6 +2367,19 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
     // its own per-session key, so drop the cloud auth headers and inject the
     // engine Bearer key instead — otherwise it 401s.
     let local = (upstreamScheme == "http" && host == InferenceService.engineHost)
+    // The explicit-local path carries the guest's per-VM engine key (a valid
+    // EngineKey). Preserve it so the downstream repair proxy can identify the
+    // workspace and resolve the `bromure-local` model sentinel — and the engine
+    // accepts it directly. Only swap in the admin key when the guest sent a
+    // cloud credential the engine can't use (the hybrid cloud→local fallback).
+    let guestBearer: String? = lines.compactMap { line -> String? in
+        guard let colon = line.firstIndex(of: ":"),
+              String(line[..<colon]).trimmingCharacters(in: .whitespaces).lowercased() == "authorization"
+        else { return nil }
+        let v = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+        return v.hasPrefix("Bearer ") ? String(v.dropFirst(7)) : v
+    }.first
+    let keepGuestKey = local && (guestBearer.map { EngineKey.profileID(forKey: $0) != nil } ?? false)
     for line in lines where !line.isEmpty {
         guard let colon = line.firstIndex(of: ":") else { continue }
         let name = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
@@ -2377,13 +2390,13 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
              "proxy-connection", "keep-alive", "te", "upgrade":
             continue
         case "authorization", "x-api-key":
-            if local { continue }   // replaced below for the local engine
+            if local && !keepGuestKey { continue }   // replaced below for the local engine
             req.setValue(value, forHTTPHeaderField: name)
         default:
             req.setValue(value, forHTTPHeaderField: name)
         }
     }
-    if local {
+    if local && !keepGuestKey {
         req.setValue("Bearer \(InferenceService.apiKey)", forHTTPHeaderField: "Authorization")
     }
 

@@ -45,6 +45,7 @@ public enum LLMRouting {
         return h == "api.anthropic.com"
             || h == "api.openai.com"
             || h.hasSuffix(".api.anthropic.com")
+            || h == InferenceService.localMitmHost   // the local-inference sentinel
     }
 
     /// Decide where to send a request to `host:port`. `sessionKey` pins a
@@ -54,30 +55,30 @@ public enum LLMRouting {
                               context: LLMRoutingContext,
                               sessionKey: String,
                               localHost: String = InferenceService.engineHost,
-                              localPort: Int = InferenceService.enginePort,
+                              // Route to the tool-call-repair proxy (which fronts the
+                              // engine), not the bare engine, so local replies get
+                              // leaked-tool-call rescue + SSE re-emission like before.
+                              localPort: Int = InferenceService.repairProxyPort,
                               now: Double) -> UpstreamTarget {
         let cloud = UpstreamTarget(host: host, port: port,
                                    backend: .cloud, servedBy: "cloud")
         guard isLLMHost(host) else { return cloud }
 
+        let local = UpstreamTarget(host: localHost, port: localPort, backend: .local,
+                                   servedBy: "local-\(context.localModelLabel)")
+        // The local sentinel host *is* "use the on-host engine" — unconditional,
+        // independent of the cloud/local/hybrid mode (which steers real cloud
+        // hosts). The guest only ever targets it when local was selected.
+        if host.lowercased() == InferenceService.localMitmHost { return local }
+
         switch context.routing {
         case .cloud:
             return cloud
         case .local:
-            return UpstreamTarget(host: localHost, port: localPort,
-                                  backend: .local,
-                                  servedBy: "local-\(context.localModelLabel)")
+            return local
         case .hybrid:
             let decision = context.hybrid.route(sessionID: sessionKey, now: now)
-            switch decision.backend {
-            case .cloud:
-                return UpstreamTarget(host: host, port: port, backend: .cloud,
-                                      servedBy: "cloud")
-            case .local:
-                return UpstreamTarget(host: localHost, port: localPort,
-                                      backend: .local,
-                                      servedBy: "local-\(context.localModelLabel)")
-            }
+            return decision.backend == .local ? local : cloud
         }
     }
 
