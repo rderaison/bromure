@@ -1705,6 +1705,29 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         return specs
     }
 
+    // MARK: - Local Models ↔ Agents sync (Bug#6)
+
+    /// Pin every agent (primary + additional) at the on-host engine. Called when
+    /// the user turns on local mode and picks a model in "Local Models", so that
+    /// one action configures the workspace's agents — no second trip to the
+    /// "Agents" pane. Each `.local` agent serves the profile's `activeModelID`.
+    public mutating func setAllAgentsLocal() {
+        authMode = .local
+        for i in additionalTools.indices { additionalTools[i].authMode = .local }
+    }
+
+    /// Undo `setAllAgentsLocal` when local mode is turned off (routing leaves
+    /// `.local`): restore each agent's pre-local auth from `prior` so a
+    /// subscription isn't clobbered, falling back to `.token`. Only touches
+    /// agents currently in `.local` mode, so a manually cloud-configured agent
+    /// is left alone.
+    public mutating func clearAgentsLocal(restoring prior: [Tool: AuthMode] = [:]) {
+        if authMode == .local { authMode = prior[tool] ?? .token }
+        for i in additionalTools.indices where additionalTools[i].authMode == .local {
+            additionalTools[i].authMode = prior[additionalTools[i].tool] ?? .token
+        }
+    }
+
     // MARK: - Fusion eligibility
 
     /// True when `tool` is enabled in this profile AND has a credential Fusion

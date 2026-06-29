@@ -14,6 +14,9 @@ public final class ModelDownloadManager {
     public enum State: Equatable {
         case downloading(Double, String)   // fraction 0–1, "X.X / Y GB"
         case failed(String)
+        /// A pull interrupted by a crash/kill (sentinel left behind): bytes
+        /// already on disk + the expected total, for a "Resume / Discard" row.
+        case interrupted(bytesOnDisk: Int64, totalBytes: Int64)
     }
 
     /// Keyed by HF repo.
@@ -36,6 +39,14 @@ public final class ModelDownloadManager {
     /// determinate bar.
     public func start(repo: String, totalBytes: Int64) {
         guard tasks[repo] == nil else { return }
+        // Preflight disk space before showing "downloading", so a doomed pull
+        // surfaces as a clear failure (with Retry) instead of a false start.
+        do {
+            try ModelDownloader.checkDiskSpace(repo: repo, expectedBytes: totalBytes)
+        } catch {
+            states[repo] = .failed(error.localizedDescription)
+            return
+        }
         states[repo] = .downloading(0, "Starting…")
         let total = max(1, totalBytes)
         let task = Task { [weak self] in
@@ -51,7 +62,7 @@ public final class ModelDownloadManager {
                 }
             }
             do {
-                try await ModelDownloader.pull(repo: repo, onProgress: { _ in })
+                try await ModelDownloader.pull(repo: repo, expectedBytes: totalBytes, onProgress: { _ in })
                 poller.cancel()
                 self?.finishOK(repo)
             } catch is CancellationError {
@@ -59,7 +70,7 @@ public final class ModelDownloadManager {
                 self?.finishCancelled(repo)
             } catch {
                 poller.cancel()
-                self?.finishFailed(repo, "\(error)")
+                self?.finishFailed(repo, error.localizedDescription)
             }
         }
         tasks[repo] = task
@@ -68,6 +79,29 @@ public final class ModelDownloadManager {
     /// Cancel an in-flight download (terminates `hf` + removes the partial).
     public func cancel(repo: String) {
         tasks[repo]?.cancel()
+    }
+
+    /// Surface any download interrupted by a crash/kill — its in-progress
+    /// sentinel outlived the app — as a resumable entry, so the picker offers
+    /// "Resume" or "Discard" rather than silently leaving a half-pull on disk
+    /// (Bug#2). Call once at launch. Resuming is just `start(repo:)` again
+    /// (HubDownloader skips files already complete); discarding deletes them.
+    public func detectInterrupted() {
+        for repo in CatalogStore.shared.interruptedRepos() {
+            if tasks[repo] != nil { continue }                 // a live pull owns it
+            if case .interrupted = states[repo] { continue }   // already surfaced
+            let onDisk = CatalogStore.shared.installedBytes(repo: repo)
+            let totalGB = CatalogStore.shared.resolve(repo)?.downloadGB ?? 0
+            states[repo] = .interrupted(bytesOnDisk: onDisk,
+                                        totalBytes: Int64(totalGB * 1_000_000_000))
+        }
+    }
+
+    /// Throw away an interrupted (or failed) download's partial artifacts and
+    /// clear its state — the "quietly delete" branch of Bug#2.
+    public func discard(repo: String) {
+        try? CatalogStore.shared.removeInstalled(repo: repo)
+        states[repo] = nil
     }
 
     private func finishOK(_ repo: String) {

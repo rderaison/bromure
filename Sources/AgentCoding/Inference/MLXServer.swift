@@ -44,7 +44,16 @@ final class MLXServer: @unchecked Sendable {
         Task {
             await MLXEngine.shared.setMemoryBudget(memoryBudgetGB)
             for m in models {
-                _ = try? await MLXEngine.shared.ensureLoaded(repo: m.repo, estMemGB: m.estMemGB)
+                // Log load outcome to stderr — captured into the Inference Engine
+                // Log window — so a model that can't load says *why* instead of
+                // failing silently. (Was a swallowed `try?`.)
+                do {
+                    _ = try await MLXEngine.shared.ensureLoaded(repo: m.repo, estMemGB: m.estMemGB)
+                    FileHandle.standardError.write(Data("[engine] loaded \(m.repo)\n".utf8))
+                } catch {
+                    FileHandle.standardError.write(Data(
+                        "[engine] failed to load \(m.repo): \(error.localizedDescription)\n".utf8))
+                }
             }
         }
         if alreadyRunning { return }
@@ -131,7 +140,8 @@ final class MLXServer: @unchecked Sendable {
 
     private func inference(_ req: Request, wire: Wire) -> Data {
         guard let payload = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] else {
-            return Self.json(status: 400, object: ["error": ["message": "invalid JSON body"]])
+            return Self.json(status: 400, object: wire.errorJSON(message: "invalid JSON body",
+                                                                 type: "invalid_request_error"))
         }
         let parsed = WireRequest.parse(payload, wire: wire)
         let repo = parsed.model
@@ -181,7 +191,19 @@ final class MLXServer: @unchecked Sendable {
 
         switch result! {
         case .failure(let err):
-            return Self.json(status: 500, object: ["error": ["message": "\(err.localizedDescription)"]])
+            // Surface the reason in the Inference Engine Log too (this runs in
+            // the engine child; its stderr is teed into the log window).
+            FileHandle.standardError.write(Data(
+                "[engine] request for \(repo) failed: \(err.localizedDescription)\n".utf8))
+            // Native per-wire error envelope carrying the engine's real reason
+            // (e.g. "Couldn't load <model>: unsupported architecture") so the
+            // agent shows it instead of a generic "issue with the selected
+            // model" (Bug#5). A model that can't load won't load on retry, so
+            // use a 4xx the agent surfaces immediately rather than a 5xx it
+            // retries.
+            return Self.json(status: 400,
+                             object: wire.errorJSON(message: err.localizedDescription,
+                                                    type: "invalid_request_error"))
         case .success(let c):
             EngineMetrics.shared.record(prompt: c.promptTokens, completion: c.completionTokens,
                                   ttft: c.ttft, duration: c.ttft + c.decodeSeconds)

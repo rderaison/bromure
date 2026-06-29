@@ -77,26 +77,30 @@ public enum PromptInjectionModels {
         }
     }
 
-    /// Free host space required before starting a model download. The
-    /// largest asset (the ModernBERT model.onnx) is ~600 MB and lands in a
-    /// temp file before an instant same-volume move, so peak usage is ~one
-    /// model; 1.5 GB leaves comfortable headroom.
-    static let minimumFreeBytes: UInt64 = 1_500_000_000
+    /// Free-space preflight: the `diskFull` error to surface if the models
+    /// volume can't hold this detector's assets plus a safety margin, or nil if
+    /// it fits (or free space can't be read — we fail open). Shared by
+    /// `download(_:)` and the editor's confirm-and-download flow so both refuse
+    /// a doomed download up front. Mirrors the MLX-weights gate via `DiskSpace`.
+    static func diskSpaceError(for kind: Kind) -> Err? {
+        guard let free = DiskSpace.freeBytes(at: directory(for: kind)) else { return nil }
+        let need = DiskSpace.requiredBytes(forWriting: kind.approxBytes)
+        guard free < UInt64(need) else { return nil }
+        return .diskFull(availableMB: free / (1024 * 1024),
+                         requiredMB: UInt64(need) / (1024 * 1024))
+    }
 
     /// Download every file for `kind` (skipping ones already present + valid).
     /// Atomic per-file; verifies the size floor.
     public static func download(_ kind: Kind,
                                 progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws {
+        // Fail fast on a near-full host so a half-written model doesn't
+        // silently disable the detector (or wedge the move). Also enforced by
+        // the editor flow before the progress panel; this covers the launch-time
+        // background fetch (`ensureInstalledInBackground`).
+        if let err = diskSpaceError(for: kind) { throw err }
         let dir = directory(for: kind)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        // Fail fast on a near-full host so a half-written model doesn't
-        // silently disable the detector (or wedge the move).
-        if let free = (try? FileManager.default
-            .attributesOfFileSystem(forPath: dir.path)[.systemFreeSize]) as? UInt64,
-           free < minimumFreeBytes {
-            throw Err.diskFull(availableMB: free / (1024 * 1024),
-                               requiredMB: minimumFreeBytes / (1024 * 1024))
-        }
         let files = kind.files
         // Byte-weighted progress: the model.onnx dominates (≈99% of the
         // bytes), so per-file step progress would freeze the bar for the

@@ -55,6 +55,7 @@ struct BromureAC: ParsableCommand {
     /// this, `bromure-ac -AppleLanguages "(fr)"` exits with "Unknown option"
     /// before NSApplication starts. Mirrors the browser entry point.
     static func main() {
+        let invokedName = URL(fileURLWithPath: CommandLine.arguments.first ?? "").lastPathComponent
         let args = Array(CommandLine.arguments.dropFirst())
         var filtered: [String] = []
         var skipNext = false
@@ -62,6 +63,14 @@ struct BromureAC: ParsableCommand {
             if skipNext { skipNext = false; continue }
             if arg.hasPrefix("-Apple") { skipNext = true; continue }
             filtered.append(arg)
+        }
+        // Invoked as `bromure-cli` (the /usr/local/bin symlink → this binary)
+        // with no subcommand: print help instead of falling through to the GUI
+        // default subcommand (Run), which traps when there's no .app bundle to
+        // host NSApplication. The .app's own `bromure-ac` binary keeps its GUI
+        // default. (Bug#4.)
+        if filtered.isEmpty, invokedName == "bromure-cli" {
+            filtered = ["help"]
         }
         Self.main(filtered)
     }
@@ -306,6 +315,12 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                         keyEquivalent: "")
     supplyChainLogItem.target = delegate
     windowMenu.addItem(supplyChainLogItem)
+
+    let inferenceLogItem = NSMenuItem(title: L("Inference Engine Log…"),
+                                      action: #selector(ACAppDelegate.openInferenceLogAction(_:)),
+                                      keyEquivalent: "")
+    inferenceLogItem.target = delegate
+    windowMenu.addItem(inferenceLogItem)
     // The bromure.io Enrollment item is added to the *app* menu (next
     // to Check for Updates…) rather than here — see
     // `ACAppDelegate.installEnrollmentMenuItem(into:)`, called from
@@ -1109,6 +1124,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // background (vLLM.md §5.1). Non-fatal — falls back to the bundled
         // catalog.json on any network failure, so this never blocks launch.
         Task.detached(priority: .background) { await CatalogStore.shared.refresh() }
+
+        // Surface any model download a previous crash/kill left half-finished as
+        // a resumable entry in the Local Models picker (Bug#2). GUI only.
+        if !headless {
+            Task { @MainActor in ModelDownloadManager.shared.detectInterrupted() }
+        }
 
         // Reap any vllm-mlx engine orphaned by a previous hard kill before we
         // start our own (it can hold tens of GB of unified memory).
@@ -2410,6 +2431,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             supplyChainLogWindow = nil
             return
         }
+        if win === inferenceLogWindow {
+            inferenceLogWindow = nil
+            return
+        }
         if win === traceInspectorWindow {
             traceInspectorWindow = nil
             return
@@ -2673,6 +2698,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var preferencesWindow: NSWindow?
     private var remoteAccessWindow: NSWindow?
     private var supplyChainLogWindow: NSWindow?
+    private var inferenceLogWindow: NSWindow?
     /// File-browser panels, one per profile (keyed by profile id) so each
     /// session window gets its own, reused on subsequent clicks.
     private var fileBrowserWindows: [UUID: NSWindow] = [:]
@@ -2755,6 +2781,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         supplyChainLogWindow = win
+    }
+
+    /// Window menu → "Inference Engine Log…". A live tail of the on-device MLX
+    /// engine's output (model load, "serving", OOM/crash, load errors) — so
+    /// diagnosing a local-model problem doesn't mean digging through Console.
+    /// One window app-wide; reopening brings it forward.
+    @objc func openInferenceLogAction(_ sender: Any?) {
+        if let win = inferenceLogWindow {
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 460),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false)
+        win.title = NSLocalizedString("Inference Engine Log", comment: "")
+        win.center()
+        win.delegate = self
+        win.isReleasedWhenClosed = false
+        win.contentView = NSHostingView(rootView: LogConsoleView.inferenceEngine())
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        inferenceLogWindow = win
     }
 
     /// Window menu → "Enroll in bromure.io…" / "bromure.io Enrollment".

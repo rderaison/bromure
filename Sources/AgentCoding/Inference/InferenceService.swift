@@ -164,6 +164,9 @@ public actor InferenceService {
     private var process: Process?
     private var lastConfig: EngineSpawnConfig?
     private var restartCount = 0
+    /// Tees the engine child's stdout/stderr into the Inference Engine Log.
+    /// Retained for the child's lifetime; replaced on each (re)spawn.
+    private var engineLogReader: PipeLineReader?
 
     public init(engine: InferenceEngine = .vllmMLX, catalog: CatalogStore = .shared) {
         self.engine = engine
@@ -294,9 +297,22 @@ public actor InferenceService {
         env[Self.engineKeyEnvVar] = Self.apiKey            // parent's admin key
         env[EngineKey.masterEnvVar] = EngineKey.masterHex  // so the child can verify per-VM keys
         proc.environment = env
+
+        // Tee the engine child's stdout+stderr into the Inference Engine Log
+        // (Window → Inference Engine Log…) so model-load / "serving" / OOM /
+        // error lines are visible without Console. The buffer also mirrors each
+        // line to our stderr, preserving the prior bromure-ac.log behavior.
+        let logPipe = Pipe()
+        proc.standardOutput = logPipe
+        proc.standardError = logPipe
+        let reader = PipeLineReader { InferenceLog.shared.record($0) }
+        reader.attach(to: logPipe.fileHandleForReading)
+        self.engineLogReader = reader
+
         proc.terminationHandler = { [weak self] p in
             Task { await self?.onEngineExit(p) }
         }
+        InferenceLog.shared.record("[inference] starting engine for: \(repos.joined(separator: ", "))")
         try proc.run()
         self.process = proc
         self.activeModels = repos
@@ -306,6 +322,8 @@ public actor InferenceService {
         try await waitUntilReady(deadline: Date().addingTimeInterval(timeout))
         restartCount = 0   // healthy boot resets the crash-loop counter
         InferenceRepairProxy.shared.startIfNeeded(enginePort: Self.enginePort)
+        InferenceLog.shared.record(
+            "[inference] engine ready on port \(Self.enginePort) — serving \(repos.count) model(s).")
     }
 
     /// Engine-child termination handler. Restarts on an unexpected exit (a
@@ -316,13 +334,13 @@ public actor InferenceService {
         Self.runningPID = 0
         guard let cfg = lastConfig, !activeModels.isEmpty else { return }
         guard restartCount < 3 else {
-            FileHandle.standardError.write(Data(
-                "[inference] engine child crashed repeatedly — giving up (a model likely OOMs this Mac)\n".utf8))
+            InferenceLog.shared.record(
+                "[inference] engine child crashed repeatedly — giving up (a model likely OOMs this Mac)")
             return
         }
         restartCount += 1
-        FileHandle.standardError.write(Data(
-            "[inference] engine child exited (OOM?); restarting (\(restartCount)/3)\n".utf8))
+        InferenceLog.shared.record(
+            "[inference] engine child exited (OOM?); restarting (\(restartCount)/3)")
         try? await Task.sleep(nanoseconds: 1_500_000_000)
         try? await spawnEngine(config: cfg, repos: activeModels, timeout: 120)
     }

@@ -475,8 +475,10 @@ struct ModelPull: ParsableCommand {
         guard CatalogStore.looksLikeHFRepo(repo) || CatalogStore.shared.resolve(model) != nil else {
             throw ValidationError("'\(model)' isn't a known catalog id or an org/repo.")
         }
-        print("Validating \(repo) …")
         let total = max(1, Int64((CatalogStore.shared.resolve(model)?.downloadGB ?? 1) * 1_000_000_000))
+        // Fail fast on a full disk — before provisioning or hitting the network.
+        try ModelDownloader.checkDiskSpace(repo: repo, expectedBytes: total)
+        print("Validating \(repo) …")
         try blockingRun {
             // `hf` ships inside the engine venv — provision it first if needed.
             if EngineProvisioner.resolveUV() != nil, !EngineProvisioner.shared.isProvisioned {
@@ -492,7 +494,7 @@ struct ModelPull: ParsableCommand {
                 }
             }
             do {
-                try await ModelDownloader.pull(repo: repo, onProgress: { _ in })
+                try await ModelDownloader.pull(repo: repo, expectedBytes: total, onProgress: { _ in })
                 poller.cancel()
                 ProgressBar.draw(1.0, label: "done"); ProgressBar.finish()
             } catch { poller.cancel(); ProgressBar.finish(); throw error }

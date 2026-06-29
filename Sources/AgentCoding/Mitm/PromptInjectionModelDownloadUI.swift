@@ -64,6 +64,11 @@ final class PromptInjectionModelDownloader: NSObject {
         guard alert.runModal() == .alertFirstButtonReturn else {
             finish(success: false); return
         }
+        // Preflight disk space before committing, so the user is warned up front
+        // rather than watching the progress panel appear and immediately fail.
+        if let err = PromptInjectionModels.diskSpaceError(for: kind) {
+            finish(success: false, error: err); return
+        }
         guard PromptInjectionModels.claimInFlight(kind) else {
             // Something else started it between our checks.
             finish(success: true); return

@@ -61,6 +61,20 @@ enum Wire {
             ]
         }
     }
+
+    /// Error body in this wire's native shape, so the agent surfaces the real
+    /// reason instead of a generic "issue with the selected model" (Bug#5).
+    /// Anthropic (Claude) requires the `{"type":"error","error":{…}}` envelope;
+    /// the OpenAI surfaces (Grok/Codex) use `{"error":{…}}`. `type` is the
+    /// provider error class (e.g. invalid_request_error / api_error).
+    func errorJSON(message: String, type: String) -> [String: Any] {
+        switch self {
+        case .messages:
+            return ["type": "error", "error": ["type": type, "message": message]]
+        case .chat, .responses:
+            return ["error": ["message": message, "type": type, "code": NSNull()]]
+        }
+    }
 }
 
 /// A request parsed out of any of the three wire formats into the engine's

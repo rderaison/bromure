@@ -150,10 +150,61 @@ public final class CatalogStore: @unchecked Sendable {
     public func resolvedModelDirectory(for repo: String) -> URL? {
         let local = localModelDirectory(for: repo)
         if FileManager.default.fileExists(atPath: local.appendingPathComponent("config.json").path),
-           !hasSuffixFile(local, ".partial") {
+           !hasSuffixFile(local, ".partial"),
+           // Never "installed" while the in-progress sentinel is present — an
+           // interrupted download can have config.json yet be missing weight
+           // shards (the gap between files), which would otherwise read as a
+           // complete, loadable model. (Bug#2/#3.)
+           !FileManager.default.fileExists(atPath: incompleteMarkerURL(for: repo).path) {
             return local
         }
         return nil
+    }
+
+    // MARK: - Download completion sentinel (interrupted-download detection)
+
+    /// Sentinel file written into a model's dir while its download is in flight
+    /// and removed only once every file has landed. A sentinel left behind after
+    /// a crash/kill marks an *interrupted* download: such a dir is never treated
+    /// as installed (above) and never merged into the catalog as an "installed
+    /// extra", so a half-pull can't masquerade as a real model (Bug#2/#3).
+    public static let incompleteMarkerName = ".incomplete"
+
+    public func incompleteMarkerURL(for repo: String) -> URL {
+        localModelDirectory(for: repo).appendingPathComponent(Self.incompleteMarkerName)
+    }
+
+    /// Begin a download: create the per-repo dir and drop the in-progress
+    /// sentinel. Idempotent (safe to call again when resuming).
+    public func beginDownload(repo: String) {
+        let dir = localModelDirectory(for: repo)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: incompleteMarkerURL(for: repo).path, contents: nil)
+    }
+
+    /// Finish a download cleanly: remove the sentinel so the model now reads as
+    /// installed.
+    public func finishDownload(repo: String) {
+        try? FileManager.default.removeItem(at: incompleteMarkerURL(for: repo))
+    }
+
+    /// True if `repo`'s dir exists but still carries the in-progress sentinel —
+    /// a download the app didn't finish (killed/crashed mid-pull).
+    public func isInterrupted(repo: String) -> Bool {
+        let dir = localModelDirectory(for: repo)
+        return FileManager.default.fileExists(atPath: dir.path)
+            && FileManager.default.fileExists(atPath: incompleteMarkerURL(for: repo).path)
+    }
+
+    /// Every repo with a lingering in-progress sentinel — the set of interrupted
+    /// downloads to offer for resume (or discard) on launch.
+    public func interruptedRepos() -> [String] {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: modelsDir.path)
+        else { return [] }
+        return names.filter { $0.contains("--") }
+            .map { $0.replacingOccurrences(of: "--", with: "/") }
+            .filter { isInterrupted(repo: $0) }
+            .sorted()
     }
 
     /// One-time move of models the old `hf` CLI left in the HF hub cache

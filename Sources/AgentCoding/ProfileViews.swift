@@ -167,6 +167,9 @@ struct ProfileStorageContext {
 struct ProfileEditorView: View {
     @State private var draft: Profile
     @State private var selectedCategory: EditorCategory = .general
+    /// Each agent's auth before local mode pinned it to `.local` (Bug#6), so
+    /// turning local mode back off restores it instead of clobbering it.
+    @State private var preLocalAuthModes: [Profile.Tool: Profile.AuthMode] = [:]
     private let isNew: Bool
     private let terminalDefaults: TerminalAppDefaults
     /// Where the profile's bytes live + how to reset them. Optional
@@ -378,6 +381,27 @@ struct ProfileEditorView: View {
                }) {
                 selectedCategory = cat
             }
+        }
+        // Bug#6: enabling local mode + choosing a model also configures the
+        // workspace's agents to use it (auth → "Local model"), so it's not a
+        // two-step "Local Models, then Agents" dance. Watches the two controls
+        // the Local Models pane drives.
+        .onChange(of: draft.modelRouting) { _, _ in syncAgentsForLocalModels() }
+        .onChange(of: draft.activeModelID) { _, _ in syncAgentsForLocalModels() }
+    }
+
+    /// Keep agent auth in step with the Local Models pane (Bug#6). In local mode
+    /// with a model chosen, every agent is pinned to the on-host engine; leaving
+    /// local mode restores each agent's prior cloud auth.
+    private func syncAgentsForLocalModels() {
+        if draft.modelRouting == .local, draft.activeModelID != nil {
+            if draft.authMode != .local { preLocalAuthModes[draft.tool] = draft.authMode }
+            for s in draft.additionalTools where s.authMode != .local {
+                preLocalAuthModes[s.tool] = s.authMode
+            }
+            draft.setAllAgentsLocal()
+        } else {
+            draft.clearAgentsLocal(restoring: preLocalAuthModes)
         }
     }
 
@@ -2999,6 +3023,26 @@ struct LocalModelsSettingsView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Stop download")
+            }
+        case .interrupted(let onDisk, let total):
+            // A pull the app didn't finish (crash/kill). Offer to resume it
+            // (HubDownloader skips files already on disk) or discard the
+            // partial. (Bug#2.)
+            HStack(spacing: 8) {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("Interrupted").font(.caption2).foregroundStyle(.orange)
+                    Text(total > 0 ? ProgressBar.bytesLabel(onDisk, total)
+                                   : ByteCountFormatter.string(fromByteCount: onDisk, countStyle: .file))
+                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                Button("Resume") { startDownload(model) }.controlSize(.small)
+                Button {
+                    downloads.discard(repo: model.repo)
+                } label: {
+                    Image(systemName: "trash").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Discard the partial download")
             }
         case .failed(let msg):
             HStack(spacing: 6) {
