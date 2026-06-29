@@ -9,6 +9,15 @@
     <string>W3RD8G85BC.io.bromure.agentic-coding</string>
     <key>com.apple.developer.team-identifier</key>
     <string>W3RD8G85BC</string>
+    <!-- Data-protection keychain access group (team-prefixed; self-authorized
+         by the Developer ID cert). Without this the DPKC has no group to grant,
+         so SecItemAdd/Copy fail with errSecMissingEntitlement and at-rest
+         encryption (trace bodies, captured Claude credentials) silently fails,
+         forcing the file-key fallback. -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>W3RD8G85BC.io.bromure.agentic-coding</string>
+    </array>
     <!-- vmnet framework for host-side network filtering -->
     <key>com.apple.developer.networking.vmnet</key>
     <true/>

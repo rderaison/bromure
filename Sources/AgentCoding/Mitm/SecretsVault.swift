@@ -36,9 +36,15 @@ public enum SecretsVault {
             return fetched
         }
         let fresh = SymmetricKey(size: .bits256)
-        if (try? storeInKeychain(fresh)) != nil {
+        do {
+            try storeInKeychain(fresh)
             cachedKey = fresh
             return fresh
+        } catch {
+            // Log the real OSStatus (e.g. -34018 errSecMissingEntitlement) so a
+            // signing/entitlement misconfig is diagnosable instead of silent.
+            FileHandle.standardError.write(Data(
+                "[secrets] keychain store failed: \(error) — falling back to file key\n".utf8))
         }
 
         // Fallback: a 0600 key file under Application Support. The Data
