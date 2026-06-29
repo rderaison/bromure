@@ -4538,6 +4538,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sendCommand("docker-remove \(id)", in: pane)
     }
 
+    /// Install cross-arch QEMU emulation (binfmt handlers) in the workspace.
+    func requestDockerBinfmtInstall(in pane: SessionPane) {
+        sendCommand("docker-binfmt", in: pane)
+    }
+
     /// User-supplied fields for the "new container" dialog.
     struct DockerRunSpec {
         var image: String
@@ -4545,6 +4550,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var ports: [String] = []     // "8080:80"
         var env: [String] = []       // "KEY=val"
         var volumes: [String] = []   // "/host:/container"
+        /// Pass the workspace's whole environment (API tokens, etc.) through.
+        var inheritEnv: Bool = false
+        /// Pass just the HTTP(S) proxy vars (covered by inheritEnv when set).
+        var inheritProxy: Bool = false
     }
 
     /// Launch a new container. The whole `docker run -d …` command is assembled
@@ -4572,7 +4581,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         cmd += " \(q(image))"
         cmd = cmd.replacingOccurrences(of: "\n", with: " ")
-        sendCommand("docker-run \(cmd)", in: pane)
+        // The guest builds the --env-file (from the workspace's login shell) and
+        // runs this command backgrounded, so a slow pull / inherited-env capture
+        // can't wedge its command loop. `inheritEnv` is a superset of proxy.
+        let mode = spec.inheritEnv ? "env" : (spec.inheritProxy ? "proxy" : "none")
+        sendCommand("docker-run \(mode) \(cmd)", in: pane)
     }
 
     /// Toggle the guest's expensive dashboard polling (CPU/mem + images) by
@@ -5046,6 +5059,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sandbox.onDockerImages = { [weak self] images in
             Task { @MainActor in
                 self?.pane(for: pid)?.applyDockerImages(images)
+            }
+        }
+        sandbox.onDockerError = { [weak self] message in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyDockerError(message)
+            }
+        }
+        sandbox.onDockerBinfmt = { [weak self] arches in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyDockerBinfmt(arches)
+            }
+        }
+        sandbox.onDockerArch = { [weak self] list in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyDockerArch(list)
             }
         }
         sandbox.onIPUpdate = { [weak self] ip in

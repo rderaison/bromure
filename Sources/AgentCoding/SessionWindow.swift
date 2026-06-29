@@ -19,6 +19,8 @@ public struct DockerContainer: Identifiable, Equatable {
     /// Filled from `docker stats` (gated, dashboard-only); "" when unknown.
     public var cpuPerc: String
     public var memUsage: String
+    /// Image architecture, dashboard-only (e.g. "amd64", "arm64", "arm/v7").
+    public var arch: String = ""
     public var shortID: String { String(id.prefix(12)) }
     public var isRunning: Bool { state == "running" }
     /// CPU as a number (docker reports "12.34%"); nil while unknown.
@@ -100,6 +102,14 @@ final class TabsModel {
     var dockerContainers: [DockerContainer] = []
     /// Local docker images — only refreshed while a dashboard is open (gated).
     var dockerImages: [DockerImage] = []
+    /// Most recent docker action failure (run/start/stop/remove), shown as a
+    /// banner in the dashboard until dismissed.
+    var dockerError: String?
+    /// qemu arch suffixes currently emulated (binfmt_misc), dashboard-only.
+    var binfmtArches: [String] = []
+    /// True once we've received a binfmt probe (distinguishes "none" from
+    /// "not yet known" so the UI doesn't flash the install button).
+    var binfmtProbed = false
     var accentHex: String = "#3B82F6"
     /// Most recent VM IP reported by the guest's xinitrc loop. Surfaced
     /// in the toolbar; click to copy.

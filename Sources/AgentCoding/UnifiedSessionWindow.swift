@@ -158,8 +158,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onSelectTab: { [weak self] id, idx in self?.selectTab(profileID: id, index: idx) },
             onNewTab:    { [weak self] id in self?.newTab(profileID: id) },
             onCloseTab:  { [weak self] id, idx in self?.closeTab(profileID: id, index: idx) },
-            onDockerAttach: { [weak self] id, cid, shell in self?.dockerAttach(profileID: id, containerID: cid, shell: shell) },
             onSelectDocker: { [weak self] id in self?.showDockerDashboard(id) },
+            onOpenContainer: { [weak self] id, cid in self?.showDockerDashboard(id, container: cid) },
             onDetachVM:  { [weak self] id in self?.acDelegate?.popOutVM(id) },
             onCloseVM:   { [weak self] id in self?.acDelegate?.closeVMFromSidebar(id) },
             onStart:     { [weak self] id in self?.acDelegate?.startProfile(id) },
@@ -360,7 +360,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     /// Show the Docker dashboard for a VM in the stage (over its framebuffer),
     /// and turn on the guest's expensive stats/images polling for the duration.
-    func showDockerDashboard(_ id: Profile.ID) {
+    func showDockerDashboard(_ id: Profile.ID, container: String? = nil) {
         guard let selPane = pane(id) else { return }
         if let prev = dockerSelectedID, prev != id, let p = pane(prev) {
             acDelegate?.setDockerWatch(false, in: p)   // hand off watch between VMs
@@ -376,7 +376,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onStart:  { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerStart(containerID: cid, in: p) } },
             onStop:   { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerStop(containerID: cid, in: p) } },
             onRemove: { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerRemove(containerID: cid, in: p) } },
-            onAttach: { [weak self] cid, shell in self?.dockerAttach(profileID: id, containerID: cid, shell: shell) })
+            onAttach: { [weak self] cid, shell in self?.dockerAttach(profileID: id, containerID: cid, shell: shell) },
+            onInstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtInstall(in: p) } },
+            initialContainerID: container)
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         dockerSlot.addSubview(host)
@@ -511,10 +513,10 @@ private struct SessionSidebar: View {
     let onSelectTab: (Profile.ID, Int) -> Void
     let onNewTab: (Profile.ID) -> Void
     let onCloseTab: (Profile.ID, Int) -> Void
-    /// (profileID, containerID, shell) — attach to a docker container in a new tab.
-    let onDockerAttach: (Profile.ID, String, String) -> Void
     /// Open the VM's Docker dashboard in the stage.
     let onSelectDocker: (Profile.ID) -> Void
+    /// (profileID, containerID) — open the dashboard on this container's detail.
+    let onOpenContainer: (Profile.ID, String) -> Void
     let onDetachVM: (Profile.ID) -> Void
     let onCloseVM: (Profile.ID) -> Void
     let onStart: (Profile.ID) -> Void
@@ -553,8 +555,8 @@ private struct SessionSidebar: View {
                             onSelectTab: onSelectTab,
                             onNewTab: onNewTab,
                             onCloseTab: onCloseTab,
-                            onDockerAttach: onDockerAttach,
                             onSelectDocker: onSelectDocker,
+                            onOpenContainer: onOpenContainer,
                             onDetachVM: onDetachVM,
                             onCloseVM: onCloseVM,
                             onStart: onStart,
@@ -616,8 +618,8 @@ private struct VMSection: View {
     let onSelectTab: (Profile.ID, Int) -> Void
     let onNewTab: (Profile.ID) -> Void
     let onCloseTab: (Profile.ID, Int) -> Void
-    let onDockerAttach: (Profile.ID, String, String) -> Void
     let onSelectDocker: (Profile.ID) -> Void
+    let onOpenContainer: (Profile.ID, String) -> Void
     let onDetachVM: (Profile.ID) -> Void
     let onCloseVM: (Profile.ID) -> Void
     let onStart: (Profile.ID) -> Void
@@ -721,7 +723,7 @@ private struct VMSection: View {
                         isSelected: isSelected,
                         isDockerActive: isDockerActive,
                         onOpen: { onSelectDocker(row.id) },
-                        onAttach: { cid, shell in onDockerAttach(row.id, cid, shell) },
+                        onOpenContainer: { cid in onOpenContainer(row.id, cid) },
                         onSelectTab: { idx in onSelectTab(row.id, idx) },
                         onCloseTab: { idx in onCloseTab(row.id, idx) })
                 }
@@ -877,8 +879,8 @@ private struct DockerSection: View {
     let isSelected: Bool
     let isDockerActive: Bool
     let onOpen: () -> Void
-    /// (containerID, shell)
-    let onAttach: (String, String) -> Void
+    /// containerID — open the dashboard on this container's detail.
+    let onOpenContainer: (String) -> Void
     /// model position of a nested attach tab
     let onSelectTab: (Int) -> Void
     let onCloseTab: (Int) -> Void
@@ -904,13 +906,11 @@ private struct DockerSection: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(isDockerActive ? .primary : .secondary)
                     .lineLimit(1)
-                if !running.isEmpty {
-                    Text("\(running.count)")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(Capsule().fill(Color.primary.opacity(0.08)))
-                }
+                Text("\(running.count)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.primary.opacity(0.08)))
                 Spacer(minLength: 2)
             }
             .padding(.leading, 16)
@@ -925,23 +925,16 @@ private struct DockerSection: View {
             .onHover { headerHover = $0 }
 
             if expanded {
-                if running.isEmpty {
-                    Text("No running containers")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                        .padding(.leading, 34).padding(.vertical, 3)
-                } else {
-                    ForEach(running) { container in
-                        DockerContainerRow(
-                            container: container,
-                            accentHex: accentHex,
-                            isSelected: isSelected,
-                            tabs: tabRows(for: container),
-                            activeTabID: model.activeTab?.id,
-                            onAttach: { shell in onAttach(container.id, shell) },
-                            onSelectTab: onSelectTab,
-                            onCloseTab: onCloseTab)
-                    }
+                ForEach(running) { container in
+                    DockerContainerRow(
+                        container: container,
+                        accentHex: accentHex,
+                        isSelected: isSelected,
+                        tabs: tabRows(for: container),
+                        activeTabID: model.activeTab?.id,
+                        onOpen: { onOpenContainer(container.id) },
+                        onSelectTab: onSelectTab,
+                        onCloseTab: onCloseTab)
                 }
             }
         }
@@ -963,12 +956,11 @@ private struct DockerContainerRow: View {
     let isSelected: Bool
     let tabs: [(pos: Int, tab: TabsModel.Tab)]
     let activeTabID: UUID?
-    let onAttach: (String) -> Void
+    /// Open the dashboard on this container's detail screen.
+    let onOpen: () -> Void
     let onSelectTab: (Int) -> Void
     let onCloseTab: (Int) -> Void
     @State private var hovering = false
-    @State private var showDetails = false
-    @State private var shell = "bash"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -984,9 +976,7 @@ private struct DockerContainerRow: View {
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 2)
                 if hovering {
-                    IconButton(system: "terminal", help: "Attach a shell", size: 10) {
-                        showDetails = true
-                    }
+                    IconButton(system: "info.circle", help: "Details & attach", size: 10) { onOpen() }
                 }
             }
             .padding(.leading, 34)
@@ -994,21 +984,10 @@ private struct DockerContainerRow: View {
             .padding(.vertical, 4)
             .background(
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(showDetails ? Color.primary.opacity(0.08)
-                                      : (hovering ? Color.primary.opacity(0.04) : .clear)))
+                    .fill(hovering ? Color.primary.opacity(0.04) : .clear))
             .contentShape(Rectangle())
-            .onTapGesture { showDetails.toggle() }
+            .onTapGesture(perform: onOpen)
             .onHover { hovering = $0 }
-            .popover(isPresented: $showDetails, arrowEdge: .trailing) {
-                DockerContainerPopover(
-                    container: container,
-                    shell: $shell,
-                    onAttach: {
-                        onAttach(shell)
-                        showDetails = false
-                    })
-                .frame(width: 260)
-            }
 
             ForEach(tabs, id: \.tab.id) { entry in
                 DockerTabRow(
@@ -1057,67 +1036,6 @@ private struct DockerTabRow: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovering = $0 }
-    }
-}
-
-/// Details + attach controls shown in the container popover.
-private struct DockerContainerPopover: View {
-    let container: DockerContainer
-    @Binding var shell: String
-    let onAttach: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(container.name.isEmpty ? container.shortID : container.name)
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            VStack(alignment: .leading, spacing: 3) {
-                DockerDetailRow(label: "Image", value: container.image)
-                DockerDetailRow(label: "Status", value: container.status)
-                if !container.ports.isEmpty {
-                    DockerDetailRow(label: "Ports", value: container.ports)
-                }
-                DockerDetailRow(label: "ID", value: container.shortID)
-            }
-
-            Divider()
-
-            HStack(spacing: 6) {
-                Text("shell:")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                TextField("bash", text: $shell)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .onSubmit(onAttach)
-                Button("Attach", action: onAttach)
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(12)
-    }
-}
-
-/// One "label: value" line in the container popover.
-private struct DockerDetailRow: View {
-    let label: String
-    let value: String
-    var body: some View {
-        HStack(alignment: .top, spacing: 6) {
-            Text(label)
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
-                .frame(width: 48, alignment: .leading)
-            Text(value)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .lineLimit(2)
-                .truncationMode(.middle)
-            Spacer(minLength: 0)
-        }
     }
 }
 

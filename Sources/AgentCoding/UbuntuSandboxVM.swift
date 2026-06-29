@@ -68,6 +68,18 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// (from `docker images`).
     public var onDockerImages: (([DockerImage]) -> Void)?
 
+    /// Called when a docker action (run / start / stop / remove) fails in the
+    /// guest — carries docker's stderr. One-shot: the file is consumed on read.
+    public var onDockerError: ((String) -> Void)?
+
+    /// Called (dashboard-only) with the qemu arch suffixes registered+enabled in
+    /// binfmt_misc (e.g. ["x86_64","arm"]). Empty = emulation not installed.
+    public var onDockerBinfmt: (([String]) -> Void)?
+
+    /// Called (dashboard-only) with each running container's architecture
+    /// (id, arch e.g. "amd64"/"arm64"/"arm/v7").
+    public var onDockerArch: (([(id: String, arch: String)]) -> Void)?
+
     /// Called when the guest bounces a host-owned keychord (⌘T/⌘W/⌘N/⌘1-9)
     /// back to the host. While the VM holds keyboard focus the VZ view
     /// forwards every chord to the guest before AppKit can intercept it, so
@@ -587,6 +599,38 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                                     size: im.Size ?? "", created: im.CreatedSince ?? ""))
                             }
                             self?.onDockerImages?(images)
+                            continue
+                        }
+                        // docker-binfmt.txt — space-separated qemu arch suffixes
+                        // currently emulated; may be empty (probed, none).
+                        if name == "docker-binfmt.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let arches = raw.split(whereSeparator: { $0 == " " || $0.isNewline })
+                                .map(String.init)
+                            self?.onDockerBinfmt?(arches)
+                            continue
+                        }
+                        // docker-arch.txt — "id<TAB>arch" per running container.
+                        if name == "docker-arch.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            var out: [(id: String, arch: String)] = []
+                            for line in raw.split(whereSeparator: \.isNewline) {
+                                let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
+                                guard cols.count >= 2 else { continue }
+                                out.append((id: String(cols[0]).trimmingCharacters(in: .whitespaces),
+                                            arch: String(cols[1]).trimmingCharacters(in: .whitespaces)))
+                            }
+                            self?.onDockerArch?(out)
+                            continue
+                        }
+                        // docker-error.txt — one-shot: a failed docker action's
+                        // stderr. Read, delete, surface. (Deleting makes it fire
+                        // once rather than every 40ms poll.)
+                        if name == "docker-error.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8))?
+                                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            try? fm.removeItem(at: entry)
+                            if !raw.isEmpty { self?.onDockerError?(raw) }
                             continue
                         }
                         // shortcut-<key>.txt is handled by the fast path at the

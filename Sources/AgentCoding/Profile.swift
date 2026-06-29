@@ -3717,6 +3717,12 @@ public final class ProfileStore {
 
     log() { printf '%s [agent] %s\n' "$(date +%T)" "$*" >> "$LOG"; }
 
+    # Surface a docker error to the host as a one-shot file (it reads + deletes).
+    docker_err() {
+        printf '%s' "$1" > "$INBOX/.docker-error.tmp" 2>/dev/null \
+            && mv -f "$INBOX/.docker-error.tmp" "$INBOX/docker-error.txt" 2>/dev/null
+    }
+
     log "starting"
 
     # --- Host-owned keychords: ⌘T / ⌘W / ⌘N / ⌘1-9 ----------------------------
@@ -3849,6 +3855,27 @@ public final class ProfileStore {
                     printf '%s' "$i" > "$INBOX/.docker-images.tmp" 2>/dev/null \
                         && mv -f "$INBOX/.docker-images.tmp" "$INBOX/docker-images.txt" 2>/dev/null
                 fi
+                # Cross-arch emulation: which qemu interpreters are registered AND
+                # enabled in binfmt_misc (e.g. qemu-x86_64). Space-separated arch
+                # suffixes; empty = no emulation installed. Always published (even
+                # empty) so the host can tell "probed, none" from "not yet probed".
+                b=""
+                for qf in /proc/sys/fs/binfmt_misc/qemu-*; do
+                    [ -e "$qf" ] || continue
+                    head -1 "$qf" 2>/dev/null | grep -q '^enabled' && b="$b ${qf##*/qemu-}"
+                done
+                printf '%s' "${b# }" > "$INBOX/.docker-binfmt.tmp" 2>/dev/null \
+                    && mv -f "$INBOX/.docker-binfmt.tmp" "$INBOX/docker-binfmt.txt" 2>/dev/null
+                # Per-running-container architecture (from the image config), one
+                # "id<TAB>arch" line each — lets the dashboard flag emulated ones.
+                a=""
+                for cid in $(docker ps -q 2>/dev/null); do
+                    img=$(docker inspect --format '{{.Image}}' "$cid" 2>/dev/null)
+                    ar=$(docker image inspect --format '{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}' "$img" 2>/dev/null)
+                    a="$a$cid	$ar"$'\n'
+                done
+                printf '%s' "$a" > "$INBOX/.docker-arch.tmp" 2>/dev/null \
+                    && mv -f "$INBOX/.docker-arch.tmp" "$INBOX/docker-arch.txt" 2>/dev/null
             fi
             sleep 2
         done
@@ -3885,16 +3912,54 @@ public final class ProfileStore {
                                   "docker exec -it $cid $sh" 2>/dev/null) \
                                 && tmux set-option -w -t "$win" @container "$cid" 2>/dev/null || true ;;
                         # Container lifecycle — arg is a single id (host-sanitised
-                        # to a conservative charset). Errors are swallowed; the
-                        # docker_loop roster reflects the new state within ~2s.
-                        docker-start)  docker start "$arg" >/dev/null 2>&1 || true ;;
-                        docker-stop)   docker stop "$arg" >/dev/null 2>&1 || true ;;
-                        docker-remove) docker rm -f "$arg" >/dev/null 2>&1 || true ;;
-                        # Launch a new container. arg is a COMPLETE `docker run -d …`
-                        # command the host assembled with POSIX single-quoting of
-                        # every user-supplied field, so running it via `bash -c` is
-                        # safe (each value is a single quoted literal).
-                        docker-run)    bash -c "$arg" >/dev/null 2>&1 || true ;;
+                        # to a conservative charset). BACKGROUNDED: `docker stop`
+                        # can block ~10s, and the command loop is single-threaded
+                        # — a blocking op here would stall every later command
+                        # (attach, select-tab, …). On failure the stderr is
+                        # surfaced to the host via docker_err; the roster reflects
+                        # the new state within ~2s.
+                        docker-start)  ( e=$(docker start "$arg" 2>&1 >/dev/null) || docker_err "$e" ) & ;;
+                        docker-stop)   ( e=$(docker stop "$arg" 2>&1 >/dev/null) || docker_err "$e" ) & ;;
+                        docker-remove) ( e=$(docker rm -f "$arg" 2>&1 >/dev/null) || docker_err "$e" ) & ;;
+                        # Install cross-arch emulation (QEMU binfmt handlers) the
+                        # docker-native way. Backgrounded — it pulls an image and
+                        # registers binfmt; the docker-binfmt.txt poll reflects it.
+                        docker-binfmt)
+                            ( e=$(docker run --privileged --rm tonistiigi/binfmt --install all 2>&1 >/dev/null) || docker_err "$e" ) & ;;
+                        # Launch a new container. arg is "<mode> <full docker run -d …>"
+                        # where mode ∈ none|env|proxy selects whether to inject an
+                        # --env-file built from the workspace's LOGIN-shell env (so
+                        # it sees the same token/proxy exports the agent shells do —
+                        # this agent runs non-interactively). The whole thing is
+                        # BACKGROUNDED and the env capture is `timeout`-bounded so a
+                        # slow image pull or a hanging rc can never wedge the loop.
+                        # The run command's user fields are already single-quoted by
+                        # the host; mode + injection are host/agent constants.
+                        docker-run)
+                            rmode="${arg%% *}"; rcmd="${arg#* }"
+                            (
+                                ef=""
+                                case "$rmode" in
+                                    env)
+                                        ef=$(mktemp)
+                                        timeout 8 bash -lic env 2>/dev/null \
+                                            | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
+                                            | grep -vE '^(PATH|HOME|HOSTNAME|PWD|OLDPWD|SHLVL|SHELL|TERM|USER|LOGNAME|MAIL|_|DISPLAY|XAUTHORITY|LS_COLORS)=' \
+                                            > "$ef" 2>/dev/null ;;
+                                    proxy)
+                                        ef=$(mktemp)
+                                        timeout 8 bash -lic env 2>/dev/null \
+                                            | grep -iE '^(http_proxy|https_proxy|no_proxy|all_proxy|ftp_proxy)=' \
+                                            > "$ef" 2>/dev/null ;;
+                                esac
+                                if [ -n "$ef" ]; then
+                                    full="${rcmd/docker run -d/docker run -d --env-file $ef}"
+                                else
+                                    full="$rcmd"
+                                fi
+                                e=$(bash -c "$full" 2>&1 >/dev/null) || docker_err "$e"
+                                [ -n "$ef" ] && rm -f "$ef"
+                            ) & ;;
                         # Halt, don't `reboot`. A guest-issued `sudo reboot`
                         # restarts the VM *in place* — VZ never fires
                         # guestDidStop, so the host's onStopped → relaunchVM

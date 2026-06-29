@@ -289,6 +289,7 @@ final class SessionPane {
         let merged = containers.map { c -> DockerContainer in
             var c = c
             if let s = dockerStats[c.id] { c.cpuPerc = s.cpu; c.memUsage = s.mem }
+            if let a = dockerArch[c.id] { c.arch = a }
             return c
         }
         if model.dockerContainers != merged { model.dockerContainers = merged }
@@ -311,6 +312,28 @@ final class SessionPane {
 
     func applyDockerImages(_ images: [DockerImage]) {
         if model.dockerImages != images { model.dockerImages = images }
+    }
+
+    func applyDockerError(_ message: String) {
+        model.dockerError = message
+    }
+
+    func applyDockerBinfmt(_ arches: [String]) {
+        if !model.binfmtProbed { model.binfmtProbed = true }
+        if model.binfmtArches != arches { model.binfmtArches = arches }
+    }
+
+    /// Last per-container architecture, merged into the container list like stats.
+    private var dockerArch: [String: String] = [:]
+    func applyDockerArch(_ list: [(id: String, arch: String)]) {
+        dockerArch = Dictionary(list.map { ($0.id, $0.arch) }, uniquingKeysWith: { a, _ in a })
+        var changed = false
+        var containers = model.dockerContainers
+        for i in containers.indices {
+            let a = dockerArch[containers[i].id] ?? ""
+            if containers[i].arch != a { containers[i].arch = a; changed = true }
+        }
+        if changed { model.dockerContainers = containers }
     }
 
     /// True when the host window is key AND the embedded VZ view holds keyboard
