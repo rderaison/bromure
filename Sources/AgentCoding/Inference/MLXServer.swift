@@ -7,10 +7,11 @@ import MLXLMCommon
 /// Anthropic / Responses surface the guest agents expect.
 ///
 /// It returns *non-streaming* protocol JSON. Streaming + tool-call repair stay
-/// the job of ``InferenceRepairProxy`` (port 11500), which already buffers a
-/// non-streaming upstream message, rescues leaked tool calls, and re-emits SSE
-/// for all three wire formats — so the bridge wiring is unchanged: guest →
-/// vsock → 11500 (repair) → 11434 (this server).
+/// the job of ``InferenceRepairProxy``, which already buffers a non-streaming
+/// upstream message, rescues leaked tool calls, and re-emits SSE for all three
+/// wire formats — so the bridge wiring is unchanged: guest → vsock → repair
+/// proxy → this server. Both host ports are now kernel-assigned (dynamic) to
+/// avoid colliding with whatever else holds the old 11434 / 11500.
 ///
 /// Same shape as the other small servers here: one accept loop, a thread per
 /// connection, raw HTTP/1.1.

@@ -782,10 +782,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             }
         }
 
-        /// Guest-side base URL for the on-host inference engine (Path 1):
-        /// 127.0.0.1:11434 → vsock 8446 bridge → host loopback engine.
-        public static let localEngineBaseURL = "http://127.0.0.1:11434"
-
         /// Env exports that pin this tool at the local engine serving
         /// `model`. The model name must match what the engine reports in
         /// `/v1/models` (we launch it with `--model <repo>`, so it's the

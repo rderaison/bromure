@@ -6,13 +6,10 @@ import Virtualization
 ///
 /// This is the host end of Path 1 (§2.2): the in-VM bridge listens on
 /// 127.0.0.1:11434, forwards over vsock 8446, and we splice that to the
-/// engine on loopback. Per-VM and loopback-only — the engine never binds
+/// repair proxy on loopback. Per-VM and loopback-only — the engine never binds
 /// anything but 127.0.0.1, and no other VM on the subnet can reach it.
 /// Same raw-TCP-pump shape as the python bridge's other forwards.
 final class InferenceListenerDelegate: NSObject, VZVirtioSocketListenerDelegate {
-    let enginePort: Int
-    init(enginePort: Int) { self.enginePort = enginePort }
-
     @available(macOS, deprecated: 10.15)
     func listener(_ listener: VZVirtioSocketListener,
                   shouldAcceptNewConnection connection: VZVirtioSocketConnection,
@@ -20,7 +17,8 @@ final class InferenceListenerDelegate: NSObject, VZVirtioSocketListenerDelegate 
         let fd = dup(connection.fileDescriptor)
         // Splice to the tool-call repair proxy (which forwards to the engine),
         // not the engine directly, so leaked-as-text tool calls get rescued.
-        let port = InferenceRepairProxy.listenPort
+        // Read its dynamic port at connect time — the proxy is up by now.
+        let port = InferenceRepairProxy.shared.listenPort
         Thread.detachNewThread {
             InferenceVsockBridge.pump(vsockFD: fd, host: "127.0.0.1", port: port)
         }

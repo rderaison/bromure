@@ -197,7 +197,7 @@ enum Fusion {
         case (_, .local):
             // Any tool in local mode → the on-host engine (loopback). No
             // real credential needed; the engine ignores the dummy key.
-            return .local(base: Profile.Tool.localEngineBaseURL)
+            return .local(base: InferenceService.engineBaseURL)
         default:
             return nil
         }
@@ -688,7 +688,7 @@ enum Fusion {
         // Local leg — a model served by the on-host engine, fused alongside
         // the cloud legs. OpenAI-compatible call to the loopback engine.
         if let localModel = config.localLegModel, !localModel.isEmpty {
-            if let txt = await askModel(cred: .local(base: Profile.Tool.localEngineBaseURL),
+            if let txt = await askModel(cred: .local(base: InferenceService.engineBaseURL),
                                         model: localModel,
                                         system: guestSystem.isEmpty ? legSystem : guestSystem,
                                         question: transcript.isEmpty ? question : transcript,
@@ -714,7 +714,7 @@ enum Fusion {
         // otherwise resolve the chosen cloud provider's credential.
         let judgeCred: Cred?
         if config.judgeLocal {
-            judgeCred = .local(base: Profile.Tool.localEngineBaseURL)
+            judgeCred = .local(base: InferenceService.engineBaseURL)
         } else if let judgeMode = config.authModes[config.judgeProvider] {
             judgeCred = await resolveCred(tool: config.judgeProvider, authMode: judgeMode,
                                           swapper: swapper, profileID: profileID)

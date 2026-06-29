@@ -77,9 +77,14 @@ public struct EngineSpawnConfig: Codable, Sendable {
     }
     public var memoryBudgetGB: Int
     public var models: [Model]
+    /// Loopback TCP port the engine child must bind — allocated by the parent
+    /// (a free port, off Ollama's 11434) and read back in the child to set
+    /// `InferenceService.enginePort`. 0 in configs built before `spawnEngine`
+    /// stamps it; `spawnEngine` always overwrites it with the live port.
+    public var enginePort: Int
 
-    public init(memoryBudgetGB: Int, models: [Model]) {
-        self.memoryBudgetGB = memoryBudgetGB; self.models = models
+    public init(memoryBudgetGB: Int, models: [Model], enginePort: Int = 0) {
+        self.memoryBudgetGB = memoryBudgetGB; self.models = models; self.enginePort = enginePort
     }
 
     /// The `InferenceModel`s the engine child should serve.
@@ -117,14 +122,22 @@ public enum InferenceServiceError: Error, Equatable {
 /// - Lazy-start on first request; readiness via `/v1/models`.
 /// - Auto-restart on crash; graceful teardown with the app.
 public actor InferenceService {
-    /// Host loopback port the engine binds. The guest reaches it as
-    /// 127.0.0.1:11434 via the vsock 8446 bridge → here.
-    public static let enginePort = 11434
+    /// Host loopback port the engine child binds. **Dynamically allocated** at
+    /// first spawn (a kernel-assigned free port) so we never collide with
+    /// whatever already holds the old fixed 11434 — Ollama, LM Studio, etc. 0
+    /// until allocated. The guest never sees this port: inside the VM it dials
+    /// 127.0.0.1:11434, which the vsock 8446 bridge splices to here. Set in the
+    /// parent by `spawnEngine`; set in the engine child from the spawn config.
+    nonisolated(unsafe) public static var enginePort = 0
     public static let engineHost = "127.0.0.1"
-    /// Loopback port of the tool-call-repair proxy that fronts the engine —
-    /// public mirror of `InferenceRepairProxy.listenPort` so routing defaults
-    /// can name it without exposing the proxy type.
-    public static let repairProxyPort = InferenceRepairProxy.listenPort
+    /// Loopback port of the tool-call-repair proxy that fronts the engine. Also
+    /// dynamic (the proxy binds a kernel-assigned port); routing defaults read
+    /// it here without depending on the proxy type. 0 until the proxy starts.
+    public static var repairProxyPort: Int { InferenceRepairProxy.shared.listenPort }
+    /// Host-side base URL of the running engine (loopback, dynamic port), for
+    /// in-process callers that speak plain JSON straight to it (e.g. Fusion).
+    /// NOT for the guest — the guest dials the vsock bridge, not this port.
+    public static var engineBaseURL: String { "http://\(engineHost):\(enginePort)" }
     /// Stable model id the guest agents are pinned to (`ANTHROPIC_MODEL` etc.).
     /// The repair proxy maps it to each workspace's currently-active model, so
     /// switching the local model is a host-side remap — no guest reconfigure and
@@ -381,6 +394,35 @@ public actor InferenceService {
         return stubPlan()
     }
 
+    /// Ask the kernel for a free loopback TCP port: bind 127.0.0.1:0, read the
+    /// assigned port back, release it. The engine child then binds it. The
+    /// microscopic window between release and re-bind is covered by MLXServer's
+    /// bind retry; picking a *currently-free* port is the whole point (vs.
+    /// squatting Ollama's 11434). Returns 0 only if the socket calls fail.
+    static func allocateLoopbackPort() -> Int {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return 0 }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0   // kernel-assigned ephemeral port
+        _ = inet_pton(AF_INET, engineHost, &addr.sin_addr)
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0 else { return 0 }
+        var actual = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let got = withUnsafeMutablePointer(to: &actual) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
+        }
+        guard got == 0 else { return 0 }
+        return Int(UInt16(bigEndian: actual.sin_port))
+    }
+
     /// Spawn `bromure-ac _mlx-engine` (our own binary, engine mode) on the
     /// loopback engine port and wait until it answers. Out-of-process so a model
     /// load that OOMs jetsams only the child; the parent + VMs survive and the
@@ -390,6 +432,14 @@ public actor InferenceService {
                 ?? (CommandLine.arguments.first.map { URL(fileURLWithPath: $0) }) else {
             throw InferenceServiceError.engineNotFound
         }
+        // Pick a free loopback port once (kernel-assigned), then reuse it across
+        // respawns. Picking a *currently-free* port is what keeps the engine off
+        // a busy 11434 (Ollama, LM Studio, …) — the old hard-coded port was the
+        // "waiting for the previous engine to release it" hang when a foreign
+        // process held it. Stamp it into the config so the child binds the same.
+        if Self.enginePort == 0 { Self.enginePort = Self.allocateLoopbackPort() }
+        var config = config
+        config.enginePort = Self.enginePort
         let cfgURL = catalog.modelsDir.deletingLastPathComponent()
             .appendingPathComponent("engine-spawn.json")
         try JSONEncoder().encode(config).write(to: cfgURL, options: .atomic)

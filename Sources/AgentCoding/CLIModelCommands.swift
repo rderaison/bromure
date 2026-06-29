@@ -284,6 +284,10 @@ struct MLXEngineChild: ParsableCommand {
     func run() throws {
         let data = try Data(contentsOf: URL(fileURLWithPath: config))
         let cfg = try JSONDecoder().decode(EngineSpawnConfig.self, from: data)
+        // The parent allocated a free engine port and passed it here — adopt it
+        // before MLXServer binds (else the child would bind the wrong port and
+        // the parent's readiness probe would never find it).
+        if cfg.enginePort > 0 { InferenceService.enginePort = cfg.enginePort }
         guard MLXServer.shared.start(models: cfg.inferenceModels, memoryBudgetGB: cfg.memoryBudgetGB) else {
             // Couldn't bind the port — exit non-zero so the parent's readiness
             // wait fails fast (and clearly) instead of polling a dead port.
@@ -350,7 +354,7 @@ struct RepairServe: ParsableCommand {
     @Option(name: .long) var enginePort = InferenceService.enginePort
     func run() throws {
         InferenceRepairProxy.shared.startIfNeeded(enginePort: enginePort)
-        print("repair proxy on 127.0.0.1:\(InferenceRepairProxy.listenPort) -> engine :\(enginePort)")
+        print("repair proxy on 127.0.0.1:\(InferenceRepairProxy.shared.listenPort) -> engine :\(enginePort)")
         RunLoop.main.run()
     }
 }

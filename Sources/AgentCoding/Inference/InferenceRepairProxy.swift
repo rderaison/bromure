@@ -13,9 +13,11 @@ import Foundation
 final class InferenceRepairProxy: @unchecked Sendable {
     static let shared = InferenceRepairProxy()
 
-    /// Public port the bridge/clients connect to. The engine itself binds
+    /// Port the bridge/clients connect to — **kernel-assigned** in
+    /// `startIfNeeded` (was a fixed 11500, which clashed with anything else
+    /// holding that port). 0 until started. The engine itself binds
     /// `InferenceService.enginePort`; we forward there.
-    static let listenPort = 11500
+    private(set) var listenPort = 0
 
     private var listenFD: Int32 = -1
     private var running = false
@@ -55,8 +57,9 @@ final class InferenceRepairProxy: @unchecked Sendable {
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(UInt16(Self.listenPort).bigEndian)
+        addr.sin_port = 0   // kernel-assigned: avoids clashing with whatever holds 11500
         _ = inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr)
         let bound = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -64,6 +67,14 @@ final class InferenceRepairProxy: @unchecked Sendable {
             }
         }
         if bound != 0 || listen(fd, 64) != 0 { close(fd); return }
+        // Read back the port the kernel handed us so the vsock bridge + MITM
+        // routing know where to forward.
+        var actual = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &actual) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
+        }
+        listenPort = Int(UInt16(bigEndian: actual.sin_port))
         listenFD = fd
         running = true
         Thread.detachNewThread { [weak self] in self?.acceptLoop(enginePort: enginePort) }

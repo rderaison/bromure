@@ -238,12 +238,14 @@ struct LLMRoutingTests {
         #expect(t.servedBy == "cloud")
     }
 
-    @Test("Local routing rewrites to the loopback engine") func local() {
+    @Test("Local routing rewrites to the loopback repair proxy") func local() {
         let t = LLMRouting.decide(host: "api.anthropic.com", port: 443,
                                   context: ctx(.local), sessionKey: "s", now: 0)
         #expect(t.backend == .local)
         #expect(t.host == InferenceService.engineHost)
-        #expect(t.port == InferenceService.enginePort)
+        // Local traffic is sent to the repair proxy (which fronts the engine),
+        // so it gets leaked-tool-call rescue + SSE re-emission.
+        #expect(t.port == InferenceService.repairProxyPort)
         #expect(t.servedBy == "local-glm")
     }
 
