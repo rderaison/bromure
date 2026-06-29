@@ -37,7 +37,7 @@ final class EngineMetrics: @unchecked Sendable {
         let ts = ttftSum, tc = ttftCount, ds = durationSum, dc = durationCount
         let inf = inFlight, run = inFlight, total = requestsTotal
         lock.unlock()
-        let metalBytes = MLX.GPU.activeMemory
+        let metalBytes = MLX.Memory.activeMemory
         return """
         # in-process MLX engine metrics
         mlx_prompt_tokens_total \(pt)

@@ -179,10 +179,10 @@ actor MLXEngine {
         // fresh full prefill can't run away). Tunable: BROMURE_GPU_CACHE_GB.
         let cacheGB = ProcessInfo.processInfo.environment["BROMURE_GPU_CACHE_GB"]
             .flatMap { Int($0) } ?? 4
-        _ = MLX.GPU.set(cacheLimit: cacheGB << 30)
+        MLX.Memory.cacheLimit = cacheGB << 30
         // A soft overall ceiling when a budget is set, so the engine sheds cache
         // instead of OOM-killing this out-of-process child.
-        if gb > 0 { _ = MLX.GPU.set(memoryLimit: gb << 30, relaxed: true) }
+        if gb > 0 { MLX.Memory.memoryLimit = gb << 30 }
     }
 
     // MARK: - Model resolution & loading
@@ -242,7 +242,7 @@ actor MLXEngine {
     func unloadAll() {
         residents.removeAll()
         sessionCaches.removeAll()
-        MLX.GPU.clearCache()
+        MLX.Memory.clearCache()
     }
 
     /// Unload any resident model not in `keep` — used when a workspace closes
@@ -254,7 +254,7 @@ actor MLXEngine {
             residents[repo] = nil
             sessionCaches[repo] = nil
         }
-        MLX.GPU.clearCache()
+        MLX.Memory.clearCache()
     }
 
     // MARK: - Generation
@@ -334,7 +334,7 @@ actor MLXEngine {
         // (the VMs share unified memory) can't page weights out mid-decode.
         // Scoped: the previous limit is restored when generation returns.
         let wiredBytes = (estMemGB > 0 ? estMemGB : max(memoryBudgetGB, 1)) << 30
-        return try await MLX.GPU.withWiredLimit(wiredBytes) {
+        return try await MLX.Memory.withWiredLimit(wiredBytes) {
         try await container.perform { [session] (context: ModelContext) in
             let input = try await context.processor.prepare(
                 input: UserInput(chat: MLXEngine.withToolReminder(messages, hasTools: tools?.isEmpty == false),
