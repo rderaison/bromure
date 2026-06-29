@@ -171,9 +171,29 @@ public actor ConsentBroker {
         pending[key] = []
 
         let profileName = profileNames[profileID] ?? "(unknown workspace)"
-        let decision = await Self.askUser(profileName: profileName,
+        let decision: Decision
+        if RemoteConsent.isActive(for: profileID) {
+            // No GUI (SSH/CLI): prompt in the workspace's tmux. nil → deny.
+            let title = String(format: NSLocalizedString("Allow “%@” to use %@?",
+                comment: "Consent prompt: profile name + credential display name"),
+                profileName, credentialDisplayName)
+            let choices = ["Allow for 1 hour", "Allow for 5 minutes",
+                           "Allow for the rest of the session", "Don't allow"]
+            let idx = await Task.detached {
+                RemoteConsent.choose(profileID: profileID, title: title,
+                                     message: scopeHint, choices: choices)
+            }.value
+            switch idx {
+            case 0:  decision = .allow1hr
+            case 1:  decision = .allow5min
+            case 2:  decision = .allowSession
+            default: decision = .deny   // "Don't allow" or timeout/failure
+            }
+        } else {
+            decision = await Self.askUser(profileName: profileName,
                                           credentialDisplayName: credentialDisplayName,
                                           scopeHint: scopeHint)
+        }
 
         let allow: Bool
         switch decision {

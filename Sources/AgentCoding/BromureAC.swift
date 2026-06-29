@@ -1365,6 +1365,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             SupplyChainLog.shared.record("[remote] SSH front door started.")
         } catch {
             SupplyChainLog.shared.record("[remote] start failed: \(error.localizedDescription)")
+            // Surface it: remote access is enabled but the listener was refused
+            // (firewall / Local Network privacy / port in use). The log alone is
+            // invisible; show the decoded reason. (Headless has no GUI for this.)
+            if !headless {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Remote access couldn’t start"
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: "OK")
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
         }
     }
 
@@ -1618,6 +1630,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let bridge = self.shellBridges[uuid] else { return nil }
             guard let conn = bridge.dequeueConnection() else { return nil }
             return ACShellProxyConnection(fd: conn.fileDescriptor, conn: conn)
+        }
+
+        server.onResolveProfileID = { [weak self] idOrName in
+            guard let self else { return nil }
+            return MainActor.assumeIsolated { self.resolveRunningSessionID(idOrName)?.uuidString }
+        }
+
+        // Remote (SSH/CLI) consent prompts: a session with no GUI window can't
+        // show an NSAlert anyone would see, so the MITM consent brokers present
+        // in the workspace's tmux instead. execInVM drives the popup via the
+        // shell agent; isRemoteSession = "running but no GUI pane".
+        RemoteConsent.execInVM = { [weak server] pid, cmd, timeout in
+            server?.vmExec(profileID: pid.uuidString, command: cmd, timeoutSeconds: timeout)
+        }
+        // "Remote" = a live CLI/SSH interactive attach (tmux), regardless of
+        // whether a GUI pane also exists (the unified window has a pane for every
+        // running VM, so a pane check is useless here).
+        RemoteConsent.isRemoteSession = { [weak server] pid in
+            server?.isInteractivelyAttached(pid.uuidString) ?? false
         }
 
         // docker-style VM control plane.

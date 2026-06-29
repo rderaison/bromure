@@ -25,8 +25,24 @@ public actor PromptInjectionConsentBroker {
         }
         pending[key] = []
         let name = profileNames[profileID] ?? "this workspace"
-        let allow = await Self.ask(profileName: name, detectorName: detectorName,
+        let allow: Bool
+        if RemoteConsent.isActive(for: profileID) {
+            // No GUI (SSH/CLI): prompt in the workspace's tmux. nil/Block → block.
+            let title = String(format: NSLocalizedString("Possible %@ in “%@”",
+                comment: "Prompt-injection consent title"), detectorName, name)
+            let message = String(format: NSLocalizedString(
+                "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@",
+                comment: "Prompt-injection consent body (remote)"),
+                source, String(flaggedText.prefix(1500)))
+            let idx = await Task.detached {
+                RemoteConsent.choose(profileID: profileID, title: title, message: message,
+                                     choices: ["Block this request", "Allow this request"])
+            }.value
+            allow = (idx == 1)   // only an explicit "Allow" lets it through
+        } else {
+            allow = await Self.ask(profileName: name, detectorName: detectorName,
                                    source: source, flaggedText: flaggedText)
+        }
         decisions[key] = allow
         let waiters = pending.removeValue(forKey: key) ?? []
         for w in waiters { w.resume(returning: allow) }

@@ -136,7 +136,32 @@ final class RemoteAccessServer {
             SupplyChainLog.shared.record("[remote] embedded SSH server listening on \(config.bindAddress):\(config.port).")
         } catch {
             try? g.syncShutdownGracefully()
-            throw RemoteError.startFailed(error.localizedDescription)
+            throw RemoteError.startFailed(Self.describeBindFailure(error, config: config))
+        }
+    }
+
+    /// Turn an opaque NIO bind error ("NIOCore.IOError error 1") into something
+    /// actionable: decode the errno and name the usual culprits. The bare
+    /// `localizedDescription` only says "error 1", which is useless.
+    private static func describeBindFailure(_ error: Error, config: Config) -> String {
+        let target = "\(config.bindAddress):\(config.port)"
+        guard let io = error as? IOError else { return error.localizedDescription }
+        let code = io.errnoCode
+        let name = String(cString: strerror(code))
+        switch code {
+        case EACCES, EPERM:
+            return "couldn't bind \(target): \(name) (errno \(code)). Port \(config.port) may be "
+                + "privileged (<1024 needs root — use the 2222 default or any port ≥1024), or a "
+                + "firewall / macOS Local Network privacy is blocking the listener "
+                + "(System Settings → Privacy & Security → Local Network → enable Bromure AC)."
+        case EADDRINUSE:
+            return "couldn't bind \(target): \(name) (errno \(code)). Port \(config.port) is already "
+                + "in use — pick another port or stop the other listener (lsof -i :\(config.port))."
+        case EADDRNOTAVAIL:
+            return "couldn't bind \(target): \(name) (errno \(code)). That address isn't on this Mac "
+                + "— use 0.0.0.0 (all interfaces) or 127.0.0.1 (local only)."
+        default:
+            return "couldn't bind \(target): \(name) (errno \(code))."
         }
     }
 

@@ -115,9 +115,29 @@ public actor SupplyChainConsentBroker {
         pending[key] = []
 
         let profileName = profileNames[profileID] ?? "(unknown profile)"
-        let decision = await Self.askUser(profileName: profileName,
+        let decision: Decision
+        if RemoteConsent.isActive(for: profileID) {
+            // No GUI (SSH/CLI): prompt in the workspace's tmux. nil → deny.
+            let title = String(format: NSLocalizedString(
+                "Pass through %@ from workspace “%@”?",
+                comment: "Supply-chain bypass prompt"), scopeDisplayName, profileName)
+            let choices = ["Allow for 15 minutes", "Allow once",
+                           "Allow for the rest of the session", "Don't allow"]
+            let idx = await Task.detached {
+                RemoteConsent.choose(profileID: profileID, title: title,
+                                     message: detail, choices: choices)
+            }.value
+            switch idx {
+            case 0:  decision = .allow15min
+            case 1:  decision = .allowOnce
+            case 2:  decision = .allowSession
+            default: decision = .deny
+            }
+        } else {
+            decision = await Self.askUser(profileName: profileName,
                                           scopeDisplayName: scopeDisplayName,
                                           detail: detail)
+        }
 
         let allow: Bool
         switch decision {

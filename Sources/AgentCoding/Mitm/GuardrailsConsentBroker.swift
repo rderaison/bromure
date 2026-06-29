@@ -153,9 +153,30 @@ public actor GuardrailsConsentBroker {
         pending[key] = []
 
         let profileName = profileNames[profileID] ?? "(unknown profile)"
-        let decision = await Self.askUser(profileName: profileName,
+        let decision: Decision
+        if RemoteConsent.isActive(for: profileID) {
+            // No GUI (SSH/CLI): prompt in the workspace's tmux. nil → deny.
+            let title = String(format: NSLocalizedString(
+                "Allow write on “%@” from workspace “%@”?",
+                comment: "Guardrails write prompt: scope display name + profile name"),
+                scopeDisplayName, profileName)
+            let choices = ["Allow for 15 minutes", "Allow once",
+                           "Allow for the rest of the session", "Don't allow"]
+            let idx = await Task.detached {
+                RemoteConsent.choose(profileID: profileID, title: title,
+                                     message: operation, choices: choices)
+            }.value
+            switch idx {
+            case 0:  decision = .allow15min
+            case 1:  decision = .allowOnce
+            case 2:  decision = .allowSession
+            default: decision = .deny
+            }
+        } else {
+            decision = await Self.askUser(profileName: profileName,
                                           scopeDisplayName: scopeDisplayName,
                                           operation: operation)
+        }
 
         let allow: Bool
         switch decision {

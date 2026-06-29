@@ -58,6 +58,9 @@ final class ACAutomationServer {
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
+    /// Resolve an id-or-name to the canonical profile UUID string, so interactive
+    /// attach state is keyed the same way the consent broker queries it (by UUID).
+    var onResolveProfileID: ((_ idOrName: String) -> String?)?
 
     // docker-style VM control plane (CLI). Each returns plain dicts/bools so
     // the server stays free of app types.
@@ -746,6 +749,47 @@ final class ACAutomationServer {
         _ = conn.conn  // keep alive until response is sent
     }
 
+    /// Run `command` in `profileID`'s VM via the shell agent; return stdout, or
+    /// nil on failure. Blocking — call off the main thread (it hops to main only
+    /// to dequeue a shell connection). Used by `RemoteConsent` to drive a tmux
+    /// consent popup over SSH.
+    public func vmExec(profileID: String, command: String, timeoutSeconds: Int) -> String? {
+        var shellConn: ACShellProxyConnection?
+        for _ in 0..<100 {
+            shellConn = DispatchQueue.main.sync { self.onGetShellConnection?(profileID) }
+            if shellConn != nil { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        guard let conn = shellConn else { return nil }
+        defer { _ = conn.conn }   // keep the connection alive until we're done
+        return Self.executeShellCommand(fd: conn.fd, command: command, timeout: timeoutSeconds)?.stdout
+    }
+
+    // Sessions currently attached interactively over CLI/SSH (profileID → count;
+    // a session can have more than one attach). SHARED (static) across every
+    // AutomationServer instance: the attach is handled by `controlServer` (Unix
+    // socket) but the consent broker may query via `automationServer` (TCP), so
+    // per-instance state would never match (that was the `marked=[]` bug).
+    private static let attachLock = NSLock()
+    nonisolated(unsafe) private static var attachedCounts: [String: Int] = [:]
+
+    /// True while `profileID` has at least one live interactive (CLI/SSH) attach.
+    public func isInteractivelyAttached(_ profileID: String) -> Bool {
+        Self.attachLock.lock(); defer { Self.attachLock.unlock() }
+        let hit = (Self.attachedCounts[profileID] ?? 0) > 0
+        FileHandle.standardError.write(Data(
+            "[consent] attached? q=\(profileID.prefix(8)) marked=\(Self.attachedCounts.keys.map { String($0.prefix(8)) }) → \(hit)\n".utf8))
+        return hit
+    }
+    private func markAttached(_ profileID: String) {
+        Self.attachLock.lock(); Self.attachedCounts[profileID, default: 0] += 1; Self.attachLock.unlock()
+    }
+    private func unmarkAttached(_ profileID: String) {
+        Self.attachLock.lock()
+        if let c = Self.attachedCounts[profileID] { Self.attachedCounts[profileID] = c <= 1 ? nil : c - 1 }
+        Self.attachLock.unlock()
+    }
+
     /// Interactive pty session: dequeue a guest shell connection, tell the
     /// guest to go interactive, then pump raw bytes between the CLI's socket and
     /// the guest vsock until either side closes. The pty framing is end-to-end
@@ -784,6 +828,15 @@ final class ACAutomationServer {
         let hbytes = Array(header.utf8)
         _ = hbytes.withUnsafeBytes { Darwin.write(clientFD, $0.baseAddress, hbytes.count) }
 
+        // For the life of this attach the session is "in CLI/SSH mode" — consent
+        // prompts go to a tmux popup the attached user can see, not an NSAlert.
+        // Key by the canonical UUID (the CLI may pass a name/short id) so the
+        // consent broker, which queries by UUID, actually matches.
+        let attachKey = (DispatchQueue.main.sync { self.onResolveProfileID?(profileID) }) ?? profileID
+        FileHandle.standardError.write(Data(
+            "[consent] attach START raw=\(profileID) key=\(attachKey.prefix(8))\n".utf8))
+        markAttached(attachKey)
+        defer { unmarkAttached(attachKey) }
         Self.pump(clientFD, vsockFD)
         _ = conn.conn   // keep the vsock connection alive for the whole pump
         Darwin.close(clientFD)
