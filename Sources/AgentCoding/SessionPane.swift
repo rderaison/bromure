@@ -288,21 +288,24 @@ final class SessionPane {
     func applyDockerList(_ containers: [DockerContainer]) {
         let merged = containers.map { c -> DockerContainer in
             var c = c
-            if let s = dockerStats[c.id] { c.cpuPerc = s.cpu; c.memUsage = s.mem }
-            if let a = dockerArch[c.id] { c.arch = a }
+            // stats / arch come keyed by docker's SHORT id (12-char); the
+            // container list uses the full id (--no-trunc), so look up by shortID.
+            if let s = dockerStats[c.shortID] { c.cpuPerc = s.cpu; c.memUsage = s.mem }
+            if let a = dockerArch[c.shortID] { c.arch = a }
             return c
         }
         if model.dockerContainers != merged { model.dockerContainers = merged }
     }
 
     /// Overlay live CPU/mem onto the current container list (dashboard-only).
+    /// `docker stats` reports the SHORT id, so key everything by `prefix(12)`.
     func applyDockerStats(_ stats: [(id: String, cpu: String, mem: String)]) {
-        dockerStats = Dictionary(stats.map { ($0.id, (cpu: $0.cpu, mem: $0.mem)) },
+        dockerStats = Dictionary(stats.map { (String($0.id.prefix(12)), (cpu: $0.cpu, mem: $0.mem)) },
                                  uniquingKeysWith: { a, _ in a })
         var changed = false
         var list = model.dockerContainers
         for i in list.indices {
-            let s = dockerStats[list[i].id]
+            let s = dockerStats[list[i].shortID]
             let cpu = s?.cpu ?? "", mem = s?.mem ?? ""
             if list[i].cpuPerc != cpu { list[i].cpuPerc = cpu; changed = true }
             if list[i].memUsage != mem { list[i].memUsage = mem; changed = true }
@@ -333,11 +336,12 @@ final class SessionPane {
     /// Last per-container architecture, merged into the container list like stats.
     private var dockerArch: [String: String] = [:]
     func applyDockerArch(_ list: [(id: String, arch: String)]) {
-        dockerArch = Dictionary(list.map { ($0.id, $0.arch) }, uniquingKeysWith: { a, _ in a })
+        dockerArch = Dictionary(list.map { (String($0.id.prefix(12)), $0.arch) },
+                                uniquingKeysWith: { a, _ in a })
         var changed = false
         var containers = model.dockerContainers
         for i in containers.indices {
-            let a = dockerArch[containers[i].id] ?? ""
+            let a = dockerArch[containers[i].shortID] ?? ""
             if containers[i].arch != a { containers[i].arch = a; changed = true }
         }
         if changed { model.dockerContainers = containers }
