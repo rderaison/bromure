@@ -3927,30 +3927,35 @@ public final class ProfileStore {
                         docker-binfmt)
                             ( e=$(docker run --privileged --rm tonistiigi/binfmt --install all 2>&1 >/dev/null) || docker_err "$e" ) & ;;
                         # Launch a new container. arg is "<mode> <full docker run -d …>"
-                        # where mode ∈ none|env|proxy selects whether to inject an
-                        # --env-file built from the workspace's LOGIN-shell env (so
-                        # it sees the same token/proxy exports the agent shells do —
-                        # this agent runs non-interactively). The whole thing is
-                        # BACKGROUNDED and the env capture is `timeout`-bounded so a
-                        # slow image pull or a hanging rc can never wedge the loop.
-                        # The run command's user fields are already single-quoted by
-                        # the host; mode + injection are host/agent constants.
+                        # where mode ∈ none|env|proxy|both selects which HOST-INJECTED
+                        # env to forward — NOT the whole shell environment. The host
+                        # passes vars to the workspace via two generated files on the
+                        # metadata share:
+                        #   api_key.env — tokens (ANTHROPIC_API_KEY, GH_TOKEN, …)
+                        #   proxy.env   — http(s)_proxy / no_proxy (+ CA hints)
+                        # We source ONLY those in a clean `env -i` shell (no rc, so it
+                        # can't hang and can't pick up unrelated vars) and emit a
+                        # docker --env-file. For proxy we forward just the *_proxy
+                        # vars (the CA paths point at the VM's filesystem). The whole
+                        # thing is BACKGROUNDED; failures surface via docker_err.
                         docker-run)
                             rmode="${arg%% *}"; rcmd="${arg#* }"
                             (
                                 ef=""
                                 case "$rmode" in
-                                    env)
+                                    env|both)
                                         ef=$(mktemp)
-                                        timeout 8 bash -lic env 2>/dev/null \
+                                        timeout 5 env -i PATH=/usr/bin:/bin bash -c \
+                                            '[ -r /mnt/bromure-meta/api_key.env ] && . /mnt/bromure-meta/api_key.env 2>/dev/null; env' 2>/dev/null \
                                             | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
-                                            | grep -vE '^(PATH|HOME|HOSTNAME|PWD|OLDPWD|SHLVL|SHELL|TERM|USER|LOGNAME|MAIL|_|DISPLAY|XAUTHORITY|LS_COLORS)=' \
-                                            > "$ef" 2>/dev/null ;;
-                                    proxy)
-                                        ef=$(mktemp)
-                                        timeout 8 bash -lic env 2>/dev/null \
-                                            | grep -iE '^(http_proxy|https_proxy|no_proxy|all_proxy|ftp_proxy)=' \
-                                            > "$ef" 2>/dev/null ;;
+                                            | grep -vE '^(PATH|PWD|SHLVL|_|SHELL|HOME|HOSTNAME)=' >> "$ef" ;;
+                                esac
+                                case "$rmode" in
+                                    proxy|both)
+                                        [ -n "$ef" ] || ef=$(mktemp)
+                                        timeout 5 env -i PATH=/usr/bin:/bin bash -c \
+                                            '[ -r /mnt/bromure-meta/proxy.env ] && . /mnt/bromure-meta/proxy.env 2>/dev/null; env' 2>/dev/null \
+                                            | grep -iE '^(http_proxy|https_proxy|no_proxy|all_proxy|ftp_proxy)=' >> "$ef" ;;
                                 esac
                                 if [ -n "$ef" ]; then
                                     full="${rcmd/docker run -d/docker run -d --env-file $ef}"

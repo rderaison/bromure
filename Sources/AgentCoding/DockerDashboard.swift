@@ -975,7 +975,6 @@ private struct NewContainerSheet: View {
                                     .font(.system(size: 11)).foregroundStyle(.secondary)
                             }
                         }
-                        .disabled(inheritEnv)   // already covered by the full environment
                     }
                     .toggleStyle(.checkbox)
 

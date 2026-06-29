@@ -4581,10 +4581,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         cmd += " \(q(image))"
         cmd = cmd.replacingOccurrences(of: "\n", with: " ")
-        // The guest builds the --env-file (from the workspace's login shell) and
-        // runs this command backgrounded, so a slow pull / inherited-env capture
-        // can't wedge its command loop. `inheritEnv` is a superset of proxy.
-        let mode = spec.inheritEnv ? "env" : (spec.inheritProxy ? "proxy" : "none")
+        // The guest builds the --env-file by sourcing ONLY the host-injected env
+        // files on the metadata share (tokens from api_key.env, proxy from
+        // proxy.env) — not the whole shell environment — then runs this command
+        // backgrounded so it can't wedge the command loop.
+        let mode = spec.inheritEnv
+            ? (spec.inheritProxy ? "both" : "env")
+            : (spec.inheritProxy ? "proxy" : "none")
         sendCommand("docker-run \(mode) \(cmd)", in: pane)
     }
 
