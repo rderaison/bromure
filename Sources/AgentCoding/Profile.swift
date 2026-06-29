@@ -3509,6 +3509,20 @@ public final class ProfileStore {
                 >> /tmp/xinitrc.log
     fi
 
+    # Re-apply cross-arch emulation if the user enabled it in a prior session.
+    # binfmt_misc registrations live in the kernel and are wiped on reboot, so
+    # "Enable emulation" would otherwise be needed every launch. The
+    # tonistiigi/binfmt image is cached on the persistent disk, so re-running is
+    # fast and offline. Backgrounded after waiting for dockerd so it never
+    # delays the session.
+    if [ -f "$HOME/.bromure-binfmt-enabled" ] && command -v docker >/dev/null 2>&1; then
+        (
+            for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+            docker run --privileged --rm tonistiigi/binfmt --install all >/dev/null 2>&1 \
+                && echo "[xinit] re-applied binfmt emulation" >> /tmp/xinitrc.log
+        ) &
+    fi
+
     # Claude subscription-token agent — connects to host vsock 8446
     # and answers read/write RPCs against ~/.claude/.credentials.json.
     # Owns the on-disk fake↔real swap when the user accepts the
@@ -3717,6 +3731,23 @@ public final class ProfileStore {
 
     log() { printf '%s [agent] %s\n' "$(date +%T)" "$*" >> "$LOG"; }
 
+    # Surface a docker error to the host as a one-shot file (it reads + deletes).
+    docker_err() {
+        printf '%s' "$1" > "$INBOX/.docker-error.tmp" 2>/dev/null \
+            && mv -f "$INBOX/.docker-error.tmp" "$INBOX/docker-error.txt" 2>/dev/null
+    }
+
+    # Publish "run job" progress (state\timage\tdone\ttotal) for the dashboard,
+    # so a detached `docker run` that's pulling layers doesn't look stuck.
+    docker_run_status() {
+        printf '%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4" > "$INBOX/.docker-run-status.tmp" 2>/dev/null \
+            && mv -f "$INBOX/.docker-run-status.tmp" "$INBOX/docker-run-status.txt" 2>/dev/null
+    }
+    docker_run_status_clear() {
+        : > "$INBOX/.docker-run-status.tmp" 2>/dev/null \
+            && mv -f "$INBOX/.docker-run-status.tmp" "$INBOX/docker-run-status.txt" 2>/dev/null
+    }
+
     log "starting"
 
     # --- Host-owned keychords: ⌘T / ⌘W / ⌘N / ⌘1-9 ----------------------------
@@ -3798,7 +3829,7 @@ public final class ProfileStore {
     roster_loop() {
         while :; do
             if out=$(tmux list-windows -t "$TMUX_S" \
-                     -F '#{window_index}	#{?window_active,1,0}	#{pane_current_command}' 2>/dev/null); then
+                     -F '#{window_index}	#{?window_active,1,0}	#{pane_current_command}	#{@container}' 2>/dev/null); then
                 printf '%s' "$out" > "$INBOX/.tabs.tmp" 2>/dev/null \
                     && mv -f "$INBOX/.tabs.tmp" "$INBOX/tabs.txt" 2>/dev/null
             elif ! tmux has-session -t "$TMUX_S" 2>/dev/null; then
@@ -3818,6 +3849,64 @@ public final class ProfileStore {
     }
     roster_loop &
 
+    # Docker: every 2s publish the container list as NDJSON (one JSON object per
+    # line, `docker ps -a --format '{{json .}}'`) so the host can render the
+    # source-list sub-tree AND the in-app dashboard (running + stopped). Atomic
+    # rename so the host never reads a partial list; an EMPTY file when docker is
+    # absent / the daemon is down (the host then shows an empty dashboard but
+    # still keeps the Docker node).
+    #
+    # The dashboard's extra data is EXPENSIVE (`docker stats --no-stream` blocks
+    # ~1.5s) so it's gated behind a marker file the host drops while a dashboard
+    # is open: when "$INBOX/.docker-watch" exists we also publish per-container
+    # CPU/mem (docker-stats.txt) and the local image list (docker-images.txt).
+    # The `{{json .}}` template emits valid JSON regardless of field contents, so
+    # no separator escaping is needed.
+    docker_loop() {
+        while :; do
+            if out=$(docker ps -a --no-trunc --format '{{json .}}' 2>/dev/null); then
+                printf '%s' "$out" > "$INBOX/.docker.tmp" 2>/dev/null \
+                    && mv -f "$INBOX/.docker.tmp" "$INBOX/docker.txt" 2>/dev/null
+            else
+                : > "$INBOX/.docker.tmp" 2>/dev/null \
+                    && mv -f "$INBOX/.docker.tmp" "$INBOX/docker.txt" 2>/dev/null
+            fi
+            if [ -f "$INBOX/.docker-watch" ]; then
+                if s=$(docker stats --no-stream --format '{{json .}}' 2>/dev/null); then
+                    printf '%s' "$s" > "$INBOX/.docker-stats.tmp" 2>/dev/null \
+                        && mv -f "$INBOX/.docker-stats.tmp" "$INBOX/docker-stats.txt" 2>/dev/null
+                fi
+                if i=$(docker images --format '{{json .}}' 2>/dev/null); then
+                    printf '%s' "$i" > "$INBOX/.docker-images.tmp" 2>/dev/null \
+                        && mv -f "$INBOX/.docker-images.tmp" "$INBOX/docker-images.txt" 2>/dev/null
+                fi
+                # Cross-arch emulation: which qemu interpreters are registered AND
+                # enabled in binfmt_misc (e.g. qemu-x86_64). Space-separated arch
+                # suffixes; empty = no emulation installed. Always published (even
+                # empty) so the host can tell "probed, none" from "not yet probed".
+                b=""
+                for qf in /proc/sys/fs/binfmt_misc/qemu-*; do
+                    [ -e "$qf" ] || continue
+                    head -1 "$qf" 2>/dev/null | grep -q '^enabled' && b="$b ${qf##*/qemu-}"
+                done
+                printf '%s' "${b# }" > "$INBOX/.docker-binfmt.tmp" 2>/dev/null \
+                    && mv -f "$INBOX/.docker-binfmt.tmp" "$INBOX/docker-binfmt.txt" 2>/dev/null
+                # Per-running-container architecture (from the image config), one
+                # "id<TAB>arch" line each — lets the dashboard flag emulated ones.
+                a=""
+                for cid in $(docker ps -q 2>/dev/null); do
+                    img=$(docker inspect --format '{{.Image}}' "$cid" 2>/dev/null)
+                    ar=$(docker image inspect --format '{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}' "$img" 2>/dev/null)
+                    a="$a$cid	$ar"$'\n'
+                done
+                printf '%s' "$a" > "$INBOX/.docker-arch.tmp" 2>/dev/null \
+                    && mv -f "$INBOX/.docker-arch.tmp" "$INBOX/docker-arch.txt" 2>/dev/null
+            fi
+            sleep 2
+        done
+    }
+    docker_loop &
+
     # Command loop: the host drops cmd-<action>.txt into the outbox. Every tab
     # action is now just a tmux window op against the one session. Backgrounded
     # so the foreground (below) can own the terminal's lifetime.
@@ -3835,6 +3924,150 @@ public final class ProfileStore {
                         new-tab)      tmux new-window -t "$TMUX_S" 2>/dev/null || true ;;
                         select-tab)   tmux select-window -t "$TMUX_S:$arg" 2>/dev/null || true ;;
                         close-tab)    tmux kill-window -t "$TMUX_S:$arg" 2>/dev/null || true ;;
+                        # Attach to a docker container in a fresh tab: arg is
+                        # "<container-id> <shell>". The host sanitises the shell;
+                        # the id comes from `docker ps`. The new tmux window is
+                        # tagged with the per-window option @container so the host
+                        # can nest the tab under its container in the source-list
+                        # (instead of showing it as a top-level "docker" tab).
+                        docker-attach)
+                            cid="${arg%% *}"; sh="${arg#* }"
+                            [ "$sh" = "$arg" ] && sh=bash
+                            win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" \
+                                  "docker exec -it $cid $sh" 2>/dev/null) \
+                                && tmux set-option -w -t "$win" @container "$cid" 2>/dev/null || true ;;
+                        # Container lifecycle — arg is a single id (host-sanitised
+                        # to a conservative charset). BACKGROUNDED: `docker stop`
+                        # can block ~10s, and the command loop is single-threaded
+                        # — a blocking op here would stall every later command
+                        # (attach, select-tab, …). On failure the stderr is
+                        # surfaced to the host via docker_err; the roster reflects
+                        # the new state within ~2s.
+                        docker-start)  ( e=$(docker start "$arg" 2>&1 >/dev/null) || docker_err "$e" ) & ;;
+                        docker-stop)   ( e=$(docker stop "$arg" 2>&1 >/dev/null) || docker_err "$e" ) & ;;
+                        docker-remove) ( e=$(docker rm -f "$arg" 2>&1 >/dev/null) || docker_err "$e" ) & ;;
+                        # Install cross-arch emulation (QEMU binfmt handlers) the
+                        # docker-native way. A persistent marker records the user's
+                        # choice so xinitrc re-applies it on every boot (binfmt_misc
+                        # registrations are kernel-runtime and don't survive reboot).
+                        docker-binfmt)
+                            ( touch "$HOME/.bromure-binfmt-enabled" 2>/dev/null
+                              e=$(docker run --privileged --rm tonistiigi/binfmt --install all 2>&1 >/dev/null) || docker_err "$e" ) & ;;
+                        # Disable cross-arch emulation: drop the persistence marker
+                        # and unregister the QEMU binfmt handlers.
+                        docker-binfmt-off)
+                            ( rm -f "$HOME/.bromure-binfmt-enabled" 2>/dev/null
+                              e=$(docker run --privileged --rm tonistiigi/binfmt --uninstall qemu-'*' 2>&1 >/dev/null) || docker_err "$e" ) & ;;
+                        # Launch a new container. arg is "<mode> <full docker run -d …>"
+                        # where mode ∈ none|env|proxy|both selects which HOST-INJECTED
+                        # env to forward — NOT the whole shell environment. The host
+                        # passes vars to the workspace via two generated files on the
+                        # metadata share:
+                        #   api_key.env — tokens (ANTHROPIC_API_KEY, GH_TOKEN, …)
+                        #   proxy.env   — http(s)_proxy / no_proxy (+ CA hints)
+                        # We source ONLY those in a clean `env -i` shell (no rc, so it
+                        # can't hang and can't pick up unrelated vars) and emit a
+                        # docker --env-file. For proxy we forward just the *_proxy
+                        # vars (the CA paths point at the VM's filesystem). The whole
+                        # thing is BACKGROUNDED; failures surface via docker_err.
+                        docker-run)
+                            rmode="${arg%% *}"; rrest="${arg#* }"
+                            rit="${rrest%% *}"; rrest2="${rrest#* }"
+                            rtag="${rrest2%% *}"; rrest3="${rrest2#* }"
+                            rimg="${rrest3%% *}"; rcmd="${rrest3#* }"
+                            (
+                                ef=""; extra=""
+                                # env/both: forward the host-injected TOKENS (their
+                                # values are dynamic fakes), sourced from api_key.env.
+                                case "$rmode" in
+                                    env|both)
+                                        ef=$(mktemp)
+                                        timeout 5 env -i PATH=/usr/bin:/bin bash -c \
+                                            '[ -r /mnt/bromure-meta/api_key.env ] && . /mnt/bromure-meta/api_key.env 2>/dev/null; env' 2>/dev/null \
+                                            | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
+                                            | grep -vE '^(PATH|PWD|SHLVL|_|SHELL|HOME|HOSTNAME)=' >> "$ef" ;;
+                                esac
+                                # proxy/both: route the container through the VM's
+                                # MITM proxy via the docker bridge gateway
+                                # (host.docker.internal → host-gateway; the bridge
+                                # daemon listens on 0.0.0.0:8080) and make it TRUST
+                                # the MITM CA at the SYSTEM level. The key is the
+                                # combined bundle: the VM's ca-certificates.crt is
+                                # the full public CA set WITH the Bromure CA appended
+                                # (by update-ca-certificates). Bind-mounting it over
+                                # the container's system bundle is what lets apt /
+                                # openssl-based tools (which ignore the *_CA env
+                                # vars) verify the proxy's forged certs — fixing e.g.
+                                # `apt-get update`. The env vars (for node/python/
+                                # curl/etc.) point at the same bundle; node wants the
+                                # raw PEM via NODE_EXTRA_CA_CERTS. Mirrors proxy.env.
+                                case "$rmode" in
+                                    proxy|both)
+                                        [ -n "$ef" ] || ef=$(mktemp)
+                                        printf '%s\n' \
+                                            'http_proxy=http://host.docker.internal:8080' \
+                                            'https_proxy=http://host.docker.internal:8080' \
+                                            'HTTP_PROXY=http://host.docker.internal:8080' \
+                                            'HTTPS_PROXY=http://host.docker.internal:8080' \
+                                            'no_proxy=localhost,127.0.0.1,::1' \
+                                            'NO_PROXY=localhost,127.0.0.1,::1' \
+                                            'NODE_EXTRA_CA_CERTS=/etc/ssl/certs/bromure-ca.pem' \
+                                            'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt' \
+                                            'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+                                            'CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt' \
+                                            'GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt' \
+                                            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' \
+                                            'AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt' >> "$ef"
+                                        extra="$extra --add-host=host.docker.internal:host-gateway"
+                                        # The combined bundle is what makes apt trust
+                                        # the proxy; the raw PEM is for NODE_EXTRA_CA_CERTS.
+                                        [ -r /etc/ssl/certs/ca-certificates.crt ] \
+                                            && extra="$extra -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro"
+                                        [ -r /etc/ssl/certs/bromure-ca.pem ] \
+                                            && extra="$extra -v /etc/ssl/certs/bromure-ca.pem:/etc/ssl/certs/bromure-ca.pem:ro"
+                                        ;;
+                                esac
+                                [ -n "$ef" ] && extra="--env-file $ef $extra"
+                                if [ -n "$extra" ]; then
+                                    full="${rcmd/docker run /docker run $extra }"
+                                else
+                                    full="$rcmd"
+                                fi
+                                if [ "$rit" = "1" ]; then
+                                    # Interactive (-it): run inside a fresh tmux
+                                    # window so the user drives it (e.g. gdb). Tag
+                                    # the window with the container name so the host
+                                    # nests it under its container in the source-list.
+                                    # The env-file is consumed at container start;
+                                    # leave it (disposable VM) since the window
+                                    # outlives us.
+                                    win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" "$full" 2>/dev/null)
+                                    if [ -n "$win" ]; then
+                                        [ "$rtag" != "-" ] && tmux set-option -w -t "$win" @container "$rtag" 2>/dev/null
+                                    else
+                                        docker_err "failed to open interactive container"
+                                    fi
+                                else
+                                    # Detached: if the image isn't local, pull it
+                                    # first and report layer progress so it doesn't
+                                    # look stuck. (-it pulls visibly in its own tab.)
+                                    if [ "$rimg" != "-" ] \
+                                       && ! docker image inspect "$rimg" >/dev/null 2>&1; then
+                                        docker_run_status pulling "$rimg" 0 0
+                                        dl=0; tot=0
+                                        docker pull "$rimg" 2>&1 | while IFS= read -r pl; do
+                                            case "$pl" in
+                                                *"Pulling fs layer"*) tot=$((tot+1)); docker_run_status pulling "$rimg" "$dl" "$tot" ;;
+                                                *"Pull complete"*)     dl=$((dl+1));   docker_run_status pulling "$rimg" "$dl" "$tot" ;;
+                                            esac
+                                        done
+                                    fi
+                                    docker_run_status starting "$rimg" 0 0
+                                    e=$(bash -c "$full" 2>&1 >/dev/null) || docker_err "$e"
+                                    docker_run_status_clear
+                                    [ -n "$ef" ] && rm -f "$ef"
+                                fi
+                            ) & ;;
                         # Halt, don't `reboot`. A guest-issued `sudo reboot`
                         # restarts the VM *in place* — VZ never fires
                         # guestDidStop, so the host's onStopped → relaunchVM

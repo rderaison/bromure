@@ -2,6 +2,37 @@ import Foundation
 import SandboxEngine
 @preconcurrency import Virtualization
 
+// MARK: - docker `--format '{{json .}}'` line shapes
+
+/// One line of `docker ps -a --format '{{json .}}'`. Field names match docker's
+/// JSON keys exactly. `State` is absent on very old docker, so it's optional and
+/// we fall back to the `Status` text.
+private struct DockerPSJSON: Decodable {
+    let ID: String
+    let Names: String
+    let Image: String
+    let Status: String
+    let Ports: String?
+    let RunningFor: String?
+    private let StateRaw: String?
+    var State: String { StateRaw ?? (Status.hasPrefix("Up") ? "running" : "exited") }
+    enum CodingKeys: String, CodingKey { case ID, Names, Image, Status, Ports, RunningFor, StateRaw = "State" }
+}
+
+private struct DockerStatsJSON: Decodable {
+    let ID: String
+    let CPUPerc: String?
+    let MemUsage: String?
+}
+
+private struct DockerImageJSON: Decodable {
+    let ID: String
+    let Repository: String
+    let Tag: String
+    let Size: String?
+    let CreatedSince: String?
+}
+
 /// Boots an Ubuntu base image for an interactive session.
 ///
 /// Per-profile session: boots from a CoW clone of the base image, mounts
@@ -18,10 +49,40 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     public var onURLOpen: ((URL) -> Void)?
 
     /// Called every ~0.7s with the current tmux window list — each entry is
-    /// (window index, whether it's the active window, foreground command).
+    /// (window index, whether it's the active window, foreground command,
+    /// and the @container option if the window is a docker-exec attach tab).
     /// tmux is the source of truth, so the host mirrors this directly as the
     /// tab bar; there's no per-process liveness reconciliation.
-    public var onTabList: (([(index: Int, active: Bool, label: String)]) -> Void)?
+    public var onTabList: (([(index: Int, active: Bool, label: String, containerID: String?)]) -> Void)?
+
+    /// Called ~every 2s with the guest's container list (from `docker ps -a`,
+    /// running + stopped). Empty when docker is absent / the daemon is down.
+    /// Drives the "Docker" sub-tree and the dashboard.
+    public var onDockerList: (([DockerContainer]) -> Void)?
+
+    /// Called ~every 2s WHILE a dashboard is open with per-container CPU/mem
+    /// (from `docker stats --no-stream`). Keyed by full container id.
+    public var onDockerStats: (([(id: String, cpu: String, mem: String)]) -> Void)?
+
+    /// Called ~every 2s WHILE a dashboard is open with the local image list
+    /// (from `docker images`).
+    public var onDockerImages: (([DockerImage]) -> Void)?
+
+    /// Called when a docker action (run / start / stop / remove) fails in the
+    /// guest — carries docker's stderr. One-shot: the file is consumed on read.
+    public var onDockerError: ((String) -> Void)?
+
+    /// Called (dashboard-only) with the qemu arch suffixes registered+enabled in
+    /// binfmt_misc (e.g. ["x86_64","arm"]). Empty = emulation not installed.
+    public var onDockerBinfmt: (([String]) -> Void)?
+
+    /// Called (dashboard-only) with each running container's architecture
+    /// (id, arch e.g. "amd64"/"arm64"/"arm/v7").
+    public var onDockerArch: (([(id: String, arch: String)]) -> Void)?
+
+    /// Called with the current "run job" progress while a detached `docker run`
+    /// is pulling/starting — (state, image, done, total). state is "" when idle.
+    public var onDockerRunStatus: (((state: String, image: String, done: Int, total: Int)) -> Void)?
 
     /// Called when the guest bounces a host-owned keychord (⌘T/⌘W/⌘N/⌘1-9)
     /// back to the host. While the VM holds keyboard focus the VZ view
@@ -476,21 +537,118 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             continue
                         }
                         // tabs.txt — the tmux window list, one line per tab:
-                        // "<index>\t<active 0|1>\t<foreground command>".
-                        // Constantly rewritten atomically; don't delete. This
-                        // IS the tab model — tmux is the source of truth, so
-                        // the host mirrors it directly (no liveness guessing).
+                        // "<index>\t<active 0|1>\t<foreground command>\t<@container>".
+                        // The 4th column is empty unless the window is a docker
+                        // attach tab. Constantly rewritten atomically; don't
+                        // delete. tmux is the source of truth, so the host
+                        // mirrors it directly (no liveness guessing).
                         if name == "tabs.txt" {
                             let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
-                            var tabs: [(index: Int, active: Bool, label: String)] = []
+                            var tabs: [(index: Int, active: Bool, label: String, containerID: String?)] = []
                             for line in raw.split(whereSeparator: \.isNewline) {
                                 let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
                                 guard cols.count >= 3, let idx = Int(cols[0]) else { continue }
+                                let cid = cols.count >= 4
+                                    ? String(cols[3]).trimmingCharacters(in: .whitespaces) : ""
                                 tabs.append((index: idx, active: cols[1] == "1",
-                                             label: String(cols[2]).trimmingCharacters(in: .whitespaces)))
+                                             label: String(cols[2]).trimmingCharacters(in: .whitespaces),
+                                             containerID: cid.isEmpty ? nil : cid))
                             }
                             tabs.sort { $0.index < $1.index }
                             self?.onTabList?(tabs)
+                            continue
+                        }
+                        // docker.txt — `docker ps -a --format '{{json .}}'`, one
+                        // JSON object per line (running + stopped). Rewritten
+                        // atomically every ~2s; empty when there's no docker.
+                        if name == "docker.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            var containers: [DockerContainer] = []
+                            for line in raw.split(whereSeparator: \.isNewline) {
+                                guard let data = line.data(using: .utf8),
+                                      let ps = try? JSONDecoder().decode(DockerPSJSON.self, from: data)
+                                else { continue }
+                                containers.append(DockerContainer(
+                                    id: ps.ID, name: ps.Names, image: ps.Image,
+                                    status: ps.Status, state: ps.State.lowercased(),
+                                    ports: ps.Ports ?? "", runningFor: ps.RunningFor ?? ""))
+                            }
+                            self?.onDockerList?(containers)
+                            continue
+                        }
+                        // docker-stats.txt — `docker stats --no-stream` NDJSON;
+                        // dashboard-only (gated by the .docker-watch marker).
+                        if name == "docker-stats.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            var stats: [(id: String, cpu: String, mem: String)] = []
+                            for line in raw.split(whereSeparator: \.isNewline) {
+                                guard let data = line.data(using: .utf8),
+                                      let s = try? JSONDecoder().decode(DockerStatsJSON.self, from: data)
+                                else { continue }
+                                stats.append((id: s.ID, cpu: s.CPUPerc ?? "", mem: s.MemUsage ?? ""))
+                            }
+                            self?.onDockerStats?(stats)
+                            continue
+                        }
+                        // docker-images.txt — `docker images` NDJSON; dashboard-only.
+                        if name == "docker-images.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            var images: [DockerImage] = []
+                            for line in raw.split(whereSeparator: \.isNewline) {
+                                guard let data = line.data(using: .utf8),
+                                      let im = try? JSONDecoder().decode(DockerImageJSON.self, from: data)
+                                else { continue }
+                                images.append(DockerImage(
+                                    id: im.ID, repository: im.Repository, tag: im.Tag,
+                                    size: im.Size ?? "", created: im.CreatedSince ?? ""))
+                            }
+                            self?.onDockerImages?(images)
+                            continue
+                        }
+                        // docker-binfmt.txt — space-separated qemu arch suffixes
+                        // currently emulated; may be empty (probed, none).
+                        if name == "docker-binfmt.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let arches = raw.split(whereSeparator: { $0 == " " || $0.isNewline })
+                                .map(String.init)
+                            self?.onDockerBinfmt?(arches)
+                            continue
+                        }
+                        // docker-arch.txt — "id<TAB>arch" per running container.
+                        if name == "docker-arch.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            var out: [(id: String, arch: String)] = []
+                            for line in raw.split(whereSeparator: \.isNewline) {
+                                let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
+                                guard cols.count >= 2 else { continue }
+                                out.append((id: String(cols[0]).trimmingCharacters(in: .whitespaces),
+                                            arch: String(cols[1]).trimmingCharacters(in: .whitespaces)))
+                            }
+                            self?.onDockerArch?(out)
+                            continue
+                        }
+                        // docker-run-status.txt — "state\timage\tdone\ttotal" while
+                        // a detached run pulls/starts; empty when idle.
+                        if name == "docker-run-status.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let cols = raw.split(separator: "\t", omittingEmptySubsequences: false)
+                            if cols.count >= 4, !cols[0].isEmpty {
+                                self?.onDockerRunStatus?((
+                                    state: String(cols[0]), image: String(cols[1]),
+                                    done: Int(cols[2]) ?? 0, total: Int(cols[3]) ?? 0))
+                            } else {
+                                self?.onDockerRunStatus?((state: "", image: "", done: 0, total: 0))
+                            }
+                            continue
+                        }
+                        // docker-error.txt — one-shot: a failed docker action's
+                        // stderr. Read, delete, surface. (Deleting makes it fire
+                        // once rather than every 40ms poll.)
+                        if name == "docker-error.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8))?
+                                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            try? fm.removeItem(at: entry)
+                            if !raw.isEmpty { self?.onDockerError?(raw) }
                             continue
                         }
                         // shortcut-<key>.txt is handled by the fast path at the

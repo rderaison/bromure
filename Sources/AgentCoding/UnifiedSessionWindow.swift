@@ -47,6 +47,9 @@ final class SessionListModel {
     /// Every profile, in display order — the source list's top level.
     var profileRows: [ProfileRow] = []
     var selectedID: Profile.ID?
+    /// Set when a VM's Docker dashboard is the active stage surface — highlights
+    /// that VM's Docker node in the source list.
+    var dockerSelectedID: Profile.ID?
 }
 
 /// Coarse per-tab activity derived from the foreground program tmux reports as
@@ -117,6 +120,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private var sidebarHost: NSHostingView<SessionSidebar>!
     /// The pane currently mounted in the stage, if any. Drives the empty state.
     private var mountedPane: SessionPane?
+
+    /// Full-bleed overlay on top of the stage that shows the Docker dashboard
+    /// for the selected VM. Hidden unless `dockerSelectedID` is set.
+    private let dockerSlot = NSView()
+    private var dockerHosting: NSHostingView<DockerDashboardView>?
+    /// The VM whose Docker dashboard is currently shown (nil = none).
+    private var dockerSelectedID: Profile.ID?
     private var toolbarDelegate: UnifiedToolbarDelegate?
 
     init(acDelegate: ACAppDelegate) {
@@ -148,6 +158,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onSelectTab: { [weak self] id, idx in self?.selectTab(profileID: id, index: idx) },
             onNewTab:    { [weak self] id in self?.newTab(profileID: id) },
             onCloseTab:  { [weak self] id, idx in self?.closeTab(profileID: id, index: idx) },
+            onSelectDocker: { [weak self] id in self?.showDockerDashboard(id) },
+            onOpenContainer: { [weak self] id, cid in self?.showDockerDashboard(id, container: cid) },
             onDetachVM:  { [weak self] id in self?.acDelegate?.popOutVM(id) },
             onCloseVM:   { [weak self] id in self?.acDelegate?.closeVMFromSidebar(id) },
             onStart:     { [weak self] id in self?.acDelegate?.startProfile(id) },
@@ -176,6 +188,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         emptyStateHost.translatesAutoresizingMaskIntoConstraints = false
         stage.addSubview(paneSlot)
         stage.addSubview(emptyStateHost)
+        // Docker dashboard overlay — added last so it sits above the framebuffer
+        // and empty-state. Opaque background so it fully covers the VM behind it.
+        dockerSlot.translatesAutoresizingMaskIntoConstraints = false
+        dockerSlot.wantsLayer = true
+        dockerSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        dockerSlot.isHidden = true
+        stage.addSubview(dockerSlot)
         NSLayoutConstraint.activate([
             paneSlot.topAnchor.constraint(equalTo: stage.topAnchor),
             paneSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
@@ -185,6 +204,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             emptyStateHost.leadingAnchor.constraint(equalTo: paneSlot.leadingAnchor),
             emptyStateHost.trailingAnchor.constraint(equalTo: paneSlot.trailingAnchor),
             emptyStateHost.bottomAnchor.constraint(equalTo: paneSlot.bottomAnchor),
+            dockerSlot.topAnchor.constraint(equalTo: stage.topAnchor),
+            dockerSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
+            dockerSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            dockerSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
         ])
 
         // ---- Layout: fixed-width sidebar | divider | framebuffer stage ----
@@ -265,6 +288,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Remove a profile's pane from the sidebar + stage. Does NOT touch the VM.
     func removePane(_ id: Profile.ID) {
         guard let idx = hostedPanes.firstIndex(where: { $0.profile.id == id }) else { return }
+        if dockerSelectedID == id { clearDockerDashboard() }
         let pane = hostedPanes.remove(at: idx)
         if pane.containerView.superview === paneSlot { pane.containerView.removeFromSuperview() }
         if pane.host === self { pane.host = nil }
@@ -295,6 +319,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// mounts its framebuffer; a running-but-detached one reattaches; an
     /// off/suspended one shows its Start card in the stage.
     func selectRow(_ id: Profile.ID) {
+        clearDockerDashboard()
         selectedID = id
         listModel.selectedID = id
         if let pane = pane(id) { mountSelected(pane); return }
@@ -331,6 +356,67 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         emptyStateHost.isHidden = (mountedPane != nil)
     }
 
+    // MARK: Docker dashboard overlay
+
+    /// Show the Docker dashboard for a VM in the stage (over its framebuffer),
+    /// and turn on the guest's expensive stats/images polling for the duration.
+    func showDockerDashboard(_ id: Profile.ID, container: String? = nil) {
+        guard let selPane = pane(id) else { return }
+        if let prev = dockerSelectedID, prev != id, let p = pane(prev) {
+            acDelegate?.setDockerWatch(false, in: p)   // hand off watch between VMs
+        }
+        if selectedID != id { select(profileID: id) }
+        dockerSelectedID = id
+        listModel.dockerSelectedID = id
+        dockerHosting?.removeFromSuperview()
+        let view = DockerDashboardView(
+            model: selPane.model,
+            accentHex: selPane.profile.color.hexInUI,
+            onRun:    { [weak self] spec in
+                guard let self, let p = self.pane(id) else { return }
+                self.acDelegate?.requestDockerRun(spec: spec, in: p)
+                // Interactive runs open a tmux tab — surface it by dropping the dashboard.
+                if spec.interactive { self.clearDockerDashboard() }
+            },
+            onStart:  { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerStart(containerID: cid, in: p) } },
+            onStop:   { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerStop(containerID: cid, in: p) } },
+            onRemove: { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerRemove(containerID: cid, in: p) } },
+            onAttach: { [weak self] cid, shell in self?.dockerAttach(profileID: id, containerID: cid, shell: shell) },
+            onInstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtInstall(in: p) } },
+            onUninstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtUninstall(in: p) } },
+            initialContainerID: container)
+        let host = NSHostingView(rootView: view)
+        host.translatesAutoresizingMaskIntoConstraints = false
+        dockerSlot.addSubview(host)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: dockerSlot.topAnchor),
+            host.bottomAnchor.constraint(equalTo: dockerSlot.bottomAnchor),
+            host.leadingAnchor.constraint(equalTo: dockerSlot.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: dockerSlot.trailingAnchor),
+        ])
+        dockerHosting = host
+        acDelegate?.setDockerWatch(true, in: selPane)
+        updateDockerOverlay()
+        makeFirstResponder(host)
+    }
+
+    /// Tear down the dashboard overlay and stop the guest's gated polling.
+    func clearDockerDashboard() {
+        guard dockerSelectedID != nil else { return }
+        if let id = dockerSelectedID, let p = pane(id) {
+            acDelegate?.setDockerWatch(false, in: p)
+        }
+        dockerSelectedID = nil
+        listModel.dockerSelectedID = nil
+        dockerHosting?.removeFromSuperview()
+        dockerHosting = nil
+        updateDockerOverlay()
+    }
+
+    private func updateDockerOverlay() {
+        dockerSlot.isHidden = (dockerSelectedID == nil)
+    }
+
     /// Honour the selected profile's terminal-transparency setting. The pane's
     /// own container layer carries the alpha; here we flip the *window* to
     /// non-opaque and clear the *stage* backing so that alpha composites against
@@ -352,15 +438,26 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     // MARK: Tab actions (forward to the pane)
 
     func selectTab(profileID id: Profile.ID, index: Int) {
+        clearDockerDashboard()
         if selectedID != id { select(profileID: id) }
         pane(id)?.switchTo(index: index)
     }
     func newTab(profileID id: Profile.ID) {
+        clearDockerDashboard()
         if selectedID != id { select(profileID: id) }
         if let p = pane(id) { acDelegate?.spawnNewTab(in: p) }
     }
     func closeTab(profileID id: Profile.ID, index: Int) {
         pane(id)?.closeTab(at: index)
+    }
+    func dockerAttach(profileID id: Profile.ID, containerID: String, shell: String) {
+        // The new shell becomes the active tmux window; surface it by dropping
+        // the dashboard so the framebuffer is visible.
+        clearDockerDashboard()
+        if selectedID != id { select(profileID: id) }
+        if let p = pane(id) {
+            acDelegate?.requestDockerAttach(containerID: containerID, shell: shell, in: p)
+        }
     }
 
     // MARK: - SessionPaneHost
@@ -422,6 +519,10 @@ private struct SessionSidebar: View {
     let onSelectTab: (Profile.ID, Int) -> Void
     let onNewTab: (Profile.ID) -> Void
     let onCloseTab: (Profile.ID, Int) -> Void
+    /// Open the VM's Docker dashboard in the stage.
+    let onSelectDocker: (Profile.ID) -> Void
+    /// (profileID, containerID) — open the dashboard on this container's detail.
+    let onOpenContainer: (Profile.ID, String) -> Void
     let onDetachVM: (Profile.ID) -> Void
     let onCloseVM: (Profile.ID) -> Void
     let onStart: (Profile.ID) -> Void
@@ -455,10 +556,13 @@ private struct SessionSidebar: View {
                             row: row,
                             entry: model.entries.first { $0.id == row.id },
                             isSelected: model.selectedID == row.id,
+                            isDockerActive: model.dockerSelectedID == row.id,
                             onSelect: onSelect,
                             onSelectTab: onSelectTab,
                             onNewTab: onNewTab,
                             onCloseTab: onCloseTab,
+                            onSelectDocker: onSelectDocker,
+                            onOpenContainer: onOpenContainer,
                             onDetachVM: onDetachVM,
                             onCloseVM: onCloseVM,
                             onStart: onStart,
@@ -514,10 +618,14 @@ private struct VMSection: View {
     /// Live tab model when the VM is running AND attached; nil otherwise.
     var entry: SessionListModel.VMEntry?
     let isSelected: Bool
+    /// True when this VM's Docker dashboard is the active stage surface.
+    let isDockerActive: Bool
     let onSelect: (Profile.ID) -> Void
     let onSelectTab: (Profile.ID, Int) -> Void
     let onNewTab: (Profile.ID) -> Void
     let onCloseTab: (Profile.ID, Int) -> Void
+    let onSelectDocker: (Profile.ID) -> Void
+    let onOpenContainer: (Profile.ID, String) -> Void
     let onDetachVM: (Profile.ID) -> Void
     let onCloseVM: (Profile.ID) -> Void
     let onStart: (Profile.ID) -> Void
@@ -598,19 +706,33 @@ private struct VMSection: View {
             .contentShape(Rectangle())
             .onTapGesture { onSelect(row.id) }
 
-            // Nested tab rows for a running, attached VM.
+            // Nested rows for a running, attached VM: top-level tabs (attach
+            // tabs are nested under their container instead), then the always-on
+            // Docker node.
             if let entry {
                 VStack(alignment: .leading, spacing: 1) {
                     ForEach(Array(entry.model.tabs.enumerated()), id: \.element.id) { idx, tab in
-                        TabRow(
-                            label: tab.label,
-                            agentKind: BromureIcons.agentKind(forLabel: tab.label),
-                            thinking: entry.model.thinking,
-                            isActive: idx == entry.model.activeIndex && isSelected,
-                            accentHex: row.accentHex,
-                            onSelect: { onSelectTab(row.id, idx) },
-                            onClose: { onCloseTab(row.id, idx) })
+                        if tab.containerID == nil {
+                            TabRow(
+                                label: tab.label,
+                                agentKind: BromureIcons.agentKind(forLabel: tab.label),
+                                thinking: entry.model.thinking,
+                                isActive: tab.id == entry.model.activeTab?.id && isSelected,
+                                accentHex: row.accentHex,
+                                chord: (isSelected && idx < 9) ? idx + 1 : nil,
+                                onSelect: { onSelectTab(row.id, idx) },
+                                onClose: { onCloseTab(row.id, idx) })
+                        }
                     }
+                    DockerSection(
+                        model: entry.model,
+                        accentHex: row.accentHex,
+                        isSelected: isSelected,
+                        isDockerActive: isDockerActive,
+                        onOpen: { onSelectDocker(row.id) },
+                        onOpenContainer: { cid in onOpenContainer(row.id, cid) },
+                        onSelectTab: { idx in onSelectTab(row.id, idx) },
+                        onCloseTab: { idx in onCloseTab(row.id, idx) })
                 }
                 .overlay(alignment: .leading) {
                     Rectangle()
@@ -711,6 +833,8 @@ private struct TabRow: View {
     let thinking: Bool
     let isActive: Bool
     let accentHex: String
+    /// ⌘-number for this tab (1–9), or nil for tabs past 9 / unfocused VMs.
+    let chord: Int?
     let onSelect: () -> Void
     let onClose: () -> Void
     @State private var hovering = false
@@ -741,6 +865,8 @@ private struct TabRow: View {
             Spacer(minLength: 2)
             if hovering {
                 IconButton(system: "xmark", help: "Close tab (⌘W)", size: 9) { onClose() }
+            } else if let chord {
+                ChordLabel(chord)
             }
         }
         .padding(.leading, 26)
@@ -749,6 +875,193 @@ private struct TabRow: View {
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(isActive ? Color.primary.opacity(0.08) : (hovering ? Color.primary.opacity(0.04) : .clear)))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// Right-aligned ⌘-number affordance shown next to a tab, à la unpeel.
+private struct ChordLabel: View {
+    let n: Int
+    init(_ n: Int) { self.n = n }
+    var body: some View {
+        Text("⌘\(n)")
+            .font(.system(size: 11))
+            .foregroundStyle(.tertiary)
+            .monospacedDigit()
+    }
+}
+
+/// The always-on "Docker" node under a workspace's tabs. The header opens the
+/// dashboard (onOpen); the chevron expands a sub-tree of running containers,
+/// each with its attach tabs nested underneath.
+private struct DockerSection: View {
+    let model: TabsModel
+    let accentHex: String
+    let isSelected: Bool
+    let isDockerActive: Bool
+    let onOpen: () -> Void
+    /// containerID — open the dashboard on this container's detail.
+    let onOpenContainer: (String) -> Void
+    /// model position of a nested attach tab
+    let onSelectTab: (Int) -> Void
+    let onCloseTab: (Int) -> Void
+    @State private var expanded = true
+    @State private var headerHover = false
+
+    private var running: [DockerContainer] { model.dockerContainers.filter(\.isRunning) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 8) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 10)
+                    .contentShape(Rectangle())
+                    .onTapGesture { expanded.toggle() }   // chevron toggles only
+                Image(systemName: "shippingbox.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(hex: "#2496ED"))   // Docker blue
+                    .frame(width: 16)
+                Text("Docker")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(isDockerActive ? .primary : .secondary)
+                    .lineLimit(1)
+                Text("\(running.count)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+                Spacer(minLength: 2)
+            }
+            .padding(.leading, 20)   // clear of the tree rule at x≈17
+            .padding(.trailing, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isDockerActive ? Color(hex: accentHex).opacity(0.14)
+                                         : (headerHover ? Color.primary.opacity(0.04) : .clear)))
+            .contentShape(Rectangle())
+            .onTapGesture { onOpen() }              // rest of header → dashboard
+            .onHover { headerHover = $0 }
+
+            if expanded {
+                ForEach(running) { container in
+                    DockerContainerRow(
+                        container: container,
+                        accentHex: accentHex,
+                        isSelected: isSelected,
+                        tabs: tabRows(for: container),
+                        activeTabID: model.activeTab?.id,
+                        onOpen: { onOpenContainer(container.id) },
+                        onSelectTab: onSelectTab,
+                        onCloseTab: onCloseTab)
+                }
+            }
+        }
+    }
+
+    /// (model position, tab) for the attach tabs belonging to a container.
+    private func tabRows(for c: DockerContainer) -> [(pos: Int, tab: TabsModel.Tab)] {
+        // Attach tabs tag with the container id; interactive `docker run -it`
+        // tabs tag with the container name (the id isn't known when launched).
+        model.tabs.enumerated()
+            .filter { $0.element.containerID == c.id || $0.element.containerID == c.name }
+            .map { (pos: $0.offset, tab: $0.element) }
+    }
+}
+
+/// One running container under the Docker node: a row that opens the attach
+/// popover, plus its attach tabs nested underneath.
+private struct DockerContainerRow: View {
+    let container: DockerContainer
+    let accentHex: String
+    let isSelected: Bool
+    let tabs: [(pos: Int, tab: TabsModel.Tab)]
+    let activeTabID: UUID?
+    /// Open the dashboard on this container's detail screen.
+    let onOpen: () -> Void
+    let onSelectTab: (Int) -> Void
+    let onCloseTab: (Int) -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 7, height: 7)
+                    .frame(width: 18)
+                Text(container.name.isEmpty ? container.shortID : container.name)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 2)
+                if hovering {
+                    IconButton(system: "info.circle", help: "Details & attach", size: 10) { onOpen() }
+                }
+            }
+            .padding(.leading, 34)
+            .padding(.trailing, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(hovering ? Color.primary.opacity(0.04) : .clear))
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onOpen)
+            .onHover { hovering = $0 }
+
+            ForEach(tabs, id: \.tab.id) { entry in
+                DockerTabRow(
+                    label: entry.tab.label,
+                    isActive: entry.tab.id == activeTabID && isSelected,
+                    accentHex: accentHex,
+                    chord: (isSelected && entry.pos < 9) ? entry.pos + 1 : nil,
+                    onSelect: { onSelectTab(entry.pos) },
+                    onClose: { onCloseTab(entry.pos) })
+            }
+        }
+    }
+}
+
+/// A `docker exec` attach tab, nested one level deeper than a container row.
+private struct DockerTabRow: View {
+    let label: String
+    let isActive: Bool
+    let accentHex: String
+    let chord: Int?
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "terminal")
+                .font(.system(size: 10))
+                .foregroundStyle(isActive ? Color(hex: accentHex) : .secondary)
+                .frame(width: 16)
+            Text(label.isEmpty ? "shell" : label)
+                .font(.system(size: 11, weight: isActive ? .medium : .regular))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .foregroundStyle(isActive ? .primary : .secondary)
+            Spacer(minLength: 2)
+            if hovering {
+                IconButton(system: "xmark", help: "Close tab (⌘W)", size: 8) { onClose() }
+            } else if let chord {
+                ChordLabel(chord)
+            }
+        }
+        .padding(.leading, 48)
+        .padding(.trailing, 8)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isActive ? Color.primary.opacity(0.08)
+                               : (hovering ? Color.primary.opacity(0.04) : .clear)))
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovering = $0 }

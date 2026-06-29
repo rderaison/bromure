@@ -5,7 +5,7 @@ Bromure AC in-VM bridge daemon.
 Listens for several kinds of clients inside the VM and bridges each to
 the host's MITM engine over vsock:
 
-  • HTTP proxy:  127.0.0.1:8080 (TCP)              →  vsock CID 2 port 8443
+  • HTTP proxy:  0.0.0.0:8080 (TCP)                →  vsock CID 2 port 8443
   • ssh-agent:   /tmp/bromure-agent.sock (Unix)    →  vsock CID 2 port 8444
   • AWS creds:   /tmp/bromure-aws-creds.sock (Unix) →  vsock CID 2 port 8445
   • Local LLM:   127.0.0.1:11434 (TCP)             →  vsock CID 2 port 8446
@@ -21,10 +21,12 @@ Ubuntu 24.04).
 Lives in /mnt/bromure-meta and is executed by xinitrc — host-managed,
 no base-image changes required.
 """
+import ipaddress
 import os
 import select
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import traceback
@@ -91,14 +93,64 @@ def bridge(client: socket.socket, vsock_port: int, label: str) -> None:
     host.close()
 
 
+def _proxy_allowed_nets() -> "list[ipaddress._BaseNetwork]":
+    """Networks permitted to use the HTTP proxy: loopback + docker bridges.
+
+    Even though we bind 0.0.0.0 so containers can reach us via the bridge
+    gateway, we only *serve* loopback and docker bridge subnets — anything
+    arriving on the VM's external NIC (LAN/NAT) is refused. We always include
+    127.0.0.0/8 and docker's default address pool (172.16.0.0/12), plus any
+    live docker0 / br-* interface subnets (covers custom pools present now)."""
+    nets = [
+        ipaddress.ip_network("127.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+    ]
+    try:
+        out = subprocess.check_output(
+            ["ip", "-o", "-f", "inet", "addr", "show"],
+            text=True, stderr=subprocess.DEVNULL)
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and (parts[1].startswith("docker")
+                                    or parts[1].startswith("br-")):
+                try:
+                    nets.append(ipaddress.ip_network(parts[3], strict=False))
+                except ValueError:
+                    pass
+    except Exception:
+        pass
+    return nets
+
+
+def _proxy_peer_allowed(nets, addr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return any(ip in n for n in nets)
+
+
 def serve_http_proxy() -> None:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("127.0.0.1", HTTP_PROXY_TCP_PORT))
+    # Bind 0.0.0.0 (not just loopback) so docker containers can route through
+    # the MITM proxy via the bridge gateway (host.docker.internal:host-gateway).
+    # We still firewall in userspace below: only loopback + docker bridge peers
+    # are served, so the open bind doesn't expose the proxy to the LAN/NAT side.
+    s.bind(("0.0.0.0", HTTP_PROXY_TCP_PORT))
     s.listen(64)
-    log(f"[http] listening on 127.0.0.1:{HTTP_PROXY_TCP_PORT}")
+    allowed = _proxy_allowed_nets()
+    log(f"[http] listening on 0.0.0.0:{HTTP_PROXY_TCP_PORT} "
+        f"(allowed: {', '.join(str(n) for n in allowed)})")
     while True:
-        conn, _addr = s.accept()
+        conn, addr = s.accept()
+        if not _proxy_peer_allowed(allowed, addr[0]):
+            log(f"[http] refused {addr[0]} (not loopback / docker bridge)")
+            try:
+                conn.close()
+            except OSError:
+                pass
+            continue
         threading.Thread(
             target=bridge,
             args=(conn, HTTP_PROXY_VSOCK_PORT, "http"),

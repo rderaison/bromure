@@ -4307,9 +4307,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     loopbackRelayAgentURL: loopbackRelayAgentURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
-            // True only when the resumed snapshot's kittys are still
-            // valid — drives spawn-vs-raise at the end of this block.
-            var restoredSnapshot = false
             do {
                 try sandbox.prepare()
                 win.vmView.virtualMachine = sandbox.vm
@@ -4322,7 +4319,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if sandbox.hasSavedState {
                     do {
                         try await sandbox.restore()
-                        restoredSnapshot = true
                         FileHandle.standardError.write(Data(
                             "[ac] restored '\(profile.name)' from saved state\n".utf8))
                     } catch {
@@ -4502,6 +4498,128 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Close a tab → tmux kill-window at that index.
     func requestCloseTab(index: Int, in pane: SessionPane) {
         sendCommand("close-tab \(index)", in: pane)
+    }
+
+    /// Attach to a running docker container in a new tab → the guest spawns a
+    /// tmux window running `docker exec -it <id> <shell>`. The shell is
+    /// user-supplied (the popover field), so sanitise it to a conservative
+    /// charset and fall back to `bash` for anything empty or suspicious — the
+    /// command is interpolated into a guest shell line, so this is the trust
+    /// boundary. The container id comes from `docker ps`, not the user.
+    func requestDockerAttach(containerID: String, shell: String, in pane: SessionPane) {
+        let allowed = CharacterSet(charactersIn:
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.")
+        let trimmed = shell.trimmingCharacters(in: .whitespaces)
+        let safe = !trimmed.isEmpty && trimmed.unicodeScalars.allSatisfy(allowed.contains)
+            ? trimmed : "bash"
+        sendCommand("docker-attach \(containerID) \(safe)", in: pane)
+    }
+
+    /// Conservative charset for ids/names interpolated into a guest shell line.
+    private static let dockerIDAllowed = CharacterSet(charactersIn:
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.:@")
+
+    private func sanitizedDockerID(_ raw: String) -> String? {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, t.unicodeScalars.allSatisfy(Self.dockerIDAllowed.contains) else { return nil }
+        return t
+    }
+
+    func requestDockerStart(containerID: String, in pane: SessionPane) {
+        guard let id = sanitizedDockerID(containerID) else { return }
+        sendCommand("docker-start \(id)", in: pane)
+    }
+    func requestDockerStop(containerID: String, in pane: SessionPane) {
+        guard let id = sanitizedDockerID(containerID) else { return }
+        sendCommand("docker-stop \(id)", in: pane)
+    }
+    func requestDockerRemove(containerID: String, in pane: SessionPane) {
+        guard let id = sanitizedDockerID(containerID) else { return }
+        sendCommand("docker-remove \(id)", in: pane)
+    }
+
+    /// Install cross-arch QEMU emulation (binfmt handlers) in the workspace.
+    func requestDockerBinfmtInstall(in pane: SessionPane) {
+        sendCommand("docker-binfmt", in: pane)
+    }
+
+    /// Disable cross-arch emulation (unregister binfmt + drop the marker).
+    func requestDockerBinfmtUninstall(in pane: SessionPane) {
+        sendCommand("docker-binfmt-off", in: pane)
+    }
+
+    /// User-supplied fields for the "new container" dialog.
+    struct DockerRunSpec {
+        var image: String
+        var name: String = ""
+        var ports: [String] = []     // "8080:80"
+        var env: [String] = []       // "KEY=val"
+        var volumes: [String] = []   // "/host:/container"
+        /// Pass the workspace's whole environment (API tokens, etc.) through.
+        var inheritEnv: Bool = false
+        /// Pass just the HTTP(S) proxy vars (covered by inheritEnv when set).
+        var inheritProxy: Bool = false
+        /// Run with a TTY (-it) in a fresh tmux tab instead of detached (-d).
+        var interactive: Bool = false
+    }
+
+    /// Launch a new container. The whole `docker run -d …` command is assembled
+    /// HERE with POSIX single-quoting of every user field, then run on the guest
+    /// via `bash -c` — so values can't break out of their argument. Newlines are
+    /// stripped (the command travels as one line in the cmd file).
+    func requestDockerRun(spec: DockerRunSpec, in pane: SessionPane) {
+        let image = spec.image.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !image.isEmpty else { return }
+        func q(_ s: String) -> String {
+            "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        var cmd = spec.interactive ? "docker run -it" : "docker run -d"
+        // For interactive runs we need a known container name so the guest can
+        // tag the tmux tab and the sidebar can nest it under its container —
+        // generate one when the user didn't supply it.
+        var name = spec.name.trimmingCharacters(in: .whitespaces)
+        if spec.interactive && name.isEmpty {
+            name = "bromure-" + UUID().uuidString.prefix(6).lowercased()
+        }
+        if !name.isEmpty {
+            cmd += " --name \(q(name))"
+        }
+        for p in spec.ports where !p.trimmingCharacters(in: .whitespaces).isEmpty {
+            cmd += " -p \(q(p.trimmingCharacters(in: .whitespaces)))"
+        }
+        for e in spec.env where !e.trimmingCharacters(in: .whitespaces).isEmpty {
+            cmd += " -e \(q(e.trimmingCharacters(in: .whitespaces)))"
+        }
+        for v in spec.volumes where !v.trimmingCharacters(in: .whitespaces).isEmpty {
+            cmd += " -v \(q(v.trimmingCharacters(in: .whitespaces)))"
+        }
+        cmd += " \(q(image))"
+        cmd = cmd.replacingOccurrences(of: "\n", with: " ")
+        // The guest builds the --env-file by sourcing ONLY the host-injected env
+        // files on the metadata share (tokens from api_key.env, proxy from
+        // proxy.env) — not the whole shell environment — then runs this command
+        // backgrounded so it can't wedge the command loop.
+        let mode = spec.inheritEnv
+            ? (spec.inheritProxy ? "both" : "env")
+            : (spec.inheritProxy ? "proxy" : "none")
+        // <mode> <interactive 0|1> <tag> <image> <command>. <tag> is the
+        // container name interactive tabs nest under ("-" otherwise); <image> is
+        // the bare ref the guest pre-pulls (with progress) for detached runs.
+        let tag = (spec.interactive && !name.isEmpty) ? name : "-"
+        sendCommand("docker-run \(mode) \(spec.interactive ? "1" : "0") \(tag) \(image) \(cmd)", in: pane)
+    }
+
+    /// Toggle the guest's expensive dashboard polling (CPU/mem + images) by
+    /// creating/removing the `.docker-watch` marker in the outbox. Called when a
+    /// Docker dashboard is shown/hidden so `docker stats` only runs when visible.
+    func setDockerWatch(_ on: Bool, in pane: SessionPane) {
+        guard let outbox = pane.sandbox?.sessionDisk?.outboxDirectory else { return }
+        let marker = outbox.appendingPathComponent(".docker-watch")
+        if on {
+            try? Data().write(to: marker)
+        } else {
+            try? FileManager.default.removeItem(at: marker)
+        }
     }
 
     private func sendCommand(_ command: String, in pane: SessionPane) {
@@ -4947,6 +5065,41 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     (index: $0.index, label: $0.label, active: $0.active)
                 }
                 self.pane(for: pid)?.applyTabList(tabs)
+            }
+        }
+        sandbox.onDockerList = { [weak self] containers in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyDockerList(containers)
+            }
+        }
+        sandbox.onDockerStats = { [weak self] stats in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyDockerStats(stats)
+            }
+        }
+        sandbox.onDockerImages = { [weak self] images in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyDockerImages(images)
+            }
+        }
+        sandbox.onDockerError = { [weak self] message in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyDockerError(message)
+            }
+        }
+        sandbox.onDockerBinfmt = { [weak self] arches in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyDockerBinfmt(arches)
+            }
+        }
+        sandbox.onDockerArch = { [weak self] list in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyDockerArch(list)
+            }
+        }
+        sandbox.onDockerRunStatus = { [weak self] s in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyDockerRunStatus(s)
             }
         }
         sandbox.onIPUpdate = { [weak self] ip in

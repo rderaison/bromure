@@ -396,7 +396,7 @@ struct WorkspacesList: ParsableCommand {
         // Running details (uptime, window, tabs) keyed by full id.
         let vms = (try? client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
         var running: [String: [String: Any]] = [:]
-        for vm in (vms ?? []) { if let id = vm["id"] as? String { running[id] = vm } }
+        for vm in vms { if let id = vm["id"] as? String { running[id] = vm } }
 
         print(pad("WORKSPACE ID", 14) + pad("NAME", 22) + pad("TOOL", 9)
               + pad("AUTH", 14) + pad("STATE", 11) + pad("UP", 8) + "WINDOW")
@@ -474,7 +474,7 @@ struct ProfilesDescribe: ParsableCommand {
         // the old `vm describe` showed) — pulled from the running-VM listing.
         if v["running"] as? Bool == true {
             let vms = (try? client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
-            if let vm = (vms ?? []).first(where: { ($0["id"] as? String) == (v["id"] as? String) }) {
+            if let vm = vms.first(where: { ($0["id"] as? String) == (v["id"] as? String) }) {
                 print("  ── runtime ──")
                 row("state", vm["state"] as? String)
                 row("window", (vm["attached"] as? Bool ?? false) ? "attached" : "detached")

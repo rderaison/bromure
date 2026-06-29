@@ -165,7 +165,7 @@ public actor InferenceService {
     /// main app and shared by the engine child + every Bromure-injected client
     /// (guest configs, Fusion). The forked engine child inherits it via the
     /// `BROMURE_ENGINE_KEY` env var so it authenticates the parent's clients.
-    nonisolated(unsafe) public static let apiKey: String = {
+    nonisolated public static let apiKey: String = {
         if let inherited = ProcessInfo.processInfo.environment["BROMURE_ENGINE_KEY"],
            !inherited.isEmpty {
             return inherited
