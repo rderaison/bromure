@@ -316,13 +316,23 @@ struct VMKill: ParsableCommand {
 struct VMAttach: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "attach",
-        abstract: "Attach your terminal to a VM's tmux session (tmux-style). Same tabs as the GUI.")
+        abstract: "Attach your terminal to a VM's tmux session, a tab, or a docker container.",
+        discussion: """
+        Examples:
+          vm attach my-workspace                      # current tmux tab
+          vm attach my-workspace 2                     # jump to tab 2
+          vm attach my-workspace containers:web -- bash  # docker exec -it into a container
+        """)
 
     @Argument(help: "VM id or workspace name.")
     var vm: String
 
-    @Argument(help: "Tab index from `vm ls` to jump to. Omit to attach to the current tab.")
-    var tab: Int?
+    @Argument(help: "Tab index, or `containers:<name>` for a running container. Omit for the current tab.")
+    var target: String?
+
+    @Argument(parsing: .postTerminator,
+              help: "Shell/command for a container target, after `--` (default: bash).")
+    var command: [String] = []
 
     @Flag(name: .shortAndLong, help: "Open a GUI window instead of attaching your terminal.")
     var window = false
@@ -341,19 +351,57 @@ struct VMAttach: ParsableCommand {
             return
         }
 
-        // Terminal attach to the one tmux session. The GUI kitty and this CLI
-        // client share it (lockstep), so a tab switch on either side moves both.
-        // With a tab index, jump to that tmux window first.
         let vms = (try client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
         guard let vmObj = vms.first(where: { matchesVM($0, vm) }) else {
             throw ValidationError("VM not found: \(vm)")
         }
-        let target = (vmObj["id"] as? String) ?? vm
-        var cmd = "tmux attach -t bromure"
-        if let tab {
-            cmd += " \\; select-window -t bromure:\(tab)"
+        let vmID = (vmObj["id"] as? String) ?? vm
+
+        // containers:<name> → docker exec -it into that container.
+        if let target, target.hasPrefix("containers:") {
+            let name = String(target.dropFirst("containers:".count))
+            guard isSafeContainerRef(name) else {
+                throw ValidationError("Invalid container name: \(name)")
+            }
+            let shell = command.isEmpty ? "bash" : command.joined(separator: " ")
+            try InteractiveExec.run(client: client, vm: vmID,
+                                    command: "docker exec -it \(name) \(shell)")
+            return
         }
-        try InteractiveExec.run(client: client, vm: target, command: cmd)
+
+        // Terminal attach to the one tmux session. The GUI kitty and this CLI
+        // client share it (lockstep), so a tab switch on either side moves both.
+        // With a tab index, jump to that tmux window first.
+        var cmd = "tmux attach -t bromure"
+        if let target {
+            guard let idx = Int(target) else {
+                throw ValidationError("Tab must be a number or `containers:<name>`: \(target)")
+            }
+            cmd += " \\; select-window -t bromure:\(idx)"
+        }
+        try InteractiveExec.run(client: client, vm: vmID, command: cmd)
+    }
+}
+
+/// Conservative validation for a docker container name/id used in a shell line.
+private func isSafeContainerRef(_ s: String) -> Bool {
+    !s.isEmpty && s.allSatisfy { $0.isLetter || $0.isNumber || "_.-".contains($0) }
+}
+
+/// Running containers in a VM (via `docker ps`), for `ls` / `describe`.
+private func runningContainers(_ client: ControlClient, vmID: String)
+    -> [(name: String, image: String, status: String)]
+{
+    guard let r = try? client.request(
+        "POST", "/vms/\(ControlClient.encodeSegment(vmID))/exec",
+        body: ["command": "docker ps --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}' 2>/dev/null",
+               "timeout": 5]),
+        r.status == 200, let out = r.json["stdout"] as? String else { return [] }
+    return out.split(whereSeparator: \.isNewline).compactMap { line in
+        let c = line.split(separator: "\t", omittingEmptySubsequences: false)
+        guard c.count >= 2 else { return nil }
+        return (name: String(c[0]), image: String(c[1]),
+                status: c.count >= 3 ? String(c[2]) : "")
     }
 }
 
@@ -420,6 +468,12 @@ struct WorkspacesList: ParsableCommand {
                 let title = t["title"] as? String ?? "shell"
                 let active = (t["active"] as? Bool ?? false) ? " *" : ""
                 print("    └─ \(title) (\(idx))\(active)")
+            }
+            // Running docker containers, if any (attach with `vm attach <id> containers:<name>`).
+            if live {
+                for c in runningContainers(client, vmID: id) {
+                    print("    🐳 \(c.name)  \(c.image)  \(c.status)")
+                }
             }
         }
     }
@@ -493,6 +547,13 @@ struct ProfilesDescribe: ParsableCommand {
                 if let tabs = vm["tabs"] as? [[String: Any]], !tabs.isEmpty {
                     print("  tabs:")
                     for t in tabs { print("    \(t["index"] as? Int ?? 0). \(t["title"] as? String ?? "shell")") }
+                }
+                let containers = runningContainers(client, vmID: vm["id"] as? String ?? workspace)
+                if !containers.isEmpty {
+                    print("  containers:")
+                    for c in containers {
+                        print("    🐳 \(c.name)  \(c.image)  \(c.status)   (attach: vm attach \(v["shortId"] as? String ?? "") containers:\(c.name) -- bash)")
+                    }
                 }
                 let target = vm["id"] as? String ?? workspace
                 if let r = try? client.request(
@@ -722,7 +783,12 @@ struct TraceClear: ParsableCommand {
 
 struct Exec: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Run a command inside a VM (like `docker exec`). Use -it for an interactive shell.")
+        abstract: "Run a command inside a VM, after `--` (kubectl-style). Use -it for an interactive shell.",
+        discussion: """
+        Examples:
+          vm exec my-workspace -- ls -la
+          vm exec my-workspace -it -- bash
+        """)
 
     @Flag(name: [.customShort("i"), .long], help: "Interactive: keep stdin open.")
     var interactive = false
@@ -736,8 +802,8 @@ struct Exec: ParsableCommand {
     @Argument(help: "VM id or workspace name.")
     var vm: String
 
-    @Argument(parsing: .captureForPassthrough,
-              help: "Command and args. Omit (with -it) for an interactive shell.")
+    @Argument(parsing: .postTerminator,
+              help: "Command and args after `--`. Omit (with -it) for an interactive shell.")
     var command: [String] = []
 
     func run() throws {
