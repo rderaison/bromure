@@ -227,7 +227,9 @@ final class SessionPane {
     func switchTo(index: Int) {
         guard model.tabs.indices.contains(index) else { return }
         model.activeIndex = index
-        acDelegate?.requestSelectTab(index: index, in: self)
+        // `index` is the model position; the guest wants the tmux window index,
+        // which can differ once windows have been closed (gaps).
+        acDelegate?.requestSelectTab(index: model.tabs[index].index, in: self)
     }
 
     /// Close a tab → tmux kill-window. The roster removes the pill. Closing the
@@ -235,7 +237,8 @@ final class SessionPane {
     /// pipeline.
     func closeTab(at index: Int) {
         guard model.tabs.indices.contains(index) else { return }
-        acDelegate?.requestCloseTab(index: index, in: self)
+        // `index` is the model position → map to the tmux window index.
+        acDelegate?.requestCloseTab(index: model.tabs[index].index, in: self)
         if model.tabs.count <= 1 {
             host?.paneRequestsClose(self)
         }
@@ -244,7 +247,7 @@ final class SessionPane {
     /// Mirror the guest's tmux window list as the tab bar. tmux is
     /// authoritative, so there's no liveness guessing or reaping. Pill objects
     /// are reused by position so SwiftUI keeps stable row identity.
-    func applyTabList(_ tabs: [(index: Int, active: Bool, label: String)]) {
+    func applyTabList(_ tabs: [(index: Int, active: Bool, label: String, containerID: String?)]) {
         if rebootRequested { return }
         guard !tabs.isEmpty else {
             // tmux is gone — the last window closed (or the VM is shutting
@@ -260,10 +263,13 @@ final class SessionPane {
             model.tabs.removeLast(model.tabs.count - tabs.count)
         }
         while model.tabs.count < tabs.count {
-            model.tabs.append(TabsModel.Tab(label: tabs[model.tabs.count].label))
+            let t = tabs[model.tabs.count]
+            model.tabs.append(TabsModel.Tab(label: t.label, index: t.index, containerID: t.containerID))
         }
-        for (i, t) in tabs.enumerated() where model.tabs[i].label != t.label {
-            model.tabs[i].label = t.label
+        for (i, t) in tabs.enumerated() {
+            if model.tabs[i].label != t.label { model.tabs[i].label = t.label }
+            if model.tabs[i].index != t.index { model.tabs[i].index = t.index }
+            if model.tabs[i].containerID != t.containerID { model.tabs[i].containerID = t.containerID }
         }
         if let activePos = tabs.firstIndex(where: { $0.active }), model.activeIndex != activePos {
             model.activeIndex = activePos
@@ -271,6 +277,40 @@ final class SessionPane {
         if model.activeIndex >= model.tabs.count {
             model.activeIndex = max(0, model.tabs.count - 1)
         }
+    }
+
+    /// Last per-container CPU/mem from `docker stats`, kept so a fresh container
+    /// list (published more often than we may get stats) re-merges the numbers.
+    private var dockerStats: [String: (cpu: String, mem: String)] = [:]
+
+    /// Mirror the guest's container list, overlaying any known CPU/mem. Guarded
+    /// so an unchanged list (republished every 2s) doesn't churn SwiftUI.
+    func applyDockerList(_ containers: [DockerContainer]) {
+        let merged = containers.map { c -> DockerContainer in
+            var c = c
+            if let s = dockerStats[c.id] { c.cpuPerc = s.cpu; c.memUsage = s.mem }
+            return c
+        }
+        if model.dockerContainers != merged { model.dockerContainers = merged }
+    }
+
+    /// Overlay live CPU/mem onto the current container list (dashboard-only).
+    func applyDockerStats(_ stats: [(id: String, cpu: String, mem: String)]) {
+        dockerStats = Dictionary(stats.map { ($0.id, (cpu: $0.cpu, mem: $0.mem)) },
+                                 uniquingKeysWith: { a, _ in a })
+        var changed = false
+        var list = model.dockerContainers
+        for i in list.indices {
+            let s = dockerStats[list[i].id]
+            let cpu = s?.cpu ?? "", mem = s?.mem ?? ""
+            if list[i].cpuPerc != cpu { list[i].cpuPerc = cpu; changed = true }
+            if list[i].memUsage != mem { list[i].memUsage = mem; changed = true }
+        }
+        if changed { model.dockerContainers = list }
+    }
+
+    func applyDockerImages(_ images: [DockerImage]) {
+        if model.dockerImages != images { model.dockerImages = images }
     }
 
     /// True when the host window is key AND the embedded VZ view holds keyboard

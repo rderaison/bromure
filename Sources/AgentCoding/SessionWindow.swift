@@ -3,6 +3,64 @@ import SandboxEngine
 import SwiftUI
 @preconcurrency import Virtualization
 
+// MARK: - Docker
+
+/// One running container reported by the guest's `docker ps` loop, mirrored into
+/// `TabsModel.dockerContainers` and rendered as a sub-tree under the workspace's
+/// tabs in the source-list.
+public struct DockerContainer: Identifiable, Equatable {
+    public let id: String       // full container id — used for `docker exec`
+    public var name: String
+    public var image: String
+    public var status: String   // e.g. "Up 3 minutes" / "Exited (0) 2m ago"
+    public var state: String    // "running", "exited", "paused", "created", …
+    public var ports: String
+    public var runningFor: String   // "2 hours ago" / "5 minutes ago"
+    /// Filled from `docker stats` (gated, dashboard-only); "" when unknown.
+    public var cpuPerc: String
+    public var memUsage: String
+    public var shortID: String { String(id.prefix(12)) }
+    public var isRunning: Bool { state == "running" }
+    /// CPU as a number (docker reports "12.34%"); nil while unknown.
+    public var cpuValue: Double? { Double(cpuPerc.replacingOccurrences(of: "%", with: "")) }
+
+    public init(id: String, name: String, image: String, status: String,
+                state: String, ports: String, runningFor: String = "",
+                cpuPerc: String = "", memUsage: String = "") {
+        self.id = id
+        self.name = name
+        self.image = image
+        self.status = status
+        self.state = state
+        self.ports = ports
+        self.runningFor = runningFor
+        self.cpuPerc = cpuPerc
+        self.memUsage = memUsage
+    }
+}
+
+/// One local docker image, from `docker images` — feeds the dashboard's Images
+/// view and the new-container picker.
+public struct DockerImage: Identifiable, Equatable {
+    public let id: String           // image id (sha)
+    public var repository: String   // "nginx" / "<none>"
+    public var tag: String          // "latest" / "<none>"
+    public var size: String         // "142MB"
+    public var created: String      // "2 days ago"
+    /// "repo:tag" — the ref you'd `docker run`; falls back to the id when untagged.
+    public var ref: String {
+        repository != "<none>" && tag != "<none>" ? "\(repository):\(tag)" : String(id.prefix(12))
+    }
+
+    public init(id: String, repository: String, tag: String, size: String, created: String) {
+        self.id = id
+        self.repository = repository
+        self.tag = tag
+        self.size = size
+        self.created = created
+    }
+}
+
 // MARK: - Tabs model
 
 /// Observable model backing a TabbedSessionWindow. Each tab represents a
@@ -19,14 +77,29 @@ final class TabsModel {
         // so updating `label` from the title-poll path live-refreshes
         // the pill without us having to replace the array slot.
         var label: String
-        init(label: String, id: UUID = UUID()) {
+        /// The real tmux window index — used for select/close (windows can have
+        /// gaps after closes, so position ≠ index).
+        var index: Int
+        /// Set when this tab is a `docker exec` attach window (tmux @container
+        /// option); such tabs are nested under their container in the source-list
+        /// instead of shown as a top-level tab.
+        var containerID: String?
+        init(label: String, index: Int = 0, containerID: String? = nil, id: UUID = UUID()) {
             self.label = label
+            self.index = index
+            self.containerID = containerID
             self.id = id
         }
     }
 
     var tabs: [Tab] = []
     var activeIndex: Int = 0
+
+    /// All docker containers in this VM (running + stopped), refreshed ~every 2s
+    /// from the guest. Drives the source-list Docker sub-tree and the dashboard.
+    var dockerContainers: [DockerContainer] = []
+    /// Local docker images — only refreshed while a dashboard is open (gated).
+    var dockerImages: [DockerImage] = []
     var accentHex: String = "#3B82F6"
     /// Most recent VM IP reported by the guest's xinitrc loop. Surfaced
     /// in the toolbar; click to copy.
@@ -118,7 +191,7 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
     func snapshotTabs() -> SessionDisk.TabsState { pane.snapshotTabs() }
     func switchTo(index: Int) { pane.switchTo(index: index) }
     func closeTab(at index: Int) { pane.closeTab(at: index) }
-    func applyTabList(_ tabs: [(index: Int, active: Bool, label: String)]) { pane.applyTabList(tabs) }
+    func applyTabList(_ tabs: [(index: Int, active: Bool, label: String, containerID: String?)]) { pane.applyTabList(tabs) }
     @discardableResult
     func performACShortcut(_ key: String, isRepeat: Bool = false) -> Bool {
         pane.performACShortcut(key, isRepeat: isRepeat)

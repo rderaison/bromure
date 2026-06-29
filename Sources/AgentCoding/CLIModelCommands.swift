@@ -176,7 +176,7 @@ struct SpecBench: ParsableCommand {
             FileHandle.standardError.write(Data("loading main \(rlabel) + draft \(dlabel) …\n".utf8))
             let mainC = try await loadModelContainer(from: mainDir, using: #huggingFaceTokenizerLoader())
             let draftC = try await loadModelContainer(from: draftDir, using: #huggingFaceTokenizerLoader())
-            let draftModel = try await draftC.perform { (c: ModelContext) in c.model }
+            let draftModel = await draftC.perform { (c: ModelContext) in c.model }
             let gp = GenerateParameters(maxTokens: mt, temperature: 0)
             try await mainC.perform { (ctx: ModelContext) in
                 let input = try await ctx.processor.prepare(input: UserInput(chat: [.user(p)]))
@@ -308,7 +308,7 @@ struct MLXServe: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "_mlx-serve", shouldDisplay: false)
     @Argument(help: "HF repo (must be in the models dir / hub cache).") var repo: String
     func run() throws {
-        try blockingRun {
+        _ = try blockingRun {
             try await InferenceService.shared.ensureRunning(modelRepo: repo)
         }
         let line = "serving \(repo) on http://127.0.0.1:\(InferenceService.enginePort)\n" +

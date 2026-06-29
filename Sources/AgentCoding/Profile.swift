@@ -3798,7 +3798,7 @@ public final class ProfileStore {
     roster_loop() {
         while :; do
             if out=$(tmux list-windows -t "$TMUX_S" \
-                     -F '#{window_index}	#{?window_active,1,0}	#{pane_current_command}' 2>/dev/null); then
+                     -F '#{window_index}	#{?window_active,1,0}	#{pane_current_command}	#{@container}' 2>/dev/null); then
                 printf '%s' "$out" > "$INBOX/.tabs.tmp" 2>/dev/null \
                     && mv -f "$INBOX/.tabs.tmp" "$INBOX/tabs.txt" 2>/dev/null
             elif ! tmux has-session -t "$TMUX_S" 2>/dev/null; then
@@ -3818,6 +3818,43 @@ public final class ProfileStore {
     }
     roster_loop &
 
+    # Docker: every 2s publish the container list as NDJSON (one JSON object per
+    # line, `docker ps -a --format '{{json .}}'`) so the host can render the
+    # source-list sub-tree AND the in-app dashboard (running + stopped). Atomic
+    # rename so the host never reads a partial list; an EMPTY file when docker is
+    # absent / the daemon is down (the host then shows an empty dashboard but
+    # still keeps the Docker node).
+    #
+    # The dashboard's extra data is EXPENSIVE (`docker stats --no-stream` blocks
+    # ~1.5s) so it's gated behind a marker file the host drops while a dashboard
+    # is open: when "$INBOX/.docker-watch" exists we also publish per-container
+    # CPU/mem (docker-stats.txt) and the local image list (docker-images.txt).
+    # The `{{json .}}` template emits valid JSON regardless of field contents, so
+    # no separator escaping is needed.
+    docker_loop() {
+        while :; do
+            if out=$(docker ps -a --no-trunc --format '{{json .}}' 2>/dev/null); then
+                printf '%s' "$out" > "$INBOX/.docker.tmp" 2>/dev/null \
+                    && mv -f "$INBOX/.docker.tmp" "$INBOX/docker.txt" 2>/dev/null
+            else
+                : > "$INBOX/.docker.tmp" 2>/dev/null \
+                    && mv -f "$INBOX/.docker.tmp" "$INBOX/docker.txt" 2>/dev/null
+            fi
+            if [ -f "$INBOX/.docker-watch" ]; then
+                if s=$(docker stats --no-stream --format '{{json .}}' 2>/dev/null); then
+                    printf '%s' "$s" > "$INBOX/.docker-stats.tmp" 2>/dev/null \
+                        && mv -f "$INBOX/.docker-stats.tmp" "$INBOX/docker-stats.txt" 2>/dev/null
+                fi
+                if i=$(docker images --format '{{json .}}' 2>/dev/null); then
+                    printf '%s' "$i" > "$INBOX/.docker-images.tmp" 2>/dev/null \
+                        && mv -f "$INBOX/.docker-images.tmp" "$INBOX/docker-images.txt" 2>/dev/null
+                fi
+            fi
+            sleep 2
+        done
+    }
+    docker_loop &
+
     # Command loop: the host drops cmd-<action>.txt into the outbox. Every tab
     # action is now just a tmux window op against the one session. Backgrounded
     # so the foreground (below) can own the terminal's lifetime.
@@ -3835,6 +3872,29 @@ public final class ProfileStore {
                         new-tab)      tmux new-window -t "$TMUX_S" 2>/dev/null || true ;;
                         select-tab)   tmux select-window -t "$TMUX_S:$arg" 2>/dev/null || true ;;
                         close-tab)    tmux kill-window -t "$TMUX_S:$arg" 2>/dev/null || true ;;
+                        # Attach to a docker container in a fresh tab: arg is
+                        # "<container-id> <shell>". The host sanitises the shell;
+                        # the id comes from `docker ps`. The new tmux window is
+                        # tagged with the per-window option @container so the host
+                        # can nest the tab under its container in the source-list
+                        # (instead of showing it as a top-level "docker" tab).
+                        docker-attach)
+                            cid="${arg%% *}"; sh="${arg#* }"
+                            [ "$sh" = "$arg" ] && sh=bash
+                            win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" \
+                                  "docker exec -it $cid $sh" 2>/dev/null) \
+                                && tmux set-option -w -t "$win" @container "$cid" 2>/dev/null || true ;;
+                        # Container lifecycle — arg is a single id (host-sanitised
+                        # to a conservative charset). Errors are swallowed; the
+                        # docker_loop roster reflects the new state within ~2s.
+                        docker-start)  docker start "$arg" >/dev/null 2>&1 || true ;;
+                        docker-stop)   docker stop "$arg" >/dev/null 2>&1 || true ;;
+                        docker-remove) docker rm -f "$arg" >/dev/null 2>&1 || true ;;
+                        # Launch a new container. arg is a COMPLETE `docker run -d …`
+                        # command the host assembled with POSIX single-quoting of
+                        # every user-supplied field, so running it via `bash -c` is
+                        # safe (each value is a single quoted literal).
+                        docker-run)    bash -c "$arg" >/dev/null 2>&1 || true ;;
                         # Halt, don't `reboot`. A guest-issued `sudo reboot`
                         # restarts the VM *in place* — VZ never fires
                         # guestDidStop, so the host's onStopped → relaunchVM
