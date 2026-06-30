@@ -751,3 +751,8 @@
 /* Docker container logs button */
 "Logs" = "Logs";
 "View logs" = "Ver logs";
+
+/* Workspace lifecycle context menu */
+"Shutdown" = "Desligar";
+"Suspend" = "Suspender";
+"Reboot" = "Reiniciar";

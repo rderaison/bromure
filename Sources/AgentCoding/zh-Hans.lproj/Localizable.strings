@@ -751,3 +751,8 @@
 /* Docker container logs button */
 "Logs" = "日志";
 "View logs" = "查看日志";
+
+/* Workspace lifecycle context menu */
+"Shutdown" = "关机";
+"Suspend" = "挂起";
+"Reboot" = "重启";

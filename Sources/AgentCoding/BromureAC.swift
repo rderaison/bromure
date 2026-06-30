@@ -629,6 +629,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         requestStopSession(id, action: action)
     }
 
+    /// Menu "Shutdown": always power the VM off, regardless of the close-action
+    /// default (which is what made the old "Stop" ambiguous).
+    func shutdownProfile(_ id: Profile.ID) {
+        requestStopSession(id, action: .shutdown)
+    }
+
+    /// Menu "Suspend": always save RAM state to disk, regardless of the default.
+    func suspendProfile(_ id: Profile.ID) {
+        requestStopSession(id, action: .suspend)
+    }
+
     /// Picker "Restart": power off (clearing saved state) then boot fresh.
     func restartProfile(_ id: Profile.ID) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
@@ -3578,7 +3589,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case digitalOcean
         case awsCredentials
         case containerRegistries
-        case approvalGates
         case keyboardSettings
         case terminalAppearance
         case gitIdentity
@@ -3616,8 +3626,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return NSLocalizedString("AWS credentials", comment: "")
         case .containerRegistries:
             return NSLocalizedString("Container registry credentials", comment: "")
-        case .approvalGates:
-            return NSLocalizedString("Credential approval gates", comment: "")
         case .keyboardSettings:
             return NSLocalizedString("Cursor / keyboard settings", comment: "")
         case .terminalAppearance:
@@ -3665,11 +3673,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // set up on cold boot, even though their config files refresh live.
         if old.kubeconfigs != new.kubeconfigs { changes.append(.kubernetes) }
         if old.awsCredentials != new.awsCredentials { changes.append(.awsCredentials) }
-        if old.apiKeyRequiresApproval != new.apiKeyRequiresApproval
-            || old.digitalOceanTokenRequiresApproval != new.digitalOceanTokenRequiresApproval
-            || old.sshKeyRequiresApproval != new.sshKeyRequiresApproval {
-            changes.append(.approvalGates)
-        }
+        // Credential "ask before use" gates are applied LIVE — no reboot. The
+        // api-key / DigitalOcean consent rides on the token swap map's
+        // consentCredentialID (rebuilt by applyLiveSessionRefresh), and the
+        // ssh-key gate is re-pushed to the ssh-agent there too. (Manual-token /
+        // docker-registry / imported-SSH-key gates already ride their own
+        // credential diffs.)
         if old.cursorShape != new.cursorShape
             || old.keyboardLayoutOverride != new.keyboardLayoutOverride
             || old.keyRepeatDelayMs != new.keyRepeatDelayMs
@@ -3711,6 +3720,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             || old.mcpServers != new.mcpServers
             || old.gitUserName != new.gitUserName
             || old.gitUserEmail != new.gitUserEmail
+            // Approval-gate toggles flip a credential's consentCredentialID in the
+            // token map, so the live refresh must re-emit it.
+            || old.apiKeyRequiresApproval != new.apiKeyRequiresApproval
+            || old.digitalOceanTokenRequiresApproval != new.digitalOceanTokenRequiresApproval
     }
 
     /// Apply env-var / credential / guardrail edits to a running session
@@ -3772,6 +3785,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if old.activeModelID != new.activeModelID || old.modelRouting != new.modelRouting {
             if let engine = mitmEngine { applyRouting(engine, for: new) }
             startLocalEngineIfNeeded(for: new)
+        }
+
+        // The SSH-key "ask before use" gate is host-side (the ssh-agent), not the
+        // token swap map, so re-push the default agent key with the new flag in
+        // place — no reboot. Done before the guard since this field alone doesn't
+        // trip the credential/env diff. (Adding/removing imported keys still
+        // cold-boots for the seed load, via the importedSSHKeys restart diff.)
+        if old.sshKeyRequiresApproval != new.sshKeyRequiresApproval, let engine = mitmEngine {
+            engine.sshAgent.setKeys(loadAgentKeys(for: new), for: new.id)
         }
 
         guard sessionRefreshAffectingChange(from: old, to: new) else { return }

@@ -753,3 +753,8 @@
 /* Docker container logs button */
 "Logs" = "Registros";
 "View logs" = "Ver registros";
+
+/* Workspace lifecycle context menu */
+"Shutdown" = "Apagar";
+"Suspend" = "Suspender";
+"Reboot" = "Reiniciar";

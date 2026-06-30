@@ -751,3 +751,8 @@
 /* Docker container logs button */
 "Logs" = "ログ";
 "View logs" = "ログを表示";
+
+/* Workspace lifecycle context menu */
+"Shutdown" = "シャットダウン";
+"Suspend" = "サスペンド";
+"Reboot" = "再起動";

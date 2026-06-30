@@ -163,7 +163,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onDetachVM:  { [weak self] id in self?.acDelegate?.popOutVM(id) },
             onCloseVM:   { [weak self] id in self?.acDelegate?.closeVMFromSidebar(id) },
             onStart:     { [weak self] id in self?.acDelegate?.startProfile(id) },
-            onStop:      { [weak self] id in self?.acDelegate?.stopProfile(id) },
+            onShutdown:  { [weak self] id in self?.acDelegate?.shutdownProfile(id) },
+            onSuspend:   { [weak self] id in self?.acDelegate?.suspendProfile(id) },
             onRestart:   { [weak self] id in self?.acDelegate?.restartProfile(id) },
             onEdit:      { [weak self] id in self?.acDelegate?.sidebarEditProfile(id) },
             onDuplicate: { [weak self] id in self?.acDelegate?.sidebarDuplicateProfile(id) },
@@ -536,7 +537,8 @@ private struct SessionSidebar: View {
     let onDetachVM: (Profile.ID) -> Void
     let onCloseVM: (Profile.ID) -> Void
     let onStart: (Profile.ID) -> Void
-    let onStop: (Profile.ID) -> Void
+    let onShutdown: (Profile.ID) -> Void
+    let onSuspend: (Profile.ID) -> Void
     let onRestart: (Profile.ID) -> Void
     let onEdit: (Profile.ID) -> Void
     let onDuplicate: (Profile.ID) -> Void
@@ -576,7 +578,8 @@ private struct SessionSidebar: View {
                             onDetachVM: onDetachVM,
                             onCloseVM: onCloseVM,
                             onStart: onStart,
-                            onStop: onStop,
+                            onShutdown: onShutdown,
+                            onSuspend: onSuspend,
                             onRestart: onRestart,
                             onEdit: onEdit,
                             onDuplicate: onDuplicate,
@@ -639,7 +642,8 @@ private struct VMSection: View {
     let onDetachVM: (Profile.ID) -> Void
     let onCloseVM: (Profile.ID) -> Void
     let onStart: (Profile.ID) -> Void
-    let onStop: (Profile.ID) -> Void
+    let onShutdown: (Profile.ID) -> Void
+    let onSuspend: (Profile.ID) -> Void
     let onRestart: (Profile.ID) -> Void
     let onEdit: (Profile.ID) -> Void
     let onDuplicate: (Profile.ID) -> Void
@@ -695,7 +699,7 @@ private struct VMSection: View {
                     IconButton(system: "plus", help: "New tab (⌘T)") { onNewTab(row.id) }
                 }
                 ControlMenu(row: row,
-                            onStart: onStart, onStop: onStop, onRestart: onRestart,
+                            onStart: onStart, onShutdown: onShutdown, onSuspend: onSuspend, onRestart: onRestart,
                             onEdit: onEdit, onDuplicate: onDuplicate,
                             onReset: onReset, onDelete: onDelete)
             }
@@ -763,7 +767,8 @@ private struct VMSection: View {
 private struct ControlMenu: View {
     let row: SessionListModel.ProfileRow
     let onStart: (Profile.ID) -> Void
-    let onStop: (Profile.ID) -> Void
+    let onShutdown: (Profile.ID) -> Void
+    let onSuspend: (Profile.ID) -> Void
     let onRestart: (Profile.ID) -> Void
     let onEdit: (Profile.ID) -> Void
     let onDuplicate: (Profile.ID) -> Void
@@ -778,8 +783,9 @@ private struct ControlMenu: View {
             case .suspended:
                 Button("Resume") { onStart(row.id) }
             case .running, .booting:
-                Button("Stop") { onStop(row.id) }
-                Button("Restart") { onRestart(row.id) }
+                Button("Shutdown") { onShutdown(row.id) }
+                Button("Suspend") { onSuspend(row.id) }
+                Button("Reboot") { onRestart(row.id) }
             }
             Divider()
             Button("Edit…") { onEdit(row.id) }
