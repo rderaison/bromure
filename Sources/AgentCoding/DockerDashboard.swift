@@ -30,6 +30,8 @@ struct DockerDashboardView: View {
     let onRemove: (String) -> Void
     /// (containerID, shell)
     let onAttach: (String, String) -> Void
+    /// containerID — opens `docker logs -f` in a new tab.
+    let onLogs: (String) -> Void
     /// Install / uninstall cross-arch QEMU emulation in the workspace.
     let onInstallBinfmt: () -> Void
     let onUninstallBinfmt: () -> Void
@@ -157,7 +159,8 @@ struct DockerDashboardView: View {
                     onStart: { onStart(c.id) },
                     onStop: { onStop(c.id) },
                     onDelete: { deleteTarget = c },
-                    onAttach: { shell in onAttach(c.id, shell) })
+                    onAttach: { shell in onAttach(c.id, shell) },
+                    onLogs: { onLogs(c.id) })
             } else if model.dockerContainers.isEmpty {
                 EmptyStateView(
                     icon: "shippingbox",
@@ -207,7 +210,8 @@ struct DockerDashboardView: View {
                     container: c,
                     onOpen: { detailID = c.id },
                     onStart: { onStart(c.id) }, onStop: { onStop(c.id) },
-                    onDelete: { deleteTarget = c })
+                    onDelete: { deleteTarget = c },
+                    onLogs: { onLogs(c.id) })
                 if c.id != filteredContainers.last?.id {
                     Divider().opacity(0.35).padding(.leading, 14)
                 }
@@ -305,6 +309,7 @@ private struct ContainerRow: View {
     let onStart: () -> Void
     let onStop: () -> Void
     let onDelete: () -> Void
+    let onLogs: () -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -330,7 +335,8 @@ private struct ContainerRow: View {
                 .frame(width: Col.started, alignment: .leading)
             CPUCell(container: container).frame(width: Col.cpu, alignment: .leading)
             ContainerActions(container: container, hovering: hovering,
-                             onStart: onStart, onStop: onStop, onDelete: onDelete)
+                             onStart: onStart, onStop: onStop, onDelete: onDelete,
+                             onLogs: onLogs)
                 .frame(width: Col.actions, alignment: .trailing)
         }
         .padding(.horizontal, 14).padding(.vertical, 9)
@@ -553,6 +559,7 @@ private struct ContainerActions: View {
     let onStart: () -> Void
     let onStop: () -> Void
     let onDelete: () -> Void
+    let onLogs: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -561,6 +568,7 @@ private struct ContainerActions: View {
             } else {
                 actionButton("play.fill", "Start", .green, action: onStart)
             }
+            actionButton("doc.plaintext", "View logs", .secondary, action: onLogs)
             actionButton("trash", "Delete", .secondary, action: onDelete)
         }
         .opacity(hovering ? 1 : 0.55)
@@ -798,6 +806,7 @@ private struct ContainerDetailView: View {
     let onStop: () -> Void
     let onDelete: () -> Void
     let onAttach: (String) -> Void
+    let onLogs: () -> Void
     @State private var shell = "sh"
 
     private var color: Color {
@@ -870,6 +879,12 @@ private struct ContainerDetailView: View {
                             }
                             .buttonStyle(.borderedProminent).controlSize(.large)
                         }
+                        // Logs work whether the container is running or stopped.
+                        Button { onLogs() } label: {
+                            Label("Logs", systemImage: "doc.plaintext")
+                                .frame(minWidth: 150)
+                        }
+                        .buttonStyle(.bordered).controlSize(.large)
                     }
 
                     // Details

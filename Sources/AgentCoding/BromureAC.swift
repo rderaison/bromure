@@ -4527,6 +4527,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let id = sanitizedDockerID(containerID) else { return }
         sendCommand("docker-remove \(id)", in: pane)
     }
+    /// Open `docker logs -f <container>` in a new tmux tab nested under the
+    /// container in the source-list.
+    func requestDockerLogs(containerID: String, in pane: SessionPane) {
+        guard let id = sanitizedDockerID(containerID) else { return }
+        sendCommand("docker-logs \(id)", in: pane)
+    }
 
     /// Install cross-arch QEMU emulation (binfmt handlers) in the workspace.
     func requestDockerBinfmtInstall(in pane: SessionPane) {

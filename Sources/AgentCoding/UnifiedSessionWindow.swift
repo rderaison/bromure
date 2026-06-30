@@ -382,6 +382,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onStop:   { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerStop(containerID: cid, in: p) } },
             onRemove: { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerRemove(containerID: cid, in: p) } },
             onAttach: { [weak self] cid, shell in self?.dockerAttach(profileID: id, containerID: cid, shell: shell) },
+            onLogs:   { [weak self] cid in self?.dockerLogs(profileID: id, containerID: cid) },
             onInstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtInstall(in: p) } },
             onUninstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtUninstall(in: p) } },
             initialContainerID: container)
@@ -457,6 +458,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if selectedID != id { select(profileID: id) }
         if let p = pane(id) {
             acDelegate?.requestDockerAttach(containerID: containerID, shell: shell, in: p)
+        }
+    }
+
+    func dockerLogs(profileID id: Profile.ID, containerID: String) {
+        // `docker logs -f` opens a tmux tab — surface it by dropping the dashboard.
+        clearDockerDashboard()
+        if selectedID != id { select(profileID: id) }
+        if let p = pane(id) {
+            acDelegate?.requestDockerLogs(containerID: containerID, in: p)
         }
     }
 

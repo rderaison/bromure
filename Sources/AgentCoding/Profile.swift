@@ -3980,6 +3980,18 @@ public final class ProfileStore {
                             win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" \
                                   "docker exec -it $cid $sh || { echo; echo bromure: attach failed. is $sh in this container -- try shell sh; echo Press Enter to close; read _; }" 2>/dev/null) \
                                 && tmux set-option -w -t "$win" @container "$cid" 2>/dev/null || true ;;
+                        # Stream `docker logs -f` in a fresh tab, nested under the
+                        # container (the @container tag) like docker-attach. Name
+                        # the window "logs" (and pin it, since automatic-rename
+                        # would otherwise relabel it after the process). Keep the
+                        # tab open once the stream ends (container stopped / the
+                        # user hits Ctrl-C) so the logs stay readable.
+                        docker-logs)
+                            cid="$arg"
+                            win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" -n logs \
+                                  "docker logs -f $cid; echo; echo bromure: log stream ended -- press Enter to close; read _" 2>/dev/null) \
+                                && tmux set-option -w -t "$win" @container "$cid" 2>/dev/null \
+                                && tmux set-option -w -t "$win" automatic-rename off 2>/dev/null || true ;;
                         # Container lifecycle — arg is a single id (host-sanitised
                         # to a conservative charset). BACKGROUNDED: `docker stop`
                         # can block ~10s, and the command loop is single-threaded
