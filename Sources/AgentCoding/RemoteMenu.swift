@@ -166,16 +166,26 @@ final class RemoteMenuApp {
 
     /// docker exec -it into a running container, à la `vm attach … containers:…`.
     private func attachContainer(vmID: String, container: String) {
+        // Ask which shell to run rather than hardcoding one — bash often isn't
+        // in the image (alpine/distroless), so the default is sh. Escape cancels;
+        // a blank entry uses sh. The value is interpolated into the guest
+        // `docker exec` line, so restrict it to a safe charset (fall back to sh).
+        let allowed = Set(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.")
+        guard let raw = tui.prompt("Shell to run in \(container)  (Enter for sh)") else { return }
+        let entered = raw.trimmingCharacters(in: .whitespaces)
+        let shell = (!entered.isEmpty && entered.allSatisfy(allowed.contains)) ? entered : "sh"
+
         tui.end()
         defer { tui.begin() }
         let banner = "\u{1B}[2J\u{1B}[H" +
             "\u{1B}[1m  Type `exit` (or Ctrl-d) to leave the container\u{1B}[0m\r\n\r\n" +
-            "  Attaching to \(container)…\r\n"
+            "  Attaching to \(container) (\(shell))…\r\n"
         FileHandle.standardOutput.write(Data(banner.utf8))
         Thread.sleep(forTimeInterval: 1.0)
         do {
             try InteractiveExec.run(client: client, vm: vmID,
-                                    command: "docker exec -it \(container) bash")
+                                    command: "docker exec -it \(container) \(shell)")
         } catch {
             let msg = "\r\nCouldn't attach: \(error.localizedDescription)\r\nPress Enter…"
             FileHandle.standardOutput.write(Data(msg.utf8))

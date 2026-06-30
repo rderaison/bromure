@@ -798,7 +798,7 @@ private struct ContainerDetailView: View {
     let onStop: () -> Void
     let onDelete: () -> Void
     let onAttach: (String) -> Void
-    @State private var shell = "bash"
+    @State private var shell = "sh"
 
     private var color: Color {
         switch container.state {
@@ -852,7 +852,7 @@ private struct ContainerDetailView: View {
                         if container.isRunning {
                             HStack(spacing: 8) {
                                 Text("Shell").font(.system(size: 12)).foregroundStyle(.secondary)
-                                TextField("bash", text: $shell)
+                                TextField("sh", text: $shell)
                                     .textFieldStyle(.roundedBorder)
                                     .font(.system(size: 12, design: .monospaced))
                                     .frame(width: 160)

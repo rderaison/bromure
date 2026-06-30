@@ -3971,9 +3971,14 @@ public final class ProfileStore {
                         # (instead of showing it as a top-level "docker" tab).
                         docker-attach)
                             cid="${arg%% *}"; sh="${arg#* }"
-                            [ "$sh" = "$arg" ] && sh=bash
+                            [ "$sh" = "$arg" ] && sh=sh
+                            # Run the shell in the new tab. If `docker exec` fails
+                            # (e.g. the requested shell isn't in the image — bash
+                            # often isn't), keep the tab open showing the error
+                            # instead of the window vanishing instantly, which made
+                            # the failure invisible.
                             win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" \
-                                  "docker exec -it $cid $sh" 2>/dev/null) \
+                                  "docker exec -it $cid $sh || { echo; echo bromure: attach failed. is $sh in this container -- try shell sh; echo Press Enter to close; read _; }" 2>/dev/null) \
                                 && tmux set-option -w -t "$win" @container "$cid" 2>/dev/null || true ;;
                         # Container lifecycle — arg is a single id (host-sanitised
                         # to a conservative charset). BACKGROUNDED: `docker stop`

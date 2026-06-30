@@ -4491,15 +4491,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Attach to a running docker container in a new tab → the guest spawns a
     /// tmux window running `docker exec -it <id> <shell>`. The shell is
     /// user-supplied (the popover field), so sanitise it to a conservative
-    /// charset and fall back to `bash` for anything empty or suspicious — the
+    /// charset and fall back to `sh` for anything empty or suspicious — the
     /// command is interpolated into a guest shell line, so this is the trust
     /// boundary. The container id comes from `docker ps`, not the user.
+    /// `sh` (not `bash`) is the default: it's present in virtually every image,
+    /// whereas bash often isn't (alpine/distroless), where attach would fail.
     func requestDockerAttach(containerID: String, shell: String, in pane: SessionPane) {
         let allowed = CharacterSet(charactersIn:
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.")
         let trimmed = shell.trimmingCharacters(in: .whitespaces)
         let safe = !trimmed.isEmpty && trimmed.unicodeScalars.allSatisfy(allowed.contains)
-            ? trimmed : "bash"
+            ? trimmed : "sh"
         sendCommand("docker-attach \(containerID) \(safe)", in: pane)
     }
 
