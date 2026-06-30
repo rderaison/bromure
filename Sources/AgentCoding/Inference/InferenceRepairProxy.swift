@@ -343,7 +343,12 @@ final class InferenceRepairProxy: @unchecked Sendable {
     private static func syncData(_ req: URLRequest) -> (Data?, Int) {
         let sem = DispatchSemaphore(value: 0)
         var out: Data?; var status = 502
-        var r = req; r.timeoutInterval = 300
+        // Generous: a large model with a big prompt can prefill/generate for
+        // many minutes, and the engine streams nothing until done. Kept under
+        // the MITM's 1800s idle cap on the local leg so, on a true hang, this
+        // times out first and returns a wire-shaped error the MITM can relay
+        // (rather than the MITM aborting the connection mid-flight).
+        var r = req; r.timeoutInterval = 1500
         let task = URLSession.shared.dataTask(with: r) { d, resp, _ in
             out = d; status = (resp as? HTTPURLResponse)?.statusCode ?? 502; sem.signal()
         }

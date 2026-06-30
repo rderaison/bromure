@@ -1108,9 +1108,25 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
 
         // The local engine speaks plain HTTP on loopback; cloud is HTTPS.
+        // Local inference can stream nothing back for a long time: the repair
+        // proxy buffers the whole reply (stream:false) and a large model with a
+        // big prompt can prefill/generate for minutes. The default 60s idle
+        // timeout would abort it (-1001) and tear down the connection, so use a
+        // long-timeout loopback session for the local leg. (The cert-challenge
+        // delegate is irrelevant on plain-HTTP loopback.)
+        var relaySession = session
+        var ownsRelaySession = false
+        if routedBackend == .local {
+            let cfg = URLSessionConfiguration.ephemeral
+            cfg.timeoutIntervalForRequest = 1800    // 30 min idle cap
+            cfg.timeoutIntervalForResource = 3600
+            relaySession = URLSession(configuration: cfg)
+            ownsRelaySession = true
+        }
+        defer { if ownsRelaySession { relaySession.finishTasksAndInvalidate() } }
         let relay = try await relayUpstream(rawRequest: toForward,
                                             host: upstreamHost, port: upstreamPort,
-                                            session: session,
+                                            session: relaySession,
                                             tls: tls,
                                             upstreamScheme: routedBackend == .local ? "http" : "https")
 

@@ -67,6 +67,18 @@ struct BromureAC: ParsableCommand {
     /// this, `bromure-ac -AppleLanguages "(fr)"` exits with "Unknown option"
     /// before NSApplication starts. Mirrors the browser entry point.
     static func main() {
+        // Ignore SIGPIPE process-wide. Our hand-rolled loopback servers (the
+        // MITM repair proxy + inference bridge, the automation server, the MLX
+        // engine) use raw BSD-socket write()s. Writing to a peer that already
+        // closed — e.g. the MITM aborting a slow local-inference request, then
+        // the repair proxy finishing and writing the buffered reply back to the
+        // now-dead connection — delivers SIGPIPE, whose default disposition
+        // kills the process (the repair proxy runs *in the app*, so it took the
+        // whole app down). Ignored, write() returns EPIPE and the loop ends
+        // cleanly. NIO already ignores SIGPIPE for its own sockets; these
+        // don't go through NIO. Runs for every process (GUI, CLI, engine child).
+        signal(SIGPIPE, SIG_IGN)
+
         let invokedName = URL(fileURLWithPath: CommandLine.arguments.first ?? "").lastPathComponent
         let args = Array(CommandLine.arguments.dropFirst())
         var filtered: [String] = []
