@@ -933,6 +933,14 @@ private struct TabRow: View {
     @State private var hovering = false
 
     private var isAgent: Bool { agentKind != nil }
+    /// Dedicated tab glyph for the agents that ship one; other agents
+    /// (aider/goose/…) keep the generic robot.
+    private var agentIconName: String {
+        switch agentKind {
+        case "claude", "codex", "grok": return agentKind ?? "robot"
+        default: return "robot"
+        }
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -944,7 +952,7 @@ private struct TabRow: View {
                 if isAgent && thinking {
                     ThinkingDots(color: Color(hex: accentHex))
                 } else if isAgent {
-                    SVGIcon(name: "robot", fallbackSymbol: "sparkles", size: 13)
+                    SVGIcon(name: agentIconName, fallbackSymbol: "sparkles", size: 13)
                         .foregroundStyle(isActive ? Color(hex: accentHex) : .secondary)
                 } else {
                     Image(systemName: "terminal")
