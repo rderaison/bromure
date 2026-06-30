@@ -1201,8 +1201,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     }
 
     /// Network attachment style. NAT uses VZ's built-in NAT (default,
-    /// works everywhere). Bridged uses VZBridgedNetworkDeviceAttachment
-    /// against the chosen host interface so the VM gets a LAN-routable IP.
+    /// works everywhere). Bridged puts the VM on the chosen host interface
+    /// (LAN-routable IP) via vmnet's bridged mode — entitled by
+    /// com.apple.developer.networking.vmnet, not the restricted
+    /// com.apple.vm.networking — so it needs a Developer-ID-signed build.
     public var networkMode: NetworkMode
 
     /// Host interface identifier when `networkMode == .bridged`. nil falls

@@ -116,6 +116,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// VM-side handle of this VM's port on the shared `VMNetSwitch` (NAT mode
     /// only). Detached on stop so the switch forgets its learned MACs.
     private var switchPort: FileHandle?
+    /// Per-VM vmnet interface in bridged mode (the uplink for `.bridged`
+    /// profiles). Kept alive for the VM's lifetime; torn down alongside the VM.
+    private var networkFilter: NetworkFilter?
     /// The underlying VZ machine. Exposed so the host app can attach a
     /// VZVirtualMachineView for display.
     public private(set) var vm: VZVirtualMachine?
@@ -153,6 +156,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         if let switchPort {
             VMNetSwitch.shared.detachPort(switchPort, releaseLease: false)
         }
+        networkFilter?.stop()
     }
 
     public func prepare() throws {
@@ -208,15 +212,25 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 net.attachment = VZNATNetworkDeviceAttachment()
             }
         case .bridged:
+            // Bridge via vmnet's bridged mode (kVmnetBridgedMode), which is
+            // authorized by `com.apple.developer.networking.vmnet` — the
+            // entitlement we already ship — rather than
+            // `VZBridgedNetworkDeviceAttachment`, which demands the *restricted*
+            // `com.apple.vm.networking`. This is exactly how Bromure Web bridges
+            // (NetworkFilter → VZFileHandleNetworkDeviceAttachment). Enumerating
+            // interfaces via VZBridgedNetworkInterface is read-only and needs no
+            // special entitlement; only the VZ attachment did.
             let bridgedID = sessionDisk?.profile.bridgedInterfaceID
             let interfaces = VZBridgedNetworkInterface.networkInterfaces
-            let match = interfaces.first(where: { $0.identifier == bridgedID })
-                ?? interfaces.first
-            if let iface = match {
-                net.attachment = VZBridgedNetworkDeviceAttachment(interface: iface)
+            let iface = interfaces.first(where: { $0.identifier == bridgedID }) ?? interfaces.first
+            if let ifName = iface?.identifier,
+               let netInfo = HostNetworkInfo.detect(),
+               let filter = NetworkFilter(networkInfo: netInfo, bridgedInterface: ifName) {
+                net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
+                self.networkFilter = filter
             } else {
                 FileHandle.standardError.write(Data(
-                    "[run] no bridged interfaces available, falling back to NAT\n".utf8))
+                    "[run] bridged networking unavailable, falling back to NAT\n".utf8))
                 net.attachment = VZNATNetworkDeviceAttachment()
             }
         }
@@ -723,6 +737,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             VMNetSwitch.shared.detachPort(port)
             switchPort = nil
         }
+        networkFilter?.stop()
+        networkFilter = nil
     }
 
     /// Load the profile's persistent VZ machine identifier from disk, or
