@@ -150,9 +150,12 @@ struct ModelCatalogTests {
         let tmp = fm.temporaryDirectory.appendingPathComponent("bromure-cat-\(UUID().uuidString)")
         let hub = tmp.appendingPathComponent("hub")
         // A fully-downloaded "retired" repo on disk, not in the catalog.
-        let snap = hub.appendingPathComponent("models--x--retired/snapshots/main")
-        try fm.createDirectory(at: snap, withIntermediateDirectories: true)
-        try "{}".write(to: snap.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        // Installed weights now live in the flat per-repo layout under
+        // supportDir/models/<org>--<name>/ (CatalogStore.modelsDir), which is
+        // what installedRepos() scans — not the legacy HF hub cache.
+        let modelDir = tmp.appendingPathComponent("models/x--retired")
+        try fm.createDirectory(at: modelDir, withIntermediateDirectories: true)
+        try "{}".write(to: modelDir.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
         // A cached remote catalog (CatalogStore.init loads supportDir/catalog.json).
         try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
         try #"{"version":9,"models":[{"id":"only","repo":"y/only","name":"Only","download_gb":1,"min_unified_mem_gb":8}]}"#
@@ -403,9 +406,9 @@ struct EngineProvisionerTests {
     @Test("uv command builders match the uv CLI") func uvArgs() {
         let dir = URL(fileURLWithPath: "/tmp/eng")
         // Always use uv's managed standalone Python — never system/Xcode python3.
-        #expect(EngineProvisioner.pythonInstallArgs() == ["python", "install", "3.12"])
+        #expect(EngineProvisioner.pythonInstallArgs() == ["python", "install", "3.12.13"])
         #expect(EngineProvisioner.venvArgs(dir: dir)
-                == ["venv", "/tmp/eng", "--python", "3.12", "--python-preference", "only-managed"])
+                == ["venv", "/tmp/eng", "--python", "3.12.13", "--python-preference", "only-managed"])
         let py = URL(fileURLWithPath: "/tmp/eng/bin/python")
         let req = URL(fileURLWithPath: "/tmp/req.lock")
         #expect(EngineProvisioner.pipInstallArgs(venvPython: py, requirementsFile: req)
@@ -451,7 +454,7 @@ struct LocalToolAuthTests {
             Profile.Tool.claude.localEnvExports(model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
                                                 key: InferenceService.apiKey)
                 .map { ($0.name, $0.value) })
-        #expect(env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:11434")
+        #expect(env["ANTHROPIC_BASE_URL"] == "https://bromure.llm")
         // All five model slots (main + small-fast + the 3 aliases) → local.
         for k in ["ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
                   "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -476,7 +479,7 @@ struct LocalToolAuthTests {
     @Test("Grok uses the custom-models endpoint env (GROK_MODELS_BASE_URL + XAI_API_KEY)") func grokEnv() {
         let grok = Dictionary(uniqueKeysWithValues:
             Profile.Tool.grok.localEnvExports(model: "m", key: InferenceService.apiKey).map { ($0.name, $0.value) })
-        #expect(grok["GROK_MODELS_BASE_URL"] == "http://127.0.0.1:11434/v1")
+        #expect(grok["GROK_MODELS_BASE_URL"] == "https://bromure.llm/v1")
         #expect(grok["XAI_API_KEY"] == InferenceService.apiKey)
         // The old names are ignored by the grok CLI — must not be set.
         #expect(grok["GROK_BASE_URL"] == nil)
@@ -511,16 +514,16 @@ struct LocalToolAuthTests {
         let url = URL(fileURLWithPath: "Sources/AgentCoding/Resources/catalog.json")
         let cat = try ModelCatalog.parse(Data(contentsOf: url))
         #expect(cat.models.allSatisfy { ($0.toolParser ?? "").isEmpty == false })
-        #expect(cat.model(id: "qwen2.5-coder-7b-mlx-4bit")?.toolParser == "hermes")
+        #expect(cat.model(id: "qwen3-8b-mlx-4bit-dwq")?.toolParser == "hermes")
     }
 
     @Test("Prometheus metrics parse + sum across labels") func metricsParse() {
         let text = """
-        # HELP vllm:generation_tokens_total Generated tokens
-        # TYPE vllm:generation_tokens_total counter
-        vllm:generation_tokens_total{model="a"} 100
-        vllm:generation_tokens_total{model="b"} 50
-        vllm:num_requests_running 2
+        # HELP mlx_completion_tokens_total Generated tokens
+        # TYPE mlx_completion_tokens_total counter
+        mlx_completion_tokens_total{model="a"} 100
+        mlx_completion_tokens_total{model="b"} 50
+        mlx_scheduler_running_requests 2
         garbage line without value
         """
         let m = InferenceMetrics.parse(text)
@@ -529,20 +532,21 @@ struct LocalToolAuthTests {
         #expect(m.promptTokens == nil)
     }
 
-    @Test("Accessors map to the real vllm-mlx metric names") func metricsRealNames() {
-        // Shape verified against vllm-mlx v0.4.0rc1 /metrics (labels included).
+    @Test("Accessors map to the real mlx engine metric names") func metricsRealNames() {
+        // Shape verified against the in-process MLX engine /metrics (the
+        // counters are emitted with the bare `mlx_` prefix, no `vllm_`).
         let text = """
-        vllm_mlx_completion_tokens_total{model="a"} 80
-        vllm_mlx_completion_tokens_total{model="b"} 40
-        vllm_mlx_prompt_tokens_total{model="a"} 200
-        vllm_mlx_scheduler_running_requests 1
-        vllm_mlx_scheduler_waiting_requests 3
-        vllm_mlx_http_requests_in_flight 2
-        vllm_mlx_cache_hit_rate 0.75
-        vllm_mlx_cache_utilization_ratio 0.4
-        vllm_mlx_metal_memory_bytes 8589934592
-        vllm_mlx_inference_request_duration_seconds_sum 5.0
-        vllm_mlx_inference_request_duration_seconds_count 10
+        mlx_completion_tokens_total{model="a"} 80
+        mlx_completion_tokens_total{model="b"} 40
+        mlx_prompt_tokens_total{model="a"} 200
+        mlx_scheduler_running_requests 1
+        mlx_scheduler_waiting_requests 3
+        mlx_http_requests_in_flight 2
+        mlx_cache_hit_rate 0.75
+        mlx_cache_utilization_ratio 0.4
+        mlx_metal_memory_bytes 8589934592
+        mlx_inference_request_duration_seconds_sum 5.0
+        mlx_inference_request_duration_seconds_count 10
         """
         let m = InferenceMetrics.parse(text)
         #expect(m.generationTokens == 120)        // completion tokens, summed
@@ -560,13 +564,17 @@ struct LocalToolAuthTests {
         p.activeModelID = "m1"
         p.additionalTools = [Profile.ToolSpec(tool: .codex, authMode: .local, localModelID: "m2")]
         p.fusionLocalLeg = "m3"
-        #expect(Set(p.distinctLocalModelIDs) == ["m1", "m2", "m3"])
+        // Single-model-per-profile: every `.local` agent (primary + additional)
+        // serves the profile's one activeModelID ("m1"), so the per-tool
+        // localModelID "m2" is not gathered. The fusion local leg "m3" is its
+        // own served model.
+        #expect(Set(p.distinctLocalModelIDs) == ["m1", "m3"])
     }
 
     @Test("Codex local provider TOML uses the responses wire API") func codexTOML() {
         let toml = SessionDisk.codexLocalProviderTOML(model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
         #expect(toml.contains("model_provider = \"bromure-local\""))
-        #expect(toml.contains("base_url = \"http://127.0.0.1:11434/v1\""))
+        #expect(toml.contains("base_url = \"https://bromure.llm/v1\""))
         #expect(toml.contains("wire_api = \"responses\""))
         #expect(toml.contains("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"))
     }
@@ -617,11 +625,13 @@ struct LocalToolAuthTests {
         p.activeModelID = "m-primary"
         #expect(p.localEngineModelID == "m-primary")
 
-        // Cloud primary, but an additional tool is local → its model.
+        // Cloud primary with an additional `.local` tool but no activeModelID:
+        // single-model design serves the profile's activeModelID, which is nil
+        // here, so there's nothing for the engine to serve.
         var p2 = Profile(name: "t", tool: .claude, authMode: .token)
         p2.additionalTools = [Profile.ToolSpec(tool: .codex, authMode: .local,
                                                localModelID: "m-codex")]
-        #expect(p2.localEngineModelID == "m-codex")
+        #expect(p2.localEngineModelID == nil)
 
         // Hybrid routing also needs the active model served.
         var p3 = Profile(name: "t", tool: .claude, authMode: .token)
