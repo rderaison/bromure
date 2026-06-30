@@ -24,8 +24,24 @@ actor MLXEngine {
         var errorDescription: String? {
             switch self {
             case .notDownloaded(let r): return "Model not downloaded: \(r)"
-            case .loadFailed(let r, let u): return "Couldn't load \(r): \(u)"
+            case .loadFailed(let r, let u):
+                // An unsupported architecture is permanent (the on-device MLX
+                // engine doesn't implement that model type yet), not a transient
+                // load failure — say so plainly instead of leaking the raw
+                // `unsupportedModelType("…")` so the user doesn't keep retrying.
+                if let type = Self.unsupportedModelType(in: u) {
+                    return "Can't run \(r): its architecture “\(type)” isn't supported by the on-device engine yet — pick a different model."
+                }
+                return "Couldn't load \(r): \(u)"
             }
+        }
+
+        /// Extract the model type from a `unsupportedModelType("…")` description.
+        private static func unsupportedModelType(in s: String) -> String? {
+            guard s.contains("unsupportedModelType"),
+                  let open = s.firstIndex(of: "\""),
+                  let close = s[s.index(after: open)...].firstIndex(of: "\"") else { return nil }
+            return String(s[s.index(after: open)..<close])
         }
     }
 
