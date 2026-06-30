@@ -1026,7 +1026,9 @@ private struct DockerContainerRow: View {
                     IconButton(system: "info.circle", help: "Details & attach", size: 10) { onOpen() }
                 }
             }
-            .padding(.leading, 34)
+            // Indented past the Docker node's icon (x≈38) so containers read as
+            // nested under it rather than as siblings of the Docker row.
+            .padding(.leading, 44)
             .padding(.trailing, 8)
             .padding(.vertical, 4)
             .background(
@@ -1077,7 +1079,8 @@ private struct DockerTabRow: View {
                 ChordLabel(chord)
             }
         }
-        .padding(.leading, 48)
+        // One step deeper than the container row (44) it nests under.
+        .padding(.leading, 58)
         .padding(.trailing, 8)
         .padding(.vertical, 3)
         .background(
