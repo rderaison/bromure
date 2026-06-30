@@ -3999,6 +3999,31 @@ public final class ProfileStore {
     }
     roster_loop &
 
+    # VM vitals for the workspace dashboard: aggregate CPU% (delta of /proc/stat),
+    # memory used/total (/proc/meminfo) and 1-min load. Reading /proc is cheap, so
+    # this runs unconditionally; the host reads vmstat.txt off the outbox.
+    vmstat_loop() {
+        prev_idle=0; prev_total=0
+        while :; do
+            read -r _ u n s idle iow irq sirq steal _ < /proc/stat 2>/dev/null
+            total=$((u+n+s+idle+iow+irq+sirq+steal))
+            didle=$((idle - prev_idle)); dtotal=$((total - prev_total))
+            cpu=0
+            [ "$dtotal" -gt 0 ] && cpu=$(( (100 * (dtotal - didle)) / dtotal ))
+            prev_idle=$idle; prev_total=$total
+            memtotal=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)
+            memavail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)
+            memused=$(( ${memtotal:-0} - ${memavail:-0} ))
+            load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
+            printf 'cpu %s\nmem_used_kb %s\nmem_total_kb %s\nload %s\n' \
+                   "$cpu" "$memused" "${memtotal:-0}" "${load:-0}" \
+                > "$INBOX/.vmstat.tmp" 2>/dev/null \
+                && mv -f "$INBOX/.vmstat.tmp" "$INBOX/vmstat.txt" 2>/dev/null
+            sleep 1.5
+        done
+    }
+    vmstat_loop &
+
     # Docker: every 2s publish the container list as NDJSON (one JSON object per
     # line, `docker ps -a --format '{{json .}}'`) so the host can render the
     # source-list sub-tree AND the in-app dashboard (running + stopped). Atomic

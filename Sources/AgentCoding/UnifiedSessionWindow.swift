@@ -127,6 +127,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private var dockerHosting: NSHostingView<DockerDashboardView>?
     /// The VM whose Docker dashboard is currently shown (nil = none).
     private var dockerSelectedID: Profile.ID?
+    /// Full-bleed overlay showing the VM dashboard (vitals + config) for the
+    /// selected workspace. Hidden unless `vmDashboardSelectedID` is set.
+    private let vmDashboardSlot = NSView()
+    private var vmDashboardHosting: NSHostingView<VMDashboardView>?
+    private var vmDashboardSelectedID: Profile.ID?
     private var toolbarDelegate: UnifiedToolbarDelegate?
 
     init(acDelegate: ACAppDelegate) {
@@ -154,7 +159,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // ---- Sidebar (left) ----
         let sidebar = SessionSidebar(
             model: listModel,
-            onSelect:    { [weak self] id in self?.selectRow(id) },
+            onSelect:    { [weak self] id in self?.selectWorkspaceName(id) },
             onSelectTab: { [weak self] id, idx in self?.selectTab(profileID: id, index: idx) },
             onNewTab:    { [weak self] id in self?.newTab(profileID: id) },
             onCloseTab:  { [weak self] id, idx in self?.closeTab(profileID: id, index: idx) },
@@ -196,6 +201,18 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         dockerSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         dockerSlot.isHidden = true
         stage.addSubview(dockerSlot)
+        // VM dashboard overlay — same treatment as the Docker overlay.
+        vmDashboardSlot.translatesAutoresizingMaskIntoConstraints = false
+        vmDashboardSlot.wantsLayer = true
+        vmDashboardSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        vmDashboardSlot.isHidden = true
+        stage.addSubview(vmDashboardSlot)
+        NSLayoutConstraint.activate([
+            vmDashboardSlot.topAnchor.constraint(equalTo: stage.topAnchor),
+            vmDashboardSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
+            vmDashboardSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            vmDashboardSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+        ])
         NSLayoutConstraint.activate([
             paneSlot.topAnchor.constraint(equalTo: stage.topAnchor),
             paneSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
@@ -321,6 +338,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// off/suspended one shows its Start card in the stage.
     func selectRow(_ id: Profile.ID) {
         clearDockerDashboard()
+        clearVMDashboard()
         selectedID = id
         listModel.selectedID = id
         if let pane = pane(id) { mountSelected(pane); return }
@@ -363,6 +381,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// and turn on the guest's expensive stats/images polling for the duration.
     func showDockerDashboard(_ id: Profile.ID, container: String? = nil) {
         guard let selPane = pane(id) else { return }
+        clearVMDashboard()
         if let prev = dockerSelectedID, prev != id, let p = pane(prev) {
             acDelegate?.setDockerWatch(false, in: p)   // hand off watch between VMs
         }
@@ -419,6 +438,57 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         dockerSlot.isHidden = (dockerSelectedID == nil)
     }
 
+    // MARK: VM dashboard overlay
+
+    /// Show the workspace VM dashboard (vitals + config) over the framebuffer.
+    /// Running VMs only — an off/suspended row keeps its Start card.
+    func showVMDashboard(_ id: Profile.ID) {
+        guard let selPane = pane(id) else { return }
+        clearDockerDashboard()
+        if selectedID != id { select(profileID: id) }
+        vmDashboardSelectedID = id
+        vmDashboardHosting?.removeFromSuperview()
+        let info = acDelegate?.vmDashboardData(for: id)
+        let view = VMDashboardView(
+            model: selPane.model,
+            profile: selPane.profile,
+            accentHex: selPane.profile.color.hexInUI,
+            vCPUs: UbuntuSandboxVM.runtimeCPUs,
+            diskAllocatedBytes: info?.diskAllocated ?? 0,
+            diskCapacityBytes: info?.diskCapacity ?? 0,
+            startedAt: info?.startedAt)
+        let host = NSHostingView(rootView: view)
+        host.translatesAutoresizingMaskIntoConstraints = false
+        vmDashboardSlot.addSubview(host)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: vmDashboardSlot.topAnchor),
+            host.bottomAnchor.constraint(equalTo: vmDashboardSlot.bottomAnchor),
+            host.leadingAnchor.constraint(equalTo: vmDashboardSlot.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: vmDashboardSlot.trailingAnchor),
+        ])
+        vmDashboardHosting = host
+        updateVMOverlay()
+    }
+
+    func clearVMDashboard() {
+        guard vmDashboardSelectedID != nil else { return }
+        vmDashboardSelectedID = nil
+        vmDashboardHosting?.removeFromSuperview()
+        vmDashboardHosting = nil
+        updateVMOverlay()
+    }
+
+    private func updateVMOverlay() {
+        vmDashboardSlot.isHidden = (vmDashboardSelectedID == nil)
+    }
+
+    /// Workspace name clicked in the source list → select it and (for a running
+    /// VM) surface its dashboard; off/suspended rows fall back to the Start card.
+    func selectWorkspaceName(_ id: Profile.ID) {
+        selectRow(id)
+        if pane(id) != nil { showVMDashboard(id) }
+    }
+
     /// Honour the selected profile's terminal-transparency setting. The pane's
     /// own container layer carries the alpha; here we flip the *window* to
     /// non-opaque and clear the *stage* backing so that alpha composites against
@@ -441,11 +511,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     func selectTab(profileID id: Profile.ID, index: Int) {
         clearDockerDashboard()
+        clearVMDashboard()
         if selectedID != id { select(profileID: id) }
         pane(id)?.switchTo(index: index)
     }
     func newTab(profileID id: Profile.ID) {
         clearDockerDashboard()
+        clearVMDashboard()
         if selectedID != id { select(profileID: id) }
         if let p = pane(id) { acDelegate?.spawnNewTab(in: p) }
     }

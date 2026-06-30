@@ -64,6 +64,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// (from `docker stats --no-stream`). Keyed by full container id.
     public var onDockerStats: (([(id: String, cpu: String, mem: String)]) -> Void)?
 
+    /// VM vitals for the workspace dashboard (~every 1.5s): aggregate CPU%,
+    /// memory used/total (KB), and 1-minute load average.
+    public var onVMStats: ((_ cpu: Double, _ memUsedKB: Int, _ memTotalKB: Int, _ load: Double) -> Void)?
+
     /// Called ~every 2s WHILE a dashboard is open with the local image list
     /// (from `docker images`).
     public var onDockerImages: (([DockerImage]) -> Void)?
@@ -588,6 +592,26 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                                 stats.append((id: s.ID, cpu: s.CPUPerc ?? "", mem: s.MemUsage ?? ""))
                             }
                             self?.onDockerStats?(stats)
+                            continue
+                        }
+                        // vmstat.txt — VM vitals (key value per line) for the
+                        // workspace dashboard: cpu / mem_used_kb / mem_total_kb / load.
+                        if name == "vmstat.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            var cpu = 0.0, used = 0, total = 0, load = 0.0
+                            for line in raw.split(whereSeparator: \.isNewline) {
+                                let p = line.split(separator: " ")
+                                guard p.count == 2 else { continue }
+                                let v = String(p[1])
+                                switch p[0] {
+                                case "cpu":          cpu = Double(v) ?? 0
+                                case "mem_used_kb":  used = Int(v) ?? 0
+                                case "mem_total_kb": total = Int(v) ?? 0
+                                case "load":         load = Double(v) ?? 0
+                                default: break
+                                }
+                            }
+                            self?.onVMStats?(cpu, used, total, load)
                             continue
                         }
                         // docker-images.txt — `docker images` NDJSON; dashboard-only.

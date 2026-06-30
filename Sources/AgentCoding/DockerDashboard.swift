@@ -409,7 +409,7 @@ private struct ImageRow: View {
 
 // MARK: - Stat cards + graph
 
-private struct StatCard: View {
+struct StatCard: View {
     let title: LocalizedStringKey
     let value: String
     let caption: LocalizedStringKey
@@ -432,7 +432,7 @@ private struct StatCard: View {
 }
 
 /// CPU stat card with a live area-chart sparkline of recent total CPU.
-private struct CPUStatCard: View {
+struct CPUStatCard: View {
     let value: Double
     let history: [Double]
     let tint: Color

@@ -679,6 +679,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         attachWindow(to: session)
     }
 
+    /// Disk + uptime for the workspace VM dashboard. Disk sizes come from the
+    /// profile's disk.img (allocated on-disk vs the image's full capacity);
+    /// `startedAt` from the running session (nil when off).
+    func vmDashboardData(for id: Profile.ID) -> (diskAllocated: Int64, diskCapacity: Int64, startedAt: Date?) {
+        var alloc: Int64 = 0, cap: Int64 = 0
+        if let profile = profiles.first(where: { $0.id == id }),
+           let rv = try? store.diskURL(for: profile)
+               .resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileSizeKey]) {
+            alloc = Int64(rv.totalFileAllocatedSize ?? 0)
+            cap = Int64(rv.fileSize ?? 0)
+        }
+        return (alloc, cap, runningSessions[id]?.startedAt)
+    }
+
     // MARK: - Unified window source list
 
     /// Rebuild the unified window's profile list (all profiles + run state).
@@ -5173,6 +5187,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sandbox.onDockerStats = { [weak self] stats in
             Task { @MainActor in
                 self?.pane(for: pid)?.applyDockerStats(stats)
+            }
+        }
+        sandbox.onVMStats = { [weak self] cpu, used, total, load in
+            Task { @MainActor in
+                self?.pane(for: pid)?.applyVMStats(cpu: cpu, memUsedKB: used, memTotalKB: total, load: load)
             }
         }
         sandbox.onDockerImages = { [weak self] images in

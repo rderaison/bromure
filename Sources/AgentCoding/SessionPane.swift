@@ -313,6 +313,13 @@ final class SessionPane {
         if changed { model.dockerContainers = list }
     }
 
+    func applyVMStats(cpu: Double, memUsedKB: Int, memTotalKB: Int, load: Double) {
+        model.vmCPU = cpu
+        model.vmMemUsedKB = memUsedKB
+        model.vmMemTotalKB = memTotalKB
+        model.vmLoad = load
+    }
+
     func applyDockerImages(_ images: [DockerImage]) {
         if model.dockerImages != images { model.dockerImages = images }
     }

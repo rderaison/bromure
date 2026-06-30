@@ -132,6 +132,13 @@ final class TabsModel {
     /// Most recent VM IP reported by the guest's xinitrc loop. Surfaced
     /// in the toolbar; click to copy.
     var ipAddress: String?
+
+    /// VM vitals for the workspace dashboard, refreshed ~every 1.5s from the
+    /// guest's vmstat loop: aggregate CPU%, memory used/total (KB), 1-min load.
+    var vmCPU: Double = 0
+    var vmMemUsedKB: Int = 0
+    var vmMemTotalKB: Int = 0
+    var vmLoad: Double = 0
     /// Drives the red toolbar indicator. True when the Mac is enrolled
     /// with bromure.io AND this session's profile is NOT in private
     /// mode — i.e. session metadata is being shipped upstream.
