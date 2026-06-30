@@ -247,8 +247,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // cloud/hybrid profiles keep their real account/telemetry traffic.
         if let rctx = Self.routingProvider?(profileID), rctx.routing == .local {
             let h = host.lowercased()
+            // Only suppress Claude's management calls when the *Claude* agent is
+            // itself local. In a mixed profile (subscription Claude + local
+            // Codex) Claude's account/management traffic is legitimate and must
+            // reach the cloud — otherwise it gets a `{}` it can't parse.
             let anthropicMgmt = (h == "api.anthropic.com" || h.hasSuffix(".anthropic.com"))
                 && !reqPath.hasPrefix("/v1/")            // keep /v1/messages*, /v1/models, count_tokens
+                && rctx.isLocalProviderHost(host)
             let telemetry = ["api.mixpanel.com", "api.statsig.com",
                              "statsig.anthropic.com", "events.statsigapi.net"].contains(h)
                 || h.hasSuffix(".sentry.io") || h.hasSuffix(".datadoghq.com")

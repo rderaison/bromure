@@ -230,16 +230,19 @@ public final class MitmEngine {
     public nonisolated func setRouting(_ routing: Profile.Routing,
                                        modelLabel: String,
                                        hybrid: HybridConfig,
+                                       localCloudHosts: Set<String> = [],
                                        for profileID: UUID) {
         fusionLock.lock()
         if let existing = routingContexts[profileID] {
             existing.routing = routing
             existing.localModelLabel = modelLabel
             existing.hybrid.update(config: hybrid)
+            existing.localCloudHosts = localCloudHosts
         } else {
             routingContexts[profileID] = LLMRoutingContext(
                 routing: routing, localModelLabel: modelLabel,
-                hybrid: HybridRouter(config: hybrid))
+                hybrid: HybridRouter(config: hybrid),
+                localCloudHosts: localCloudHosts)
         }
         fusionLock.unlock()
         SupplyChainLog.shared.record(

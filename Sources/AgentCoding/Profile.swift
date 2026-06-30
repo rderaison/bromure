@@ -1757,6 +1757,43 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         Tool.allCases.filter { hasUsableCredential(for: $0) }
     }
 
+    /// `modelRouting`, but a *pure*-`.local` route with no agent actually in
+    /// `.local` auth mode is downgraded to `.cloud`.
+    ///
+    /// `modelRouting == .local` is the mechanism that reroutes a cloud-auth
+    /// agent's LLM calls (e.g. to `api.anthropic.com`) onto the on-host MLX
+    /// engine. That only makes sense when an agent is genuinely meant to run
+    /// locally. If a profile is flagged `.local` yet **no** tool is in `.local`
+    /// auth mode — e.g. a subscription Claude that still has a model selected —
+    /// honoring it would short-circuit the agent's management calls and reroute
+    /// `/v1/messages` into the engine, returning empty/garbled 200s instead of
+    /// the real subscription response. Treat that as cloud. `.hybrid` (a
+    /// deliberate cloud+local split for a cloud-auth agent) is left untouched.
+    public var effectiveModelRouting: Routing {
+        if modelRouting == .local,
+           !allToolSpecs.contains(where: { $0.authMode == .local }) {
+            return .cloud
+        }
+        return modelRouting
+    }
+
+    /// Base domains of the cloud providers whose agent is in `.local` auth
+    /// mode. The proxy uses this to keep routing *per-agent* in a mixed
+    /// profile: only a host owned by a genuinely-local agent gets short-
+    /// circuited / rerouted to the engine, so a subscription Claude sharing a
+    /// VM with a local Codex still reaches `api.anthropic.com`.
+    public var localProviderCloudHosts: Set<String> {
+        var hosts: Set<String> = []
+        for spec in allToolSpecs where spec.authMode == .local {
+            switch spec.tool {
+            case .claude: hosts.insert("anthropic.com")
+            case .codex:  hosts.formUnion(["openai.com", "chatgpt.com"])
+            case .grok:   hosts.formUnion(["x.ai", "grok.com"])
+            }
+        }
+        return hosts
+    }
+
     /// The model id the on-host engine should serve for this profile, or
     /// nil if no local inference is needed. Single-engine phase: one model.
     /// A tool explicitly in `.local` mode wins (primary first); otherwise
@@ -1768,7 +1805,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // A local Fusion leg or judge also needs the engine serving its model.
         if let m = fusionLocalLeg, !m.isEmpty { return m }
         if fusionJudgeLocal, let m = fusionJudgeModel, !m.isEmpty { return m }
-        if modelRouting != .cloud, let m = activeModelID, !m.isEmpty { return m }
+        if effectiveModelRouting != .cloud, let m = activeModelID, !m.isEmpty { return m }
         return nil
     }
 
@@ -1783,7 +1820,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
            let m = activeModelID { ids.insert(m) }
         if let m = fusionLocalLeg { ids.insert(m) }
         if fusionJudgeLocal, let m = fusionJudgeModel { ids.insert(m) }
-        if modelRouting != .cloud, let m = activeModelID { ids.insert(m) }
+        if effectiveModelRouting != .cloud, let m = activeModelID { ids.insert(m) }
         return ids.filter { !$0.isEmpty }.sorted()
     }
 

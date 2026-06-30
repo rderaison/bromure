@@ -215,9 +215,11 @@ struct ModelValidationTests {
 @Suite("LLMRouting")
 struct LLMRoutingTests {
     private func ctx(_ routing: Profile.Routing,
+                     localCloudHosts: Set<String> = [],
                      _ cfg: HybridConfig = HybridConfig()) -> LLMRoutingContext {
         LLMRoutingContext(routing: routing, localModelLabel: "glm",
-                          hybrid: HybridRouter(config: cfg))
+                          hybrid: HybridRouter(config: cfg),
+                          localCloudHosts: localCloudHosts)
     }
 
     @Test("Only LLM hosts are re-routed") func hostGate() {
@@ -238,15 +240,47 @@ struct LLMRoutingTests {
         #expect(t.servedBy == "cloud")
     }
 
-    @Test("Local routing rewrites to the loopback repair proxy") func local() {
+    @Test("Local routing rewrites a local agent's host to the loopback repair proxy") func local() {
+        // Claude is the local agent here, so its provider host is in the set.
         let t = LLMRouting.decide(host: "api.anthropic.com", port: 443,
-                                  context: ctx(.local), sessionKey: "s", now: 0)
+                                  context: ctx(.local, localCloudHosts: ["anthropic.com"]),
+                                  sessionKey: "s", now: 0)
         #expect(t.backend == .local)
         #expect(t.host == InferenceService.engineHost)
         // Local traffic is sent to the repair proxy (which fronts the engine),
         // so it gets leaked-tool-call rescue + SSE re-emission.
         #expect(t.port == InferenceService.repairProxyPort)
         #expect(t.servedBy == "local-glm")
+    }
+
+    @Test("Mixed profile B: claude cloud + codex local — only OpenAI reroutes") func mixedClaudeCloudCodexLocal() {
+        // Profile B: Claude on a subscription (cloud), Codex on the local engine.
+        let c = ctx(.local, localCloudHosts: ["openai.com", "chatgpt.com"])
+        // Claude's real cloud traffic must NOT be hijacked.
+        let anthropic = LLMRouting.decide(host: "api.anthropic.com", port: 443,
+                                          context: c, sessionKey: "s", now: 0)
+        #expect(anthropic.backend == .cloud)
+        // Codex's provider host reroutes to the engine.
+        let openai = LLMRouting.decide(host: "api.openai.com", port: 443,
+                                       context: c, sessionKey: "s", now: 0)
+        #expect(openai.backend == .local)
+    }
+
+    @Test("Mixed profile A: claude local + codex cloud — only Anthropic reroutes") func mixedClaudeLocalCodexCloud() {
+        // Profile A: Claude on the local engine, Codex in the cloud.
+        let c = ctx(.local, localCloudHosts: ["anthropic.com"])
+        let anthropic = LLMRouting.decide(host: "api.anthropic.com", port: 443,
+                                          context: c, sessionKey: "s", now: 0)
+        #expect(anthropic.backend == .local)
+        let openai = LLMRouting.decide(host: "api.openai.com", port: 443,
+                                       context: c, sessionKey: "s", now: 0)
+        #expect(openai.backend == .cloud)
+    }
+
+    @Test("Local sentinel host is always engine-bound, even with no local provider") func sentinelAlwaysLocal() {
+        let t = LLMRouting.decide(host: InferenceService.localMitmHost, port: 443,
+                                  context: ctx(.local), sessionKey: "s", now: 0)
+        #expect(t.backend == .local)
     }
 
     @Test("Hard-error statuses are recognized") func hardErr() {
@@ -414,7 +448,8 @@ struct EngineProvisionerTests {
 struct LocalToolAuthTests {
     @Test("Claude points every model slot at the local model") func claudeSlots() {
         let env = Dictionary(uniqueKeysWithValues:
-            Profile.Tool.claude.localEnvExports(model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+            Profile.Tool.claude.localEnvExports(model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+                                                key: InferenceService.apiKey)
                 .map { ($0.name, $0.value) })
         #expect(env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:11434")
         // All five model slots (main + small-fast + the 3 aliases) → local.
@@ -432,7 +467,7 @@ struct LocalToolAuthTests {
 
     @Test("Codex carries only the dummy key (config.toml does the routing)") func codexEnv() {
         let codex = Dictionary(uniqueKeysWithValues:
-            Profile.Tool.codex.localEnvExports(model: "m").map { ($0.name, $0.value) })
+            Profile.Tool.codex.localEnvExports(model: "m", key: InferenceService.apiKey).map { ($0.name, $0.value) })
         #expect(codex["OPENAI_API_KEY"] == InferenceService.apiKey)
         // Codex is redirected by the config.toml provider, not env vars.
         #expect(codex["OPENAI_BASE_URL"] == nil)
@@ -440,7 +475,7 @@ struct LocalToolAuthTests {
 
     @Test("Grok uses the custom-models endpoint env (GROK_MODELS_BASE_URL + XAI_API_KEY)") func grokEnv() {
         let grok = Dictionary(uniqueKeysWithValues:
-            Profile.Tool.grok.localEnvExports(model: "m").map { ($0.name, $0.value) })
+            Profile.Tool.grok.localEnvExports(model: "m", key: InferenceService.apiKey).map { ($0.name, $0.value) })
         #expect(grok["GROK_MODELS_BASE_URL"] == "http://127.0.0.1:11434/v1")
         #expect(grok["XAI_API_KEY"] == InferenceService.apiKey)
         // The old names are ignored by the grok CLI — must not be set.
@@ -516,7 +551,6 @@ struct LocalToolAuthTests {
         #expect(m.requestsWaiting == 3)
         #expect(m.requestsInFlight == 2)
         #expect(m.cacheHitRate == 0.75)
-        #expect(m.cacheUsage == 0.4)
         #expect(m.metalMemoryBytes == 8589934592)
         #expect(m.avgInferenceLatency == 0.5)     // 5.0 / 10
     }

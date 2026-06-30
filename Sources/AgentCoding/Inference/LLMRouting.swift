@@ -9,13 +9,30 @@ public final class LLMRoutingContext: @unchecked Sendable {
     /// `served-by` marker (§4.4).
     public var localModelLabel: String
     public let hybrid: HybridRouter
+    /// Base domains (lowercased, e.g. `anthropic.com`) whose owning agent is
+    /// itself in `.local` auth mode. A profile can mix agents — e.g. Claude on
+    /// a subscription (cloud) alongside Codex on the local engine. Profile-wide
+    /// `.local` routing must NOT hijack a cloud agent's real cloud traffic, so
+    /// the proxy only short-circuits / reroutes a real cloud host when that
+    /// host belongs to a genuinely-local agent. The local sentinel host is
+    /// always engine-bound regardless (see `decide`).
+    public var localCloudHosts: Set<String>
 
     public init(routing: Profile.Routing,
                 localModelLabel: String,
-                hybrid: HybridRouter) {
+                hybrid: HybridRouter,
+                localCloudHosts: Set<String> = []) {
         self.routing = routing
         self.localModelLabel = localModelLabel
         self.hybrid = hybrid
+        self.localCloudHosts = localCloudHosts
+    }
+
+    /// True iff `host` (or a subdomain) is a cloud provider whose agent is in
+    /// `.local` auth mode in this profile.
+    public func isLocalProviderHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return localCloudHosts.contains { h == $0 || h.hasSuffix("." + $0) }
     }
 }
 
@@ -75,7 +92,13 @@ public enum LLMRouting {
         case .cloud:
             return cloud
         case .local:
-            return local
+            // Reroute a real cloud host to the engine ONLY when its owning
+            // agent is itself local. A subscription/token agent sharing the
+            // profile with a local agent keeps its real cloud traffic — its env
+            // points at the real provider, and profile-wide `.local` must not
+            // hijack it into a dead local path. (Genuinely-local agents reach
+            // the engine via the sentinel host, handled above.)
+            return context.isLocalProviderHost(host) ? local : cloud
         case .hybrid:
             let decision = context.hybrid.route(sessionID: sessionKey, now: now)
             return decision.backend == .local ? local : cloud

@@ -930,9 +930,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// engine at session launch (vLLM.md §4). The model label (catalog id
     /// or repo) is what the `served-by` trace marker shows.
     func applyRouting(_ engine: MitmEngine, for profile: Profile) {
-        engine.setRouting(profile.modelRouting,
+        // `effectiveModelRouting`, not the raw flag: a pure-local route with no
+        // `.local` agent (e.g. a subscription Claude with a leftover model
+        // selected) must NOT reroute the agent's real cloud traffic into the
+        // on-host engine.
+        engine.setRouting(profile.effectiveModelRouting,
                           modelLabel: profile.activeModelID ?? "default",
                           hybrid: HybridConfig(profile: profile),
+                          localCloudHosts: profile.localProviderCloudHosts,
                           for: profile.id)
     }
 

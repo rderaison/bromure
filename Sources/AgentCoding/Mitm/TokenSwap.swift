@@ -200,37 +200,25 @@ public final class TokenSwapper: @unchecked Sendable {
                 : false
             guard inHeader || inBody else { continue }
 
-            // Gate on consent if the entry is flagged — OR if it is
-            // unscoped. An entry with no host filter has its scope check
-            // (above) skipped, so its REAL secret would be injected onto
-            // *any* outbound host the agent CONNECTs to, including an
-            // attacker's — and `detectCompromise` deliberately skips
-            // unscoped entries (for them every host is "in scope"), so no
-            // alert fires either. The only boundary left for an unscoped
-            // secret is explicit consent, so force a prompt even when the
-            // entry didn't opt into a consent credential. The synthetic id
-            // is keyed on the destination host, so a one-time approval for
-            // a legitimate host can't silently blanket a different
-            // (attacker) host the agent reaches later in the session.
-            let unscoped = (entry.host?.isEmpty ?? true)
-            let gateCredID = entry.consentCredentialID
-                ?? (unscoped ? "unscoped:\(host):\(Self.preview(entry.fake))" : nil)
-            if let credID = gateCredID {
+            // Gate on consent if the entry is flagged. An entry is flagged
+            // (consentCredentialID set) exactly when the user opted into
+            // approval (manual token `requireApproval`, kubeconfig gate, etc.).
+            // We deliberately do NOT force a prompt on unscoped-but-unflagged
+            // entries: a blank host filter with approval off is an explicit
+            // "inject everywhere, don't ask" choice, and overriding it breaks
+            // legitimate always-on credentials (MCP bearers, env-wide tokens).
+            // A user who wants an unscoped secret gated sets `requireApproval`
+            // on it (or gives it a host filter); that is the supported control.
+            if let credID = entry.consentCredentialID {
                 FileHandle.standardError.write(Data(
                     "[mitm] swap candidate on \(host) gated → consent \(credID)\n".utf8))
-                let scopeHint = unscoped
-                    ? String(format: NSLocalizedString(
-                        "sending this saved credential to %@ — it has no host restriction",
-                        comment: ""), host)
-                    : (entry.host.map { String(format: NSLocalizedString(
-                        "for any *.%@ request", comment: ""), $0) }
-                        ?? NSLocalizedString("for outbound requests", comment: ""))
                 let allowed = await consent.consent(
                     profileID: profileID,
                     credentialID: credID,
-                    credentialDisplayName: entry.consentDisplayName
-                        ?? (unscoped ? NSLocalizedString("a saved credential", comment: "") : credID),
-                    scopeHint: scopeHint)
+                    credentialDisplayName: entry.consentDisplayName ?? credID,
+                    scopeHint: entry.host.map { String(format: NSLocalizedString(
+                        "for any *.%@ request", comment: ""), $0) }
+                        ?? NSLocalizedString("for outbound requests", comment: ""))
                 if !allowed { continue }
             }
 
