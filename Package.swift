@@ -22,8 +22,11 @@ let package = Package(
         // In-process MLX inference engine (replaces the Python vllm-mlx subprocess).
         // mlx-swift-examples was renamed mlx-swift-lm; track the latest (3.x adds
         // the SpeculativeTokenIterator API).
-        .package(url: "https://github.com/ml-explore/mlx-swift.git", .upToNextMinor(from: "0.31.3")),
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", "3.31.0" ..< "3.32.0"),
+        // 3.31.4 raises its swift-syntax floor to 602..<604 (matches the Swift
+        // 6.3 toolchain). After bumping, do a clean build — stale macro-plugin
+        // artifacts from the previous swift-syntax otherwise fail to load.
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", .upToNextMinor(from: "0.31.5")),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", "3.31.4" ..< "3.32.0"),
     ],
     targets: [
         .executableTarget(
