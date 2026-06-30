@@ -3478,7 +3478,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Editing keeps the original id (already preserved by ProfileEditorView).
         do {
             try store.save(profile)
-            try store.prepareHomeDirectory(for: profile, terminalDefaults: terminalDefaults)
+            try store.prepareHomeDirectory(for: profile, terminalDefaults: terminalDefaults,
+                                           displayScale: TerminalAppDefaults.currentDisplayScale())
             let agentDir = store.profileDirectory(for: profile)
                 .appendingPathComponent("agent", isDirectory: true)
             if generateSSH {
@@ -3811,7 +3812,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         try? store.prepareHomeDirectory(for: profile,
                                         terminalDefaults: terminalDefaults,
                                         tokenPlan: plan,
-                                        kubeconfigYAML: kubeYAML)
+                                        kubeconfigYAML: kubeYAML,
+                                        displayScale: TerminalAppDefaults.currentDisplayScale())
 
         // Rewrite api_key.env / proxy.env / MCP configs into the stable
         // meta-share dir and bump env.generation for the guest's
@@ -4132,7 +4134,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         try? store.prepareHomeDirectory(for: profile,
                                         terminalDefaults: terminalDefaults,
                                         tokenPlan: plan,
-                                        kubeconfigYAML: kubeYAMLForVM)
+                                        kubeconfigYAML: kubeYAMLForVM,
+                                        displayScale: TerminalAppDefaults.currentDisplayScale())
         // Codex subscription: seed a bogus ~/.codex/auth.json before boot so
         // the guest runs without logging in (host owns the real token).
         seedCodexAuthFile(for: profile)

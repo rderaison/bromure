@@ -95,19 +95,31 @@ extension Color {
 }
 
 extension TerminalAppDefaults {
+    /// Host display backing scale (1 = non-Retina, 2 = Retina), used to size
+    /// the guest's kitty font so it isn't doubled on a non-Retina screen.
+    /// Mirrors the image-build-time detection in `UbuntuImageManager`.
+    @MainActor public static func currentDisplayScale() -> Int {
+        Int(NSScreen.main?.backingScaleFactor ?? 2)
+    }
+
     /// Render a complete kitty.conf for `profile` using its overrides
     /// (with `terminalDefaults` filling per-field gaps) plus the cursor
     /// shape, opacity, standard bindings, and URL-open hook. Result is
     /// dropped at ~/.config/kitty/kitty.conf in the guest's home.
     public static func kittyConfig(for profile: Profile,
-                                   terminalDefaults: TerminalAppDefaults) -> String {
+                                   terminalDefaults: TerminalAppDefaults,
+                                   displayScale: Int = 2) -> String {
         let style = profile.resolveStyle(against: terminalDefaults)
-        // Empirical conversion: Terminal.app's 12pt visually matches
-        // kitty's 18pt under our default X DPI (96) on Retina. So the
-        // user enters whatever they're used to in Terminal.app and we
-        // scale by 1.5× before kitty sees it. Live ⌘+ / ⌘- still works
-        // for fine-tuning.
-        let size = max(8, Int((Double(style.fontSize) * 1.5).rounded()))
+        // Empirical conversion: Terminal.app's 12pt visually matches kitty's
+        // 18pt under our default X DPI (96) **on a Retina display** — VZ renders
+        // the guest framebuffer at the host window's *backing* pixels (2× dense
+        // on Retina, 1× otherwise). On a non-Retina display the framebuffer is
+        // half as dense, so a fixed font_size renders ~2× larger physically.
+        // Scale the 1.5× Retina factor by the host's backing scale so the font
+        // is the same physical size on either screen: 1.5× on Retina (scale 2),
+        // 0.75× on non-Retina (scale 1). Live ⌘+ / ⌘- still fine-tunes.
+        let factor = 1.5 * Double(displayScale) / 2.0
+        let size = max(8, Int((Double(style.fontSize) * factor).rounded()))
         let opacity = String(format: "%.2f", min(1.0, max(0.3, profile.windowOpacity)))
         _ = opacity  // intentionally unused: handled by NSWindow.alphaValue
         let stamp = ISO8601DateFormatter().string(from: Date())

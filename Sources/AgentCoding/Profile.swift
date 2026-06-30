@@ -2675,7 +2675,8 @@ public final class ProfileStore {
     public func prepareHomeDirectory(for profile: Profile,
                                      terminalDefaults: TerminalAppDefaults,
                                      tokenPlan: SessionTokenPlan? = nil,
-                                     kubeconfigYAML: String? = nil) throws {
+                                     kubeconfigYAML: String? = nil,
+                                     displayScale: Int = 2) throws {
         let home = homeDirectory(for: profile)
         if !fm.fileExists(atPath: home.path) {
             try fm.createDirectory(
@@ -2802,7 +2803,8 @@ public final class ProfileStore {
         try fm.createDirectory(at: kittyConfigDir, withIntermediateDirectories: true)
         let kittyConfig = kittyConfigDir.appendingPathComponent("kitty.conf")
         try TerminalAppDefaults
-            .kittyConfig(for: profile, terminalDefaults: terminalDefaults)
+            .kittyConfig(for: profile, terminalDefaults: terminalDefaults,
+                         displayScale: displayScale)
             .write(to: kittyConfig, atomically: true, encoding: .utf8)
 
         // ~/.tmux.conf — ONE tmux session per VM; each tab is a tmux window.
