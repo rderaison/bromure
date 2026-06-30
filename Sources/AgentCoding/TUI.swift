@@ -104,11 +104,11 @@ final class TUI {
     /// index, or nil if the user backed out (Esc / q / left).
     /// `items` are the row labels; `footer` is the hint line at the bottom.
     func menu(title: String, items: [String], footer: String? = nil,
-              initial: Int = 0) -> Int? {
+              header: [String] = [], initial: Int = 0) -> Int? {
         guard !items.isEmpty else { return nil }
         var sel = min(max(initial, 0), items.count - 1)
         while true {
-            render(title: title, items: items, selected: sel,
+            render(title: title, header: header, items: items, selected: sel,
                    footer: footer ?? "↑/↓ move · Enter select · q back")
             switch readKey() {
             case .up:    sel = (sel - 1 + items.count) % items.count
@@ -124,7 +124,7 @@ final class TUI {
         }
     }
 
-    private func render(title: String, items: [String], selected: Int, footer: String) {
+    private func render(title: String, header: [String] = [], items: [String], selected: Int, footer: String) {
         clear()
         let (cols, rows) = size
         let width = max(20, min(cols, 100))
@@ -132,11 +132,23 @@ final class TUI {
         move(row: 1, col: 1); write("┌" + bar + "┐")
         move(row: 2, col: 1); write("│ " + bold(pad(title, width - 4)) + " │")
         move(row: 3, col: 1); write("├" + bar + "┤")
+        var line = 4
+
+        // Optional header block (e.g. a workspace's live vitals), set off with
+        // its own separator.
+        if !header.isEmpty {
+            for h in header {
+                move(row: line, col: 1); write("│ " + dim(pad(h, width - 4)) + " │")
+                line += 1
+            }
+            move(row: line, col: 1); write("├" + bar + "┤")
+            line += 1
+        }
 
         // Body, clipped to the available rows (leave room for header + footer).
-        let bodyRows = max(1, rows - 6)
+        let headerRows = header.isEmpty ? 0 : header.count + 1
+        let bodyRows = max(1, rows - 6 - headerRows)
         let start = max(0, min(selected - bodyRows + 1, items.count - bodyRows))
-        var line = 4
         for i in start..<min(items.count, start + bodyRows) {
             let label = " " + pad(items[i], width - 4) + " "
             move(row: line, col: 1)

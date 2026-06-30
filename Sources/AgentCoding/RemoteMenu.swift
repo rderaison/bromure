@@ -41,7 +41,7 @@ final class RemoteMenuApp {
     // MARK: - Top level
 
     private func topMenu() {
-        let items = ["Workspaces", "Models", "Trace", "Status", "Exit (disconnect)"]
+        let items = ["Workspaces", "Models", "Trace", "Exit (disconnect)"]
         while true {
             guard let sel = tui.menu(title: "bromure-ac · remote",
                                      items: items,
@@ -52,7 +52,6 @@ final class RemoteMenuApp {
             case 0: workspacesMenu()
             case 1: modelsMenu()
             case 2: traceMenu()
-            case 3: showOutput("Status", ["status"])
             default: return                    // Exit
             }
         }
@@ -81,21 +80,37 @@ final class RemoteMenuApp {
         let state = ws["state"] as? String ?? "off"
         let live = (state == "running" || state == "booting")
         while true {
-            let items = live ? ["Attach", "Describe", "Kill", "Back"]
-                             : ["Start", "Describe", "Back"]
-            guard let sel = tui.menu(title: "Workspace: \(name)  ·  \(state)",
-                                     items: items, footer: "Enter select · q back") else { return }
             if live {
-                switch sel {
-                case 0: attachMenu(vmID: id, name: name)  // pick a tab or container
-                case 1: showOutput("describe \(name)", ["workspaces", "describe", id])
-                case 2:
-                    if tui.confirm("Kill \(name)?") {
-                        showOutput("kill \(name)", ["vm", "kill", id]); return
-                    }
-                default: return
+                // Pull live state each loop so the Fusion label reflects the last
+                // toggle. Fusion only appears when the workspace allows it.
+                let vm = fetchVM(id)
+                let fusionConfigurable = vm?["fusionConfigurable"] as? Bool ?? false
+                let fusionEngaged = vm?["fusionEngaged"] as? Bool ?? false
+                var labels = ["Attach", "Describe"]
+                var actions: [() -> Bool] = [
+                    { self.attachMenu(vmID: id, name: name); return false },
+                    { self.showOutput("describe \(name)", ["workspaces", "describe", id]); return false },
+                ]
+                if fusionConfigurable {
+                    labels.append("Fusion: \(fusionEngaged ? "on ✓" : "off")")
+                    actions.append { self.toggleFusion(id: id, name: name, currentlyOn: fusionEngaged); return false }
                 }
+                labels.append("Kill")
+                actions.append {
+                    guard self.tui.confirm("Kill \(name)?") else { return false }
+                    self.showOutput("kill \(name)", ["vm", "kill", id]); return true
+                }
+                labels.append("Back")
+                guard let sel = tui.menu(title: "Workspace: \(name)  ·  \(state)",
+                                         items: labels, footer: "Enter select · q back",
+                                         header: vmDashboardLines(vm)) else { return }
+                if sel >= 0, sel < actions.count {
+                    if actions[sel]() { return }
+                } else { return }              // Back
             } else {
+                let items = ["Start", "Describe", "Back"]
+                guard let sel = tui.menu(title: "Workspace: \(name)  ·  \(state)",
+                                         items: items, footer: "Enter select · q back") else { return }
                 switch sel {
                 case 0: startWorkspace(id: id, name: name); return
                 case 1: showOutput("describe \(name)", ["workspaces", "describe", id])
@@ -103,6 +118,13 @@ final class RemoteMenuApp {
                 }
             }
         }
+    }
+
+    /// Flip Fusion for a running workspace via the same `fusion` CLI verb the
+    /// menu mirrors elsewhere.
+    private func toggleFusion(id: String, name: String, currentlyOn: Bool) {
+        let action = currentlyOn ? "disable" : "enable"
+        tui.pager(title: "Fusion \(action) · \(name)", body: runSelf(["fusion", action, id]))
     }
 
     /// Boot an off/suspended workspace window-less, then hand the remote terminal
@@ -224,7 +246,10 @@ final class RemoteMenuApp {
                                  footer: "Enter select · q back") else { return }
         switch sel {
         case 0: showOutput("model ls", ["model", "ls"])
-        case 1: showOutput("model catalog", ["model", "catalog"])
+        // --all: the TUI has no flag to type, so show the whole catalog (FIT
+        // badges mark what fits) — nothing hidden, so the CLI's "use --all" hint
+        // is suppressed too.
+        case 1: showOutput("model catalog", ["model", "catalog", "--all"])
         default: return
         }
     }
@@ -290,6 +315,57 @@ final class RemoteMenuApp {
 
     private func pad(_ s: String, _ w: Int) -> String {
         s.count >= w ? s : s + String(repeating: " ", count: w - s.count)
+    }
+
+    /// A compact text version of the GUI workspace dashboard — live CPU / memory
+    /// / load, the machine spec, disk, uptime, and a config line. Rendered above
+    /// the action menu for a running workspace.
+    private func vmDashboardLines(_ vm: [String: Any]?) -> [String] {
+        guard let vm else { return ["vitals unavailable"] }
+        let hasStats = vm["hasStats"] as? Bool ?? false
+        let memUsedKB = vm["memUsedKB"] as? Int ?? 0
+        let memTotalKB = vm["memTotalKB"] as? Int ?? 0
+        let vcpu = vm["cpuCount"] as? Int ?? 0
+        let memGB = vm["memoryGB"] as? Int ?? 0
+        let diskBytes = vm["diskAllocatedBytes"] as? Int ?? 0
+        let up = vm["uptimeSeconds"] as? Int ?? 0
+        let ip = (vm["ip"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "—"
+        let tool = vm["tool"] as? String ?? "?"
+        let fusionConfigurable = vm["fusionConfigurable"] as? Bool ?? false
+        let fusion = (vm["fusionEngaged"] as? Bool ?? false) ? "on" : "off"
+
+        let cpuStr = hasStats ? String(format: "%.0f%%", num(vm["cpu"])) : "—"
+        let totGB = memTotalKB > 0 ? Double(memTotalKB) / 1_048_576 : Double(memGB)
+        let memStr = (hasStats && memUsedKB > 0)
+            ? String(format: "%.1f/%.1f GB", Double(memUsedKB) / 1_048_576, totGB)
+            : "\(memGB) GB"
+        let loadStr = hasStats ? String(format: "%.2f", num(vm["load"])) : "—"
+        let diskStr = diskBytes > 0 ? gbFromBytes(diskBytes) : "—"
+
+        var cfg = "IP \(ip)   tool \(tool)"
+        if fusionConfigurable { cfg += "   fusion \(fusion)" }
+        return [
+            "CPU \(pad(cpuStr, 5)) Mem \(pad(memStr, 13)) load \(loadStr)",
+            "vCPU \(pad("\(vcpu)", 3)) Disk \(pad(diskStr, 9)) up \(uptimeText(up))",
+            cfg,
+        ]
+    }
+
+    private func num(_ v: Any?) -> Double {
+        if let d = v as? Double { return d }
+        if let i = v as? Int { return Double(i) }
+        return 0
+    }
+    private func gbFromBytes(_ b: Int) -> String {
+        let g = Double(b) / 1_073_741_824
+        return g >= 1 ? String(format: "%.1f GB", g)
+                      : String(format: "%.0f MB", Double(b) / 1_048_576)
+    }
+    private func uptimeText(_ secs: Int) -> String {
+        let h = secs / 3600, m = (secs % 3600) / 60
+        if h > 0 { return "\(h)h \(m)m" }
+        if m > 0 { return "\(m)m" }
+        return "\(secs)s"
     }
 
     /// Run a non-interactive `bromure-ac` subcommand and show its output in the
