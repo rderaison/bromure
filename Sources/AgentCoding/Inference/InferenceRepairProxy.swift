@@ -250,10 +250,13 @@ final class InferenceRepairProxy: @unchecked Sendable {
 
         /// Append a user turn that quotes the preamble back and asks the model to
         /// call the tool it skipped. A user message (not an assistant one) keeps the
-        /// shape well-known across engines.
-        func continuationPayload(_ payload: [String: Any], preamble: String) -> [String: Any] {
+        /// shape well-known across engines. `attempt` escalates the wording.
+        func continuationPayload(_ payload: [String: Any], preamble: String, attempt: Int) -> [String: Any] {
             var p = payload
-            let nudge = "Your previous response ended after describing the next step:\n\n\"\(String(preamble.suffix(500)))\"\n\n…but you did NOT call a tool to perform it. Call the appropriate tool now to carry out exactly that step. Respond with the tool call only — no prose."
+            let head = "Your previous response ended after describing the next step:\n\n\"\(String(preamble.suffix(500)))\"\n\n…but you did NOT call a tool to perform it."
+            let nudge = attempt == 0
+                ? head + " Call the appropriate tool now to carry out exactly that step. Respond with the tool call only — no prose."
+                : head + " You MUST output a tool call NOW and nothing else — e.g. <tool_call>{\"name\":\"…\",\"arguments\":{…}}</tool_call>. Do NOT describe the step again; perform it."
             switch self {
             case .responses:
                 var input = (payload["input"] as? [[String: Any]]) ?? []
@@ -264,6 +267,8 @@ final class InferenceRepairProxy: @unchecked Sendable {
                 msgs.append(["role": "user", "content": nudge])
                 p["messages"] = msgs
             }
+            // Honored if the engine implements it; harmless otherwise.
+            p["tool_choice"] = "required"
             return p
         }
     }
@@ -360,19 +365,33 @@ final class InferenceRepairProxy: @unchecked Sendable {
             guard !toolNames.isEmpty, api.cleanStop(message),
                   api.hasNoToolCall(message, toolNames: toolNames),
                   looksLikeStuckPreamble(api.assistantText(message)) else { return message }
-            var cont = api.continuationPayload(payload, preamble: api.assistantText(message))
-            cont["stream"] = false
-            guard let body = try? JSONSerialization.data(withJSONObject: cont) else { return message }
-            var cur = ur
-            cur.httpBody = body
-            let (d2, s2) = syncData(cur)
-            guard s2 == 200, let d2,
-                  let m2 = (try? JSONSerialization.jsonObject(with: d2)) as? [String: Any],
-                  !api.hasNoToolCall(m2, toolNames: toolNames) else { return message }
-            if ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil {
-                appendRepairLog("[repair] ~~ \(req.path) continued stuck preamble; recovered a tool call\n")
+            let preamble = api.assistantText(message)
+            let dbg = ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil
+            if dbg { appendRepairLog("[repair] ~~ \(req.path) stuck preamble detected; re-prompting\n") }
+            // Up to two re-prompts, escalating: the nudge gets blunter and the
+            // second adds temperature so a greedy model can't just re-emit the same
+            // preamble. The first attempt that yields a tool call wins; otherwise we
+            // keep the original message and the turn ends as before.
+            for attempt in 0..<2 {
+                var cont = api.continuationPayload(payload, preamble: preamble, attempt: attempt)
+                cont["stream"] = false
+                if attempt > 0 { cont["temperature"] = 0.7 }
+                guard let body = try? JSONSerialization.data(withJSONObject: cont) else { break }
+                var cur = ur
+                cur.httpBody = body
+                let (d2, s2) = syncData(cur)
+                guard s2 == 200, let d2,
+                      let m2 = (try? JSONSerialization.jsonObject(with: d2)) as? [String: Any] else {
+                    if dbg { appendRepairLog("[repair] ~~ \(req.path) attempt \(attempt + 1): engine status \(s2)\n") }
+                    continue
+                }
+                if !api.hasNoToolCall(m2, toolNames: toolNames) {
+                    if dbg { appendRepairLog("[repair] ~~ \(req.path) recovered a tool call on attempt \(attempt + 1)\n") }
+                    return m2
+                }
+                if dbg { appendRepairLog("[repair] ~~ \(req.path) attempt \(attempt + 1): still no tool call (\(api.assistantText(m2).count) chars)\n") }
             }
-            return m2
+            return message
         }()
 
         if ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil {
