@@ -3272,17 +3272,6 @@ public final class ProfileStore {
         esac
     }
 
-    # Show an agent's real name on the tmux tab while it runs. claude/codex/grok
-    # launch via `node`, which tmux reports as the pane's foreground command — so
-    # the tab would read "node" and the per-agent styling + the thinking indicator
-    # (both keyed on the tab label) would break. These wrappers set the window's
-    # @label (preferred by the host roster over pane_current_command) for the
-    # duration of the run, then clear it. `command` calls the real binary. Covers
-    # both the auto-launch below (`"$BROMURE_AC_TOOL"`) and a manual `codex` etc.
-    claude() { tmux set-option -w @label claude 2>/dev/null; command claude "$@"; local _rc=$?; tmux set-option -wu @label 2>/dev/null; return $_rc; }
-    codex()  { tmux set-option -w @label codex  2>/dev/null; command codex  "$@"; local _rc=$?; tmux set-option -wu @label 2>/dev/null; return $_rc; }
-    grok()   { tmux set-option -w @label grok   2>/dev/null; command grok   "$@"; local _rc=$?; tmux set-option -wu @label 2>/dev/null; return $_rc; }
-
     # Auto-launch the agent on the FIRST interactive shell of this VM
     # session only. Subsequent kitty tabs / new windows / nested shells
     # all skip the launch and land at plain bash. The marker lives in
@@ -3878,14 +3867,49 @@ public final class ProfileStore {
     # never reads a partial list. Empty/absent = no tabs → host powers off.
     roster_loop() {
         while :; do
-            # Label = the per-window @label override if set (agents launch via
-            # `node`; docker attach/logs windows run the `docker` client — both
-            # mask the real name), else the pane's foreground command (which on a
-            # plain shell tab already follows e.g. vi/less correctly).
-            if out=$(tmux list-windows -t "$TMUX_S" \
-                     -F '#{window_index}	#{?window_active,1,0}	#{?@label,#{@label},#{pane_current_command}}	#{@container}' 2>/dev/null); then
-                printf '%s' "$out" > "$INBOX/.tabs.tmp" 2>/dev/null \
-                    && mv -f "$INBOX/.tabs.tmp" "$INBOX/tabs.txt" 2>/dev/null
+            # Resolve each window's LABEL in shell (not a tmux format conditional):
+            #   1. an explicit @label wins (docker attach/logs windows set it
+            #      directly — always reliable);
+            #   2. else, when the foreground command is an INTERPRETER that hides
+            #      the real program — claude/codex/grok all run as `node`, so the
+            #      tab would read "node" and the host's agent badge + thinking
+            #      indicator (keyed on the label) never fire — read the tty's
+            #      foreground argv and map the script it runs to the agent. A plain
+            #      `node` with no agent script stays "node". This is what makes a
+            #      SECONDARY tool work: with claude primary + codex also present,
+            #      `node /usr/bin/codex` resolves to codex regardless of which tool
+            #      is the primary.
+            #   3. else the foreground command verbatim (a plain shell tab already
+            #      follows vi/less correctly).
+            if raw=$(tmux list-windows -t "$TMUX_S" \
+                     -F '#{window_index}	#{?window_active,1,0}	#{pane_current_command}	#{pane_tty}	#{@label}	#{@container}' 2>/dev/null); then
+                : > "$INBOX/.tabs.tmp" 2>/dev/null
+                printf '%s\n' "$raw" | while IFS='	' read -r idx active cmd tty label container; do
+                    [ -z "$idx" ] && continue
+                    name="$label"
+                    if [ -z "$name" ]; then
+                        name="$cmd"
+                        case "$cmd" in
+                            node|node[0-9]*|deno|bun|python|python[0-9.]*|ruby|uv|tsx)
+                                # First non-flag arg after the interpreter on the
+                                # tty's FOREGROUND process (STAT has '+') = the
+                                # script it runs (e.g. /usr/bin/codex).
+                                script=$(ps -ww -t "${tty#/dev/}" -o stat=,args= 2>/dev/null \
+                                         | awk '$1 ~ /[+]/ {for(i=3;i<=NF;i++) if($i !~ /^-/){print $i; exit}}')
+                                prog=${script##*/}; prog=${prog%%.*}
+                                case "$prog" in
+                                    claude|codex|grok|aider|goose|amp|opencode|gemini|cursor)
+                                        name="$prog" ;;
+                                    *) for ag in claude codex grok aider goose amp opencode gemini cursor; do
+                                           case "$script" in *"$ag"*) name="$ag"; break ;; esac
+                                       done ;;
+                                esac ;;
+                        esac
+                    fi
+                    printf '%s\t%s\t%s\t%s\n' "$idx" "$active" "$name" "$container" \
+                        >> "$INBOX/.tabs.tmp"
+                done
+                mv -f "$INBOX/.tabs.tmp" "$INBOX/tabs.txt" 2>/dev/null
             elif ! tmux has-session -t "$TMUX_S" 2>/dev/null; then
                 # list-windows failed AND the session is genuinely gone — the
                 # user closed the last window (Ctrl-D) so tmux (and the kitty
