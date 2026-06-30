@@ -40,23 +40,11 @@ pipeline {
             }
         }
 
-        stage('Reinstall MLX engine (clean)') {
-            // Wipe the provisioned vllm-mlx venv so every run reinstalls the
-            // engine from scratch against the pinned, hash-locked
-            // engine-requirements.txt — exercising the deterministic install
-            // path (bundled uv + standalone Python + hash-verified wheels) on a
-            // clean machine. Fail hard if provisioning doesn't produce a usable
-            // engine.
-            steps {
-                sh '''
-                    APP_BUNDLE=$(cat .app_bundle_path)
-                    ENGINE="$HOME/Library/Application Support/BromureAC/engine"
-                    rm -rf "$ENGINE"
-                    "$APP_BUNDLE/Contents/MacOS/bromure-ac" model install 2>&1 | tee engine-install.log
-                    test -x "$ENGINE/bin/vllm-mlx" || { echo "engine not provisioned after model install"; exit 1; }
-                '''
-            }
-        }
+        // The inference engine is now in-process MLX-Swift: the app binary
+        // re-execs itself as `model _mlx-engine` and build.sh bundles
+        // mlx.metallib. There is no venv to provision, so the old
+        // "Reinstall MLX engine (clean)" stage (which asserted a now-gone
+        // $ENGINE/bin/vllm-mlx) was removed — the bundle IS the engine.
 
         stage('Init Base Image') {
             // Needed for sections 6 (Session control) and 8 (VM-side via /exec).
@@ -249,6 +237,89 @@ pipeline {
                 }
             }
         }
+
+        stage('16. Local model commands') {
+            // `model catalog`/`ls`/`pull`-validation/`--help` over the in-process
+            // MLX-Swift engine + bundled catalog. No agent, no VM, no download.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^16\\."'
+                }
+            }
+        }
+
+        stage('17. LLM routing') {
+            // `workspaces routing` arg validation (<mode> <vm> order) plus the
+            // modelRouting/activeModelID profile-JSON round-trip (effective vs
+            // raw routing). No VM required.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^17\\."'
+                }
+            }
+        }
+
+        stage('18. Hybrid knobs') {
+            // `workspaces hybrid split/budget/ttft` validation + the
+            // hybridCloudTokenBudget/hybridSoftTTFTSeconds/hybridLocalSplitPercent
+            // profile-JSON round-trip. No VM required.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^18\\."'
+                }
+            }
+        }
+
+        stage('19. Remote access') {
+            // `remote --help`, default-disabled status (bind 0.0.0.0), and a
+            // throwaway authorized-key add/ls/rm. Never enables remote access.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^19\\."'
+                }
+            }
+        }
+
+        stage('20. Auth modes') {
+            // Per-tool authMode (token/subscription/local), mixed additionalTools,
+            // and the subscriptionTokenSwap state — all via profile JSON. No VM.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^20\\."'
+                }
+            }
+        }
+
+        stage('21. Fusion') {
+            // `workspaces fusion` verb validation + the fusionLocalLeg/
+            // fusionJudgeProvider/fusionJudgeModel/fusionJudgeLocal JSON
+            // round-trip. No VM required for the config layer.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^21\\."'
+                }
+            }
+        }
+
+        stage('22. Trace shapes') {
+            // `trace ls/summary/hostnames/clear` return sane shapes (may be
+            // empty). No VM required.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^22\\."'
+                }
+            }
+        }
+
+        stage('23. Unified naming') {
+            // `workspaces` is canonical, `vm` is the alias: ls/describe agree
+            // across both names. No VM required.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^23\\."'
+                }
+            }
+        }
     }
 
     post {
@@ -261,7 +332,6 @@ pipeline {
                 security default-keychain -s login.keychain-db || true
             '''
             archiveArtifacts artifacts: '/tmp/bromure-ac.log', allowEmptyArchive: true
-            archiveArtifacts artifacts: 'engine-install.log', allowEmptyArchive: true
         }
     }
 }

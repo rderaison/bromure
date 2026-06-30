@@ -1719,6 +1719,342 @@ async function main() {
   }
 
   // ======================================================================
+  // 16. Local model commands (catalog / ls / pull validation — no agent/VM)
+  // ======================================================================
+  console.log("\n--- 16. Local model commands ---");
+
+  // `model catalog`, `model ls`, and `model pull` validation run in-process
+  // against the bundled catalog + the in-process MLX engine — they need
+  // neither the control socket nor a VM. Gate only on the binary being present.
+  const cliBinPresent = /workspaces|SUBCOMMANDS|USAGE|OPTIONS/i.test(
+    cli(["--help"], { allowFail: true })
+  );
+  if (!cliBinPresent) {
+    console.log("  \x1b[33mSKIP\x1b[0m  model commands (bromure-ac binary not found)");
+  } else {
+    await test("16.1 model catalog --offline lists curated models with a host-RAM header", async () => {
+      const out = cli(["model", "catalog", "--offline"], { allowFail: true });
+      assertIncludes(out, "Host unified memory");
+      assertIncludes(out, "FIT"); // the catalog table header (ID FIT TOOLS SIZE NAME)
+    });
+
+    await test("16.2 model ls shows installed models (or a clean empty note)", async () => {
+      const out = cli(["model", "ls"], { allowFail: true });
+      assert(/No models installed|GB|\(.*\)/.test(out), `unexpected model ls output: ${out}`);
+    });
+
+    await test("16.3 model pull rejects a bogus id WITHOUT downloading", async () => {
+      // No slash, not a catalog id → fails CatalogStore.looksLikeHFRepo before
+      // any network or disk activity.
+      const out = cli(["model", "pull", "ACE2E-definitely-not-a-real-model"], { allowFail: true });
+      assert(/known catalog id or an org/i.test(out),
+             `expected a validation rejection, got: ${out}`);
+      assert(!/Pulled |Downloading|Validating /.test(out),
+             `pull appears to have started work for a bogus id: ${out}`);
+    });
+
+    await test("16.4 model --help lists the catalog/pull/ls subcommands", async () => {
+      const out = cli(["model", "--help"], { allowFail: true });
+      for (const sub of ["catalog", "pull", "ls"]) assertIncludes(out, sub);
+    });
+  }
+
+  // ======================================================================
+  // 17. LLM routing (CLI validation + modelRouting/activeModelID JSON)
+  // ======================================================================
+  console.log("\n--- 17. LLM routing ---");
+
+  await test("17.1 routing rejects a bad mode (validated before any VM lookup)", async () => {
+    const out = cli(["workspaces", "routing", "notamode", "whatever"], { allowFail: true });
+    assert(/Mode must be 'cloud', 'local', or 'hybrid'/i.test(out),
+           `expected a mode rejection, got: ${out}`);
+  });
+
+  await test("17.2 routing arg order is <mode> <vm>: a vm-first call reads as a bad mode", async () => {
+    // `routing <vm> <mode>` parses the first positional as the mode → rejected.
+    // Pins the documented order without needing a running VM.
+    const out = cli(["workspaces", "routing", "some-workspace", "cloud"], { allowFail: true });
+    assert(/Mode must be 'cloud', 'local', or 'hybrid'/i.test(out),
+           `expected the first positional parsed as the mode, got: ${out}`);
+  });
+
+  await test("17.3 modelRouting + activeModelID round-trip via profile JSON", async () => {
+    const id = createProfile("ACE2E_Route_RT");
+    try {
+      const before = getProfileJSON(id);
+      assert(before.modelRouting === undefined || before.modelRouting === "cloud",
+             "default routing should be cloud (omitted)");
+      const p = getProfileJSON(id);
+      p.modelRouting = "hybrid";
+      p.activeModelID = "ACE2E-fake-model-id";
+      setProfileJSON(id, p);
+      const after = getProfileJSON(id);
+      assertEq(after.modelRouting, "hybrid");
+      assertEq(after.activeModelID, "ACE2E-fake-model-id");
+    } finally { deleteProfile(id); }
+  });
+
+  await test("17.4 local routing on a subscription tool persists raw (effective is computed)", async () => {
+    // modelRouting:'local' is recorded verbatim. effectiveModelRouting downgrades
+    // it to cloud at runtime when NO tool is in .local auth (a subscription
+    // Claude keeps reaching api.anthropic.com); that downgrade is a computed
+    // property, not stored — so JSON only proves the raw value round-trips.
+    const id = createProfile("ACE2E_Route_Eff");
+    try {
+      const p = getProfileJSON(id);
+      p.authMode = "subscription";
+      p.modelRouting = "local";
+      setProfileJSON(id, p);
+      const after = getProfileJSON(id);
+      assertEq(after.authMode, "subscription");
+      assertEq(after.modelRouting, "local");
+    } finally { deleteProfile(id); }
+  });
+
+  if (cliReachable) {
+    await test("17.5 routing a correct <mode> at an unknown VM reports not-found", async () => {
+      const out = cli(["workspaces", "routing", "cloud", "ACE2E-no-such-vm-zzz"], { allowFail: true });
+      assert(/not found|Couldn't set routing|No bromure-ac agent/i.test(out),
+             `expected a VM-not-found style error, got: ${out}`);
+    });
+  }
+
+  // ======================================================================
+  // 18. Hybrid knobs (CLI validation + budget/ttft/split JSON round-trip)
+  // ======================================================================
+  console.log("\n--- 18. Hybrid knobs ---");
+
+  await test("18.1 hybrid split rejects an out-of-range percent (validated locally)", async () => {
+    const out = cli(["workspaces", "hybrid", "split", "150", "whatever"], { allowFail: true });
+    assert(/Split must be between 0 and 100/i.test(out), `expected a range rejection, got: ${out}`);
+  });
+
+  await test("18.2 hybrid knobs round-trip via profile JSON", async () => {
+    const id = createProfile("ACE2E_Hybrid_RT");
+    try {
+      const p = getProfileJSON(id);
+      // Defaults are omitted from JSON: budget 0, ttft 5, split 0.
+      assert(p.hybridCloudTokenBudget === undefined || p.hybridCloudTokenBudget === 0, "budget default");
+      assert(p.hybridSoftTTFTSeconds === undefined || p.hybridSoftTTFTSeconds === 5, "ttft default");
+      assert(p.hybridLocalSplitPercent === undefined || p.hybridLocalSplitPercent === 0, "split default");
+      p.modelRouting = "hybrid";
+      p.hybridCloudTokenBudget = 250000;
+      p.hybridSoftTTFTSeconds = 8.5;
+      p.hybridLocalSplitPercent = 25;
+      setProfileJSON(id, p);
+      const after = getProfileJSON(id);
+      assertEq(after.modelRouting, "hybrid");
+      assertEq(after.hybridCloudTokenBudget, 250000);
+      assertEq(after.hybridSoftTTFTSeconds, 8.5);
+      assertEq(after.hybridLocalSplitPercent, 25);
+    } finally { deleteProfile(id); }
+  });
+
+  if (cliReachable) {
+    await test("18.3 hybrid budget at an unknown VM surfaces an agent-side error", async () => {
+      const out = cli(["workspaces", "hybrid", "budget", "1000", "ACE2E-no-such-vm-zzz"], { allowFail: true });
+      assert(/not found|Couldn't set hybrid|No bromure-ac agent/i.test(out),
+             `expected a VM-not-found style error, got: ${out}`);
+    });
+  }
+
+  // ======================================================================
+  // 19. Remote access CLI (disabled by default; key add/list/remove)
+  // ======================================================================
+  console.log("\n--- 19. Remote access ---");
+
+  await test("19.1 remote --help lists status/enable/disable/key", async () => {
+    const out = cli(["remote", "--help"], { allowFail: true });
+    for (const sub of ["status", "enable", "disable", "key"]) assertIncludes(out, sub);
+  });
+
+  if (!cliReachable) {
+    console.log("  \x1b[33mSKIP\x1b[0m  remote status/key tests (control socket down)");
+  } else {
+    await test("19.2 remote status: disabled by default, bind 0.0.0.0", async () => {
+      const out = cli(["remote", "status"], { allowFail: true });
+      if (/No bromure-ac agent running/.test(out)) return; // graceful
+      assert(/Remote access:\s*disabled/i.test(out), `expected remote disabled, got: ${out}`);
+      assert(/Bind:\s*0\.0\.0\.0:/.test(out), `expected default bind 0.0.0.0, got: ${out}`);
+    });
+
+    await test("19.3 remote key add → ls → rm round-trips a throwaway key", async () => {
+      // A disposable ed25519 public key (never used to log in — this test never
+      // enables remote access, only manages the authorized-keys list).
+      const PUBKEY =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMz+q2C3RYGPQG8GiBeWPfinUJB7hFwKnRLuJwKrWqRy ACE2E_remote_throwaway";
+      const add = cli(["remote", "key", "add", PUBKEY], { allowFail: true });
+      if (/No bromure-ac agent running/.test(add)) return; // graceful
+      const fp = (add.match(/Added key:\s*(\S+)/) || [])[1];
+      assert(fp, `add did not report a fingerprint: ${add}`);
+      try {
+        assertIncludes(cli(["remote", "key", "ls"], { allowFail: true }), "ACE2E_remote_throwaway");
+        const rm = cli(["remote", "key", "rm", fp], { allowFail: true });
+        assert(/Removed/i.test(rm), `expected a removal confirmation, got: ${rm}`);
+        assert(!cli(["remote", "key", "ls"], { allowFail: true }).includes("ACE2E_remote_throwaway"),
+               "throwaway key still present after rm");
+      } finally {
+        cli(["remote", "key", "rm", fp], { allowFail: true }); // safety net
+      }
+    });
+  }
+
+  // ======================================================================
+  // 20. Subscription + auth modes (per-tool authMode + token-swap state)
+  // ======================================================================
+  console.log("\n--- 20. Auth modes ---");
+
+  await test("20.1 primary authMode round-trips token/subscription/local", async () => {
+    const id = createProfile("ACE2E_Auth_Primary");
+    try {
+      for (const m of ["token", "subscription", "local"]) {
+        const p = getProfileJSON(id);
+        p.authMode = m;
+        setProfileJSON(id, p);
+        assertEq(getProfileJSON(id).authMode, m);
+      }
+    } finally { deleteProfile(id); }
+  });
+
+  await test("20.2 additionalTools with mixed auth modes round-trip", async () => {
+    const id = createProfile("ACE2E_Auth_Mixed");
+    try {
+      const p = getProfileJSON(id);
+      p.tool = "claude";
+      p.authMode = "subscription";
+      p.additionalTools = [
+        { tool: "codex", authMode: "subscription" },
+        { tool: "grok", authMode: "local", localModelID: "ACE2E-fake-model" },
+      ];
+      setProfileJSON(id, p);
+      const after = getProfileJSON(id);
+      const byTool = Object.fromEntries((after.additionalTools || []).map((t) => [t.tool, t]));
+      assert(byTool.codex && byTool.codex.authMode === "subscription", "codex subscription lost");
+      assert(byTool.grok && byTool.grok.authMode === "local", "grok local lost");
+      assertEq(byTool.grok.localModelID, "ACE2E-fake-model");
+    } finally { deleteProfile(id); }
+  });
+
+  await test("20.3 subscriptionTokenSwap state round-trips (default unset)", async () => {
+    const id = createProfile("ACE2E_Auth_Swap");
+    try {
+      const before = getProfileJSON(id);
+      assert(before.subscriptionTokenSwap === undefined || before.subscriptionTokenSwap === "unset",
+             "swap should default to unset (omitted)");
+      for (const s of ["accepted", "declined"]) {
+        const p = getProfileJSON(id);
+        p.subscriptionTokenSwap = s;
+        setProfileJSON(id, p);
+        assertEq(getProfileJSON(id).subscriptionTokenSwap, s);
+      }
+    } finally { deleteProfile(id); }
+  });
+
+  // ======================================================================
+  // 21. Fusion (CLI validation + fusion-field JSON round-trip)
+  // ======================================================================
+  console.log("\n--- 21. Fusion ---");
+
+  await test("21.1 fusion rejects a non enable/disable verb (validated locally)", async () => {
+    const out = cli(["workspaces", "fusion", "sideways", "whatever"], { allowFail: true });
+    assert(/Action must be 'enable' or 'disable'|enable|disable/i.test(out),
+           `expected an action-verb rejection, got: ${out}`);
+  });
+
+  await test("21.2 fusion fields round-trip via profile JSON", async () => {
+    const id = createProfile("ACE2E_Fusion_RT");
+    try {
+      const p = getProfileJSON(id);
+      assert(!p.fusionJudgeLocal, "fusionJudgeLocal should default off/omitted");
+      p.fusionLocalLeg = "ACE2E-local-leg-model";
+      p.fusionJudgeProvider = "claude";
+      p.fusionJudgeModel = "ACE2E-judge-model";
+      p.fusionJudgeLocal = true;
+      setProfileJSON(id, p);
+      const after = getProfileJSON(id);
+      assertEq(after.fusionLocalLeg, "ACE2E-local-leg-model");
+      assertEq(after.fusionJudgeProvider, "claude");
+      assertEq(after.fusionJudgeModel, "ACE2E-judge-model");
+      assertEq(after.fusionJudgeLocal, true);
+    } finally { deleteProfile(id); }
+  });
+
+  if (cliReachable) {
+    await test("21.3 fusion enable on an unknown VM reports not-found", async () => {
+      const out = cli(["workspaces", "fusion", "enable", "ACE2E-no-such-vm-zzz"], { allowFail: true });
+      assert(/not found|Couldn't set fusion|No bromure-ac agent/i.test(out),
+             `expected a VM-not-found style error, got: ${out}`);
+    });
+  }
+
+  // ======================================================================
+  // 22. Trace CLI shapes (ls / summary / hostnames / clear — may be empty)
+  // ======================================================================
+  console.log("\n--- 22. Trace shapes ---");
+
+  if (!cliReachable) {
+    console.log("  \x1b[33mSKIP\x1b[0m  trace shape tests (control socket down)");
+  } else {
+    await test("22.1 trace ls prints a header or a clean empty note", async () => {
+      const out = cli(["trace", "ls"], { allowFail: true });
+      assert(/No trace records|HOST\s+METHOD|TIME/.test(out), `unexpected trace ls: ${out}`);
+    });
+
+    await test("22.2 trace summary is a sane shape or empty", async () => {
+      const out = cli(["trace", "summary"], { allowFail: true });
+      assert(/No trace records|requests across|status:/.test(out), `unexpected trace summary: ${out}`);
+    });
+
+    await test("22.3 trace hostnames lists hosts or an empty note", async () => {
+      const out = cli(["trace", "hostnames"], { allowFail: true });
+      assert(/No trace records/.test(out) || /\S/.test(out), `unexpected trace hostnames: ${out}`);
+    });
+
+    await test("22.4 trace clear -f reports a cleared count", async () => {
+      assertIncludes(cli(["trace", "clear", "-f"], { allowFail: true }), "Cleared");
+    });
+  }
+
+  // ======================================================================
+  // 23. Unified naming: `workspaces` is canonical, `vm` is its alias
+  // ======================================================================
+  console.log("\n--- 23. Unified naming ---");
+
+  if (!cliReachable) {
+    console.log("  \x1b[33mSKIP\x1b[0m  alias tests (control socket down)");
+  } else {
+    await test("23.1 `workspaces ls` and `vm ls` are the same unified listing", async () => {
+      const ws = cli(["workspaces", "ls"], { allowFail: true });
+      const vm = cli(["vm", "ls"], { allowFail: true });
+      const marker = /No workspaces|WORKSPACE ID/;
+      assert(marker.test(ws), `unexpected workspaces ls: ${ws}`);
+      assert(marker.test(vm), `unexpected vm ls: ${vm}`);
+      // Same static header line behind both names proves the alias (the UP
+      // column ticks, so we compare the header, not the whole table).
+      const header = (s) => (s.match(/^WORKSPACE ID.*$/m) || [""])[0];
+      assertEq(header(ws), header(vm), "header differs between workspaces and vm");
+    });
+
+    await test("23.2 a freshly-created workspace shows up in `workspaces ls`", async () => {
+      const id = createProfile("ACE2E_Unified_List");
+      try {
+        assertIncludes(cli(["workspaces", "ls"], { allowFail: true }), "ACE2E_Unified_List");
+      } finally { deleteProfile(id); }
+    });
+
+    await test("23.3 `vm describe` == `workspaces describe` for the same workspace", async () => {
+      const id = createProfile("ACE2E_Unified_Desc");
+      try {
+        const norm = (s) => s.replace(/\s+/g, " ").trim();
+        const a = cli(["workspaces", "describe", "ACE2E_Unified_Desc"], { allowFail: true });
+        const b = cli(["vm", "describe", "ACE2E_Unified_Desc"], { allowFail: true });
+        assertIncludes(a, "ACE2E_Unified_Desc");
+        assertEq(norm(a), norm(b), "describe diverged between the workspaces and vm aliases");
+      } finally { deleteProfile(id); }
+    });
+  }
+
+  // ======================================================================
   // Done
   // ======================================================================
   console.log(
