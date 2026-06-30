@@ -69,7 +69,18 @@ pipeline {
                     sh '''
                         rm -f bromure-ac.provisionprofile
                         cp "$PROVISION_PROFILE" bromure-ac.provisionprofile
-                        ./package.sh bromure-ac
+                        # Build, with a one-shot self-heal. A dependency bump (e.g.
+                        # mlx-swift-lm raising its swift-syntax floor) leaves a stale
+                        # macro plugin in the cached .build that fails with
+                        # "failed to receive result from plugin"; a clean rebuild
+                        # fixes it. Retry once from a clean .build on any failure, so
+                        # the dep-bump case self-heals without forcing a slow clean
+                        # build every run.
+                        ./package.sh bromure-ac || {
+                            echo "=== package.sh failed — wiping .build (stale macro plugin after a dependency bump?) and retrying once ==="
+                            rm -rf .build
+                            ./package.sh bromure-ac
+                        }
                     '''
                 }
             }
