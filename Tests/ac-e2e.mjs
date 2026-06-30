@@ -183,6 +183,16 @@ function createProfile(name, opts = {}) {
   const id = ac(cmd);
   if (!id.match(/^[0-9A-F-]{36}$/i))
     throw new Error(`Bad profile ID returned: ${id}`);
+  // Throwaway test workspaces must close non-interactively: the default
+  // closeAction is `.ask`, which pops a blocking "Close …? Run in background /
+  // Suspend / Shut down" modal on every `open ac session` teardown — that
+  // floods the UI and stalls the suite. Force `shutdown` unless a test opts
+  // out (e.g. the closeAction-default tests pass opts.closeAction:null).
+  if (opts.closeAction !== null) {
+    try {
+      setProfileSetting(id, "closeAction", opts.closeAction || "shutdown");
+    } catch {}
+  }
   return id;
 }
 
