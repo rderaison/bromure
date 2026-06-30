@@ -695,22 +695,39 @@ async function main() {
         }
       });
 
-      await test("6.3 close ac session removes it from the list", async () => {
+      // The unified window keeps every workspace in the list (running or off),
+      // so closing a session no longer *removes* it — it stops the VM while the
+      // workspace persists. Assert the VM leaves the `running` state instead of
+      // expecting the entry to disappear. State comes from GET /vms.
+      await test("6.3 close ac session stops the VM (the workspace stays listed)", async () => {
         const id = createProfile("ACE2E_Close");
+        const vmState = async () => {
+          const r = await api("GET", "/vms");
+          const v = (Array.isArray(r?.vms) ? r.vms : []).find(
+            (x) => String(x.id).toUpperCase() === id.toUpperCase()
+          );
+          return v ? v.state : "(absent)"; // a running-only list → absent == stopped
+        };
+        const waitFor = async (pred, tries = 40) => {
+          for (let i = 0; i < tries; i++) {
+            await sleep(750);
+            if (pred(await vmState())) return true;
+          }
+          return false;
+        };
         try {
           ac(`open ac session "${id}"`);
-          for (let i = 0; i < 10; i++) {
-            await sleep(500);
-            const sessions = acJSON("list ac sessions");
-            if (sessions.some((s) => s.profileId === id)) break;
-          }
+          assert(
+            await waitFor((s) => s === "running"),
+            "VM never reached 'running' before close"
+          );
           ac(`close ac session "${id}"`);
-          for (let i = 0; i < 10; i++) {
-            await sleep(500);
-            const sessions = acJSON("list ac sessions");
-            if (!sessions.some((s) => s.profileId === id)) return;
-          }
-          throw new Error("Session window still listed after close");
+          // Test workspaces use closeAction=shutdown, so close powers the VM
+          // down: it stays listed but its state must leave 'running'.
+          assert(
+            await waitFor((s) => s !== "running"),
+            "VM still 'running' after close ac session"
+          );
         } finally {
           deleteProfile(id);
         }
