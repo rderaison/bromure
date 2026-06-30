@@ -137,6 +137,9 @@ actor MLXEngine {
     - Each argument is its own <parameter=name>…</parameter> block.
     - NEVER emit a tool call as JSON ({"name":…,"arguments":…}) or any other shape.
     - Use exact tool names as declared. No extra prose inside <tool_call>.
+    - When you say you will do something (create/run/edit a file), emit its tool
+      call in the SAME response. NEVER end your turn with only a description of an
+      action you have not yet performed.
     ──────────────────────────────────────────────
     """
 

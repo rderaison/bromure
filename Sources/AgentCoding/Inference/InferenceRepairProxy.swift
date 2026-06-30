@@ -256,7 +256,10 @@ final class InferenceRepairProxy: @unchecked Sendable {
             let head = "Your previous response ended after describing the next step:\n\n\"\(String(preamble.suffix(500)))\"\n\n…but you did NOT call a tool to perform it."
             let nudge = attempt == 0
                 ? head + " Call the appropriate tool now to carry out exactly that step. Respond with the tool call only — no prose."
-                : head + " You MUST output a tool call NOW and nothing else — e.g. <tool_call>{\"name\":\"…\",\"arguments\":{…}}</tool_call>. Do NOT describe the step again; perform it."
+                // Show the XML format (NOT JSON): the values are raw, so a large
+                // file body doesn't have to be JSON-escaped — which a quantized
+                // model botches, producing a malformed call that can't be rescued.
+                : head + " Output a tool call NOW and nothing else, in this EXACT format (raw values, NOT JSON):\n<tool_call>\n<function=ExactToolName>\n<parameter=name>\nvalue\n</parameter>\n</function>\n</tool_call>\nPerform the step; do not describe it again."
             switch self {
             case .responses:
                 var input = (payload["input"] as? [[String: Any]]) ?? []
@@ -389,7 +392,11 @@ final class InferenceRepairProxy: @unchecked Sendable {
                     if dbg { appendRepairLog("[repair] ~~ \(req.path) recovered a tool call on attempt \(attempt + 1)\n") }
                     return m2
                 }
-                if dbg { appendRepairLog("[repair] ~~ \(req.path) attempt \(attempt + 1): still no tool call (\(api.assistantText(m2).count) chars)\n") }
+                if dbg {
+                    let mt = api.assistantText(m2)
+                    let mtail = String(mt.suffix(180)).replacingOccurrences(of: "\n", with: "\\n")
+                    appendRepairLog("[repair] ~~ \(req.path) attempt \(attempt + 1): still no tool call (\(mt.count) chars) tail=\(mtail)\n")
+                }
             }
             return message
         }()
