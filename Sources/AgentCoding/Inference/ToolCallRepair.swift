@@ -455,7 +455,6 @@ enum ToolCallRepair {
         for m in fnRe.matches(in: cleaned as String, range: NSRange(location: 0, length: cleaned.length)).reversed() {
             guard m.numberOfRanges >= 3 else { continue }
             let name = cleaned.substring(with: m.range(at: 1))
-            if !toolNames.isEmpty && !toolNames.contains(name) { continue }
             let body = cleaned.substring(with: m.range(at: 2))
             let bns = body as NSString
             var input: [String: Any] = [:]
@@ -468,12 +467,17 @@ enum ToolCallRepair {
                 if val.hasSuffix("\n") { val.removeLast() }
                 input[key] = val
             }
-            // Empty input is legitimate for no-argument tools (EnterPlanMode,
-            // ExitPlanMode, TaskList, …). Only treat an arg-less <function=X>
-            // as stray text when we CAN'T confirm the name against the
-            // request's declared tools — when we can (the name passed the
-            // toolNames gate above), rescue it even with no parameters.
-            guard !input.isEmpty || !toolNames.isEmpty else { continue }
+            // A <function=NAME> carrying <parameter=…> children is the
+            // unambiguous Qwen tool-call shape — rescue it regardless of the
+            // declared tools. This is what makes codex's `apply_patch` work:
+            // codex describes apply_patch in the SYSTEM PROMPT, not the request's
+            // `tools` array, so it never appears in toolNames — yet the model
+            // still emits it in this format, and gating on toolNames dropped it
+            // (the call leaked as text and the file was never written). Only an
+            // arg-LESS <function=x> whose name isn't a declared tool is treated
+            // as stray prose; no-arg declared tools (EnterPlanMode, ExitPlanMode,
+            // TaskList, …) still pass.
+            guard !input.isEmpty || toolNames.contains(name) else { continue }
             blocks.insert(["type": "tool_use",
                 "id": "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24).lowercased(),
                 "name": name, "input": input], at: 0)

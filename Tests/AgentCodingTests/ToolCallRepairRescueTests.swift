@@ -83,6 +83,34 @@ struct ToolCallRepairRescueTests {
         #expect(blocks.isEmpty)
     }
 
+    @Test("codex apply_patch rescued though it's not in the declared tools")
+    func qwenApplyPatchUndeclared() {
+        // codex describes apply_patch in the SYSTEM PROMPT, not the request's
+        // `tools` array — so it's absent from toolNames even though the model
+        // emits it. A call WITH parameters must still be rescued; otherwise it
+        // leaks as text and the file is never written (the reported bug).
+        let txt = """
+        <tool_call>
+        <function=apply_patch>
+        <parameter=patch>
+        *** Begin Patch
+        *** Create File: /home/ubuntu/demo/build-and-run.sh
+        #!/bin/bash
+        echo hi
+        *** End Patch
+        </parameter>
+        </function>
+        </tool_call>
+        """
+        // Other tools are declared (shell/read), apply_patch is not.
+        let (clean, blocks) = ToolCallRepair.rescue(text: txt, toolNames: ["shell", "read"])
+        let r = first(blocks)
+        #expect(r?.0 == "apply_patch")
+        #expect((r?.1["patch"] as? String)?.contains("*** Begin Patch") == true)
+        #expect((r?.1["patch"] as? String)?.contains("build-and-run.sh") == true)
+        #expect(clean.isEmpty)   // the <tool_call> wrapper is stripped too
+    }
+
     // MARK: XML-element calls <ToolName attr="…"/>
 
     @Test("XML-element call converts attributes to parameters (declared tool)")
