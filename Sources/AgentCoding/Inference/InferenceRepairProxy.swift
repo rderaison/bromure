@@ -256,6 +256,12 @@ final class InferenceRepairProxy: @unchecked Sendable {
             ticker = t
         }
 
+        if ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil {
+            // Pair with the `<-` line below: a `->` with no following `<-` (while
+            // the agent spins) means the engine HUNG on this request — distinct
+            // from a turn that ended with no tool call (which logs a `<-`).
+            appendRepairLog("[repair] -> \(req.path) model=\(payload["model"] as? String ?? "?") msgs=\((payload["messages"] as? [Any])?.count ?? (payload["input"] as? [Any])?.count ?? -1)\n")
+        }
         let t0 = Date()
         let (data, status) = syncData(ur)
         ticker?.cancel()
@@ -288,15 +294,40 @@ final class InferenceRepairProxy: @unchecked Sendable {
                         (item["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined()
                     }.joined())
                 ?? ""
+            // finish/stop reason + whether the engine ALREADY emitted a structured
+            // tool call. A "stuck" turn — the agent narrates a next step then
+            // nothing happens — shows up here as reason=stop/end_turn, native=false,
+            // rescued=0: the model ENDED the turn after the narration without
+            // emitting the tool call. Contrast: reason=length = the call was
+            // truncated (raise max output tokens); rescued>0 = we recovered a leaked
+            // call (fine); native=true = the engine's own parser produced the call
+            // (fine). The tail of the text is where the premature stop is visible.
+            let (reason, native): (String, Bool) = {
+                if let ch = (message["choices"] as? [[String: Any]])?.first {     // chat (codex/grok)
+                    return (ch["finish_reason"] as? String ?? "?",
+                            (ch["message"] as? [String: Any])?["tool_calls"] as? [Any] != nil)
+                }
+                if let out = message["output"] as? [[String: Any]] {             // responses
+                    return (message["status"] as? String ?? "?",
+                            out.contains { ($0["type"] as? String) == "function_call" })
+                }
+                return (message["stop_reason"] as? String ?? "?",               // anthropic messages
+                        (message["content"] as? [[String: Any]])?.contains { ($0["type"] as? String) == "tool_use" } ?? false)
+            }()
             let rescued = ToolCallRepair.rescue(text: txt, toolNames: toolNames).blocks.count
-            let line = "[repair] \(req.path) tools=\(toolNames.sorted()) textlen=\(txt.count) rescued=\(rescued) :: \(txt.prefix(220).replacingOccurrences(of: "\n", with: "\\n"))\n"
-            if let h = FileHandle(forWritingAtPath: "/tmp/bromure-repair.log") {
-                h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
-            } else { try? line.write(toFile: "/tmp/bromure-repair.log", atomically: true, encoding: .utf8) }
+            let tail = String(txt.suffix(400)).replacingOccurrences(of: "\n", with: "\\n")
+            appendRepairLog("[repair] <- \(req.path) reason=\(reason) native=\(native) rescued=\(rescued) tools=\(toolNames.sorted()) textlen=\(txt.count) tail=\(tail)\n")
         }
         return httpResponse(status: 200,
                             headers: [("Content-Type", "text/event-stream"), ("Cache-Control", "no-cache")],
                             body: api.repairedSSE(message, toolNames: toolNames))
+    }
+
+    /// Append one line to `/tmp/bromure-repair.log` (BROMURE_REPAIR_DEBUG only).
+    private static func appendRepairLog(_ line: String) {
+        if let h = FileHandle(forWritingAtPath: "/tmp/bromure-repair.log") {
+            h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
+        } else { try? line.write(toFile: "/tmp/bromure-repair.log", atomically: true, encoding: .utf8) }
     }
 
     private static func passthrough(_ req: Request, base: String) -> Data {
