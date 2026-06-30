@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
   <title>Grok tab template icon</title>
-  <g stroke="currentColor" stroke-width="26" stroke-linecap="round">
-    <path d="M70 70 L186 186"/>
-    <path d="M186 70 L70 186"/>
+  <g stroke="currentColor" stroke-width="20" stroke-linecap="round">
+    <circle cx="128" cy="128" r="82"/>
+    <path d="M170 86 L92 164"/>
   </g>
 </svg>
