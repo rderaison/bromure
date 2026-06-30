@@ -630,25 +630,46 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// Menu "Shutdown": always power the VM off, regardless of the close-action
-    /// default (which is what made the old "Stop" ambiguous).
+    /// default (which is what made the old "Stop" ambiguous). Confirmed first —
+    /// it stops running processes (unlike Suspend, which is recoverable).
     func shutdownProfile(_ id: Profile.ID) {
+        guard let profile = profiles.first(where: { $0.id == id }),
+              confirmDisruptiveLifecycle(verb: "Shut Down", profile: profile,
+                body: "Powers off the VM and stops everything running inside it. The system disk is kept; in-progress work in running processes is lost.")
+        else { return }
         requestStopSession(id, action: .shutdown)
     }
 
     /// Menu "Suspend": always save RAM state to disk, regardless of the default.
+    /// No confirmation — it's recoverable (resume picks up where you left off).
     func suspendProfile(_ id: Profile.ID) {
         requestStopSession(id, action: .suspend)
     }
 
-    /// Picker "Restart": power off (clearing saved state) then boot fresh.
+    /// Menu "Reboot": power off (clearing saved state) then boot fresh. Confirmed.
     func restartProfile(_ id: Profile.ID) {
-        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        guard let profile = profiles.first(where: { $0.id == id }),
+              confirmDisruptiveLifecycle(verb: "Reboot", profile: profile,
+                body: "Powers the VM off and boots it fresh. Everything running inside it is stopped.")
+        else { return }
         Task { @MainActor in
             if runningSessions[id] != nil {
                 await stopSession(id, action: .shutdown)
             }
             launch(profile)
         }
+    }
+
+    /// Modal confirmation for a disruptive lifecycle action (Shut Down / Reboot)
+    /// that stops the guest. Returns true if the user confirmed.
+    private func confirmDisruptiveLifecycle(verb: String, profile: Profile, body: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "\(verb) “\(profile.name)”?"
+        alert.informativeText = body
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: verb)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// Picker "Connect/Show": surface a running VM — attaches a window if it's
