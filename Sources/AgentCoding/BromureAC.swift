@@ -389,6 +389,9 @@ final class RunningSession {
     /// True once an explicit stop is in flight, so the VM-stopped callback
     /// doesn't double-run teardown.
     var stopping: Bool = false
+    /// Set once this session has snapshotted its disk (on first boot-ready), so
+    /// the repeated tab-roster callbacks only checkpoint once per boot.
+    var didCheckpoint: Bool = false
 
     init(profileID: Profile.ID, profile: Profile, sandbox: UbuntuSandboxVM) {
         self.profileID = profileID
@@ -1640,6 +1643,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return nil }
             return await self.automationCreateVM(spec: spec)
         }
+        server.onListCheckpoints = { [weak self] idOrName in
+            self?.automationListCheckpoints(idOrName) ?? []
+        }
+        server.onRevertCheckpoint = { [weak self] idOrName, cp in
+            await self?.automationRevertCheckpoint(idOrName: idOrName, checkpoint: cp)
+                ?? ["error": "unavailable"]
+        }
         server.onDescribeProfile = { [weak self] key in self?.automationProfileDescribe(key) }
         server.onDeleteProfile = { [weak self] key in
             self?.automationDeleteProfile(key) ?? ["ok": false, "error": "unavailable"]
@@ -1936,6 +1946,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Accepts a full UUID, an exact profile name (case-insensitive), or a
     /// unique short-id *prefix* (dash-insensitive) — so the 12-char hex id from
     /// `vm ls` (or any unambiguous prefix of it) works, docker-style.
+    @MainActor private func automationListCheckpoints(_ idOrName: String) -> [[String: Any]] {
+        guard let profile = profileByNameOrID(idOrName) else { return [] }
+        return store.listCheckpoints(for: profile).map {
+            ["id": $0.id,
+             "createdAt": Int($0.createdAt.timeIntervalSince1970),
+             "allocatedBytes": $0.allocatedBytes]
+        }
+    }
+
+    @MainActor private func automationRevertCheckpoint(idOrName: String, checkpoint: String) async -> [String: Any] {
+        guard let profile = profileByNameOrID(idOrName) else {
+            return ["error": "Workspace not found: \(idOrName)"]
+        }
+        // The disk image is replaced wholesale, so the VM must not have it open.
+        if runningSessions[profile.id] != nil {
+            return ["error": "Stop the workspace first (`vm kill \(profile.name)`), then revert."]
+        }
+        do {
+            try store.revertDisk(for: profile, to: checkpoint)
+            return ["status": "reverted", "checkpoint": checkpoint, "workspace": profile.name]
+        } catch {
+            return ["error": error.localizedDescription]
+        }
+    }
+
     @MainActor private func resolveRunningSessionID(_ key: String) -> Profile.ID? {
         if let uuid = UUID(uuidString: key), runningSessions[uuid] != nil { return uuid }
         if let byName = runningSessions.values
@@ -5068,6 +5103,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     (index: $0.index, label: $0.label, active: $0.active)
                 }
                 self.pane(for: pid)?.applyTabList(tabs)
+                // First non-empty roster = the guest booted to kitty/tmux, so the
+                // disk is proven bootable. Snapshot it (once per session) as a
+                // rollback point — a later bad shutdown can revert here instead of
+                // a full reset. clonefile is instant; run it off the main actor.
+                if !tabs.isEmpty,
+                   let session = self.runningSessions[pid], !session.didCheckpoint,
+                   let profile = self.profiles.first(where: { $0.id == pid }) {
+                    session.didCheckpoint = true
+                    let store = self.store
+                    Task.detached {
+                        do { _ = try store.snapshotDisk(for: profile, at: Date()) }
+                        catch {
+                            FileHandle.standardError.write(Data(
+                                "[checkpoint] snapshot \(profile.name) failed: \(error)\n".utf8))
+                        }
+                    }
+                }
             }
         }
         sandbox.onDockerList = { [weak self] containers in

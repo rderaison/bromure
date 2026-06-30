@@ -419,10 +419,66 @@ private func matchesVM(_ vm: [String: Any], _ key: String) -> Bool {
 
 // MARK: - `profiles` subcommand group
 
+struct VMCheckpoints: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "checkpoints",
+        abstract: "List a workspace's disk rollback points (newest first). One is taken on each successful boot.")
+
+    @Argument(help: "Workspace id or name.")
+    var vm: String
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let resp = try client.request("GET", "/vms/\(ControlClient.encodeSegment(vm))/checkpoints")
+        guard resp.status == 200 else {
+            throw ValidationError(resp.json["error"] as? String ?? "Couldn't list checkpoints.")
+        }
+        let list = resp.json["checkpoints"] as? [[String: Any]] ?? []
+        if list.isEmpty { print("No checkpoints for \(vm) yet — one is taken on each successful boot."); return }
+        let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        print("CHECKPOINT    CREATED               SIZE")
+        for c in list {
+            let id = (c["id"] as? String ?? "?").padding(toLength: 12, withPad: " ", startingAt: 0)
+            let ts = c["createdAt"] as? Int ?? 0
+            let date = fmt.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
+            let mb = String(format: "%.0f MB", Double(c["allocatedBytes"] as? Int ?? 0) / 1_000_000)
+            print("\(id)  \(date)   \(mb)")
+        }
+        print("\nRevert with:  vm revert \(vm) <CHECKPOINT>   (stop the workspace first)")
+    }
+}
+
+struct VMRevert: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "revert",
+        abstract: "Roll a workspace's disk back to a checkpoint. Stop the workspace first; your home dir + project folder are untouched.")
+
+    @Argument(help: "Workspace id or name.")
+    var vm: String
+    @Argument(help: "Checkpoint id (from `vm checkpoints`).")
+    var checkpoint: String
+
+    func run() throws {
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        let resp = try client.request("POST", "/vms/\(ControlClient.encodeSegment(vm))/revert",
+                                      body: ["checkpoint": checkpoint])
+        guard resp.status == 200 else {
+            throw ValidationError(resp.json["error"] as? String ?? "Revert failed.")
+        }
+        print("Reverted \(vm) to checkpoint \(checkpoint). Boot it with `vm run \(vm)`.")
+    }
+}
+
 struct Profiles: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "workspaces",
         abstract: "Manage workspaces — list (live + off), boot, exec, and lifecycle. Also available as `vm`.",
+        // NOTE: disk checkpoints run silently (a snapshot per boot, kept to 5),
+        // but VMCheckpoints/VMRevert are intentionally NOT registered yet — the
+        // list/revert surface stays unexposed until we decide to ship it. The
+        // structs + control routes remain so re-exposing is a one-line change.
         subcommands: [WorkspacesList.self, VMRun.self, VMKill.self, Exec.self,
                       VMAttach.self, ProfilesDescribe.self, ProfilesRemove.self,
                       VMFusion.self, VMRouting.self, VMHybrid.self],

@@ -2578,6 +2578,78 @@ public final class ProfileStore {
         try? fm.removeItem(at: dir.appendingPathComponent("tabs.json"))
     }
 
+    // MARK: - Disk checkpoints (rollback points)
+
+    /// A point-in-time clone of a profile's disk, taken after a successful boot
+    /// (so it's proven bootable). Lets the user roll back a session that corrupted
+    /// the disk to a recent good state instead of a full reset to base.
+    public struct DiskCheckpoint: Identifiable, Sendable {
+        public let id: String        // unix timestamp (seconds) — the filename stem
+        public let createdAt: Date
+        public let url: URL
+        public let allocatedBytes: Int64
+    }
+
+    public func checkpointsDirectory(for profile: Profile) -> URL {
+        profileDirectory(for: profile).appendingPathComponent("checkpoints")
+    }
+
+    /// CoW-clone the current disk into `checkpoints/<ts>.img` and keep only the
+    /// `keep` newest. clonefile is instant + near-zero space (shares blocks with
+    /// the live disk until they diverge), so this is cheap to do every boot.
+    /// Cloning a live disk yields a crash-consistent image (ext4 journal replays
+    /// on restore) — acceptable for a rollback point, and the source just booted.
+    @discardableResult
+    public func snapshotDisk(for profile: Profile, at date: Date, keep: Int = 5) throws -> DiskCheckpoint? {
+        let disk = diskURL(for: profile)
+        guard fm.fileExists(atPath: disk.path) else { return nil }
+        let dir = checkpointsDirectory(for: profile)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let ts = Int(date.timeIntervalSince1970)
+        let dst = dir.appendingPathComponent("\(ts).img")
+        guard !fm.fileExists(atPath: dst.path) else { return nil }   // one per second
+        try Self.cloneItem(at: disk, to: dst)
+        pruneCheckpoints(for: profile, keep: keep)
+        return listCheckpoints(for: profile).first { $0.id == String(ts) }
+    }
+
+    /// Newest first.
+    public func listCheckpoints(for profile: Profile) -> [DiskCheckpoint] {
+        let dir = checkpointsDirectory(for: profile)
+        let urls = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.totalFileAllocatedSizeKey])) ?? []
+        return urls.compactMap { url -> DiskCheckpoint? in
+            guard url.pathExtension == "img",
+                  let ts = Int(url.deletingPathExtension().lastPathComponent) else { return nil }
+            let bytes = (try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize)
+                .flatMap { Int64($0) } ?? 0
+            return DiskCheckpoint(id: String(ts), createdAt: Date(timeIntervalSince1970: TimeInterval(ts)),
+                                  url: url, allocatedBytes: bytes)
+        }.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    private func pruneCheckpoints(for profile: Profile, keep: Int) {
+        for old in listCheckpoints(for: profile).dropFirst(max(0, keep)) {
+            try? fm.removeItem(at: old.url)
+        }
+    }
+
+    /// Restore a checkpoint over the live disk. The VM MUST be stopped first (the
+    /// caller enforces this) — replacing an open disk image would corrupt it.
+    /// Clears saved RAM state so the kernel's block-device view matches the disk.
+    public func revertDisk(for profile: Profile, to checkpointID: String) throws {
+        let src = checkpointsDirectory(for: profile).appendingPathComponent("\(checkpointID).img")
+        guard fm.fileExists(atPath: src.path) else {
+            throw NSError(domain: "BromureAC.checkpoint", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Checkpoint \(checkpointID) not found"])
+        }
+        let disk = diskURL(for: profile)
+        if fm.fileExists(atPath: disk.path) { try fm.removeItem(at: disk) }
+        try Self.cloneItem(at: src, to: disk)
+        let dir = profileDirectory(for: profile)
+        try? fm.removeItem(at: dir.appendingPathComponent("vm.state"))
+        try? fm.removeItem(at: dir.appendingPathComponent("tabs.json"))
+    }
+
     /// Wipe the per-profile **home** directory. Inverse of resetDisk:
     /// the profile's system disk is left alone (so apt-installed tools
     /// remain), but everything under /home/ubuntu — projects, .ssh,

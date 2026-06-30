@@ -70,6 +70,11 @@ final class ACAutomationServer {
     /// Create (boot) a VM from a profile ref or inline spec + mounts. Returns
     /// the new VM's info dict, or nil on failure.
     var onCreateVM: ((_ spec: [String: Any]) async -> [String: Any]?)?
+    /// Disk rollback points (CLI `vm checkpoints` / `vm revert`). List returns
+    /// newest-first dicts; revert returns a result dict (with an `error` key on
+    /// failure, e.g. the VM is still running).
+    var onListCheckpoints: ((_ idOrName: String) -> [[String: Any]])?
+    var onRevertCheckpoint: ((_ idOrName: String, _ checkpoint: String) async -> [String: Any])?
 
     // Profile management (CLI `profiles …`).
     var onDescribeProfile: ((_ idOrName: String) -> [String: Any]?)?
@@ -578,6 +583,33 @@ final class ACAutomationServer {
             semaphore.wait()
             sendResponse(fd: fd, status: ok ? 200 : 404,
                          body: ok ? ["status": "attached"] : ["error": "VM not found"])
+            return
+        }
+        if rest.hasSuffix("/checkpoints") {
+            guard method == "GET" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let id = decode(String(rest.dropLast("/checkpoints".count)))
+            let list = DispatchQueue.main.sync { self.onListCheckpoints?(id) ?? [] }
+            sendResponse(fd: fd, status: 200, body: ["checkpoints": list])
+            return
+        }
+        if rest.hasSuffix("/revert") {
+            guard method == "POST" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let id = decode(String(rest.dropLast("/revert".count)))
+            let cp = (bodyJSON["checkpoint"] as? String) ?? ""
+            let semaphore = DispatchSemaphore(value: 0)
+            var result: [String: Any] = ["error": "not handled"]
+            DispatchQueue.main.async {
+                Task { @MainActor in
+                    result = await self.onRevertCheckpoint?(id, cp) ?? ["error": "not handled"]
+                    semaphore.signal()
+                }
+            }
+            semaphore.wait()
+            sendResponse(fd: fd, status: result["error"] == nil ? 200 : 400, body: result)
             return
         }
         if rest.hasSuffix("/fusion") {
