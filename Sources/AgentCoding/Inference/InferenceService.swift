@@ -211,30 +211,7 @@ public actor InferenceService {
     public var loadedModelRepos: [String] { activeModels }
     public var isRunning: Bool { process?.isRunning ?? false }
 
-    // MARK: - Binary resolution
-
-    /// Resolve the engine executable. Preference order:
-    ///   1. `BROMURE_VLLM_MLX` env override (dev / tests)
-    ///   2. the on-demand venv provisioned by `EngineProvisioner` into
-    ///      Application Support (the standard path, §3.1 decided)
-    ///   3. `vllm-mlx` on `PATH`
-    public static func resolveExecutable(
-        env: [String: String] = ProcessInfo.processInfo.environment,
-        provisioner: EngineProvisioner = .shared,
-        fileExists: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
-    ) -> URL? {
-        if let override = env["BROMURE_VLLM_MLX"], fileExists(override) {
-            return URL(fileURLWithPath: override)
-        }
-        if fileExists(provisioner.vllmExecutable.path) {
-            return provisioner.vllmExecutable
-        }
-        for dir in (env["PATH"] ?? "/usr/local/bin:/usr/bin:/opt/homebrew/bin").split(separator: ":") {
-            let candidate = "\(dir)/vllm-mlx"
-            if fileExists(candidate) { return URL(fileURLWithPath: candidate) }
-        }
-        return nil
-    }
+    // MARK: - Launch plan
 
     /// Build the launch plan for a model repo. Pure — no spawning.
     /// `cached` skips vllm-mlx's startup HF check (it calls `snapshot_download`

@@ -147,7 +147,7 @@ struct Model: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "model",
         abstract: "Manage local MLX inference models (catalog, pull, use).",
-        subcommands: [ModelCatalogList.self, ModelInstall.self, ModelPull.self,
+        subcommands: [ModelCatalogList.self, ModelPull.self,
                       ModelLS.self, ModelUse.self, ModelRM.self, RepairServe.self,
                       MLXSelfTest.self, MLXServe.self, MLXEngineChild.self,
                       ToolCallRepairTest.self, EngineKeyPrint.self, ConvParseTest.self,
@@ -359,58 +359,6 @@ struct RepairServe: ParsableCommand {
     }
 }
 
-struct ModelInstall: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "install",
-        abstract: "Provision the local vllm-mlx engine (uv + pinned venv).")
-
-    @Flag(name: .long, help: "Upgrade an installed engine to the newest published wheel.")
-    var upgrade = false
-
-    func run() throws {
-        guard EngineProvisioner.resolveUV() != nil else {
-            throw ValidationError("uv not found. The app bundles it; on a dev build, `brew install uv`.")
-        }
-        if upgrade {
-            guard EngineProvisioner.shared.isProvisioned else {
-                throw ValidationError("Engine isn't installed yet — run `model install` first.")
-            }
-            print("Upgrading vllm-mlx to the newest published wheel…")
-            try blockingRun {
-                try await EngineProvisioner.shared.refreshToLatest { line in
-                    FileHandle.standardError.write(Data(line.utf8))
-                }
-            }
-            print("Engine upgraded.")
-            return
-        }
-        if EngineProvisioner.shared.isProvisioned {
-            print("Engine already provisioned at \(EngineProvisioner.shared.engineDir.path). Use --upgrade to refresh.")
-            return
-        }
-        guard EngineProvisioner.resolveUV() != nil else {
-            throw ValidationError("uv not found. The app bundles it; on a dev build, `brew install uv`.")
-        }
-        print("Provisioning vllm-mlx engine (first run only)…")
-        try blockingRun {
-            let total = Double(EngineProvisioner.estimatedInstallBytes)
-            let poller = Task {
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 700_000_000)
-                    let f = min(0.97, Double(EngineProvisioner.shared.installedBytes) / total)
-                    ProgressBar.draw(f, label: "installing engine")
-                }
-            }
-            do {
-                try await EngineProvisioner.shared.ensureProvisioned()
-                poller.cancel()
-                ProgressBar.draw(1.0, label: "done"); ProgressBar.finish()
-            } catch { poller.cancel(); ProgressBar.finish(); throw error }
-        }
-        print("Engine ready at \(EngineProvisioner.shared.vllmExecutable.path).")
-    }
-}
-
 struct ModelCatalogList: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "catalog",
@@ -490,10 +438,6 @@ struct ModelPull: ParsableCommand {
         try ModelDownloader.checkDiskSpace(repo: repo, expectedBytes: total)
         print("Validating \(repo) …")
         try blockingRun {
-            // `hf` ships inside the engine venv — provision it first if needed.
-            if EngineProvisioner.resolveUV() != nil, !EngineProvisioner.shared.isProvisioned {
-                try await EngineProvisioner.shared.ensureProvisioned()
-            }
             // Determinate progress from real bytes on disk.
             let poller = Task {
                 while !Task.isCancelled {

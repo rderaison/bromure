@@ -392,59 +392,6 @@ struct HybridRouterTests {
     }
 }
 
-// MARK: - Engine provisioning (uv + on-demand venv, §3.1)
-
-@Suite("EngineProvisioner")
-struct EngineProvisionerTests {
-    @Test("Engine + venv paths live under Application Support") func paths() {
-        let p = EngineProvisioner(supportDir: URL(fileURLWithPath: "/tmp/bromure-test-support"))
-        #expect(p.engineDir.path == "/tmp/bromure-test-support/engine")
-        #expect(p.vllmExecutable.path == "/tmp/bromure-test-support/engine/bin/vllm-mlx")
-        #expect(p.venvPython.path.hasSuffix("/engine/bin/python"))
-    }
-
-    @Test("uv command builders match the uv CLI") func uvArgs() {
-        let dir = URL(fileURLWithPath: "/tmp/eng")
-        // Always use uv's managed standalone Python — never system/Xcode python3.
-        #expect(EngineProvisioner.pythonInstallArgs() == ["python", "install", "3.12.13"])
-        #expect(EngineProvisioner.venvArgs(dir: dir)
-                == ["venv", "/tmp/eng", "--python", "3.12.13", "--python-preference", "only-managed"])
-        let py = URL(fileURLWithPath: "/tmp/eng/bin/python")
-        let req = URL(fileURLWithPath: "/tmp/req.lock")
-        #expect(EngineProvisioner.pipInstallArgs(venvPython: py, requirementsFile: req)
-                == ["pip", "install", "--python", "/tmp/eng/bin/python", "--prerelease", "allow", "-r", "/tmp/req.lock"])
-        // --upgrade pulls a republished wheel even when something's installed.
-        #expect(EngineProvisioner.pipInstallArgs(venvPython: py, requirementsFile: req, upgrade: true)
-                == ["pip", "install", "--python", "/tmp/eng/bin/python", "--prerelease", "allow", "--upgrade", "-r", "/tmp/req.lock"])
-    }
-
-    @Test("uv resolves from BROMURE_UV override first") func resolveUV() {
-        let url = EngineProvisioner.resolveUV(
-            env: ["BROMURE_UV": "/opt/uv"], bundle: nil,
-            fileExists: { $0 == "/opt/uv" })
-        #expect(url?.path == "/opt/uv")
-        // Falls through to PATH when no override / bundle.
-        let onPath = EngineProvisioner.resolveUV(
-            env: ["PATH": "/x:/y"], bundle: nil,
-            fileExists: { $0 == "/y/uv" })
-        #expect(onPath?.path == "/y/uv")
-    }
-
-    @Test("Default requirements install vllm-mlx from the Bromure index") func reqs() {
-        let r = EngineProvisioner.defaultRequirements
-        #expect(r.contains("vllm-mlx"))
-        #expect(r.contains("--find-links"))
-        #expect(r.contains("https://dl.bromure.io/mlx/find-links.html"))
-    }
-
-    @Test("Engine executable resolution prefers the env override") func engineResolve() {
-        let url = InferenceService.resolveExecutable(
-            env: ["BROMURE_VLLM_MLX": "/custom/vllm-mlx"],
-            fileExists: { $0 == "/custom/vllm-mlx" })
-        #expect(url?.path == "/custom/vllm-mlx")
-    }
-}
-
 // MARK: - Per-tool local model auth (env injection)
 
 @Suite("Local model per-tool")
