@@ -206,6 +206,66 @@ final class InferenceRepairProxy: @unchecked Sendable {
             }
             return names
         }
+
+        // MARK: - Stuck-preamble continuation helpers
+
+        /// The assistant text in the buffered upstream message.
+        func assistantText(_ message: [String: Any]) -> String {
+            switch self {
+            case .messages:
+                return (message["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined() ?? ""
+            case .chat:
+                return ((message["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any])?["content"] as? String ?? ""
+            case .responses:
+                return (message["output"] as? [[String: Any]])?.compactMap { item in
+                    (item["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined()
+                }.joined() ?? ""
+            }
+        }
+
+        /// True when the turn carries no tool call — neither a native one from the
+        /// engine's parser nor one we could rescue from the text.
+        func hasNoToolCall(_ message: [String: Any], toolNames: Set<String>) -> Bool {
+            switch self {
+            case .messages:
+                if (message["content"] as? [[String: Any]])?.contains(where: { ($0["type"] as? String) == "tool_use" }) == true { return false }
+            case .chat:
+                if let m = (message["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any],
+                   (m["tool_calls"] as? [Any])?.isEmpty == false { return false }
+            case .responses:
+                if (message["output"] as? [[String: Any]])?.contains(where: { ($0["type"] as? String) == "function_call" }) == true { return false }
+            }
+            return ToolCallRepair.rescue(text: assistantText(message), toolNames: toolNames).blocks.isEmpty
+        }
+
+        /// The turn ended cleanly (model's own end-of-turn), not truncated by the
+        /// output-token cap — a truncated call needs more tokens, not a re-prompt.
+        func cleanStop(_ message: [String: Any]) -> Bool {
+            switch self {
+            case .messages: return (message["stop_reason"] as? String) != "max_tokens"
+            case .chat:     return ((message["choices"] as? [[String: Any]])?.first?["finish_reason"] as? String) != "length"
+            case .responses: return (message["status"] as? String ?? "completed") == "completed"
+            }
+        }
+
+        /// Append a user turn that quotes the preamble back and asks the model to
+        /// call the tool it skipped. A user message (not an assistant one) keeps the
+        /// shape well-known across engines.
+        func continuationPayload(_ payload: [String: Any], preamble: String) -> [String: Any] {
+            var p = payload
+            let nudge = "Your previous response ended after describing the next step:\n\n\"\(String(preamble.suffix(500)))\"\n\n…but you did NOT call a tool to perform it. Call the appropriate tool now to carry out exactly that step. Respond with the tool call only — no prose."
+            switch self {
+            case .responses:
+                var input = (payload["input"] as? [[String: Any]]) ?? []
+                input.append(["role": "user", "content": [["type": "input_text", "text": nudge]]])
+                p["input"] = input
+            case .chat, .messages:
+                var msgs = (payload["messages"] as? [[String: Any]]) ?? []
+                msgs.append(["role": "user", "content": nudge])
+                p["messages"] = msgs
+            }
+            return p
+        }
     }
 
     /// Build the full HTTP response bytes for a request.
@@ -287,10 +347,38 @@ final class InferenceRepairProxy: @unchecked Sendable {
                                 headers: [("Content-Type", "application/json")], body: body)
         }
         let toolNames = API.toolNames(in: payload)
+
+        // Auto-continue a "stuck preamble": a local model (notably Qwen3-Coder)
+        // often narrates the next step — "Now I'll create the server file:" — then
+        // emits its end-of-turn token WITHOUT the tool call (observed: 22 completion
+        // tokens, status=completed, no function_call). The agent shows that text and
+        // stops. When a turn announces an action but carries no tool call, re-prompt
+        // ONCE — quoting the preamble back — so the model emits the call it skipped.
+        // Bounded to a single retry; on failure we keep the original message (the
+        // turn just ends, exactly as before — no regression).
+        let finalMessage: [String: Any] = {
+            guard !toolNames.isEmpty, api.cleanStop(message),
+                  api.hasNoToolCall(message, toolNames: toolNames),
+                  looksLikeStuckPreamble(api.assistantText(message)) else { return message }
+            var cont = api.continuationPayload(payload, preamble: api.assistantText(message))
+            cont["stream"] = false
+            guard let body = try? JSONSerialization.data(withJSONObject: cont) else { return message }
+            var cur = ur
+            cur.httpBody = body
+            let (d2, s2) = syncData(cur)
+            guard s2 == 200, let d2,
+                  let m2 = (try? JSONSerialization.jsonObject(with: d2)) as? [String: Any],
+                  !api.hasNoToolCall(m2, toolNames: toolNames) else { return message }
+            if ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil {
+                appendRepairLog("[repair] ~~ \(req.path) continued stuck preamble; recovered a tool call\n")
+            }
+            return m2
+        }()
+
         if ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil {
-            let txt = ((message["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined())
-                ?? ((message["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any])?["content"] as? String
-                ?? ((message["output"] as? [[String: Any]])?.compactMap { item in
+            let txt = ((finalMessage["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined())
+                ?? ((finalMessage["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any])?["content"] as? String
+                ?? ((finalMessage["output"] as? [[String: Any]])?.compactMap { item in
                         (item["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined()
                     }.joined())
                 ?? ""
@@ -303,16 +391,16 @@ final class InferenceRepairProxy: @unchecked Sendable {
             // call (fine); native=true = the engine's own parser produced the call
             // (fine). The tail of the text is where the premature stop is visible.
             let (reason, native): (String, Bool) = {
-                if let ch = (message["choices"] as? [[String: Any]])?.first {     // chat (codex/grok)
+                if let ch = (finalMessage["choices"] as? [[String: Any]])?.first {     // chat (codex/grok)
                     return (ch["finish_reason"] as? String ?? "?",
                             (ch["message"] as? [String: Any])?["tool_calls"] as? [Any] != nil)
                 }
-                if let out = message["output"] as? [[String: Any]] {             // responses
-                    return (message["status"] as? String ?? "?",
+                if let out = finalMessage["output"] as? [[String: Any]] {             // responses
+                    return (finalMessage["status"] as? String ?? "?",
                             out.contains { ($0["type"] as? String) == "function_call" })
                 }
-                return (message["stop_reason"] as? String ?? "?",               // anthropic messages
-                        (message["content"] as? [[String: Any]])?.contains { ($0["type"] as? String) == "tool_use" } ?? false)
+                return (finalMessage["stop_reason"] as? String ?? "?",               // anthropic messages
+                        (finalMessage["content"] as? [[String: Any]])?.contains { ($0["type"] as? String) == "tool_use" } ?? false)
             }()
             let rescued = ToolCallRepair.rescue(text: txt, toolNames: toolNames).blocks.count
             let tail = String(txt.suffix(400)).replacingOccurrences(of: "\n", with: "\\n")
@@ -320,7 +408,28 @@ final class InferenceRepairProxy: @unchecked Sendable {
         }
         return httpResponse(status: 200,
                             headers: [("Content-Type", "text/event-stream"), ("Cache-Control", "no-cache")],
-                            body: api.repairedSSE(message, toolNames: toolNames))
+                            body: api.repairedSSE(finalMessage, toolNames: toolNames))
+    }
+
+    /// Heuristic: the assistant text ANNOUNCES an imminent action it then didn't
+    /// take — a colon cliffhanger ("…the structure:") or an "I'll …" / "Now I'll …"
+    /// / "Next, I'll …" lead-in near the end. Deliberately conservative: a genuine
+    /// final answer reads as a summary, and a miss just lets the turn end as before.
+    private static func looksLikeStuckPreamble(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, t.count < 1200 else { return false }
+        if t.hasSuffix(":") { return true }
+        let lower = t.lowercased()
+        // Don't re-prompt an obvious wrap-up.
+        if lower.contains("let me know") || lower.hasSuffix("done.")
+            || lower.contains("is complete") || lower.contains("all set")
+            || lower.contains("you're all set") { return false }
+        // An action lead-in in the tail is where the missing call would be.
+        let tail = String(lower.suffix(180))
+        let announces = ["i'll ", "i will ", "now i", "next i", "next, i",
+                         "let me ", "let's ", "i'm going to", "i am going to",
+                         "going to ", "first, i", "first i", "then i'll"]
+        return announces.contains { tail.contains($0) }
     }
 
     /// Append one line to `/tmp/bromure-repair.log` (BROMURE_REPAIR_DEBUG only).
