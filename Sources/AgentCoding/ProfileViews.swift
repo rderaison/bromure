@@ -2889,6 +2889,12 @@ struct LocalModelsSettingsView: View {
     // and re-entering this pane (and so the VM-launch path can see it).
     private let downloads = ModelDownloadManager.shared
 
+    /// Bumped when a model is removed to force the rows to re-read
+    /// `CatalogStore.isInstalled` — that lookup hits disk and isn't observable,
+    /// so without this the row keeps showing "Installed" after a Remove and the
+    /// button appears to do nothing.
+    @State private var refreshTick = 0
+
     /// "Enable local models" ↔ routing ≠ cloud. Turning it on defaults to Local.
     private var enableLocal: Binding<Bool> {
         Binding(
@@ -2908,7 +2914,10 @@ struct LocalModelsSettingsView: View {
     }
 
     var body: some View {
-        Form {
+        // Establish a dependency on refreshTick so a Remove re-runs the rows'
+        // `installed` lookup (CatalogStore.isInstalled is a non-observable disk read).
+        let _ = refreshTick
+        return Form {
             Section {
                 Toggle(isOn: enableLocal) {
                     Text("Enable local models")
@@ -3082,8 +3091,14 @@ struct LocalModelsSettingsView: View {
     }
 
     private func removeModel(_ model: CatalogModel) {
-        try? CatalogStore.shared.removeInstalled(repo: model.repo)
+        do {
+            try CatalogStore.shared.removeInstalled(repo: model.repo)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[models] remove \(model.repo) failed: \(error)\n".utf8))
+        }
         if activeModelID == model.id { activeModelID = nil }
+        refreshTick += 1   // force the row to re-read isInstalled (see refreshTick)
     }
 }
 
