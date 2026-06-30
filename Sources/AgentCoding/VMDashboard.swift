@@ -13,6 +13,10 @@ struct VMDashboardView: View {
     let diskAllocatedBytes: Int64
     let diskCapacityBytes: Int64
     let startedAt: Date?
+    let onNewTerminal: () -> Void
+    let onSuspend: () -> Void
+    let onReboot: () -> Void
+    let onShutdown: () -> Void
 
     @State private var cpuHistory: [Double] = []
     @State private var now = Date()
@@ -59,7 +63,22 @@ struct VMDashboardView: View {
                 }
             }
             Spacer()
+            actionBar
         }
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 8) {
+            Button { onNewTerminal() } label: { Label("New Terminal", systemImage: "plus") }
+                .buttonStyle(.borderedProminent)
+            Button { onSuspend() } label: { Label("Suspend", systemImage: "pause.fill") }
+                .help("Save the VM's state to disk")
+            Button { onReboot() } label: { Label("Reboot", systemImage: "arrow.clockwise") }
+            Button(role: .destructive) { onShutdown() } label: { Label("Shut Down", systemImage: "power") }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .labelStyle(.titleAndIcon)
     }
 
     private var runningPill: some View {
@@ -127,13 +146,13 @@ struct VMDashboardView: View {
     private struct ConfigRow { let icon: String; let label: String; let value: String }
 
     private var configRows: [ConfigRow] {
-        var rows: [ConfigRow] = [
-            .init(icon: "wrench.and.screwdriver.fill", label: "Agent", value: profile.tool.displayName),
-            .init(icon: "key.fill", label: "Auth", value: profile.authMode.displayName),
-            .init(icon: "arrow.triangle.branch", label: "Model routing", value: routingText),
-        ]
-        if profile.modelRouting != .cloud {
-            rows.append(.init(icon: "cpu", label: "Local model", value: modelText))
+        // One row PER configured tool — each carries its own auth mode and (when
+        // local) its own model, so a mixed workspace (e.g. Claude in the cloud +
+        // Codex on-device) reads correctly instead of collapsing to the primary.
+        var rows: [ConfigRow] = profile.allToolSpecs.map { spec in
+            ConfigRow(icon: spec.authMode == .local ? "cpu" : "cloud",
+                      label: spec.tool.displayName,
+                      value: toolModeText(spec))
         }
         rows.append(.init(icon: "shield.lefthalf.filled", label: "Guardrails", value: guardrailsText))
         rows.append(.init(icon: "lock.shield", label: "Prompt-injection scan",
@@ -144,16 +163,13 @@ struct VMDashboardView: View {
 
     // MARK: Derived values
 
-    private var routingText: String {
-        switch profile.modelRouting {
-        case .cloud:  return "Cloud"
-        case .local:  return "Local (on-device)"
-        case .hybrid: return "Hybrid"
+    /// Where a tool runs + how it authenticates / which local model it serves.
+    private func toolModeText(_ spec: Profile.ToolSpec) -> String {
+        if spec.authMode == .local {
+            let model = spec.localModelID.flatMap { CatalogStore.shared.resolve($0)?.name ?? $0 }
+            return "On-device · \(model ?? "local model")"
         }
-    }
-    private var modelText: String {
-        guard let id = profile.activeModelID, !id.isEmpty else { return "—" }
-        return CatalogStore.shared.resolve(id)?.name ?? id
+        return "Cloud · \(spec.authMode.displayName)"
     }
     private var guardrailsText: String {
         let g = profile.guardrails

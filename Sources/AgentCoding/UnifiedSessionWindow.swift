@@ -307,6 +307,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func removePane(_ id: Profile.ID) {
         guard let idx = hostedPanes.firstIndex(where: { $0.profile.id == id }) else { return }
         if dockerSelectedID == id { clearDockerDashboard() }
+        if vmDashboardSelectedID == id { clearVMDashboard() }
         let pane = hostedPanes.remove(at: idx)
         if pane.containerView.superview === paneSlot { pane.containerView.removeFromSuperview() }
         if pane.host === self { pane.host = nil }
@@ -456,7 +457,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             vCPUs: UbuntuSandboxVM.runtimeCPUs,
             diskAllocatedBytes: info?.diskAllocated ?? 0,
             diskCapacityBytes: info?.diskCapacity ?? 0,
-            startedAt: info?.startedAt)
+            startedAt: info?.startedAt,
+            onNewTerminal: { [weak self] in self?.newTab(profileID: id) },
+            onSuspend:     { [weak self] in self?.acDelegate?.suspendProfile(id) },
+            onReboot:      { [weak self] in self?.acDelegate?.restartProfile(id) },
+            onShutdown:    { [weak self] in self?.acDelegate?.shutdownProfile(id) })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         vmDashboardSlot.addSubview(host)
