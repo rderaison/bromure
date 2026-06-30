@@ -3,12 +3,15 @@ import Charts
 
 /// A professional dashboard for a single workspace VM, shown in the stage when
 /// its name is selected in the source list (mirrors `DockerDashboardView`'s look
-/// and reuses its `StatCard` / `CPUStatCard`). Live vitals — a CPU sparkline,
-/// memory, load — plus the static machine spec and the profile's configuration.
+/// and reuses its `StatCard` / `CPUStatCard`). Shown for ANY run state — a
+/// running VM gets live vitals; a suspended/off one still shows the machine spec
+/// and the profile config (so the config is useful even with no framebuffer).
 struct VMDashboardView: View {
-    let model: TabsModel
+    /// nil when the VM isn't running (no live vitals available).
+    let model: TabsModel?
     let profile: Profile
     let accentHex: String
+    let state: SessionListModel.RunState
     let vCPUs: Int
     let diskAllocatedBytes: Int64
     let diskCapacityBytes: Int64
@@ -17,11 +20,14 @@ struct VMDashboardView: View {
     let onSuspend: () -> Void
     let onReboot: () -> Void
     let onShutdown: () -> Void
+    /// Start (off) / Resume (suspended).
+    let onResume: () -> Void
 
     @State private var cpuHistory: [Double] = []
     @State private var now = Date()
 
     private var accent: Color { Color(hex: accentHex) }
+    private var isRunning: Bool { state == .running || state == .booting }
 
     var body: some View {
         ScrollView {
@@ -33,11 +39,9 @@ struct VMDashboardView: View {
             .padding(18)
         }
         .background(.background)
-        // Sample CPU on a steady cadence so the sparkline keeps moving; also
-        // ticks `now` so uptime stays live.
         .onReceive(Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()) { _ in
             now = Date()
-            cpuHistory.append(model.vmCPU)
+            cpuHistory.append(model?.vmCPU ?? 0)
             if cpuHistory.count > 60 { cpuHistory.removeFirst(cpuHistory.count - 60) }
         }
     }
@@ -45,17 +49,19 @@ struct VMDashboardView: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(spacing: 12) {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(accent.opacity(0.15))
-                .frame(width: 44, height: 44)
-                .overlay(Image(systemName: "desktopcomputer")
-                    .font(.system(size: 20)).foregroundStyle(accent))
+        HStack(spacing: 14) {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(LinearGradient(colors: [accent, accent.opacity(0.6)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+                .frame(width: 48, height: 48)
+                .overlay(Image(systemName: "server.rack")
+                    .font(.system(size: 19, weight: .medium)).foregroundStyle(.white))
+                .shadow(color: accent.opacity(0.35), radius: 5, y: 2)
             VStack(alignment: .leading, spacing: 3) {
                 Text(profile.name).font(.system(size: 20, weight: .semibold))
                 HStack(spacing: 8) {
-                    runningPill
-                    if let ip = model.ipAddress, !ip.isEmpty {
+                    statePill
+                    if let ip = model?.ipAddress, !ip.isEmpty {
                         Label(ip, systemImage: "network")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(.secondary).labelStyle(.titleAndIcon)
@@ -67,50 +73,61 @@ struct VMDashboardView: View {
         }
     }
 
-    private var actionBar: some View {
-        HStack(spacing: 8) {
-            Button { onNewTerminal() } label: { Label("New Terminal", systemImage: "plus") }
-                .buttonStyle(.borderedProminent)
-            Button { onSuspend() } label: { Label("Suspend", systemImage: "pause.fill") }
-                .help("Save the VM's state to disk")
-            Button { onReboot() } label: { Label("Reboot", systemImage: "arrow.clockwise") }
-            Button(role: .destructive) { onShutdown() } label: { Label("Shut Down", systemImage: "power") }
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.regular)
-        .labelStyle(.titleAndIcon)
-    }
-
-    private var runningPill: some View {
+    private var statePill: some View {
         HStack(spacing: 5) {
-            Circle().fill(Color.green).frame(width: 7, height: 7)
-            Text("Running").font(.system(size: 11, weight: .medium))
+            Circle().fill(stateColor).frame(width: 7, height: 7)
+            Text(stateLabel).font(.system(size: 11, weight: .medium))
         }
         .padding(.horizontal, 8).padding(.vertical, 3)
-        .background(Capsule().fill(Color.green.opacity(0.14)))
-        .foregroundStyle(.green)
+        .background(Capsule().fill(stateColor.opacity(0.14)))
+        .foregroundStyle(stateColor)
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 8) {
+            if isRunning {
+                Button { onNewTerminal() } label: { Label("New Terminal", systemImage: "plus") }
+                    .buttonStyle(.borderedProminent)
+                Button { onSuspend() } label: { Label("Suspend", systemImage: "pause.fill") }
+                    .buttonStyle(.bordered).help("Save the VM's state to disk")
+                Button { onReboot() } label: { Label("Reboot", systemImage: "arrow.clockwise") }
+                    .buttonStyle(.bordered)
+                Button(role: .destructive) { onShutdown() } label: { Label("Shut Down", systemImage: "power") }
+                    .buttonStyle(.bordered)
+            } else {
+                Button { onResume() } label: {
+                    Label(state == .suspended ? "Resume" : "Start", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .controlSize(.regular)
+        .labelStyle(.titleAndIcon)
     }
 
     // MARK: Vitals
 
     private var statStrip: some View {
         HStack(spacing: 12) {
-            CPUStatCard(value: model.vmCPU, history: cpuHistory, tint: accent)
-            StatCard(title: "Memory",
-                     value: gb(model.vmMemUsedKB),
-                     caption: "of \(profile.memoryGB) GB",
-                     systemImage: "memorychip.fill", tint: .purple)
-            StatCard(title: "vCPUs",
-                     value: "\(vCPUs)",
-                     caption: "load \(String(format: "%.2f", model.vmLoad))",
+            if isRunning {
+                CPUStatCard(value: model?.vmCPU ?? 0, history: cpuHistory, tint: accent)
+                StatCard(title: "Memory", value: gb(model?.vmMemUsedKB ?? 0),
+                         caption: "of \(profile.memoryGB) GB",
+                         systemImage: "memorychip.fill", tint: .purple)
+            } else {
+                StatCard(title: "CPU", value: "—", caption: "\(stateLabel.lowercased())",
+                         systemImage: "cpu.fill", tint: accent)
+                StatCard(title: "Memory", value: "\(profile.memoryGB) GB", caption: "allocated",
+                         systemImage: "memorychip.fill", tint: .purple)
+            }
+            StatCard(title: "vCPUs", value: "\(vCPUs)",
+                     caption: isRunning ? "load \(String(format: "%.2f", model?.vmLoad ?? 0))" : "cores",
                      systemImage: "cpu.fill", tint: .blue)
-            StatCard(title: "Disk",
-                     value: gbBytes(diskAllocatedBytes),
+            StatCard(title: "Disk", value: gbBytes(diskAllocatedBytes),
                      caption: "of \(gbBytes(diskCapacityBytes))",
                      systemImage: "internaldrive.fill", tint: .teal)
-            StatCard(title: "Uptime",
-                     value: uptimeText,
-                     caption: "since boot",
+            StatCard(title: "Uptime", value: isRunning ? uptimeText : "—",
+                     caption: isRunning ? "since boot" : "\(stateLabel.lowercased())",
                      systemImage: "clock.fill", tint: .orange)
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -162,6 +179,23 @@ struct VMDashboardView: View {
     }
 
     // MARK: Derived values
+
+    private var stateLabel: String {
+        switch state {
+        case .running:   return "Running"
+        case .booting:   return "Booting"
+        case .suspended: return "Suspended"
+        case .off:       return "Off"
+        }
+    }
+    private var stateColor: Color {
+        switch state {
+        case .running:   return .green
+        case .booting:   return .orange
+        case .suspended: return .blue
+        case .off:       return Color(nsColor: .tertiaryLabelColor)
+        }
+    }
 
     /// Where a tool runs + how it authenticates / which local model it serves.
     private func toolModeText(_ spec: Profile.ToolSpec) -> String {

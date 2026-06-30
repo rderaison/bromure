@@ -348,7 +348,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         case .running, .booting:
             acDelegate?.connectProfile(id)   // reattach a backgrounded VM
         case .off, .suspended:
-            mountSelected(nil)               // Start card for this profile
+            mountSelected(nil)               // drop any stale framebuffer behind the overlay
+            showVMDashboard(id)              // spec + config dashboard, not a bare "is down" card
         }
     }
 
@@ -442,18 +443,21 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     // MARK: VM dashboard overlay
 
     /// Show the workspace VM dashboard (vitals + config) over the framebuffer.
-    /// Running VMs only — an off/suspended row keeps its Start card.
+    /// Shown for any run state: a running VM gets live vitals; a suspended/off
+    /// one shows the spec + config (more useful than a black framebuffer).
     func showVMDashboard(_ id: Profile.ID) {
-        guard let selPane = pane(id) else { return }
+        guard let profile = acDelegate?.profile(for: id) else { return }
         clearDockerDashboard()
-        if selectedID != id { select(profileID: id) }
+        let p = pane(id)
+        let state = listModel.profileRows.first { $0.id == id }?.state ?? (p != nil ? .running : .off)
         vmDashboardSelectedID = id
         vmDashboardHosting?.removeFromSuperview()
         let info = acDelegate?.vmDashboardData(for: id)
         let view = VMDashboardView(
-            model: selPane.model,
-            profile: selPane.profile,
-            accentHex: selPane.profile.color.hexInUI,
+            model: p?.model,
+            profile: p?.profile ?? profile,
+            accentHex: (p?.profile ?? profile).color.hexInUI,
+            state: state,
             vCPUs: UbuntuSandboxVM.runtimeCPUs,
             diskAllocatedBytes: info?.diskAllocated ?? 0,
             diskCapacityBytes: info?.diskCapacity ?? 0,
@@ -461,7 +465,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onNewTerminal: { [weak self] in self?.newTab(profileID: id) },
             onSuspend:     { [weak self] in self?.acDelegate?.suspendProfile(id) },
             onReboot:      { [weak self] in self?.acDelegate?.restartProfile(id) },
-            onShutdown:    { [weak self] in self?.acDelegate?.shutdownProfile(id) })
+            onShutdown:    { [weak self] in self?.acDelegate?.shutdownProfile(id) },
+            onResume:      { [weak self] in self?.acDelegate?.startProfile(id); self?.clearVMDashboard() })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         vmDashboardSlot.addSubview(host)
@@ -487,11 +492,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         vmDashboardSlot.isHidden = (vmDashboardSelectedID == nil)
     }
 
-    /// Workspace name clicked in the source list → select it and (for a running
-    /// VM) surface its dashboard; off/suspended rows fall back to the Start card.
+    /// Workspace name clicked in the source list → select it and surface its
+    /// dashboard, whether the VM is running, suspended, or off.
     func selectWorkspaceName(_ id: Profile.ID) {
         selectRow(id)
-        if pane(id) != nil { showVMDashboard(id) }
+        showVMDashboard(id)
     }
 
     /// Honour the selected profile's terminal-transparency setting. The pane's
@@ -893,8 +898,8 @@ private struct VMIcon: View {
             .fill(Color(hex: accentHex).opacity(state == .off ? 0.10 : 0.18))
             .frame(width: 24, height: 24)
             .overlay(
-                Image(systemName: "desktopcomputer")
-                    .font(.system(size: 14))
+                Image(systemName: "server.rack")
+                    .font(.system(size: 13))
                     .foregroundStyle(Color(hex: accentHex).opacity(state == .off ? 0.55 : 1)))
             .overlay(alignment: .bottomTrailing) {
                 Circle()

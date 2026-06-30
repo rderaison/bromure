@@ -682,6 +682,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Disk + uptime for the workspace VM dashboard. Disk sizes come from the
     /// profile's disk.img (allocated on-disk vs the image's full capacity);
     /// `startedAt` from the running session (nil when off).
+    /// The saved profile for an id — works whether or not the VM is running, so
+    /// the dashboard can render an off/suspended workspace's config.
+    func profile(for id: Profile.ID) -> Profile? { profiles.first { $0.id == id } }
+
     func vmDashboardData(for id: Profile.ID) -> (diskAllocated: Int64, diskCapacity: Int64, startedAt: Date?) {
         var alloc: Int64 = 0, cap: Int64 = 0
         if let profile = profiles.first(where: { $0.id == id }),
