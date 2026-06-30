@@ -293,7 +293,7 @@ private struct ContainerHeaderRow: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 9)
     }
-    private func label(_ s: String) -> some View {
+    private func label(_ s: LocalizedStringKey) -> some View {
         Text(s).font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
             .textCase(.uppercase).tracking(0.6)
     }
@@ -355,7 +355,7 @@ private struct ImageHeaderRow: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 9)
     }
-    private func label(_ s: String) -> some View {
+    private func label(_ s: LocalizedStringKey) -> some View {
         Text(s).font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
             .textCase(.uppercase).tracking(0.6)
     }
@@ -404,9 +404,9 @@ private struct ImageRow: View {
 // MARK: - Stat cards + graph
 
 private struct StatCard: View {
-    let title: String
+    let title: LocalizedStringKey
     let value: String
-    let caption: String
+    let caption: LocalizedStringKey
     let systemImage: String
     let tint: Color
     var body: some View {
@@ -567,7 +567,7 @@ private struct ContainerActions: View {
         .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
-    private func actionButton(_ symbol: String, _ help: String, _ tint: Color,
+    private func actionButton(_ symbol: String, _ help: LocalizedStringKey, _ tint: Color,
                               action: @escaping () -> Void) -> some View {
         Button(action: action) { Image(systemName: symbol).font(.system(size: 12)) }
             .buttonStyle(.borderless).foregroundStyle(tint).help(help)
@@ -578,7 +578,7 @@ private struct ContainerActions: View {
 
 private struct SearchField: View {
     @Binding var text: String
-    let prompt: String
+    let prompt: LocalizedStringKey
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -653,8 +653,7 @@ private struct EmulationControl: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
-                .help("Cross-arch emulation enabled: "
-                      + arches.map(friendlyArch).sorted().joined(separator: ", "))
+                .help("Cross-arch emulation enabled: \(arches.map(friendlyArch).sorted().joined(separator: ", "))")
             }
         }
         .onChange(of: arches.isEmpty) { _, _ in busy = false }   // settled either way
@@ -723,9 +722,9 @@ private func archIsEmulated(_ arch: String) -> Bool {
 
 private struct EmptyStateView: View {
     let icon: String
-    let title: String
-    let subtitle: String
-    let actionTitle: String?
+    let title: LocalizedStringKey
+    let subtitle: LocalizedStringKey
+    let actionTitle: LocalizedStringKey?
     let action: (() -> Void)?
     var body: some View {
         VStack(spacing: 10) {
@@ -881,7 +880,7 @@ private struct ContainerDetailView: View {
                         if !container.arch.isEmpty {
                             Divider().opacity(0.35)
                             DetailRow("Architecture",
-                                      container.arch + (archIsEmulated(container.arch) ? "  (emulated)" : ""),
+                                      container.arch + (archIsEmulated(container.arch) ? "  " + String(localized: "(emulated)") : ""),
                                       mono: true)
                         }
                         Divider().opacity(0.35)
@@ -914,10 +913,10 @@ private struct ContainerDetailView: View {
 }
 
 private struct DetailRow: View {
-    let label: String
+    let label: LocalizedStringKey
     let value: String
     var mono = false
-    init(_ label: String, _ value: String, mono: Bool = false) {
+    init(_ label: LocalizedStringKey, _ value: String, mono: Bool = false) {
         self.label = label; self.value = value; self.mono = mono
     }
     var body: some View {
@@ -1057,14 +1056,14 @@ private struct NewContainerSheet: View {
         .onAppear { if image.isEmpty { image = prefillImage } }
     }
 
-    private func fieldLabel(_ s: String) -> some View {
+    private func fieldLabel(_ s: LocalizedStringKey) -> some View {
         Text(s).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
             .textCase(.uppercase).tracking(0.5)
     }
 
-    private func kvEditor(_ title: String, _ rows: Binding<[KV]>,
-                          _ aPrompt: String, _ bPrompt: String, _ sep: String,
-                          add: String) -> some View {
+    private func kvEditor(_ title: LocalizedStringKey, _ rows: Binding<[KV]>,
+                          _ aPrompt: LocalizedStringKey, _ bPrompt: LocalizedStringKey, _ sep: String,
+                          add: LocalizedStringKey) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.system(size: 12, weight: .medium))
             ForEach(rows) { $row in
