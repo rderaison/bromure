@@ -747,3 +747,7 @@
 "host path" = "主機路徑";
 "container path" = "容器路徑";
 "Add volume" = "加入磁碟區";
+
+/* Docker container logs button */
+"Logs" = "日誌";
+"View logs" = "查看日誌";

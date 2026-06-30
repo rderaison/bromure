@@ -747,3 +747,7 @@
 "host path" = "Host-Pfad";
 "container path" = "Container-Pfad";
 "Add volume" = "Volume hinzufügen";
+
+/* Docker container logs button */
+"Logs" = "Protokolle";
+"View logs" = "Protokolle anzeigen";

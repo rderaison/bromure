@@ -747,3 +747,7 @@
 "host path" = "ホストパス";
 "container path" = "コンテナパス";
 "Add volume" = "ボリュームを追加";
+
+/* Docker container logs button */
+"Logs" = "ログ";
+"View logs" = "ログを表示";

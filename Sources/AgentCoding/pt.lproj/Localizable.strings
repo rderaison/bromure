@@ -747,3 +747,7 @@
 "host path" = "caminho no host";
 "container path" = "caminho no contêiner";
 "Add volume" = "Adicionar volume";
+
+/* Docker container logs button */
+"Logs" = "Logs";
+"View logs" = "Ver logs";

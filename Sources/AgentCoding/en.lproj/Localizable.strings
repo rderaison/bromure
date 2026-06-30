@@ -748,3 +748,7 @@
 "host path" = "host path";
 "container path" = "container path";
 "Add volume" = "Add volume";
+
+/* Docker container logs button */
+"Logs" = "Logs";
+"View logs" = "View logs";

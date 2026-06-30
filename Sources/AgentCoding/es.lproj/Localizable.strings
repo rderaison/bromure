@@ -749,3 +749,7 @@
 "host path" = "ruta del host";
 "container path" = "ruta del contenedor";
 "Add volume" = "Añadir volumen";
+
+/* Docker container logs button */
+"Logs" = "Registros";
+"View logs" = "Ver registros";
