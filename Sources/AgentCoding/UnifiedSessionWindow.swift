@@ -859,6 +859,10 @@ private struct TabRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            // Invisible gutter the width of the Docker node's chevron, so a tab's
+            // icon lines up with the Docker icon (and any other chevroned node)
+            // rather than sitting a chevron's-width to its left.
+            Color.clear.frame(width: 10, height: 14)
             Group {
                 if isAgent && thinking {
                     ThinkingDots(color: Color(hex: accentHex))
@@ -885,7 +889,9 @@ private struct TabRow: View {
                 ChordLabel(chord)
             }
         }
-        .padding(.leading, 26)
+        // Matches the Docker node's leading (20) so, with the chevron gutter
+        // above, the tab icon and the Docker icon align at the same x.
+        .padding(.leading, 20)
         .padding(.trailing, 8)
         .padding(.vertical, 4)
         .background(
