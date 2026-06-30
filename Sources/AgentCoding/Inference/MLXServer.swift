@@ -287,13 +287,19 @@ final class MLXServer: @unchecked Sendable {
                              object: wire.errorJSON(message: err.localizedDescription,
                                                     type: "invalid_request_error"))
         case .success(let c):
-            EngineMetrics.shared.record(prompt: c.promptTokens, completion: c.completionTokens,
+            EngineMetrics.shared.record(prompt: c.promptTokens, prefill: c.prefilledTokens,
+                                  completion: c.completionTokens,
                                   ttft: c.ttft, duration: c.ttft + c.decodeSeconds)
             // Per-query metadata → Inference Engine Log (this runs in the engine
-            // child; its stderr is teed into the log window).
+            // child; its stderr is teed into the log window). `prefilled` is the
+            // uncached suffix actually computed; the prefill rate is over that,
+            // not the full prompt (which a KV-cache hit mostly skips).
             let decodeTps = Double(c.completionTokens) / max(0.001, c.decodeSeconds)
-            let meta = "[engine] \(repo) — prompt \(c.promptTokens) tok, completion \(c.completionTokens) tok, "
-                + String(format: "TTFT %.2fs, decode %.1f tok/s\n", c.ttft, decodeTps)
+            let prefillTps = Double(c.prefilledTokens) / max(0.001, c.ttft)
+            let meta = "[engine] \(repo) — prompt \(c.promptTokens) tok (prefilled \(c.prefilledTokens)), "
+                + "completion \(c.completionTokens) tok, "
+                + String(format: "TTFT %.2fs (%.0f tok/s prefill), decode %.1f tok/s\n",
+                         c.ttft, prefillTps, decodeTps)
             FileHandle.standardError.write(Data(meta.utf8))
             // Telemetry to bromure.io when enrolled (no-ops otherwise) is wired
             // in the InferenceService integration stage.

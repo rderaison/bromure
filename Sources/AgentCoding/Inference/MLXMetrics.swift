@@ -11,6 +11,7 @@ final class EngineMetrics: @unchecked Sendable {
     private let lock = NSLock()
 
     private var promptTokensTotal = 0
+    private var prefilledTokensTotal = 0
     private var completionTokensTotal = 0
     private var ttftSum = 0.0
     private var ttftCount = 0
@@ -22,9 +23,10 @@ final class EngineMetrics: @unchecked Sendable {
     func requestStarted() { lock.lock(); inFlight += 1; requestsTotal += 1; lock.unlock() }
     func requestFinished() { lock.lock(); inFlight = max(0, inFlight - 1); lock.unlock() }
 
-    func record(prompt: Int, completion: Int, ttft: TimeInterval, duration: TimeInterval) {
+    func record(prompt: Int, prefill: Int, completion: Int, ttft: TimeInterval, duration: TimeInterval) {
         lock.lock()
         promptTokensTotal += prompt
+        prefilledTokensTotal += prefill
         completionTokensTotal += completion
         ttftSum += ttft; ttftCount += 1
         durationSum += duration; durationCount += 1
@@ -33,7 +35,7 @@ final class EngineMetrics: @unchecked Sendable {
 
     func prometheus(uptime: TimeInterval, loaded: Int) -> String {
         lock.lock()
-        let pt = promptTokensTotal, ct = completionTokensTotal
+        let pt = promptTokensTotal, pft = prefilledTokensTotal, ct = completionTokensTotal
         let ts = ttftSum, tc = ttftCount, ds = durationSum, dc = durationCount
         let inf = inFlight, run = inFlight, total = requestsTotal
         lock.unlock()
@@ -41,6 +43,7 @@ final class EngineMetrics: @unchecked Sendable {
         return """
         # in-process MLX engine metrics
         mlx_prompt_tokens_total \(pt)
+        mlx_prefill_tokens_total \(pft)
         mlx_completion_tokens_total \(ct)
         mlx_inference_ttft_seconds_sum \(ts)
         mlx_inference_ttft_seconds_count \(tc)

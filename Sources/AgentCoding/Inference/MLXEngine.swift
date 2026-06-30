@@ -299,6 +299,12 @@ actor MLXEngine {
     struct Completion: Sendable {
         var text: String
         var promptTokens: Int
+        /// Tokens actually prefilled this turn — the full prompt minus the
+        /// leading KV-cache prefix that was reused. This (not `promptTokens`) is
+        /// what TTFT actually measured, so it's the correct numerator for
+        /// prefill throughput. With prefix caching the two diverge sharply: an
+        /// agent re-sending a 20k-token transcript prefills only the new turn.
+        var prefilledTokens: Int
         var completionTokens: Int
         /// Time to first token (prefill seconds).
         var ttft: TimeInterval
@@ -421,6 +427,7 @@ actor MLXEngine {
             return Completion(
                 text: MLXEngine.stripThinking(text),
                 promptTokens: promptIds.count,
+                prefilledTokens: suffix.count,
                 completionTokens: generatedIds.count,
                 ttft: ttft,
                 decodeSeconds: decode,

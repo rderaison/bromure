@@ -38,6 +38,11 @@ public struct InferenceMetrics: Sendable, Equatable {
 
     // Metric names emitted by the in-process MLX engine (see MLXMetrics).
     public var promptTokens: Double?     { values["mlx_prompt_tokens_total"] }
+    /// Tokens actually prefilled = full prompt minus the reused KV-cache
+    /// prefix. This — not `promptTokens` — is what TTFT measured, so it's the
+    /// correct numerator for prefill throughput. (Absent on engines built
+    /// before the counter existed.)
+    public var prefilledTokens: Double?  { values["mlx_prefill_tokens_total"] }
     public var generationTokens: Double? { values["mlx_completion_tokens_total"] }
     public var requestsRunning: Double?  { values["mlx_scheduler_running_requests"] }
     public var requestsWaiting: Double?  { values["mlx_scheduler_waiting_requests"] }
@@ -126,8 +131,13 @@ public final class InferenceMetricsModel {
             if let comp = m.generationTokens, let dec = m.decodeSeconds, dec > 0.05 {
                 tokensPerSecond = comp / dec
             }
-            if let prompt = m.promptTokens, let ttft = m.ttftSeconds, ttft > 0.05 {
-                prefillTokensPerSecond = prompt / ttft
+            // Prefill rate over the tokens ACTUALLY prefilled, not the full
+            // prompt: with prefix caching most of the prompt is a KV-cache hit
+            // that TTFT never measured, so prompt/ttft read as absurdly high
+            // (e.g. a 20k-token prompt over a 0.14s cached-prefix TTFT → ~148k
+            // tok/s). Fall back to promptTokens only for a pre-counter engine.
+            if let pf = (m.prefilledTokens ?? m.promptTokens), let ttft = m.ttftSeconds, ttft > 0.05 {
+                prefillTokensPerSecond = pf / ttft
             }
             latest = m
             loadedModels = await InferenceService.shared.loadedModelRepos
