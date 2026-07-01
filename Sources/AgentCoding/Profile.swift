@@ -2091,6 +2091,39 @@ struct ProfileSecrets: Codable {
             }
         }
     }
+
+    /// Overlay the non-empty secrets from `newer` on top of `self`.
+    /// `self` is the workspace's *existing* on-disk secret set; `newer`
+    /// is whatever the caller actually supplied in an edit (harvested via
+    /// `extract`, so it only ever holds values the caller typed). Used by
+    /// the headless update path: a profile document round-tripped through
+    /// `describe`/export comes back with blank secrets, so without this a
+    /// save would wipe every stored secret. Keys the caller left blank
+    /// keep their existing value; keys the caller set are replaced.
+    mutating func overlay(with newer: ProfileSecrets) {
+        if let v = newer.apiKey { apiKey = v }
+        additionalToolApiKeys.merge(newer.additionalToolApiKeys) { _, n in n }
+        gitHTTPSTokens.merge(newer.gitHTTPSTokens) { _, n in n }
+        manualTokenValues.merge(newer.manualTokenValues) { _, n in n }
+        if let v = newer.kubeconfigs, !v.isEmpty { kubeconfigs = v }
+        if let v = newer.digitalOceanToken { digitalOceanToken = v }
+        if let v = newer.awsSecretAccessKey { awsSecretAccessKey = v }
+        if let v = newer.awsSessionToken { awsSessionToken = v }
+        if let m = newer.dockerRegistryPasswords {
+            dockerRegistryPasswords = (dockerRegistryPasswords ?? [:]).merging(m) { _, n in n }
+        }
+        if let m = newer.httpDatabaseSecrets {
+            httpDatabaseSecrets = (httpDatabaseSecrets ?? [:]).merging(m) { _, n in n }
+        }
+        if let v = newer.defaultClaudeTokens { defaultClaudeTokens = v }
+        if let v = newer.defaultCodexTokens { defaultCodexTokens = v }
+        if let m = newer.mcpBearerTokens {
+            mcpBearerTokens = (mcpBearerTokens ?? [:]).merging(m) { _, n in n }
+        }
+        if let m = newer.mcpOAuthStates {
+            mcpOAuthStates = (mcpOAuthStates ?? [:]).merging(m) { _, n in n }
+        }
+    }
 }
 
 /// Centralized profile-UUID → MAC-address mapping, persisted as

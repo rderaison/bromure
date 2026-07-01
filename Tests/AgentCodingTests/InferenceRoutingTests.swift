@@ -519,7 +519,8 @@ struct LocalToolAuthTests {
     }
 
     @Test("Codex local provider TOML uses the responses wire API") func codexTOML() {
-        let toml = SessionDisk.codexLocalProviderTOML(model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        let toml = SessionDisk.codexLocalProviderTOML(
+            model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit", contextWindow: 32768)
         #expect(toml.contains("model_provider = \"bromure-local\""))
         #expect(toml.contains("base_url = \"https://bromure.llm/v1\""))
         #expect(toml.contains("wire_api = \"responses\""))

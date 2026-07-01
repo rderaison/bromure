@@ -79,6 +79,18 @@ final class ACAutomationServer {
     // Profile management (CLI `profiles …`).
     var onDescribeProfile: ((_ idOrName: String) -> [String: Any]?)?
     var onDeleteProfile: ((_ idOrName: String) -> [String: Any])?
+    /// Full-fidelity Profile JSON (secrets blanked) for the `workspaces edit`
+    /// round-trip + the TUI raw-JSON hatch. nil when the workspace is unknown.
+    var onExportProfile: ((_ idOrName: String) -> [String: Any]?)?
+    /// Create a workspace from a JSON document. Returns `{ok, id, …}` or
+    /// `{ok:false, error}`.
+    var onCreateProfile: ((_ doc: [String: Any]) -> [String: Any])?
+    /// Update a workspace (full-document, secret-preserving). Returns
+    /// `{ok, …}` or `{ok:false, error}`.
+    var onUpdateProfile: ((_ idOrName: String, _ doc: [String: Any]) -> [String: Any])?
+    /// Reboot a running workspace in place (`soft` | `hard`). Async — a fresh
+    /// VM has to boot before it returns.
+    var onRebootVM: ((_ idOrName: String, _ mode: String) async -> [String: Any])?
 
     // MITM trace inspection (CLI `trace …`) + fusion toggle (`vm fusion`).
     var onListTrace: ((_ profileKey: String?) -> [[String: Any]])?
@@ -242,6 +254,14 @@ final class ACAutomationServer {
             if let clRange = headers.range(of: "content-length: "),
                let clValue = Int(headers[clRange.upperBound...].prefix(while: { $0.isNumber })) {
                 let bodyStart = raw.distance(from: raw.startIndex, to: headerEnd.upperBound)
+                // Grow the buffer to fit the full declared body — a `POST
+                // /profiles` carrying large inline secrets (PEMs, kubeconfigs)
+                // can exceed the initial 64 KB. Cap at a sane ceiling so a
+                // bogus Content-Length can't exhaust memory.
+                let needed = min(bodyStart + max(0, clValue), 8 * 1024 * 1024)
+                if needed > buf.count {
+                    buf.append(contentsOf: [UInt8](repeating: 0, count: needed - buf.count))
+                }
                 var remaining = clValue - (totalRead - bodyStart)
                 while remaining > 0 && totalRead < buf.count {
                     var tmp = [UInt8](repeating: 0, count: min(remaining, buf.count - totalRead))
@@ -295,6 +315,18 @@ final class ACAutomationServer {
         case ("GET", "/profiles"):
             let profiles = DispatchQueue.main.sync { self.onListProfiles?() ?? [] }
             sendResponse(fd: fd, status: 200, body: ["profiles": profiles.map { $0.toDict() }])
+
+        case ("POST", "/profiles"):
+            // Create a workspace from a JSON document (headless counterpart of
+            // the SwiftUI editor). Owner-only, like every other mutation.
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            let result = DispatchQueue.main.sync { self.onCreateProfile?(bodyJSON) }
+                ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 201 : 400, body: result)
 
         case ("GET", "/sessions"):
             let sessions = DispatchQueue.main.sync { self.onListSessions?() ?? [] }
@@ -442,7 +474,7 @@ final class ACAutomationServer {
             handleVMRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)
 
         case (let m, let p) where p.hasPrefix("/profiles/"):
-            handleProfileRoute(fd: fd, method: m, path: p)
+            handleProfileRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)
 
         case (let m, let p) where p == "/trace" || p.hasPrefix("/trace?"):
             handleTraceRoute(fd: fd, method: m, path: p)
@@ -612,6 +644,25 @@ final class ACAutomationServer {
             sendResponse(fd: fd, status: result["error"] == nil ? 200 : 400, body: result)
             return
         }
+        if rest.hasSuffix("/reboot") {
+            guard method == "POST" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let id = decode(String(rest.dropLast("/reboot".count)))
+            let mode = (bodyJSON["mode"] as? String) ?? "soft"
+            let semaphore = DispatchSemaphore(value: 0)
+            var result: [String: Any] = ["ok": false, "error": "not handled"]
+            DispatchQueue.main.async {
+                Task { @MainActor in
+                    result = await self.onRebootVM?(id, mode) ?? ["ok": false, "error": "not handled"]
+                    semaphore.signal()
+                }
+            }
+            semaphore.wait()
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 409, body: result)
+            return
+        }
         if rest.hasSuffix("/fusion") {
             guard method == "POST" else {
                 sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
@@ -716,21 +767,42 @@ final class ACAutomationServer {
         }
     }
 
-    private func handleProfileRoute(fd: Int32, method: String, path: String) {
+    private func handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String: Any]) {
         guard debugEnabled || isTrustedLocal else {
             sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
             return
         }
-        let noQuery = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        let parts = path.split(separator: "?", maxSplits: 1).map(String.init)
+        let noQuery = parts.first ?? path
+        let query = parts.count > 1 ? parts[1] : ""
         let raw = String(noQuery.dropFirst("/profiles/".count))
         let id = raw.removingPercentEncoding ?? raw
         switch method {
         case "GET":
-            if let d = DispatchQueue.main.sync(execute: { self.onDescribeProfile?(id) }) {
+            // `?full=1` → the whole Profile Codable (secrets blanked) for the
+            // `workspaces edit` / raw-JSON round-trip; otherwise the compact
+            // describe summary.
+            if query.contains("full=1") || query.contains("full=true") {
+                if let d = DispatchQueue.main.sync(execute: { self.onExportProfile?(id) }) {
+                    sendResponse(fd: fd, status: 200, body: d)
+                } else {
+                    sendResponse(fd: fd, status: 404, body: ["error": "Profile not found"])
+                }
+            } else if let d = DispatchQueue.main.sync(execute: { self.onDescribeProfile?(id) }) {
                 sendResponse(fd: fd, status: 200, body: d)
             } else {
                 sendResponse(fd: fd, status: 404, body: ["error": "Profile not found"])
             }
+        case "PUT", "PATCH":
+            // Full-document, secret-preserving update (the client sends a doc it
+            // fetched via `?full=1`, edited).
+            let result = DispatchQueue.main.sync(execute: { self.onUpdateProfile?(id, bodyJSON) })
+                ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            // 404 for a missing workspace, 400 for a bad document, else 200.
+            let status: Int = ok ? 200
+                : ((result["error"] as? String)?.contains("not found") == true ? 404 : 400)
+            sendResponse(fd: fd, status: status, body: result)
         case "DELETE":
             let result = DispatchQueue.main.sync(execute: { self.onDeleteProfile?(id) })
                 ?? ["ok": false, "error": "unavailable"]

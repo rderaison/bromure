@@ -479,8 +479,10 @@ struct Profiles: ParsableCommand {
         // but VMCheckpoints/VMRevert are intentionally NOT registered yet — the
         // list/revert surface stays unexposed until we decide to ship it. The
         // structs + control routes remain so re-exposing is a one-line change.
-        subcommands: [WorkspacesList.self, VMRun.self, VMKill.self, Exec.self,
+        subcommands: [WorkspacesList.self, WorkspacesCreate.self, WorkspacesEdit.self,
+                      VMRun.self, VMKill.self, WorkspacesReboot.self, Exec.self,
                       VMAttach.self, ProfilesDescribe.self, ProfilesRemove.self,
+                      WorkspacesSSHKeygen.self,
                       VMFusion.self, VMRouting.self, VMHybrid.self],
         aliases: ["vm"])
 }
@@ -650,6 +652,212 @@ struct ProfilesRemove: ParsableCommand {
         }
         print("Deleted workspace \(resp.json["name"] as? String ?? workspace).")
     }
+}
+
+// MARK: - `workspaces create` / `edit` / `reboot`
+
+struct WorkspacesCreate: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "create",
+        abstract: "Create a workspace (the CLI counterpart of the app's New Workspace editor).",
+        discussion: """
+        Set common fields with flags, or pass a full profile JSON document with
+        --from-json (a file path, or - for stdin — same shape as `workspaces edit`).
+        Flags override any matching field in the JSON document.
+
+        Examples:
+          workspaces create --name web --tool claude --auth token --api-key sk-… --memory 8
+          workspaces create --from-json ./ws.json
+        """)
+
+    @Option(name: .long, help: "Workspace name (required unless --from-json supplies one).")
+    var name: String?
+    @Option(name: .long, help: "Primary tool: claude | codex | grok.")
+    var tool: String?
+    @Option(name: .long, help: "Auth mode: token | subscription | bedrock | local.")
+    var auth: String?
+    @Option(name: .long, help: "API key (for --auth token).")
+    var apiKey: String?
+    @Option(name: .long, help: "VM RAM in GB.")
+    var memory: Int?
+    @Option(name: .long, help: "Accent color: blue|red|green|orange|purple|pink|teal|gray.")
+    var color: String?
+    @Option(name: [.customShort("v"), .long],
+            help: "Shared host folder mounted at ~/<basename>. Repeatable.")
+    var folder: [String] = []
+    @Flag(name: .long, help: "Generate a fresh SSH key (host-side; the public key is printed).")
+    var generateSsh = false
+    @Option(name: .long, help: "Full profile JSON document: a file path, or - for stdin.")
+    var fromJson: String?
+
+    func run() throws {
+        let client = ControlClient()
+        try client.ensureAgentRunning()
+        var body: [String: Any] = [:]
+        if let fromJson { body = try loadJSONDocument(fromJson) }
+        if let name { body["name"] = name }
+        if let tool { body["tool"] = tool }
+        if let auth { body["authMode"] = auth }
+        if let apiKey { body["apiKey"] = apiKey }
+        if let memory { body["memoryGB"] = memory }
+        if let color { body["color"] = color }
+        if !folder.isEmpty {
+            body["folderPaths"] = folder.map { ($0 as NSString).expandingTildeInPath }
+        }
+        if generateSsh { body["generateSSH"] = true }
+        guard (body["name"] as? String)?.isEmpty == false else {
+            throw ValidationError("A workspace name is required (--name, or a \"name\" in --from-json).")
+        }
+        let resp = try client.request("POST", "/profiles", body: body)
+        guard resp.status == 201, (resp.json["ok"] as? Bool) == true else {
+            throw ValidationError(resp.json["error"] as? String
+                ?? "Couldn't create the workspace (HTTP \(resp.status)).")
+        }
+        let sid = resp.json["shortId"] as? String ?? ""
+        let nm = resp.json["name"] as? String ?? (body["name"] as? String ?? "?")
+        print("Created workspace \(nm)\(sid.isEmpty ? "" : " (\(sid))").")
+        if let pub = resp.json["sshPublicKey"] as? String, !pub.isEmpty {
+            print("\nSSH public key (add to your Git host):\n\(pub)")
+        }
+    }
+}
+
+struct WorkspacesSSHKeygen: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ssh-keygen",
+        abstract: "Generate a fresh SSH key for a workspace (host-side; prints the public key).")
+
+    @Argument(help: "Workspace id or name.")
+    var workspace: String
+
+    func run() throws {
+        let client = ControlClient()
+        try client.ensureAgentRunning()
+        let seg = ControlClient.encodeSegment(workspace)
+        let cur = try client.request("GET", "/profiles/\(seg)?full=1")
+        guard cur.status == 200 else {
+            throw ValidationError(cur.json["error"] as? String ?? "Workspace not found: \(workspace)")
+        }
+        var doc = cur.json
+        doc["generateSSH"] = true
+        let resp = try client.request("PUT", "/profiles/\(seg)", body: doc)
+        guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
+            throw ValidationError(resp.json["error"] as? String ?? "Couldn't generate a key (HTTP \(resp.status)).")
+        }
+        if let pub = resp.json["sshPublicKey"] as? String, !pub.isEmpty {
+            print(pub)
+        } else {
+            print("Generated a new SSH key for \(workspace).")
+        }
+    }
+}
+
+struct WorkspacesEdit: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "edit",
+        abstract: "Edit a workspace's full settings — opens its JSON in $EDITOR (kubectl-style).",
+        discussion: """
+        With no --from-json this fetches the workspace's entire configuration,
+        opens it in $EDITOR (or vi), and saves your changes back. Secrets are shown
+        blank: leave one blank to keep the stored value, or type a new value to
+        change it. Pass --from-json to apply a document non-interactively.
+        """)
+
+    @Argument(help: "Workspace id or name.")
+    var workspace: String
+    @Option(name: .long, help: "Apply a full profile JSON document non-interactively: a file path, or - for stdin.")
+    var fromJson: String?
+
+    func run() throws {
+        let client = ControlClient()
+        try client.ensureAgentRunning()
+        let seg = ControlClient.encodeSegment(workspace)
+        let body: [String: Any]
+        if let fromJson {
+            body = try loadJSONDocument(fromJson)
+        } else {
+            let cur = try client.request("GET", "/profiles/\(seg)?full=1")
+            guard cur.status == 200 else {
+                throw ValidationError(cur.json["error"] as? String ?? "Workspace not found: \(workspace)")
+            }
+            guard let edited = try editJSONInEditor(cur.json) else {
+                print("No changes."); return
+            }
+            body = edited
+        }
+        let resp = try client.request("PUT", "/profiles/\(seg)", body: body)
+        guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
+            throw ValidationError(resp.json["error"] as? String ?? "Couldn't save (HTTP \(resp.status)).")
+        }
+        print("Saved workspace \(resp.json["name"] as? String ?? workspace).")
+    }
+}
+
+struct WorkspacesReboot: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "reboot",
+        abstract: "Reboot a running workspace (graceful by default; --hard tears it down immediately).")
+
+    @Argument(help: "Workspace id or name.")
+    var workspace: String
+    @Flag(name: .long, help: "Hard reboot: stop the VM immediately instead of a graceful halt.")
+    var hard = false
+
+    func run() throws {
+        let client = ControlClient()
+        try client.ensureAgentRunning()
+        FileHandle.standardError.write(Data("Rebooting \(workspace) (\(hard ? "hard" : "soft"))…\n".utf8))
+        let resp = try client.request("POST", "/vms/\(ControlClient.encodeSegment(workspace))/reboot",
+                                      body: ["mode": hard ? "hard" : "soft"])
+        guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
+            throw ValidationError(resp.json["error"] as? String ?? "Couldn't reboot \(workspace).")
+        }
+        print("Rebooted \(resp.json["workspace"] as? String ?? workspace).")
+    }
+}
+
+/// Load a JSON object from a file path, or from stdin when `spec == "-"`.
+func loadJSONDocument(_ spec: String) throws -> [String: Any] {
+    let data: Data
+    if spec == "-" {
+        data = FileHandle.standardInput.readDataToEndOfFile()
+    } else {
+        data = try Data(contentsOf: URL(fileURLWithPath: (spec as NSString).expandingTildeInPath))
+    }
+    guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw ValidationError("Expected a JSON object in \(spec == "-" ? "stdin" : spec).")
+    }
+    return obj
+}
+
+/// Write `doc` to a temp file, open $EDITOR (or vi) on it, and return the
+/// parsed result — or nil if the user saved no change. Throws on an invalid
+/// edit so we never PUT malformed JSON.
+func editJSONInEditor(_ doc: [String: Any]) throws -> [String: Any]? {
+    let pretty = try JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys])
+    let file = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bromure-workspace-\(UUID().uuidString).json")
+    try pretty.write(to: file)
+    defer { try? FileManager.default.removeItem(at: file) }
+    let before = try Data(contentsOf: file)
+
+    let editor = ProcessInfo.processInfo.environment["VISUAL"]
+        ?? ProcessInfo.processInfo.environment["EDITOR"] ?? "vi"
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/sh")
+    // Pass the path as $1 so spaces/quotes in the temp path can't break the line.
+    p.arguments = ["-c", "\(editor) \"$1\"", "sh", file.path]
+    try p.run()
+    p.waitUntilExit()
+    guard p.terminationStatus == 0 else {
+        throw ValidationError("Editor exited with status \(p.terminationStatus) — not saving.")
+    }
+    let after = try Data(contentsOf: file)
+    if after == before { return nil }
+    guard let obj = try JSONSerialization.jsonObject(with: after) as? [String: Any] else {
+        throw ValidationError("The edited file isn't valid JSON — not saving.")
+    }
+    return obj
 }
 
 // MARK: - `vm fusion`
@@ -901,7 +1109,13 @@ private nonisolated(unsafe) var gWinchPending: Int32 = 0
 /// local terminal in raw mode, and pumps the framed pty protocol (data / resize
 /// / exit) until the remote command exits.
 enum InteractiveExec {
-    static func run(client: ControlClient, vm: String, command: String) throws {
+    /// `overlayTrigger` is a single byte (e.g. Ctrl-] = 0x1D) that, when pressed
+    /// alone, is intercepted host-side — it never reaches the guest — and calls
+    /// `onOverlay` (the controller draws its workspace overlay). Double-tapping
+    /// it in one read forwards a single literal byte. Both nil (the default)
+    /// disables interception, leaving a plain transparent pump.
+    static func run(client: ControlClient, vm: String, command: String,
+                    overlayTrigger: UInt8? = nil, onOverlay: (() -> Void)? = nil) throws {
         var ws = winsize()
         _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws)
         let cols0 = ws.ws_col == 0 ? 80 : Int(ws.ws_col)
@@ -948,7 +1162,26 @@ enum InteractiveExec {
 
             if fds[0].revents & pollIn != 0 {
                 let r = Darwin.read(stdinFD, &rbuf, rbuf.count)
-                if r > 0 { sendFrame(fd, 0, Array(rbuf[0..<r])) }
+                if r > 0 {
+                    // Controller keychord: a lone trigger byte is caught here —
+                    // before it's framed to the guest — and hands control to the
+                    // host overlay. tmux (in the guest) never sees it, so there's
+                    // no prefix collision. Double-tap in one read = one literal.
+                    if let trigger = overlayTrigger, let onOverlay {
+                        if r == 1, rbuf[0] == trigger {
+                            onOverlay()
+                            // Repaint the guest after the host-side overlay by
+                            // re-sending the window size (tmux redraws on resize).
+                            var w = winsize(); _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &w)
+                            sendFrame(fd, 1, resizePayload(cols: Int(w.ws_col), rows: Int(w.ws_row)))
+                            continue
+                        }
+                        if r == 2, rbuf[0] == trigger, rbuf[1] == trigger {
+                            sendFrame(fd, 0, [trigger]); continue
+                        }
+                    }
+                    sendFrame(fd, 0, Array(rbuf[0..<r]))
+                }
                 else { sendFrame(fd, 3, []); stdinFD = -1 }   // EOF: stop polling stdin
             }
             if fds[1].revents & pollIn != 0 {

@@ -1701,8 +1701,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 ?? ["error": "unavailable"]
         }
         server.onDescribeProfile = { [weak self] key in self?.automationProfileDescribe(key) }
+        server.onExportProfile = { [weak self] key in self?.automationProfileExport(key) }
+        server.onCreateProfile = { [weak self] doc in
+            self?.automationUpsertProfile(idOrName: nil, doc: doc) ?? ["ok": false, "error": "unavailable"]
+        }
+        server.onUpdateProfile = { [weak self] key, doc in
+            self?.automationUpsertProfile(idOrName: key, doc: doc) ?? ["ok": false, "error": "unavailable"]
+        }
         server.onDeleteProfile = { [weak self] key in
             self?.automationDeleteProfile(key) ?? ["ok": false, "error": "unavailable"]
+        }
+        server.onRebootVM = { [weak self] idOrName, mode in
+            await self?.automationRebootVM(idOrName: idOrName, mode: mode) ?? ["ok": false, "error": "unavailable"]
         }
         server.onListTrace = { [weak self] profileKey in self?.automationTraceList(profileKey) ?? [] }
         server.onClearTrace = { [weak self] in self?.mitmEngine?.traceStore.clear() ?? 0 }
@@ -1988,6 +1998,41 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
               let session = runningSessions[id] else { return false }
         attachWindow(to: session)
         return true
+    }
+
+    /// Reboot a running workspace in place — window-independent, so it also
+    /// works for detached remote/SSH sessions (the keychord overlay + the CLI
+    /// `workspaces reboot`). `soft` gracefully halts (ACPI, filesystems flush);
+    /// `hard` tears the VM down immediately. Both clear any suspended state and
+    /// cold-boot a fresh VM for the same profile, re-attaching a window only if
+    /// one was attached before.
+    @MainActor private func automationRebootVM(idOrName: String, mode: String) async -> [String: Any] {
+        guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
+            return ["ok": false, "error": "VM not running: \(idOrName)"]
+        }
+        let profile = session.profile
+        let wasAttached = isAttached(id)
+        session.sandbox.sessionDisk?.clearSavedState()   // cold-boot fresh, never resume
+
+        if mode == "hard", let vm = session.sandbox.vm {
+            await Self.forceStop(vm)
+        } else {
+            await stopSession(id, action: .shutdown)
+        }
+        // Wait for the old session to leave the registry before re-booting the
+        // same profile — they share per-profile dirs (outbox, meta share), so
+        // overlapping boots would race the virtiofs handles.
+        for _ in 0..<200 {
+            if runningSessions[id] == nil { break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        launch(profile, detached: !wasAttached)
+        var up = false
+        for _ in 0..<600 {   // first boots can take a while
+            if runningSessions[id] != nil { up = true; break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return ["ok": up, "workspace": profile.name, "mode": mode == "hard" ? "hard" : "soft"]
     }
 
     /// Docker-style 12-char short id for a profile: the UUID's hex with dashes
@@ -3615,29 +3660,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func handleEditorSave(profile: Profile, generateSSH: Bool, editing: Profile?) {
         var profile = profile
-        // Belt-and-braces: trim every secret before persisting. Pasted
-        // tokens routinely come with trailing whitespace; embedding
-        // either in an HTTP header value at swap time would corrupt
-        // the request and trigger a "401 Invalid API key" upstream.
-        let trim = { (s: String?) in
-            s?.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        profile.apiKey = trim(profile.apiKey)
-        profile.additionalTools = profile.additionalTools.map { spec in
-            var s = spec
-            s.apiKey = trim(s.apiKey)
-            return s
-        }
-        profile.gitHTTPSCredentials = profile.gitHTTPSCredentials.map { c in
-            var copy = c
-            copy.token = c.token.trimmingCharacters(in: .whitespacesAndNewlines)
-            return copy
-        }
-        profile.manualTokens = profile.manualTokens.map { t in
-            var copy = t
-            copy.realValue = t.realValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            return copy
-        }
 
         // Shared-folder edits are incompatible with a suspended VM:
         // virtiofs shares become slot-tagged VZDirectoryShares in the VM
@@ -3672,45 +3694,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         // Editing keeps the original id (already preserved by ProfileEditorView).
+        // The shared save/reconcile core is factored into `persistEditedProfile`
+        // so the headless control-socket path (create/edit over the CLI + TUI)
+        // reuses the exact same persistence and app-state refresh.
         do {
-            try store.save(profile)
-            try store.prepareHomeDirectory(for: profile, terminalDefaults: terminalDefaults,
-                                           displayScale: TerminalAppDefaults.currentDisplayScale())
-            let agentDir = store.profileDirectory(for: profile)
-                .appendingPathComponent("agent", isDirectory: true)
-            if generateSSH {
-                // Agent dir is host-only — never mounted into the VM.
-                // The private seed lives here; the public key gets a
-                // courtesy copy into the VM's ~/.ssh for reference.
-                let pub = try makeSSHKey(in: agentDir)
-                profile.sshPublicKey = pub
-                try store.save(profile)
-            } else if editing == nil,
-                      profile.sshPublicKey != nil,
-                      !FileManager.default.fileExists(atPath:
-                        agentDir.appendingPathComponent("id_ed25519.raw").path) {
-                // New profile that inherited the default public key
-                // from the preferences template — copy the matching
-                // private seed in so the in-process ssh-agent has
-                // something to load. No-op when "Generate" was ticked
-                // (handled above) or when the user already imported a
-                // key (existing raw file).
-                try DefaultSSHKey.copy(to: agentDir)
-            }
+            try persistEditedProfile(&profile, editing: editing, generateSSH: generateSSH)
         } catch {
             showError(error, message: editing == nil
                       ? "Couldn't create the workspace."
                       : "Couldn't save the workspace.")
             return
         }
-        profiles = store.loadAll()
-        refreshSidebar()
-        reconcileBootLaunchAgent()   // a saved bootAtStartup change may flip the plist
-        // The privateMode toggle and enrollment-gated streaming flag
-        // both flow off `profiles`; resync the running session
-        // toolbars now so a flip from public → private (or back)
-        // doesn't wait for the next launch to take effect.
-        refreshStreamingState()
         closeEditorWindow()
         // Show the SSH key viewer right after a brand-new generation so the
         // user can paste it into GitHub before forgetting.
@@ -3738,6 +3732,191 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 promptRestartForChanges(items: restartItems, window: win)
             }
         }
+    }
+
+    /// Shared save + app-state reconciliation for a created/edited profile.
+    /// Deliberately AppKit-free (no NSAlert, no window ops) so the headless
+    /// control-socket path can call it too — the GUI-only bits (folder-discard
+    /// alert, SSH-key viewer, live-session restart prompt) stay in the callers.
+    /// Mutates `profile` (may set `sshPublicKey`) and refreshes `profiles` +
+    /// the sidebar. Throws on disk/keychain failure.
+    @MainActor
+    func persistEditedProfile(_ profile: inout Profile, editing: Profile?,
+                              generateSSH: Bool) throws {
+        // Belt-and-braces: trim every secret before persisting. Pasted tokens
+        // routinely come with trailing whitespace; embedding either in an HTTP
+        // header value at swap time would corrupt the request and trigger a
+        // "401 Invalid API key" upstream.
+        let trim = { (s: String?) in s?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        profile.apiKey = trim(profile.apiKey)
+        profile.additionalTools = profile.additionalTools.map { var s = $0; s.apiKey = trim(s.apiKey); return s }
+        profile.gitHTTPSCredentials = profile.gitHTTPSCredentials.map {
+            var c = $0; c.token = c.token.trimmingCharacters(in: .whitespacesAndNewlines); return c
+        }
+        profile.manualTokens = profile.manualTokens.map {
+            var t = $0; t.realValue = t.realValue.trimmingCharacters(in: .whitespacesAndNewlines); return t
+        }
+
+        try store.save(profile)
+        try store.prepareHomeDirectory(for: profile, terminalDefaults: terminalDefaults,
+                                       displayScale: TerminalAppDefaults.currentDisplayScale())
+        let agentDir = store.profileDirectory(for: profile)
+            .appendingPathComponent("agent", isDirectory: true)
+        if generateSSH {
+            // Agent dir is host-only — never mounted into the VM. The private
+            // seed lives here; the public key gets a courtesy copy into the
+            // VM's ~/.ssh for reference.
+            let pub = try makeSSHKey(in: agentDir)
+            profile.sshPublicKey = pub
+            try store.save(profile)
+        } else if editing == nil,
+                  profile.sshPublicKey != nil,
+                  !FileManager.default.fileExists(atPath:
+                    agentDir.appendingPathComponent("id_ed25519.raw").path) {
+            // New profile that inherited the default public key from the
+            // preferences template — copy the matching private seed in so the
+            // in-process ssh-agent has something to load.
+            try DefaultSSHKey.copy(to: agentDir)
+        }
+        profiles = store.loadAll()
+        refreshSidebar()
+        reconcileBootLaunchAgent()   // a saved bootAtStartup change may flip the plist
+        // The privateMode toggle and enrollment-gated streaming flag both flow
+        // off `profiles`; resync the running session toolbars now so a flip from
+        // public → private (or back) doesn't wait for the next launch.
+        refreshStreamingState()
+    }
+
+    // MARK: - Headless profile create / edit / export (control socket)
+
+    /// Create (`idOrName == nil`) or update a workspace from a JSON document
+    /// sent over the owner-only control socket — the headless counterpart of
+    /// the SwiftUI editor's Save. Returns a describe-style dict on success, or
+    /// `{ok:false, error}` (the caller maps that to a 4xx/5xx). Reuses the GUI
+    /// persistence via `persistEditedProfile`.
+    @MainActor
+    func automationUpsertProfile(idOrName: String?, doc rawDoc: [String: Any]) -> [String: Any] {
+        // Drop transport-only markers before decoding. `generateSSH` is a
+        // control flag (not a Profile field): when set, the host mints a fresh
+        // ed25519 key in the profile's agent dir — host-side, exactly like the
+        // GUI's "Generate SSH key". The private seed never enters the VM.
+        var doc = rawDoc
+        doc.removeValue(forKey: "_secretsRedacted")
+        let generateSSH = (rawDoc["generateSSH"] as? Bool) == true
+        doc.removeValue(forKey: "generateSSH")
+
+        let profile: Profile
+        let editing: Profile?
+
+        if let idOrName {
+            // ---- Update: full-document replace of a workspace's non-secret
+            // fields, preserving stored secrets the caller didn't re-supply.
+            guard let existing = profileByNameOrID(idOrName) else {
+                return ["ok": false, "error": "Workspace not found: \(idOrName)"]
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: doc),
+                  var incoming = try? JSONDecoder.iso8601().decode(Profile.self, from: data) else {
+                return ["ok": false, "error": "Invalid profile document"]
+            }
+            // Server-owned identity — never trust the client's copies.
+            incoming.id = existing.id
+            incoming.createdAt = existing.createdAt
+            incoming.lastUsedAt = existing.lastUsedAt
+
+            // Shared-folder edits are incompatible with a suspended VM (same
+            // reasoning as the GUI's discard alert). Headless can't prompt, so
+            // refuse rather than silently discard the snapshot.
+            if existing.folderPaths != incoming.folderPaths {
+                let stateURL = store.profileDirectory(for: existing)
+                    .appendingPathComponent("vm.state")
+                if FileManager.default.fileExists(atPath: stateURL.path) {
+                    return ["ok": false, "error":
+                        "Shared folders changed but this workspace has a suspended VM. "
+                        + "Stop it first (`vm kill \(existing.name)`), then edit folders."]
+                }
+            }
+
+            // Secret preservation: a document round-tripped through describe/
+            // export comes back with blank secrets. Harvest the existing set +
+            // whatever the caller actually typed, overlay the latter on the
+            // former, and re-apply — so untouched secrets survive.
+            var existingCopy = existing
+            let existingSecrets = ProfileSecrets.extract(stripping: &existingCopy)
+            var incomingCopy = incoming
+            let incomingSecrets = ProfileSecrets.extract(stripping: &incomingCopy)
+            var merged = existingSecrets
+            merged.overlay(with: incomingSecrets)
+            merged.apply(to: &incoming)
+
+            profile = incoming
+            editing = existing
+        } else {
+            // ---- Create: seed from the preferences template (so a new
+            // workspace inherits the user's defaults + default OAuth tokens),
+            // then overlay the caller's fields at the document level so
+            // unspecified keys keep their template value.
+            let name = (doc["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !name.isEmpty else { return ["ok": false, "error": "A workspace name is required."] }
+            let minted = store.newProfileFromTemplate(name: name)
+            guard let mData = try? JSONEncoder.iso8601().encode(minted),
+                  var base = (try? JSONSerialization.jsonObject(with: mData)) as? [String: Any] else {
+                return ["ok": false, "error": "Internal error seeding the workspace."]
+            }
+            for (k, v) in doc { base[k] = v }
+            guard let data = try? JSONSerialization.data(withJSONObject: base),
+                  var created = try? JSONDecoder.iso8601().decode(Profile.self, from: data) else {
+                return ["ok": false, "error": "Invalid profile document"]
+            }
+            // Force server-owned identity regardless of what the doc carried.
+            created.id = minted.id
+            created.createdAt = minted.createdAt
+            created.lastUsedAt = nil
+            profile = created
+            editing = nil
+        }
+
+        var toSave = profile
+        do {
+            try persistEditedProfile(&toSave, editing: editing, generateSSH: generateSSH)
+        } catch {
+            return ["ok": false, "error": error.localizedDescription]
+        }
+
+        // Push host-side cosmetic + live-swap updates into a running session,
+        // matching the GUI (minus the restart prompt, which needs a window).
+        if editing != nil, let win = pane(for: toSave.id) {
+            let runningProfile = win.profile
+            win.applyLiveProfileUpdates(toSave)
+            applyLiveSessionRefresh(from: runningProfile, to: toSave,
+                                    terminalDefaults: terminalDefaults, window: win)
+        }
+
+        var result = automationProfileDescribe(toSave.id.uuidString) ?? ["id": toSave.id.uuidString]
+        result["ok"] = true
+        // Surface the freshly-minted public key so the caller can show it for
+        // pasting into GitHub etc. (public, not a secret).
+        if generateSSH, let pub = toSave.sshPublicKey, !pub.isEmpty { result["sshPublicKey"] = pub }
+        return result
+    }
+
+    /// Full-fidelity profile export for the `kubectl edit`-style round-trip
+    /// (CLI `workspaces edit`, the TUI raw-JSON hatch). Emits the entire
+    /// `Profile` Codable shape with every secret blanked — so an editor can
+    /// change any non-secret field and PUT it back, and `automationUpsertProfile`
+    /// preserves the untouched secrets. `describe` stays the compact summary.
+    @MainActor
+    func automationProfileExport(_ key: String) -> [String: Any]? {
+        guard let p = profileByNameOrID(key) else { return nil }
+        var stripped = p
+        _ = ProfileSecrets.extract(stripping: &stripped)   // blank all secrets
+        guard let data = try? JSONEncoder.iso8601().encode(stripped),
+              var dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        // Flag so callers/humans know the secret fields were redacted (blank =
+        // keep the stored value on save; type a value to change it).
+        dict["_secretsRedacted"] = true
+        return dict
     }
 
     /// Per-field categories that change behaviour inside the booted
@@ -6407,4 +6586,25 @@ private func locateSetupDir() throws -> URL {
         return url
     }
     throw ValidationError("vm-setup directory not found in resource bundle")
+}
+
+// ISO-8601 JSON coders for the headless profile create/edit round-trip.
+// File-private on purpose: several files keep their own copy (Profile.swift,
+// TraceStore.swift) rather than sharing one internal symbol — matching that
+// convention avoids cross-file redeclaration clashes.
+private extension JSONDecoder {
+    static func iso8601() -> JSONDecoder {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }
+}
+
+private extension JSONEncoder {
+    static func iso8601() -> JSONEncoder {
+        let e = JSONEncoder()
+        e.dateEncodingStrategy = .iso8601
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return e
+    }
 }
