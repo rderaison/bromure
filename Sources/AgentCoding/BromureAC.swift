@@ -2247,13 +2247,47 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// loginwindow key-equivalents), where they'd be swallowed; Openbox grabs
     /// them (see Profile.swift's rc.xml) and `bromure-hostkey` bounces the bare
     /// token here. Returns true when `key` was a system chord (fully handled).
+    /// Per-chord timestamp feeding the leading-edge guard below.
+    private var lastSystemChordAt: [String: Date] = [:]
+
+    /// True from the moment ⌘Q starts the quit flow until the app actually
+    /// exits (or the user cancels). The quit confirmation blocks the main
+    /// thread in `runModal`, during which a stranded-keyUp autorepeat can queue
+    /// more `q` bounces; without this, every one re-enters `NSApp.terminate`
+    /// after the dialog closes and preempts the drain, so the app never quits.
+    private var quitRequested = false
+
     @discardableResult @MainActor
     func performACSystemChord(_ key: String) -> Bool {
         switch key {
+        case "q", "h", "ctrl-q", "shift-q": break
+        default: return false
+        }
+        // Leading-edge autorepeat guard. Each of these chords pulls focus off
+        // the VM, so the guest loses the keyUp and X can autorepeat the chord
+        // for a beat before the guest's own keyup-release (see bromure-hostkey)
+        // lands. Swallow those repeats so ⌘Q shows ONE quit dialog, not a stack,
+        // and ⌘H/lock/log-out fire once. 600ms passes a deliberate re-press.
+        let now = Date()
+        if let prev = lastSystemChordAt[key], now.timeIntervalSince(prev) < 0.6 {
+            return true
+        }
+        lastSystemChordAt[key] = now
+
+        switch key {
         case "q":
-            // Standard ⌘Q — routes through applicationShouldTerminate, which
-            // confirms and drains any running VMs before actually quitting.
-            NSApp.terminate(nil)
+            // ⌘Q. Do NOT call NSApp.terminate synchronously here: we're inside a
+            // MainActor Task (a serial main-queue block), and terminate()'s
+            // `.terminateLater` path spins a nested runloop waiting for a reply
+            // that only ANOTHER MainActor job (the VM drain) can produce — which
+            // can't start until this block returns. That deadlocks the main
+            // thread and the app never quits. Instead drive the quit on its own
+            // Task that drains via async/await (freeing the MainActor at each
+            // suspension) and only then terminates. Re-entrancy guard: repeats
+            // that land while the confirmation dialog is up are dropped.
+            if quitRequested { return true }
+            quitRequested = true
+            Task { @MainActor in await self.performBouncedQuit() }
         case "h":
             NSApp.hide(nil)
         case "ctrl-q":
@@ -2323,9 +2357,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// `vm.stop()` callbacks: drained-first means VZ ends its
     /// internal activity exactly once, in order.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Menu / window-close / system-quit path: invoked directly by AppKit
+        // (not from a Task), so the `.terminateLater` nested runloop CAN service
+        // the drain job. (The guest-bounced ⌘Q can't use this — see
+        // performBouncedQuit — so it pre-drains and hits `.terminateNow`.)
+        guard confirmQuit() else {
+            quitRequested = false
+            return .terminateCancel
+        }
         let running = runningSessions.values.filter { $0.sandbox.vm?.state == .running }
         if running.isEmpty { return .terminateNow }
 
+        Task { @MainActor in
+            await self.drainRunningVMs()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    /// The shared "N VMs running — quit anyway?" confirmation. Returns true to
+    /// proceed (nothing running, or the user clicked Quit), false to abort.
+    @MainActor
+    private func confirmQuit() -> Bool {
+        let running = runningSessions.values.filter { $0.sandbox.vm?.state == .running }
+        if running.isEmpty { return true }
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Quit Bromure Agentic Coding?", comment: "")
         let names = running.map { $0.profile.name }.joined(separator: ", ")
@@ -2337,15 +2392,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Quit", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return .terminateCancel
-        }
+        return alert.runModal() == .alertFirstButtonReturn
+    }
 
-        Task { @MainActor in
-            await self.drainRunningVMs()
-            NSApp.reply(toApplicationShouldTerminate: true)
+    /// Quit driven from the guest-bounced ⌘Q. Runs on its own MainActor Task so
+    /// it can drain the VMs with async/await — every `await` frees the main
+    /// thread, so VZ's pause/stop completions actually run. Only once the VMs
+    /// are down do we call terminate, which then takes the synchronous
+    /// `.terminateNow` path (no `.terminateLater` nested-runloop wait, hence no
+    /// deadlock against this same actor).
+    @MainActor
+    private func performBouncedQuit() async {
+        guard confirmQuit() else {
+            quitRequested = false
+            return
         }
-        return .terminateLater
+        await drainRunningVMs()
+        NSApp.terminate(nil)
     }
 
     /// Stop every running VM in parallel on quit via `stopSession`, honoring
@@ -5390,12 +5453,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         switch resolved {
         case .suspend:
             sandbox.sessionDisk?.saveTabs(currentTabsSnapshot(for: profileID))
-            do {
-                try await sandbox.suspend()
+            // Bound the suspend. vm.pause()/saveMachineStateTo can hang against a
+            // wedged or CPU-pegged guest (e.g. a runaway autorepeat loop), which
+            // would strand quit in `.terminateLater` forever — the dialog is
+            // answered but the app never exits. Race the suspend against a
+            // deadline and force-stop if it doesn't land, exactly like the
+            // .shutdown watchdog below. 20s comfortably covers a legit multi-GB
+            // RAM save on SSD while still guaranteeing quit terminates.
+            let saved = await withTaskGroup(of: Bool.self) { group -> Bool in
+                group.addTask { @MainActor in
+                    do { try await sandbox.suspend(); return true }
+                    catch { return false }
+                }
+                group.addTask { @MainActor in
+                    try? await Task.sleep(nanoseconds: 20_000_000_000)
+                    return false
+                }
+                let first = await group.next() ?? false
+                group.cancelAll()
+                return first
+            }
+            if saved {
                 FileHandle.standardError.write(Data("[ac] suspended '\(name)'\n".utf8))
-            } catch {
+            } else {
                 FileHandle.standardError.write(Data(
-                    "[ac] suspend '\(name)' failed (\(error)) — forcing stop\n".utf8))
+                    "[ac] suspend '\(name)' failed or timed out — forcing stop\n".utf8))
                 sandbox.sessionDisk?.clearSavedState()
                 await Self.forceStop(vm)
             }

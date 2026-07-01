@@ -3885,6 +3885,17 @@ public final class ProfileStore {
     d=/mnt/bromure-outbox
     [ -d "$d" ] || exit 0
     : > "$d/shortcut-${key}.txt" 2>/dev/null
+    # ⌘Q/⌘H/⇧⌘Q/⌃⌘Q pull macOS focus off the VM (quit dialog / hide / lock /
+    # log out). The VZ view never delivers the matching keyUp once focus leaves,
+    # so X keeps autorepeating the chord — spinning the CPU and re-bouncing the
+    # shortcut in a tight loop. Synthesize the release so the stuck chord clears.
+    # The tab chords (⌘T/⌘W/…) don't move focus, so they don't need this.
+    case "$key" in
+        q|h|shift-q|ctrl-q)
+            xdotool keyup Super_L Super_R Shift_L Shift_R Control_L Control_R q \
+                2>/dev/null || true
+            ;;
+    esac
     HKEOF
     chmod +x "$HOSTKEY"
 
