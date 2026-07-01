@@ -3889,8 +3889,14 @@ public final class ProfileStore {
     chmod +x "$HOSTKEY"
 
     # Openbox grabs only the host-owned chords; every other ⌘ chord (⌘C/⌘V/…)
-    # falls through to kitty as Super+… as before. ⌘H/⌘Q/⌘Tab never reach the
-    # guest (capturesSystemKeys = false → macOS owns them), so they aren't here.
+    # falls through to kitty as Super+… as before. ⌘Tab is a WindowServer hotkey
+    # macOS intercepts before the guest (capturesSystemKeys = false), so it's
+    # absent — but ⌘Q/⌘H and the system ⇧⌘Q (log out) / ⌃⌘Q (lock screen) chords
+    # are app / loginwindow key-equivalents the VZ view *does* forward to the
+    # guest, where they'd be silently swallowed. So grab + bounce those too and
+    # let the host run the real macOS action (see ACAppDelegate.onShortcut →
+    # performACSystemChord). The Mac ⌘ arrives as Super (W); Shift/Ctrl keep
+    # their own modifier bits, so ⇧⌘Q → W-S-q and ⌃⌘Q → W-C-q.
     # Written as a per-user config (precedence over /etc/xdg) + reconfigure;
     # openbox is already up (started from xinitrc before this agent runs).
     mkdir -p "$HOME/.config/openbox"
@@ -3910,6 +3916,10 @@ public final class ProfileStore {
         <keybind key="W-7"><action name="Execute"><command>$HOSTKEY 7</command></action></keybind>
         <keybind key="W-8"><action name="Execute"><command>$HOSTKEY 8</command></action></keybind>
         <keybind key="W-9"><action name="Execute"><command>$HOSTKEY 9</command></action></keybind>
+        <keybind key="W-q"><action name="Execute"><command>$HOSTKEY q</command></action></keybind>
+        <keybind key="W-h"><action name="Execute"><command>$HOSTKEY h</command></action></keybind>
+        <keybind key="W-S-q"><action name="Execute"><command>$HOSTKEY shift-q</command></action></keybind>
+        <keybind key="W-C-q"><action name="Execute"><command>$HOSTKEY ctrl-q</command></action></keybind>
       </keyboard>
       <applications>
         <application class="*"><decor>no</decor><focus>yes</focus></application>
@@ -3917,7 +3927,7 @@ public final class ProfileStore {
     </openbox_config>
     OBEOF
     openbox --reconfigure >/dev/null 2>&1 || true
-    log "installed openbox keychord grabs (host owns ⌘T/⌘W/⌘N/⌘1-9)"
+    log "installed openbox keychord grabs (host owns ⌘T/⌘W/⌘N/⌘1-9/⌘Q/⌘H/⇧⌘Q/⌃⌘Q)"
 
     # ── Tabs = tmux windows ──────────────────────────────────────────────
     # ONE tmux session ("bromure"); each tab is a window in it. A single

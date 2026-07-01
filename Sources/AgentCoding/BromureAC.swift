@@ -2240,6 +2240,69 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return event
     }
 
+    /// Host actions for the macOS system chords the guest bounces back while the
+    /// VM holds keyboard focus — ⌘Q, ⌘H, and the ⇧⌘Q (log out) / ⌃⌘Q (lock
+    /// screen) shortcuts. The VZ view forwards these to the guest
+    /// (capturesSystemKeys only frees WindowServer hotkeys like ⌘Tab, not app /
+    /// loginwindow key-equivalents), where they'd be swallowed; Openbox grabs
+    /// them (see Profile.swift's rc.xml) and `bromure-hostkey` bounces the bare
+    /// token here. Returns true when `key` was a system chord (fully handled).
+    @discardableResult @MainActor
+    func performACSystemChord(_ key: String) -> Bool {
+        switch key {
+        case "q":
+            // Standard ⌘Q — routes through applicationShouldTerminate, which
+            // confirms and drains any running VMs before actually quitting.
+            NSApp.terminate(nil)
+        case "h":
+            NSApp.hide(nil)
+        case "ctrl-q":
+            lockScreen()
+        case "shift-q":
+            logOut()
+        default:
+            return false
+        }
+        return true
+    }
+
+    /// ⌃⌘Q — lock the screen. No public API locks the session;
+    /// login.framework's `SACLockScreenImmediate` is the same entry point the
+    /// system shortcut drives. dlopen'd so a macOS that ever drops the symbol
+    /// degrades to a logged no-op rather than a launch-time link failure.
+    @MainActor
+    private func lockScreen() {
+        typealias LockFn = @convention(c) () -> Int32
+        guard let handle = dlopen(
+            "/System/Library/PrivateFrameworks/login.framework/Versions/Current/login",
+            RTLD_NOW),
+              let sym = dlsym(handle, "SACLockScreenImmediate") else {
+            NSLog("[hostkey] lock-screen entry point unavailable")
+            return
+        }
+        _ = unsafeBitCast(sym, to: LockFn.self)()
+    }
+
+    /// ⇧⌘Q — log out. Sends loginwindow the same Apple event the shortcut does,
+    /// so the standard "quit all applications and log out?" confirmation shows
+    /// (kAELogOut 'logo', not the no-prompt variant). First use may raise the
+    /// Automation-permission prompt to control loginwindow.
+    @MainActor
+    private func logOut() {
+        let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.loginwindow")
+        let event = NSAppleEventDescriptor.appleEvent(
+            withEventClass: AEEventClass(0x6165_7674),   // 'aevt'
+            eventID: AEEventID(0x6c6f_676f),             // 'logo'
+            targetDescriptor: target,
+            returnID: AEReturnID(-1),                     // kAutoGenerateReturnID
+            transactionID: AETransactionID(0))            // kAnyTransactionID
+        do {
+            try event.sendEvent(options: .noReply, timeout: 5)
+        } catch {
+            NSLog("[hostkey] log-out event failed: \(error)")
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Quit only when literally every window is gone — picker + all
         // session windows. Closing one session shouldn't take the others
@@ -5236,11 +5299,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
         sandbox.onShortcut = { [weak self] key in
-            // A host-owned chord (⌘T/⌘W/⌘N/⌘1-9) that Openbox grabbed in the
-            // guest and bounced back because the VM held keyboard focus. Run
-            // the same action the key monitor would — performACShortcut is the
-            // shared sink, so the two paths can't drift. No-op when detached.
-            Task { @MainActor in self?.pane(for: pid)?.performACShortcut(key) }
+            // A host-owned chord that Openbox grabbed in the guest and bounced
+            // back because the VM held keyboard focus. The macOS system chords
+            // (⌘Q/⌘H/⇧⌘Q/⌃⌘Q) are app-global, so they run first and independent
+            // of any pane; the tab chords (⌘T/⌘W/⌘N/⌘1-9) go through
+            // performACShortcut — the shared sink the key monitor also uses, so
+            // the two delivery paths can't drift. No-op when detached.
+            Task { @MainActor in
+                guard let self else { return }
+                if self.performACSystemChord(key) { return }
+                self.pane(for: pid)?.performACShortcut(key)
+            }
         }
     }
 
