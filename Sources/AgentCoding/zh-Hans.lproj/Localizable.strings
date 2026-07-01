@@ -756,3 +756,31 @@
 "Shutdown" = "关机";
 "Suspend" = "挂起";
 "Reboot" = "重启";
+
+/* Agentic Coding → Credentials — field labels, hints & buttons */
+"Real secret" = "真实密钥";
+"Environment variable" = "环境变量";
+"API host (optional)" = "API 主机（可选）";
+"Personal access token" = "个人访问令牌";
+"Registry host" = "镜像仓库主机";
+"Password or token" = "密码或令牌";
+"Environment variable(s)" = "环境变量";
+"e.g. Stripe (sandbox)" = "例如 Stripe（沙盒）";
+"e.g. Production cluster" = "例如 生产集群";
+"Hide value" = "隐藏值";
+"Show value" = "显示值";
+"Hide token" = "隐藏令牌";
+"Show token" = "显示令牌";
+"No extra credentials yet." = "尚无额外凭据。";
+"Add credential" = "添加凭据";
+"A name for you to recognise this entry. Shown here only — never sent anywhere." = "便于你识别此条目的名称。仅在此处显示，不会发送到任何地方。";
+"Your real API key. Stays on macOS — the VM only ever sees a fake stand-in." = "你的真实 API 密钥。仅保留在 macOS 上——虚拟机只会看到一个伪造的替身。";
+"The agent reads the fake token from this variable inside the VM. Leave blank to inject nothing and copy it in yourself." = "代理会在虚拟机内从此变量读取伪造令牌。留空则不注入任何内容，需自行填入。";
+"Hostname only, no https:// or path. The real key is only substituted on requests to this host and its subdomains. Leave blank to allow any host." = "仅填主机名，不含 https:// 或路径。仅在向该主机及其子域名发出的请求中替换为真实密钥。留空则允许任意主机。";
+"The git host these credentials sign in to. Works with self-hosted GitLab / Gitea too." = "这些凭据登录的 git 主机。也适用于自托管的 GitLab / Gitea。";
+"The registry you docker pull / push to, e.g. ghcr.io or a private registry host." = "你执行 docker pull / push 的镜像仓库，例如 ghcr.io 或私有仓库主机。";
+"A name for you to recognise this endpoint. Shown here only." = "便于你识别此端点的名称。仅在此处显示。";
+"The hostname the agent connects to — no https:// or path. Both the credential swap and Guardrails scope to this host, so self-hosted instances work." = "代理连接的主机名——不含 https:// 或路径。凭据替换和 Guardrails 都以该主机为范围，因此自托管实例可正常工作。";
+"Your real secret. Stays on macOS — the VM only ever sees a fake stand-in." = "你的真实密钥。仅保留在 macOS 上——虚拟机只会看到一个伪造的替身。";
+"Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string." = "在虚拟机中导出伪造密钥所用的变量——多个时用逗号分隔。请在代码/连接字符串中引用它们。";
+"Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox." = "为任何 Bromure 不会自动处理的 API 添加凭据（Anthropic、OpenAI、GitHub、GitLab、DigitalOcean 和 Kubernetes 已自动处理）。虚拟机内的代理只会看到伪造令牌（`brm_…`）；当请求离开虚拟机时，Bromure 会在出口处把伪造令牌换回你的真实密钥——因此你的真实密钥永远不会进入沙盒。";

@@ -1745,12 +1745,12 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var otherTokensSubsection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("For any API beyond the auto-handled ones (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean, Kubernetes). Each entry mints a fresh fake (`brm_…`) deterministic in your real value; the fake is exported as the named env var inside the VM, the proxy swaps it back to your real value on the wire.")
+            Text(NSLocalizedString("Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox.", comment: ""))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if draft.manualTokens.isEmpty {
-                Text("No other API tokens configured.")
+                Text(NSLocalizedString("No extra credentials yet.", comment: ""))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -1768,7 +1768,7 @@ struct ProfileEditorView: View {
                 Button {
                     draft.manualTokens.append(ManualToken())
                 } label: {
-                    Label("Add token", systemImage: "plus")
+                    Label(NSLocalizedString("Add credential", comment: ""), systemImage: "plus")
                 }
                 .buttonStyle(.borderless)
             }
@@ -3102,6 +3102,26 @@ struct LocalModelsSettingsView: View {
     }
 }
 
+// MARK: - Credential field label helpers
+
+/// Bold caption that sits above a credential input, naming the field.
+/// Shared by every credential row so the labelling stays consistent.
+/// The passed string is localized here, so call sites pass plain English.
+private func credFieldLabel(_ text: String) -> some View {
+    Text(NSLocalizedString(text, comment: "credential field label"))
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+}
+
+/// Small tertiary line under a credential input explaining what to type.
+/// The passed string is localized here, so call sites pass plain English.
+private func credFieldHint(_ text: String) -> some View {
+    Text(NSLocalizedString(text, comment: "credential field hint"))
+        .font(.caption2)
+        .foregroundStyle(.tertiary)
+        .fixedSize(horizontal: false, vertical: true)
+}
+
 // MARK: - Manual token row (Advanced)
 
 /// One editable row for the Advanced→Manual tokens list. Pairs a name
@@ -3113,44 +3133,70 @@ private struct ManualTokenRow: View {
     @State private var revealReal: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                TextField("Name", text: $token.name, prompt: Text("Stripe sandbox"))
-                    .textFieldStyle(.roundedBorder)
-                Button(action: onRemove) {
-                    Image(systemName: "minus.circle")
-                }
-                .buttonStyle(.borderless)
-                .help("Remove this token rule")
-            }
-            HStack(spacing: 6) {
-                TextField("Env var", text: $token.envVarName, prompt: Text("STRIPE_API_KEY"))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 200)
-                TextField("Host filter (optional)", text: $token.hostFilter,
-                          prompt: Text("api.stripe.com"))
-                    .textFieldStyle(.roundedBorder)
-            }
-            HStack(spacing: 6) {
-                ZStack {
-                    if revealReal {
-                        TextField("Real value", text: $token.realValue,
-                                  prompt: Text("real secret — stays on macOS"))
-                            .textFieldStyle(.roundedBorder)
-                    } else {
-                        SecureField("Real value", text: $token.realValue,
-                                    prompt: Text("real secret — stays on macOS"))
-                            .textFieldStyle(.roundedBorder)
+        VStack(alignment: .leading, spacing: 12) {
+            // Name — the display label for this entry, plus the remove button.
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    credFieldLabel("Name")
+                    Spacer()
+                    Button(action: onRemove) {
+                        Image(systemName: "minus.circle")
                     }
+                    .buttonStyle(.borderless)
+                    .help(NSLocalizedString("Remove this credential", comment: ""))
                 }
-                Button {
-                    revealReal.toggle()
-                } label: {
-                    Image(systemName: revealReal ? "eye.slash" : "eye")
-                }
-                .buttonStyle(.borderless)
-                .help(revealReal ? "Hide value" : "Show value")
+                TextField("", text: $token.name,
+                          prompt: Text(NSLocalizedString("e.g. Stripe (sandbox)", comment: "")))
+                    .textFieldStyle(.roundedBorder)
+                    .labelsHidden()
+                credFieldHint("A name for you to recognise this entry. Shown here only — never sent anywhere.")
             }
+
+            // Real secret — the actual key, masked by default.
+            VStack(alignment: .leading, spacing: 3) {
+                credFieldLabel("Real secret")
+                HStack(spacing: 6) {
+                    ZStack {
+                        if revealReal {
+                            TextField("", text: $token.realValue, prompt: Text("sk_live_…"))
+                                .textFieldStyle(.roundedBorder)
+                        } else {
+                            SecureField("", text: $token.realValue, prompt: Text("sk_live_…"))
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    .labelsHidden()
+                    Button {
+                        revealReal.toggle()
+                    } label: {
+                        Image(systemName: revealReal ? "eye.slash" : "eye")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(revealReal
+                          ? NSLocalizedString("Hide value", comment: "")
+                          : NSLocalizedString("Show value", comment: ""))
+                }
+                credFieldHint("Your real API key. Stays on macOS — the VM only ever sees a fake stand-in.")
+            }
+
+            // Env var — the variable the fake is exported under inside the VM.
+            VStack(alignment: .leading, spacing: 3) {
+                credFieldLabel("Environment variable")
+                TextField("", text: $token.envVarName, prompt: Text("STRIPE_API_KEY"))
+                    .textFieldStyle(.roundedBorder)
+                    .labelsHidden()
+                credFieldHint("The agent reads the fake token from this variable inside the VM. Leave blank to inject nothing and copy it in yourself.")
+            }
+
+            // Host — restricts where the fake is swapped back to the real key.
+            VStack(alignment: .leading, spacing: 3) {
+                credFieldLabel("API host (optional)")
+                TextField("", text: $token.hostFilter, prompt: Text("api.stripe.com"))
+                    .textFieldStyle(.roundedBorder)
+                    .labelsHidden()
+                credFieldHint("Hostname only, no https:// or path. The real key is only substituted on requests to this host and its subdomains. Leave blank to allow any host.")
+            }
+
             Toggle(isOn: $token.requireApproval) {
                 Text(NSLocalizedString("Require approval to use", comment: ""))
                     .font(.caption)
@@ -3158,7 +3204,7 @@ private struct ManualTokenRow: View {
             .toggleStyle(.checkbox)
             .controlSize(.small)
         }
-        .padding(8)
+        .padding(10)
         .background(Color(nsColor: .textBackgroundColor),
                     in: RoundedRectangle(cornerRadius: 6))
     }
@@ -4141,47 +4187,64 @@ private struct HTTPSCredentialRow: View {
     @State private var revealToken: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: hostSymbol)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16)
-                TextField("Host", text: $credential.host, prompt: Text("github.com"))
-                    .textFieldStyle(.roundedBorder)
-                Button {
-                    onOpenTokenPage(credential.host)
-                } label: {
-                    Image(systemName: "arrow.up.right.square")
-                }
-                .buttonStyle(.borderless)
-                .help("Open this host's token-creation page in your browser")
-                .disabled(!hasKnownTokenPage)
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                credFieldLabel("Host")
+                HStack(spacing: 6) {
+                    Image(systemName: hostSymbol)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16)
+                    TextField("", text: $credential.host, prompt: Text("github.com"))
+                        .textFieldStyle(.roundedBorder)
+                        .labelsHidden()
+                    Button {
+                        onOpenTokenPage(credential.host)
+                    } label: {
+                        Image(systemName: "arrow.up.right.square")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(NSLocalizedString("Open this host's token-creation page in your browser", comment: ""))
+                    .disabled(!hasKnownTokenPage)
 
-                Button(action: onRemove) {
-                    Image(systemName: "minus.circle")
+                    Button(action: onRemove) {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(NSLocalizedString("Remove this credential", comment: ""))
                 }
-                .buttonStyle(.borderless)
-                .help("Remove this credential")
+                credFieldHint("The git host these credentials sign in to. Works with self-hosted GitLab / Gitea too.")
             }
-            HStack(spacing: 6) {
-                TextField("Username", text: $credential.username, prompt: Text("octocat"))
-                    .textFieldStyle(.roundedBorder)
-                ZStack {
-                    if revealToken {
-                        TextField("Token", text: $credential.token, prompt: Text("ghp_…"))
-                            .textFieldStyle(.roundedBorder)
-                    } else {
-                        SecureField("Token", text: $credential.token, prompt: Text("ghp_…"))
-                            .textFieldStyle(.roundedBorder)
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    credFieldLabel("Username")
+                    TextField("", text: $credential.username, prompt: Text("octocat"))
+                        .textFieldStyle(.roundedBorder)
+                        .labelsHidden()
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    credFieldLabel("Personal access token")
+                    HStack(spacing: 6) {
+                        ZStack {
+                            if revealToken {
+                                TextField("", text: $credential.token, prompt: Text("ghp_…"))
+                                    .textFieldStyle(.roundedBorder)
+                            } else {
+                                SecureField("", text: $credential.token, prompt: Text("ghp_…"))
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                        .labelsHidden()
+                        Button {
+                            revealToken.toggle()
+                        } label: {
+                            Image(systemName: revealToken ? "eye.slash" : "eye")
+                        }
+                        .buttonStyle(.borderless)
+                        .help(revealToken
+                              ? NSLocalizedString("Hide token", comment: "")
+                              : NSLocalizedString("Show token", comment: ""))
                     }
                 }
-                Button {
-                    revealToken.toggle()
-                } label: {
-                    Image(systemName: revealToken ? "eye.slash" : "eye")
-                }
-                .buttonStyle(.borderless)
-                .help(revealToken ? "Hide token" : "Show token")
             }
             Toggle(isOn: $credential.requireApproval) {
                 Text(NSLocalizedString("Require approval to use", comment: ""))
@@ -4252,64 +4315,88 @@ private struct DatabaseEndpointRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                TextField("Name (optional)", text: $endpoint.name,
-                          prompt: Text("Production cluster"))
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    credFieldLabel("Name (optional)")
+                    Spacer()
+                    Button(action: onRemove) {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(NSLocalizedString("Remove this endpoint", comment: ""))
+                }
+                TextField("", text: $endpoint.name,
+                          prompt: Text(NSLocalizedString("e.g. Production cluster", comment: "")))
                     .textFieldStyle(.roundedBorder)
-                Button(action: onRemove) {
-                    Image(systemName: "minus.circle")
-                }
-                .buttonStyle(.borderless)
-                .help(NSLocalizedString("Remove this endpoint", comment: ""))
+                    .labelsHidden()
+                credFieldHint("A name for you to recognise this endpoint. Shown here only.")
             }
-            TextField("Host", text: $endpoint.host, prompt: Text(hostPrompt))
-                .textFieldStyle(.roundedBorder)
-                .disableAutocorrection(true)
-                .help(NSLocalizedString(
-                    "The hostname the agent connects to (no scheme). Both the credential swap and Guardrails scope to this host, so self-hosted instances work.",
-                    comment: ""))
 
-            Picker("Auth", selection: $endpoint.auth) {
-                ForEach(HTTPDatabaseEndpoint.AuthKind.allCases, id: \.self) { a in
-                    Text(a.displayName).tag(a)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            if endpoint.auth == .basic {
-                TextField("Username", text: $endpoint.username, prompt: Text("default"))
+            VStack(alignment: .leading, spacing: 3) {
+                credFieldLabel("Host")
+                TextField("", text: $endpoint.host, prompt: Text(hostPrompt))
                     .textFieldStyle(.roundedBorder)
                     .disableAutocorrection(true)
+                    .labelsHidden()
+                credFieldHint("The hostname the agent connects to — no https:// or path. Both the credential swap and Guardrails scope to this host, so self-hosted instances work.")
             }
 
-            HStack(spacing: 6) {
-                ZStack {
-                    if revealSecret {
-                        TextField("Secret", text: $endpoint.secret, prompt: Text(secretPrompt))
-                            .textFieldStyle(.roundedBorder)
-                    } else {
-                        SecureField("Secret", text: $endpoint.secret, prompt: Text("•••• ••••"))
-                            .textFieldStyle(.roundedBorder)
+            VStack(alignment: .leading, spacing: 3) {
+                credFieldLabel("Authentication")
+                Picker("", selection: $endpoint.auth) {
+                    ForEach(HTTPDatabaseEndpoint.AuthKind.allCases, id: \.self) { a in
+                        Text(a.displayName).tag(a)
                     }
                 }
-                Button {
-                    revealSecret.toggle()
-                } label: {
-                    Image(systemName: revealSecret ? "eye.slash" : "eye")
-                }
-                .buttonStyle(.borderless)
-                .help(revealSecret
-                      ? NSLocalizedString("Hide secret", comment: "")
-                      : NSLocalizedString("Show secret", comment: ""))
+                .pickerStyle(.segmented)
+                .labelsHidden()
             }
 
-            TextField("Env var(s)", text: envVarsText, prompt: Text(envVarPrompt))
-                .textFieldStyle(.roundedBorder)
-                .disableAutocorrection(true)
-                .help(NSLocalizedString(
-                    "Environment variable(s) the fake secret is exported under in the VM (comma-separated for more than one). Reference these from your code / connection string.",
-                    comment: ""))
+            if endpoint.auth == .basic {
+                VStack(alignment: .leading, spacing: 3) {
+                    credFieldLabel("Username")
+                    TextField("", text: $endpoint.username, prompt: Text("default"))
+                        .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                        .labelsHidden()
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                credFieldLabel("Secret")
+                HStack(spacing: 6) {
+                    ZStack {
+                        if revealSecret {
+                            TextField("", text: $endpoint.secret, prompt: Text(secretPrompt))
+                                .textFieldStyle(.roundedBorder)
+                        } else {
+                            SecureField("", text: $endpoint.secret, prompt: Text("•••• ••••"))
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    .labelsHidden()
+                    Button {
+                        revealSecret.toggle()
+                    } label: {
+                        Image(systemName: revealSecret ? "eye.slash" : "eye")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(revealSecret
+                          ? NSLocalizedString("Hide secret", comment: "")
+                          : NSLocalizedString("Show secret", comment: ""))
+                }
+                credFieldHint("Your real secret. Stays on macOS — the VM only ever sees a fake stand-in.")
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                credFieldLabel("Environment variable(s)")
+                TextField("", text: envVarsText, prompt: Text(envVarPrompt))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                    .labelsHidden()
+                credFieldHint("Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string.")
+            }
 
             Toggle(isOn: $endpoint.requireApproval) {
                 Text(NSLocalizedString("Require approval to use", comment: ""))
@@ -4333,44 +4420,59 @@ private struct DockerRegistryRow: View {
     @State private var revealPassword: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: hostSymbol)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16)
-                TextField("Host", text: $cred.host, prompt: Text("ghcr.io"))
-                    .textFieldStyle(.roundedBorder)
-                    .disableAutocorrection(true)
-                Button(action: onRemove) {
-                    Image(systemName: "minus.circle")
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                credFieldLabel("Registry host")
+                HStack(spacing: 6) {
+                    Image(systemName: hostSymbol)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16)
+                    TextField("", text: $cred.host, prompt: Text("ghcr.io"))
+                        .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                        .labelsHidden()
+                    Button(action: onRemove) {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(NSLocalizedString("Remove this registry", comment: ""))
                 }
-                .buttonStyle(.borderless)
-                .help(NSLocalizedString("Remove this registry", comment: ""))
+                credFieldHint("The registry you docker pull / push to, e.g. ghcr.io or a private registry host.")
             }
-            HStack(spacing: 6) {
-                TextField("Username", text: $cred.username, prompt: Text("octocat"))
-                    .textFieldStyle(.roundedBorder)
-                    .disableAutocorrection(true)
-                ZStack {
-                    if revealPassword {
-                        TextField("Password / token", text: $cred.password,
-                                  prompt: Text("ghp_…"))
-                            .textFieldStyle(.roundedBorder)
-                    } else {
-                        SecureField("Password / token", text: $cred.password,
-                                    prompt: Text("•••• ••••"))
-                            .textFieldStyle(.roundedBorder)
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    credFieldLabel("Username")
+                    TextField("", text: $cred.username, prompt: Text("octocat"))
+                        .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                        .labelsHidden()
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    credFieldLabel("Password or token")
+                    HStack(spacing: 6) {
+                        ZStack {
+                            if revealPassword {
+                                TextField("", text: $cred.password,
+                                          prompt: Text("ghp_…"))
+                                    .textFieldStyle(.roundedBorder)
+                            } else {
+                                SecureField("", text: $cred.password,
+                                            prompt: Text("•••• ••••"))
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                        .labelsHidden()
+                        Button {
+                            revealPassword.toggle()
+                        } label: {
+                            Image(systemName: revealPassword ? "eye.slash" : "eye")
+                        }
+                        .buttonStyle(.borderless)
+                        .help(revealPassword
+                              ? NSLocalizedString("Hide password", comment: "")
+                              : NSLocalizedString("Show password", comment: ""))
                     }
                 }
-                Button {
-                    revealPassword.toggle()
-                } label: {
-                    Image(systemName: revealPassword ? "eye.slash" : "eye")
-                }
-                .buttonStyle(.borderless)
-                .help(revealPassword
-                      ? NSLocalizedString("Hide password", comment: "")
-                      : NSLocalizedString("Show password", comment: ""))
             }
             Toggle(isOn: $cred.requireApproval) {
                 Text(NSLocalizedString("Require approval to use", comment: ""))

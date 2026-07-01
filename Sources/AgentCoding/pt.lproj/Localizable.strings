@@ -756,3 +756,31 @@
 "Shutdown" = "Desligar";
 "Suspend" = "Suspender";
 "Reboot" = "Reiniciar";
+
+/* Agentic Coding → Credentials — field labels, hints & buttons */
+"Real secret" = "Segredo real";
+"Environment variable" = "Variável de ambiente";
+"API host (optional)" = "Host da API (opcional)";
+"Personal access token" = "Token de acesso pessoal";
+"Registry host" = "Host do registro";
+"Password or token" = "Senha ou token";
+"Environment variable(s)" = "Variável(is) de ambiente";
+"e.g. Stripe (sandbox)" = "ex.: Stripe (sandbox)";
+"e.g. Production cluster" = "ex.: Cluster de produção";
+"Hide value" = "Ocultar valor";
+"Show value" = "Mostrar valor";
+"Hide token" = "Ocultar token";
+"Show token" = "Mostrar token";
+"No extra credentials yet." = "Ainda não há credenciais adicionais.";
+"Add credential" = "Adicionar credencial";
+"A name for you to recognise this entry. Shown here only — never sent anywhere." = "Um nome para você reconhecer esta entrada. Mostrado apenas aqui — nunca enviado a lugar nenhum.";
+"Your real API key. Stays on macOS — the VM only ever sees a fake stand-in." = "Sua chave de API real. Permanece no macOS — a VM só vê um substituto falso.";
+"The agent reads the fake token from this variable inside the VM. Leave blank to inject nothing and copy it in yourself." = "O agente lê o token falso a partir desta variável dentro da VM. Deixe em branco para não injetar nada e inseri-lo você mesmo.";
+"Hostname only, no https:// or path. The real key is only substituted on requests to this host and its subdomains. Leave blank to allow any host." = "Apenas o nome do host, sem https:// ou caminho. A chave real só é substituída em solicitações para este host e seus subdomínios. Deixe em branco para permitir qualquer host.";
+"The git host these credentials sign in to. Works with self-hosted GitLab / Gitea too." = "O host git no qual estas credenciais fazem login. Funciona também com GitLab / Gitea auto-hospedados.";
+"The registry you docker pull / push to, e.g. ghcr.io or a private registry host." = "O registro para o qual você faz docker pull / push, ex.: ghcr.io ou um host de registro privado.";
+"A name for you to recognise this endpoint. Shown here only." = "Um nome para você reconhecer este endpoint. Mostrado apenas aqui.";
+"The hostname the agent connects to — no https:// or path. Both the credential swap and Guardrails scope to this host, so self-hosted instances work." = "O nome de host ao qual o agente se conecta — sem https:// ou caminho. Tanto a troca de credenciais quanto as Guardrails se aplicam a este host, então instâncias auto-hospedadas funcionam.";
+"Your real secret. Stays on macOS — the VM only ever sees a fake stand-in." = "Seu segredo real. Permanece no macOS — a VM só vê um substituto falso.";
+"Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string." = "Variável(is) sob a(s) qual(is) o segredo falso é exportado na VM — separadas por vírgula se houver mais de uma. Referencie-as no seu código / string de conexão.";
+"Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox." = "Adicione credenciais para qualquer API que o Bromure não trate automaticamente (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean e Kubernetes já são tratados). O agente dentro da VM só vê um token falso (`brm_…`); quando uma solicitação sai da VM, o Bromure troca o falso de volta pela sua chave real na saída — assim, seu segredo real nunca entra no sandbox.";

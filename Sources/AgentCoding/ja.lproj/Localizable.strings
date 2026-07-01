@@ -756,3 +756,31 @@
 "Shutdown" = "シャットダウン";
 "Suspend" = "サスペンド";
 "Reboot" = "再起動";
+
+/* Agentic Coding → Credentials — field labels, hints & buttons */
+"Real secret" = "実際のシークレット";
+"Environment variable" = "環境変数";
+"API host (optional)" = "APIホスト（任意）";
+"Personal access token" = "個人アクセストークン";
+"Registry host" = "レジストリホスト";
+"Password or token" = "パスワードまたはトークン";
+"Environment variable(s)" = "環境変数";
+"e.g. Stripe (sandbox)" = "例：Stripe（サンドボックス）";
+"e.g. Production cluster" = "例：本番クラスター";
+"Hide value" = "値を隠す";
+"Show value" = "値を表示";
+"Hide token" = "トークンを隠す";
+"Show token" = "トークンを表示";
+"No extra credentials yet." = "追加の認証情報はまだありません。";
+"Add credential" = "認証情報を追加";
+"A name for you to recognise this entry. Shown here only — never sent anywhere." = "このエントリを識別するための名前です。ここにのみ表示され、どこにも送信されません。";
+"Your real API key. Stays on macOS — the VM only ever sees a fake stand-in." = "実際のAPIキーです。macOSに保存され、VMには偽の代替値のみが渡されます。";
+"The agent reads the fake token from this variable inside the VM. Leave blank to inject nothing and copy it in yourself." = "エージェントはVM内でこの変数から偽のトークンを読み取ります。空欄にすると何も注入されず、自分で入力できます。";
+"Hostname only, no https:// or path. The real key is only substituted on requests to this host and its subdomains. Leave blank to allow any host." = "ホスト名のみ（https:// やパスは不要）。実際のキーは、このホストとそのサブドメインへのリクエストでのみ置き換えられます。空欄にするとすべてのホストを許可します。";
+"The git host these credentials sign in to. Works with self-hosted GitLab / Gitea too." = "これらの認証情報でサインインするgitホスト。セルフホストのGitLab / Giteaでも動作します。";
+"The registry you docker pull / push to, e.g. ghcr.io or a private registry host." = "docker pull / push を行うレジストリ（例：ghcr.io やプライベートレジストリのホスト）。";
+"A name for you to recognise this endpoint. Shown here only." = "このエンドポイントを識別するための名前です。ここにのみ表示されます。";
+"The hostname the agent connects to — no https:// or path. Both the credential swap and Guardrails scope to this host, so self-hosted instances work." = "エージェントが接続するホスト名（https:// やパスは不要）。認証情報の置き換えとGuardrailsはこのホストを対象とするため、セルフホストのインスタンスでも動作します。";
+"Your real secret. Stays on macOS — the VM only ever sees a fake stand-in." = "実際のシークレットです。macOSに保存され、VMには偽の代替値のみが渡されます。";
+"Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string." = "VM内で偽のシークレットがエクスポートされる変数（複数の場合はカンマ区切り）。コードや接続文字列からこれらを参照してください。";
+"Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox." = "Bromureが自動的に処理しないAPI（Anthropic、OpenAI、GitHub、GitLab、DigitalOcean、Kubernetesは対応済み）の認証情報を追加します。VM内のエージェントには偽のトークン（`brm_…`）のみが見えます。リクエストがVMを出る際に、Bromureが偽のトークンを実際のキーに戻すため、実際のシークレットがサンドボックスに入ることはありません。";
