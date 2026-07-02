@@ -130,6 +130,13 @@ then `scripts/publish-image.sh <path-to-bromure-ac>`:
 
 `DRY_RUN=1` stops after compression (no uploads/deletes).
 
+`dl.bromure.io` is fronted by a Cloudflare Worker
+(`tools/cloudflare-worker.js` — deployed manually, keep in sync): `*.json`
+manifests get a 1s edge TTL straight from the Spaces origin, immutable
+binaries get 24h via DO's CDN endpoint. The publish smoke-test verifies
+the Spaces origin first, then polls the public CDN for up to an hour
+before deleting the previous image.
+
 ## Testing locally (no uploads)
 
 ```bash
