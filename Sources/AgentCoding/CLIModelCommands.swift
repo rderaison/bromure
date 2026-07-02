@@ -377,7 +377,7 @@ struct ModelCatalogList: ParsableCommand {
         // any network failure.
         if CatalogStore.refreshDisabled {
             FileHandle.standardError.write(Data(
-                "note: remote catalog disabled (defaults catalog.refreshDisabled); showing the bundled catalog.\n".utf8))
+                "note: catalog download disabled (defaults catalog.refreshDisabled); using the bundled + on-disk catalog.\n".utf8))
         } else if !offline {
             let ok = try blockingRun { await CatalogStore.shared.refresh() }
             if !ok {

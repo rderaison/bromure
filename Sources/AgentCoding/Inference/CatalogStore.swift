@@ -42,10 +42,12 @@ public final class CatalogStore: @unchecked Sendable {
 
     /// Testing kill-switch for the remote catalog:
     ///   defaults write io.bromure.agentic-coding catalog.refreshDisabled -bool YES
-    /// When set, the published manifest is neither fetched at startup nor
-    /// adopted from the on-disk cache, so the *bundled* `Resources/catalog.json`
-    /// is authoritative — an edited entry can be tested across launches without
-    /// the remote catalog replacing it. Delete the key to go back to normal.
+    /// When set, the published manifest is never *downloaded* — but the on-disk
+    /// cache (`Application Support/BromureAC/catalog.json`) is still read and
+    /// adopted, so a hand-edited catalog dropped there can be tested across
+    /// launches without the published one overwriting it. Delete that file too
+    /// when the *bundled* `Resources/catalog.json` should be authoritative.
+    /// Delete the key to go back to normal.
     public static var refreshDisabled: Bool {
         UserDefaults.standard.bool(forKey: "catalog.refreshDisabled")
     }
@@ -60,10 +62,10 @@ public final class CatalogStore: @unchecked Sendable {
         // The fetched catalog fully REPLACES the bundled baseline — no merging
         // of stale entries (a retired model disappears the moment it's dropped
         // from the published catalog.json). The bundled baseline is only the
-        // offline day-one fallback. With `refreshDisabled` the cached remote is
-        // ignored too — not just the fetch — else a previously-cached manifest
-        // would keep shadowing the bundled catalog under test.
-        let base = (Self.refreshDisabled ? nil : remote) ?? ModelCatalog.baseline
+        // offline day-one fallback. `refreshDisabled` blocks the *download*
+        // only: the on-disk cache still applies, so a hand-edited cache file
+        // survives launches instead of being clobbered by the published one.
+        let base = remote ?? ModelCatalog.baseline
         return withInstalledExtras(base)
     }
 
