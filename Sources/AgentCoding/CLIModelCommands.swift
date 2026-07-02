@@ -375,7 +375,10 @@ struct ModelCatalogList: ParsableCommand {
         // Live lookup against dl.bromure.io/mlx/catalog.json (merged over the
         // bundled baseline). Non-fatal — falls back to bundled + cached on
         // any network failure.
-        if !offline {
+        if CatalogStore.refreshDisabled {
+            FileHandle.standardError.write(Data(
+                "note: remote catalog disabled (defaults catalog.refreshDisabled); showing the bundled catalog.\n".utf8))
+        } else if !offline {
             let ok = try blockingRun { await CatalogStore.shared.refresh() }
             if !ok {
                 FileHandle.standardError.write(Data(
