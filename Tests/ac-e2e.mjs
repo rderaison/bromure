@@ -817,34 +817,35 @@ async function main() {
   if (!SKIP_SESSIONS) {
     console.log("\n--- 8. VM-side verification ---");
 
-    // Same gate as section 6 — skip when no base image / no debug shell.
-    const h = await api("GET", "/health");
-    const hasDebugShell = h?.debugEnabled === true;
-    let canExec = hasDebugShell;
-    if (!hasDebugShell) {
-      console.log(
-        "  \x1b[33mSKIP\x1b[0m  VM-side tests (BROMURE_DEBUG_CLAUDE not set on the running app)"
-      );
-    } else {
-      // Probe whether sessions can actually start.
-      try {
-        const id = createProfile("ACE2E_VMProbe");
-        const r = ac(`open ac session "${id}"`);
-        if (r.startsWith("error:")) canExec = false;
-        await sleep(1000);
-        ac(`close ac session "${id}"`);
-        await sleep(500);
-        deleteProfile(id);
-      } catch {
-        canExec = false;
-      }
+    // The debug shell is required here — CI exports BROMURE_DEBUG_CLAUDE=1
+    // and the preflight launches the app with it. An app running without it
+    // is a stale instance: FAIL with the remedy, don't skip.
+    await test("8.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", async () => {
+      const h = await api("GET", "/health");
+      assertEq(h.status, "ok");
+      assert(h.debugEnabled === true,
+             "app is running without BROMURE_DEBUG_CLAUDE=1 — quit it and rerun; the harness relaunches it with the flag");
+    });
+
+    // Probe whether sessions can actually start (base image present).
+    let canExec = true;
+    try {
+      const id = createProfile("ACE2E_VMProbe");
+      const r = ac(`open ac session "${id}"`);
+      if (r.startsWith("error:")) canExec = false;
+      await sleep(1000);
+      ac(`close ac session "${id}"`);
+      await sleep(500);
+      deleteProfile(id);
+    } catch {
+      canExec = false;
     }
 
-    if (hasDebugShell && !canExec) {
+    if (!canExec) {
       console.log(
         "  \x1b[33mSKIP\x1b[0m  VM-side tests (no base image — run `bromure-ac init` first)"
       );
-    } else if (canExec) {
+    } else {
       // Helper: open a session and wait for the shell-agent vsock pool to
       // fill before trying /exec. The agent dials back on guest boot,
       // which takes ~5-15s after the session window appears.
@@ -1190,13 +1191,15 @@ async function main() {
   if (!SKIP_SESSIONS) {
     console.log("\n--- 10. Supply Chain Security — VM-side ---");
 
-    const h = await api("GET", "/health");
-    const hasDebugShell = h?.debugEnabled === true;
-    if (!hasDebugShell) {
-      console.log(
-        "  \x1b[33mSKIP\x1b[0m  SC VM-side tests (BROMURE_DEBUG_CLAUDE not set)"
-      );
-    } else {
+    // Same contract as 8.0: the debug shell is guaranteed by CI/the
+    // preflight launcher — a running app without it FAILS, never skips.
+    await test("10.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", async () => {
+      const h = await api("GET", "/health");
+      assertEq(h.status, "ok");
+      assert(h.debugEnabled === true,
+             "app is running without BROMURE_DEBUG_CLAUDE=1 — quit it and rerun; the harness relaunches it with the flag");
+    });
+    {
       // Reuse the helper from section 8.
       async function withSCSession(profileName, policy, cb) {
         const id = createProfile(profileName);
@@ -1487,18 +1490,16 @@ async function main() {
   // ======================================================================
   console.log("\n--- 12. Prompt Injection detection ---");
 
-  // An unreachable HTTP API is an app failure (section 5.0 pins it); only
-  // the deliberate BROMURE_DEBUG_CLAUDE opt-out may skip this section.
-  let piDetectAvailable = false;
-  await test("12.0 /health answers (detection needs the HTTP API)", async () => {
+  // The detection endpoint needs the HTTP API + the debug shell — both
+  // guaranteed (CI exports BROMURE_DEBUG_CLAUDE=1; the preflight launches
+  // the app with it). A running app without it FAILS, never skips.
+  await test("12.0 detection endpoint available (/health + debug shell)", async () => {
     const h = await api("GET", "/health");
     assertEq(h.status, "ok");
-    piDetectAvailable = h.debugEnabled === true;
+    assert(h.debugEnabled === true,
+           "app is running without BROMURE_DEBUG_CLAUDE=1 — quit it and rerun; the harness relaunches it with the flag");
   });
-
-  if (!piDetectAvailable) {
-    console.log("  \x1b[33mSKIP\x1b[0m  detection endpoint (BROMURE_DEBUG_CLAUDE not set)");
-  } else {
+  {
     const detect = async (text, kind = "rules") => {
       const r = await api("POST", "/detect/prompt-injection", { text, kind });
       assert(r._status === 200, `detect HTTP ${r._status}`);
