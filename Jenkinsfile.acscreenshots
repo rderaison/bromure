@@ -27,9 +27,24 @@ pipeline {
                     file(credentialsId: 'PROVISION_PROFILE_AC', variable: 'PROVISION_PROFILE')
                 ]) {
                     sh '''
+                        # Without pipefail, `| tee` masks a failed build.
+                        set -o pipefail
                         rm -f bromure-ac.provisionprofile
                         cp "$PROVISION_PROFILE" bromure-ac.provisionprofile
-                        ./build.sh bromure-ac 2>&1 | tee build.log
+                        if ! ./build.sh bromure-ac 2>&1 | tee build.log; then
+                            # A swift-syntax bump (e.g. mlx-swift-lm 3.31.4) leaves
+                            # stale macro-plugin artifacts in this persistent
+                            # workspace; the compiler then dies with "failed to
+                            # receive result from plugin" (see Package.swift).
+                            # The documented fix is a clean build — retry once.
+                            if grep -q "failed to receive result from plugin" build.log; then
+                                echo "Stale macro-plugin artifacts detected; clean rebuild"
+                                rm -rf .build
+                                ./build.sh bromure-ac 2>&1 | tee build.log
+                            else
+                                exit 1
+                            fi
+                        fi
                     '''
                 }
             }
