@@ -1,0 +1,30 @@
+{
+  "formatVersion": 1,
+  "image": null,
+  "postinstall": [
+    {
+      "uuid": "7c9f1a2e-3b4d-4e5f-8a6b-1c2d3e4f5a6b",
+      "seq": 10,
+      "description": "Claude Code (Anthropic)",
+      "command": "npx --yes @socketsecurity/cli npm install -g --silent @anthropic-ai/claude-code"
+    },
+    {
+      "uuid": "2e8b4c6d-9f1a-4b3c-9d5e-6f7a8b9c0d1e",
+      "seq": 20,
+      "description": "Codex CLI (OpenAI)",
+      "command": "npx --yes @socketsecurity/cli npm install -g --silent @openai/codex"
+    },
+    {
+      "uuid": "5a1c3e5b-7d9f-4a2b-8c4d-0e1f2a3b4c5d",
+      "seq": 30,
+      "description": "Grok CLI (x.ai)",
+      "command": "curl -fsSL https://x.ai/cli/install.sh | bash\nif [ -d /root/.grok ]; then\n    rm -rf /opt/grok\n    mv /root/.grok /opt/grok\n    chmod -R a+rX /opt/grok\n    ln -sf /opt/grok/bin/grok /usr/local/bin/grok\nfi\ncommand -v grok >/dev/null 2>&1 || echo 'WARNING: grok not on PATH after install'"
+    },
+    {
+      "uuid": "9d3e5f7a-1b2c-4d6e-b8f9-3a4b5c6d7e8f",
+      "seq": 40,
+      "description": "Google Cloud SDK (gcloud)",
+      "command": "ARCH=$(uname -m)\ncase \"$ARCH\" in aarch64|arm64) K=arm ;; x86_64) K=x86_64 ;; *) echo \"unsupported arch $ARCH\"; exit 0 ;; esac\nURL=\"https://dl.google.com/dl/cloudsdk/channels/rapid/google-cloud-cli-linux-${K}.tar.gz\"\nTMP=$(mktemp -d)\ncurl -fsSL \"$URL\" -o \"$TMP/gcloud.tar.gz\"\ntar -xzf \"$TMP/gcloud.tar.gz\" -C /opt\n/opt/google-cloud-sdk/install.sh --quiet --usage-reporting=false --path-update=false --command-completion=false || true\nln -sf /opt/google-cloud-sdk/bin/gcloud  /usr/local/bin/gcloud\nln -sf /opt/google-cloud-sdk/bin/gsutil  /usr/local/bin/gsutil\nln -sf /opt/google-cloud-sdk/bin/bq      /usr/local/bin/bq\nrm -rf \"$TMP\""
+    }
+  ]
+}

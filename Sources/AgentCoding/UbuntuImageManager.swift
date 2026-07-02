@@ -4,16 +4,28 @@ import Foundation
 import SandboxEngine
 @preconcurrency import Virtualization
 
-/// Builds and locates the Ubuntu base image for Bromure Agentic Coding.
+/// Builds, downloads, and locates the Ubuntu base image for Bromure
+/// Agentic Coding.
 ///
-/// Strategy mirrors the browser's Alpine bootstrapping approach:
+/// Two ways to obtain the image:
+///
+/// **Download (preferred)** — `downloadBaseImage` fetches the prebuilt
+/// free-software image published weekly to dl.bromure.io (img-catalog.json
+/// names the current build), verifies + expands it, then applies the
+/// catalog's postinstall steps (Claude Code, Codex, Grok, gcloud — the
+/// non-free software the published image cannot contain) in a chroot.
+///
+/// **Local build (fallback)** — mirrors the browser's Alpine bootstrap:
 ///   1. Download the Alpine netboot kernel + initramfs (small, ~25 MB).
 ///   2. Boot a one-shot installer VM on a fresh raw disk.
 ///   3. Drive the installer over its serial console: log in, mount our
 ///      vm-setup virtiofs share, run setup.sh.
-///   4. setup.sh debootstraps Ubuntu Noble onto the disk, installs node /
-///      rust / claude / codex / wezterm, and grub-installs for EFI boot.
-///   5. On SANDBOX_SETUP_DONE, halt and promote the disk to base.img.
+///   4. setup.sh debootstraps Ubuntu Noble onto the disk, installs the
+///      free-software tooling (node, kitty, docker, cloud CLIs…), and
+///      grub-installs for EFI boot.
+///   5. Apply the img-catalog postinstall steps (same chroot mechanism
+///      as the download path, via postinstall.sh).
+///   6. On completion, promote the disk to base.img.
 ///
 /// The runtime VM (UbuntuSandboxVM) boots base.img directly via
 /// VZEFIBootLoader — no kernel extraction needed because GRUB is on the
@@ -46,6 +58,9 @@ public final class UbuntuImageManager {
 
     /// Ubuntu LTS release we target. Update when a new LTS lands.
     public static let ubuntuRelease = "noble"
+    /// Human name for `ubuntuRelease` — surfaces in img-catalog.json's
+    /// image description and the setup UI. Keep the two in sync.
+    public static let imageDescription = "Ubuntu 24.04"
 
     /// Default size of the raw target disk. Roomy because rust toolchains,
     /// node_modules, model caches and project clones all want space.
@@ -67,7 +82,9 @@ public final class UbuntuImageManager {
         "https://dl-cdn.alpinelinux.org/alpine/v\(alpineVersion)/releases/aarch64"
     }
 
-    private let storageDir: URL
+    // Internal (not private): UbuntuImageManager+Remote.swift — the
+    // prebuilt-image download path — shares these.
+    let storageDir: URL
     private let setupDir: URL
 
     public init(storageDir: URL? = nil, setupDir: URL) {
@@ -87,6 +104,12 @@ public final class UbuntuImageManager {
     public var baseDiskURL: URL { storageDir.appendingPathComponent("base.img") }
     public var efiVarsURL: URL { storageDir.appendingPathComponent("efivars.bin") }
     public var versionStampURL: URL { storageDir.appendingPathComponent("base.version") }
+    /// Records where the installed image came from (the img-catalog.json
+    /// image uuid for downloads, nil for local builds) and which
+    /// postinstall step uuids have been applied. The diff between the
+    /// catalog's steps and `appliedStepUUIDs` drives the "new packages
+    /// are recommended" consent prompt.
+    public var imageStateURL: URL { storageDir.appendingPathComponent("image-state.json") }
 
     private var alpineKernelURL: URL { storageDir.appendingPathComponent("alpine-vmlinuz") }
     private var alpineInitrdURL: URL { storageDir.appendingPathComponent("alpine-initramfs") }
@@ -180,10 +203,19 @@ public final class UbuntuImageManager {
     /// stream from the installer guest (everything apt / debootstrap /
     /// setup.sh prints) — high-volume; suitable for piping straight into
     /// a console log view.
+    ///
+    /// `postinstallSteps` are the img-catalog.json commands to apply after
+    /// the free-software install completes (Claude Code, Codex, … — see
+    /// ImageCatalog). `includeMacFonts` shares the host's font dirs with
+    /// the installer so they're copied into the image; the publish
+    /// pipeline (init-foss-image) turns it off because Apple's
+    /// fonts must not ship in the redistributable image.
     public func createBaseImage(
         progress: @escaping (String) -> Void,
         output: @escaping (String) -> Void = { _ in },
-        force: Bool = false
+        force: Bool = false,
+        includeMacFonts: Bool = true,
+        postinstallSteps: [PostinstallStep] = []
     ) async throws {
         let fm = FileManager.default
         try fm.createDirectory(at: storageDir, withIntermediateDirectories: true)
@@ -246,13 +278,47 @@ public final class UbuntuImageManager {
             progress("Allocating \(Self.baseDiskBytes / (1024*1024*1024))GB sparse disk…")
             try createSparseDisk(at: scratchDisk, sizeBytes: Self.baseDiskBytes)
 
-            // 3. Drive Alpine through the install.
+            // 3. Drive Alpine through the install. A guest-kernel crash
+            //    (panic/Oops) mid-bake is a rare transient of VZ + the
+            //    Alpine linux-virt kernel under heavy dpkg I/O — worth
+            //    exactly one clean retry on a fresh disk before failing
+            //    the build (setup.sh repartitions from scratch anyway,
+            //    but a pristine sparse file keeps no half-written blocks).
             progress("Booting Alpine installer (this drives the Ubuntu install)…")
-            try await runInstaller(
-                targetDisk: scratchDisk,
-                progress: progress,
-                output: output
-            )
+            do {
+                try await runInstaller(
+                    targetDisk: scratchDisk,
+                    includeMacFonts: includeMacFonts,
+                    progress: progress,
+                    output: output
+                )
+            } catch UbuntuImageError.installerReportedFailure(let msg)
+                where msg.contains("Kernel panic") || msg.contains("Internal error: Oops") {
+                progress("Guest kernel crashed mid-install — retrying once on a fresh disk…")
+                try? fm.removeItem(at: scratchDisk)
+                try createSparseDisk(at: scratchDisk, sizeBytes: Self.baseDiskBytes)
+                try await runInstaller(
+                    targetDisk: scratchDisk,
+                    includeMacFonts: includeMacFonts,
+                    progress: progress,
+                    output: output
+                )
+            }
+
+            // 3b. Apply the catalog's postinstall steps (agent installs)
+            //     to the still-unpromoted disk. Fonts were already copied
+            //     by the installer run above (when enabled), so the
+            //     postinstall boot doesn't attach the font shares again.
+            if !postinstallSteps.isEmpty {
+                progress("Installing recommended packages (\(postinstallSteps.count) step(s))…")
+                try await runPostinstall(
+                    steps: postinstallSteps,
+                    targetDisk: scratchDisk,
+                    includeMacFonts: false,
+                    progress: progress,
+                    output: output
+                )
+            }
 
             // 4. Build a fresh EFI variable store next to the existing
             //    one. First boot of the installed Ubuntu populates it
@@ -274,6 +340,10 @@ public final class UbuntuImageManager {
             try? fm.removeItem(at: efiVarsURL)
             try fm.moveItem(at: scratchEFI, to: efiVarsURL)
             try newStamp.write(to: versionStampURL, atomically: true, encoding: .utf8)
+            writeImageState(BaseImageState(
+                imageUUID: nil,   // local build — no catalog uuid
+                version: newStamp,
+                appliedStepUUIDs: postinstallSteps.map(\.uuid)))
 
             progress("Base image ready at \(baseDiskURL.path) (v\(newStamp))")
         } catch {
@@ -293,9 +363,55 @@ public final class UbuntuImageManager {
                 try? fm.removeItem(at: baseDiskURL)
                 try? fm.removeItem(at: efiVarsURL)
                 try? fm.removeItem(at: versionStampURL)
+                try? fm.removeItem(at: imageStateURL)
             }
             throw error
         }
+    }
+
+    // MARK: - Image state (source + applied postinstall steps)
+
+    /// Sidecar to the version stamp: which published image build the
+    /// on-disk base.img came from (nil = built locally) and which
+    /// img-catalog postinstall steps have been applied to it.
+    public struct BaseImageState: Codable, Sendable, Equatable {
+        public var imageUUID: String?
+        public var version: String
+        public var appliedStepUUIDs: [String]
+
+        public init(imageUUID: String?, version: String, appliedStepUUIDs: [String]) {
+            self.imageUUID = imageUUID
+            self.version = version
+            self.appliedStepUUIDs = appliedStepUUIDs
+        }
+    }
+
+    public func loadImageState() -> BaseImageState? {
+        guard let data = try? Data(contentsOf: imageStateURL) else { return nil }
+        return try? JSONDecoder().decode(BaseImageState.self, from: data)
+    }
+
+    /// Best-effort persist — the state is advisory (it only gates prompts,
+    /// never whether the image boots), so a write failure must not fail a
+    /// build that already promoted successfully.
+    public func writeImageState(_ state: BaseImageState) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(state) {
+            try? data.write(to: imageStateURL, options: .atomic)
+        }
+    }
+
+    /// One-time migration for images that predate image-state.json: those
+    /// were built with the agents baked in by the old setup.sh, so every
+    /// step in the *bundled baseline* catalog is de-facto applied. Only
+    /// steps added to the catalog later should prompt.
+    public func migrateLegacyImageStateIfNeeded() {
+        guard hasBaseImage, loadImageState() == nil else { return }
+        writeImageState(BaseImageState(
+            imageUUID: nil,
+            version: installedImageVersion ?? Self.imageVersion,
+            appliedStepUUIDs: ImageCatalog.baseline.postinstall.map(\.uuid)))
     }
 
     // MARK: - Alpine netboot download
@@ -356,11 +472,100 @@ public final class UbuntuImageManager {
     // MARK: - Installer VM
 
     /// Boot Alpine on the target disk and drive setup.sh over the serial
-    /// console. Resolves on SANDBOX_SETUP_DONE; throws on failure marker,
-    /// guest crash, or hard timeout.
+    /// console — the full Ubuntu install. Resolves on SANDBOX_SETUP_DONE;
+    /// throws on failure marker, guest crash, or hard timeout.
     @MainActor
     private func runInstaller(
         targetDisk: URL,
+        includeMacFonts: Bool,
+        progress: @escaping (String) -> Void,
+        output: @escaping (String) -> Void
+    ) async throws {
+        let scale = Self.detectDisplayScale()
+        try await runProvisioner(
+            targetDisk: targetDisk,
+            script: "setup.sh",
+            scriptArgs: "\(scale)",
+            extraShares: [],
+            includeMacFonts: includeMacFonts,
+            successMarker: "SANDBOX_SETUP_DONE",
+            failureMarker: "SANDBOX_SETUP_FAILED:",
+            markerTimeout: 30 * 60,
+            hardTimeout: 45 * 60,
+            progress: progress,
+            output: output
+        )
+    }
+
+    /// Boot Alpine against an already-installed Ubuntu disk and run
+    /// postinstall.sh: chroot into the image and execute the given
+    /// img-catalog steps, plus the macOS font copy when enabled. Internal
+    /// so the download path (UbuntuImageManager+Remote.swift) drives it too.
+    @MainActor
+    func runPostinstall(
+        steps: [PostinstallStep],
+        targetDisk: URL,
+        includeMacFonts: Bool,
+        progress: @escaping (String) -> Void,
+        output: @escaping (String) -> Void
+    ) async throws {
+        // Materialise the steps as NNNN-<uuid8>.sh files in a temp dir the
+        // guest mounts as the `postinstall` virtiofs share; lexical order
+        // is execution order. Line 1 of each file is the human description
+        // postinstall.sh echoes around the run.
+        let fm = FileManager.default
+        let shareDir = fm.temporaryDirectory
+            .appendingPathComponent("bromure-postinstall-\(UUID().uuidString)", isDirectory: true)
+        let stepsDir = shareDir.appendingPathComponent("steps", isDirectory: true)
+        try fm.createDirectory(at: stepsDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: shareDir) }
+
+        for step in steps.sorted(by: { ($0.seq, $0.uuid) < ($1.seq, $1.uuid) }) {
+            let file = stepsDir.appendingPathComponent(
+                String(format: "%04d-%@.sh", step.seq, String(step.uuid.prefix(8))))
+            let title = step.description.replacingOccurrences(of: "\n", with: " ")
+            let body = "# \(title)\nset -e\n\(step.command)\n"
+            try body.write(to: file, atomically: true, encoding: .utf8)
+        }
+
+        // The Alpine netboot may not be cached yet — on the download path
+        // this runs on a fresh machine before any local build ever did.
+        if !fm.fileExists(atPath: alpineKernelURL.path) ||
+           !fm.fileExists(atPath: alpineInitrdURL.path) {
+            progress("Downloading Alpine netboot installer…")
+            try await downloadAlpineNetboot(progress: progress)
+        }
+
+        try await runProvisioner(
+            targetDisk: targetDisk,
+            script: "postinstall.sh",
+            scriptArgs: "",
+            extraShares: [("postinstall", shareDir)],
+            includeMacFonts: includeMacFonts,
+            successMarker: "SANDBOX_POSTINSTALL_DONE",
+            failureMarker: "SANDBOX_POSTINSTALL_FAILED:",
+            markerTimeout: 20 * 60,
+            hardTimeout: 30 * 60,
+            progress: progress,
+            output: output
+        )
+    }
+
+    /// Shared Alpine provisioning driver: boot the netboot installer with
+    /// `targetDisk` attached as vda, log in over serial, mount the
+    /// vm-setup share (+ any `extraShares`, read-only), run
+    /// `/tmp/setup/<script>` and wait for its marker.
+    @MainActor
+    private func runProvisioner(
+        targetDisk: URL,
+        script: String,
+        scriptArgs: String,
+        extraShares: [(tag: String, url: URL)],
+        includeMacFonts: Bool,
+        successMarker: String,
+        failureMarker: String,
+        markerTimeout: TimeInterval,
+        hardTimeout: TimeInterval,
         progress: @escaping (String) -> Void,
         output: @escaping (String) -> Void
     ) async throws {
@@ -476,39 +681,54 @@ public final class UbuntuImageManager {
             directory: VZSharedDirectory(url: setupDir, readOnly: true)
         )
 
-        // Share the host's macOS system + user fonts read-only so the
-        // installer can `cp -a` them into /usr/share/fonts/macos/. After
-        // install, the fonts live on base.img — no runtime mount needed.
-        let systemFontsURL = URL(fileURLWithPath: "/System/Library/Fonts")
-        let macFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "macos-fonts")
-        macFontsFS.share = VZSingleDirectoryShare(
-            directory: VZSharedDirectory(url: systemFontsURL, readOnly: true)
-        )
+        var shares: [VZDirectorySharingDeviceConfiguration] = [setupFS]
 
-        var shares: [VZDirectorySharingDeviceConfiguration] = [setupFS, macFontsFS]
-        let userFontsURL = URL(fileURLWithPath: "/Library/Fonts")
-        if FileManager.default.fileExists(atPath: userFontsURL.path) {
-            let userFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "macos-user-fonts")
-            userFontsFS.share = VZSingleDirectoryShare(
-                directory: VZSharedDirectory(url: userFontsURL, readOnly: true)
+        // Share the host's macOS system + user fonts read-only so the
+        // guest script can `cp -a` them into /usr/share/fonts/macos/.
+        // After that, the fonts live on base.img — no runtime mount
+        // needed. Skipped by the publish pipeline: Apple's fonts are not
+        // redistributable and must never reach the published image.
+        if includeMacFonts {
+            let systemFontsURL = URL(fileURLWithPath: "/System/Library/Fonts")
+            let macFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "macos-fonts")
+            macFontsFS.share = VZSingleDirectoryShare(
+                directory: VZSharedDirectory(url: systemFontsURL, readOnly: true)
             )
-            shares.append(userFontsFS)
+            shares.append(macFontsFS)
+
+            let userFontsURL = URL(fileURLWithPath: "/Library/Fonts")
+            if FileManager.default.fileExists(atPath: userFontsURL.path) {
+                let userFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "macos-user-fonts")
+                userFontsFS.share = VZSingleDirectoryShare(
+                    directory: VZSharedDirectory(url: userFontsURL, readOnly: true)
+                )
+                shares.append(userFontsFS)
+            }
+
+            // Terminal.app bundles SF Mono (including "SF Mono Terminal"), which is
+            // NOT in the system/user font directories above — it lives inside the
+            // app bundle. Share it too so those families actually render in the
+            // guest's kitty when a profile picks them.
+            let terminalFontDirs = [
+                "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts",
+                "/Applications/Utilities/Terminal.app/Contents/Resources/Fonts",
+            ]
+            if let termFonts = terminalFontDirs.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+                let termFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "macos-terminal-fonts")
+                termFontsFS.share = VZSingleDirectoryShare(
+                    directory: VZSharedDirectory(url: URL(fileURLWithPath: termFonts), readOnly: true)
+                )
+                shares.append(termFontsFS)
+            }
         }
 
-        // Terminal.app bundles SF Mono (including "SF Mono Terminal"), which is
-        // NOT in the system/user font directories above — it lives inside the
-        // app bundle. Share it too so those families actually render in the
-        // guest's kitty when a profile picks them.
-        let terminalFontDirs = [
-            "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts",
-            "/Applications/Utilities/Terminal.app/Contents/Resources/Fonts",
-        ]
-        if let termFonts = terminalFontDirs.first(where: { FileManager.default.fileExists(atPath: $0) }) {
-            let termFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "macos-terminal-fonts")
-            termFontsFS.share = VZSingleDirectoryShare(
-                directory: VZSharedDirectory(url: URL(fileURLWithPath: termFonts), readOnly: true)
+        // Caller-provided shares (e.g. the postinstall steps dir).
+        for extra in extraShares {
+            let fsDev = VZVirtioFileSystemDeviceConfiguration(tag: extra.tag)
+            fsDev.share = VZSingleDirectoryShare(
+                directory: VZSharedDirectory(url: extra.url, readOnly: true)
             )
-            shares.append(termFontsFS)
+            shares.append(fsDev)
         }
         config.directorySharingDevices = shares
 
@@ -561,7 +781,7 @@ public final class UbuntuImageManager {
         // successful install as a crash.
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
-                try await Task.sleep(nanoseconds: 45 * 60 * 1_000_000_000)
+                try await Task.sleep(nanoseconds: UInt64(hardTimeout) * 1_000_000_000)
                 throw UbuntuImageError.installerTimeout
             }
             // Watch host free space while the guest writes the rootfs. When
@@ -665,16 +885,21 @@ public final class UbuntuImageManager {
                 send("mkdir -p /tmp/setup && mount -t virtiofs setup /tmp/setup\n")
                 try await buffer.wait(for: "localhost:~#", timeout: 60, failures: [])
 
-                progress("Running setup.sh (apt + npm)…")
-                let scale = Self.detectDisplayScale()
+                progress("Running \(script)…")
                 // Pass the Alpine mirror URL (our proxy if it's up,
-                // else direct CDN) so setup.sh appends the community
-                // repo via the same channel apk's main repo uses.
-                send("ALPINE_REPO_BASE='\(alpineRepoBase)' sh /tmp/setup/setup.sh \(scale)\n")
+                // else direct CDN) so the guest script routes its
+                // fetches via the same channel apk's main repo uses.
+                send("ALPINE_REPO_BASE='\(alpineRepoBase)' sh /tmp/setup/\(script) \(scriptArgs)\n")
+                // Beyond the script's own failure marker, watch for the
+                // guest kernel dying (panic/Oops) — after one of those
+                // the VM just hangs, and without these markers the only
+                // signal would be the full markerTimeout expiring.
                 try await buffer.wait(
-                    for: "SANDBOX_SETUP_DONE",
-                    timeout: 30 * 60,
-                    failures: ["SANDBOX_SETUP_FAILED:"]
+                    for: successMarker,
+                    timeout: markerTimeout,
+                    failures: [failureMarker,
+                               "Kernel panic",
+                               "Internal error: Oops"]
                 )
 
                 progress("Powering off installer (Alpine OpenRC stop is 5-15s)…")
@@ -697,6 +922,100 @@ public final class UbuntuImageManager {
             // Wait for the driver to finish; cancel the timeout.
             try await group.next()
             group.cancelAll()
+        }
+    }
+
+    // MARK: - Boot verification
+
+    /// Boot `diskURL` the way a real session does (EFI loader → GRUB on
+    /// the disk's ESP) with a throwaway EFI variable store, and wait for
+    /// the serial login prompt. The image's kernel cmdline carries
+    /// `console=hvc0`, so systemd's getty-generator spawns
+    /// serial-getty@hvc0 — its `login:` prompt is proof the disk gets
+    /// through GRUB, the kernel, and systemd to multi-user.
+    ///
+    /// The publish pipeline runs this against an APFS clone of the
+    /// freshly built image: booting dirties the disk (machine-id,
+    /// journal), and the published artifact must stay byte-identical to
+    /// what was checksummed.
+    @MainActor
+    public func verifyImageBoots(
+        diskURL: URL,
+        timeout: TimeInterval = 5 * 60,
+        progress: @escaping (String) -> Void,
+        output: @escaping (String) -> Void = { _ in }
+    ) async throws {
+        let fm = FileManager.default
+        let scratchEFI = fm.temporaryDirectory
+            .appendingPathComponent("bromure-verify-efivars-\(UUID().uuidString).bin")
+        let variableStore = try VZEFIVariableStore(creatingVariableStoreAt: scratchEFI, options: [])
+        defer { try? fm.removeItem(at: scratchEFI) }
+
+        let config = VZVirtualMachineConfiguration()
+        config.cpuCount = Self.installerCPUs
+        config.memorySize = Self.installerMemoryBytes
+        let bootLoader = VZEFIBootLoader()
+        bootLoader.variableStore = variableStore
+        config.bootLoader = bootLoader
+        config.platform = VZGenericPlatformConfiguration()
+        // No network device on purpose: every network mount/unit in the
+        // image is nofail/non-blocking, so boot must reach the login
+        // prompt fully offline — a stronger check than one that could
+        // hide a boot-blocking network dependency behind CI's DHCP.
+        let diskAttachment = try VZDiskImageStorageDeviceAttachment(
+            url: diskURL, readOnly: false
+        )
+        config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
+        config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
+        serial.attachment = VZFileHandleSerialPortAttachment(
+            fileHandleForReading: stdinPipe.fileHandleForReading,
+            fileHandleForWriting: stdoutPipe.fileHandleForWriting
+        )
+        config.serialPorts = [serial]
+        try config.validate()
+
+        let vm = VZVirtualMachine(configuration: config)
+        let buffer = ConsoleBuffer()
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty { return }
+            FileHandle.standardError.write(chunk)
+            buffer.append(chunk)
+            output(String(decoding: chunk, as: UTF8.self))
+        }
+        defer { stdoutPipe.fileHandleForReading.readabilityHandler = nil }
+
+        progress("Booting image for verification…")
+        try await vm.start()
+        do {
+            // "contains a file system with errors": the image left the
+            // bake with the ext4 error flag set. setup.sh/postinstall.sh
+            // run a final e2fsck that clears (or fails on) it, so seeing
+            // this at boot means the artifact under test is damaged —
+            // reject it even though fsck would likely repair and boot.
+            try await buffer.wait(
+                for: "login:",
+                timeout: timeout,
+                failures: ["Kernel panic", "grub rescue", "GRUB rescue",
+                           "contains a file system with errors"]
+            )
+        } catch {
+            await Self.forceStop(vm)
+            throw error
+        }
+        progress("Image booted to the login prompt — OK.")
+        await Self.forceStop(vm)
+    }
+
+    @MainActor
+    private static func forceStop(_ vm: VZVirtualMachine) async {
+        guard vm.state != .stopped else { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            vm.stop(completionHandler: { _ in cont.resume() })
         }
     }
 
@@ -850,6 +1169,15 @@ public enum UbuntuImageError: LocalizedError {
     /// expected to offer the NetworkHealer (kickstart bootpd +
     /// NetworkSharing) and retry the build.
     case noGuestNetwork
+    /// img-catalog.json could not be fetched (or names no image) — the
+    /// prebuilt download path can't proceed. Callers offer the local
+    /// build as fallback.
+    case catalogUnavailable
+    /// The catalog names a compression this build doesn't implement.
+    case unsupportedCompression(String)
+    /// Decompressing the downloaded disk image failed or produced the
+    /// wrong size.
+    case imageExpandFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -877,6 +1205,15 @@ public enum UbuntuImageError: LocalizedError {
         case .noGuestNetwork:
             return NSLocalizedString("Installer VM didn't get a network address from vmnet.",
                 comment: "Base-image build: installer VM has no network")
+        case .catalogUnavailable:
+            return NSLocalizedString("The image catalog could not be downloaded.",
+                comment: "Base-image download: img-catalog.json fetch failed")
+        case .unsupportedCompression(let kind):
+            return String(format: NSLocalizedString("Unsupported image compression: %@",
+                comment: "Base-image download: catalog names an unknown compression"), kind)
+        case .imageExpandFailed(let why):
+            return String(format: NSLocalizedString("Could not expand the downloaded image: %@",
+                comment: "Base-image download: decompression failed"), why)
         }
     }
 }

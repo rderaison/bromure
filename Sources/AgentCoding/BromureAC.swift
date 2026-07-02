@@ -40,7 +40,8 @@ struct BromureAC: ParsableCommand {
         var groups: [ArgumentParser.CommandGroup] = []
         if !asCLI {
             groups.append(ArgumentParser.CommandGroup(name: "Image management",
-                                       subcommands: [Init.self, Info.self, Reset.self]))
+                                       subcommands: [Init.self, Info.self, Reset.self,
+                                                     InitFossImage.self, VerifyImage.self]))
         }
         groups.append(ArgumentParser.CommandGroup(name: "Workspaces", subcommands: [Profiles.self]))
         groups.append(ArgumentParser.CommandGroup(name: "Tracing", subcommands: [Trace.self]))
@@ -104,31 +105,73 @@ struct BromureAC: ParsableCommand {
 
 struct Init: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Build the Ubuntu base image (one-time, ~10 min)."
+        abstract: "Install the Ubuntu base image (downloads the prebuilt image; local build as fallback)."
     )
 
+    @Flag(name: .long,
+          help: "Skip the prebuilt-image download and build locally with setup.sh (~10 min).")
+    var buildLocal = false
+
+    @Flag(name: .long,
+          help: ArgumentHelp("Fail when the download fails instead of falling back to a local build.",
+                             visibility: .hidden))
+    var downloadOnly = false
+
+    @Option(name: .long,
+            help: ArgumentHelp("Install into this directory instead of Application Support (pipeline tests).",
+                               visibility: .hidden))
+    var storageDir: String?
+
     func run() throws {
-        let imageManager = try makeImageManager()
-        // The build path keeps the existing image usable until the
+        let storageDirURL = storageDir.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let imageManager = try makeImageManager(storageDir: storageDirURL)
+        // With a custom storage dir, scope the catalog cache there too —
+        // a pipeline test must not pollute (or read) the real app's
+        // cached catalog in Application Support.
+        let catalogStore = storageDirURL.map { ImageCatalogStore(supportDir: $0) }
+            ?? ImageCatalogStore.shared
+        // The install path keeps the existing image usable until the
         // new one is ready (writes go to .partial files, then atomic
         // swap), so we don't pre-delete the version stamp. `init` is
         // an explicit user verb — if they typed it, they want the
-        // image rebuilt — so always pass force=true. The earlier
-        // `--force` flag was redundant.
-        // Pump the main RunLoop while an async Task does the actual build.
-        // We can't `semaphore.wait()` here because `runInstaller` is
+        // image reinstalled — so always pass force=true.
+        // Pump the main RunLoop while an async Task does the actual work.
+        // We can't `semaphore.wait()` here because the provisioner VM is
         // @MainActor — a sync block of the main thread starves the main
         // actor's executor and the install hangs at the first MainActor hop.
         // Driving the RunLoop instead lets MainActor continuations run.
         var result: Result<Void, Error>?
+        let buildLocal = self.buildLocal
+        let downloadOnly = self.downloadOnly
         Task {
-            do {
+            let progress: (String) -> Void = { msg in
+                FileHandle.standardError.write(Data("[init] \(msg)\n".utf8))
+            }
+            // Local build path: the postinstall steps come from the
+            // freshest catalog we can get (remote, else the bundled
+            // baseline) — a new installation applies all of them
+            // without prompting, per the setup consent.
+            func buildLocally() async throws {
+                _ = await catalogStore.refresh()
+                let catalog = catalogStore.effective()
                 try await imageManager.createBaseImage(
-                    progress: { msg in
-                        FileHandle.standardError.write(Data("[init] \(msg)\n".utf8))
-                    },
-                    force: true
+                    progress: progress,
+                    force: true,
+                    postinstallSteps: catalog.sortedSteps
                 )
+            }
+            do {
+                if buildLocal {
+                    try await buildLocally()
+                } else {
+                    do {
+                        try await imageManager.downloadBaseImage(
+                            catalogStore: catalogStore, progress: progress)
+                    } catch let error where !downloadOnly {
+                        progress("Prebuilt-image download unavailable (\(error.localizedDescription)) — building locally instead.")
+                        try await buildLocally()
+                    }
+                }
                 result = .success(())
             } catch {
                 result = .failure(error)
@@ -139,6 +182,115 @@ struct Init: ParsableCommand {
         }
         try result!.get()
         print("Base image ready: \(imageManager.baseDiskURL.path)")
+    }
+}
+
+// MARK: - init-foss-image
+
+/// Publisher-side build (Jenkinsfile.image → scripts/publish-image.sh):
+/// produce the redistributable base image containing free software only —
+/// no Claude Code / Codex / Grok / gcloud (those are img-catalog.json
+/// postinstall steps applied on the end-user's machine) and no Apple
+/// fonts. The artifacts land in --output, never in Application Support,
+/// so a publish run can't clobber a developer's own base image.
+struct InitFossImage: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "init-foss-image",
+        abstract: "Build the redistributable free-software base image (publish pipeline)."
+    )
+
+    @Option(name: .long,
+            help: "Directory the artifacts land in (base.img, base.version, build-info.json).")
+    var output: String
+
+    func run() throws {
+        let outputDir = URL(fileURLWithPath: output, isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+        let imageManager = UbuntuImageManager(storageDir: outputDir,
+                                              setupDir: try locateSetupDir())
+
+        var result: Result<Void, Error>?
+        Task {
+            do {
+                try await imageManager.createBaseImage(
+                    progress: { msg in
+                        FileHandle.standardError.write(Data("[init-foss-image] \(msg)\n".utf8))
+                    },
+                    force: true,
+                    includeMacFonts: false,
+                    postinstallSteps: []
+                )
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+        }
+        while result == nil {
+            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+        }
+        try result!.get()
+
+        // build-info.json: the publish script reads image metadata from
+        // here instead of parsing Swift sources.
+        let info: [String: String] = [
+            "version": UbuntuImageManager.imageVersion,
+            "ubuntuRelease": UbuntuImageManager.ubuntuRelease,
+            "description": UbuntuImageManager.imageDescription,
+            "builtAt": ISO8601DateFormatter().string(from: Date()),
+        ]
+        let data = try JSONSerialization.data(
+            withJSONObject: info, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: outputDir.appendingPathComponent("build-info.json"))
+        print("Free-software image ready: \(imageManager.baseDiskURL.path)")
+    }
+}
+
+// MARK: - verify-image
+
+/// Publish-pipeline gate: boot a base image headless and require the
+/// serial login prompt within the timeout. Run it against a throwaway
+/// APFS clone (`cp -c`) — booting dirties the disk (machine-id, journal),
+/// and the artifact being published must stay byte-identical to what was
+/// checksummed.
+struct VerifyImage: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "verify-image",
+        abstract: "Boot-check a base image: wait for the serial login prompt (run on a clone)."
+    )
+
+    @Option(name: .long, help: "Path to the disk image to boot (a disposable clone).")
+    var disk: String
+
+    @Option(name: .long, help: "Boot timeout in seconds.")
+    var timeout: Int = 300
+
+    func run() throws {
+        let diskURL = URL(fileURLWithPath: disk)
+        guard FileManager.default.fileExists(atPath: diskURL.path) else {
+            throw ValidationError("no disk image at \(diskURL.path)")
+        }
+        let imageManager = try makeImageManager()
+        var result: Result<Void, Error>?
+        let timeout = TimeInterval(self.timeout)
+        Task {
+            do {
+                try await imageManager.verifyImageBoots(
+                    diskURL: diskURL,
+                    timeout: timeout,
+                    progress: { msg in
+                        FileHandle.standardError.write(Data("[verify-image] \(msg)\n".utf8))
+                    }
+                )
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+        }
+        while result == nil {
+            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+        }
+        try result!.get()
+        print("Image boot verification passed: \(diskURL.path)")
     }
 }
 
@@ -1323,37 +1475,46 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if imageManager.hasBaseImage {
             showUnifiedWindowAsHome()
             if profiles.isEmpty { openEditorWindow(editing: nil) }
-            // Stale image — nag (non-blocking) but let the user keep
-            // working with the existing base.
-            if imageManager.baseImageNeedsUpdate {
-                Task { @MainActor in
-                    self.promptBaseImageUpdate()
+            // Image-maintenance checks (non-blocking; the user keeps
+            // working with the existing base throughout). Refresh the
+            // image catalog, then in priority order:
+            //   1. Full-image update — the app shipped a newer
+            //      imageVersion, or img-catalog.json moved to a new
+            //      image version → offer to download the new image.
+            //   2. New postinstall steps published since this image was
+            //      installed → ask consent, then amend base.img.
+            Task { @MainActor in
+                self.imageManager.migrateLegacyImageStateIfNeeded()
+                let remote = await ImageCatalogStore.shared.refresh()
+                let installedMajor = self.imageManager.installedImageVersion
+                    .map(UbuntuImageManager.majorVersion(of:))
+                let catalogMajor = (remote?.image?.version)
+                    .map(UbuntuImageManager.majorVersion(of:))
+                // Only a strictly NEWER published version counts — a
+                // stale CDN catalog (publish pipeline lagging an app
+                // release) must not offer a downgrade. Non-numeric
+                // majors fall back to plain inequality.
+                let catalogIsNewer: Bool = {
+                    guard let cat = catalogMajor, let inst = installedMajor else { return false }
+                    if let c = Int(cat), let i = Int(inst) { return c > i }
+                    return cat != inst
+                }()
+                if self.imageManager.baseImageNeedsUpdate || catalogIsNewer {
+                    // A full update re-applies every catalog step, so
+                    // don't also nag about new steps underneath it.
+                    self.promptBaseImageUpdate(
+                        catalogVersion: catalogIsNewer ? catalogMajor : nil)
+                    return
+                }
+                let catalog = remote ?? ImageCatalogStore.shared.effective()
+                let applied = self.imageManager.loadImageState()?.appliedStepUUIDs ?? []
+                let pending = catalog.pendingSteps(appliedUUIDs: applied)
+                if !pending.isEmpty {
+                    self.promptNewPostinstallSteps(pending)
                 }
             }
         } else {
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 560, height: 500),
-                styleMask: [.titled, .closable, .resizable, .miniaturizable],
-                backing: .buffered, defer: false
-            )
-            window.title = "Bromure Agentic Coding"
-            window.delegate = self
-            window.titlebarAppearsTransparent = false
-            // See TabbedSessionWindow for the same fix: AppKit's window
-            // close animator can over-release captured block ivars when
-            // SwiftUI tears the contentView down concurrently (most
-            // visible when the user closes this window mid-rebuild while
-            // the InitProgressModel is still updating).
-            window.animationBehavior = .none
-            // We hold a strong reference (`self.mainWindow = window`).
-            // NSWindow defaults to `isReleasedWhenClosed = true` for
-            // non-controller windows, which would autorelease the window
-            // on close and double-free it against our strong ref —
-            // crashing in the next autorelease pool drain. Disable.
-            window.isReleasedWhenClosed = false
-            window.center()
-            window.makeKeyAndOrderFront(nil)
-            self.mainWindow = window
+            ensureInstallWindow()
             renderSetup()
             NSApp.activate(ignoringOtherApps: true)
         }
@@ -2789,6 +2950,36 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Screen wiring
 
+    /// The setup/progress window (`mainWindow`). Created by the first-run
+    /// path at launch; re-created on demand when an update or postinstall
+    /// flow starts from the unified home, where no setup window exists.
+    private func ensureInstallWindow() {
+        if mainWindow != nil { return }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 500),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false
+        )
+        window.title = "Bromure Agentic Coding"
+        window.delegate = self
+        window.titlebarAppearsTransparent = false
+        // See TabbedSessionWindow for the same fix: AppKit's window
+        // close animator can over-release captured block ivars when
+        // SwiftUI tears the contentView down concurrently (most
+        // visible when the user closes this window mid-rebuild while
+        // the InitProgressModel is still updating).
+        window.animationBehavior = .none
+        // We hold a strong reference (`self.mainWindow = window`).
+        // NSWindow defaults to `isReleasedWhenClosed = true` for
+        // non-controller windows, which would autorelease the window
+        // on close and double-free it against our strong ref —
+        // crashing in the next autorelease pool drain. Disable.
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        self.mainWindow = window
+    }
+
     private func renderSetup() {
         guard let win = mainWindow else { return }
         win.title = "Bromure Agentic Coding"
@@ -2805,7 +2996,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         win.center()
     }
 
-    private func renderInitializing() {
+    private func renderInitializing(
+        title: String = "Building base image",
+        subtitle: String = "This is the one-time install. Don't close the window."
+    ) {
         guard let win = mainWindow else { return }
         win.title = "Bromure Agentic Coding — Setup"
         // Sized to the InitializingView's intrinsic layout (header +
@@ -2818,49 +3012,66 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         win.center()
         win.contentView = NSHostingView(rootView: InitializingView(
             model: initProgress,
+            title: title,
+            subtitle: subtitle,
             onCancel: { [weak self] in self?.renderSetup() }
         ))
     }
 
-    private func startInit(force: Bool = false) {
+    private func startInit(force: Bool = false, buildLocal: Bool = false) {
         // Note: we do NOT delete the version stamp here even when
         // force == true. The stamp gates whether existing sessions
         // can launch from the old image — wiping it would brick the
-        // image the moment the user clicks "Rebuild Now". The build
-        // path uses .partial files and only swaps + rewrites the
-        // stamp when the new image is fully in place.
+        // image the moment the user clicks "Rebuild Now". Both install
+        // paths use .partial files and only swap + rewrite the stamp
+        // when the new image is fully in place.
         initProgress.reset()
+        ensureInstallWindow()
         renderInitializing()
 
         installTask = Task { @MainActor in
             defer { self.installTask = nil }
+            // High-level checkpoints: drive the status pill + bookmark
+            // the console log with a leading marker so they're easy to
+            // find in the firehose.
+            let progressCB: (String) -> Void = { msg in
+                Task { @MainActor in
+                    // Suppress updates after cancellation — the hosted
+                    // SwiftUI view is being torn down on the same run
+                    // loop tick and we don't want the observation chain
+                    // over-releasing.
+                    guard self.installTask != nil else { return }
+                    self.initProgress.status = msg
+                    self.initProgress.recordHostPhase(msg)
+                    self.initProgress.appendLog("\n▶ " + msg + "\n")
+                }
+            }
+            // Raw guest serial bytes — append as-is so timing and apt's
+            // progress lines look the same as on stderr.
+            let outputCB: (String) -> Void = { chunk in
+                Task { @MainActor in
+                    guard self.installTask != nil else { return }
+                    self.initProgress.appendLog(chunk)
+                }
+            }
             do {
-                try await imageManager.createBaseImage(
-                    progress: { msg in
-                        // High-level checkpoints: drive the status pill +
-                        // bookmark the console log with a leading marker
-                        // so they're easy to find in the firehose.
-                        Task { @MainActor in
-                            // Suppress updates after cancellation — the
-                            // hosted SwiftUI view is being torn down on
-                            // the same run loop tick and we don't want
-                            // the observation chain over-releasing.
-                            guard self.installTask != nil else { return }
-                            self.initProgress.status = msg
-                            self.initProgress.recordHostPhase(msg)
-                            self.initProgress.appendLog("\n▶ " + msg + "\n")
-                        }
-                    },
-                    output: { chunk in
-                        // Raw guest serial bytes — append as-is so timing
-                        // and apt's progress lines look the same as on stderr.
-                        Task { @MainActor in
-                            guard self.installTask != nil else { return }
-                            self.initProgress.appendLog(chunk)
-                        }
-                    },
-                    force: force
-                )
+                if buildLocal {
+                    try await self.buildBaseImageLocally(
+                        force: force, progress: progressCB, output: outputCB)
+                } else {
+                    do {
+                        try await self.imageManager.downloadBaseImage(
+                            progress: progressCB, output: outputCB)
+                    } catch {
+                        // No prebuilt image reachable (offline, CDN
+                        // outage, bad artifact). Fall back to the local
+                        // build so setup still completes — the catalog's
+                        // postinstall steps ride along either way.
+                        progressCB("Download unavailable (\(error.localizedDescription)) — building locally instead…")
+                        try await self.buildBaseImageLocally(
+                            force: force, progress: progressCB, output: outputCB)
+                    }
+                }
                 self.initProgress.stop()
                 self.initProgress.isRunning = false
                 FileHandle.standardError.write(Data(
@@ -2882,6 +3093,72 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if case UbuntuImageError.noGuestNetwork = error {
                     await self.presentBakeNetworkHealerPrompt(force: force)
                 }
+            }
+        }
+    }
+
+    /// Local build with the img-catalog postinstall steps applied on top —
+    /// the fallback when the prebuilt-image download isn't available, and
+    /// the explicit "Rebuild Locally" menu path. A new installation runs
+    /// every step without an extra prompt: the setup screen the user
+    /// clicked through is the consent for the initial set.
+    private func buildBaseImageLocally(
+        force: Bool,
+        progress: @escaping (String) -> Void,
+        output: @escaping (String) -> Void
+    ) async throws {
+        var catalog = ImageCatalogStore.shared.remote()
+        if catalog == nil { catalog = await ImageCatalogStore.shared.refresh() }
+        let steps = (catalog ?? ImageCatalogStore.shared.effective()).sortedSteps
+        try await imageManager.createBaseImage(
+            progress: progress,
+            output: output,
+            force: force,
+            postinstallSteps: steps
+        )
+    }
+
+    /// Run user-accepted postinstall steps against the existing base
+    /// image, reusing the install progress window. The image is amended
+    /// on an APFS clone and swapped atomically, so sessions launched
+    /// meanwhile keep a bootable base.
+    private func startPostinstall(_ steps: [PostinstallStep]) {
+        initProgress.reset()
+        ensureInstallWindow()
+        renderInitializing(
+            title: "Installing recommended packages",
+            subtitle: "The base image is being amended. Existing workspaces keep working."
+        )
+        NSApp.activate(ignoringOtherApps: true)
+
+        installTask = Task { @MainActor in
+            defer { self.installTask = nil }
+            do {
+                try await self.imageManager.applyPostinstallSteps(
+                    steps,
+                    progress: { msg in
+                        Task { @MainActor in
+                            guard self.installTask != nil else { return }
+                            self.initProgress.status = msg
+                            self.initProgress.recordHostPhase(msg)
+                            self.initProgress.appendLog("\n▶ " + msg + "\n")
+                        }
+                    },
+                    output: { chunk in
+                        Task { @MainActor in
+                            guard self.installTask != nil else { return }
+                            self.initProgress.appendLog(chunk)
+                        }
+                    }
+                )
+                self.initProgress.stop()
+                self.initProgress.isRunning = false
+                if let w = self.mainWindow { w.close() }
+                self.mainWindow = nil
+            } catch {
+                self.initProgress.stop()
+                self.initProgress.isRunning = false
+                self.initProgress.error = error.localizedDescription
             }
         }
     }
@@ -3417,33 +3694,61 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func rebuildBaseImageAction(_ sender: Any?) {
         let alert = NSAlert()
-        alert.messageText = "Rebuild the base image?"
-        alert.informativeText = "Re-runs the full Ubuntu installer (~5–10 min) using the current setup.sh. Existing workspaces' disks aren't touched — on next launch each one's drift prompt will offer to reset to the new base."
-        alert.addButton(withTitle: "Rebuild")
+        alert.messageText = "Update the base image?"
+        alert.informativeText = "Downloads the latest prebuilt image (or re-runs the full local installer, ~5–10 min) and re-applies the recommended packages. Existing workspaces' disks aren't touched — on next launch each one's drift prompt will offer to reset to the new base."
+        alert.addButton(withTitle: "Download Prebuilt")
+        alert.addButton(withTitle: "Rebuild Locally")
         alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            startInit(force: true)
+        case .alertSecondButtonReturn:
+            startInit(force: true, buildLocal: true)
+        default:
+            break
+        }
+    }
+
+    /// Non-blocking nag shown on each launch when the on-disk base image
+    /// is older than what's available — either the app ships a newer
+    /// `imageVersion`, or img-catalog.json published a newer image
+    /// (`catalogVersion`). "Later" dismisses for this launch only — we'll
+    /// ask again next time the app starts so the user keeps the option
+    /// without being blocked from running stale images.
+    private func promptBaseImageUpdate(catalogVersion: String? = nil) {
+        let alert = NSAlert()
+        let installed = imageManager.installedImageVersion ?? "?"
+        let target = catalogVersion ?? UbuntuImageManager.imageVersion
+        alert.messageText = NSLocalizedString("Base image update available", comment: "")
+        alert.informativeText = String(
+            format: NSLocalizedString(
+                "Your base image is at version %@ but version %@ is available. The current image still works — updating downloads the new prebuilt image (a few GB; local rebuild as fallback) and re-applies the recommended packages.",
+                comment: ""),
+            installed, target)
+        alert.addButton(withTitle: NSLocalizedString("Update Now", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
         if alert.runModal() == .alertFirstButtonReturn {
             startInit(force: true)
         }
     }
 
-    /// Non-blocking nag shown on each launch when the on-disk base
-    /// image stamp is older than the app's bundled `imageVersion`.
-    /// "Later" dismisses for this launch only — we'll ask again next
-    /// time the app starts so the user keeps the option without being
-    /// blocked from running stale images.
-    private func promptBaseImageUpdate() {
+    /// Consent gate for postinstall steps published in img-catalog.json
+    /// after this image was installed. They run as root inside the base
+    /// image, so nothing executes until the user explicitly accepts.
+    /// "Later" asks again next launch.
+    private func promptNewPostinstallSteps(_ steps: [PostinstallStep]) {
         let alert = NSAlert()
-        let installed = imageManager.installedImageVersion ?? "?"
-        alert.messageText = NSLocalizedString("Base image update available", comment: "")
+        let list = steps.map { "• \($0.description)" }.joined(separator: "\n")
+        alert.messageText = NSLocalizedString("New recommended packages", comment: "")
         alert.informativeText = String(
             format: NSLocalizedString(
-                "Your base image is at version %@ but the app ships version %@. The current image still works — rebuilding (~5–10 min) picks up the latest setup.sh changes (new tools, updated configs).",
+                "New packages are recommended to be installed:\n\n%@\n\nBromure installs them into the base image (a few minutes, in the background VM). Existing workspaces keep running; each one's drift prompt will offer a reset to pick them up.",
                 comment: ""),
-            installed, UbuntuImageManager.imageVersion)
-        alert.addButton(withTitle: NSLocalizedString("Rebuild Now", comment: ""))
+            list)
+        alert.addButton(withTitle: NSLocalizedString("Install", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
         if alert.runModal() == .alertFirstButtonReturn {
-            startInit(force: true)
+            startPostinstall(steps)
         }
     }
 
@@ -6564,7 +6869,8 @@ struct Reset: ParsableCommand {
             }
         }
         let fm = FileManager.default
-        for url in [imageManager.baseDiskURL, imageManager.efiVarsURL, imageManager.versionStampURL] {
+        for url in [imageManager.baseDiskURL, imageManager.efiVarsURL,
+                    imageManager.versionStampURL, imageManager.imageStateURL] {
             try? fm.removeItem(at: url)
         }
         print("Base image cleared.")
@@ -6573,9 +6879,9 @@ struct Reset: ParsableCommand {
 
 // MARK: - shared
 
-private func makeImageManager() throws -> UbuntuImageManager {
+private func makeImageManager(storageDir: URL? = nil) throws -> UbuntuImageManager {
     let dir = try locateSetupDir()
-    return UbuntuImageManager(setupDir: dir)
+    return UbuntuImageManager(storageDir: storageDir, setupDir: dir)
 }
 
 /// Locate the vm-setup directory (containing setup.sh) shipped in the SPM

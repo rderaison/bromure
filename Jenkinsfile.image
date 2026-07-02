@@ -1,0 +1,105 @@
+// Jenkinsfile.image — build the free-software base image weekly and
+// publish it (plus img-catalog.json) to the DigitalOcean Space that
+// Bromure Agentic Coding downloads from at install time
+// (https://dl.bromure.io/images/…).
+//
+// Weekly because the image bakes in `apt-get dist-upgrade`: new
+// installations always start from current Ubuntu packages without the
+// catalog version changing (existing users are NOT re-prompted — the
+// version only moves when UbuntuImageManager.imageVersion is bumped
+// deliberately, which is what triggers the in-app "download the new
+// image" offer).
+//
+// Non-free software (Claude Code, Codex, Grok CLI, gcloud) is NOT in this
+// image — it's declared as postinstall steps in the catalog (canonical
+// source: Sources/AgentCoding/Resources/img-catalog.json) and installed
+// on the end-user's machine.
+//
+// The freshly built image is boot-checked on an APFS clone
+// (bromure-ac verify-image) before anything is uploaded, and the newly
+// published catalog + image are smoke-tested from the CDN before the
+// previous build's objects are deleted.
+pipeline {
+    agent { label 'macosx-builder' }
+
+    triggers {
+        // Weekly, Monday early morning (hash-spread within the hour).
+        cron('H 3 * * 1')
+    }
+
+    options {
+        // A full run is build (~10 min) + boot check + gzip + multi-GB
+        // upload; anything past 2h is wedged.
+        timeout(time: 2, unit: 'HOURS')
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Build, boot-check, and compress the image but skip every upload/delete.'
+        )
+        booleanParam(
+            name: 'KEEP_PREVIOUS',
+            defaultValue: false,
+            description: 'Publish the new image but keep the previous images/<uuid>/ objects.'
+        )
+    }
+
+    environment {
+        // Same bucket + public base as the release pipelines; this just
+        // writes under the images/ prefix. Secrets come from Jenkins creds.
+        DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+        DO_SPACES_REGION      = 'nyc3'
+        DO_SPACES_BUCKET      = 'bromure-dl'
+        DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
+    }
+
+    stages {
+        stage('Install release-tool deps') {
+            steps {
+                // Same socket.dev-wrapped install as the release pipelines;
+                // tools/spaces-put.mjs needs @aws-sdk/client-s3 + lib-storage.
+                sh '''
+                    set -euo pipefail
+                    (cd tools && if [ -f package-lock.json ]; then \
+                                    npx --yes @socketsecurity/cli npm ci --silent; \
+                                 else \
+                                    npx --yes @socketsecurity/cli npm install --silent; \
+                                 fi)
+                '''
+            }
+        }
+
+        stage('Build bromure-ac') {
+            steps {
+                // build.sh owns compiling + signing (ad-hoc with the full
+                // BromureAC.entitlements, incl. virtualization) — the
+                // publish script consumes the resulting binary rather
+                // than duplicating the build.
+                sh '''
+                    set -euo pipefail
+                    ./build.sh bromure-ac
+                '''
+            }
+        }
+
+        stage('Build image + Verify + Publish') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DO_SPACES_KEY',    variable: 'DO_SPACES_KEY'),
+                    string(credentialsId: 'DO_SPACES_SECRET', variable: 'DO_SPACES_SECRET')
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export DRY_RUN="${DRY_RUN}"
+                        export KEEP_PREVIOUS="${KEEP_PREVIOUS}"
+                        ./scripts/publish-image.sh \
+                            ".build/arm64-apple-macosx/release/Bromure Agentic Coding.app/Contents/MacOS/bromure-ac"
+                    '''
+                }
+            }
+        }
+    }
+}

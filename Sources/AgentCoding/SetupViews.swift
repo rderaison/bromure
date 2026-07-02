@@ -80,7 +80,8 @@ final class InitProgressModel {
     /// also flow through `appendLog` and count as lines.
     func recordHostPhase(_ msg: String) {
         let m = msg.lowercased()
-        if m.contains("base image already at") || m.contains("base image ready") {
+        if m.contains("base image already at") || m.contains("base image ready")
+            || m.contains("packages installed") {
             bumpProgress(to: 1.0)
         }
     }
@@ -143,7 +144,7 @@ struct SetupView: View {
             }
             Text("Welcome to Bromure Agentic Coding")
                 .font(.title2.bold())
-            Text("First-time setup downloads Ubuntu Server and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Only happens once per base-image version.")
+            Text("First-time setup downloads a prebuilt Ubuntu 24.04 image (or builds it locally when the download isn't available) and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Only happens once per base-image version.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -166,10 +167,13 @@ struct SetupView: View {
 
 // MARK: - Initializing progress
 
-/// Shown while `createBaseImage` is running. Spinner + latest status +
+/// Shown while `downloadBaseImage` / `createBaseImage` /
+/// `applyPostinstallSteps` is running. Spinner + latest status +
 /// collapsible console log of every progress message.
 struct InitializingView: View {
     let model: InitProgressModel
+    var title: String = "Building base image"
+    var subtitle: String = "This is the one-time install. Don't close the window."
     let onCancel: () -> Void
 
     /// Console pane is collapsed by default — the determinate progress
@@ -187,9 +191,9 @@ struct InitializingView: View {
                         .frame(width: 36, height: 36)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Building base image")
+                    Text(title)
                         .font(.headline)
-                    Text("This is the one-time install. Don't close the window.")
+                    Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

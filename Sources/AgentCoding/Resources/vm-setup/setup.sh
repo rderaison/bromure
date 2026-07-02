@@ -1,14 +1,21 @@
 #!/bin/sh
-# Bromure Agentic Coding — base image build script.
+# Bromure Agentic Coding — base image build script (free software only).
 #
 # Runs inside an Alpine Linux netboot installer driven by the host over
 # the serial console. The host watches stdout for the SANDBOX_SETUP_DONE
 # marker (success) or SANDBOX_SETUP_FAILED (any failure).
 #
+# The image this script produces is redistributable: everything installed
+# here carries a free-software license (MIT/Apache/GPL/OFL). Non-free
+# software (Claude Code, Codex, Grok CLI, gcloud) is installed later, on
+# the end-user's machine, by the img-catalog.json postinstall steps —
+# see postinstall.sh in this directory. This is what lets Jenkins publish
+# the built image to dl.bromure.io for download.
+#
 # Pipeline:
 #   1. Partition vda (GPT, EFI + ext4) and format.
 #   2. debootstrap Ubuntu 24.04 (Noble) for ARM64 onto /mnt.
-#   3. Bind-mount /dev /proc /sys, chroot, install kernel/grub/agents.
+#   3. Bind-mount /dev /proc /sys, chroot, install kernel/grub/tooling.
 #   4. grub-install for EFI boot from vda1.
 #   5. umount, sync, print marker.
 #
@@ -420,46 +427,19 @@ step "apt-get install nodejs" \
 log "node $(node --version), npm $(npm --version)"
 
 # ---------------------------------------------------------------------------
-# socket.dev CLI — used to wrap subsequent npm installs for supply-chain
-# scanning per project policy.
+# socket.dev CLI (MIT) — pre-installed so the img-catalog postinstall
+# commands can wrap their npm installs for supply-chain scanning without
+# npx having to fetch the wrapper first.
+#
+# NOTE: the coding agents themselves (Claude Code, Codex, Grok CLI) and
+# gcloud are NOT installed here. This script builds the redistributable
+# free-software image published to dl.bromure.io — non-free software is
+# installed on the user's machine by the postinstall steps declared in
+# img-catalog.json (see Resources/img-catalog.json + postinstall.sh).
 # ---------------------------------------------------------------------------
 
 step "npm install -g @socketsecurity/cli" \
     retry npm install -g --silent @socketsecurity/cli
-
-socket_npm() {
-    npx --yes @socketsecurity/cli npm "$@"
-}
-
-# ---------------------------------------------------------------------------
-# Coding agents (Claude Code, Codex)
-# ---------------------------------------------------------------------------
-
-step "npm install -g @anthropic-ai/claude-code (via socket)" \
-    retry socket_npm install -g --silent @anthropic-ai/claude-code
-
-step "npm install -g @openai/codex (via socket)" \
-    retry socket_npm install -g --silent @openai/codex
-
-# Grok CLI (x.ai). Not published on npm — installed via x.ai's official
-# shell installer (so it can't go through the socket.dev npm wrapper above).
-# The installer drops it under ~/.grok/bin, which here (root, chroot) means
-# /root/.grok/bin. The guest runs the agent as the unprivileged `ubuntu`
-# user, which can't read /root, and /home/ubuntu is overlaid by a host mount
-# at runtime — so the per-user install dir is unreachable. Relocate the whole
-# install to a world-readable global path and put the binary on PATH, the way
-# claude/codex land in /usr/local via npm -g. grok keeps its runtime state in
-# the user's own ~/.grok at runtime; this only relocates the binary/libs.
-step "install grok CLI (x.ai)" \
-    retry sh -c 'curl -fsSL https://x.ai/cli/install.sh | bash'
-if [ -d /root/.grok ]; then
-    rm -rf /opt/grok
-    mv /root/.grok /opt/grok
-    chmod -R a+rX /opt/grok
-    ln -sf /opt/grok/bin/grok /usr/local/bin/grok
-    echo "  relocated grok to /opt/grok; linked /usr/local/bin/grok"
-fi
-command -v grok >/dev/null 2>&1 && echo "  grok present on PATH" || echo "  WARNING: grok not on PATH after install"
 
 # ---------------------------------------------------------------------------
 # wezterm — latest GitHub release deb
@@ -570,11 +550,13 @@ step "install glab from latest GitLab release deb (best effort)" \
     ' || true
 
 # ---------------------------------------------------------------------------
-# Cloud + Kubernetes CLIs.
-# kubectl: stable release from dl.k8s.io.
-# doctl: GitHub release tarball.
-# awscli v2: official aws bundle (works for arm64 + amd64).
-# gcloud: Google Cloud SDK tarball.
+# Cloud + Kubernetes CLIs (free-software licenses only).
+# kubectl: stable release from dl.k8s.io (Apache-2.0).
+# doctl: GitHub release tarball (Apache-2.0).
+# awscli v2: official aws bundle (Apache-2.0, arm64 + amd64).
+# azure-cli: Microsoft apt repo (MIT).
+# gcloud is proprietary (Google ToS, no redistribution) — it is installed
+# by an img-catalog.json postinstall step, not baked into this image.
 # Each install is best-effort with `|| true` so a single failure
 # doesn't take down the rest.
 # ---------------------------------------------------------------------------
@@ -626,27 +608,6 @@ step "install awscli v2 (Amazon)" \
         "$TMP/aws/install" --update
         rm -rf "$TMP"
         echo "  installed awscli $(/usr/local/bin/aws --version 2>&1 | head -1)"
-    ' || true
-
-step "install Google Cloud SDK (gcloud)" \
-    sh -c '
-        set -e
-        ARCH=$(uname -m)
-        case "$ARCH" in aarch64|arm64) K=arm ;; x86_64) K=x86_64 ;; *) echo "  unsupported arch $ARCH"; exit 0 ;; esac
-        URL="https://dl.google.com/dl/cloudsdk/channels/rapid/google-cloud-cli-linux-${K}.tar.gz"
-        echo "  fetching $URL"
-        TMP=$(mktemp -d)
-        curl -fsSL "$URL" -o "$TMP/gcloud.tar.gz"
-        tar -xzf "$TMP/gcloud.tar.gz" -C /opt
-        # Non-interactive install: skip components, no PATH munging
-        # (we add /opt/google-cloud-sdk/bin via .bashrc PATH below).
-        /opt/google-cloud-sdk/install.sh --quiet --usage-reporting=false \
-            --path-update=false --command-completion=false || true
-        ln -sf /opt/google-cloud-sdk/bin/gcloud  /usr/local/bin/gcloud
-        ln -sf /opt/google-cloud-sdk/bin/gsutil  /usr/local/bin/gsutil
-        ln -sf /opt/google-cloud-sdk/bin/bq      /usr/local/bin/bq
-        rm -rf "$TMP"
-        echo "  installed gcloud"
     ' || true
 
 step "install azure-cli (Microsoft)" \
@@ -916,6 +877,12 @@ CHROOT_EOF
 # The host shares /System/Library/Fonts (and optionally /Library/Fonts)
 # read-only via virtiofs; we mount them, cp -a into /usr/share/fonts/macos/,
 # then fc-cache so the in-chroot fontconfig picks them up.
+#
+# Apple's fonts are NOT redistributable, so the publish pipeline
+# (init-foss-image) never attaches these shares — every mount below
+# is a no-op there and the published image ships without them. End-user
+# machines get the fonts from their own /System/Library/Fonts, either here
+# (local build) or via postinstall.sh (downloaded image).
 # ---------------------------------------------------------------------------
 
 log "copying macOS fonts into base image"
@@ -958,6 +925,21 @@ umount /mnt/sys     || true
 umount /mnt/boot/efi
 umount /mnt
 sync
+
+# Final integrity gate: force-check the filesystem we just built. If the
+# guest kernel hit any ext4 trouble during the bake it set the error
+# flag in the superblock, which would otherwise force a repair on the
+# user's FIRST boot ("contains a file system with errors, check
+# forced"). -p auto-fixes what's safe and clears the flag; exit >= 4
+# means real, uncorrected damage — fail the bake rather than ship it.
+log "running final e2fsck on $TARGET_ROOT"
+e2fsck -f -p "$TARGET_ROOT" || {
+    rc=$?
+    if [ "$rc" -ge 4 ]; then
+        fail "e2fsck found uncorrectable errors on $TARGET_ROOT (exit $rc)"
+    fi
+    log "e2fsck corrected issues (exit $rc)"
+}
 
 log "all done"
 echo "SANDBOX_SETUP_DONE"

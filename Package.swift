@@ -66,7 +66,8 @@ let package = Package(
             path: "Sources/AgentCoding",
             exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef"],
             resources: [.copy("Resources/vm-setup"), .copy("Resources/icons"),
-                        .copy("Resources/catalog.json")],
+                        .copy("Resources/catalog.json"),
+                        .copy("Resources/img-catalog.json")],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("OpenDirectory"),
