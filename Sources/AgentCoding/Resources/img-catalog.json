@@ -24,7 +24,7 @@
       "uuid": "9d3e5f7a-1b2c-4d6e-b8f9-3a4b5c6d7e8f",
       "seq": 40,
       "description": "Google Cloud SDK (gcloud)",
-      "command": "ARCH=$(uname -m)\ncase \"$ARCH\" in aarch64|arm64) K=arm ;; x86_64) K=x86_64 ;; *) echo \"unsupported arch $ARCH\"; exit 0 ;; esac\nURL=\"https://dl.google.com/dl/cloudsdk/channels/rapid/google-cloud-cli-linux-${K}.tar.gz\"\nTMP=$(mktemp -d)\ncurl -fsSL \"$URL\" -o \"$TMP/gcloud.tar.gz\"\ntar -xzf \"$TMP/gcloud.tar.gz\" -C /opt\n/opt/google-cloud-sdk/install.sh --quiet --usage-reporting=false --path-update=false --command-completion=false || true\nln -sf /opt/google-cloud-sdk/bin/gcloud  /usr/local/bin/gcloud\nln -sf /opt/google-cloud-sdk/bin/gsutil  /usr/local/bin/gsutil\nln -sf /opt/google-cloud-sdk/bin/bq      /usr/local/bin/bq\nrm -rf \"$TMP\""
+      "command": "ARCH=$(uname -m)\ncase \"$ARCH\" in aarch64|arm64) K=arm ;; x86_64) K=x86_64 ;; *) echo \"unsupported arch $ARCH\"; exit 0 ;; esac\nURL=\"https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-${K}.tar.gz\"\nTMP=$(mktemp -d)\ncurl -fsSL \"$URL\" -o \"$TMP/gcloud.tar.gz\"\ntar -xzf \"$TMP/gcloud.tar.gz\" -C /opt\n/opt/google-cloud-sdk/install.sh --quiet --usage-reporting=false --path-update=false --command-completion=false || true\nln -sf /opt/google-cloud-sdk/bin/gcloud  /usr/local/bin/gcloud\nln -sf /opt/google-cloud-sdk/bin/gsutil  /usr/local/bin/gsutil\nln -sf /opt/google-cloud-sdk/bin/bq      /usr/local/bin/bq\nrm -rf \"$TMP\""
     }
   ]
 }

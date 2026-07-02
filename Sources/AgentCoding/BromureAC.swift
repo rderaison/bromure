@@ -167,7 +167,12 @@ struct Init: ParsableCommand {
                     do {
                         try await imageManager.downloadBaseImage(
                             catalogStore: catalogStore, progress: progress)
-                    } catch let error where !downloadOnly {
+                    } catch let error where !downloadOnly
+                        && UbuntuImageManager.isDownloadSideFailure(error) {
+                        // Only download-side failures (catalog, transfer,
+                        // checksum, expansion) fall back — a postinstall-VM
+                        // failure would hit the identical machinery in the
+                        // local bake and fail again after ~10 wasted min.
                         progress("Prebuilt-image download unavailable (\(error.localizedDescription)) — building locally instead.")
                         try await buildLocally()
                     }
@@ -3051,9 +3056,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         installTask = Task { @MainActor in
             defer { self.installTask = nil }
-            // High-level checkpoints: drive the status pill + bookmark
-            // the console log with a leading marker so they're easy to
-            // find in the firehose.
+            // High-level checkpoints: drive the status pill + weighted
+            // progress bar + bookmark the console log with a leading
+            // marker so they're easy to find in the firehose.
             let progressCB: (String) -> Void = { msg in
                 Task { @MainActor in
                     // Suppress updates after cancellation — the hosted
@@ -3061,9 +3066,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     // loop tick and we don't want the observation chain
                     // over-releasing.
                     guard self.installTask != nil else { return }
-                    self.initProgress.status = msg
-                    self.initProgress.recordHostPhase(msg)
-                    self.initProgress.appendLog("\n▶ " + msg + "\n")
+                    self.initProgress.noteHostProgress(msg)
                 }
             }
             // Raw guest serial bytes — append as-is so timing and apt's
@@ -3082,15 +3085,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     do {
                         try await self.imageManager.downloadBaseImage(
                             progress: progressCB, output: outputCB)
-                    } catch {
+                    } catch let error where UbuntuImageManager.isDownloadSideFailure(error) {
                         // No prebuilt image reachable (offline, CDN
-                        // outage, bad artifact). Fall back to the local
-                        // build so setup still completes — the catalog's
-                        // postinstall steps ride along either way.
+                        // outage, bad artifact) — the one class of
+                        // failure where a local build is a genuine
+                        // remedy. Never fall back silently: from the
+                        // user's perspective the download may have just
+                        // "finished" (checksum/expansion failures land
+                        // after the transfer), and rolling straight into
+                        // a 10-minute Alpine + debootstrap bake reads as
+                        // the download restarting itself.
+                        guard self.confirmLocalBuildFallback(for: error) else {
+                            throw error
+                        }
                         progressCB("Download unavailable (\(error.localizedDescription)) — building locally instead…")
                         try await self.buildBaseImageLocally(
                             force: force, progress: progressCB, output: outputCB)
                     }
+                    // Anything else — the postinstall VM failing, disk
+                    // space, cancellation — propagates: the local bake
+                    // runs the same machinery and would fail the same
+                    // way, ten minutes later.
                 }
                 self.initProgress.stop()
                 self.initProgress.isRunning = false
@@ -3115,6 +3130,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
         }
+    }
+
+    /// The prebuilt-image download failed. Offer the local bake — with
+    /// the actual error front and center — instead of starting it
+    /// silently.
+    private func confirmLocalBuildFallback(for error: Error) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Image download failed", comment: "")
+        alert.informativeText = String(
+            format: NSLocalizedString(
+                "%@\n\nBromure can build the image locally instead (~10 min, same result).",
+                comment: "Base-image download failed; offer the local build"),
+            error.localizedDescription)
+        alert.addButton(withTitle: NSLocalizedString("Build Locally", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// Local build with the img-catalog postinstall steps applied on top —
@@ -3159,9 +3190,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     progress: { msg in
                         Task { @MainActor in
                             guard self.installTask != nil else { return }
-                            self.initProgress.status = msg
-                            self.initProgress.recordHostPhase(msg)
-                            self.initProgress.appendLog("\n▶ " + msg + "\n")
+                            self.initProgress.noteHostProgress(msg)
                         }
                     },
                     output: { chunk in

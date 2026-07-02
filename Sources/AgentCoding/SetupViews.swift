@@ -44,6 +44,17 @@ final class InitProgressModel {
     /// observed in `appendLog`.
     private(set) var linesSeen = 0
 
+    // Phase-weighted accounting for the prebuilt-image download path:
+    // the image download fills 0→60% of the bar, expansion 60→80%, and
+    // the postinstall steps the rest. The postinstall segment anchors
+    // wherever the bar sits when it starts, so a standalone postinstall
+    // run (consent prompt) maps its steps across the whole bar, and the
+    // local bake — which emits none of these messages and stays
+    // line-driven — is unaffected.
+    private var expectedPostinstallSteps = 0
+    private var completedPostinstallSteps = 0
+    private var postinstallBase: Double?
+
     private let maxLines = 100
     private var lines: [String] = []
     private var trailing: String = ""
@@ -59,6 +70,9 @@ final class InitProgressModel {
         linesSeen = 0
         lines = []
         trailing = ""
+        expectedPostinstallSteps = 0
+        completedPostinstallSteps = 0
+        postinstallBase = nil
     }
 
     /// No-op holdover so callers that paired `reset()` with `stop()`
@@ -73,17 +87,90 @@ final class InitProgressModel {
         if v > progress { progress = v }
     }
 
-    /// Bookend host-phase recogniser: cached-image fast path, and
-    /// the final "ready" jump to 1.0. Everything in between is
-    /// driven by the line counter — we don't need fine-grained
-    /// host phases anymore because the host's progress messages
-    /// also flow through `appendLog` and count as lines.
+    /// One-stop host-progress intake: sets the status pill (with any
+    /// trailing percentage stripped — the bar is the single percentage
+    /// shown in the GUI), advances the phase-weighted bar, and bookmarks
+    /// the console log with a leading marker.
+    func noteHostProgress(_ msg: String) {
+        status = Self.strippingTrailingPercent(from: msg)
+        recordHostPhase(msg)
+        appendLog("\n▶ " + msg + "\n")
+    }
+
+    /// Host-phase recogniser. For the local bake it's just the bookends
+    /// (cached-image fast path, final "ready" jump) — everything in
+    /// between is line-driven. The download path additionally reports
+    /// its phases with percentages, which map onto the 60/20/20 split
+    /// documented above.
     func recordHostPhase(_ msg: String) {
         let m = msg.lowercased()
         if m.contains("base image already at") || m.contains("base image ready")
             || m.contains("packages installed") {
             bumpProgress(to: 1.0)
+            return
         }
+        // "Downloading Ubuntu 24.04 image (2.9 GB)… 37%" → 0…0.60.
+        // (The Alpine netboot download doesn't carry a percentage, so it
+        // can't match.)
+        if m.hasPrefix("downloading"), m.contains("image"), m.hasSuffix("%") {
+            if let pct = Self.trailingPercent(of: m) {
+                bumpProgress(to: 0.60 * pct)
+            }
+            return
+        }
+        if m.hasPrefix("verifying checksum") {
+            bumpProgress(to: 0.60)
+            return
+        }
+        // "Expanding image…" / "Expanding image… 45%" → 0.60…0.80.
+        if m.hasPrefix("expanding image") {
+            bumpProgress(to: 0.60 + 0.20 * (Self.trailingPercent(of: m) ?? 0.0))
+            return
+        }
+        // "Installing recommended packages (4 step(s)…" — anchor the
+        // final segment at the bar's current position; each guest-side
+        // "END   step" line (spotted by appendLog) advances it.
+        if m.hasPrefix("installing recommended packages") {
+            if let n = Self.firstInt(of: m), n > 0 {
+                expectedPostinstallSteps = n
+                completedPostinstallSteps = 0
+                postinstallBase = progress
+            }
+            return
+        }
+    }
+
+    /// "…foo… 37%" → 0.37. nil when the message doesn't end in a percent.
+    private static func trailingPercent(of msg: String) -> Double? {
+        guard msg.hasSuffix("%") else { return nil }
+        let digits = msg.dropLast().reversed().prefix(while: { $0.isNumber })
+        guard !digits.isEmpty, let v = Int(String(digits.reversed())) else { return nil }
+        return min(1.0, Double(v) / 100.0)
+    }
+
+    /// First run of digits in the message ("(4 step(s)…" → 4).
+    private static func firstInt(of msg: String) -> Int? {
+        var current = ""
+        for ch in msg {
+            if ch.isNumber {
+                current.append(ch)
+            } else if !current.isEmpty {
+                break
+            }
+        }
+        return Int(current)
+    }
+
+    /// Drop a trailing " NN%" so the status pill doesn't show a second
+    /// percentage next to the bar's.
+    static func strippingTrailingPercent(from msg: String) -> String {
+        guard msg.hasSuffix("%") else { return msg }
+        var s = msg.dropLast()
+        let digitsEnd = s.endIndex
+        while let c = s.last, c.isNumber { s = s.dropLast() }
+        guard s.endIndex != digitsEnd else { return msg }  // bare "%" — leave it
+        while s.last == " " { s = s.dropLast() }
+        return String(s)
     }
 
     func appendLog(_ chunk: String) {
@@ -103,6 +190,17 @@ final class InitProgressModel {
             let line = String(buf[..<nl])
             lines.append(line)
             linesSeen += 1
+            // Postinstall step completions (the guest's "END   step …"
+            // marker) advance the final weighted segment armed by
+            // recordHostPhase's "Installing recommended packages (N…".
+            if expectedPostinstallSteps > 0, line.contains(" END   step ") {
+                completedPostinstallSteps += 1
+                let base = postinstallBase ?? 0
+                let span = max(0, 0.99 - base)
+                let done = min(completedPostinstallSteps, expectedPostinstallSteps)
+                bumpProgress(to: base + span * Double(done)
+                                        / Double(expectedPostinstallSteps))
+            }
             // Each line nudges the bar by 1/expectedTotalLines,
             // capped at progressCeiling so the final phase jump to
             // 1.0 is always visible. If real installs exceed the

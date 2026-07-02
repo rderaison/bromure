@@ -14,6 +14,29 @@ import SandboxEngine
 
 extension UbuntuImageManager {
 
+    /// True when a `downloadBaseImage` failure is download-side — the
+    /// catalog fetch, the transfer itself, checksum verification, or
+    /// expansion — i.e. the cases where building the image locally is a
+    /// genuine remedy. VM-side failures (the postinstall boot), disk
+    /// space, and cancellation return false: a local bake runs the exact
+    /// same machinery, so falling back would burn ~10 minutes before
+    /// failing identically.
+    public static func isDownloadSideFailure(_ error: Error) -> Bool {
+        if error is CancellationError { return false }
+        if let e = error as? UbuntuImageError {
+            switch e {
+            case .catalogUnavailable, .downloadFailed, .checksumInvalid,
+                 .unsupportedCompression, .imageExpandFailed:
+                return true
+            default:
+                return false
+            }
+        }
+        // Transport-level failures out of URLSession (offline, DNS, TLS,
+        // connection reset mid-transfer).
+        return error is URLError
+    }
+
     /// End-to-end "new installation" download. Always fetches the latest
     /// img-catalog.json first, then the image it names. Mirrors
     /// `createBaseImage`'s crash-safety: everything lands in .partial
