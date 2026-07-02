@@ -3855,6 +3855,30 @@ public final class ProfileStore {
         done
     ) >/dev/null 2>&1 &
 
+    # Shutdown hook: tell the host whether a halt is a REBOOT (vs poweroff or a
+    # user closing the session). The in-session detection in the tab agent can
+    # lose the race — systemd may kill the session before its next poll and
+    # dbus may already be down — but this ExecStop runs as part of the shutdown
+    # transaction itself: as root (systemd → private socket, dbus-independent),
+    # and RequiresMountsFor keeps the outbox virtiofs mounted until it's done.
+    # The host polls the marker at ~40ms and relaunches instead of tearing the
+    # workspace down. Rewritten every boot (idempotent; no base-image change).
+    sudo tee /etc/systemd/system/bromure-reboot-signal.service >/dev/null <<'RBEOF' \
+        && sudo systemctl daemon-reload \
+        && sudo systemctl restart bromure-reboot-signal.service \
+        && echo "[xinit] bromure-reboot-signal hook installed" >> /tmp/xinitrc.log \
+        || echo "[xinit] bromure-reboot-signal install failed (non-fatal)" >> /tmp/xinitrc.log
+    [Unit]
+    Description=Bromure: signal reboot intent to the host at shutdown
+    RequiresMountsFor=/mnt/bromure-outbox
+
+    [Service]
+    Type=oneshot
+    RemainAfterExit=yes
+    ExecStart=/bin/true
+    ExecStop=/bin/sh -c 'if systemctl list-jobs --no-legend 2>/dev/null | grep -q reboot.target; then : > /mnt/bromure-outbox/reboot-intent; sync; fi'
+    RBEOF
+
     # The tab agent is the foreground process. It launches the one fullscreen
     # kitty (→ tmux session), publishes the window roster, and loops on
     # /mnt/bromure-outbox/cmd-*.txt. Killing it ends the X session.
@@ -3876,6 +3900,42 @@ public final class ProfileStore {
     LOG=/tmp/bromure-agent.log
 
     log() { printf '%s [agent] %s\n' "$(date +%T)" "$*" >> "$LOG"; }
+
+    # True while systemd is taking the system down for a *reboot* — as opposed
+    # to a poweroff/halt or the user just closing the last tmux window. When the
+    # session ends we normally power the VM off (the host tears the workspace
+    # down); but if the OS is rebooting, tmux was killed by the shutdown, NOT the
+    # user. In that case drop a one-shot marker the host reads to RELAUNCH a fresh
+    # VM in place (like the app's Reboot) instead of shutting the workspace down.
+    reboot_pending() {
+        local out
+        # User-level query first: succeeds while dbus is up (the common case —
+        # we poll every roster tick, so we usually catch the queued job within
+        # ~0.7s of the user typing `reboot`, long before shutdown degrades).
+        if out=$(systemctl list-jobs --no-legend 2>/dev/null); then
+            printf '%s' "$out" | grep -q 'reboot\.target' && return 0
+            return 1
+        fi
+        # dbus already down (late shutdown): root systemctl falls back to
+        # systemd's private socket, which answers until the very end.
+        sudo -n systemctl list-jobs --no-legend 2>/dev/null \
+            | grep -q 'reboot\.target' && return 0
+        [ "$(runlevel 2>/dev/null | awk '{print $2}')" = 6 ]
+    }
+    # One-shot per shell context; the marker write is idempotent and the host
+    # dedupes, so the guard only avoids pointless repeat syscalls.
+    REBOOT_SIGNALLED=0
+    signal_reboot_if_pending() {
+        [ "$REBOOT_SIGNALLED" = 1 ] && return 0
+        if reboot_pending; then
+            log "reboot detected — signalling host to relaunch"
+            : > "$INBOX/reboot-intent" 2>/dev/null
+            sync
+            REBOOT_SIGNALLED=1
+            return 0
+        fi
+        return 1
+    }
 
     # Surface a docker error to the host as a one-shot file (it reads + deletes).
     docker_err() {
@@ -3995,6 +4055,12 @@ public final class ProfileStore {
     # never reads a partial list. Empty/absent = no tabs → host powers off.
     roster_loop() {
         while :; do
+            # Catch a reboot the moment systemd queues its job — within one tick
+            # of the user typing `reboot`, while dbus and this whole session are
+            # still alive. Waiting for tmux to die is too late: by then this
+            # script may be SIGTERM'd and dbus down, which is exactly how the
+            # host used to mistake a reboot for a session close.
+            signal_reboot_if_pending || true
             # Resolve each window's LABEL in shell (not a tmux format conditional):
             #   1. an explicit @label wins (docker attach/logs windows set it
             #      directly — always reliable);
@@ -4047,6 +4113,11 @@ public final class ProfileStore {
                 # list-windows hiccup while the server is still alive. Without
                 # this branch tabs.txt keeps its last non-empty value forever
                 # and the VM hangs with a live-but-empty X session.
+                # BUT: if tmux is gone because the OS is rebooting (not a user
+                # close), mark the reboot FIRST — the host drains that on its
+                # fast tick, so it flags the relaunch before it sees the empty
+                # roster and would otherwise shut the workspace down.
+                signal_reboot_if_pending
                 : > "$INBOX/.tabs.tmp" 2>/dev/null \
                     && mv -f "$INBOX/.tabs.tmp" "$INBOX/tabs.txt" 2>/dev/null
             fi
@@ -4371,6 +4442,12 @@ public final class ProfileStore {
         sleep 1
     done
 
+    # If the foreground exited because the OS is rebooting (systemd killed tmux),
+    # tell the host to relaunch rather than tear the workspace down. Either way we
+    # `poweroff` — that fires VZ guestDidStop deterministically, and the host uses
+    # the marker to decide relaunch (reboot) vs teardown (user closed the session
+    # / poweroff). This is the same halt→host-relaunch path as `soft-reboot`.
+    signal_reboot_if_pending
     log "session over — powering off"
     sync
     sudo poweroff

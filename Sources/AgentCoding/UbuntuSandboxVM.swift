@@ -98,6 +98,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// exclusive by focus, so a single press fires exactly one of them.
     public var onShortcut: ((String) -> Void)?
 
+    /// Fired when the guest signals it's going down for a *reboot* (the guest
+    /// writes a `reboot-intent` marker before halting). Lets the host relaunch
+    /// the VM in place instead of tearing the session down — a guest `reboot`
+    /// then behaves like the app's Reboot rather than a shutdown.
+    public var onGuestReboot: (() -> Void)?
+
     /// Called whenever the guest writes a new primary IPv4 to the outbox
     /// (every 5s while the VM is up). Wire this to surface in the UI.
     public var onIPUpdate: ((String) -> Void)?
@@ -480,6 +486,17 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             .replacingOccurrences(of: ".txt", with: "")
                         if !key.isEmpty { self?.onShortcut?(key) }
                     }
+                }
+
+                // FAST PATH — reboot-intent: the guest is going down for a
+                // reboot (systemd reboot.target), not a user-closed session.
+                // Drained on the fast tick so the host flags the reboot BEFORE
+                // the slow-path roster scan publishes the empty tabs.txt that
+                // would otherwise trigger the close-action shutdown.
+                let rebootMarker = outbox.appendingPathComponent("reboot-intent")
+                if fm.fileExists(atPath: rebootMarker.path) {
+                    try? fm.removeItem(at: rebootMarker)
+                    self?.onGuestReboot?()
                 }
 
                 // Throttle the heavier scan to ~every 12th tick (~480ms) so

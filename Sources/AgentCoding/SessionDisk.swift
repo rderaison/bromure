@@ -1074,7 +1074,7 @@ public final class SessionDisk {
         for entry in entries {
             let name = entry.lastPathComponent
             if name.hasPrefix("closed-") || name.hasPrefix("diag-")
-                || name.hasPrefix("shortcut-") {
+                || name.hasPrefix("shortcut-") || name == "reboot-intent" {
                 try? fm.removeItem(at: entry)
             }
         }
