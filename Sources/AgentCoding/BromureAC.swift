@@ -2696,8 +2696,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Task wouldn't run before the process exits, orphaning vllm-mlx
         // (and its large RAM footprint).
         InferenceService.killIfRunning()
-        // Tear down the optional SSH front door so we don't orphan sshd.
+        // Tear down the optional SSH front door so we don't orphan sshd,
+        // and its Cloudflare tunnel so we don't orphan cloudflared.
         RemoteAccessServer.shared.stop()
+        CloudflareTunnelSupervisor.killIfRunning()
     }
 
     /// Catch the catchable abnormal-termination signals so we still
@@ -2725,6 +2727,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     "[bromure-ac] caught signal \(sig); terminating ssh-agent + engine + exiting\n".utf8))
                 self?.mitmEngine?.privateAgent.terminate()
                 InferenceService.killIfRunning()
+                CloudflareTunnelSupervisor.killIfRunning()
                 // Exit with a non-zero code so callers can distinguish
                 // signal-driven shutdown from a clean ⌘Q.
                 exit(128 + sig)
@@ -6076,6 +6079,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let sandbox = session.sandbox
         session.stopping = true
         let name = session.profile.name
+        // A suspended/off VM can't serve its ports; tear down any Cloudflare
+        // exposures pointing at it (the SSH front door tunnel is unaffected).
+        CloudflareTunnelSupervisor.shared.unexposeAll(prefix: "ws:\(profileID.uuidString):")
         // `.ask` and `.background` both collapse to `.suspend` — a programmatic
         // stop isn't the moment for a modal, and "background" can't survive the
         // agent exiting, so suspend keeps state and the user decides next launch.

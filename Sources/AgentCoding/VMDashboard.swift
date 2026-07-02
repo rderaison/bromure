@@ -178,28 +178,38 @@ struct VMDashboardView: View {
             ForEach(Array(externalPorts.enumerated()), id: \.offset) { i, p in
                 if i > 0 { Divider().opacity(0.35).padding(.leading, 14) }
                 let ep = endpoint(p)
-                HStack(spacing: 8) {
-                    Text(ep)
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .textSelection(.enabled)
-                    Button { copyEndpoint(ep) } label: {
-                        Image(systemName: copiedEndpoint == ep ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 10))
-                            .foregroundStyle(copiedEndpoint == ep ? .green : .secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text(ep)
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .textSelection(.enabled)
+                        Button { copyEndpoint(ep) } label: {
+                            Image(systemName: copiedEndpoint == ep ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 10))
+                                .foregroundStyle(copiedEndpoint == ep ? .green : .secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Copy \(ep)")
+                        if p.proto == "udp" {
+                            Text("udp")
+                                .font(.system(size: 9, weight: .semibold))
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 12)
+                        Text(p.process.isEmpty ? "—" : p.process)
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.middle)
+                        // HTTP services only: a quick tunnel is browsable for
+                        // web origins; raw TCP (ssh, databases, udp) would
+                        // need cloudflared on every connecting client.
+                        if isExposable(p) { exposeButton(p) }
                     }
-                    .buttonStyle(.borderless)
-                    .help("Copy \(ep)")
-                    if p.proto == "udp" {
-                        Text("udp")
-                            .font(.system(size: 9, weight: .semibold))
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Capsule().fill(Color.secondary.opacity(0.15)))
-                            .foregroundStyle(.secondary)
+                    if isExposable(p),
+                       let info = CloudflareTunnelSupervisor.shared.tunnels[exposeID(p)] {
+                        tunnelStatusLine(info)
                     }
-                    Spacer(minLength: 12)
-                    Text(p.process.isEmpty ? "—" : p.process)
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 8)
             }
@@ -208,6 +218,120 @@ struct VMDashboardView: View {
             .fill(Color.primary.opacity(0.035)))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
             .strokeBorder(Color.primary.opacity(0.06)))
+    }
+
+    // MARK: Internet exposure (Cloudflare quick tunnels)
+
+    private func exposeID(_ p: ListeningPort) -> String {
+        "ws:\(profile.id.uuidString):\(p.port)"
+    }
+
+    private func isExposable(_ p: ListeningPort) -> Bool {
+        p.proto == "tcp"
+            && CloudflareTunnelSupervisor.isLikelyWebService(port: p.port, process: p.process)
+    }
+
+    /// The globe: click to expose this HTTP service to the internet through
+    /// its own Cloudflare quick tunnel; click again to unexpose. One tunnel
+    /// (and one random URL) per service — toggling one never disturbs the
+    /// others.
+    @ViewBuilder private func exposeButton(_ p: ListeningPort) -> some View {
+        let info = CloudflareTunnelSupervisor.shared.tunnels[exposeID(p)]
+        Button { toggleExposure(p) } label: {
+            Image(systemName: "globe")
+                .font(.system(size: 11))
+                .foregroundStyle(globeColor(info))
+        }
+        .buttonStyle(.borderless)
+        .disabled((model?.ipAddress ?? "").isEmpty)
+        .help(info == nil
+              ? "Expose to the internet (Cloudflare quick tunnel)"
+              : "Stop exposing to the internet")
+    }
+
+    private func globeColor(_ info: CloudflareTunnelSupervisor.Info?) -> Color {
+        switch info?.state {
+        case nil: return Color.secondary.opacity(0.55)
+        case .running: return .green
+        case .failed: return .red
+        case .installing, .starting: return .orange
+        }
+    }
+
+    @ViewBuilder private func tunnelStatusLine(_ info: CloudflareTunnelSupervisor.Info) -> some View {
+        HStack(spacing: 6) {
+            switch info.state {
+            case .installing:
+                ProgressView().controlSize(.mini)
+                Text("Downloading & verifying cloudflared (~18 MB, one-time)…")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            case .starting:
+                ProgressView().controlSize(.mini)
+                Text("Starting tunnel…")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            case .failed(let msg):
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9)).foregroundStyle(.red)
+                Text(msg).font(.system(size: 10)).foregroundStyle(.red)
+                    .lineLimit(2)
+            case .running(let host):
+                let publicURL = "https://\(host)"
+                if let url = URL(string: publicURL) {
+                    Link(host, destination: url)
+                        .font(.system(size: 10, design: .monospaced))
+                } else {
+                    Text(host)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                Button { copyEndpoint(publicURL) } label: {
+                    Image(systemName: copiedEndpoint == publicURL ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 9))
+                        .foregroundStyle(copiedEndpoint == publicURL ? .green : .secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Copy public URL")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 2)
+    }
+
+    private func toggleExposure(_ p: ListeningPort) {
+        let sup = CloudflareTunnelSupervisor.shared
+        let id = exposeID(p)
+        if sup.tunnels[id] != nil {
+            sup.unexpose(id)
+            return
+        }
+        guard let ip = model?.ipAddress, !ip.isEmpty else { return }
+        guard Self.confirmTunnelConsent() else { return }
+        sup.expose(id: id, origin: "http://\(ip):\(p.port)")
+    }
+
+    /// One-time consent covering the cloudflared download and Cloudflare's
+    /// service terms.
+    private static func confirmTunnelConsent() -> Bool {
+        let d = UserDefaults.standard
+        if d.bool(forKey: "cloudflareTunnel.consented") { return true }
+        let a = NSAlert()
+        a.messageText = "Expose services to the internet via Cloudflare Tunnel?"
+        a.informativeText = """
+        Bromure will download cloudflared \(CloudflaredPin.version) (~18 MB) from GitHub, verify it \
+        against a pinned checksum and Cloudflare's Developer ID signature, and run one tunnel process \
+        per exposed service (recorded in the Supply Chain Log).
+
+        Traffic transits Cloudflare's network under their Terms of Service (cloudflare.com/terms).
+
+        Each service gets a random public https://….trycloudflare.com URL — anyone who has it can \
+        reach the service, so make sure the service itself expects that. The URL changes if the \
+        tunnel restarts.
+        """
+        a.addButton(withTitle: "Agree & Expose")
+        a.addButton(withTitle: "Cancel")
+        guard a.runModal() == .alertFirstButtonReturn else { return false }
+        d.set(true, forKey: "cloudflareTunnel.consented")
+        return true
     }
 
     // MARK: Configuration
