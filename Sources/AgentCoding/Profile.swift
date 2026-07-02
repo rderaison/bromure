@@ -3624,6 +3624,14 @@ public final class ProfileStore {
         echo "[xinit] bromure-vm-bridge pid $!" >> /tmp/xinitrc.log
     fi
 
+    # Self-heal: a base image can ship with the bake-time apt proxy config
+    # still present (it points at the host's ephemeral bake listener,
+    # 192.168.64.1:<port>, which doesn't exist in a session — so every
+    # `apt-get update` fails with connection-refused). Drop it at session start.
+    test -f /etc/apt/apt.conf.d/99-bromure-proxy \
+        && sudo rm -f /etc/apt/apt.conf.d/99-bromure-proxy \
+        && echo "[xinit] removed stale bake-time apt proxy config" >> /tmp/xinitrc.log
+
     # Wire dockerd through the bridge.
     #
     # dockerd is launched by systemd at boot, BEFORE this xinitrc runs.
@@ -4150,6 +4158,23 @@ public final class ProfileStore {
         done
     }
     vmstat_loop &
+
+    # Listening sockets for the workspace dashboard + `vm <id> -L`: raw
+    # `ss -tulnpH` lines (proto/state/queues/local/peer/process), published
+    # atomically every 3s; the host parses. `ss` ships in default Ubuntu
+    # (iproute2) — unlike netstat/lsof, which aren't installed. sudo so the
+    # process column resolves for root-owned services (sshd, dockerd); falls
+    # back to the unprivileged snapshot (no process names) if sudo is ever
+    # unavailable.
+    ports_loop() {
+        while :; do
+            { sudo -n ss -tulnpH 2>/dev/null || ss -tulnH 2>/dev/null; } \
+                > "$INBOX/.ports.tmp" \
+                && mv -f "$INBOX/.ports.tmp" "$INBOX/ports.txt" 2>/dev/null
+            sleep 3
+        done
+    }
+    ports_loop &
 
     # Docker: every 2s publish the container list as NDJSON (one JSON object per
     # line, `docker ps -a --format '{{json .}}'`) so the host can render the

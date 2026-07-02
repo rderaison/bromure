@@ -1007,11 +1007,27 @@ final class RemoteMenuApp {
 
         var cfg = "IP \(ip)   tool \(tool)"
         if fusionConfigurable { cfg += "   fusion \(fusion)" }
-        return [
+        var lines = [
             "CPU \(pad(cpuStr, 5)) Mem \(pad(memStr, 13)) load \(loadStr)",
             "vCPU \(pad("\(vcpu)", 3)) Disk \(pad(diskStr, 9)) up \(uptimeText(up))",
             cfg,
         ]
+        // Externally-reachable listening ports (loopback-bound ones are only
+        // visible inside the VM, so they're hidden here — same as the app's
+        // dashboard). Deduped across the v4/v6 wildcard pair.
+        if let raw = vm["listeningPorts"] as? [[String: Any]] {
+            var seen = Set<String>()
+            let ports = raw.compactMap { d -> String? in
+                guard let port = d["port"] as? Int,
+                      let proto = d["proto"] as? String,
+                      let addr = d["addr"] as? String else { return nil }
+                if addr.hasPrefix("127.") || addr == "[::1]" || addr == "::1" { return nil }
+                let label = "\(port)/\(proto)"
+                return seen.insert(label).inserted ? label : nil
+            }
+            if !ports.isEmpty { lines.append("ports \(ports.joined(separator: " "))") }
+        }
+        return lines
     }
 
     private func num(_ v: Any?) -> Double {

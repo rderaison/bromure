@@ -482,8 +482,13 @@ struct Profiles: ParsableCommand {
         subcommands: [WorkspacesList.self, WorkspacesCreate.self, WorkspacesEdit.self,
                       VMRun.self, VMKill.self, WorkspacesReboot.self, Exec.self,
                       VMAttach.self, ProfilesDescribe.self, ProfilesRemove.self,
-                      WorkspacesSSHKeygen.self,
+                      WorkspacesSSHKeygen.self, WorkspacePorts.self,
                       VMFusion.self, VMRouting.self, VMHybrid.self],
+        // Default subcommand so `vm <workspace> -L` works docker-style: an
+        // unrecognized first token falls through to `ports` as its argument.
+        // Bare `vm` still shows the group help (ports with no workspace
+        // re-raises the help request).
+        defaultSubcommand: WorkspacePorts.self,
         aliases: ["vm"])
 }
 
@@ -813,6 +818,62 @@ struct WorkspacesReboot: ParsableCommand {
             throw ValidationError(resp.json["error"] as? String ?? "Couldn't reboot \(workspace).")
         }
         print("Rebooted \(resp.json["workspace"] as? String ?? workspace).")
+    }
+}
+
+struct WorkspacePorts: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ports",
+        abstract: "Show a running workspace's listening ports (also `vm <workspace> -L`).",
+        discussion: """
+        Queries the guest live with `ss` (root, so process names resolve for every
+        service — netstat/lsof aren't in default Ubuntu). Loopback-bound ports are
+        listed too and marked; the app dashboard shows only the externally
+        reachable ones.
+        """)
+
+    @Argument(help: "Workspace id or name.")
+    var workspace: String?
+
+    @Flag(name: [.customShort("L"), .long],
+          help: "List listening ports (the only mode; lets `vm <workspace> -L` read naturally).")
+    var listening = false
+
+    func run() throws {
+        guard let workspace, workspace.lowercased() != "help" else {
+            // Bare `vm` (and `vm help`) land here because ports is the group's
+            // default subcommand: keep the pre-existing behavior — show help.
+            throw CleanExit.helpRequest(Profiles.self)
+        }
+        let client = ControlClient()
+        guard client.isAgentRunning() else { print("No bromure-ac agent running."); return }
+        // Resolve BEFORE exec'ing: a typo'd subcommand falls through to here as
+        // a "workspace", and the exec route would sit in its 10s
+        // shell-connection wait before erroring. Describe 404s instantly.
+        let seg = ControlClient.encodeSegment(workspace)
+        let probe = try client.request("GET", "/profiles/\(seg)")
+        guard probe.status == 200 else {
+            throw ValidationError(
+                "Unknown workspace (or subcommand) '\(workspace)'. See `vm ls` or `vm --help`.")
+        }
+        guard (probe.json["running"] as? Bool) == true else {
+            throw ValidationError(
+                "Workspace '\(workspace)' isn't running — start it with `vm run \(workspace)`.")
+        }
+        let resp = try client.request(
+            "POST", "/vms/\(seg)/exec",
+            body: ["command": "sudo -n ss -tulnpH 2>/dev/null || ss -tulnH", "timeout": 10])
+        guard resp.status == 200 else {
+            throw ValidationError(resp.json["error"] as? String
+                ?? "Couldn't query '\(workspace)' (HTTP \(resp.status)).")
+        }
+        let rows = UbuntuSandboxVM.parseListeningPorts(resp.json["stdout"] as? String ?? "")
+        guard !rows.isEmpty else { print("No listening ports."); return }
+        print(pad("PORT", 7) + pad("PROTO", 7) + pad("ADDRESS", 22) + "PROCESS")
+        for r in rows {
+            let scope = r.isLoopback ? "  (loopback-only)" : ""
+            print(pad("\(r.port)", 7) + pad(r.proto, 7) + pad(r.addr, 22) + r.process + scope)
+        }
     }
 }
 

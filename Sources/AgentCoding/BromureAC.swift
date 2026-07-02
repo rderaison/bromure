@@ -386,6 +386,9 @@ final class RunningSession {
     /// Fusion engaged state, mirrored from the engine so a reattaching
     /// window restores the toolbar toggle correctly.
     var fusionEngaged: Bool = false
+    /// Listening sockets from the guest's ports loop, mirrored here so the
+    /// `/vms` record (CLI/TUI) can show them even while detached.
+    var listeningPorts: [ListeningPort] = []
     /// True once an explicit stop is in flight, so the VM-stopped callback
     /// doesn't double-run teardown.
     var stopping: Bool = false
@@ -1196,6 +1199,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Refresh the MLX model catalog from the hosted manifest in the
         // background (vLLM.md §5.1). Non-fatal — falls back to the bundled
         // catalog.json on any network failure, so this never blocks launch.
+        // No-op when the `catalog.refreshDisabled` default is set (testing).
         Task.detached(priority: .background) { await CatalogStore.shared.refresh() }
 
         // Surface any model download a previous crash/kill left half-finished as
@@ -1988,6 +1992,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "baseImageVersion": s.profile.baseImageVersionAtClone ?? "unknown",
                 "fusionConfigurable": s.profile.fusionConfigurable,
                 "fusionEngaged": mitmEngine?.fusionEngaged(for: s.profileID) ?? false,
+                // Mirrored from the session (not the pane) so detached VMs report
+                // them too. The TUI/dashboard filter loopback at display time.
+                "listeningPorts": s.listeningPorts.map {
+                    ["proto": $0.proto, "addr": $0.addr, "port": $0.port,
+                     "process": $0.process] as [String: Any]
+                },
             ]
         }
     }
@@ -5481,6 +5491,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.pane(for: pid)?.rebootRequested = true
                 // A stale suspend image is invalid across a guest reboot.
                 session.sandbox.sessionDisk?.clearSavedState()
+                // The pooled shell connections belong to the boot that's going
+                // away — flush them so the first exec after the reboot doesn't
+                // dequeue a dead socket ("Shell command execution failed").
+                self.shellBridges[pid]?.flushPool()
                 FileHandle.standardError.write(Data(
                     "[ac] guest reboot detected for '\(session.profile.name)' — riding it out\n".utf8))
             }
@@ -5559,6 +5573,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sandbox.onVMStats = { [weak self] cpu, used, total, load in
             Task { @MainActor in
                 self?.pane(for: pid)?.applyVMStats(cpu: cpu, memUsedKB: used, memTotalKB: total, load: load)
+            }
+        }
+        sandbox.onPortsList = { [weak self] ports in
+            Task { @MainActor in
+                guard let self else { return }
+                self.runningSessions[pid]?.listeningPorts = ports
+                self.pane(for: pid)?.applyListeningPorts(ports)
             }
         }
         sandbox.onDockerImages = { [weak self] images in

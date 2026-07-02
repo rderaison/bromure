@@ -79,6 +79,31 @@ public struct DockerImage: Identifiable, Equatable {
     }
 }
 
+/// One listening socket in the guest, from its ports loop (`sudo ss -tulnpH` →
+/// ports.txt). Feeds the workspace dashboard's Listening Ports table, the
+/// `/vms` record, and the CLI's `vm <id> -L`.
+public struct ListeningPort: Equatable, Sendable {
+    public let proto: String   // "tcp" / "udp"
+    public let addr: String    // "0.0.0.0", "127.0.0.1", "[::]", "[::1]", …
+    public let port: Int
+    /// Owning process name(s) from ss's users:(…) column ("sshd", "nginx");
+    /// empty when the snapshot ran without -p.
+    public let process: String
+
+    public init(proto: String, addr: String, port: Int, process: String = "") {
+        self.proto = proto
+        self.addr = addr
+        self.port = port
+        self.process = process
+    }
+
+    /// Bound to a loopback address — reachable only from inside the VM, so the
+    /// dashboard hides it (the user asked for externally-visible ports).
+    public var isLoopback: Bool {
+        addr.hasPrefix("127.") || addr == "[::1]" || addr == "::1"
+    }
+}
+
 // MARK: - Tabs model
 
 /// Observable model backing a TabbedSessionWindow. Each tab represents a
@@ -139,6 +164,9 @@ final class TabsModel {
     var vmMemUsedKB: Int = 0
     var vmMemTotalKB: Int = 0
     var vmLoad: Double = 0
+    /// Listening sockets from the guest's ports loop (~every 3s). The dashboard
+    /// renders the non-loopback subset.
+    var vmListeningPorts: [ListeningPort] = []
     /// Drives the red toolbar indicator. True when the Mac is enrolled
     /// with bromure.io AND this session's profile is NOT in private
     /// mode — i.e. session metadata is being shipped upstream.

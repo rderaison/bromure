@@ -104,6 +104,14 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// then behaves like the app's Reboot rather than a shutdown.
     public var onGuestReboot: (() -> Void)?
 
+    /// Listening sockets published by the guest's ports loop (`ss -tulnH` →
+    /// ports.txt, every ~3s). Fired only when the set changes. Drives the
+    /// workspace dashboard's Ports row and the `/vms` record.
+    public var onPortsList: (([ListeningPort]) -> Void)?
+    /// Raw ports.txt from the last delivery, to skip re-parsing/re-firing when
+    /// nothing changed (the guest rewrites the file even when idle).
+    private var lastPortsRaw: String?
+
     /// Called whenever the guest writes a new primary IPv4 to the outbox
     /// (every 5s while the VM is up). Wire this to surface in the UI.
     public var onIPUpdate: ((String) -> Void)?
@@ -645,6 +653,17 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             self?.onVMStats?(cpu, used, total, load)
                             continue
                         }
+                        // ports.txt — raw `ss -tulnH` lines from the guest's
+                        // ports loop (~3s cadence). Parse → dashboard/API; only
+                        // fire when the content actually changed.
+                        if name == "ports.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            if raw != self?.lastPortsRaw {
+                                self?.lastPortsRaw = raw
+                                self?.onPortsList?(Self.parseListeningPorts(raw))
+                            }
+                            continue
+                        }
                         // docker-images.txt — `docker images` NDJSON; dashboard-only.
                         if name == "docker-images.txt" {
                             let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
@@ -743,6 +762,50 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             self.releaseMACToPool()
             self.onStopped?(nil)
         }
+    }
+
+    /// Parse `ss -tuln` output (one socket per line: netid, state, queues,
+    /// local, peer, and — under sudo `-p` — the users:(("name",pid,fd))
+    /// process column) into listening ports. Header-tolerant and
+    /// column-count-tolerant so the same parser serves the guest's ports loop
+    /// and the CLI's on-demand query. De-dupes identical entries.
+    nonisolated static func parseListeningPorts(_ raw: String) -> [ListeningPort] {
+        var out: [ListeningPort] = []
+        for line in raw.split(whereSeparator: \.isNewline) {
+            let f = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard f.count >= 5 else { continue }
+            let proto = String(f[0])
+            guard proto == "tcp" || proto == "udp" else { continue }   // skips headers
+            guard let (addr, port) = splitLocalAddress(f[4]) else { continue }
+            // Distinct process names from the users:(…) column, when present —
+            // e.g. users:(("nginx",pid=91,fd=6),("nginx",pid=92,fd=6)) → nginx.
+            var names: [String] = []
+            if let usersRange = line.range(of: "users:") {
+                var rest = line[usersRange.upperBound...]
+                while let open = rest.firstIndex(of: "\"") {
+                    let after = rest.index(after: open)
+                    guard let close = rest[after...].firstIndex(of: "\"") else { break }
+                    let name = String(rest[after..<close])
+                    if !names.contains(name) { names.append(name) }
+                    rest = rest[rest.index(after: close)...]
+                }
+            }
+            let p = ListeningPort(proto: proto, addr: addr, port: port,
+                                  process: names.joined(separator: ", "))
+            if !out.contains(p) { out.append(p) }
+        }
+        return out.sorted { ($0.port, $0.proto) < ($1.port, $1.proto) }
+    }
+
+    /// "0.0.0.0:22" / "[::]:80" / "127.0.0.53%lo:53" / "*:8080" → (addr, port).
+    /// Strips the %scope/iface suffix; normalizes `*` to 0.0.0.0.
+    nonisolated static func splitLocalAddress(_ s: Substring) -> (addr: String, port: Int)? {
+        guard let colon = s.lastIndex(of: ":"),
+              let port = Int(s[s.index(after: colon)...]) else { return nil }
+        var addr = String(s[..<colon])
+            .replacingOccurrences(of: #"%[^\]]*"#, with: "", options: .regularExpression)
+        if addr == "*" { addr = "0.0.0.0" }
+        return (addr, port)
     }
 
     private func releaseMACToPool() {

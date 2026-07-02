@@ -330,6 +330,10 @@ final class SessionPane {
         model.vmLoad = load
     }
 
+    func applyListeningPorts(_ ports: [ListeningPort]) {
+        if model.vmListeningPorts != ports { model.vmListeningPorts = ports }
+    }
+
     func applyDockerImages(_ images: [DockerImage]) {
         if model.dockerImages != images { model.dockerImages = images }
     }

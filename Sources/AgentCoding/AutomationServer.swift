@@ -834,23 +834,44 @@ final class ACAutomationServer {
             if shellConn != nil { break }
             Thread.sleep(forTimeInterval: 0.1)
         }
-        guard let conn = shellConn else {
+        guard var conn = shellConn else {
             sendResponse(fd: fd, status: 502, body: [
                 "error": "No shell connection for '\(profileID)' after 10s — the VM may not be running, the id/name didn't match, or its shell agent hasn't come up yet.",
             ])
             return
         }
 
-        if let result = Self.executeShellCommand(fd: conn.fd, command: command, timeout: timeout) {
-            sendResponse(fd: fd, status: 200, body: [
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exitCode": result.exitCode,
-            ])
-        } else {
-            sendResponse(fd: fd, status: 502, body: ["error": "Shell command execution failed"])
+        // A dequeued connection can be DEAD without the pool knowing — after an
+        // in-place guest reboot the pool head still holds the previous boot's
+        // sockets. A dead socket fails before the command ever runs (write
+        // error / instant EOF), so it's safe to fall through to the next queued
+        // connection; a mid-stream failure is NOT retried (the command may have
+        // executed).
+        for attempt in 0..<4 {
+            switch Self.executeShellCommand(fd: conn.fd, command: command, timeout: timeout) {
+            case .success(let result):
+                sendResponse(fd: fd, status: 200, body: [
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "exitCode": result.exitCode,
+                ])
+                _ = conn.conn  // keep alive until the response is sent
+                return
+            case .deadConnection:
+                guard attempt < 3,
+                      let next = DispatchQueue.main.sync(execute: { self.onGetShellConnection?(profileID) })
+                else {
+                    sendResponse(fd: fd, status: 502, body: [
+                        "error": "Shell command execution failed (stale guest connection — retry in a moment)",
+                    ])
+                    return
+                }
+                conn = next
+            case .protocolFailure:
+                sendResponse(fd: fd, status: 502, body: ["error": "Shell command execution failed"])
+                return
+            }
         }
-        _ = conn.conn  // keep alive until response is sent
     }
 
     /// Run `command` in `profileID`'s VM via the shell agent; return stdout, or
@@ -864,9 +885,22 @@ final class ACAutomationServer {
             if shellConn != nil { break }
             Thread.sleep(forTimeInterval: 0.1)
         }
-        guard let conn = shellConn else { return nil }
-        defer { _ = conn.conn }   // keep the connection alive until we're done
-        return Self.executeShellCommand(fd: conn.fd, command: command, timeout: timeoutSeconds)?.stdout
+        guard var conn = shellConn else { return nil }
+        // Same stale-pool retry as handleExec: a dead pooled socket (previous
+        // guest boot) fails before the command runs, so the next one is safe.
+        for attempt in 0..<4 {
+            defer { _ = conn.conn }   // keep the connection alive until we're done
+            switch Self.executeShellCommand(fd: conn.fd, command: command, timeout: timeoutSeconds) {
+            case .success(let result): return result.stdout
+            case .protocolFailure: return nil
+            case .deadConnection:
+                guard attempt < 3,
+                      let next = DispatchQueue.main.sync(execute: { self.onGetShellConnection?(profileID) })
+                else { return nil }
+                conn = next
+            }
+        }
+        return nil
     }
 
     // Active interactive (CLI/SSH) attaches → the gate the host uses to present a
@@ -1110,10 +1144,21 @@ final class ACAutomationServer {
 
     /// Wire format: [u32be len][JSON {"cmd": "...", "timeout": N}] →
     ///              [u32be len][JSON {"stdout": "...", "stderr": "...", "exit_code": N}]
-    private static func executeShellCommand(fd: Int32, command: String, timeout: Int) -> ACShellExecResult? {
+    /// How one exec attempt on a pooled connection ended. `deadConnection`
+    /// means nothing was ever exchanged (write failed, or EOF before a single
+    /// response byte) — the guest can't have run the command, so the caller may
+    /// safely retry on another connection. `protocolFailure` is a mid-stream
+    /// error — the command may have executed, so don't retry.
+    private enum ShellExecOutcome {
+        case success(ACShellExecResult)
+        case deadConnection
+        case protocolFailure
+    }
+
+    private static func executeShellCommand(fd: Int32, command: String, timeout: Int) -> ShellExecOutcome {
         let request: [String: Any] = ["cmd": command, "timeout": timeout]
         guard let bodyData = try? JSONSerialization.data(withJSONObject: request) else {
-            return nil
+            return .protocolFailure
         }
         var lenBE = UInt32(bodyData.count).bigEndian
         let lenData = Data(bytes: &lenBE, count: 4)
@@ -1123,20 +1168,21 @@ final class ACAutomationServer {
             guard let base = ptr.baseAddress else { return 0 }
             return Darwin.write(fd, base, payload.count)
         }
-        guard bytesWritten == payload.count else { return nil }
+        guard bytesWritten == payload.count else { return .deadConnection }
 
-        // Read length prefix
+        // Read length prefix. EOF before the FIRST byte = the peer was already
+        // gone (stale pool entry from a previous guest boot) → retryable.
         var lenBuf = [UInt8](repeating: 0, count: 4)
         var got = 0
         while got < 4 {
             let n = lenBuf.withUnsafeMutableBufferPointer { ptr -> Int in
                 Darwin.read(fd, ptr.baseAddress!.advanced(by: got), 4 - got)
             }
-            if n <= 0 { return nil }
+            if n <= 0 { return got == 0 ? .deadConnection : .protocolFailure }
             got += n
         }
         let respLen = (UInt32(lenBuf[0]) << 24) | (UInt32(lenBuf[1]) << 16) | (UInt32(lenBuf[2]) << 8) | UInt32(lenBuf[3])
-        guard respLen < 50 * 1024 * 1024 else { return nil }
+        guard respLen < 50 * 1024 * 1024 else { return .protocolFailure }
 
         var bodyBuf = [UInt8](repeating: 0, count: Int(respLen))
         got = 0
@@ -1144,17 +1190,17 @@ final class ACAutomationServer {
             let n = bodyBuf.withUnsafeMutableBufferPointer { ptr -> Int in
                 Darwin.read(fd, ptr.baseAddress!.advanced(by: got), Int(respLen) - got)
             }
-            if n <= 0 { return nil }
+            if n <= 0 { return .protocolFailure }
             got += n
         }
         guard let obj = try? JSONSerialization.jsonObject(with: Data(bodyBuf)) as? [String: Any] else {
-            return nil
+            return .protocolFailure
         }
-        return ACShellExecResult(
+        return .success(ACShellExecResult(
             stdout: obj["stdout"] as? String ?? "",
             stderr: obj["stderr"] as? String ?? "",
             exitCode: obj["exit_code"] as? Int ?? -1
-        )
+        ))
     }
 
     // MARK: - Response helpers
