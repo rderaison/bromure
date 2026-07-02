@@ -1,28 +1,11 @@
-// Jenkinsfile.spaces — build the vllm-mlx engine wheel and publish it,
-// plus the model catalog, to the DigitalOcean Space the app pulls from at
-// runtime (https://dl.bromure.io/mlx/…). Independent of the app-release
-// pipelines (Jenkinsfile / Jenkinsfile.ac): models live on Hugging Face,
-// so this only ships the small engine wheel + catalog.json.
+// Jenkinsfile.spaces — publish the model catalog to the DigitalOcean Space
+// the app pulls from at runtime (https://dl.bromure.io/mlx/catalog.json).
+// Independent of the app-release pipelines (Jenkinsfile / Jenkinsfile.ac).
+// The inference engine is in-process MLX-Swift now, so the old vllm-mlx
+// wheel build/publish is gone — this job only ships catalog.json, and
+// models live on Hugging Face, never here.
 pipeline {
     agent { label 'macosx-builder' }
-
-    parameters {
-        string(
-            name: 'VLLM_MLX_REF',
-            defaultValue: '',
-            description: 'vllm-mlx git tag/sha to build (blank = default branch HEAD).'
-        )
-        booleanParam(
-            name: 'PUBLISH_CATALOG',
-            defaultValue: true,
-            description: 'Upload Sources/AgentCoding/Resources/catalog.json to mlx/catalog.json.'
-        )
-        booleanParam(
-            name: 'PUBLISH_WHEEL',
-            defaultValue: true,
-            description: 'Build the vllm-mlx wheel and publish it under mlx/simple/vllm-mlx/.'
-        )
-    }
 
     environment {
         // Same bucket + public base as the release pipelines; this just
@@ -31,7 +14,6 @@ pipeline {
         DO_SPACES_REGION      = 'nyc3'
         DO_SPACES_BUCKET      = 'bromure-dl'
         DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
-        VLLM_MLX_REPO         = 'https://github.com/waybarrios/vllm-mlx'
     }
 
     stages {
@@ -50,7 +32,7 @@ pipeline {
             }
         }
 
-        stage('Build + Publish') {
+        stage('Publish catalog') {
             steps {
                 withCredentials([
                     string(credentialsId: 'DO_SPACES_KEY',    variable: 'DO_SPACES_KEY'),
@@ -58,9 +40,6 @@ pipeline {
                 ]) {
                     sh '''
                         set -euo pipefail
-                        export VLLM_MLX_REF="${VLLM_MLX_REF}"
-                        export PUBLISH_CATALOG="${PUBLISH_CATALOG}"
-                        export PUBLISH_WHEEL="${PUBLISH_WHEEL}"
                         ./scripts/publish-spaces.sh
                     '''
                 }
