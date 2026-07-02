@@ -40,6 +40,16 @@ public final class CatalogStore: @unchecked Sendable {
     public static let defaultRefreshURL =
         URL(string: "https://dl.bromure.io/mlx/catalog.json")!
 
+    /// Testing kill-switch for the remote catalog:
+    ///   defaults write io.bromure.agentic-coding catalog.refreshDisabled -bool YES
+    /// When set, the published manifest is neither fetched at startup nor
+    /// adopted from the on-disk cache, so the *bundled* `Resources/catalog.json`
+    /// is authoritative — an edited entry can be tested across launches without
+    /// the remote catalog replacing it. Delete the key to go back to normal.
+    public static var refreshDisabled: Bool {
+        UserDefaults.standard.bool(forKey: "catalog.refreshDisabled")
+    }
+
     private func adoptRemote(_ parsed: ModelCatalog) {
         lock.lock(); cachedRemote = parsed; lock.unlock()
     }
@@ -50,8 +60,10 @@ public final class CatalogStore: @unchecked Sendable {
         // The fetched catalog fully REPLACES the bundled baseline — no merging
         // of stale entries (a retired model disappears the moment it's dropped
         // from the published catalog.json). The bundled baseline is only the
-        // offline day-one fallback.
-        let base = remote ?? ModelCatalog.baseline
+        // offline day-one fallback. With `refreshDisabled` the cached remote is
+        // ignored too — not just the fetch — else a previously-cached manifest
+        // would keep shadowing the bundled catalog under test.
+        let base = (Self.refreshDisabled ? nil : remote) ?? ModelCatalog.baseline
         return withInstalledExtras(base)
     }
 
@@ -119,6 +131,7 @@ public final class CatalogStore: @unchecked Sendable {
     @discardableResult
     public func refresh(from url: URL = CatalogStore.defaultRefreshURL,
                         session: URLSession = .shared) async -> Bool {
+        guard !Self.refreshDisabled else { return false }
         do {
             let (data, resp) = try await session.data(from: url)
             guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return false }

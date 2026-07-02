@@ -58,6 +58,17 @@ public final class ShellBridge: @unchecked Sendable {
         return conn
     }
 
+    /// Drop every queued connection. Called when the guest reboots in place:
+    /// the pooled sockets belong to the previous boot's shell agent and are
+    /// dead — an exec that dequeues one fails instantly. The fresh boot's
+    /// agent refills the pool within seconds of coming up.
+    public func flushPool() {
+        guard !vsockPool.isEmpty else { return }
+        if shellDebug { print("[ShellBridge] flushing \(vsockPool.count) pooled connections") }
+        for conn in vsockPool { conn.close() }
+        vsockPool.removeAll()
+    }
+
     /// Number of connections available in the pool.
     public var poolSize: Int { vsockPool.count }
 

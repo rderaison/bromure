@@ -133,6 +133,12 @@ final class SessionPane {
     /// tabs closed".
     private var sawTabList = false
 
+    /// Reset boot-detection when the same pane is reused for a fresh VM (a
+    /// reboot relaunch). Without this the stale `sawTabList == true` makes the
+    /// relaunched VM's early empty roster — published before its tmux is up —
+    /// read as "all tabs closed" and power the fresh VM straight back off.
+    func resetBootDetection() { sawTabList = false }
+
     /// Per-key timestamp of the last host-owned chord seen, feeding
     /// `acAutorepeatGuard`.
     private var lastShortcutAt: [String: Date] = [:]
@@ -248,6 +254,10 @@ final class SessionPane {
     /// authoritative, so there's no liveness guessing or reaping. Pill objects
     /// are reused by position so SwiftUI keeps stable row identity.
     func applyTabList(_ tabs: [(index: Int, active: Bool, label: String, containerID: String?)]) {
+        // While a reboot is in flight, ignore roster churn entirely — the guest
+        // is going down and coming back, and the host is driving a clean relaunch
+        // (which resets this pane's boot-detection). Acting on the transient
+        // empty rosters here is exactly what used to shut a rebooting VM down.
         if rebootRequested { return }
         guard !tabs.isEmpty else {
             // tmux is gone — the last window closed (or the VM is shutting
@@ -318,6 +328,10 @@ final class SessionPane {
         model.vmMemUsedKB = memUsedKB
         model.vmMemTotalKB = memTotalKB
         model.vmLoad = load
+    }
+
+    func applyListeningPorts(_ ports: [ListeningPort]) {
+        if model.vmListeningPorts != ports { model.vmListeningPorts = ports }
     }
 
     func applyDockerImages(_ images: [DockerImage]) {

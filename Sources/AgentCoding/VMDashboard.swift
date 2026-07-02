@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import Charts
 
@@ -35,6 +36,7 @@ struct VMDashboardView: View {
                 header
                 statStrip
                 configCard
+                if isRunning && !externalPorts.isEmpty { portsCard }
             }
             .padding(18)
         }
@@ -131,6 +133,81 @@ struct VMDashboardView: View {
                      systemImage: "clock.fill", tint: .orange)
         }
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    // MARK: Listening ports
+
+    @State private var copiedEndpoint: String?
+
+    /// Externally-reachable listening sockets (loopback-bound ones are inside-VM
+    /// only, so they're hidden here), deduped across the v4/v6 wildcard pair —
+    /// preferring the entry that carries a process name.
+    private var externalPorts: [ListeningPort] {
+        var byKey: [String: ListeningPort] = [:]
+        for p in (model?.vmListeningPorts ?? []) where !p.isLoopback {
+            let key = "\(p.port)/\(p.proto)"
+            if let existing = byKey[key], !existing.process.isEmpty { continue }
+            byKey[key] = p
+        }
+        return byKey.values.sorted { ($0.port, $0.proto) < ($1.port, $1.proto) }
+    }
+
+    /// The address a user would actually connect to: wildcard binds are
+    /// reachable on the VM's IP; a specific bind names itself.
+    private func endpoint(_ p: ListeningPort) -> String {
+        let host = (p.addr == "0.0.0.0" || p.addr == "[::]")
+            ? (model?.ipAddress ?? p.addr) : p.addr
+        return "\(host):\(p.port)"
+    }
+
+    private func copyEndpoint(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        copiedEndpoint = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            if copiedEndpoint == text { copiedEndpoint = nil }
+        }
+    }
+
+    private var portsCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Listening Ports")
+                .font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                .textCase(.uppercase).tracking(0.6)
+                .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
+            ForEach(Array(externalPorts.enumerated()), id: \.offset) { i, p in
+                if i > 0 { Divider().opacity(0.35).padding(.leading, 14) }
+                let ep = endpoint(p)
+                HStack(spacing: 8) {
+                    Text(ep)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .textSelection(.enabled)
+                    Button { copyEndpoint(ep) } label: {
+                        Image(systemName: copiedEndpoint == ep ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 10))
+                            .foregroundStyle(copiedEndpoint == ep ? .green : .secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy \(ep)")
+                    if p.proto == "udp" {
+                        Text("udp")
+                            .font(.system(size: 9, weight: .semibold))
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 12)
+                    Text(p.process.isEmpty ? "—" : p.process)
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 8)
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(Color.primary.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(Color.primary.opacity(0.06)))
     }
 
     // MARK: Configuration

@@ -538,9 +538,22 @@ final class RunningSession {
     /// Fusion engaged state, mirrored from the engine so a reattaching
     /// window restores the toolbar toggle correctly.
     var fusionEngaged: Bool = false
+    /// Listening sockets from the guest's ports loop, mirrored here so the
+    /// `/vms` record (CLI/TUI) can show them even while detached.
+    var listeningPorts: [ListeningPort] = []
     /// True once an explicit stop is in flight, so the VM-stopped callback
     /// doesn't double-run teardown.
     var stopping: Bool = false
+    /// Set when the guest signalled a reboot (its `reboot-intent` marker). Makes
+    /// the VM-stopped callback relaunch a fresh VM instead of tearing the
+    /// session down — the detached-session (window-less) counterpart of the
+    /// pane's `rebootRequested`.
+    var rebootRequested: Bool = false
+    /// VZ restarts a guest-initiated `reboot` *in place* (no guestDidStop), so
+    /// the way to know the reboot finished is the roster dipping EMPTY (tmux
+    /// died going down / not yet up on the second boot) and then coming back.
+    /// This records the dip; the non-empty roster after it clears both flags.
+    var sawRebootDip: Bool = false
     /// Set once this session has snapshotted its disk (on first boot-ready), so
     /// the repeated tab-roster callbacks only checkpoint once per boot.
     var didCheckpoint: Bool = false
@@ -1338,6 +1351,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Refresh the MLX model catalog from the hosted manifest in the
         // background (vLLM.md §5.1). Non-fatal — falls back to the bundled
         // catalog.json on any network failure, so this never blocks launch.
+        // No-op when the `catalog.refreshDisabled` default is set (testing).
         Task.detached(priority: .background) { await CatalogStore.shared.refresh() }
 
         // Surface any model download a previous crash/kill left half-finished as
@@ -2139,6 +2153,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "baseImageVersion": s.profile.baseImageVersionAtClone ?? "unknown",
                 "fusionConfigurable": s.profile.fusionConfigurable,
                 "fusionEngaged": mitmEngine?.fusionEngaged(for: s.profileID) ?? false,
+                // Mirrored from the session (not the pane) so detached VMs report
+                // them too. The TUI/dashboard filter loopback at display time.
+                "listeningPorts": s.listeningPorts.map {
+                    ["proto": $0.proto, "addr": $0.addr, "port": $0.port,
+                     "process": $0.process] as [String: Any]
+                },
             ]
         }
     }
@@ -5743,15 +5763,45 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sandbox.onStopped = { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                // A user-requested reboot rebuilds the VM in the same window.
-                if let pane = self.pane(for: pid), pane.rebootRequested {
-                    pane.rebootRequested = false
-                    self.relaunchVM(in: pane)
+                // A reboot — whether requested from the app (pane.rebootRequested)
+                // or initiated inside the guest (`reboot`, which sets the session
+                // flag via onGuestReboot) — rebuilds a fresh VM in place. An
+                // EXPLICIT stop (stopSession sets `stopping`) always wins, so a
+                // user Shutdown that lands mid-reboot still tears down. Otherwise
+                // it's a real stop (guest poweroff, crash): tear the session down
+                // and close any attached window.
+                let explicitStop = self.runningSessions[pid]?.stopping ?? false
+                if !explicitStop,
+                   (self.pane(for: pid)?.rebootRequested ?? false)
+                    || (self.runningSessions[pid]?.rebootRequested ?? false) {
+                    self.relaunchAfterGuestReboot(pid)
                 } else {
-                    // Real stop (guest poweroff, crash, or our requestStop):
-                    // tear the session down and close any attached window.
                     self.handleSessionStopped(profileID: pid)
                 }
+            }
+        }
+        sandbox.onGuestReboot = { [weak self] in
+            Task { @MainActor in
+                guard let self, let session = self.runningSessions[pid],
+                      !session.rebootRequested else { return }   // dedupe repeats
+                // Flag the reboot so the empty rosters the guest publishes on its
+                // way down don't trigger the close-action shutdown
+                // (SessionPane.applyTabList guards on rebootRequested). Then just
+                // let it happen: VZ restarts a guest `reboot` in place, so the VM
+                // comes back by itself — no host stop/relaunch needed. The dip
+                // tracking in onTabList clears the flags when tmux reappears; if
+                // VZ *does* stop the VM instead, onStopped relaunches.
+                session.rebootRequested = true
+                session.sawRebootDip = false
+                self.pane(for: pid)?.rebootRequested = true
+                // A stale suspend image is invalid across a guest reboot.
+                session.sandbox.sessionDisk?.clearSavedState()
+                // The pooled shell connections belong to the boot that's going
+                // away — flush them so the first exec after the reboot doesn't
+                // dequeue a dead socket ("Shell command execution failed").
+                self.shellBridges[pid]?.flushPool()
+                FileHandle.standardError.write(Data(
+                    "[ac] guest reboot detected for '\(session.profile.name)' — riding it out\n".utf8))
             }
         }
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
@@ -5774,6 +5824,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sandbox.onTabList = { [weak self] tabs in
             Task { @MainActor in
                 guard let self else { return }
+                // Guest-initiated reboot in flight: VZ restarts the VM in place,
+                // so "reboot finished" is the roster dipping empty (tmux gone on
+                // the way down / not yet up early in the second boot) and then
+                // coming back. Track the dip here — this callback fires for
+                // detached sessions too, unlike the pane — and clear both flags
+                // when tmux reappears so normal close handling resumes.
+                if let session = self.runningSessions[pid], session.rebootRequested {
+                    if tabs.isEmpty {
+                        session.sawRebootDip = true
+                    } else if session.sawRebootDip {
+                        session.rebootRequested = false
+                        session.sawRebootDip = false
+                        self.pane(for: pid)?.rebootRequested = false
+                        FileHandle.standardError.write(Data(
+                            "[ac] guest reboot of '\(session.profile.name)' completed\n".utf8))
+                    }
+                }
                 // Mirror for detached `vm ls` / API, and drive the tab bar.
                 self.runningSessions[pid]?.tabs = tabs.map {
                     (index: $0.index, label: $0.label, active: $0.active)
@@ -5811,6 +5878,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sandbox.onVMStats = { [weak self] cpu, used, total, load in
             Task { @MainActor in
                 self?.pane(for: pid)?.applyVMStats(cpu: cpu, memUsedKB: used, memTotalKB: total, load: load)
+            }
+        }
+        sandbox.onPortsList = { [weak self] ports in
+            Task { @MainActor in
+                guard let self else { return }
+                self.runningSessions[pid]?.listeningPorts = ports
+                self.pane(for: pid)?.applyListeningPorts(ports)
             }
         }
         sandbox.onDockerImages = { [weak self] images in
@@ -5995,6 +6069,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @MainActor
     func requestStopSession(_ profileID: Profile.ID, action: Profile.CloseAction) {
         Task { @MainActor in await self.stopSession(profileID, action: action) }
+    }
+
+    /// Rebuild a fresh VM after a guest-initiated reboot. Idempotent: the two
+    /// stop signals that can arrive (our own `vm.stop` completion and, if VZ
+    /// surfaces it, `guestDidStop`) both call this, but it consumes the reboot
+    /// flag so the relaunch happens exactly once.
+    @MainActor
+    private func relaunchAfterGuestReboot(_ profileID: Profile.ID) {
+        let paneReboot = pane(for: profileID)?.rebootRequested ?? false
+        let sessionReboot = runningSessions[profileID]?.rebootRequested ?? false
+        guard paneReboot || sessionReboot else { return }   // already handled
+        runningSessions[profileID]?.rebootRequested = false
+        if let pane = pane(for: profileID) {
+            pane.rebootRequested = false
+            relaunchVM(in: pane)
+        } else {
+            // Detached (window-less, e.g. a remote/TUI session): clean teardown +
+            // fresh window-less boot.
+            let profile = runningSessions[profileID]?.profile
+            handleSessionStopped(profileID: profileID)
+            if let profile { launch(profile, detached: true) }
+        }
     }
 
     /// Best-effort current tab snapshot for `profileID`: the attached window's
@@ -6204,6 +6300,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         win.scrollBridge = nil
         win.model.activeIndex = 0
         win.model.ipAddress = nil
+        // Reusing this pane for a fresh VM: reset boot-detection so the new VM's
+        // pre-tmux empty roster isn't mistaken for "all tabs closed" (which would
+        // power the freshly-relaunched VM straight back off).
+        win.resetBootDetection()
         // Placeholder pill while the fresh VM boots; the agent creates tmux
         // window 0 and the roster repopulates the bar.
         win.model.tabs = [TabsModel.Tab(label: "shell")]
