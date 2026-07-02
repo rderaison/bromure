@@ -48,6 +48,9 @@ pipeline {
     }
 
     environment {
+        KEYCHAIN_PASSWORD = credentials('KEYCHAIN_PASSWORD')
+        BUILD_KEYCHAIN    = "${HOME}/build.keychain"
+
         // Same bucket + public base as the release pipelines; this just
         // writes under the images/ prefix. Secrets come from Jenkins creds.
         DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
@@ -57,14 +60,31 @@ pipeline {
     }
 
     stages {
+        stage('Unlock Keychain') {
+            steps {
+                sh '''
+                    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$BUILD_KEYCHAIN"
+                    security list-keychains -s "$BUILD_KEYCHAIN" login.keychain-db
+                    security default-keychain -s "$BUILD_KEYCHAIN"
+                '''
+            }
+        }
+
         stage('Install release-tool deps') {
             steps {
                 // Same socket.dev-wrapped install as the release pipelines;
                 // tools/spaces-put.mjs needs @aws-sdk/client-s3 + lib-storage.
+                // `npm ci` hard-fails whenever package-lock.json lags a
+                // package.json edit — fall back to `npm install` so a lock
+                // refresh can never brick the weekly publish. (The install
+                // path also updates the lock in the workspace; committing a
+                // regenerated lock restores pure-ci.)
                 sh '''
                     set -euo pipefail
                     (cd tools && if [ -f package-lock.json ]; then \
-                                    npx --yes @socketsecurity/cli npm ci --silent; \
+                                    npx --yes @socketsecurity/cli npm ci --silent \
+                                        || { echo "npm ci failed (lock out of sync?) — falling back to npm install"; \
+                                             npx --yes @socketsecurity/cli npm install; }; \
                                  else \
                                     npx --yes @socketsecurity/cli npm install --silent; \
                                  fi)
@@ -76,17 +96,24 @@ pipeline {
             steps {
                 // build.sh owns compiling + signing — the publish script
                 // consumes the resulting binary rather than duplicating
-                // the build. Signing is pinned to AD-HOC on purpose: this
-                // pipeline never distributes the app, ad-hoc satisfies the
-                // virtualization entitlement, and (unlike Jenkinsfile.ac /
-                // package.sh) no provisioning profile is embedded — with a
-                // real identity but no profile, the restricted
-                // entitlements would be enforced and the binary killed.
-                sh '''
-                    set -euo pipefail
-                    export CODESIGN_IDENTITY=-
-                    ./build.sh bromure-ac
-                '''
+                // the build. Signed with the same Developer ID identity +
+                // provisioning profile as the release pipeline
+                // (Jenkinsfile.ac): build.sh reads CODESIGN_IDENTITY and
+                // embeds <repo>/bromure-ac.provisionprofile, which is what
+                // lets the restricted entitlements (application-identifier,
+                // keychain group, vmnet) validate on a real identity.
+                withCredentials([
+                    string(credentialsId: 'DEVELOPER_ID',        variable: 'DEVELOPER_ID'),
+                    file(credentialsId:   'PROVISION_PROFILE_AC', variable: 'PROVISION_PROFILE')
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        rm -f bromure-ac.provisionprofile
+                        cp "$PROVISION_PROFILE" bromure-ac.provisionprofile
+                        export CODESIGN_IDENTITY="$DEVELOPER_ID"
+                        ./build.sh bromure-ac
+                    '''
+                }
             }
         }
 
