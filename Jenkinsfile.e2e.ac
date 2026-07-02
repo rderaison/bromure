@@ -82,7 +82,17 @@ pipeline {
                     # it exposes a loopback HTTP surface with no auth. Flip
                     # it on for the CI run via UserDefaults before launch.
                     defaults write io.bromure.agentic-coding automation.enabled -bool true
-                    BROMURE_DEBUG_CLAUDE=1 "$APP_BUNDLE/Contents/MacOS/bromure-ac" > /tmp/bromure-ac.log 2>&1 &
+                    # Log into the workspace: archiveArtifacts globs are
+                    # workspace-relative, so an absolute /tmp path never
+                    # matches. Clear the harness relaunch log too (it appends
+                    # across runs) so a stale copy can't get archived.
+                    rm -f bromure-ac.log bromure-ac-e2e.log /tmp/bromure-ac-e2e.log
+                    # A previous run can leave an instance behind (e.g. one the
+                    # test harness relaunched, whose pid we never recorded) —
+                    # it would hold port 9223 and shadow this build's app.
+                    pkill -x bromure-ac 2>/dev/null || true
+                    sleep 2
+                    BROMURE_DEBUG_CLAUDE=1 "$APP_BUNDLE/Contents/MacOS/bromure-ac" > bromure-ac.log 2>&1 &
                     echo $! > .bromure_ac_pid
                     # Wait up to 60s for the HTTP automation server to come up.
                     for i in $(seq 1 60); do
@@ -345,9 +355,16 @@ pipeline {
                     kill "$(cat .bromure_ac_pid)" 2>/dev/null || true
                     rm -f .bromure_ac_pid
                 fi
+                # Also reap any instance the harness relaunched mid-run
+                # (its pid was never recorded in .bromure_ac_pid).
+                pkill -x bromure-ac 2>/dev/null || true
                 security default-keychain -s login.keychain-db || true
+                # If a stage's harness preflight relaunched a dead app, its
+                # output went to /tmp — pull it into the workspace so it's
+                # archived alongside the Start App log.
+                cp /tmp/bromure-ac-e2e.log bromure-ac-e2e.log 2>/dev/null || true
             '''
-            archiveArtifacts artifacts: '/tmp/bromure-ac.log', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'bromure-ac.log, bromure-ac-e2e.log', allowEmptyArchive: true
         }
     }
 }
