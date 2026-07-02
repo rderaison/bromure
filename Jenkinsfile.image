@@ -74,12 +74,17 @@ pipeline {
 
         stage('Build bromure-ac') {
             steps {
-                // build.sh owns compiling + signing (ad-hoc with the full
-                // BromureAC.entitlements, incl. virtualization) — the
-                // publish script consumes the resulting binary rather
-                // than duplicating the build.
+                // build.sh owns compiling + signing — the publish script
+                // consumes the resulting binary rather than duplicating
+                // the build. Signing is pinned to AD-HOC on purpose: this
+                // pipeline never distributes the app, ad-hoc satisfies the
+                // virtualization entitlement, and (unlike Jenkinsfile.ac /
+                // package.sh) no provisioning profile is embedded — with a
+                // real identity but no profile, the restricted
+                // entitlements would be enforced and the binary killed.
                 sh '''
                     set -euo pipefail
+                    export CODESIGN_IDENTITY=-
                     ./build.sh bromure-ac
                 '''
             }
