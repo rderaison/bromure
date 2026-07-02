@@ -97,6 +97,9 @@ fi
 COMPRESSED_BYTES=$(stat -f%z "$GZ")
 SHA256=$(shasum -a 256 "$GZ" | awk '{print $1}')
 
+# --allow-unsigned: no signing key locally. The client side skips
+# signature verification only because BROMURE_IMAGE_CATALOG_BASE is set —
+# production fetches always require a valid signature.
 node tools/make-img-catalog.mjs \
     --baseline "Sources/AgentCoding/Resources/img-catalog.json" \
     --build-info "$BUILD_INFO" \
@@ -105,6 +108,7 @@ node tools/make-img-catalog.mjs \
     --sha256 "$SHA256" \
     --compressed-bytes "$COMPRESSED_BYTES" \
     --uncompressed-bytes "$UNCOMPRESSED_BYTES" \
+    --allow-unsigned \
     --out "$CDN/images/img-catalog.json"
 
 # Sanity: the inspect mode must read back the uuid we just wrote.

@@ -75,6 +75,10 @@ KEEP_PREVIOUS="${KEEP_PREVIOUS:-0}"
 if ! enabled "$DRY_RUN"; then
     : "${DO_SPACES_KEY:?}" "${DO_SPACES_SECRET:?}" "${DO_SPACES_ENDPOINT:?}"
     : "${DO_SPACES_REGION:?}" "${DO_SPACES_BUCKET:?}" "${DO_SPACES_PUBLIC_BASE:?}"
+    # Catalog signing key (same credential that signs Sparkle updates).
+    # Clients refuse unsigned production catalogs, so publishing without
+    # it would brick every new installation's download path.
+    : "${SPARKLE_PRIVATE_KEY:?}"
 fi
 
 STAGING="$(mktemp -d)"

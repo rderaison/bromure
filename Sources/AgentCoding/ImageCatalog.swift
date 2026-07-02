@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 
 // MARK: - img-catalog.json model
@@ -94,17 +95,74 @@ public struct RemoteBaseImage: Codable, Sendable, Equatable {
 
 /// A parsed img-catalog.json.
 public struct ImageCatalog: Codable, Sendable, Equatable {
+    /// Ed25519 signature over `signingPayload(signedAt:)`, made by the
+    /// publish pipeline with the same Sparkle key that signs app updates
+    /// (SUPublicEDKey verifies both). It covers the image identity +
+    /// sha256 AND every postinstall command — the commands run as root
+    /// inside users' base images, so a compromised CDN bucket must not
+    /// be able to alter them.
+    public struct Signature: Codable, Sendable, Equatable {
+        /// ISO-8601 signing timestamp. Also the rollback guard: clients
+        /// never adopt a catalog signed earlier than one they've already
+        /// adopted (UTC ISO-8601 compares lexically).
+        public var signedAt: String
+        /// base64 ed25519 signature.
+        public var edSignature: String
+
+        public init(signedAt: String, edSignature: String) {
+            self.signedAt = signedAt
+            self.edSignature = edSignature
+        }
+    }
+
     public var formatVersion: Int
     /// nil in the bundled baseline (which only carries the canonical
     /// postinstall list); always present in a published catalog.
     public var image: RemoteBaseImage?
     public var postinstall: [PostinstallStep]
+    /// Required on catalogs fetched from the production CDN; nil in the
+    /// bundled baseline and in test catalogs served via the
+    /// BROMURE_IMAGE_CATALOG_BASE override.
+    public var signature: Signature?
 
     public init(formatVersion: Int = 1, image: RemoteBaseImage? = nil,
-                postinstall: [PostinstallStep]) {
+                postinstall: [PostinstallStep], signature: Signature? = nil) {
         self.formatVersion = formatVersion
         self.image = image
         self.postinstall = postinstall
+        self.signature = signature
+    }
+
+    /// The canonical byte string the signature covers — semantic fields,
+    /// not raw JSON bytes, so formatting/key-order can never break
+    /// verification. tools/make-img-catalog.mjs builds the IDENTICAL
+    /// string; any change here is a format break that must be made in
+    /// both places (and bump the version line). Free-text fields are
+    /// base64'd so embedded newlines can't smuggle extra payload lines.
+    /// nil when there's no image (a baseline is never signed).
+    public func signingPayload(signedAt: String) -> Data? {
+        guard let image else { return nil }
+        func b64(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+        var lines = [
+            "bromure-img-catalog-v1",
+            "signedAt=\(signedAt)",
+            "formatVersion=\(formatVersion)",
+            "image.uuid=\(image.uuid)",
+            "image.version=\(image.version)",
+            "image.description.b64=\(b64(image.description))",
+            "image.builtAt=\(image.builtAt ?? "")",
+            "image.disk.path=\(image.disk.path)",
+            "image.disk.sha256=\(image.disk.sha256.lowercased())",
+            "image.disk.compressedBytes=\(image.disk.compressedBytes)",
+            "image.disk.uncompressedBytes=\(image.disk.uncompressedBytes)",
+            "image.disk.compression=\(image.disk.compression)",
+        ]
+        for step in postinstall.sorted(by: { $0.uuid < $1.uuid }) {
+            lines.append("step.\(step.uuid).seq=\(step.seq)")
+            lines.append("step.\(step.uuid).description.b64=\(b64(step.description))")
+            lines.append("step.\(step.uuid).command.b64=\(b64(step.command))")
+        }
+        return Data(lines.joined(separator: "\n").utf8)
     }
 
     /// Steps in execution order.
@@ -198,9 +256,42 @@ public final class ImageCatalogStore: @unchecked Sendable {
             .appendingPathComponent("BromureAC", isDirectory: true)
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         self.cacheURL = support.appendingPathComponent("img-catalog.json")
-        if let data = try? Data(contentsOf: cacheURL) {
-            self.cachedRemote = try? ImageCatalog.parse(data)
+        if let data = try? Data(contentsOf: cacheURL),
+           let cached = try? ImageCatalog.parse(data) {
+            // The cache is re-verified on load: it sits on disk where
+            // anything running as the user could edit it, and trusting
+            // it unsigned would bypass the fetch-time check below.
+            if Self.overrideBase != nil || Self.isSignatureValid(cached) {
+                self.cachedRemote = cached
+            }
         }
+    }
+
+    // MARK: - Signature verification
+
+    /// The ed25519 public key catalog signatures verify against — the
+    /// same Sparkle key that signs app updates. Read from Info.plist
+    /// (SUPublicEDKey) when running from the app bundle; the constant
+    /// covers bare-binary contexts (swift build output, unit tests) and
+    /// MUST match Sources/AgentCoding/Info.plist.
+    static var pinnedPublicKeyBase64: String {
+        (Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String)
+            ?? "G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8="
+    }
+
+    /// True when `catalog` carries a signature that verifies against
+    /// `publicKeyBase64` over the canonical payload.
+    static func isSignatureValid(
+        _ catalog: ImageCatalog,
+        publicKeyBase64: String = ImageCatalogStore.pinnedPublicKeyBase64
+    ) -> Bool {
+        guard let sig = catalog.signature,
+              let payload = catalog.signingPayload(signedAt: sig.signedAt),
+              let sigData = Data(base64Encoded: sig.edSignature),
+              let keyData = Data(base64Encoded: publicKeyBase64),
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: keyData)
+        else { return false }
+        return key.isValidSignature(sigData, for: payload)
     }
 
     /// The best catalog we have: last fetched manifest, else the baseline.
@@ -241,6 +332,25 @@ public final class ImageCatalogStore: @unchecked Sendable {
             if let http = resp as? HTTPURLResponse,
                !(200..<300).contains(http.statusCode) { return nil }
             let parsed = try ImageCatalog.parse(data)
+            // Production catalogs MUST carry a valid signature: the
+            // postinstall commands run as root in every user's base
+            // image, so TLS + bucket ACLs alone aren't enough — the
+            // catalog is anchored to the (Jenkins-held) Sparkle key.
+            // Only the explicit BROMURE_IMAGE_CATALOG_BASE override
+            // (local pipeline tests) skips this; a missing signature is
+            // as fatal as a bad one so it can't be stripped.
+            if Self.overrideBase == nil {
+                guard Self.isSignatureValid(parsed) else { return nil }
+                // Rollback guard: never adopt a catalog signed earlier
+                // than one already adopted — replaying an old, validly
+                // signed catalog could reintroduce a retired image or
+                // step. (UTC ISO-8601 timestamps compare lexically.)
+                if let prev = remote()?.signature?.signedAt,
+                   let fresh = parsed.signature?.signedAt,
+                   fresh < prev {
+                    return nil
+                }
+            }
             adoptRemote(parsed)
             try? data.write(to: cacheURL, options: .atomic)
             return parsed

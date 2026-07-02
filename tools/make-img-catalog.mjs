@@ -21,10 +21,21 @@
  *     --uncompressed-bytes N \
  *     --out <path>
  *
+ * Signing: unless --allow-unsigned is passed, the catalog is signed with
+ * the SPARKLE_PRIVATE_KEY env credential — the same ed25519 key (and the
+ * same PKCS8 wrapping as release-upload.mjs) that signs app updates. The
+ * signature covers a canonical payload of the image identity/sha256 AND
+ * every postinstall command (they run as root in users' base images);
+ * clients verify against SUPublicEDKey and refuse unsigned catalogs from
+ * the production CDN. The payload format here MUST stay byte-identical
+ * to ImageCatalog.signingPayload(signedAt:) in
+ * Sources/AgentCoding/ImageCatalog.swift.
+ *
  * Inspect mode (used to find the previous build to delete):
  *   node tools/make-img-catalog.mjs --print-image-uuid <prev-catalog.json>
  *     → prints the image uuid, or nothing when absent/unparseable.
  */
+import { createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
@@ -95,6 +106,72 @@ if (!Number.isFinite(catalog.image.disk.compressedBytes) ||
     catalog.image.disk.uncompressedBytes <= 0) {
   console.error("make-img-catalog: byte sizes must be positive numbers");
   process.exit(1);
+}
+
+// --- Sign ----------------------------------------------------------------
+// Canonical payload — keep byte-identical to
+// ImageCatalog.signingPayload(signedAt:) (Swift verifier).
+function b64(s) {
+  return Buffer.from(s, "utf8").toString("base64");
+}
+function signingPayload(cat, signedAt) {
+  const img = cat.image;
+  const lines = [
+    "bromure-img-catalog-v1",
+    `signedAt=${signedAt}`,
+    `formatVersion=${cat.formatVersion}`,
+    `image.uuid=${img.uuid}`,
+    `image.version=${img.version}`,
+    `image.description.b64=${b64(img.description)}`,
+    `image.builtAt=${img.builtAt ?? ""}`,
+    `image.disk.path=${img.disk.path}`,
+    `image.disk.sha256=${img.disk.sha256.toLowerCase()}`,
+    `image.disk.compressedBytes=${img.disk.compressedBytes}`,
+    `image.disk.uncompressedBytes=${img.disk.uncompressedBytes}`,
+    `image.disk.compression=${img.disk.compression}`,
+  ];
+  const steps = [...cat.postinstall]
+    .sort((a, b) => (a.uuid < b.uuid ? -1 : a.uuid > b.uuid ? 1 : 0));
+  for (const s of steps) {
+    lines.push(`step.${s.uuid}.seq=${s.seq}`);
+    lines.push(`step.${s.uuid}.description.b64=${b64(s.description)}`);
+    lines.push(`step.${s.uuid}.command.b64=${b64(s.command)}`);
+  }
+  return Buffer.from(lines.join("\n"), "utf8");
+}
+
+if (args.includes("--allow-unsigned")) {
+  console.log("make-img-catalog: --allow-unsigned — catalog will NOT carry a signature (test use only; clients reject unsigned production catalogs)");
+} else {
+  const SPARKLE_PRIVATE_KEY = process.env.SPARKLE_PRIVATE_KEY;
+  if (!SPARKLE_PRIVATE_KEY) {
+    console.error("make-img-catalog: SPARKLE_PRIVATE_KEY env is required (or pass --allow-unsigned for local tests)");
+    process.exit(1);
+  }
+  // Same key handling as release-upload.mjs: Sparkle stores the 64-byte
+  // (seed ‖ pub) or bare 32-byte seed; wrap the seed in the minimal
+  // PKCS8 DER envelope (RFC 8410) for node's crypto.
+  const raw = Buffer.from(SPARKLE_PRIVATE_KEY, "base64");
+  if (raw.length !== 64 && raw.length !== 32) {
+    console.error(`make-img-catalog: SPARKLE_PRIVATE_KEY must decode to 32 or 64 bytes, got ${raw.length}`);
+    process.exit(1);
+  }
+  const seed = raw.subarray(0, 32);
+  const prefix = Buffer.from("302e020100300506032b657004220420", "hex");
+  const key = createPrivateKey({
+    key: Buffer.concat([prefix, seed]), format: "der", type: "pkcs8",
+  });
+
+  const signedAt = new Date().toISOString();
+  const payload = signingPayload(catalog, signedAt);
+  const signature = sign(null, payload, key);
+  // Self-check: guards against silent key-format bugs producing
+  // signatures every client would then reject.
+  if (!verify(null, payload, createPublicKey(key), signature)) {
+    console.error("make-img-catalog: internal error — signature failed self-verify");
+    process.exit(1);
+  }
+  catalog.signature = { signedAt, edSignature: signature.toString("base64") };
 }
 
 const out = req("out");
