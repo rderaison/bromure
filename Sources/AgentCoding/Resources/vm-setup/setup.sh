@@ -621,6 +621,14 @@ step "install azure-cli (Microsoft)" \
             > /etc/apt/sources.list.d/azure-cli.list
         apt-get update -y -qq
         apt-get install -y -q --no-install-recommends azure-cli
+        # az phones telemetry to dc.services.visualstudio.com unless told
+        # not to. Off for the version probe below, and off by default for
+        # every shell in the shipped image (users can re-enable with
+        # `az config set core.collect_telemetry=true` if they want it).
+        export AZURE_CORE_COLLECT_TELEMETRY=0
+        printf "export AZURE_CORE_COLLECT_TELEMETRY=0\n" \
+            > /etc/profile.d/bromure-az-telemetry.sh
+        chmod +x /etc/profile.d/bromure-az-telemetry.sh
         echo "  installed azure-cli $(/usr/bin/az version 2>/dev/null | head -3 | tail -1)"
     ' || true
 
@@ -885,7 +893,7 @@ CHROOT_EOF
 # (local build) or via postinstall.sh (downloaded image).
 # ---------------------------------------------------------------------------
 
-log "copying macOS fonts into base image"
+log "copying macOS fonts into base image (skipped unless the host shared them — never in the published FOSS image)"
 mkdir -p /tmp/macfonts-sys /tmp/macfonts-usr /tmp/macfonts-term
 modprobe virtiofs 2>/dev/null || true
 if mount -t virtiofs macos-fonts /tmp/macfonts-sys 2>/dev/null; then
