@@ -29,8 +29,10 @@ pipeline {
 
     options {
         // A full run is build (~10 min) + boot check + gzip + multi-GB
-        // upload; anything past 2h is wedged.
-        timeout(time: 2, unit: 'HOURS')
+        // upload + up to 1h of CDN-propagation polling (the smoke-test
+        // waits for the edge to serve the new catalog before the old
+        // image is deleted); anything past 3h is wedged.
+        timeout(time: 3, unit: 'HOURS')
         disableConcurrentBuilds()
     }
 

@@ -165,21 +165,44 @@ node tools/make-img-catalog.mjs \
 echo "=== Uploading img-catalog.json (1s CDN TTL) ==="
 put "$NEW_CATALOG" "images/img-catalog.json" "application/json" "public, max-age=1, must-revalidate"
 
-# --- 7. Smoke-test from the CDN -------------------------------------------
+# --- 7. Smoke-test ---------------------------------------------------------
 # The image download must be confirmed live BEFORE the old one is deleted,
 # or a bad publish would leave millions of installers with nothing.
 echo "=== Smoke-testing published catalog + image ==="
+
+catalog_uuid() {  # url → prints the catalog's image uuid, or nothing
+    curl -fsSL -H 'Cache-Control: no-cache' "$1" 2>/dev/null \
+        | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(JSON.parse(d).image.uuid)}catch{}})' \
+        || true
+}
+
+# 7a. Origin first (straight to Spaces, no CDN in the way): proves the
+# uploads themselves landed. Fails fast — nothing here is eventually
+# consistent enough to warrant retries.
+ORIGIN_BASE="https://${DO_SPACES_BUCKET}.${DO_SPACES_ENDPOINT#https://}"
+ORIGIN_UUID=$(catalog_uuid "$ORIGIN_BASE/images/img-catalog.json")
+[ "$ORIGIN_UUID" = "$UUID" ] \
+    || { echo "ERROR: origin doesn't serve the new catalog (got '${ORIGIN_UUID:-<empty>}')"; exit 1; }
+curl -fsSIL "$ORIGIN_BASE/$DISK_KEY" >/dev/null \
+    || { echo "ERROR: image not reachable at origin ($ORIGIN_BASE/$DISK_KEY)"; exit 1; }
+echo "origin OK ($ORIGIN_BASE)."
+
+# 7b. Public CDN propagation: this is what real clients fetch, and the
+# edge (Cloudflare) can keep serving the previous catalog for a while
+# despite the 1s max-age. Poll for up to an hour — the previous image is
+# only deleted after this passes, so clients stay fully served while we
+# wait. If this regularly takes long, a Cloudflare cache rule bypassing
+# the edge cache for images/img-catalog.json is the real fix.
 CATALOG_URL="$DO_SPACES_PUBLIC_BASE/images/img-catalog.json"
 OK=""
-for i in 1 2 3 4 5 6; do
-    LIVE_UUID=$(curl -fsSL -H 'Cache-Control: no-cache' "$CATALOG_URL" \
-        | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(JSON.parse(d).image.uuid)}catch{}})' \
-        || true)
+CDN_ATTEMPTS=120   # × 30s = 1 hour
+for i in $(seq 1 "$CDN_ATTEMPTS"); do
+    LIVE_UUID=$(catalog_uuid "$CATALOG_URL")
     if [ "$LIVE_UUID" = "$UUID" ]; then OK=1; break; fi
-    echo "  catalog not propagated yet (got '${LIVE_UUID:-<empty>}'), retry $i/6…"
-    sleep 5
+    echo "  CDN not propagated yet (got '${LIVE_UUID:-<empty>}'), attempt $i/$CDN_ATTEMPTS — retrying in 30s…"
+    sleep 30
 done
-[ -n "$OK" ] || { echo "ERROR: published catalog doesn't serve the new uuid"; exit 1; }
+[ -n "$OK" ] || { echo "ERROR: CDN still serves the old catalog after 1 hour"; exit 1; }
 curl -fsSIL "$DO_SPACES_PUBLIC_BASE/$DISK_KEY" >/dev/null \
     || { echo "ERROR: published image not reachable at $DISK_KEY"; exit 1; }
 echo "smoke-test passed."
