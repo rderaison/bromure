@@ -10,7 +10,9 @@
  *
  * Prerequisites:
  *   - Bromure Agentic Coding.app built at .build/.../Bromure Agentic Coding.app
- *   - The app running (open the bundle, accept any TCC prompts).
+ *     (or pointed at via .app_bundle_path / BROMURE_AC_BIN). A missing binary
+ *     FAILS the run — it never downgrades tests to skips.
+ *   - The app is launched automatically when it isn't already running.
  *   - A base image already built (otherwise session tests are skipped).
  *
  * Usage:
@@ -19,8 +21,8 @@
  *   node Tests/ac-e2e.mjs --no-sessions   # skip the session-launch tests
  */
 
-import { execSync, execFileSync } from "child_process";
-import { readFileSync } from "fs";
+import { execSync, execFileSync, spawn } from "child_process";
+import { readFileSync, existsSync, openSync } from "fs";
 
 const APP_NAME = "Bromure Agentic Coding";
 const API = process.env.BROMURE_AC_API_URL || "http://127.0.0.1:9223";
@@ -114,6 +116,46 @@ function cli(args, { timeoutMs = 60000, allowFail = false } = {}) {
     if (allowFail) return out;
     throw new Error(`cli ${args.join(" ")} (exit ${e.status ?? "?"}): ${out || e.message}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Preflight: the binary must exist and the app must be running. Neither
+// condition may downgrade tests to skips — a missing binary or a dead
+// control socket is a build/environment failure, so it fails the run.
+// ---------------------------------------------------------------------------
+
+// `vm ls` answered by a live agent prints either the empty-state note or the
+// unified listing header (CLICommands.swift). Anything else (missing binary,
+// "No bromure-ac agent running", connect errors) = not reachable.
+const controlSocketUp = () =>
+  /No workspaces|WORKSPACE ID/.test(cli(["vm", "ls"], { allowFail: true, timeoutMs: 15000 }));
+
+async function ensureAppRunning() {
+  if (!existsSync(AC_BIN)) {
+    console.error(`bromure-ac binary not found at: ${AC_BIN}`);
+    console.error("Build it first (./build.sh bromure-ac) or point BROMURE_AC_BIN at the binary.");
+    process.exit(1);
+  }
+  if (controlSocketUp()) return;
+  console.log(`bromure-ac is not running — launching ${AC_BIN} …`);
+  // The automation server is opt-in (same UserDefaults flip as the CI
+  // Start App stage) — enable it before launch so section 5 can assert it.
+  try {
+    execSync("defaults write io.bromure.agentic-coding automation.enabled -bool true");
+  } catch {}
+  const log = openSync("/tmp/bromure-ac-e2e.log", "a");
+  spawn(AC_BIN, [], {
+    detached: true,
+    stdio: ["ignore", log, log],
+    env: { ...process.env, BROMURE_DEBUG_CLAUDE: process.env.BROMURE_DEBUG_CLAUDE || "1" },
+  }).unref();
+  for (let i = 0; i < 30; i++) {         // up to 60s, same budget as CI
+    await sleep(2000);
+    if (controlSocketUp()) return;
+  }
+  console.error("bromure-ac never became reachable (control socket still down after 60s).");
+  console.error("App output: /tmp/bromure-ac-e2e.log");
+  process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +281,9 @@ function setProfileSetting(nameOrID, key, value) {
 
 async function main() {
   console.log("\n=== Bromure Agentic Coding E2E Test Suite ===\n");
+
+  // Preflight: binary present + app running (launched here if needed).
+  await ensureAppRunning();
 
   // Pre-check: app is reachable
   try {
@@ -557,21 +602,20 @@ async function main() {
   // ======================================================================
   console.log("\n--- 5. HTTP automation API ---");
 
-  // Probe whether the HTTP server is running. The bridge defaults to ON
-  // but a user could have disabled it via UserDefaults, so we skip the
-  // section rather than fail noisily.
-  let httpAvailable = true;
-  try {
-    const h = await api("GET", "/health");
-    if (h.status !== "ok") httpAvailable = false;
-  } catch {
-    httpAvailable = false;
-  }
-  if (!httpAvailable) {
-    console.log(
-      "  \x1b[33mSKIP\x1b[0m  HTTP automation tests (server unreachable at " + API + ")"
-    );
-  } else {
+  // The automation server is required here — CI enables it before launch and
+  // the preflight enables it when launching the app itself. Unreachable is a
+  // FAILURE, not a skip: skipping quietly hid every regression behind it.
+  await test("5.0 automation server /health responds ok", async () => {
+    let h;
+    try {
+      h = await api("GET", "/health");
+    } catch (e) {
+      throw new Error(`automation server unreachable at ${API} (${e.message}) — ` +
+                      "automation.enabled off, or the app needs a restart to pick it up?");
+    }
+    assertEq(h.status, "ok");
+  });
+  {
     await test("5.1 GET /health returns ok", async () => {
       const r = await api("GET", "/health");
       assertEq(r.status, "ok");
@@ -1443,14 +1487,17 @@ async function main() {
   // ======================================================================
   console.log("\n--- 12. Prompt Injection detection ---");
 
+  // An unreachable HTTP API is an app failure (section 5.0 pins it); only
+  // the deliberate BROMURE_DEBUG_CLAUDE opt-out may skip this section.
   let piDetectAvailable = false;
-  try {
+  await test("12.0 /health answers (detection needs the HTTP API)", async () => {
     const h = await api("GET", "/health");
-    piDetectAvailable = h.status === "ok" && h.debugEnabled === true;
-  } catch {}
+    assertEq(h.status, "ok");
+    piDetectAvailable = h.debugEnabled === true;
+  });
 
   if (!piDetectAvailable) {
-    console.log("  \x1b[33mSKIP\x1b[0m  detection endpoint (needs HTTP API + BROMURE_DEBUG_CLAUDE)");
+    console.log("  \x1b[33mSKIP\x1b[0m  detection endpoint (BROMURE_DEBUG_CLAUDE not set)");
   } else {
     const detect = async (text, kind = "rules") => {
       const r = await api("POST", "/detect/prompt-injection", { text, kind });
@@ -1495,17 +1542,18 @@ async function main() {
   // ======================================================================
   console.log("\n--- 13. CLI ---");
 
-  // Reachable = the CLI binary ran AND an agent answered (a `vm ls` table or
-  // "No running VMs"). A missing binary or down socket misses both → skip.
-  const cliReachable = /No running VMs|VM ID/.test(cli(["vm", "ls"], { allowFail: true }));
-  if (!cliReachable) {
-    console.log(
-      "  \x1b[33mSKIP\x1b[0m  CLI tests (bromure-ac binary not found or control socket down)"
-    );
-  } else {
+  // The preflight guarantees the binary + a live control socket at startup;
+  // 13.0 re-pins that guarantee (an agent that died mid-suite FAILS here —
+  // it never downgrades the section to a skip).
+  await test("13.0 control socket answers `vm ls`", async () => {
+    const out = cli(["vm", "ls"], { allowFail: true });
+    assert(/No workspaces|WORKSPACE ID/.test(out),
+           `control socket down or unexpected output: ${out.slice(0, 200)}`);
+  });
+  {
     await test("13.1 vm ls reports running VMs (table or empty)", async () => {
       const out = cli(["vm", "ls"]);
-      assert(/No running VMs|VM ID/.test(out), `unexpected vm ls output: ${out}`);
+      assert(/No workspaces|WORKSPACE ID/.test(out), `unexpected vm ls output: ${out}`);
     });
 
     await test("13.2 info prints something about the base image", async () => {
@@ -1626,9 +1674,10 @@ async function main() {
   // ======================================================================
   console.log("\n--- 15. CLI VM lifecycle ---");
 
-  // Reuse the section 6/8 base-image gate.
-  let cliVMable = cliReachable;
-  if (cliReachable && !SKIP_SESSIONS) {
+  // Reuse the section 6/8 base-image gate. (The app itself is guaranteed by
+  // the preflight — only environment gates may skip: no image, --no-sessions.)
+  let cliVMable = !SKIP_SESSIONS;
+  if (cliVMable) {
     try {
       const pid = createProfile("ACE2E_CLI_Probe");
       if (ac(`open ac session "${pid}"`).startsWith("error:")) cliVMable = false;
@@ -1639,13 +1688,11 @@ async function main() {
     } catch {
       cliVMable = false;
     }
-  } else {
-    cliVMable = false;
   }
 
   if (!cliVMable) {
     console.log(
-      "  \x1b[33mSKIP\x1b[0m  CLI VM tests (no base image, --no-sessions, or socket unreachable)"
+      "  \x1b[33mSKIP\x1b[0m  CLI VM tests (no base image — run `bromure-ac init` — or --no-sessions)"
     );
   } else {
     const runArgs = ["--tool", "claude", "--auth", "subscription"];
@@ -1752,13 +1799,9 @@ async function main() {
 
   // `model catalog`, `model ls`, and `model pull` validation run in-process
   // against the bundled catalog + the in-process MLX engine — they need
-  // neither the control socket nor a VM. Gate only on the binary being present.
-  const cliBinPresent = /workspaces|SUBCOMMANDS|USAGE|OPTIONS/i.test(
-    cli(["--help"], { allowFail: true })
-  );
-  if (!cliBinPresent) {
-    console.log("  \x1b[33mSKIP\x1b[0m  model commands (bromure-ac binary not found)");
-  } else {
+  // neither the control socket nor a VM. The binary itself is guaranteed by
+  // the preflight (a missing binary already failed the run).
+  {
     await test("16.1 model catalog --offline lists curated models with a host-RAM header", async () => {
       const out = cli(["model", "catalog", "--offline"], { allowFail: true });
       assertIncludes(out, "Host unified memory");
@@ -1838,13 +1881,11 @@ async function main() {
     } finally { deleteProfile(id); }
   });
 
-  if (cliReachable) {
-    await test("17.5 routing a correct <mode> at an unknown VM reports not-found", async () => {
-      const out = cli(["workspaces", "routing", "cloud", "ACE2E-no-such-vm-zzz"], { allowFail: true });
-      assert(/not found|Couldn't set routing|No bromure-ac agent/i.test(out),
-             `expected a VM-not-found style error, got: ${out}`);
-    });
-  }
+  await test("17.5 routing a correct <mode> at an unknown VM reports not-found", async () => {
+    const out = cli(["workspaces", "routing", "cloud", "ACE2E-no-such-vm-zzz"], { allowFail: true });
+    assert(/not found|Couldn't set routing/i.test(out),
+           `expected a VM-not-found style error, got: ${out}`);
+  });
 
   // ======================================================================
   // 18. Hybrid knobs (CLI validation + budget/ttft/split JSON round-trip)
@@ -1877,13 +1918,11 @@ async function main() {
     } finally { deleteProfile(id); }
   });
 
-  if (cliReachable) {
-    await test("18.3 hybrid budget at an unknown VM surfaces an agent-side error", async () => {
-      const out = cli(["workspaces", "hybrid", "budget", "1000", "ACE2E-no-such-vm-zzz"], { allowFail: true });
-      assert(/not found|Couldn't set hybrid|No bromure-ac agent/i.test(out),
-             `expected a VM-not-found style error, got: ${out}`);
-    });
-  }
+  await test("18.3 hybrid budget at an unknown VM surfaces an agent-side error", async () => {
+    const out = cli(["workspaces", "hybrid", "budget", "1000", "ACE2E-no-such-vm-zzz"], { allowFail: true });
+    assert(/not found|Couldn't set hybrid/i.test(out),
+           `expected a VM-not-found style error, got: ${out}`);
+  });
 
   // ======================================================================
   // 19. Remote access CLI (disabled by default; key add/list/remove)
@@ -1895,12 +1934,9 @@ async function main() {
     for (const sub of ["status", "enable", "disable", "key"]) assertIncludes(out, sub);
   });
 
-  if (!cliReachable) {
-    console.log("  \x1b[33mSKIP\x1b[0m  remote status/key tests (control socket down)");
-  } else {
+  {
     await test("19.2 remote status: disabled by default, bind 0.0.0.0", async () => {
       const out = cli(["remote", "status"], { allowFail: true });
-      if (/No bromure-ac agent running/.test(out)) return; // graceful
       assert(/Remote access:\s*disabled/i.test(out), `expected remote disabled, got: ${out}`);
       assert(/Bind:\s*0\.0\.0\.0:/.test(out), `expected default bind 0.0.0.0, got: ${out}`);
     });
@@ -1911,7 +1947,6 @@ async function main() {
       const PUBKEY =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMz+q2C3RYGPQG8GiBeWPfinUJB7hFwKnRLuJwKrWqRy ACE2E_remote_throwaway";
       const add = cli(["remote", "key", "add", PUBKEY], { allowFail: true });
-      if (/No bromure-ac agent running/.test(add)) return; // graceful
       const fp = (add.match(/Added key:\s*(\S+)/) || [])[1];
       assert(fp, `add did not report a fingerprint: ${add}`);
       try {
@@ -2006,22 +2041,18 @@ async function main() {
     } finally { deleteProfile(id); }
   });
 
-  if (cliReachable) {
-    await test("21.3 fusion enable on an unknown VM reports not-found", async () => {
-      const out = cli(["workspaces", "fusion", "enable", "ACE2E-no-such-vm-zzz"], { allowFail: true });
-      assert(/not found|Couldn't set fusion|No bromure-ac agent/i.test(out),
-             `expected a VM-not-found style error, got: ${out}`);
-    });
-  }
+  await test("21.3 fusion enable on an unknown VM reports not-found", async () => {
+    const out = cli(["workspaces", "fusion", "enable", "ACE2E-no-such-vm-zzz"], { allowFail: true });
+    assert(/not found|Couldn't set fusion/i.test(out),
+           `expected a VM-not-found style error, got: ${out}`);
+  });
 
   // ======================================================================
   // 22. Trace CLI shapes (ls / summary / hostnames / clear — may be empty)
   // ======================================================================
   console.log("\n--- 22. Trace shapes ---");
 
-  if (!cliReachable) {
-    console.log("  \x1b[33mSKIP\x1b[0m  trace shape tests (control socket down)");
-  } else {
+  {
     await test("22.1 trace ls prints a header or a clean empty note", async () => {
       const out = cli(["trace", "ls"], { allowFail: true });
       assert(/No trace records|HOST\s+METHOD|TIME/.test(out), `unexpected trace ls: ${out}`);
@@ -2047,9 +2078,7 @@ async function main() {
   // ======================================================================
   console.log("\n--- 23. Unified naming ---");
 
-  if (!cliReachable) {
-    console.log("  \x1b[33mSKIP\x1b[0m  alias tests (control socket down)");
-  } else {
+  {
     await test("23.1 `workspaces ls` and `vm ls` are the same unified listing", async () => {
       const ws = cli(["workspaces", "ls"], { allowFail: true });
       const vm = cli(["vm", "ls"], { allowFail: true });
