@@ -1562,19 +1562,19 @@ async function main() {
       assert(out.length > 0, "info produced no output");
     });
 
-    await test("13.3 profiles ls includes a freshly-created profile", async () => {
+    await test("13.3 workspaces ls includes a freshly-created workspace", async () => {
       const id = createProfile("ACE2E_CLI_List");
       try {
-        assertIncludes(cli(["profiles", "ls"]), "ACE2E_CLI_List");
+        assertIncludes(cli(["workspaces", "ls"]), "ACE2E_CLI_List");
       } finally {
         deleteProfile(id);
       }
     });
 
-    await test("13.4 profiles describe shows tool/auth/mac, no secrets", async () => {
+    await test("13.4 workspaces describe shows tool/auth/mac, no secrets", async () => {
       const id = createProfile("ACE2E_CLI_Desc");
       try {
-        const out = cli(["profiles", "describe", "ACE2E_CLI_Desc"]);
+        const out = cli(["workspaces", "describe", "ACE2E_CLI_Desc"]);
         assertIncludes(out, "ACE2E_CLI_Desc");
         assertIncludes(out, "tool");
         assertIncludes(out, "mac");
@@ -1584,10 +1584,10 @@ async function main() {
       }
     });
 
-    await test("13.5 profiles rm deletes a stopped profile", async () => {
+    await test("13.5 workspaces rm deletes a stopped workspace", async () => {
       const id = createProfile("ACE2E_CLI_Rm");
-      cli(["profiles", "rm", "ACE2E_CLI_Rm", "-f"]);
-      assert(!cli(["profiles", "ls"]).includes("ACE2E_CLI_Rm"), "profile still listed after rm");
+      cli(["workspaces", "rm", "ACE2E_CLI_Rm", "-f"]);
+      assert(!cli(["workspaces", "ls"]).includes("ACE2E_CLI_Rm"), "workspace still listed after rm");
       deleteProfile(id); // safety net (already gone)
     });
 
@@ -1657,14 +1657,18 @@ async function main() {
     }
   });
 
-  await test("14.4 startInBackground roundtrips (default off)", async () => {
+  await test("14.4 removed startInBackground key is tolerated and dropped", async () => {
+    // The per-profile setting was removed in e2a03a17 (window-less boot is
+    // solely the one-shot `vm run -d` path now); old JSON carrying the field
+    // must still decode — with the key silently ignored, not persisted.
     const id = createProfile("ACE2E_Opt_StartBg");
     try {
-      assert(!getProfileJSON(id).startInBackground, "startInBackground should default off");
       const p = getProfileJSON(id);
       p.startInBackground = true;
       setProfileJSON(id, p);
-      assertEq(getProfileJSON(id).startInBackground, true);
+      const after = getProfileJSON(id);
+      assertEq(after.startInBackground, undefined);
+      assertEq(after.name, "ACE2E_Opt_StartBg"); // profile intact otherwise
     } finally {
       deleteProfile(id);
     }
@@ -1716,7 +1720,7 @@ async function main() {
       try {
         let up = false;
         for (let i = 0; i < 20; i++) {
-          const r = cli(["vm", "exec", name, "true"], { allowFail: true });
+          const r = cli(["vm", "exec", name, "--", "true"], { allowFail: true });
           if (!/No shell connection|not found|not running/i.test(r)) {
             up = true;
             break;
@@ -1727,21 +1731,21 @@ async function main() {
         await cb(name);
       } finally {
         cli(["vm", "kill", name], { allowFail: true });
-        cli(["profiles", "rm", name, "-f"], { allowFail: true });
+        cli(["workspaces", "rm", name, "-f"], { allowFail: true });
       }
     }
 
     await test("15.1 vm run → ls / exec / describe (MAC + IP) all work", async () => {
       await withCLIVM("ACE2E_CLI_VM", [], async (name) => {
         assertIncludes(cli(["vm", "ls"]), name);
-        assertIncludes(cli(["vm", "exec", name, "uname -s"]), "Linux");
+        assertIncludes(cli(["vm", "exec", name, "--", "uname", "-s"]), "Linux");
         const v = await describeWithIP(name);
         assert(/^\s*mac\s+([0-9a-f]{2}:){5}[0-9a-f]{2}/im.test(v), `no MAC in describe:\n${v}`);
         assert(/^\s*ip\s+\d+\.\d+\.\d+\.\d+/m.test(v), `no IP in describe:\n${v}`);
       });
     });
 
-    await test("15.2 a profile keeps its IP across stop + restart (sqlite lease)", async () => {
+    await test("15.2 a workspace keeps its IP across stop + restart (sqlite lease)", async () => {
       const name = "ACE2E_CLI_IP";
       try {
         cli(["vm", "run", "--name", name, ...runArgs, "-d"]);
@@ -1749,26 +1753,21 @@ async function main() {
         assert(ip1, "no IP on first boot");
         cli(["vm", "kill", name]);
         await sleep(2500);
-        cli(["vm", "run", "--profile", name, "-d"]);
+        cli(["vm", "run", name, "-d"]); // restart by name (positional)
         const ip2 = ipOf(await describeWithIP(name));
         assertEq(ip2, ip1, "IP changed after restart");
       } finally {
         cli(["vm", "kill", name], { allowFail: true });
-        cli(["profiles", "rm", name, "-f"], { allowFail: true });
+        cli(["workspaces", "rm", name, "-f"], { allowFail: true });
       }
     });
 
-    await test("15.3 startInBackground boots the VM detached (no window)", async () => {
+    await test("15.3 vm run -d boots the VM detached (no window)", async () => {
+      // startInBackground is gone (e2a03a17); window-less boot is solely the
+      // one-shot detached path — assert `vm run -d` reports window: detached.
       const name = "ACE2E_CLI_Bg";
       try {
-        // Create the profile, flag startInBackground, then run WITHOUT -d.
         cli(["vm", "run", "--name", name, ...runArgs, "-d"]);
-        cli(["vm", "kill", name]);
-        await sleep(1500);
-        const p = getProfileJSON(name);
-        p.startInBackground = true;
-        setProfileJSON(name, p);
-        cli(["vm", "run", "--profile", name]); // no -d
         let win = "";
         for (let i = 0; i < 25; i++) {
           const m = cli(["vm", "describe", name], { allowFail: true }).match(/^\s*window\s+(\w+)/m);
@@ -1778,16 +1777,16 @@ async function main() {
           }
           await sleep(2000);
         }
-        assertEq(win, "detached", "startInBackground profile did not start detached");
+        assertEq(win, "detached", "vm run -d did not boot detached");
       } finally {
         cli(["vm", "kill", name], { allowFail: true });
-        cli(["profiles", "rm", name, "-f"], { allowFail: true });
+        cli(["workspaces", "rm", name, "-f"], { allowFail: true });
       }
     });
 
-    await test("15.4 profiles rm refuses while the VM is running", async () => {
+    await test("15.4 workspaces rm refuses while the VM is running", async () => {
       await withCLIVM("ACE2E_CLI_RmGuard", [], async (name) => {
-        const out = cli(["profiles", "rm", name, "-f"], { allowFail: true });
+        const out = cli(["workspaces", "rm", name, "-f"], { allowFail: true });
         assert(/running VM/i.test(out), `expected a refusal, got: ${out}`);
       });
     });
