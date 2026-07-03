@@ -474,7 +474,13 @@ struct ToolDef: Sendable {
         // Drop JSON `null`s — swift-jinja can't convert NSNull and aborts the
         // whole chat-template render ("Cannot convert Optional<Any> to Jinja
         // Value"), 500ing any request whose tool schema has a null field.
-        let params = (Self.stripNulls(raw) as? [String: Any]) ?? [:]
+        let stripped = (Self.stripNulls(raw) as? [String: Any]) ?? [:]
+        // …and normalize `type` to a plain string. Gemma-family templates run
+        // `value['type'] | upper` on every parameter schema, so a JSON-Schema
+        // union (`"type": ["string", "null"]`) or a type-less property
+        // (anyOf/enum-only — both common in coding-agent tools) aborts the
+        // render with "upper filter requires string".
+        let params = (Self.normalizeSchemaTypes(stripped) as? [String: Any]) ?? [:]
         return [
             "type": "function",
             "function": [
@@ -494,5 +500,46 @@ struct ToolDef: Sendable {
         }
         if let a = v as? [Any] { return a.compactMap { stripNulls($0) } }
         return v
+    }
+
+    /// Keys whose value is a *map of name → schema* (not a schema itself).
+    /// Their values are normalized as schemas, but the map is left alone —
+    /// otherwise a parameter literally named "items" or "enum" would make
+    /// the map look like a schema and grow a phantom `type` entry.
+    private static let schemaMapKeys: Set<String> =
+        ["properties", "patternProperties", "definitions", "$defs"]
+
+    /// Coerce every schema node's `type` to a single string. A union array
+    /// keeps its first non-"null" member ("nullable string" → "string"); a
+    /// schema with no usable `type` (anyOf/enum-only — common in agent tool
+    /// schemas) gets one inferred from its shape. Property *names* are never
+    /// touched — only `type` keys whose value isn't already a string.
+    static func normalizeSchemaTypes(_ v: Any) -> Any {
+        guard let d = v as? [String: Any] else {
+            if let a = v as? [Any] { return a.map { normalizeSchemaTypes($0) } }
+            return v
+        }
+        var out: [String: Any] = [:]
+        for (k, val) in d {
+            if Self.schemaMapKeys.contains(k), let m = val as? [String: Any] {
+                out[k] = m.mapValues { normalizeSchemaTypes($0) }
+            } else if k == "default" || k == "examples" || k == "const" {
+                out[k] = val   // arbitrary user JSON, not a schema — verbatim
+            } else {
+                out[k] = normalizeSchemaTypes(val)
+            }
+        }
+        if let types = out["type"] as? [Any] {
+            let names = types.compactMap { $0 as? String }
+            out["type"] = names.first { $0.lowercased() != "null" } ?? names.first ?? "string"
+        } else if !(out["type"] is String) {
+            if out["properties"] != nil { out["type"] = "object" }
+            else if out["items"] != nil { out["type"] = "array" }
+            else if out["enum"] != nil { out["type"] = "string" }
+            else if out["anyOf"] != nil || out["oneOf"] != nil || out["allOf"] != nil {
+                out["type"] = "string"
+            }
+        }
+        return out
     }
 }
