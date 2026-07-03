@@ -18,9 +18,18 @@ enum ToolCallRepair {
 
     /// Pull leaked tool calls out of one text blob. Returns the text with the
     /// call markup removed, plus the recovered tool_use blocks (as JSON dicts).
-    static func rescue(text: String, toolNames: Set<String> = []) -> (cleaned: String, blocks: [[String: Any]]) {
+    /// `gemma` additionally enables Gemma 4's native call format — gated on
+    /// the model (from the request) so no other model's text is ever touched.
+    static func rescue(text: String, toolNames: Set<String> = [],
+                       gemma: Bool = false) -> (cleaned: String, blocks: [[String: Any]]) {
         var blocks: [[String: Any]] = []
         var cleaned = text
+
+        if gemma {
+            let g = rescueGemmaCalls(cleaned)
+            blocks += g.blocks
+            cleaned = g.cleaned
+        }
 
         for spec in patterns {
             let re = spec.regex
@@ -73,7 +82,8 @@ enum ToolCallRepair {
     /// Repair a non-streaming Anthropic message dict. No-op when the engine
     /// already produced a tool_use (the parser worked) — we only rescue when
     /// the call leaked into text.
-    static func repair(message: [String: Any], toolNames: Set<String> = []) -> [String: Any] {
+    static func repair(message: [String: Any], toolNames: Set<String> = [],
+                       gemma: Bool = false) -> [String: Any] {
         var msg = message
         let content = msg["content"] as? [[String: Any]] ?? []
         if content.contains(where: { ($0["type"] as? String) == "tool_use" }) { return msg }
@@ -82,7 +92,7 @@ enum ToolCallRepair {
         var rescued: [[String: Any]] = []
         for b in content {
             if (b["type"] as? String) == "text", let t = b["text"] as? String {
-                let (clean, tus) = rescue(text: t, toolNames: toolNames)
+                let (clean, tus) = rescue(text: t, toolNames: toolNames, gemma: gemma)
                 rescued += tus
                 if !clean.isEmpty { newContent.append(["type": "text", "text": clean]) }
             } else {
@@ -140,14 +150,15 @@ enum ToolCallRepair {
 
     /// Promote a tool call leaked into `choices[0].message.content` to
     /// `message.tool_calls` (OpenAI shape). No-op when tool_calls is present.
-    static func repairChat(_ resp: [String: Any], toolNames: Set<String> = []) -> [String: Any] {
+    static func repairChat(_ resp: [String: Any], toolNames: Set<String> = [],
+                           gemma: Bool = false) -> [String: Any] {
         var r = resp
         guard var choices = r["choices"] as? [[String: Any]], !choices.isEmpty else { return r }
         var choice = choices[0]
         var message = choice["message"] as? [String: Any] ?? [:]
         if message["tool_calls"] != nil { return r }
         guard let content = message["content"] as? String else { return r }
-        let (clean, blocks) = rescue(text: content, toolNames: toolNames)
+        let (clean, blocks) = rescue(text: content, toolNames: toolNames, gemma: gemma)
         guard !blocks.isEmpty else { return r }
         message["tool_calls"] = blocks.map { b in
             ["id": b["id"] ?? "call_x", "type": "function",
@@ -198,7 +209,8 @@ enum ToolCallRepair {
 
     /// Promote a tool call leaked into a `message`/`output_text` output item to
     /// a `function_call` output item. No-op when a function_call is present.
-    static func repairResponses(_ resp: [String: Any], toolNames: Set<String> = []) -> [String: Any] {
+    static func repairResponses(_ resp: [String: Any], toolNames: Set<String> = [],
+                                gemma: Bool = false) -> [String: Any] {
         var r = resp
         guard let output = r["output"] as? [[String: Any]] else { return r }
         if output.contains(where: { ($0["type"] as? String) == "function_call" }) { return r }
@@ -211,7 +223,7 @@ enum ToolCallRepair {
             var keptParts: [[String: Any]] = []
             for c in content {
                 guard (c["type"] as? String) == "output_text" else { keptParts.append(c); continue }
-                let (clean, blocks) = rescue(text: c["text"] as? String ?? "", toolNames: toolNames)
+                let (clean, blocks) = rescue(text: c["text"] as? String ?? "", toolNames: toolNames, gemma: gemma)
                 for b in blocks {
                     rescued = true
                     let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24).lowercased()
@@ -484,6 +496,127 @@ enum ToolCallRepair {
             cleaned = cleaned.replacingCharacters(in: m.range, with: "") as NSString
         }
         return (cleaned as String, blocks)
+    }
+
+    /// Gemma 4's native tool-call format (only run for Gemma-type models —
+    /// `gemma:` at the rescue call sites):
+    ///   <|tool_call>call:Name{arg:<|"|>raw string<|"|>,n:3,flag:true}<tool_call|>
+    /// `<|"|>` is the format's quote token: it delimits raw strings with NO
+    /// escaping, so values are read verbatim between delimiters (a C file's
+    /// braces/quotes/newlines pass through untouched). Bare values parse as
+    /// JSON scalars. An unterminated span (output-token cap) is left as text
+    /// so the truncation stays visible; an unparseable body is unwrapped to
+    /// its raw text rather than silently dropped.
+    static func rescueGemmaCalls(_ text: String) -> (cleaned: String, blocks: [[String: Any]]) {
+        let openTag = "<|tool_call>", closeTag = "<tool_call|>"
+        guard text.contains(openTag) else { return (text, []) }
+        var blocks: [[String: Any]] = []
+        var out = ""
+        var rest = Substring(text)
+        while let open = rest.range(of: openTag) {
+            out += rest[..<open.lowerBound]
+            guard let close = rest.range(of: closeTag, range: open.upperBound..<rest.endIndex) else {
+                out += rest[open.lowerBound...]   // truncated call — keep visible
+                rest = ""
+                break
+            }
+            let body = String(rest[open.upperBound..<close.lowerBound])
+            if let call = parseGemmaCall(body) {
+                blocks.append(["type": "tool_use",
+                    "id": "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24).lowercased(),
+                    "name": call.name, "input": call.input])
+            } else {
+                out += body
+            }
+            rest = rest[close.upperBound...]
+        }
+        out += rest
+        return (out, blocks)
+    }
+
+    /// Parse one span body: `call:Name{key:value,…}`.
+    private static func parseGemmaCall(_ body: String) -> (name: String, input: [String: Any])? {
+        let q = "<|\"|>"
+        let s = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard s.hasPrefix("call:"), let brace = s.firstIndex(of: "{") else { return nil }
+        let name = String(s[s.index(s.startIndex, offsetBy: 5)..<brace])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        let argsBlob = String(s[s.index(after: brace)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard argsBlob.hasSuffix("}") else { return nil }
+        let inner = String(argsBlob.dropLast())
+
+        var input: [String: Any] = [:]
+        var i = inner.startIndex
+        func skipWS() { while i < inner.endIndex, inner[i].isWhitespace { i = inner.index(after: i) } }
+        while true {
+            skipWS()
+            if i >= inner.endIndex { break }
+            guard let colon = inner[i...].firstIndex(of: ":") else { return nil }
+            var key = String(inner[i..<colon]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if key.hasPrefix(q), key.hasSuffix(q), key.count >= 2 * q.count {
+                key = String(key.dropFirst(q.count).dropLast(q.count))
+            }
+            guard !key.isEmpty else { return nil }
+            i = inner.index(after: colon)
+            skipWS()
+            if inner[i...].hasPrefix(q) {
+                // Quoted raw string: verbatim until the next quote token.
+                let vStart = inner.index(i, offsetBy: q.count)
+                guard let end = inner.range(of: q, range: vStart..<inner.endIndex) else { return nil }
+                input[key] = String(inner[vStart..<end.lowerBound])
+                i = end.upperBound
+            } else {
+                // Bare value: scan to the next top-level comma, tracking
+                // brace/bracket depth and skipping quoted spans.
+                var depth = 0
+                var j = i
+                while j < inner.endIndex {
+                    if inner[j...].hasPrefix(q) {
+                        guard let end = inner.range(
+                            of: q, range: inner.index(j, offsetBy: q.count)..<inner.endIndex)
+                        else { return nil }
+                        j = end.upperBound
+                        continue
+                    }
+                    let c = inner[j]
+                    if c == "{" || c == "[" { depth += 1 }
+                    else if c == "}" || c == "]" { depth -= 1 }
+                    else if c == ",", depth == 0 { break }
+                    j = inner.index(after: j)
+                }
+                input[key] = gemmaScalar(String(inner[i..<j]).trimmingCharacters(in: .whitespacesAndNewlines))
+                i = j
+            }
+            skipWS()
+            guard i < inner.endIndex, inner[i] == "," else { break }
+            i = inner.index(after: i)
+        }
+        skipWS()
+        guard i >= inner.endIndex else { return nil }   // trailing garbage → not a call
+        return (name, input)
+    }
+
+    /// A bare (unquoted) Gemma argument value → JSON scalar. Nested
+    /// structures are best-effort: quote tokens become JSON quotes and the
+    /// blob is parsed if valid; otherwise the raw text is kept as a string.
+    private static func gemmaScalar(_ raw: String) -> Any {
+        switch raw.lowercased() {
+        case "true": return true
+        case "false": return false
+        case "null": return NSNull()
+        default: break
+        }
+        if let n = Int(raw) { return n }
+        if let d = Double(raw) { return d }
+        if raw.hasPrefix("{") || raw.hasPrefix("[") {
+            let jsonish = raw.replacingOccurrences(of: "<|\"|>", with: "\"")
+            if let data = jsonish.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+                return obj
+            }
+        }
+        return raw
     }
 
     private static func htmlDecode(_ s: String) -> String {

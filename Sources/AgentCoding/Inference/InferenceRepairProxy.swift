@@ -188,11 +188,11 @@ final class InferenceRepairProxy: @unchecked Sendable {
         }
 
         /// Repair the buffered upstream message, then render it back as SSE.
-        func repairedSSE(_ message: [String: Any], toolNames: Set<String>) -> Data {
+        func repairedSSE(_ message: [String: Any], toolNames: Set<String>, gemma: Bool) -> Data {
             switch self {
-            case .messages: return ToolCallRepair.sse(message: ToolCallRepair.repair(message: message, toolNames: toolNames))
-            case .chat: return ToolCallRepair.chatSSE(ToolCallRepair.repairChat(message, toolNames: toolNames))
-            case .responses: return ToolCallRepair.responsesSSE(ToolCallRepair.repairResponses(message, toolNames: toolNames))
+            case .messages: return ToolCallRepair.sse(message: ToolCallRepair.repair(message: message, toolNames: toolNames, gemma: gemma))
+            case .chat: return ToolCallRepair.chatSSE(ToolCallRepair.repairChat(message, toolNames: toolNames, gemma: gemma))
+            case .responses: return ToolCallRepair.responsesSSE(ToolCallRepair.repairResponses(message, toolNames: toolNames, gemma: gemma))
             }
         }
 
@@ -225,7 +225,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
 
         /// True when the turn carries no tool call — neither a native one from the
         /// engine's parser nor one we could rescue from the text.
-        func hasNoToolCall(_ message: [String: Any], toolNames: Set<String>) -> Bool {
+        func hasNoToolCall(_ message: [String: Any], toolNames: Set<String>, gemma: Bool) -> Bool {
             switch self {
             case .messages:
                 if (message["content"] as? [[String: Any]])?.contains(where: { ($0["type"] as? String) == "tool_use" }) == true { return false }
@@ -235,7 +235,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
             case .responses:
                 if (message["output"] as? [[String: Any]])?.contains(where: { ($0["type"] as? String) == "function_call" }) == true { return false }
             }
-            return ToolCallRepair.rescue(text: assistantText(message), toolNames: toolNames).blocks.isEmpty
+            return ToolCallRepair.rescue(text: assistantText(message), toolNames: toolNames, gemma: gemma).blocks.isEmpty
         }
 
         /// The turn ended cleanly (model's own end-of-turn), not truncated by the
@@ -355,6 +355,9 @@ final class InferenceRepairProxy: @unchecked Sendable {
                                 headers: [("Content-Type", "application/json")], body: body)
         }
         let toolNames = API.toolNames(in: payload)
+        // Gemma-type models leak calls in their own native format; gate its
+        // parser on the request's (already-resolved) model name.
+        let gemma = (payload["model"] as? String)?.lowercased().contains("gemma") == true
 
         // Auto-continue a "stuck preamble": a local model (notably Qwen3-Coder)
         // often narrates the next step — "Now I'll create the server file:" — then
@@ -366,7 +369,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
         // turn just ends, exactly as before — no regression).
         let finalMessage: [String: Any] = {
             guard !toolNames.isEmpty, api.cleanStop(message),
-                  api.hasNoToolCall(message, toolNames: toolNames),
+                  api.hasNoToolCall(message, toolNames: toolNames, gemma: gemma),
                   looksLikeStuckPreamble(api.assistantText(message)) else { return message }
             let preamble = api.assistantText(message)
             let dbg = ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil
@@ -388,7 +391,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
                     if dbg { appendRepairLog("[repair] ~~ \(req.path) attempt \(attempt + 1): engine status \(s2)\n") }
                     continue
                 }
-                if !api.hasNoToolCall(m2, toolNames: toolNames) {
+                if !api.hasNoToolCall(m2, toolNames: toolNames, gemma: gemma) {
                     if dbg { appendRepairLog("[repair] ~~ \(req.path) recovered a tool call on attempt \(attempt + 1)\n") }
                     return m2
                 }
@@ -428,13 +431,13 @@ final class InferenceRepairProxy: @unchecked Sendable {
                 return (finalMessage["stop_reason"] as? String ?? "?",               // anthropic messages
                         (finalMessage["content"] as? [[String: Any]])?.contains { ($0["type"] as? String) == "tool_use" } ?? false)
             }()
-            let rescued = ToolCallRepair.rescue(text: txt, toolNames: toolNames).blocks.count
+            let rescued = ToolCallRepair.rescue(text: txt, toolNames: toolNames, gemma: gemma).blocks.count
             let tail = String(txt.suffix(400)).replacingOccurrences(of: "\n", with: "\\n")
             appendRepairLog("[repair] <- \(req.path) reason=\(reason) native=\(native) rescued=\(rescued) tools=\(toolNames.sorted()) textlen=\(txt.count) tail=\(tail)\n")
         }
         return httpResponse(status: 200,
                             headers: [("Content-Type", "text/event-stream"), ("Cache-Control", "no-cache")],
-                            body: api.repairedSSE(finalMessage, toolNames: toolNames))
+                            body: api.repairedSSE(finalMessage, toolNames: toolNames, gemma: gemma))
     }
 
     /// Heuristic: the assistant text ANNOUNCES an imminent action it then didn't

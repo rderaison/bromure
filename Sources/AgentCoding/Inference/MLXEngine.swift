@@ -143,16 +143,32 @@ actor MLXEngine {
     ──────────────────────────────────────────────
     """
 
-    /// Append `toolFormatReminder` to the (first) system message when the request
+    /// Gemma variant: its template teaches the model's own native call format
+    /// (`<|tool_call>call:Name{…}<tool_call|>`), so prescribing the Qwen XML
+    /// shape above would fight the training. Keep only the behavioral rule
+    /// that fixes stuck preambles.
+    static let gemmaToolReminder = """
+    ──────────────────────────────────────────────
+    TOOL-CALL RULES:
+    - Call tools in your native tool-call format, using exact tool names as declared.
+    - When you say you will do something (create/run/edit a file), emit its tool
+      call in the SAME response. NEVER end your turn with only a description of an
+      action you have not yet performed.
+    ──────────────────────────────────────────────
+    """
+
+    /// Append the tool reminder to the (first) system message when the request
     /// declares tools — keeping it in the stable prompt prefix so the KV cache
     /// still reuses across turns.
-    static func withToolReminder(_ messages: [Chat.Message], hasTools: Bool) -> [Chat.Message] {
+    static func withToolReminder(_ messages: [Chat.Message], hasTools: Bool,
+                                 gemma: Bool = false) -> [Chat.Message] {
         guard hasTools else { return messages }
+        let reminder = gemma ? gemmaToolReminder : toolFormatReminder
         var msgs = messages
         if let i = msgs.firstIndex(where: { $0.role == .system }) {
-            msgs[i].content += "\n\n" + toolFormatReminder
+            msgs[i].content += "\n\n" + reminder
         } else {
-            msgs.insert(.system(toolFormatReminder), at: 0)
+            msgs.insert(.system(reminder), at: 0)
         }
         return msgs
     }
@@ -182,6 +198,34 @@ actor MLXEngine {
             }
         }
         out += rest
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Gemma-family models don't use `<think>` — their reasoning rides a
+    /// thought channel: `<|channel>thought\n…<channel|>` before the answer.
+    /// Gate Gemma-specific handling on the repo name so no other model's
+    /// output is ever touched.
+    static func isGemmaModel(_ repo: String) -> Bool {
+        repo.lowercased().contains("gemma")
+    }
+
+    /// Drop Gemma thought channels from a model's text. A verbatim port of
+    /// the strip_thinking macro in Gemma 4's own chat template (the canonical
+    /// semantics — it's what the template applies to model turns in history):
+    /// split on the closing `<channel|>`; within each part, drop everything
+    /// from the opening `<|channel>` on. An unterminated thought (the final
+    /// part carries an opening with no close) is dropped the same way. Tool
+    /// calls survive: `<|tool_call>…<tool_call|>` contains neither marker.
+    static func stripGemmaChannels(_ s: String) -> String {
+        guard s.contains("<|channel>") || s.contains("<channel|>") else { return s }
+        var out = ""
+        for part in s.components(separatedBy: "<channel|>") {
+            if let open = part.range(of: "<|channel>") {
+                out += part[..<open.lowerBound]
+            } else {
+                out += part
+            }
+        }
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -362,7 +406,8 @@ actor MLXEngine {
         return try await MLX.Memory.withWiredLimit(wiredBytes) {
         try await container.perform { [session] (context: ModelContext) in
             let input = try await context.processor.prepare(
-                input: UserInput(chat: MLXEngine.withToolReminder(messages, hasTools: tools?.isEmpty == false),
+                input: UserInput(chat: MLXEngine.withToolReminder(messages, hasTools: tools?.isEmpty == false,
+                                                                  gemma: MLXEngine.isGemmaModel(repo)),
                                  tools: tools?.map(\.asToolSpec),
                                  additionalContext: ["enable_thinking": enableThinking]))
             // The full prompt as token ids — what we prefix-match the cache on.
@@ -443,8 +488,11 @@ actor MLXEngine {
                 FileHandle.standardError.write(Data(
                     "[mlx] prompt=\(promptIds.count) reused=\(reusedCount) prefilled=\(suffix.count) gen=\(generatedIds.count) ttft=\(String(format: "%.2f", ttft))s \(String(format: "%.1f", tps)) tok/s\n".utf8))
             }
+            let visible = MLXEngine.isGemmaModel(repo)
+                ? MLXEngine.stripGemmaChannels(MLXEngine.stripThinking(text))
+                : MLXEngine.stripThinking(text)
             return Completion(
-                text: MLXEngine.stripThinking(text),
+                text: visible,
                 promptTokens: promptIds.count,
                 prefilledTokens: suffix.count,
                 completionTokens: generatedIds.count,
