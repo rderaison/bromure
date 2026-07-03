@@ -24,10 +24,11 @@ struct ToolSchemaNormalizationTests {
         #expect(out["type"] as? String == "string")
     }
 
-    @Test("All-null union still yields a string type")
+    @Test("All-null union falls back to string and records nullable")
     func allNullUnion() {
         let out = normalize(#"{"type": ["null"]}"#)
-        #expect(out["type"] as? String == "null")
+        #expect(out["type"] as? String == "string")
+        #expect(out["nullable"] as? Bool == true)
     }
 
     @Test("Type-less node with properties infers object")
@@ -41,6 +42,44 @@ struct ToolSchemaNormalizationTests {
         #expect(normalize(#"{"items": {"type": "integer"}}"#)["type"] as? String == "array")
         #expect(normalize(#"{"enum": ["a", "b"]}"#)["type"] as? String == "string")
         #expect(normalize(#"{"anyOf": [{"type": "integer"}, {"type": "string"}]}"#)["type"] as? String == "string")
+    }
+
+    @Test("Description-only property gets a string type (unguarded `| upper` in templates)")
+    func descriptionOnlyProperty() {
+        // Gemma templates run `value['type'] | upper` on every property they
+        // walk — swift-jinja throws on undefined, so even a shapeless
+        // free-form property must end up with a type.
+        let out = normalize(#"""
+        {"type": "object", "properties": {
+            "value": {"description": "free-form value for the config key"}
+        }}
+        """#)
+        let props = out["properties"] as! [String: Any]
+        #expect((props["value"] as! [String: Any])["type"] as? String == "string")
+    }
+
+    @Test("Union with null records nullable: true")
+    func unionRecordsNullable() {
+        let out = normalize(#"{"type": ["string", "null"]}"#)
+        #expect(out["type"] as? String == "string")
+        #expect(out["nullable"] as? Bool == true)
+    }
+
+    @Test("Subschemas under anyOf and additionalProperties are normalized")
+    func subschemaPositions() {
+        let out = normalize(#"""
+        {"type": "object", "properties": {
+            "opt": {"anyOf": [{"type": ["integer", "null"]}, {"description": "raw"}]},
+            "map": {"type": "object", "additionalProperties": {"type": ["string", "null"]}}
+        }}
+        """#)
+        let props = out["properties"] as! [String: Any]
+        let opt = props["opt"] as! [String: Any]
+        let anyOf = opt["anyOf"] as! [[String: Any]]
+        #expect(anyOf[0]["type"] as? String == "integer")
+        #expect(anyOf[1]["type"] as? String == "string")
+        let map = props["map"] as! [String: Any]
+        #expect((map["additionalProperties"] as! [String: Any])["type"] as? String == "string")
     }
 
     @Test("Union types nested under properties and items are normalized")
@@ -78,15 +117,18 @@ struct ToolSchemaNormalizationTests {
         {"type": "object",
          "properties": {"cfg": {"type": "object",
                                 "properties": {"x": {"type": "integer"}},
-                                "default": {"properties": {"x": 1}}}}}
+                                "default": {"properties": {"x": 1}, "type": ["a"]},
+                                "examples": [{"anyOf": "not-a-schema"}]}}}
         """#)
         let props = out["properties"] as! [String: Any]
         let cfg = props["cfg"] as! [String: Any]
         let def = cfg["default"] as! [String: Any]
-        // The default's own "properties" key is user data, not a schema map —
-        // it must not gain a type.
-        #expect(def["type"] == nil)
+        // Non-schema positions are never walked: the default's own
+        // "properties"/"type" keys are user data and stay byte-identical.
+        #expect(def["type"] as? [String] == ["a"])
         #expect((def["properties"] as! [String: Any])["x"] as? Int == 1)
+        let examples = cfg["examples"] as! [[String: Any]]
+        #expect(examples[0]["anyOf"] as? String == "not-a-schema")
     }
 
     @Test("Well-formed schemas are untouched")

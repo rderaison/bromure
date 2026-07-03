@@ -502,43 +502,54 @@ struct ToolDef: Sendable {
         return v
     }
 
-    /// Keys whose value is a *map of name → schema* (not a schema itself).
-    /// Their values are normalized as schemas, but the map is left alone —
-    /// otherwise a parameter literally named "items" or "enum" would make
-    /// the map look like a schema and grow a phantom `type` entry.
+    /// Keys whose value is a *map of name → schema*. Their values are schemas;
+    /// the map itself is not — a parameter literally named "items" or "enum"
+    /// must never make the map look like a schema.
     private static let schemaMapKeys: Set<String> =
         ["properties", "patternProperties", "definitions", "$defs"]
+    /// Keys whose value is a single subschema.
+    private static let schemaKeys: Set<String> =
+        ["items", "additionalProperties", "additionalItems", "not",
+         "if", "then", "else", "contains", "propertyNames"]
+    /// Keys whose value is a list of subschemas.
+    private static let schemaListKeys: Set<String> =
+        ["anyOf", "oneOf", "allOf", "prefixItems"]
 
-    /// Coerce every schema node's `type` to a single string. A union array
-    /// keeps its first non-"null" member ("nullable string" → "string"); a
-    /// schema with no usable `type` (anyOf/enum-only — common in agent tool
-    /// schemas) gets one inferred from its shape. Property *names* are never
-    /// touched — only `type` keys whose value isn't already a string.
+    /// Ensure every node in *schema position* carries a plain-string `type`.
+    /// Gemma-family templates run `value['type'] | upper` on each node they
+    /// walk — a union array (["string", "null"]), a non-string, or a missing
+    /// `type` (description-only / anyOf-only properties, both routine in
+    /// agent tools) all abort the render with "upper filter requires string"
+    /// (swift-jinja throws on undefined too, unlike Python's `| upper`).
+    /// Only known schema-carrying keys are recursed into; everything else
+    /// (description, enum, default, required, …) passes through verbatim, so
+    /// non-schema values can never grow phantom keys.
     static func normalizeSchemaTypes(_ v: Any) -> Any {
-        guard let d = v as? [String: Any] else {
-            if let a = v as? [Any] { return a.map { normalizeSchemaTypes($0) } }
-            return v
-        }
-        var out: [String: Any] = [:]
-        for (k, val) in d {
+        guard var out = v as? [String: Any] else { return v }
+        for (k, val) in out {
             if Self.schemaMapKeys.contains(k), let m = val as? [String: Any] {
                 out[k] = m.mapValues { normalizeSchemaTypes($0) }
-            } else if k == "default" || k == "examples" || k == "const" {
-                out[k] = val   // arbitrary user JSON, not a schema — verbatim
-            } else {
-                out[k] = normalizeSchemaTypes(val)
+            } else if Self.schemaKeys.contains(k) {
+                // `items` may be a tuple (list of schemas); bools
+                // (additionalProperties: false) pass through untouched.
+                if let list = val as? [Any] { out[k] = list.map { normalizeSchemaTypes($0) } }
+                else { out[k] = normalizeSchemaTypes(val) }
+            } else if Self.schemaListKeys.contains(k), let list = val as? [Any] {
+                out[k] = list.map { normalizeSchemaTypes($0) }
             }
         }
         if let types = out["type"] as? [Any] {
+            // Union: keep the first non-"null" member; remember nullability
+            // (Gemma's OpenAPI-style declarations render `nullable`).
             let names = types.compactMap { $0 as? String }
-            out["type"] = names.first { $0.lowercased() != "null" } ?? names.first ?? "string"
+            out["type"] = names.first { $0.lowercased() != "null" } ?? "string"
+            if names.contains(where: { $0.lowercased() == "null" }), out["nullable"] == nil {
+                out["nullable"] = true
+            }
         } else if !(out["type"] is String) {
             if out["properties"] != nil { out["type"] = "object" }
-            else if out["items"] != nil { out["type"] = "array" }
-            else if out["enum"] != nil { out["type"] = "string" }
-            else if out["anyOf"] != nil || out["oneOf"] != nil || out["allOf"] != nil {
-                out["type"] = "string"
-            }
+            else if out["items"] != nil || out["prefixItems"] != nil { out["type"] = "array" }
+            else { out["type"] = "string" }   // enum/anyOf/description-only/…
         }
         return out
     }
