@@ -4096,7 +4096,7 @@ public final class ProfileStore {
         [ -z "$tdir" ] && tdir="$wm_root"
         [ -d "$tdir" ] || { worktree_err "merge: no checkout for '$wm_target'"; return 1; }
         # Prompt the coding agent gets when the merge conflicts.
-        rp="A git merge in this directory hit conflicts. Resolve every conflicted file (keep both sides' intent), then stage the changes and commit the merge with 'git commit --no-edit'. Run 'git status' first to see what conflicts."
+        rp="A git merge in this directory hit conflicts. Run 'git status' to see them, then resolve every conflicted file, keeping both sides' intent, and stage the resolutions with 'git add'. Do NOT commit yet: give me a short summary of how you resolved each conflict and ask whether I'd like to review the changes first. Only run 'git commit --no-edit' to finish the merge after I confirm."
         rp64=$(printf '%s' "$rp" | base64 | tr -d '\n')
         # A visible tab that runs the merge and stays open. On a clean merge it
         # reports success and waits. On CONFLICT — whether fresh, or a merge left
@@ -4145,7 +4145,7 @@ public final class ProfileStore {
     _bromure_worktree_resolve() {
         wcr_dir="$1"; wcr_tool="$2"
         [ -d "$wcr_dir" ] || { worktree_err "resolve: checkout is gone: $wcr_dir"; return 1; }
-        prompt="A git merge in this directory has conflicts. Resolve every conflicted file, then stage them and commit the merge. Run 'git status' first to see what conflicts."
+        prompt="A git merge in this directory has conflicts. Run 'git status' to see them, then resolve every conflicted file and stage the resolutions with 'git add'. Do NOT commit yet: give me a short summary of your resolution and ask whether I'd like to review the changes first. Only run 'git commit --no-edit' after I confirm."
         p64=$(printf '%s' "$prompt" | base64 | tr -d '\n')
         win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" -c "$wcr_dir" \
               -e BROMURE_AC_WT_TOOL="$wcr_tool" -e BROMURE_AC_WT_PROMPT="$p64" \
