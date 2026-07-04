@@ -884,7 +884,7 @@ private struct VMSection: View {
                                 // program is momentarily bash/node. For ordinary
                                 // tabs shownLabel == label, so this is a no-op.
                                 agentKind: BromureIcons.agentKind(forLabel: tab.shownLabel),
-                                agentStatus: entry.model.agentStatus,
+                                agentStatus: tab.agentStatus,
                                 isActive: tab.id == entry.model.activeTab?.id && isSelected,
                                 accentHex: row.accentHex,
                                 chord: (isSelected && idx < 9) ? idx + 1 : nil,

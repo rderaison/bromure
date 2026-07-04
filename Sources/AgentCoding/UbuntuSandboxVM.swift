@@ -107,9 +107,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// guest — carries git's stderr. One-shot: the file is consumed on read.
     public var onWorktreeError: ((String) -> Void)?
 
-    /// Coding-agent status signal from the guest (Claude hooks write
-    /// "working"/"done"/"needsInput"). One-shot: consumed on read.
-    public var onAgentStatus: ((String) -> Void)?
+    /// Per-tab coding-agent status from the guest (Claude hooks). `(windowIndex,
+    /// signal)` where signal ∈ "working"/"done"/"needsInput". One-shot per file.
+    public var onAgentStatus: ((Int, String) -> Void)?
 
     /// Called (dashboard-only) with the qemu arch suffixes registered+enabled in
     /// binfmt_misc (e.g. ["x86_64","arm"]). Empty = emulation not installed.
@@ -781,13 +781,16 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             if !raw.isEmpty { self?.onWorktreeError?(raw) }
                             continue
                         }
-                        // agent-status.txt — one-shot: a Claude hook reporting
-                        // working / done / needsInput for the status dot.
-                        if name == "agent-status.txt" {
+                        // agent-status-<windowIndex>.txt — one-shot: a Claude
+                        // hook reporting working/done/needsInput for that tab's
+                        // status dot. Per-window filename so two tabs signalling
+                        // at once don't clobber each other.
+                        if name.hasPrefix("agent-status-"), name.hasSuffix(".txt") {
+                            let idxStr = name.dropFirst("agent-status-".count).dropLast(".txt".count)
                             let raw = (try? String(contentsOf: entry, encoding: .utf8))?
                                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                             try? fm.removeItem(at: entry)
-                            if !raw.isEmpty { self?.onAgentStatus?(raw) }
+                            if let idx = Int(idxStr), !raw.isEmpty { self?.onAgentStatus?(idx, raw) }
                             continue
                         }
                         // shortcut-<key>.txt is handled by the fast path at the

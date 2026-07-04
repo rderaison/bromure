@@ -157,6 +157,10 @@ final class TabsModel {
         /// The cwd's git toplevel if it's a repo (gates "New worktree"); empty
         /// for non-repo cwds and worktree tabs.
         var repoRoot: String?
+        /// This tab's coding-agent status — per agent, per tab. Driven by the
+        /// MITM proxy (working, non-Claude) and Claude's per-window hooks
+        /// (working / done / needsInput). Drives the status dot on the icon.
+        var agentStatus: AgentStatus = .done
         init(label: String, index: Int = 0, containerID: String? = nil,
              cwd: String? = nil, worktreeBranch: String? = nil,
              parentBranch: String? = nil, rootRepo: String? = nil,
@@ -227,16 +231,6 @@ final class TabsModel {
     /// `fusionConfigurable`. Flipped by the lightning toggle; mirrored into
     /// the MITM engine so the proxy hot path sees the change.
     var fusionEngaged: Bool = false
-
-    /// Coarse agent status for the sidebar status dot. Driven by the MITM
-    /// proxy's conversation-request signal (→ .working, auto-cleared to .done a
-    /// few seconds after the last call) and, for Claude, by its Notification/
-    /// Stop/UserPromptSubmit hooks (→ .needsInput / .done / .working). Per-VM
-    /// (like the old `thinking` flag), so with multiple worktree agents every
-    /// agent tab reflects the same VM-level status for now.
-    var agentStatus: AgentStatus = .done
-    /// Back-compat alias — some call sites still ask "is it working?".
-    var thinking: Bool { agentStatus == .working }
 
     /// Local-inference engine status for this session's title-bar badge.
     /// nil = no local model (cloud session), so the badge is hidden.

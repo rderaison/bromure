@@ -965,31 +965,42 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let p = profiles.first(where: { $0.id == id }) { deleteProfile(p) }
     }
 
-    /// The MITM proxy saw a model *conversation* request for this profile — the
-    /// agent is working. Set the VM's status to .working (orange dot) and re-arm
-    /// a timer to drop it to .done once calls stop. The clear only downgrades a
-    /// still-.working status, so a Claude Notification hook that flipped it to
-    /// .needsInput in the meantime isn't stomped.
+    /// The MITM proxy saw a model *conversation* request for this VM. The proxy
+    /// can't attribute traffic to a specific tab, so this is the per-VM fallback
+    /// for the agents WITHOUT per-tab hooks (Codex/Grok): flip their tabs to
+    /// .working and re-arm a timer to drop them back to .done. Claude tabs are
+    /// left to their own per-window hooks (accurate per tab), so a Claude call
+    /// never flips a sibling Codex tab.
     func noteAgentActivity(_ id: Profile.ID) {
-        setAgentStatus(id, .working)
-    }
-
-    /// Central status setter (used by the proxy and by the Claude hooks). Manages
-    /// the auto-clear timer: arm on .working, cancel on a terminal state.
-    func setAgentStatus(_ id: Profile.ID, _ status: AgentStatus) {
-        pane(for: id)?.model.agentStatus = status
+        setNonClaudeAgentTabs(id, .working)
         thinkingClearTasks[id]?.cancel()
-        thinkingClearTasks[id] = nil
-        guard status == .working else { return }
         thinkingClearTasks[id] = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }
-            // Only fall back to .done if nothing more specific arrived since.
-            if self?.pane(for: id)?.model.agentStatus == .working {
-                self?.pane(for: id)?.model.agentStatus = .done
-            }
+            self?.setNonClaudeAgentTabs(id, .done)   // only tabs still .working
             self?.thinkingClearTasks[id] = nil
         }
+    }
+
+    /// Apply `status` to every NON-Claude agent tab of a VM (the proxy fallback).
+    /// A .done never stomps a tab that's mid-.working elsewhere would — but here
+    /// .done only lands on tabs still marked .working (idle transition).
+    private func setNonClaudeAgentTabs(_ id: Profile.ID, _ status: AgentStatus) {
+        guard let pane = pane(for: id) else { return }
+        for tab in pane.model.tabs {
+            guard let kind = BromureIcons.agentKind(forLabel: tab.shownLabel),
+                  kind != "claude" else { continue }
+            if status == .done && tab.agentStatus != .working { continue }
+            tab.agentStatus = status
+        }
+    }
+
+    /// Per-tab status from a Claude hook (keyed by the tmux window index the
+    /// hook reported). Authoritative for that tab — no timer, since the Stop
+    /// hook delivers the terminal state explicitly.
+    func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus) {
+        guard let tab = pane(for: id)?.model.tabs.first(where: { $0.index == index }) else { return }
+        tab.agentStatus = status
     }
 
     /// Pop a VM out of the unified window into its own standalone window. The
@@ -6327,10 +6338,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 alert.runModal()
             }
         }
-        sandbox.onAgentStatus = { [weak self] signal in
+        sandbox.onAgentStatus = { [weak self] index, signal in
             Task { @MainActor in
                 guard let self, let status = AgentStatus(signal: signal) else { return }
-                self.setAgentStatus(pid, status)
+                self.setTabAgentStatus(pid, index: index, status)
             }
         }
         sandbox.onDockerBinfmt = { [weak self] arches in

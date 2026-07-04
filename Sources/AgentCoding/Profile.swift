@@ -3088,15 +3088,20 @@ public final class ProfileStore {
             let bromureDir = home.appendingPathComponent(".bromure", isDirectory: true)
             try? fm.createDirectory(at: bromureDir, withIntermediateDirectories: true,
                                     attributes: [.posixPermissions: NSNumber(value: 0o755)])
-            let statusScript = """
+            let statusScript = #"""
             #!/bin/sh
-            # Bromure Claude-hook status reporter → sidebar dot. $1 = working|done|needsInput.
+            # Bromure Claude-hook status reporter → per-tab sidebar dot.
+            # $1 = working|done|needsInput. The hook runs inside the agent's tmux
+            # window, so $TMUX_PANE resolves this tab's window index — reported in
+            # the filename so each tab's dot is independent.
             d=/mnt/bromure-outbox
             [ -d "$d" ] || exit 0
-            printf '%s' "${1:-}" > "$d/.agent-status.tmp" 2>/dev/null \
-              && mv -f "$d/.agent-status.tmp" "$d/agent-status.txt" 2>/dev/null || true
+            idx=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{window_index}' 2>/dev/null)
+            [ -n "$idx" ] || exit 0
+            printf '%s' "${1:-}" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
+              && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
             exit 0
-            """
+            """#
             let scriptURL = bromureDir.appendingPathComponent("agent-status.sh")
             try? statusScript.write(to: scriptURL, atomically: true, encoding: .utf8)
             try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)],
