@@ -5339,8 +5339,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// checked out at the target. The guest resolves the target's checkout from
     /// `mainRoot`; `display` labels the merge tab.
     func requestMergeWorktree(sourceBranch: String, targetBranch: String,
-                              mainRoot: String, display: String, in pane: SessionPane) {
-        sendCommand("worktree-merge \(b64(sourceBranch)) \(b64(targetBranch)) \(b64(mainRoot)) \(b64(display))", in: pane)
+                              mainRoot: String, display: String, tool: String,
+                              in pane: SessionPane) {
+        sendCommand("worktree-merge \(b64(sourceBranch)) \(b64(targetBranch)) \(b64(mainRoot)) \(b64(display)) \(b64(tool))", in: pane)
     }
 
     /// Remove a worktree and delete its branch (post-merge cleanup).
@@ -5370,8 +5371,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
             encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
         case "merge":
-            guard args.count >= 4 else { return false }   // src, target, mainRoot, display
-            name = "worktree-merge"; encoded = args.prefix(4).map(b64)
+            guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
+            name = "worktree-merge"; encoded = args.prefix(5).map(b64)
         case "remove":
             guard args.count >= 2 else { return false }   // mainRoot, branch
             name = "worktree-remove"; encoded = args.prefix(2).map(b64)
@@ -5468,7 +5469,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.messageText = String(
             format: NSLocalizedString("Merge “%@”", comment: ""), tab.shownLabel)
         alert.informativeText = NSLocalizedString(
-            "Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged; resolve any conflicts there. The worktree isn't discarded — use “Discard worktree” once you're happy.",
+            "Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy.",
             comment: "")
         alert.addButton(withTitle: NSLocalizedString("Merge", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
@@ -5485,7 +5486,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let target = chain[popup.indexOfSelectedItem]
         requestMergeWorktree(sourceBranch: branch, targetBranch: target.branch,
-                             mainRoot: mainRoot, display: tab.shownLabel, in: pane)
+                             mainRoot: mainRoot, display: tab.shownLabel,
+                             tool: pane.profile.tool.rawValue, in: pane)
     }
 
     /// "Discard worktree" confirmation: remove the checkout + delete the branch.

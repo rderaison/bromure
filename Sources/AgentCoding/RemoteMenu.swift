@@ -933,7 +933,7 @@ final class RemoteMenuApp {
             guard let di = tui.menu(title: "Merge “\(title)” into", items: dests,
                                     footer: "Enter merge · q cancel") else { return }
             _ = postWorktree(vmID: vmID, action: "merge",
-                             args: [branch, chain[di].branch, mainRoot, title])
+                             args: [branch, chain[di].branch, mainRoot, title, tool])
             tui.toast("Merging into \(chain[di].label)…")
         case "Discard worktree":
             guard tui.confirm("Discard “\(title)”? Removes the checkout and deletes \(branch). Unmerged commits are lost.") else { return }

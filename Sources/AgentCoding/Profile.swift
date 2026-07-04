@@ -4059,33 +4059,42 @@ public final class ProfileStore {
     # target's worktree dir so conflicts are visible and resolvable in place.
     # The host passes only branch names + the main root; the guest resolves the
     # target's checkout itself (robust to where each worktree lives).
-    # arg fields (base64): source_branch, target_branch, main_root, display.
+    # arg fields (base64): source_branch, target_branch, main_root, display, tool.
     _bromure_worktree_merge() {
-        wm_branch="$1"; wm_target="$2"; wm_root="$3"; wm_display="$4"
+        wm_branch="$1"; wm_target="$2"; wm_root="$3"; wm_display="$4"; wm_tool="$5"
         tdir=$(_bromure_worktree_dir_for_branch "$wm_root" "$wm_target")
         [ -z "$tdir" ] && tdir="$wm_root"
         [ -d "$tdir" ] || { worktree_err "merge: no checkout for '$wm_target'"; return 1; }
-        # Preflight in the target: refuse if a merge is already in progress.
-        if git -C "$tdir" rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
-            worktree_err "merge: '$wm_target' already has a merge in progress — resolve it first."
-            return 1
-        fi
-        # A visible tab that runs the merge and stays open to show the result.
-        # Branch names go in via -e (environment VALUES, never re-parsed by the
-        # shell), NOT interpolated into the command — git allows $, (, ), and
-        # backticks in ref names, so a branch like `$(cmd)` interpolated into a
-        # command string would execute under `sh -c`. The command is single-
-        # quoted at the build level so $WT_SRC/$WT_DST/$? reach the inner shell
-        # literally and expand from the env there.
+        # Prompt the coding agent gets when the merge conflicts.
+        rp="A git merge in this directory hit conflicts. Resolve every conflicted file (keep both sides' intent), then stage the changes and commit the merge with 'git commit --no-edit'. Run 'git status' first to see what conflicts."
+        rp64=$(printf '%s' "$rp" | base64 | tr -d '\n')
+        # A visible tab that runs the merge and stays open. On a clean merge it
+        # reports success and waits. On CONFLICT — whether fresh, or a merge left
+        # in progress by an earlier attempt (we resume rather than error) — it
+        # hands the checkout to the coding agent IN PLACE to resolve
+        # automatically (exec a login shell → the .bashrc worktree-launch branch
+        # runs $BROMURE_AC_WT_TOOL with the resolve prompt). Branch names go in
+        # via -e (environment VALUES, never re-parsed), NOT interpolated into the
+        # command — git allows $, (, ), backticks in ref names, so interpolating
+        # `$(cmd)` would execute under sh -c. Command single-quoted at the build
+        # level so $WT_SRC/$WT_DST reach the inner shell and expand from the env.
         win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" -c "$tdir" \
               -e WT_SRC="$wm_branch" -e WT_DST="$wm_target" \
-              'git merge --no-edit "$WT_SRC"; \
-               ec=$?; echo; \
-               if [ $ec -eq 0 ]; then echo "bromure: merged $WT_SRC into $WT_DST."; \
-               else echo "bromure: merge hit conflicts (exit $ec). Resolve here, or right-click this tab -> Have the agent resolve."; fi; \
-               echo; echo Press Enter to close; read _' 2>/dev/null)
+              -e BROMURE_AC_WT_TOOL="$wm_tool" -e BROMURE_AC_WT_PROMPT="$rp64" \
+              'if ! git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then \
+                 git merge --no-edit "$WT_SRC"; \
+               fi; \
+               echo; \
+               if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then \
+                 echo "bromure: merge conflicts — starting $BROMURE_AC_WT_TOOL to resolve…"; echo; \
+                 exec bash -l; \
+               else \
+                 echo "bromure: merged $WT_SRC into $WT_DST."; \
+                 echo; echo Press Enter to close; read _; \
+               fi' 2>/dev/null)
         # @display "Merge → …" is the host's marker for a merge tab; its cwd is
-        # the target checkout, which the "Have the agent resolve" action reuses.
+        # the target checkout, which the manual "Have the agent resolve" action
+        # (a fallback if the agent exits) reuses.
         [ -n "$win" ] && tmux set-option -w -t "$win" @display "Merge → $wm_target" 2>/dev/null
     }
 
@@ -4474,7 +4483,8 @@ public final class ProfileStore {
                                 "$(printf %s "$1" | base64 -d 2>/dev/null)" \
                                 "$(printf %s "$2" | base64 -d 2>/dev/null)" \
                                 "$(printf %s "$3" | base64 -d 2>/dev/null)" \
-                                "$(printf %s "$4" | base64 -d 2>/dev/null)" ) & ;;
+                                "$(printf %s "$4" | base64 -d 2>/dev/null)" \
+                                "$(printf %s "$5" | base64 -d 2>/dev/null)" ) & ;;
                         worktree-remove)
                             set -- $arg
                             ( _bromure_worktree_remove \

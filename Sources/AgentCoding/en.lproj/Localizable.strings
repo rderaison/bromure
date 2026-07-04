@@ -798,7 +798,7 @@
 "Creates a git worktree branched from this tab's current commit and opens a nested agent in it." = "Creates a git worktree branched from this tab's current commit and opens a nested agent in it.";
 "Task name (e.g. Website refactoring)" = "Task name (e.g. Website refactoring)";
 "Initial prompt (optional)" = "Initial prompt (optional)";
-"Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged; resolve any conflicts there. The worktree isn't discarded — use “Discard worktree” once you're happy." = "Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged; resolve any conflicts there. The worktree isn't discarded — use “Discard worktree” once you're happy.";
+"Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy." = "Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy.";
 "This tab's working directory isn't available yet" = "This tab's working directory isn't available yet";
 "The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again." = "The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again.";
 "Worktree action failed" = "Worktree action failed";
