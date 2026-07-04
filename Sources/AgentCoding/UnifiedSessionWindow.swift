@@ -877,7 +877,13 @@ private struct VMSection: View {
                         if tab.containerID == nil {
                             TabRow(
                                 label: tab.shownLabel,
-                                agentKind: BromureIcons.agentKind(forLabel: tab.label),
+                                // Derive the icon from the shown label: a worktree
+                                // tab's display ("Refactor website (claude)")
+                                // names its tool, so agentKind's contains-match
+                                // picks the agent even when the live foreground
+                                // program is momentarily bash/node. For ordinary
+                                // tabs shownLabel == label, so this is a no-op.
+                                agentKind: BromureIcons.agentKind(forLabel: tab.shownLabel),
                                 thinking: entry.model.thinking,
                                 isActive: tab.id == entry.model.activeTab?.id && isSelected,
                                 accentHex: row.accentHex,
