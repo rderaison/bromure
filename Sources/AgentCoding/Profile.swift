@@ -3064,6 +3064,15 @@ public final class ProfileStore {
                 perms["defaultMode"] = "auto"
                 settings["permissions"] = perms
             }
+            // Keep click-drag text selection with the terminal (kitty → macOS
+            // ⌘C), not swallowed by Claude Code's fullscreen-TUI mouse capture.
+            // Merge into env (don't clobber the Bedrock env written above), and
+            // only seed when unset so a user who wants clicks can remove it.
+            var claudeEnv = settings["env"] as? [String: Any] ?? [:]
+            if claudeEnv["CLAUDE_CODE_DISABLE_MOUSE_CLICKS"] == nil {
+                claudeEnv["CLAUDE_CODE_DISABLE_MOUSE_CLICKS"] = "1"
+                settings["env"] = claudeEnv
+            }
             // Managed status hooks — report working/done/needsInput to the host
             // for the sidebar status dot. Overwrite just these four events
             // (other user hooks + settings are preserved by the read above).
