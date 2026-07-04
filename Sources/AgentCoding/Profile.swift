@@ -3058,16 +3058,49 @@ public final class ProfileStore {
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 settings = json
             }
+            // Seed the permission mode only when unset (respect a user change).
             var perms = settings["permissions"] as? [String: Any] ?? [:]
             if perms["defaultMode"] == nil {
                 perms["defaultMode"] = "auto"
                 settings["permissions"] = perms
-                let data = try JSONSerialization.data(withJSONObject: settings,
-                                                      options: [.prettyPrinted, .sortedKeys])
-                try data.write(to: claudeSettingsURL, options: .atomic)
-                try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
-                                      ofItemAtPath: claudeSettingsURL.path)
             }
+            // Managed status hooks — report working/done/needsInput to the host
+            // for the sidebar status dot. Overwrite just these four events
+            // (other user hooks + settings are preserved by the read above).
+            let hookScript = "/home/ubuntu/.bromure/agent-status.sh"
+            func hookCmd(_ arg: String) -> [[String: Any]] {
+                [["hooks": [["type": "command", "command": "\(hookScript) \(arg)"]]]]
+            }
+            var hooks = settings["hooks"] as? [String: Any] ?? [:]
+            hooks["UserPromptSubmit"] = hookCmd("working")
+            hooks["PreToolUse"] = hookCmd("working")
+            hooks["Stop"] = hookCmd("done")
+            hooks["Notification"] = hookCmd("needsInput")
+            settings["hooks"] = hooks
+
+            let data = try JSONSerialization.data(withJSONObject: settings,
+                                                  options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: claudeSettingsURL, options: .atomic)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                  ofItemAtPath: claudeSettingsURL.path)
+
+            // The reporter script the hooks call (idempotent overwrite).
+            let bromureDir = home.appendingPathComponent(".bromure", isDirectory: true)
+            try? fm.createDirectory(at: bromureDir, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: NSNumber(value: 0o755)])
+            let statusScript = """
+            #!/bin/sh
+            # Bromure Claude-hook status reporter → sidebar dot. $1 = working|done|needsInput.
+            d=/mnt/bromure-outbox
+            [ -d "$d" ] || exit 0
+            printf '%s' "${1:-}" > "$d/.agent-status.tmp" 2>/dev/null \
+              && mv -f "$d/.agent-status.tmp" "$d/agent-status.txt" 2>/dev/null || true
+            exit 0
+            """
+            let scriptURL = bromureDir.appendingPathComponent("agent-status.sh")
+            try? statusScript.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)],
+                                  ofItemAtPath: scriptURL.path)
         }
 
         // ~/.docker/config.json — Docker stores per-registry HTTP Basic

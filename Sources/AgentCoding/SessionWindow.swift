@@ -107,6 +107,22 @@ public struct ListeningPort: Equatable, Sendable {
 // MARK: - Tabs model
 
 /// Observable model backing a TabbedSessionWindow. Each tab represents a
+/// Coarse coding-agent status, shown as a small dot next to the agent's icon:
+/// working (orange, gently pulsing), done (green), needs the user (red).
+enum AgentStatus: String, Sendable {
+    case working, done, needsInput
+
+    /// Parse a guest-hook signal ("working"/"done"/"needsInput"/"needs-input").
+    init?(signal: String) {
+        switch signal.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "working": self = .working
+        case "done": self = .done
+        case "needsinput", "needs-input", "needs_input": self = .needsInput
+        default: return nil
+        }
+    }
+}
+
 /// separate kitty process inside the SAME VM — switching tabs just
 /// raises that tab's kitty window via the outbox-driven guest agent.
 @MainActor
@@ -212,10 +228,15 @@ final class TabsModel {
     /// the MITM engine so the proxy hot path sees the change.
     var fusionEngaged: Bool = false
 
-    /// True while the agent is actively calling the model (driven by the MITM
-    /// proxy's conversation-request signal, auto-cleared a few seconds after the
-    /// last call). Drives the animated "thinking" dots in the sidebar.
-    var thinking: Bool = false
+    /// Coarse agent status for the sidebar status dot. Driven by the MITM
+    /// proxy's conversation-request signal (→ .working, auto-cleared to .done a
+    /// few seconds after the last call) and, for Claude, by its Notification/
+    /// Stop/UserPromptSubmit hooks (→ .needsInput / .done / .working). Per-VM
+    /// (like the old `thinking` flag), so with multiple worktree agents every
+    /// agent tab reflects the same VM-level status for now.
+    var agentStatus: AgentStatus = .done
+    /// Back-compat alias — some call sites still ask "is it working?".
+    var thinking: Bool { agentStatus == .working }
 
     /// Local-inference engine status for this session's title-bar badge.
     /// nil = no local model (cloud session), so the badge is hidden.

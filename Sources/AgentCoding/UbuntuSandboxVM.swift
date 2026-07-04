@@ -107,6 +107,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// guest — carries git's stderr. One-shot: the file is consumed on read.
     public var onWorktreeError: ((String) -> Void)?
 
+    /// Coding-agent status signal from the guest (Claude hooks write
+    /// "working"/"done"/"needsInput"). One-shot: consumed on read.
+    public var onAgentStatus: ((String) -> Void)?
+
     /// Called (dashboard-only) with the qemu arch suffixes registered+enabled in
     /// binfmt_misc (e.g. ["x86_64","arm"]). Empty = emulation not installed.
     public var onDockerBinfmt: (([String]) -> Void)?
@@ -775,6 +779,15 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                             try? fm.removeItem(at: entry)
                             if !raw.isEmpty { self?.onWorktreeError?(raw) }
+                            continue
+                        }
+                        // agent-status.txt — one-shot: a Claude hook reporting
+                        // working / done / needsInput for the status dot.
+                        if name == "agent-status.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8))?
+                                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            try? fm.removeItem(at: entry)
+                            if !raw.isEmpty { self?.onAgentStatus?(raw) }
                             continue
                         }
                         // shortcut-<key>.txt is handled by the fast path at the

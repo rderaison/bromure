@@ -884,7 +884,7 @@ private struct VMSection: View {
                                 // program is momentarily bash/node. For ordinary
                                 // tabs shownLabel == label, so this is a no-op.
                                 agentKind: BromureIcons.agentKind(forLabel: tab.shownLabel),
-                                thinking: entry.model.thinking,
+                                agentStatus: entry.model.agentStatus,
                                 isActive: tab.id == entry.model.activeTab?.id && isSelected,
                                 accentHex: row.accentHex,
                                 chord: (isSelected && idx < 9) ? idx + 1 : nil,
@@ -1005,7 +1005,7 @@ private struct VMIcon: View {
 private struct TabRow: View {
     let label: String
     let agentKind: String?
-    let thinking: Bool
+    let agentStatus: AgentStatus
     let isActive: Bool
     let accentHex: String
     /// ⌘-number for this tab (1–9), or nil for tabs past 9 / unfocused VMs.
@@ -1046,11 +1046,15 @@ private struct TabRow: View {
                     .foregroundStyle(isActive ? Color(hex: accentHex) : .secondary)
             }
             Group {
-                if isAgent && thinking {
-                    ThinkingDots(color: Color(hex: accentHex))
-                } else if isAgent {
+                if isAgent {
+                    // The agent's icon stays put; a small status dot rides its
+                    // lower-trailing corner (orange pulsing = working, green =
+                    // done, red = needs you).
                     SVGIcon(name: agentIconName, fallbackSymbol: "sparkles", size: 13)
                         .foregroundStyle(isActive ? Color(hex: accentHex) : .secondary)
+                        .overlay(alignment: .bottomTrailing) {
+                            AgentStatusDot(status: agentStatus).offset(x: 2, y: 1)
+                        }
                 } else {
                     Image(systemName: "terminal")
                         .font(.system(size: 11))
@@ -1309,22 +1313,43 @@ private struct DockerTabRow: View {
 }
 
 /// unpeel-style staggered "typing" dots shown while the agent is working.
-private struct ThinkingDots: View {
-    var color: Color = .secondary
-    @State private var anim = false
-    var body: some View {
-        HStack(spacing: 2.5) {
-            ForEach(0..<3, id: \.self) { i in
-                Circle()
-                    .fill(color)
-                    .frame(width: 4, height: 4)
-                    .scaleEffect(anim ? 1.0 : 0.45)
-                    .opacity(anim ? 1.0 : 0.4)
-                    .animation(.easeInOut(duration: 0.5).repeatForever().delay(Double(i) * 0.16), value: anim)
-            }
+/// Small status dot overlaid on an agent's icon. Orange gently pulses while the
+/// agent is working; green means it finished its turn; red means it's waiting
+/// on the user. A thin ring keeps it legible over any icon/background.
+private struct AgentStatusDot: View {
+    let status: AgentStatus
+    @State private var pulse = false
+
+    private var color: Color {
+        switch status {
+        case .working:   return .orange
+        case .done:      return .green
+        case .needsInput: return .red
         }
-        .onAppear { anim = true }
-        .help("Working…")
+    }
+    private var help: String {
+        switch status {
+        case .working:   return NSLocalizedString("Working…", comment: "agent status dot")
+        case .done:      return NSLocalizedString("Done", comment: "agent status dot")
+        case .needsInput: return NSLocalizedString("Needs your input", comment: "agent status dot")
+        }
+    }
+    private var working: Bool { status == .working }
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: 6, height: 6)
+            .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.2))
+            // Gentle pulse only while working; steady otherwise.
+            .scaleEffect(working && pulse ? 1.15 : (working ? 0.8 : 1.0))
+            .opacity(working && pulse ? 1.0 : (working ? 0.55 : 1.0))
+            .animation(working
+                       ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true)
+                       : .default, value: pulse)
+            .onAppear { pulse = working }
+            .onChange(of: status) { _, s in pulse = (s == .working) }
+            .help(help)
     }
 }
 

@@ -966,15 +966,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// The MITM proxy saw a model *conversation* request for this profile — the
-    /// agent is working. Flip the VM's `thinking` flag (driving the animated
-    /// sidebar dots) and re-arm a timer to clear it once calls stop.
+    /// agent is working. Set the VM's status to .working (orange dot) and re-arm
+    /// a timer to drop it to .done once calls stop. The clear only downgrades a
+    /// still-.working status, so a Claude Notification hook that flipped it to
+    /// .needsInput in the meantime isn't stomped.
     func noteAgentActivity(_ id: Profile.ID) {
-        pane(for: id)?.model.thinking = true
+        setAgentStatus(id, .working)
+    }
+
+    /// Central status setter (used by the proxy and by the Claude hooks). Manages
+    /// the auto-clear timer: arm on .working, cancel on a terminal state.
+    func setAgentStatus(_ id: Profile.ID, _ status: AgentStatus) {
+        pane(for: id)?.model.agentStatus = status
         thinkingClearTasks[id]?.cancel()
+        thinkingClearTasks[id] = nil
+        guard status == .working else { return }
         thinkingClearTasks[id] = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }
-            self?.pane(for: id)?.model.thinking = false
+            // Only fall back to .done if nothing more specific arrived since.
+            if self?.pane(for: id)?.model.agentStatus == .working {
+                self?.pane(for: id)?.model.agentStatus = .done
+            }
             self?.thinkingClearTasks[id] = nil
         }
     }
@@ -6312,6 +6325,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 alert.informativeText = message
                 alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
                 alert.runModal()
+            }
+        }
+        sandbox.onAgentStatus = { [weak self] signal in
+            Task { @MainActor in
+                guard let self, let status = AgentStatus(signal: signal) else { return }
+                self.setAgentStatus(pid, status)
             }
         }
         sandbox.onDockerBinfmt = { [weak self] arches in
