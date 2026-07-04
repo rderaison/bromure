@@ -574,7 +574,18 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let tool = p.profile.tool.rawValue
         switch action {
         case .newWorktree:
-            guard let cwd = tab.cwd else { return }
+            guard let cwd = tab.cwd, !cwd.isEmpty else {
+                // No cwd from the roster — almost always a VM still running an
+                // older guest agent (worktrees shipped later). Tell the user
+                // the fix instead of failing silently.
+                let alert = NSAlert()
+                alert.messageText = NSLocalizedString("This tab's working directory isn't available yet", comment: "")
+                alert.informativeText = NSLocalizedString(
+                    "The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again.",
+                    comment: "")
+                alert.runModal()
+                return
+            }
             acDelegate?.presentCreateWorktree(cwd: cwd, defaultTool: tool, in: p)
         case .merge:
             acDelegate?.presentMergeWorktree(tab: tab, allTabs: p.model.tabs, in: p)
@@ -1067,16 +1078,35 @@ private struct TabRow: View {
         .onTapGesture(perform: onSelect)
         .onHover { hovering = $0 }
         .contextMenu {
-            if canCreateWorktree {
-                Button("New worktree…") { onAction(.newWorktree) }
+            // "New worktree…" is ALWAYS present so right-click always opens a
+            // menu. A worktree tab is itself a repo (recursion → nested
+            // worktrees), so it counts as in-a-repo too. When the cwd isn't a
+            // git repo the item is shown but disabled, with the reason inline —
+            // never a silently-empty (invisible) menu.
+            let inRepo = canCreateWorktree || isWorktree
+            Button(inRepo
+                   ? NSLocalizedString("New worktree…", comment: "Tab context menu: create a git worktree")
+                   : NSLocalizedString("New worktree…  (Not in a git repo)",
+                                       comment: "Tab context menu: disabled because the tab's cwd isn't a git repo")) {
+                onAction(.newWorktree)
             }
+            .disabled(!inRepo)
+
             if isWorktree {
-                Button("Merge…") { onAction(.merge) }
+                Button(NSLocalizedString("Merge…", comment: "Tab context menu: merge a worktree into an ancestor")) {
+                    onAction(.merge)
+                }
                 Divider()
-                Button("Discard worktree", role: .destructive) { onAction(.removeWorktree) }
+                Button(NSLocalizedString("Discard worktree", comment: "Tab context menu: remove worktree + delete branch"),
+                       role: .destructive) {
+                    onAction(.removeWorktree)
+                }
             }
             if isMergeTab {
-                Button("Have the agent resolve conflicts") { onAction(.resolveConflicts) }
+                Button(NSLocalizedString("Have the agent resolve conflicts",
+                                         comment: "Tab context menu: spawn the agent to resolve a merge conflict")) {
+                    onAction(.resolveConflicts)
+                }
             }
         }
     }

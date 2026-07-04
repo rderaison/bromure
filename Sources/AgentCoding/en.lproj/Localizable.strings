@@ -785,3 +785,20 @@
 "Your real secret. Stays on macOS — the VM only ever sees a fake stand-in." = "Your real secret. Stays on macOS — the VM only ever sees a fake stand-in.";
 "Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string." = "Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string.";
 "Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox." = "Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox.";
+
+/* Worktrees — tab context menu */
+"New worktree…" = "New worktree…";
+"New worktree…  (Not in a git repo)" = "New worktree…  (Not in a git repo)";
+"Merge…" = "Merge…";
+"Discard worktree" = "Discard worktree";
+"Have the agent resolve conflicts" = "Have the agent resolve conflicts";
+
+/* Worktrees — dialogs */
+"New worktree" = "New worktree";
+"Creates a git worktree branched from this tab's current commit and opens a nested agent in it." = "Creates a git worktree branched from this tab's current commit and opens a nested agent in it.";
+"Task name (e.g. Website refactoring)" = "Task name (e.g. Website refactoring)";
+"Initial prompt (optional)" = "Initial prompt (optional)";
+"Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged; resolve any conflicts there. The worktree isn't discarded — use “Discard worktree” once you're happy." = "Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged; resolve any conflicts there. The worktree isn't discarded — use “Discard worktree” once you're happy.";
+"This tab's working directory isn't available yet" = "This tab's working directory isn't available yet";
+"The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again." = "The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again.";
+"Worktree action failed" = "Worktree action failed";
