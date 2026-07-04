@@ -107,6 +107,22 @@ public struct ListeningPort: Equatable, Sendable {
 // MARK: - Tabs model
 
 /// Observable model backing a TabbedSessionWindow. Each tab represents a
+/// Coarse coding-agent status, shown as a small dot next to the agent's icon:
+/// working (orange, gently pulsing), done (green), needs the user (red).
+enum AgentStatus: String, Sendable {
+    case working, done, needsInput
+
+    /// Parse a guest-hook signal ("working"/"done"/"needsInput"/"needs-input").
+    init?(signal: String) {
+        switch signal.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "working": self = .working
+        case "done": self = .done
+        case "needsinput", "needs-input", "needs_input": self = .needsInput
+        default: return nil
+        }
+    }
+}
+
 /// separate kitty process inside the SAME VM — switching tabs just
 /// raises that tab's kitty window via the outbox-driven guest agent.
 @MainActor
@@ -127,11 +143,46 @@ final class TabsModel {
         /// option); such tabs are nested under their container in the source-list
         /// instead of shown as a top-level tab.
         var containerID: String?
-        init(label: String, index: Int = 0, containerID: String? = nil, id: UUID = UUID()) {
+        /// The tab's working directory — used to gate the "New worktree" menu
+        /// (only shown when the cwd is inside a git repo, resolved lazily).
+        var cwd: String?
+        /// This tab's worktree branch (`wt/<slug>`), if it's a worktree window.
+        var worktreeBranch: String?
+        /// The branch this worktree was cut from — its immediate merge parent.
+        var parentBranch: String?
+        /// The main worktree's path — where merges/removes run for this tree.
+        var rootRepo: String?
+        /// Pretty label shown instead of `label` for worktree tabs.
+        var display: String?
+        /// The cwd's git toplevel if it's a repo (gates "New worktree"); empty
+        /// for non-repo cwds and worktree tabs.
+        var repoRoot: String?
+        /// This tab's coding-agent status — per agent, per tab. Driven by the
+        /// MITM proxy (working, non-Claude) and Claude's per-window hooks
+        /// (working / done / needsInput). Drives the status dot on the icon.
+        var agentStatus: AgentStatus = .done
+        init(label: String, index: Int = 0, containerID: String? = nil,
+             cwd: String? = nil, worktreeBranch: String? = nil,
+             parentBranch: String? = nil, rootRepo: String? = nil,
+             display: String? = nil, repoRoot: String? = nil, id: UUID = UUID()) {
             self.label = label
             self.index = index
             self.containerID = containerID
+            self.cwd = cwd
+            self.worktreeBranch = worktreeBranch
+            self.parentBranch = parentBranch
+            self.rootRepo = rootRepo
+            self.display = display
+            self.repoRoot = repoRoot
             self.id = id
+        }
+
+        var isWorktree: Bool { !(worktreeBranch?.isEmpty ?? true) }
+        var isGitRepo: Bool { !(repoRoot?.isEmpty ?? true) }
+        /// What the tab strip should show.
+        var shownLabel: String {
+            if let d = display, !d.isEmpty { return d }
+            return label
         }
     }
 
@@ -180,11 +231,6 @@ final class TabsModel {
     /// `fusionConfigurable`. Flipped by the lightning toggle; mirrored into
     /// the MITM engine so the proxy hot path sees the change.
     var fusionEngaged: Bool = false
-
-    /// True while the agent is actively calling the model (driven by the MITM
-    /// proxy's conversation-request signal, auto-cleared a few seconds after the
-    /// last call). Drives the animated "thinking" dots in the sidebar.
-    var thinking: Bool = false
 
     /// Local-inference engine status for this session's title-bar badge.
     /// nil = no local model (cloud session), so the badge is hidden.
@@ -254,7 +300,7 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
     func snapshotTabs() -> SessionDisk.TabsState { pane.snapshotTabs() }
     func switchTo(index: Int) { pane.switchTo(index: index) }
     func closeTab(at index: Int) { pane.closeTab(at: index) }
-    func applyTabList(_ tabs: [(index: Int, active: Bool, label: String, containerID: String?)]) { pane.applyTabList(tabs) }
+    func applyTabList(_ tabs: [GuestTab]) { pane.applyTabList(tabs) }
     @discardableResult
     func performACShortcut(_ key: String, isRepeat: Bool = false) -> Bool {
         pane.performACShortcut(key, isRepeat: isRepeat)

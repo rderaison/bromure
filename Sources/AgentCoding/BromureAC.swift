@@ -426,6 +426,56 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                     action: #selector(NSApplication.terminate(_:)),
                     keyEquivalent: "q")
 
+    // Workspaces menu — before Edit. Acts on the unified window's selected
+    // workspace + active tab. Its ⇧⌘N / ⇧⌘G / ⇧⌘M equivalents also arrive from
+    // the VM: Openbox grabs W-S-n/g/m and bounces them to `onShortcut`, which
+    // routes to these same actions (see performACSystemChord).
+    let wsMenuItem = NSMenuItem()
+    main.addItem(wsMenuItem)
+    let wsMenu = NSMenu(title: L("Workspaces"))
+    wsMenuItem.submenu = wsMenu
+
+    let newWsItem = NSMenuItem(title: L("New Workspace…"),
+                               action: #selector(ACAppDelegate.newWorkspaceAction(_:)),
+                               keyEquivalent: "n")
+    newWsItem.keyEquivalentModifierMask = [.command, .shift]
+    newWsItem.target = delegate
+    wsMenu.addItem(newWsItem)
+
+    let newTabItem = NSMenuItem(title: L("New tab"),
+                                action: #selector(ACAppDelegate.newTabAction(_:)),
+                                keyEquivalent: "t")   // ⌘T (matches the existing chord)
+    newTabItem.target = delegate
+    wsMenu.addItem(newTabItem)
+
+    let deleteWsItem = NSMenuItem(title: L("Delete"),
+                                  action: #selector(ACAppDelegate.deleteWorkspaceAction(_:)),
+                                  keyEquivalent: "")
+    deleteWsItem.target = delegate
+    wsMenu.addItem(deleteWsItem)
+
+    wsMenu.addItem(NSMenuItem.separator())
+
+    let newWtItem = NSMenuItem(title: L("New worktree"),
+                               action: #selector(ACAppDelegate.newWorktreeAction(_:)),
+                               keyEquivalent: "g")
+    newWtItem.keyEquivalentModifierMask = [.command, .shift]
+    newWtItem.target = delegate
+    wsMenu.addItem(newWtItem)
+
+    let mergeWtItem = NSMenuItem(title: L("Merge worktree"),
+                                 action: #selector(ACAppDelegate.mergeWorktreeAction(_:)),
+                                 keyEquivalent: "m")
+    mergeWtItem.keyEquivalentModifierMask = [.command, .shift]
+    mergeWtItem.target = delegate
+    wsMenu.addItem(mergeWtItem)
+
+    let discardWtItem = NSMenuItem(title: L("Discard worktree"),
+                                   action: #selector(ACAppDelegate.discardWorktreeAction(_:)),
+                                   keyEquivalent: "")
+    discardWtItem.target = delegate
+    wsMenu.addItem(discardWtItem)
+
     // Edit menu — without these items, the responder chain has no
     // Cut/Copy/Paste/Select-All hooks and ⌘V silently fails inside
     // text fields (SecureField especially). Standard idioms; targets
@@ -537,9 +587,9 @@ final class RunningSession {
     /// headless) session can render it without a window.
     var lastIP: String?
     /// The guest's tmux window list (tabs), mirrored from the roster so
-    /// `vm ls` / the API can show tabs even while the session is detached.
-    /// Each entry is (window index, foreground command, is-active).
-    var tabs: [(index: Int, label: String, active: Bool)] = []
+    /// `vm ls` / the API / SSH can show tabs (incl. worktree metadata) even
+    /// while the session is detached.
+    var tabs: [GuestTab] = []
     /// Fusion engaged state, mirrored from the engine so a reattaching
     /// window restores the toolbar toggle correctly.
     var fusionEngaged: Bool = false
@@ -915,18 +965,42 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let p = profiles.first(where: { $0.id == id }) { deleteProfile(p) }
     }
 
-    /// The MITM proxy saw a model *conversation* request for this profile — the
-    /// agent is working. Flip the VM's `thinking` flag (driving the animated
-    /// sidebar dots) and re-arm a timer to clear it once calls stop.
+    /// The MITM proxy saw a model *conversation* request for this VM. The proxy
+    /// can't attribute traffic to a specific tab, so this is the per-VM fallback
+    /// for the agents WITHOUT per-tab hooks (Codex/Grok): flip their tabs to
+    /// .working and re-arm a timer to drop them back to .done. Claude tabs are
+    /// left to their own per-window hooks (accurate per tab), so a Claude call
+    /// never flips a sibling Codex tab.
     func noteAgentActivity(_ id: Profile.ID) {
-        pane(for: id)?.model.thinking = true
+        setNonClaudeAgentTabs(id, .working)
         thinkingClearTasks[id]?.cancel()
         thinkingClearTasks[id] = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }
-            self?.pane(for: id)?.model.thinking = false
+            self?.setNonClaudeAgentTabs(id, .done)   // only tabs still .working
             self?.thinkingClearTasks[id] = nil
         }
+    }
+
+    /// Apply `status` to every NON-Claude agent tab of a VM (the proxy fallback).
+    /// A .done never stomps a tab that's mid-.working elsewhere would — but here
+    /// .done only lands on tabs still marked .working (idle transition).
+    private func setNonClaudeAgentTabs(_ id: Profile.ID, _ status: AgentStatus) {
+        guard let pane = pane(for: id) else { return }
+        for tab in pane.model.tabs {
+            guard let kind = BromureIcons.agentKind(forLabel: tab.shownLabel),
+                  kind != "claude" else { continue }
+            if status == .done && tab.agentStatus != .working { continue }
+            tab.agentStatus = status
+        }
+    }
+
+    /// Per-tab status from a Claude hook (keyed by the tmux window index the
+    /// hook reported). Authoritative for that tab — no timer, since the Stop
+    /// hook delivers the terminal state explicitly.
+    func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus) {
+        guard let tab = pane(for: id)?.model.tabs.first(where: { $0.index == index }) else { return }
+        tab.agentStatus = status
     }
 
     /// Pop a VM out of the unified window into its own standalone window. The
@@ -1797,6 +1871,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return await self.automationDestroySession(profileNameOrID: profileNameOrID)
         }
 
+        server.onWorktreeCommand = { [weak self] profileNameOrID, action, args in
+            self?.automationWorktreeCommand(profileNameOrID: profileNameOrID,
+                                            action: action, args: args) ?? false
+        }
+
         server.onGetAppState = { [weak self] in
             guard let self else { return [:] }
             return [
@@ -2151,7 +2230,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // 1-based for display; `index` is the tmux window index the CLI
             // passes back to `select-window`.
             let tabs: [[String: Any]] = s.tabs.map { t in
-                ["index": t.index, "title": t.label.isEmpty ? "shell" : t.label, "active": t.active]
+                var d: [String: Any] = [
+                    "index": t.index,
+                    // `title` is the display name (worktree label) when set,
+                    // else the foreground program — what SSH/API should show.
+                    "title": (t.display?.isEmpty == false ? t.display! : (t.label.isEmpty ? "shell" : t.label)),
+                    "active": t.active,
+                ]
+                // Worktree metadata for SSH parity (create/merge/discard).
+                if let cwd = t.cwd { d["cwd"] = cwd }
+                if t.isWorktree {
+                    d["isWorktree"] = true
+                    if let b = t.worktreeBranch { d["worktreeBranch"] = b }
+                    if let p = t.parentBranch { d["parentBranch"] = p }
+                    if let r = t.rootRepo { d["rootRepo"] = r }
+                } else if t.isGitRepo {
+                    d["isGitRepo"] = true
+                }
+                // A "Merge → …" tab is resolvable; expose it so SSH can offer it.
+                if t.display?.hasPrefix("Merge → ") == true { d["isMergeTab"] = true }
+                return d
             }
             let diskURL = store.diskURL(for: s.profile)
             let diskAllocated = (try? diskURL.resourceValues(
@@ -2514,7 +2612,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @discardableResult @MainActor
     func performACSystemChord(_ key: String) -> Bool {
         switch key {
-        case "q", "h", "ctrl-q", "shift-q": break
+        case "q", "h", "ctrl-q", "shift-q", "shift-n", "shift-g", "shift-m": break
         default: return false
         }
         // Leading-edge autorepeat guard. Each of these chords pulls focus off
@@ -2548,6 +2646,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             lockScreen()
         case "shift-q":
             logOut()
+        // Workspaces-menu chords bounced from the VM. These don't pull macOS
+        // focus (no keyup synthesis needed in bromure-hostkey); they just run
+        // the same actions the menu items do.
+        case "shift-n":
+            newWorkspaceAction(nil)
+        case "shift-g":
+            newWorktreeAction(nil)
+        case "shift-m":
+            mergeWorktreeAction(nil)
         default:
             return false
         }
@@ -3536,6 +3643,64 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             item.title = BACEnrollmentStore.load() == nil
                 ? NSLocalizedString("Enroll in bromure.io…", comment: "")
                 : NSLocalizedString("bromure.io Enrollment…", comment: "")
+        }
+    }
+
+    // MARK: - Workspaces menu
+
+    /// What the Workspaces menu (and its bounced ⇧⌘N/⇧⌘G/⇧⌘M chords) act on:
+    /// the unified window's selected workspace, its pane, and the active tab
+    /// index. nil when nothing is selected/running.
+    private func currentWorkspaceContext() -> (id: Profile.ID, pane: SessionPane, index: Int)? {
+        guard let id = unifiedWindow?.selectedID, let pane = panes[id] else { return nil }
+        return (id, pane, pane.model.activeIndex)
+    }
+
+    @objc func newWorkspaceAction(_ sender: Any?) { openEditorWindow(editing: nil) }
+
+    @objc func newTabAction(_ sender: Any?) {
+        if let ctx = currentWorkspaceContext() { spawnNewTab(in: ctx.pane) }
+    }
+
+    @objc func deleteWorkspaceAction(_ sender: Any?) {
+        if let id = unifiedWindow?.selectedID, let p = profiles.first(where: { $0.id == id }) {
+            deleteProfile(p)
+        }
+    }
+
+    @objc func newWorktreeAction(_ sender: Any?) {
+        if let ctx = currentWorkspaceContext() {
+            unifiedWindow?.handleTabAction(profileID: ctx.id, index: ctx.index, action: .newWorktree)
+        }
+    }
+    @objc func mergeWorktreeAction(_ sender: Any?) {
+        if let ctx = currentWorkspaceContext() {
+            unifiedWindow?.handleTabAction(profileID: ctx.id, index: ctx.index, action: .merge)
+        }
+    }
+    @objc func discardWorktreeAction(_ sender: Any?) {
+        if let ctx = currentWorkspaceContext() {
+            unifiedWindow?.handleTabAction(profileID: ctx.id, index: ctx.index, action: .removeWorktree)
+        }
+    }
+
+    /// Grey out Workspaces items that don't apply to the current selection/tab.
+    /// Only affects items targeting this delegate; everything else stays enabled.
+    @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(newTabAction(_:)), #selector(deleteWorkspaceAction(_:)):
+            return unifiedWindow?.selectedID != nil
+        case #selector(newWorktreeAction(_:)):
+            guard let ctx = currentWorkspaceContext(),
+                  ctx.pane.model.tabs.indices.contains(ctx.index) else { return false }
+            let t = ctx.pane.model.tabs[ctx.index]
+            return t.isGitRepo || t.isWorktree   // a worktree tab can nest another
+        case #selector(mergeWorktreeAction(_:)), #selector(discardWorktreeAction(_:)):
+            guard let ctx = currentWorkspaceContext(),
+                  ctx.pane.model.tabs.indices.contains(ctx.index) else { return false }
+            return ctx.pane.model.tabs[ctx.index].isWorktree
+        default:
+            return true
         }
     }
 
@@ -5294,6 +5459,198 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sendCommand("close-tab \(index)", in: pane)
     }
 
+    // MARK: - Git worktrees
+    //
+    // All args are base64 (space-joined; base64 has no spaces) so paths and
+    // pretty names with spaces/parens survive the guest's `set -- $arg` split.
+
+    private func b64(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+
+    /// Create a git worktree off `cwd`'s HEAD and open a tab in it running
+    /// `tool`. `cwd` may itself be a worktree — the new branch descends from
+    /// whatever's checked out there (recursive nesting). `prompt` (v3) is the
+    /// agent's initial message; nil/empty → the sentinel "-".
+    func requestCreateWorktree(cwd: String, slug: String, display: String,
+                               tool: String, prompt: String?, in pane: SessionPane) {
+        let p = (prompt?.isEmpty == false) ? b64(prompt!) : "-"
+        sendCommand("worktree-create \(b64(cwd)) \(b64(slug)) \(b64(display)) \(b64(tool)) \(p)", in: pane)
+    }
+
+    /// Merge `sourceBranch` into `targetBranch` (an ancestor) in a visible tab
+    /// checked out at the target. The guest resolves the target's checkout from
+    /// `mainRoot`; `display` labels the merge tab.
+    func requestMergeWorktree(sourceBranch: String, targetBranch: String,
+                              mainRoot: String, display: String, tool: String,
+                              in pane: SessionPane) {
+        sendCommand("worktree-merge \(b64(sourceBranch)) \(b64(targetBranch)) \(b64(mainRoot)) \(b64(display)) \(b64(tool))", in: pane)
+    }
+
+    /// Remove a worktree and delete its branch (post-merge cleanup).
+    func requestRemoveWorktree(mainRoot: String, branch: String, in pane: SessionPane) {
+        sendCommand("worktree-remove \(b64(mainRoot)) \(b64(branch))", in: pane)
+    }
+
+    /// Spawn the agent in a conflicted merge checkout to resolve it (v3).
+    func requestResolveWorktree(dir: String, tool: String, in pane: SessionPane) {
+        sendCommand("worktree-resolve \(b64(dir)) \(b64(tool))", in: pane)
+    }
+
+    /// Queue a worktree command for a (possibly detached) session — the SSH/CLI
+    /// path. Builds the same guest command as the GUI request functions but
+    /// writes straight to the session's outbox, so no window/pane is needed.
+    @MainActor
+    func automationWorktreeCommand(profileNameOrID: String, action: String, args: [String]) -> Bool {
+        guard let p = profileByNameOrID(profileNameOrID),
+              let session = runningSessions[p.id],
+              let outbox = session.sandbox.sessionDisk?.outboxDirectory else { return false }
+        let name: String
+        let encoded: [String]
+        switch action {
+        case "create":
+            guard args.count >= 4 else { return false }   // cwd, slug, display, tool[, prompt]
+            name = "worktree-create"
+            let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
+            encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
+        case "merge":
+            guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
+            name = "worktree-merge"; encoded = args.prefix(5).map(b64)
+        case "remove":
+            guard args.count >= 2 else { return false }   // mainRoot, branch
+            name = "worktree-remove"; encoded = args.prefix(2).map(b64)
+        case "resolve":
+            guard args.count >= 2 else { return false }   // dir, tool
+            name = "worktree-resolve"; encoded = args.prefix(2).map(b64)
+        default:
+            return false
+        }
+        let line = ([name] + encoded).joined(separator: " ")
+        let file = outbox.appendingPathComponent("cmd-\(UUID().uuidString).txt")
+        try? (line + "\n").write(to: file, atomically: true, encoding: .utf8)
+        return true
+    }
+
+    // MARK: Worktree dialogs
+
+    /// A filesystem/branch-safe slug from a free-form task name.
+    private func worktreeSlug(_ name: String) -> String {
+        let lowered = name.lowercased()
+        var out = ""
+        var lastDash = false
+        for ch in lowered {
+            if ch.isLetter || ch.isNumber {
+                out.append(ch); lastDash = false
+            } else if !lastDash {
+                out.append("-"); lastDash = true
+            }
+        }
+        let trimmed = out.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return String(trimmed.prefix(40)).isEmpty ? "worktree" : String(trimmed.prefix(40))
+    }
+
+    /// "New worktree…" dialog: task name, tool, and an optional initial prompt.
+    @MainActor
+    func presentCreateWorktree(cwd: String, defaultTool: String, in pane: SessionPane) {
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("New worktree", comment: "")
+        alert.informativeText = NSLocalizedString(
+            "Creates a git worktree branched from this tab's current commit and opens a nested agent in it.",
+            comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Create", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 96))
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 68, width: 320, height: 24))
+        nameField.placeholderString = NSLocalizedString("Task name (e.g. Website refactoring)", comment: "")
+        let toolPopup = NSPopUpButton(frame: NSRect(x: 0, y: 36, width: 320, height: 24))
+        let tools = ["claude", "codex", "grok"]
+        toolPopup.addItems(withTitles: tools)
+        toolPopup.selectItem(withTitle: tools.contains(defaultTool) ? defaultTool : "claude")
+        let promptField = NSTextField(frame: NSRect(x: 0, y: 4, width: 320, height: 24))
+        promptField.placeholderString = NSLocalizedString("Initial prompt (optional)", comment: "")
+        container.addSubview(nameField)
+        container.addSubview(toolPopup)
+        container.addSubview(promptField)
+        alert.accessoryView = container
+        alert.window.initialFirstResponder = nameField
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let tool = toolPopup.titleOfSelectedItem ?? defaultTool
+        let display = "\(name) (\(tool))"
+        let prompt = promptField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        requestCreateWorktree(cwd: cwd, slug: worktreeSlug(name), display: display,
+                              tool: tool, prompt: prompt.isEmpty ? nil : prompt, in: pane)
+    }
+
+    /// "Merge…" dialog: pick a destination along the ancestor chain. Defaults to
+    /// the immediate parent; higher targets are flagged as skipping intermediates.
+    @MainActor
+    func presentMergeWorktree(tab: TabsModel.Tab, allTabs: [TabsModel.Tab], in pane: SessionPane) {
+        guard let branch = tab.worktreeBranch, let mainRoot = tab.rootRepo else { return }
+        // Ancestor chain: follow parentBranch through the sibling worktree tabs,
+        // then terminate at the main repo (the last parentBranch that isn't a
+        // worktree here). Each entry is (targetBranch, human label).
+        var chain: [(branch: String, label: String)] = []
+        var parentBranch = tab.parentBranch
+        var guardCount = 0
+        while let pb = parentBranch, !pb.isEmpty, guardCount < 8 {
+            if let parent = allTabs.first(where: { $0.worktreeBranch == pb }) {
+                chain.append((pb, parent.shownLabel))
+                parentBranch = parent.parentBranch
+            } else {
+                chain.append((pb, "\(pb) (repo root)"))
+                break
+            }
+            guardCount += 1
+        }
+        guard !chain.isEmpty else { return }
+
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Merge “%@”", comment: ""), tab.shownLabel)
+        alert.informativeText = NSLocalizedString(
+            "Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy.",
+            comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Merge", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 25))
+        for (i, dest) in chain.enumerated() {
+            // The immediate parent (index 0) is the safe default; anything above
+            // skips the intermediate worktrees, which then won't get these changes.
+            popup.addItem(withTitle: i == 0 ? dest.label : "\(dest.label)  ⚠︎ skips intermediates")
+        }
+        popup.selectItem(at: 0)
+        alert.accessoryView = popup
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let target = chain[popup.indexOfSelectedItem]
+        requestMergeWorktree(sourceBranch: branch, targetBranch: target.branch,
+                             mainRoot: mainRoot, display: tab.shownLabel,
+                             tool: pane.profile.tool.rawValue, in: pane)
+    }
+
+    /// "Discard worktree" confirmation: remove the checkout + delete the branch.
+    @MainActor
+    func confirmRemoveWorktree(tab: TabsModel.Tab, in pane: SessionPane) {
+        guard let branch = tab.worktreeBranch, let mainRoot = tab.rootRepo else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(
+            format: NSLocalizedString("Discard worktree “%@”?", comment: ""), tab.shownLabel)
+        alert.informativeText = String(
+            format: NSLocalizedString(
+                "Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost.",
+                comment: ""), branch)
+        alert.addButton(withTitle: NSLocalizedString("Discard", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        requestRemoveWorktree(mainRoot: mainRoot, branch: branch, in: pane)
+        // Close the tab too — its cwd is about to vanish.
+        if tab.index >= 0 { requestCloseTab(index: tab.index, in: pane) }
+    }
+
     /// Attach to a running docker container in a new tab → the guest spawns a
     /// tmux window running `docker exec -it <id> <shell>`. The shell is
     /// user-supplied (the popover field), so sanitise it to a conservative
@@ -5916,10 +6273,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             "[ac] guest reboot of '\(session.profile.name)' completed\n".utf8))
                     }
                 }
-                // Mirror for detached `vm ls` / API, and drive the tab bar.
-                self.runningSessions[pid]?.tabs = tabs.map {
-                    (index: $0.index, label: $0.label, active: $0.active)
-                }
+                // Mirror for detached `vm ls` / API / SSH, and drive the tab bar.
+                self.runningSessions[pid]?.tabs = tabs
                 self.pane(for: pid)?.applyTabList(tabs)
                 // First non-empty roster = the guest booted to kitty/tmux, so the
                 // disk is proven bootable. Snapshot it (once per session) as a
@@ -5970,6 +6325,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sandbox.onDockerError = { [weak self] message in
             Task { @MainActor in
                 self?.pane(for: pid)?.applyDockerError(message)
+            }
+        }
+        sandbox.onWorktreeError = { [weak self] message in
+            Task { @MainActor in
+                guard self != nil else { return }
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = NSLocalizedString("Worktree action failed", comment: "")
+                alert.informativeText = message
+                alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+                alert.runModal()
+            }
+        }
+        sandbox.onAgentStatus = { [weak self] index, signal in
+            Task { @MainActor in
+                guard let self, let status = AgentStatus(signal: signal) else { return }
+                self.setTabAgentStatus(pid, index: index, status)
             }
         }
         sandbox.onDockerBinfmt = { [weak self] arches in
@@ -6208,7 +6580,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // live roster keeps it current. tmux is already running in the VM, so
         // there's nothing to spawn or raise.
         if !session.tabs.isEmpty {
-            pane.model.tabs = session.tabs.map { TabsModel.Tab(label: $0.label) }
+            pane.model.tabs = session.tabs.map {
+                TabsModel.Tab(label: $0.label, index: $0.index, containerID: $0.containerID,
+                              cwd: $0.cwd, worktreeBranch: $0.worktreeBranch,
+                              parentBranch: $0.parentBranch, rootRepo: $0.rootRepo,
+                              display: $0.display, repoRoot: $0.repoRoot)
+            }
             pane.model.activeIndex = session.tabs.firstIndex(where: { $0.active }) ?? 0
         } else {
             pane.model.tabs = [TabsModel.Tab(label: "shell")]

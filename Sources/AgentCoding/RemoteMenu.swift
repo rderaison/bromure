@@ -224,6 +224,8 @@ final class RemoteMenuApp {
                 }
                 labels.append("Routing: \(routing)")
                 actions.append { self.chooseRouting(id: id, name: name, current: routing); return false }
+                labels.append("Worktrees…")
+                actions.append { self.worktreeMenu(vmID: id, name: name); return false }
                 labels.append("Reboot…")
                 actions.append { self.rebootWorkspace(id: id, name: name); return false }
                 labels.append("Suspend")
@@ -782,7 +784,12 @@ final class RemoteMenuApp {
                 let idx = t["index"] as? Int ?? 0
                 let title = t["title"] as? String ?? "shell"
                 let active = (t["active"] as? Bool ?? false) ? " *" : ""
-                labels.append("Tab \(idx): \(title)\(active)")
+                // Worktree tabs read as branches, indented under their parent —
+                // parity with the GUI source list's nesting.
+                let isWt = t["isWorktree"] as? Bool ?? false
+                let indent = String(repeating: "  ", count: Self.worktreeDepth(t, in: tabs))
+                let marker = isWt ? "🌿 " : ""
+                labels.append("\(indent)\(marker)Tab \(idx): \(title)\(active)")
                 actions.append { self.attach(vmID: vmID, name: name, tab: idx) }
             }
             for c in containers {
@@ -795,6 +802,158 @@ final class RemoteMenuApp {
                                      footer: "Enter attach · q back") else { return }
             if sel >= 0, sel < actions.count { actions[sel]() } else { return }
         }
+    }
+
+    // MARK: - Worktrees (SSH parity with the GUI right-click menu)
+
+    /// Nesting depth of a tab in the worktree tree (0 for ordinary tabs), by
+    /// following `parentBranch` → an ancestor tab's `worktreeBranch`. Mirrors
+    /// the GUI's `worktreeDepth`, over the API's tab dicts.
+    static func worktreeDepth(_ tab: [String: Any], in tabs: [[String: Any]]) -> Int {
+        guard tab["isWorktree"] as? Bool == true else { return 0 }
+        var depth = 1
+        var parent = tab["parentBranch"] as? String
+        var guardCount = 0
+        while let pb = parent, !pb.isEmpty, guardCount < 8 {
+            guard let p = tabs.first(where: { $0["worktreeBranch"] as? String == pb }) else { break }
+            depth += 1
+            parent = p["parentBranch"] as? String
+            guardCount += 1
+        }
+        return min(depth, 6)
+    }
+
+    /// POST a worktree action to the app for `vmID`. Returns true on success.
+    @discardableResult
+    private func postWorktree(vmID: String, action: String, args: [String]) -> Bool {
+        let body: [String: Any] = ["action": action, "args": args]
+        let resp = try? client.request(
+            "POST", "/sessions/\(ControlClient.encodeSegment(vmID))/worktree", body: body)
+        return (resp?.json["ok"] as? Bool) ?? false
+    }
+
+    /// Manage this workspace's worktrees: list repo/worktree/merge tabs, each
+    /// with its available actions. Loops so an action returns here.
+    private func worktreeMenu(vmID: String, name: String) {
+        while true {
+            let tabs = (fetchVM(vmID)?["tabs"] as? [[String: Any]]) ?? []
+            let tool = fetchVM(vmID)?["tool"] as? String ?? "claude"
+            var labels: [String] = []
+            var actions: [() -> Void] = []
+            for t in tabs {
+                let title = t["title"] as? String ?? "shell"
+                let indent = String(repeating: "  ", count: Self.worktreeDepth(t, in: tabs))
+                if t["isWorktree"] as? Bool == true {
+                    labels.append("\(indent)🌿 \(title)")
+                    actions.append { self.worktreeTabActions(vmID: vmID, name: name, tab: t, tabs: tabs, tool: tool) }
+                } else if t["isMergeTab"] as? Bool == true {
+                    labels.append("\(indent)⇗ \(title)")
+                    actions.append {
+                        guard let dir = t["cwd"] as? String else { return }
+                        if self.postWorktree(vmID: vmID, action: "resolve", args: [dir, tool]) {
+                            self.tui.toast("Spawning \(tool) to resolve conflicts…")
+                        }
+                    }
+                } else if t["isGitRepo"] as? Bool == true {
+                    labels.append("\(indent)📁 \(title)  (git)")
+                    actions.append { self.createWorktreeRemote(vmID: vmID, tab: t, defaultTool: tool) }
+                }
+            }
+            if labels.isEmpty {
+                _ = tui.menu(title: "Worktrees · \(name)", items: ["Back"],
+                             footer: "Enter back",
+                             header: ["No git repos or worktrees in this workspace yet.",
+                                      "Open a repo in a tab, then it'll appear here."])
+                return
+            }
+            labels.append("Back")
+            guard let sel = tui.menu(title: "Worktrees · \(name)", items: labels,
+                                     footer: "Enter select · q back",
+                                     header: ["Pick a repo to branch from, or a worktree to merge/discard."]) else { return }
+            if sel >= 0, sel < actions.count { actions[sel]() } else { return }
+        }
+    }
+
+    /// "New worktree" over SSH: task name → tool → optional prompt → create.
+    private func createWorktreeRemote(vmID: String, tab: [String: Any], defaultTool: String) {
+        guard let cwd = tab["cwd"] as? String else { return }
+        guard let rawName = tui.prompt("Task name (e.g. Website refactoring)"),
+              !rawName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        let taskName = rawName.trimmingCharacters(in: .whitespaces)
+        let tools = ["claude", "codex", "grok"]
+        let initial = tools.firstIndex(of: defaultTool) ?? 0
+        guard let ti = tui.menu(title: "Tool for the worktree", items: tools, initial: initial) else { return }
+        let tool = tools[ti]
+        let prompt = tui.prompt("Initial prompt (optional)") ?? ""
+        let slug = Self.slug(taskName)
+        let display = "\(taskName) (\(tool))"
+        if postWorktree(vmID: vmID, action: "create", args: [cwd, slug, display, tool, prompt]) {
+            tui.toast("Creating worktree “\(taskName)”…")
+        } else {
+            tui.toast("Couldn't create the worktree.")
+        }
+    }
+
+    /// Actions on an existing worktree tab: merge (destination pick) or discard.
+    private func worktreeTabActions(vmID: String, name: String, tab: [String: Any],
+                                    tabs: [[String: Any]], tool: String) {
+        let title = tab["title"] as? String ?? "worktree"
+        guard let branch = tab["worktreeBranch"] as? String,
+              let mainRoot = tab["rootRepo"] as? String else { return }
+        var items = ["Merge…", "Discard worktree"]
+        if tab["isMergeTab"] as? Bool == true { items.insert("Resolve conflicts", at: 0) }
+        items.append("Back")
+        guard let sel = tui.menu(title: "Worktree: \(title)", items: items,
+                                 footer: "Enter select · q back") else { return }
+        let choice = items[sel]
+        switch choice {
+        case "Resolve conflicts":
+            if let dir = tab["cwd"] as? String {
+                _ = postWorktree(vmID: vmID, action: "resolve", args: [dir, tool])
+            }
+        case "Merge…":
+            // Ancestor chain: parentBranch → … → repo root (same as the GUI).
+            var chain: [(branch: String, label: String)] = []
+            var parent = tab["parentBranch"] as? String
+            var guardCount = 0
+            while let pb = parent, !pb.isEmpty, guardCount < 8 {
+                if let p = tabs.first(where: { $0["worktreeBranch"] as? String == pb }) {
+                    chain.append((pb, p["title"] as? String ?? pb))
+                    parent = p["parentBranch"] as? String
+                } else {
+                    chain.append((pb, "\(pb) (repo root)"))
+                    break
+                }
+                guardCount += 1
+            }
+            guard !chain.isEmpty else { return }
+            let dests = chain.enumerated().map { i, d in
+                i == 0 ? d.label : "\(d.label)  ⚠︎ skips intermediates"
+            }
+            guard let di = tui.menu(title: "Merge “\(title)” into", items: dests,
+                                    footer: "Enter merge · q cancel") else { return }
+            _ = postWorktree(vmID: vmID, action: "merge",
+                             args: [branch, chain[di].branch, mainRoot, title, tool])
+            tui.toast("Merging into \(chain[di].label)…")
+        case "Discard worktree":
+            guard tui.confirm("Discard “\(title)”? Removes the checkout and deletes \(branch). Unmerged commits are lost.") else { return }
+            _ = postWorktree(vmID: vmID, action: "remove", args: [mainRoot, branch])
+            tui.toast("Discarded \(title).")
+        default:
+            return
+        }
+    }
+
+    /// Slugify a task name to a branch/dir-safe token (mirrors the GUI).
+    static func slug(_ name: String) -> String {
+        var out = ""; var lastDash = false
+        for ch in name.lowercased() {
+            if ch.isLetter || ch.isNumber { out.append(ch); lastDash = false }
+            else if !lastDash { out.append("-"); lastDash = true }
+        }
+        let trimmed = String(out.drop(while: { $0 == "-" }).prefix(40))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return trimmed.isEmpty ? "worktree" : trimmed
     }
 
     /// docker exec -it into a running container, à la `vm attach … containers:…`.

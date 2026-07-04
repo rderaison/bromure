@@ -3040,6 +3040,74 @@ public final class ProfileStore {
             try? fm.removeItem(at: claudeSettingsURL)
         }
 
+        // Default Claude Code to the `auto` permission mode so the agent runs
+        // autonomously inside the disposable VM (the VM + MITM proxy ARE the
+        // sandbox, so per-action prompts are mostly friction here). Seeded into
+        // ~/.claude/settings.json only when `permissions.defaultMode` is unset,
+        // via read-modify-write — so we never clobber the Bedrock `env` written
+        // just above or any other user settings, and a user who later picks a
+        // different mode is respected. Only for workspaces that actually use
+        // Claude Code (primary or additional tool).
+        let usesClaude = profile.tool == .claude
+            || profile.additionalTools.contains { $0.tool == .claude }
+        if usesClaude {
+            try? fm.createDirectory(at: claudeDir, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: NSNumber(value: 0o700)])
+            var settings: [String: Any] = [:]
+            if let data = try? Data(contentsOf: claudeSettingsURL),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                settings = json
+            }
+            // Seed the permission mode only when unset (respect a user change).
+            var perms = settings["permissions"] as? [String: Any] ?? [:]
+            if perms["defaultMode"] == nil {
+                perms["defaultMode"] = "auto"
+                settings["permissions"] = perms
+            }
+            // Managed status hooks — report working/done/needsInput to the host
+            // for the sidebar status dot. Overwrite just these four events
+            // (other user hooks + settings are preserved by the read above).
+            let hookScript = "/home/ubuntu/.bromure/agent-status.sh"
+            func hookCmd(_ arg: String) -> [[String: Any]] {
+                [["hooks": [["type": "command", "command": "\(hookScript) \(arg)"]]]]
+            }
+            var hooks = settings["hooks"] as? [String: Any] ?? [:]
+            hooks["UserPromptSubmit"] = hookCmd("working")
+            hooks["PreToolUse"] = hookCmd("working")
+            hooks["Stop"] = hookCmd("done")
+            hooks["Notification"] = hookCmd("needsInput")
+            settings["hooks"] = hooks
+
+            let data = try JSONSerialization.data(withJSONObject: settings,
+                                                  options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: claudeSettingsURL, options: .atomic)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                  ofItemAtPath: claudeSettingsURL.path)
+
+            // The reporter script the hooks call (idempotent overwrite).
+            let bromureDir = home.appendingPathComponent(".bromure", isDirectory: true)
+            try? fm.createDirectory(at: bromureDir, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: NSNumber(value: 0o755)])
+            let statusScript = #"""
+            #!/bin/sh
+            # Bromure Claude-hook status reporter → per-tab sidebar dot.
+            # $1 = working|done|needsInput. The hook runs inside the agent's tmux
+            # window, so $TMUX_PANE resolves this tab's window index — reported in
+            # the filename so each tab's dot is independent.
+            d=/mnt/bromure-outbox
+            [ -d "$d" ] || exit 0
+            idx=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{window_index}' 2>/dev/null)
+            [ -n "$idx" ] || exit 0
+            printf '%s' "${1:-}" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
+              && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
+            exit 0
+            """#
+            let scriptURL = bromureDir.appendingPathComponent("agent-status.sh")
+            try? statusScript.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)],
+                                  ofItemAtPath: scriptURL.path)
+        }
+
         // ~/.docker/config.json — Docker stores per-registry HTTP Basic
         // creds here as `auths.<key>.auth = base64("<user>:<password>")`.
         // We write FAKE base64 strings; the proxy substitutes the real
@@ -3390,6 +3458,30 @@ public final class ProfileStore {
     # themselves. Gated to once per boot by the marker; `-t 1` (interactive
     # terminal) is used instead of `$SHLVL=1` because the kitty's bash runs at
     # SHLVL 2 (login shell → startx → openbox → kitty adds a level).
+    # Worktree tab: the host opens this window with BROMURE_AC_WT_TOOL set (see
+    # `worktree-create`). Run that tool here — this branch runs regardless of
+    # the primary-tab marker, so a worktree sub-agent always starts even though
+    # the first tab already claimed the marker. All the env/MCP/token setup
+    # above has already run for this interactive shell.
+    if [ -n "${BROMURE_AC_WT_TOOL:-}" ] && [ -t 1 ]; then
+        _wt_tool="$BROMURE_AC_WT_TOOL"; unset BROMURE_AC_WT_TOOL
+        if ! command -v "$_wt_tool" >/dev/null 2>&1; then
+            _bromure_install_tool "$_wt_tool" || true
+            hash -r 2>/dev/null || true
+        fi
+        if command -v "$_wt_tool" >/dev/null 2>&1; then
+            printf '\\033[2m[bromure-ac] starting %s in worktree…\\033[0m\\n' "$_wt_tool"
+            if [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
+                _wt_prompt=$(printf '%s' "$BROMURE_AC_WT_PROMPT" | base64 -d 2>/dev/null)
+                unset BROMURE_AC_WT_PROMPT
+                "$_wt_tool" "$_wt_prompt"
+            else
+                "$_wt_tool"
+            fi
+        fi
+        unset _wt_tool _wt_prompt
+    fi
+
     if [ "$BROMURE_AC_REGISTER" = "1" ] \\
        && [ -t 1 ] \\
        && [ ! -e "$_bromure_marker" ] \\
@@ -3951,6 +4043,220 @@ public final class ProfileStore {
             && mv -f "$INBOX/.docker-error.tmp" "$INBOX/docker-error.txt" 2>/dev/null
     }
 
+    # Surface a worktree error to the host as a one-shot file (read + delete),
+    # mirroring docker_err. Used by the git-worktree create/merge/remove paths.
+    worktree_err() {
+        printf '%s' "$1" > "$INBOX/.worktree-error.tmp" 2>/dev/null \
+            && mv -f "$INBOX/.worktree-error.tmp" "$INBOX/worktree-error.txt" 2>/dev/null
+    }
+
+    # Copy files listed in the repo's .worktreeinclude into a fresh worktree
+    # (v3). git worktree add makes a clean checkout, so gitignored config that
+    # agents rely on (.env, local tokens) is absent. Same convention as Claude
+    # Code: each non-comment line is a path relative to the main worktree root;
+    # copied only when it exists there and isn't already in the new checkout.
+    _bromure_worktree_include() {
+        main_root="$1"; wt_dir="$2"
+        inc="$main_root/.worktreeinclude"
+        [ -r "$inc" ] || return 0
+        while IFS= read -r pat || [ -n "$pat" ]; do
+            case "$pat" in ''|'#'*) continue ;; esac
+            # Only literal relative paths (no globbing) — keep it predictable.
+            src="$main_root/$pat"; dst="$wt_dir/$pat"
+            [ -e "$src" ] || continue
+            [ -e "$dst" ] && continue
+            mkdir -p "$(dirname "$dst")" 2>/dev/null || continue
+            cp -a "$src" "$dst" 2>/dev/null || true
+        done < "$inc"
+    }
+
+    # ASCII Unit Separator (0x1f): the field delimiter for the worktree registry
+    # (and the roster parse). Non-whitespace, so `read` preserves empty fields
+    # and it can't occur in paths/branches/labels. Global so every helper shares
+    # it; roster_loop also sets its own copy defensively.
+    US=$(printf '\037')
+
+    # Worktree persistence. tmux windows are runtime-only, so a reboot wipes the
+    # worktree TABS while the git worktrees survive on disk — and the metadata
+    # that made them tabs (parent branch for nesting, pretty label, tool) lived
+    # only in tmux options. Persist it: one registry file per repo, one line per
+    # worktree, US-separated: branch<US>parent_branch<US>display<US>tool.
+    _bromure_wt_registry() { printf '%s\n' "$HOME/.bromure/worktrees/$1/.registry"; }
+
+    _bromure_wt_registry_add() {  # repo_name branch parent display tool
+        reg=$(_bromure_wt_registry "$1")
+        mkdir -p "$(dirname "$reg")" 2>/dev/null || return 0
+        printf '%s%s%s%s%s%s%s\n' "$2" "$US" "$3" "$US" "$4" "$US" "$5" >> "$reg"
+    }
+
+    _bromure_wt_registry_del() {  # repo_name branch
+        reg=$(_bromure_wt_registry "$1")
+        [ -r "$reg" ] || return 0
+        tmp="$reg.tmp.$$"; : > "$tmp"
+        while IFS="$US" read -r r_branch r_parent r_display r_tool; do
+            [ -z "$r_branch" ] || [ "$r_branch" = "$2" ] && continue
+            printf '%s%s%s%s%s%s%s\n' "$r_branch" "$US" "$r_parent" "$US" "$r_display" "$US" "$r_tool" >> "$tmp"
+        done < "$reg"
+        mv -f "$tmp" "$reg" 2>/dev/null || rm -f "$tmp"
+    }
+
+    # Reboot restore: when a repo tab is active, re-open a tab for each registered
+    # worktree of that repo that still exists on disk and isn't already open —
+    # restoring branch/parent/label/display (so the nesting comes back) and
+    # relaunching its agent. Runs ONCE per boot per repo (marker in /tmp, which a
+    # reboot clears); a worktree the user closes by hand this session stays shut.
+    _bromure_restore_worktrees() {  # repo_root repo_name
+        rr_root="$1"; rr_name="$2"
+        reg=$(_bromure_wt_registry "$rr_name")
+        [ -r "$reg" ] || return 0
+        safe=$(printf '%s' "$rr_name" | tr -c 'A-Za-z0-9._-' '_')
+        marker="/tmp/.bromure-wt-restored-$safe"
+        [ -e "$marker" ] && return 0
+        : > "$marker" 2>/dev/null
+        open=$(tmux list-windows -t "$TMUX_S" -F '#{@worktree}' 2>/dev/null)
+        while IFS="$US" read -r r_branch r_parent r_display r_tool; do
+            [ -z "$r_branch" ] && continue
+            printf '%s\n' "$open" | grep -qxF "$r_branch" && continue   # already open
+            wdir=$(_bromure_worktree_dir_for_branch "$rr_root" "$r_branch")
+            [ -n "$wdir" ] && [ -d "$wdir" ] || continue                # git worktree gone
+            win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" -c "$wdir" \
+                  -e BROMURE_AC_WT_TOOL="$r_tool" "bash -l" 2>/dev/null)
+            [ -n "$win" ] || continue
+            tmux set-option -w -t "$win" @worktree "$r_branch" 2>/dev/null
+            tmux set-option -w -t "$win" @parent_branch "$r_parent" 2>/dev/null
+            tmux set-option -w -t "$win" @root_repo "$rr_root" 2>/dev/null
+            tmux set-option -w -t "$win" @label "$r_tool" 2>/dev/null
+            tmux set-option -w -t "$win" @display "$r_display" 2>/dev/null
+        done < "$reg"
+    }
+
+    # Create a git worktree off <cwd>'s current HEAD and open a tab in it that
+    # runs <tool>. Recursive by construction: <cwd> may itself be a worktree, so
+    # the new branch descends from whatever branch is checked out there. All
+    # metadata (branch, parent branch, main-worktree root, pretty label) is
+    # stashed as per-window tmux options the roster loop republishes AND in the
+    # on-disk registry so the tab survives a reboot.
+    _bromure_worktree_create() {
+        wc_cwd="$1"; wc_slug="$2"; wc_display="$3"; wc_tool="$4"; wc_prompt_b64="$5"
+        [ "$wc_prompt_b64" = "-" ] && wc_prompt_b64=""   # "-" sentinel = no prompt
+        [ -d "$wc_cwd" ] || { worktree_err "worktree: cwd is gone: $wc_cwd"; return 1; }
+        # Parent branch (what we cut from) and the MAIN worktree root (top of
+        # `git worktree list` — always the primary checkout, never a worktree).
+        parent_branch=$(git -C "$wc_cwd" rev-parse --abbrev-ref HEAD 2>/dev/null)
+        main_root=$(git -C "$wc_cwd" worktree list --porcelain 2>/dev/null \
+                    | awk '/^worktree /{print substr($0,10); exit}')
+        [ -n "$main_root" ] || { worktree_err "worktree: $wc_cwd is not a git repo"; return 1; }
+        [ "$parent_branch" = "HEAD" ] && parent_branch=$(git -C "$wc_cwd" rev-parse --short HEAD 2>/dev/null)
+
+        repo_name=$(basename "$main_root")
+        base="$HOME/.bromure/worktrees/$repo_name"
+        mkdir -p "$base" 2>/dev/null
+        # Unique branch + dir: append -2, -3, … if the slug is taken.
+        branch="wt/$wc_slug"; wt_dir="$base/$wc_slug"; n=2
+        while git -C "$wc_cwd" show-ref --verify --quiet "refs/heads/$branch" \
+              || [ -e "$wt_dir" ]; do
+            branch="wt/$wc_slug-$n"; wt_dir="$base/$wc_slug-$n"; n=$((n+1))
+        done
+
+        if ! err=$(git -C "$wc_cwd" worktree add -b "$branch" "$wt_dir" HEAD 2>&1); then
+            worktree_err "worktree add failed: $err"; return 1
+        fi
+        _bromure_worktree_include "$main_root" "$wt_dir"
+
+        win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" -c "$wt_dir" \
+              -e BROMURE_AC_WT_TOOL="$wc_tool" -e BROMURE_AC_WT_PROMPT="$wc_prompt_b64" \
+              "bash -l" 2>/dev/null)
+        if [ -z "$win" ]; then
+            worktree_err "worktree: could not open a tab (created $branch at $wt_dir)"
+            return 1
+        fi
+        tmux set-option -w -t "$win" @worktree "$branch" 2>/dev/null
+        tmux set-option -w -t "$win" @parent_branch "$parent_branch" 2>/dev/null
+        tmux set-option -w -t "$win" @root_repo "$main_root" 2>/dev/null
+        tmux set-option -w -t "$win" @label "$wc_tool" 2>/dev/null
+        tmux set-option -w -t "$win" @display "$wc_display" 2>/dev/null
+        # Persist for reboot restore (parent branch = the nesting link).
+        _bromure_wt_registry_add "$repo_name" "$branch" "$parent_branch" "$wc_display" "$wc_tool"
+    }
+
+    # Resolve a branch's checkout dir from the worktree list (empty if the
+    # branch isn't checked out anywhere). The main worktree matches too.
+    _bromure_worktree_dir_for_branch() {
+        git -C "$1" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$2" '
+            /^worktree /{d=substr($0,10)}
+            /^branch /{ if($2==b){print d; exit} }'
+    }
+
+    # Merge <branch> into <target_branch>, in a fresh tab checked out at the
+    # target's worktree dir so conflicts are visible and resolvable in place.
+    # The host passes only branch names + the main root; the guest resolves the
+    # target's checkout itself (robust to where each worktree lives).
+    # arg fields (base64): source_branch, target_branch, main_root, display, tool.
+    _bromure_worktree_merge() {
+        wm_branch="$1"; wm_target="$2"; wm_root="$3"; wm_display="$4"; wm_tool="$5"
+        tdir=$(_bromure_worktree_dir_for_branch "$wm_root" "$wm_target")
+        [ -z "$tdir" ] && tdir="$wm_root"
+        [ -d "$tdir" ] || { worktree_err "merge: no checkout for '$wm_target'"; return 1; }
+        # Prompt the coding agent gets when the merge conflicts.
+        rp="A git merge in this directory hit conflicts. Run 'git status' to see them, then resolve every conflicted file, keeping both sides' intent, and stage the resolutions with 'git add'. Do NOT commit yet: give me a short summary of how you resolved each conflict and ask whether I'd like to review the changes first. Only run 'git commit --no-edit' to finish the merge after I confirm."
+        rp64=$(printf '%s' "$rp" | base64 | tr -d '\n')
+        # A visible tab that runs the merge and stays open. On a clean merge it
+        # reports success and waits. On CONFLICT — whether fresh, or a merge left
+        # in progress by an earlier attempt (we resume rather than error) — it
+        # hands the checkout to the coding agent IN PLACE to resolve
+        # automatically (exec a login shell → the .bashrc worktree-launch branch
+        # runs $BROMURE_AC_WT_TOOL with the resolve prompt). Branch names go in
+        # via -e (environment VALUES, never re-parsed), NOT interpolated into the
+        # command — git allows $, (, ), backticks in ref names, so interpolating
+        # `$(cmd)` would execute under sh -c. Command single-quoted at the build
+        # level so $WT_SRC/$WT_DST reach the inner shell and expand from the env.
+        win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" -c "$tdir" \
+              -e WT_SRC="$wm_branch" -e WT_DST="$wm_target" \
+              -e BROMURE_AC_WT_TOOL="$wm_tool" -e BROMURE_AC_WT_PROMPT="$rp64" \
+              'if ! git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then \
+                 git merge --no-edit "$WT_SRC"; \
+               fi; \
+               echo; \
+               if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then \
+                 echo "bromure: merge conflicts — starting $BROMURE_AC_WT_TOOL to resolve…"; echo; \
+                 exec bash -l; \
+               else \
+                 echo "bromure: merged $WT_SRC into $WT_DST."; \
+                 echo; echo Press Enter to close; read _; \
+               fi' 2>/dev/null)
+        # @display "Merge → …" is the host's marker for a merge tab; its cwd is
+        # the target checkout, which the manual "Have the agent resolve" action
+        # (a fallback if the agent exits) reuses.
+        [ -n "$win" ] && tmux set-option -w -t "$win" @display "Merge → $wm_target" 2>/dev/null
+    }
+
+    # Remove a worktree + delete its branch after a successful merge. The guest
+    # resolves the dir from the branch. arg fields (base64): main_root, branch.
+    _bromure_worktree_remove() {
+        wr_root="$1"; wr_branch="$2"
+        [ -n "$wr_root" ] || return 0
+        wdir=$(_bromure_worktree_dir_for_branch "$wr_root" "$wr_branch")
+        [ -n "$wdir" ] && [ "$wdir" != "$wr_root" ] \
+            && git -C "$wr_root" worktree remove --force "$wdir" 2>/dev/null || true
+        git -C "$wr_root" branch -D "$wr_branch" 2>/dev/null || true
+        git -C "$wr_root" worktree prune 2>/dev/null || true
+        # Drop it from the reboot registry so it isn't restored next boot.
+        _bromure_wt_registry_del "$(basename "$wr_root")" "$wr_branch"
+    }
+
+    # Spawn the parent agent in the conflicted checkout to resolve an in-flight
+    # merge (v3). arg fields (base64): merge_dir, tool.
+    _bromure_worktree_resolve() {
+        wcr_dir="$1"; wcr_tool="$2"
+        [ -d "$wcr_dir" ] || { worktree_err "resolve: checkout is gone: $wcr_dir"; return 1; }
+        prompt="A git merge in this directory has conflicts. Run 'git status' to see them, then resolve every conflicted file and stage the resolutions with 'git add'. Do NOT commit yet: give me a short summary of your resolution and ask whether I'd like to review the changes first. Only run 'git commit --no-edit' after I confirm."
+        p64=$(printf '%s' "$prompt" | base64 | tr -d '\n')
+        win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" -c "$wcr_dir" \
+              -e BROMURE_AC_WT_TOOL="$wcr_tool" -e BROMURE_AC_WT_PROMPT="$p64" \
+              "bash -l" 2>/dev/null)
+        [ -n "$win" ] && tmux set-option -w -t "$win" @display "Resolve conflicts" 2>/dev/null
+    }
+
     # Publish "run job" progress (state\timage\tdone\ttotal) for the dashboard,
     # so a detached `docker run` that's pulling layers doesn't look stuck.
     docker_run_status() {
@@ -4032,6 +4338,9 @@ public final class ProfileStore {
         <keybind key="W-h"><action name="Execute"><command>$HOSTKEY h</command></action></keybind>
         <keybind key="W-S-q"><action name="Execute"><command>$HOSTKEY shift-q</command></action></keybind>
         <keybind key="W-C-q"><action name="Execute"><command>$HOSTKEY ctrl-q</command></action></keybind>
+        <keybind key="W-S-n"><action name="Execute"><command>$HOSTKEY shift-n</command></action></keybind>
+        <keybind key="W-S-g"><action name="Execute"><command>$HOSTKEY shift-g</command></action></keybind>
+        <keybind key="W-S-m"><action name="Execute"><command>$HOSTKEY shift-m</command></action></keybind>
       </keyboard>
       <applications>
         <application class="*"><decor>no</decor><focus>yes</focus></application>
@@ -4062,6 +4371,14 @@ public final class ProfileStore {
     # foreground command (tab label) per window. Atomic rename so the host
     # never reads a partial list. Empty/absent = no tabs → host powers off.
     roster_loop() {
+        # Field separator for the tmux -F list AND the `read` below: ASCII Unit
+        # Separator (0x1f), a NON-whitespace char. `read` with a whitespace IFS
+        # (tab/space) COLLAPSES consecutive delimiters and drops empty fields —
+        # so an empty @label/@container followed by a non-empty cwd would shift
+        # every later column left (making the tab label read as the cwd and the
+        # git-repo flag land in the wrong slot). A non-whitespace IFS preserves
+        # empty fields. \037 can't appear in paths, labels, or program names.
+        US=$(printf '\037')
         while :; do
             # Catch a reboot the moment systemd queues its job — within one tick
             # of the user typing `reboot`, while dbus and this whole session are
@@ -4083,10 +4400,24 @@ public final class ProfileStore {
             #      is the primary.
             #   3. else the foreground command verbatim (a plain shell tab already
             #      follows vi/less correctly).
+            # Columns (US-separated internally; empty fields preserved): idx,
+            # active, cmd, tty, @label, @container, cwd, @worktree,
+            # @parent_branch, @root_repo, @display. The worktree columns are set
+            # by the `worktree-create` command below; empty for ordinary tabs.
+            # `#{pane_current_path}` is tmux's own cwd tracking — no /proc poll,
+            # no guest daemon. tabs.txt (written below) stays TAB-separated: that
+            # host contract is unchanged; only this internal parse uses US.
+            # tmux emits TAB-separated (bytes it definitely handles in -F; a raw
+            # control char in -F is not portable across tmux versions). We then
+            # translate TAB→US only in the read pipeline: `read` with a
+            # whitespace IFS collapses empty fields, so an empty @label/@container
+            # followed by a non-empty cwd would shift every later column; US
+            # (0x1f, non-whitespace) preserves empties. No field value contains a
+            # tab, so the translation is lossless.
             if raw=$(tmux list-windows -t "$TMUX_S" \
-                     -F '#{window_index}	#{?window_active,1,0}	#{pane_current_command}	#{pane_tty}	#{@label}	#{@container}' 2>/dev/null); then
+                     -F '#{window_index}	#{?window_active,1,0}	#{pane_current_command}	#{pane_tty}	#{@label}	#{@container}	#{pane_current_path}	#{@worktree}	#{@parent_branch}	#{@root_repo}	#{@display}' 2>/dev/null); then
                 : > "$INBOX/.tabs.tmp" 2>/dev/null
-                printf '%s\n' "$raw" | while IFS='	' read -r idx active cmd tty label container; do
+                printf '%s\n' "$raw" | tr '\t' "$US" | while IFS="$US" read -r idx active cmd tty label container cwd worktree pbranch rroot display; do
                     [ -z "$idx" ] && continue
                     name="$label"
                     if [ -z "$name" ]; then
@@ -4108,8 +4439,29 @@ public final class ProfileStore {
                                 esac ;;
                         esac
                     fi
-                    printf '%s\t%s\t%s\t%s\n' "$idx" "$active" "$name" "$container" \
+                    # Belt-and-suspenders: the tab label is a program name, never
+                    # a path. If it somehow reads as an absolute path (a future
+                    # column misalignment), fall back to "shell" rather than ever
+                    # showing the cwd as the tab name.
+                    case "$name" in /*) name="shell" ;; esac
+                    # Is the cwd inside a git repo? (Gates the "New worktree"
+                    # menu host-side.) One cheap rev-parse per tab; the toplevel
+                    # doubles as the repo name in the menu. Skip for worktree
+                    # tabs (already known repos) and empty cwds.
+                    isrepo=""
+                    if [ -n "$cwd" ] && [ -z "$worktree" ]; then
+                        # `timeout` so a slow/hung git on a virtiofs-mounted repo
+                        # can never stall the 0.7s roster tick (that would freeze
+                        # the whole tab list — new tabs would stop appearing).
+                        isrepo=$(timeout 3 git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+                    fi
+                    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                        "$idx" "$active" "$name" "$container" "$cwd" \
+                        "$worktree" "$pbranch" "$rroot" "$display" "$isrepo" \
                         >> "$INBOX/.tabs.tmp"
+                    # A repo tab is active → restore this repo's worktree tabs if
+                    # a reboot wiped them (self-guards; once per boot per repo).
+                    [ -n "$isrepo" ] && _bromure_restore_worktrees "$isrepo" "$(basename "$isrepo")"
                 done
                 mv -f "$INBOX/.tabs.tmp" "$INBOX/tabs.txt" 2>/dev/null
             elif ! tmux has-session -t "$TMUX_S" 2>/dev/null; then
@@ -4251,6 +4603,38 @@ public final class ProfileStore {
                         new-tab)      tmux new-window -t "$TMUX_S" 2>/dev/null || true ;;
                         select-tab)   tmux select-window -t "$TMUX_S:$arg" 2>/dev/null || true ;;
                         close-tab)    tmux kill-window -t "$TMUX_S:$arg" 2>/dev/null || true ;;
+                        # Git worktree create/merge/remove. All args are
+                        # base64 (space-separated, base64 has no spaces) so
+                        # paths and pretty names with spaces/parens survive the
+                        # split. Backgrounded — `git worktree add` clones the
+                        # index and can take a beat; the command loop is single-
+                        # threaded and must not stall other tab ops.
+                        worktree-create)
+                            set -- $arg
+                            ( _bromure_worktree_create \
+                                "$(printf %s "$1" | base64 -d 2>/dev/null)" \
+                                "$(printf %s "$2" | base64 -d 2>/dev/null)" \
+                                "$(printf %s "$3" | base64 -d 2>/dev/null)" \
+                                "$(printf %s "$4" | base64 -d 2>/dev/null)" \
+                                "$5" ) & ;;
+                        worktree-merge)
+                            set -- $arg
+                            ( _bromure_worktree_merge \
+                                "$(printf %s "$1" | base64 -d 2>/dev/null)" \
+                                "$(printf %s "$2" | base64 -d 2>/dev/null)" \
+                                "$(printf %s "$3" | base64 -d 2>/dev/null)" \
+                                "$(printf %s "$4" | base64 -d 2>/dev/null)" \
+                                "$(printf %s "$5" | base64 -d 2>/dev/null)" ) & ;;
+                        worktree-remove)
+                            set -- $arg
+                            ( _bromure_worktree_remove \
+                                "$(printf %s "$1" | base64 -d 2>/dev/null)" \
+                                "$(printf %s "$2" | base64 -d 2>/dev/null)" ) & ;;
+                        worktree-resolve)
+                            set -- $arg
+                            ( _bromure_worktree_resolve \
+                                "$(printf %s "$1" | base64 -d 2>/dev/null)" \
+                                "$(printf %s "$2" | base64 -d 2>/dev/null)" ) & ;;
                         # Attach to a docker container in a fresh tab: arg is
                         # "<container-id> <shell>". The host sanitises the shell;
                         # the id comes from `docker ps`. The new tmux window is

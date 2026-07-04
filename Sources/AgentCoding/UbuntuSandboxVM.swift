@@ -2,6 +2,35 @@ import Foundation
 import SandboxEngine
 @preconcurrency import Virtualization
 
+/// One tmux window as the guest roster reports it. `label` is the resolved
+/// foreground program (claude/codex/shell — drives the icon + thinking dots);
+/// `display` overrides the shown text for worktree tabs. The worktree fields
+/// are set only for windows created via `worktree-create` and describe where
+/// the checkout lives and where it can merge to.
+public struct GuestTab: Sendable {
+    public var index: Int
+    public var active: Bool
+    public var label: String
+    public var containerID: String?
+    /// The tab's working directory (tmux `pane_current_path`).
+    public var cwd: String?
+    /// This worktree's branch (`wt/<slug>`), if the window is a worktree.
+    public var worktreeBranch: String?
+    /// The branch the worktree was cut from — the immediate merge parent.
+    public var parentBranch: String?
+    /// The main (primary) worktree's path — where merges/removes run.
+    public var rootRepo: String?
+    /// Pretty label ("Website refactoring") shown instead of `label`.
+    public var display: String?
+    /// The cwd's git toplevel, if it's inside a repo (gates "New worktree").
+    /// Empty for non-repo cwds and for worktree tabs (already known repos).
+    public var repoRoot: String?
+
+    public var isWorktree: Bool { !(worktreeBranch?.isEmpty ?? true) }
+    /// A non-worktree tab sitting inside a git repo → eligible to spawn one.
+    public var isGitRepo: Bool { !(repoRoot?.isEmpty ?? true) }
+}
+
 // MARK: - docker `--format '{{json .}}'` line shapes
 
 /// One line of `docker ps -a --format '{{json .}}'`. Field names match docker's
@@ -48,12 +77,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// share. Wire this to NSWorkspace.shared.open in the GUI layer.
     public var onURLOpen: ((URL) -> Void)?
 
-    /// Called every ~0.7s with the current tmux window list — each entry is
-    /// (window index, whether it's the active window, foreground command,
-    /// and the @container option if the window is a docker-exec attach tab).
-    /// tmux is the source of truth, so the host mirrors this directly as the
-    /// tab bar; there's no per-process liveness reconciliation.
-    public var onTabList: (([(index: Int, active: Bool, label: String, containerID: String?)]) -> Void)?
+    /// Called every ~0.7s with the current tmux window list. tmux is the source
+    /// of truth, so the host mirrors this directly as the tab bar; there's no
+    /// per-process liveness reconciliation.
+    public var onTabList: (([GuestTab]) -> Void)?
 
     /// Called ~every 2s with the guest's container list (from `docker ps -a`,
     /// running + stopped). Empty when docker is absent / the daemon is down.
@@ -75,6 +102,14 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// Called when a docker action (run / start / stop / remove) fails in the
     /// guest — carries docker's stderr. One-shot: the file is consumed on read.
     public var onDockerError: ((String) -> Void)?
+
+    /// Called when a git worktree action (create / merge / remove) fails in the
+    /// guest — carries git's stderr. One-shot: the file is consumed on read.
+    public var onWorktreeError: ((String) -> Void)?
+
+    /// Per-tab coding-agent status from the guest (Claude hooks). `(windowIndex,
+    /// signal)` where signal ∈ "working"/"done"/"needsInput". One-shot per file.
+    public var onAgentStatus: ((Int, String) -> Void)?
 
     /// Called (dashboard-only) with the qemu arch suffixes registered+enabled in
     /// binfmt_misc (e.g. ["x86_64","arm"]). Empty = emulation not installed.
@@ -587,15 +622,27 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // mirrors it directly (no liveness guessing).
                         if name == "tabs.txt" {
                             let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
-                            var tabs: [(index: Int, active: Bool, label: String, containerID: String?)] = []
+                            // Columns: idx, active, label, container, cwd,
+                            // worktree, parent_branch, root_repo, display.
+                            // Older guests send only the first 4 — the trailing
+                            // fields default to nil, so a stale image degrades to
+                            // plain tabs instead of misparsing.
+                            var tabs: [GuestTab] = []
                             for line in raw.split(whereSeparator: \.isNewline) {
                                 let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
                                 guard cols.count >= 3, let idx = Int(cols[0]) else { continue }
-                                let cid = cols.count >= 4
-                                    ? String(cols[3]).trimmingCharacters(in: .whitespaces) : ""
-                                tabs.append((index: idx, active: cols[1] == "1",
-                                             label: String(cols[2]).trimmingCharacters(in: .whitespaces),
-                                             containerID: cid.isEmpty ? nil : cid))
+                                func col(_ i: Int) -> String? {
+                                    guard cols.count > i else { return nil }
+                                    let s = String(cols[i]).trimmingCharacters(in: .whitespaces)
+                                    return s.isEmpty ? nil : s
+                                }
+                                tabs.append(GuestTab(
+                                    index: idx, active: cols[1] == "1",
+                                    label: String(cols[2]).trimmingCharacters(in: .whitespaces),
+                                    containerID: col(3),
+                                    cwd: col(4), worktreeBranch: col(5),
+                                    parentBranch: col(6), rootRepo: col(7),
+                                    display: col(8), repoRoot: col(9)))
                             }
                             tabs.sort { $0.index < $1.index }
                             self?.onTabList?(tabs)
@@ -723,6 +770,27 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                             try? fm.removeItem(at: entry)
                             if !raw.isEmpty { self?.onDockerError?(raw) }
+                            continue
+                        }
+                        // worktree-error.txt — one-shot, same pattern: a failed
+                        // git worktree create/merge/remove surfaced to the host.
+                        if name == "worktree-error.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8))?
+                                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            try? fm.removeItem(at: entry)
+                            if !raw.isEmpty { self?.onWorktreeError?(raw) }
+                            continue
+                        }
+                        // agent-status-<windowIndex>.txt — one-shot: a Claude
+                        // hook reporting working/done/needsInput for that tab's
+                        // status dot. Per-window filename so two tabs signalling
+                        // at once don't clobber each other.
+                        if name.hasPrefix("agent-status-"), name.hasSuffix(".txt") {
+                            let idxStr = name.dropFirst("agent-status-".count).dropLast(".txt".count)
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8))?
+                                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            try? fm.removeItem(at: entry)
+                            if let idx = Int(idxStr), !raw.isEmpty { self?.onAgentStatus?(idx, raw) }
                             continue
                         }
                         // shortcut-<key>.txt is handled by the fast path at the
