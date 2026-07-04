@@ -3040,6 +3040,36 @@ public final class ProfileStore {
             try? fm.removeItem(at: claudeSettingsURL)
         }
 
+        // Default Claude Code to the `auto` permission mode so the agent runs
+        // autonomously inside the disposable VM (the VM + MITM proxy ARE the
+        // sandbox, so per-action prompts are mostly friction here). Seeded into
+        // ~/.claude/settings.json only when `permissions.defaultMode` is unset,
+        // via read-modify-write — so we never clobber the Bedrock `env` written
+        // just above or any other user settings, and a user who later picks a
+        // different mode is respected. Only for workspaces that actually use
+        // Claude Code (primary or additional tool).
+        let usesClaude = profile.tool == .claude
+            || profile.additionalTools.contains { $0.tool == .claude }
+        if usesClaude {
+            try? fm.createDirectory(at: claudeDir, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: NSNumber(value: 0o700)])
+            var settings: [String: Any] = [:]
+            if let data = try? Data(contentsOf: claudeSettingsURL),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                settings = json
+            }
+            var perms = settings["permissions"] as? [String: Any] ?? [:]
+            if perms["defaultMode"] == nil {
+                perms["defaultMode"] = "auto"
+                settings["permissions"] = perms
+                let data = try JSONSerialization.data(withJSONObject: settings,
+                                                      options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: claudeSettingsURL, options: .atomic)
+                try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                      ofItemAtPath: claudeSettingsURL.path)
+            }
+        }
+
         // ~/.docker/config.json — Docker stores per-registry HTTP Basic
         // creds here as `auths.<key>.auth = base64("<user>:<password>")`.
         // We write FAKE base64 strings; the proxy substitutes the real
