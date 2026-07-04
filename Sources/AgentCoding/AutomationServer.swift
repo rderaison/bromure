@@ -46,6 +46,11 @@ final class ACAutomationServer {
     var onListSessions: (() -> [ACAutomationSessionInfo])?
     var onCreateSession: ((_ profileNameOrID: String) async -> ACAutomationSessionInfo?)?
     var onDestroySession: ((_ profileNameOrID: String) async -> Bool)?
+    /// Git-worktree action for a session (SSH/CLI parity with the GUI's
+    /// right-click menu): `action` ∈ create/merge/remove/resolve, `args` are the
+    /// raw (un-encoded) fields the delegate base64-encodes into the guest
+    /// command. Returns true if the command was queued.
+    var onWorktreeCommand: ((_ profileNameOrID: String, _ action: String, _ args: [String]) -> Bool)?
     var onGetAppState: (() -> [String: Any])?
     /// Debug: render a window (`which` = "unified" | "picker" | "editor") to a
     /// PNG at the given path and return a dump of its subview frames. The app
@@ -539,6 +544,23 @@ final class ACAutomationServer {
 
     private func handleSessionRoute(fd: Int32, method: String, path: String, bodyJSON: [String: Any]) {
         let rest = String(path.dropFirst("/sessions/".count))
+        if rest.hasSuffix("/worktree") {
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            guard method == "POST" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"])
+                return
+            }
+            let id = String(rest.dropLast("/worktree".count))
+            let action = bodyJSON["action"] as? String ?? ""
+            let args = (bodyJSON["args"] as? [Any])?.compactMap { $0 as? String } ?? []
+            let ok = DispatchQueue.main.sync { self.onWorktreeCommand?(id, action, args) ?? false }
+            sendResponse(fd: fd, status: ok ? 200 : 400,
+                         body: ok ? ["ok": true] : ["ok": false, "error": "unknown session or bad action"])
+            return
+        }
         if rest.hasSuffix("/exec") {
             guard debugEnabled || isTrustedLocal else {
                 sendResponse(fd: fd, status: 403, body: ["error": "Debug endpoints require BROMURE_DEBUG_CLAUDE"])

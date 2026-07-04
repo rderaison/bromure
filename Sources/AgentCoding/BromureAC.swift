@@ -537,9 +537,9 @@ final class RunningSession {
     /// headless) session can render it without a window.
     var lastIP: String?
     /// The guest's tmux window list (tabs), mirrored from the roster so
-    /// `vm ls` / the API can show tabs even while the session is detached.
-    /// Each entry is (window index, foreground command, is-active).
-    var tabs: [(index: Int, label: String, active: Bool)] = []
+    /// `vm ls` / the API / SSH can show tabs (incl. worktree metadata) even
+    /// while the session is detached.
+    var tabs: [GuestTab] = []
     /// Fusion engaged state, mirrored from the engine so a reattaching
     /// window restores the toolbar toggle correctly.
     var fusionEngaged: Bool = false
@@ -1797,6 +1797,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return await self.automationDestroySession(profileNameOrID: profileNameOrID)
         }
 
+        server.onWorktreeCommand = { [weak self] profileNameOrID, action, args in
+            self?.automationWorktreeCommand(profileNameOrID: profileNameOrID,
+                                            action: action, args: args) ?? false
+        }
+
         server.onGetAppState = { [weak self] in
             guard let self else { return [:] }
             return [
@@ -2151,7 +2156,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // 1-based for display; `index` is the tmux window index the CLI
             // passes back to `select-window`.
             let tabs: [[String: Any]] = s.tabs.map { t in
-                ["index": t.index, "title": t.label.isEmpty ? "shell" : t.label, "active": t.active]
+                var d: [String: Any] = [
+                    "index": t.index,
+                    // `title` is the display name (worktree label) when set,
+                    // else the foreground program — what SSH/API should show.
+                    "title": (t.display?.isEmpty == false ? t.display! : (t.label.isEmpty ? "shell" : t.label)),
+                    "active": t.active,
+                ]
+                // Worktree metadata for SSH parity (create/merge/discard).
+                if let cwd = t.cwd { d["cwd"] = cwd }
+                if t.isWorktree {
+                    d["isWorktree"] = true
+                    if let b = t.worktreeBranch { d["worktreeBranch"] = b }
+                    if let p = t.parentBranch { d["parentBranch"] = p }
+                    if let r = t.rootRepo { d["rootRepo"] = r }
+                } else if t.isGitRepo {
+                    d["isGitRepo"] = true
+                }
+                // A "Merge → …" tab is resolvable; expose it so SSH can offer it.
+                if t.display?.hasPrefix("Merge → ") == true { d["isMergeTab"] = true }
+                return d
             }
             let diskURL = store.diskURL(for: s.profile)
             let diskAllocated = (try? diskURL.resourceValues(
@@ -5329,6 +5353,40 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sendCommand("worktree-resolve \(b64(dir)) \(b64(tool))", in: pane)
     }
 
+    /// Queue a worktree command for a (possibly detached) session — the SSH/CLI
+    /// path. Builds the same guest command as the GUI request functions but
+    /// writes straight to the session's outbox, so no window/pane is needed.
+    @MainActor
+    func automationWorktreeCommand(profileNameOrID: String, action: String, args: [String]) -> Bool {
+        guard let p = profileByNameOrID(profileNameOrID),
+              let session = runningSessions[p.id],
+              let outbox = session.sandbox.sessionDisk?.outboxDirectory else { return false }
+        let name: String
+        let encoded: [String]
+        switch action {
+        case "create":
+            guard args.count >= 4 else { return false }   // cwd, slug, display, tool[, prompt]
+            name = "worktree-create"
+            let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
+            encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
+        case "merge":
+            guard args.count >= 4 else { return false }   // src, target, mainRoot, display
+            name = "worktree-merge"; encoded = args.prefix(4).map(b64)
+        case "remove":
+            guard args.count >= 2 else { return false }   // mainRoot, branch
+            name = "worktree-remove"; encoded = args.prefix(2).map(b64)
+        case "resolve":
+            guard args.count >= 2 else { return false }   // dir, tool
+            name = "worktree-resolve"; encoded = args.prefix(2).map(b64)
+        default:
+            return false
+        }
+        let line = ([name] + encoded).joined(separator: " ")
+        let file = outbox.appendingPathComponent("cmd-\(UUID().uuidString).txt")
+        try? (line + "\n").write(to: file, atomically: true, encoding: .utf8)
+        return true
+    }
+
     // MARK: Worktree dialogs
 
     /// A filesystem/branch-safe slug from a free-form task name.
@@ -6072,10 +6130,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             "[ac] guest reboot of '\(session.profile.name)' completed\n".utf8))
                     }
                 }
-                // Mirror for detached `vm ls` / API, and drive the tab bar.
-                self.runningSessions[pid]?.tabs = tabs.map {
-                    (index: $0.index, label: $0.label, active: $0.active)
-                }
+                // Mirror for detached `vm ls` / API / SSH, and drive the tab bar.
+                self.runningSessions[pid]?.tabs = tabs
                 self.pane(for: pid)?.applyTabList(tabs)
                 // First non-empty roster = the guest booted to kitty/tmux, so the
                 // disk is proven bootable. Snapshot it (once per session) as a
@@ -6375,7 +6431,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // live roster keeps it current. tmux is already running in the VM, so
         // there's nothing to spawn or raise.
         if !session.tabs.isEmpty {
-            pane.model.tabs = session.tabs.map { TabsModel.Tab(label: $0.label) }
+            pane.model.tabs = session.tabs.map {
+                TabsModel.Tab(label: $0.label, index: $0.index, containerID: $0.containerID,
+                              cwd: $0.cwd, worktreeBranch: $0.worktreeBranch,
+                              parentBranch: $0.parentBranch, rootRepo: $0.rootRepo,
+                              display: $0.display, repoRoot: $0.repoRoot)
+            }
             pane.model.activeIndex = session.tabs.firstIndex(where: { $0.active }) ?? 0
         } else {
             pane.model.tabs = [TabsModel.Tab(label: "shell")]
