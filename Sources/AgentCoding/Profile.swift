@@ -4261,10 +4261,17 @@ public final class ProfileStore {
             # `#{pane_current_path}` is tmux's own cwd tracking — no /proc poll,
             # no guest daemon. tabs.txt (written below) stays TAB-separated: that
             # host contract is unchanged; only this internal parse uses US.
+            # tmux emits TAB-separated (bytes it definitely handles in -F; a raw
+            # control char in -F is not portable across tmux versions). We then
+            # translate TAB→US only in the read pipeline: `read` with a
+            # whitespace IFS collapses empty fields, so an empty @label/@container
+            # followed by a non-empty cwd would shift every later column; US
+            # (0x1f, non-whitespace) preserves empties. No field value contains a
+            # tab, so the translation is lossless.
             if raw=$(tmux list-windows -t "$TMUX_S" \
-                     -F "#{window_index}${US}#{?window_active,1,0}${US}#{pane_current_command}${US}#{pane_tty}${US}#{@label}${US}#{@container}${US}#{pane_current_path}${US}#{@worktree}${US}#{@parent_branch}${US}#{@root_repo}${US}#{@display}" 2>/dev/null); then
+                     -F '#{window_index}	#{?window_active,1,0}	#{pane_current_command}	#{pane_tty}	#{@label}	#{@container}	#{pane_current_path}	#{@worktree}	#{@parent_branch}	#{@root_repo}	#{@display}' 2>/dev/null); then
                 : > "$INBOX/.tabs.tmp" 2>/dev/null
-                printf '%s\n' "$raw" | while IFS="$US" read -r idx active cmd tty label container cwd worktree pbranch rroot display; do
+                printf '%s\n' "$raw" | tr '\t' "$US" | while IFS="$US" read -r idx active cmd tty label container cwd worktree pbranch rroot display; do
                     [ -z "$idx" ] && continue
                     name="$label"
                     if [ -z "$name" ]; then
@@ -4297,7 +4304,10 @@ public final class ProfileStore {
                     # tabs (already known repos) and empty cwds.
                     isrepo=""
                     if [ -n "$cwd" ] && [ -z "$worktree" ]; then
-                        isrepo=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+                        # `timeout` so a slow/hung git on a virtiofs-mounted repo
+                        # can never stall the 0.7s roster tick (that would freeze
+                        # the whole tab list — new tabs would stop appearing).
+                        isrepo=$(timeout 3 git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
                     fi
                     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                         "$idx" "$active" "$name" "$container" "$cwd" \
