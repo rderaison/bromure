@@ -253,7 +253,7 @@ final class SessionPane {
     /// Mirror the guest's tmux window list as the tab bar. tmux is
     /// authoritative, so there's no liveness guessing or reaping. Pill objects
     /// are reused by position so SwiftUI keeps stable row identity.
-    func applyTabList(_ tabs: [(index: Int, active: Bool, label: String, containerID: String?)]) {
+    func applyTabList(_ tabs: [GuestTab]) {
         // While a reboot is in flight, ignore roster churn entirely — the guest
         // is going down and coming back, and the host is driving a clean relaunch
         // (which resets this pane's boot-detection). Acting on the transient
@@ -274,12 +274,22 @@ final class SessionPane {
         }
         while model.tabs.count < tabs.count {
             let t = tabs[model.tabs.count]
-            model.tabs.append(TabsModel.Tab(label: t.label, index: t.index, containerID: t.containerID))
+            model.tabs.append(TabsModel.Tab(
+                label: t.label, index: t.index, containerID: t.containerID,
+                cwd: t.cwd, worktreeBranch: t.worktreeBranch,
+                parentBranch: t.parentBranch, rootRepo: t.rootRepo,
+                display: t.display, repoRoot: t.repoRoot))
         }
         for (i, t) in tabs.enumerated() {
             if model.tabs[i].label != t.label { model.tabs[i].label = t.label }
             if model.tabs[i].index != t.index { model.tabs[i].index = t.index }
             if model.tabs[i].containerID != t.containerID { model.tabs[i].containerID = t.containerID }
+            if model.tabs[i].cwd != t.cwd { model.tabs[i].cwd = t.cwd }
+            if model.tabs[i].worktreeBranch != t.worktreeBranch { model.tabs[i].worktreeBranch = t.worktreeBranch }
+            if model.tabs[i].parentBranch != t.parentBranch { model.tabs[i].parentBranch = t.parentBranch }
+            if model.tabs[i].rootRepo != t.rootRepo { model.tabs[i].rootRepo = t.rootRepo }
+            if model.tabs[i].display != t.display { model.tabs[i].display = t.display }
+            if model.tabs[i].repoRoot != t.repoRoot { model.tabs[i].repoRoot = t.repoRoot }
         }
         if let activePos = tabs.firstIndex(where: { $0.active }), model.activeIndex != activePos {
             model.activeIndex = activePos

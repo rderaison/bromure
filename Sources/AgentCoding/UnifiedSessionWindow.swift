@@ -52,6 +52,36 @@ final class SessionListModel {
     var dockerSelectedID: Profile.ID?
 }
 
+/// Right-click actions on a tab row. Handled by the window, which reads the
+/// tab's worktree metadata and dispatches to the delegate (dialogs + guest
+/// commands).
+enum TabAction {
+    case newWorktree        // any tab whose cwd is a git repo
+    case merge              // a worktree tab → merge into an ancestor
+    case removeWorktree     // a worktree tab → discard (remove + delete branch)
+    case resolveConflicts   // a "Merge → …" tab → spawn the agent to resolve
+}
+
+/// Nesting depth of a tab in the worktree tree: 0 for ordinary tabs, N for a
+/// worktree whose parent chain (by `parentBranch` → an ancestor's
+/// `worktreeBranch`) is N deep. Drives the source-list indentation so
+/// worktrees-off-worktrees read as nested. Capped so a deep tree can't march
+/// off the sidebar.
+@MainActor
+func worktreeDepth(of tab: TabsModel.Tab, in tabs: [TabsModel.Tab]) -> Int {
+    guard tab.isWorktree else { return 0 }
+    var depth = 1
+    var parentBranch = tab.parentBranch
+    var guardCount = 0
+    while let pb = parentBranch, !pb.isEmpty, guardCount < 8 {
+        guard let parent = tabs.first(where: { $0.worktreeBranch == pb }) else { break }
+        depth += 1
+        parentBranch = parent.parentBranch
+        guardCount += 1
+    }
+    return min(depth, 6)
+}
+
 /// Coarse per-tab activity derived from the foreground program tmux reports as
 /// the window label — honest signal from data we already have, no guest change.
 enum TabActivity {
@@ -163,6 +193,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onSelectTab: { [weak self] id, idx in self?.selectTab(profileID: id, index: idx) },
             onNewTab:    { [weak self] id in self?.newTab(profileID: id) },
             onCloseTab:  { [weak self] id, idx in self?.closeTab(profileID: id, index: idx) },
+            onTabAction: { [weak self] id, idx, action in self?.handleTabAction(profileID: id, index: idx, action: action) },
             onSelectDocker: { [weak self] id in self?.showDockerDashboard(id) },
             onOpenContainer: { [weak self] id, cid in self?.showDockerDashboard(id, container: cid) },
             onDetachVM:  { [weak self] id in self?.acDelegate?.popOutVM(id) },
@@ -534,6 +565,26 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func closeTab(profileID id: Profile.ID, index: Int) {
         pane(id)?.closeTab(at: index)
     }
+
+    /// Right-click worktree actions. Reads the tab + its VM's primary tool and
+    /// hands off to the delegate (dialogs + guest commands).
+    func handleTabAction(profileID id: Profile.ID, index: Int, action: TabAction) {
+        guard let p = pane(id), index < p.model.tabs.count else { return }
+        let tab = p.model.tabs[index]
+        let tool = p.profile.tool.rawValue
+        switch action {
+        case .newWorktree:
+            guard let cwd = tab.cwd else { return }
+            acDelegate?.presentCreateWorktree(cwd: cwd, defaultTool: tool, in: p)
+        case .merge:
+            acDelegate?.presentMergeWorktree(tab: tab, allTabs: p.model.tabs, in: p)
+        case .removeWorktree:
+            acDelegate?.confirmRemoveWorktree(tab: tab, in: p)
+        case .resolveConflicts:
+            guard let dir = tab.cwd else { return }
+            acDelegate?.requestResolveWorktree(dir: dir, tool: tool, in: p)
+        }
+    }
     func dockerAttach(profileID id: Profile.ID, containerID: String, shell: String) {
         // The new shell becomes the active tmux window; surface it by dropping
         // the dashboard so the framebuffer is visible.
@@ -612,6 +663,8 @@ private struct SessionSidebar: View {
     let onSelectTab: (Profile.ID, Int) -> Void
     let onNewTab: (Profile.ID) -> Void
     let onCloseTab: (Profile.ID, Int) -> Void
+    /// Right-click worktree actions on a tab (create / merge / remove / resolve).
+    let onTabAction: (Profile.ID, Int, TabAction) -> Void
     /// Open the VM's Docker dashboard in the stage.
     let onSelectDocker: (Profile.ID) -> Void
     /// (profileID, containerID) — open the dashboard on this container's detail.
@@ -655,6 +708,7 @@ private struct SessionSidebar: View {
                             onSelectTab: onSelectTab,
                             onNewTab: onNewTab,
                             onCloseTab: onCloseTab,
+                            onTabAction: onTabAction,
                             onSelectDocker: onSelectDocker,
                             onOpenContainer: onOpenContainer,
                             onDetachVM: onDetachVM,
@@ -719,6 +773,7 @@ private struct VMSection: View {
     let onSelectTab: (Profile.ID, Int) -> Void
     let onNewTab: (Profile.ID) -> Void
     let onCloseTab: (Profile.ID, Int) -> Void
+    let onTabAction: (Profile.ID, Int, TabAction) -> Void
     let onSelectDocker: (Profile.ID) -> Void
     let onOpenContainer: (Profile.ID, String) -> Void
     let onDetachVM: (Profile.ID) -> Void
@@ -810,14 +865,19 @@ private struct VMSection: View {
                     ForEach(Array(entry.model.tabs.enumerated()), id: \.element.id) { idx, tab in
                         if tab.containerID == nil {
                             TabRow(
-                                label: tab.label,
+                                label: tab.shownLabel,
                                 agentKind: BromureIcons.agentKind(forLabel: tab.label),
                                 thinking: entry.model.thinking,
                                 isActive: tab.id == entry.model.activeTab?.id && isSelected,
                                 accentHex: row.accentHex,
                                 chord: (isSelected && idx < 9) ? idx + 1 : nil,
+                                isWorktree: tab.isWorktree,
+                                worktreeDepth: worktreeDepth(of: tab, in: entry.model.tabs),
+                                canCreateWorktree: tab.isGitRepo,
+                                isMergeTab: (tab.display?.hasPrefix("Merge → ") ?? false),
                                 onSelect: { onSelectTab(row.id, idx) },
-                                onClose: { onCloseTab(row.id, idx) })
+                                onClose: { onCloseTab(row.id, idx) },
+                                onAction: { action in onTabAction(row.id, idx, action) })
                         }
                     }
                     DockerSection(
@@ -933,8 +993,16 @@ private struct TabRow: View {
     let accentHex: String
     /// ⌘-number for this tab (1–9), or nil for tabs past 9 / unfocused VMs.
     let chord: Int?
+    var isWorktree: Bool = false
+    /// Worktree nesting depth (drives extra indentation). 0 for ordinary tabs.
+    var worktreeDepth: Int = 0
+    /// The tab's cwd is a git repo → offer "New worktree…".
+    var canCreateWorktree: Bool = false
+    /// A "Merge → …" tab → offer "Have the agent resolve conflicts".
+    var isMergeTab: Bool = false
     let onSelect: () -> Void
     let onClose: () -> Void
+    var onAction: (TabAction) -> Void = { _ in }
     @State private var hovering = false
 
     private var isAgent: Bool { agentKind != nil }
@@ -953,6 +1021,13 @@ private struct TabRow: View {
             // icon lines up with the Docker icon (and any other chevroned node)
             // rather than sitting a chevron's-width to its left.
             Color.clear.frame(width: 10, height: 14)
+            // A worktree tab shows a small branch glyph before its program icon
+            // so nested sub-agents read as branches, not plain tabs.
+            if isWorktree {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 10))
+                    .foregroundStyle(isActive ? Color(hex: accentHex) : .secondary)
+            }
             Group {
                 if isAgent && thinking {
                     ThinkingDots(color: Color(hex: accentHex))
@@ -980,8 +1055,9 @@ private struct TabRow: View {
             }
         }
         // Matches the Docker node's leading (20) so, with the chevron gutter
-        // above, the tab icon and the Docker icon align at the same x.
-        .padding(.leading, 20)
+        // above, the tab icon and the Docker icon align at the same x. Worktree
+        // depth adds indentation so nested worktrees step inward.
+        .padding(.leading, 20 + CGFloat(worktreeDepth) * 14)
         .padding(.trailing, 8)
         .padding(.vertical, 4)
         .background(
@@ -990,6 +1066,19 @@ private struct TabRow: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovering = $0 }
+        .contextMenu {
+            if canCreateWorktree {
+                Button("New worktree…") { onAction(.newWorktree) }
+            }
+            if isWorktree {
+                Button("Merge…") { onAction(.merge) }
+                Divider()
+                Button("Discard worktree", role: .destructive) { onAction(.removeWorktree) }
+            }
+            if isMergeTab {
+                Button("Have the agent resolve conflicts") { onAction(.resolveConflicts) }
+            }
+        }
     }
 }
 

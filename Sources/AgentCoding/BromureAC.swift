@@ -5294,6 +5294,162 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sendCommand("close-tab \(index)", in: pane)
     }
 
+    // MARK: - Git worktrees
+    //
+    // All args are base64 (space-joined; base64 has no spaces) so paths and
+    // pretty names with spaces/parens survive the guest's `set -- $arg` split.
+
+    private func b64(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+
+    /// Create a git worktree off `cwd`'s HEAD and open a tab in it running
+    /// `tool`. `cwd` may itself be a worktree — the new branch descends from
+    /// whatever's checked out there (recursive nesting). `prompt` (v3) is the
+    /// agent's initial message; nil/empty → the sentinel "-".
+    func requestCreateWorktree(cwd: String, slug: String, display: String,
+                               tool: String, prompt: String?, in pane: SessionPane) {
+        let p = (prompt?.isEmpty == false) ? b64(prompt!) : "-"
+        sendCommand("worktree-create \(b64(cwd)) \(b64(slug)) \(b64(display)) \(b64(tool)) \(p)", in: pane)
+    }
+
+    /// Merge `sourceBranch` into `targetBranch` (an ancestor) in a visible tab
+    /// checked out at the target. The guest resolves the target's checkout from
+    /// `mainRoot`; `display` labels the merge tab.
+    func requestMergeWorktree(sourceBranch: String, targetBranch: String,
+                              mainRoot: String, display: String, in pane: SessionPane) {
+        sendCommand("worktree-merge \(b64(sourceBranch)) \(b64(targetBranch)) \(b64(mainRoot)) \(b64(display))", in: pane)
+    }
+
+    /// Remove a worktree and delete its branch (post-merge cleanup).
+    func requestRemoveWorktree(mainRoot: String, branch: String, in pane: SessionPane) {
+        sendCommand("worktree-remove \(b64(mainRoot)) \(b64(branch))", in: pane)
+    }
+
+    /// Spawn the agent in a conflicted merge checkout to resolve it (v3).
+    func requestResolveWorktree(dir: String, tool: String, in pane: SessionPane) {
+        sendCommand("worktree-resolve \(b64(dir)) \(b64(tool))", in: pane)
+    }
+
+    // MARK: Worktree dialogs
+
+    /// A filesystem/branch-safe slug from a free-form task name.
+    private func worktreeSlug(_ name: String) -> String {
+        let lowered = name.lowercased()
+        var out = ""
+        var lastDash = false
+        for ch in lowered {
+            if ch.isLetter || ch.isNumber {
+                out.append(ch); lastDash = false
+            } else if !lastDash {
+                out.append("-"); lastDash = true
+            }
+        }
+        let trimmed = out.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return String(trimmed.prefix(40)).isEmpty ? "worktree" : String(trimmed.prefix(40))
+    }
+
+    /// "New worktree…" dialog: task name, tool, and an optional initial prompt.
+    @MainActor
+    func presentCreateWorktree(cwd: String, defaultTool: String, in pane: SessionPane) {
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("New worktree", comment: "")
+        alert.informativeText = NSLocalizedString(
+            "Creates a git worktree branched from this tab's current commit and opens a nested agent in it.",
+            comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Create", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 96))
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 68, width: 320, height: 24))
+        nameField.placeholderString = NSLocalizedString("Task name (e.g. Website refactoring)", comment: "")
+        let toolPopup = NSPopUpButton(frame: NSRect(x: 0, y: 36, width: 320, height: 24))
+        let tools = ["claude", "codex", "grok"]
+        toolPopup.addItems(withTitles: tools)
+        toolPopup.selectItem(withTitle: tools.contains(defaultTool) ? defaultTool : "claude")
+        let promptField = NSTextField(frame: NSRect(x: 0, y: 4, width: 320, height: 24))
+        promptField.placeholderString = NSLocalizedString("Initial prompt (optional)", comment: "")
+        container.addSubview(nameField)
+        container.addSubview(toolPopup)
+        container.addSubview(promptField)
+        alert.accessoryView = container
+        alert.window.initialFirstResponder = nameField
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let tool = toolPopup.titleOfSelectedItem ?? defaultTool
+        let display = "\(name) (\(tool))"
+        let prompt = promptField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        requestCreateWorktree(cwd: cwd, slug: worktreeSlug(name), display: display,
+                              tool: tool, prompt: prompt.isEmpty ? nil : prompt, in: pane)
+    }
+
+    /// "Merge…" dialog: pick a destination along the ancestor chain. Defaults to
+    /// the immediate parent; higher targets are flagged as skipping intermediates.
+    @MainActor
+    func presentMergeWorktree(tab: TabsModel.Tab, allTabs: [TabsModel.Tab], in pane: SessionPane) {
+        guard let branch = tab.worktreeBranch, let mainRoot = tab.rootRepo else { return }
+        // Ancestor chain: follow parentBranch through the sibling worktree tabs,
+        // then terminate at the main repo (the last parentBranch that isn't a
+        // worktree here). Each entry is (targetBranch, human label).
+        var chain: [(branch: String, label: String)] = []
+        var parentBranch = tab.parentBranch
+        var guardCount = 0
+        while let pb = parentBranch, !pb.isEmpty, guardCount < 8 {
+            if let parent = allTabs.first(where: { $0.worktreeBranch == pb }) {
+                chain.append((pb, parent.shownLabel))
+                parentBranch = parent.parentBranch
+            } else {
+                chain.append((pb, "\(pb) (repo root)"))
+                break
+            }
+            guardCount += 1
+        }
+        guard !chain.isEmpty else { return }
+
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Merge “%@”", comment: ""), tab.shownLabel)
+        alert.informativeText = NSLocalizedString(
+            "Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged; resolve any conflicts there. The worktree isn't discarded — use “Discard worktree” once you're happy.",
+            comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Merge", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 25))
+        for (i, dest) in chain.enumerated() {
+            // The immediate parent (index 0) is the safe default; anything above
+            // skips the intermediate worktrees, which then won't get these changes.
+            popup.addItem(withTitle: i == 0 ? dest.label : "\(dest.label)  ⚠︎ skips intermediates")
+        }
+        popup.selectItem(at: 0)
+        alert.accessoryView = popup
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let target = chain[popup.indexOfSelectedItem]
+        requestMergeWorktree(sourceBranch: branch, targetBranch: target.branch,
+                             mainRoot: mainRoot, display: tab.shownLabel, in: pane)
+    }
+
+    /// "Discard worktree" confirmation: remove the checkout + delete the branch.
+    @MainActor
+    func confirmRemoveWorktree(tab: TabsModel.Tab, in pane: SessionPane) {
+        guard let branch = tab.worktreeBranch, let mainRoot = tab.rootRepo else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(
+            format: NSLocalizedString("Discard worktree “%@”?", comment: ""), tab.shownLabel)
+        alert.informativeText = String(
+            format: NSLocalizedString(
+                "Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost.",
+                comment: ""), branch)
+        alert.addButton(withTitle: NSLocalizedString("Discard", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        requestRemoveWorktree(mainRoot: mainRoot, branch: branch, in: pane)
+        // Close the tab too — its cwd is about to vanish.
+        if tab.index >= 0 { requestCloseTab(index: tab.index, in: pane) }
+    }
+
     /// Attach to a running docker container in a new tab → the guest spawns a
     /// tmux window running `docker exec -it <id> <shell>`. The shell is
     /// user-supplied (the popover field), so sanitise it to a conservative
@@ -5970,6 +6126,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sandbox.onDockerError = { [weak self] message in
             Task { @MainActor in
                 self?.pane(for: pid)?.applyDockerError(message)
+            }
+        }
+        sandbox.onWorktreeError = { [weak self] message in
+            Task { @MainActor in
+                guard self != nil else { return }
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = NSLocalizedString("Worktree action failed", comment: "")
+                alert.informativeText = message
+                alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+                alert.runModal()
             }
         }
         sandbox.onDockerBinfmt = { [weak self] arches in
