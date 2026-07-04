@@ -426,6 +426,56 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                     action: #selector(NSApplication.terminate(_:)),
                     keyEquivalent: "q")
 
+    // Workspaces menu — before Edit. Acts on the unified window's selected
+    // workspace + active tab. Its ⇧⌘N / ⇧⌘G / ⇧⌘M equivalents also arrive from
+    // the VM: Openbox grabs W-S-n/g/m and bounces them to `onShortcut`, which
+    // routes to these same actions (see performACSystemChord).
+    let wsMenuItem = NSMenuItem()
+    main.addItem(wsMenuItem)
+    let wsMenu = NSMenu(title: L("Workspaces"))
+    wsMenuItem.submenu = wsMenu
+
+    let newWsItem = NSMenuItem(title: L("New Workspace…"),
+                               action: #selector(ACAppDelegate.newWorkspaceAction(_:)),
+                               keyEquivalent: "n")
+    newWsItem.keyEquivalentModifierMask = [.command, .shift]
+    newWsItem.target = delegate
+    wsMenu.addItem(newWsItem)
+
+    let newTabItem = NSMenuItem(title: L("New tab"),
+                                action: #selector(ACAppDelegate.newTabAction(_:)),
+                                keyEquivalent: "t")   // ⌘T (matches the existing chord)
+    newTabItem.target = delegate
+    wsMenu.addItem(newTabItem)
+
+    let deleteWsItem = NSMenuItem(title: L("Delete"),
+                                  action: #selector(ACAppDelegate.deleteWorkspaceAction(_:)),
+                                  keyEquivalent: "")
+    deleteWsItem.target = delegate
+    wsMenu.addItem(deleteWsItem)
+
+    wsMenu.addItem(NSMenuItem.separator())
+
+    let newWtItem = NSMenuItem(title: L("New worktree"),
+                               action: #selector(ACAppDelegate.newWorktreeAction(_:)),
+                               keyEquivalent: "g")
+    newWtItem.keyEquivalentModifierMask = [.command, .shift]
+    newWtItem.target = delegate
+    wsMenu.addItem(newWtItem)
+
+    let mergeWtItem = NSMenuItem(title: L("Merge worktree"),
+                                 action: #selector(ACAppDelegate.mergeWorktreeAction(_:)),
+                                 keyEquivalent: "m")
+    mergeWtItem.keyEquivalentModifierMask = [.command, .shift]
+    mergeWtItem.target = delegate
+    wsMenu.addItem(mergeWtItem)
+
+    let discardWtItem = NSMenuItem(title: L("Discard worktree"),
+                                   action: #selector(ACAppDelegate.discardWorktreeAction(_:)),
+                                   keyEquivalent: "")
+    discardWtItem.target = delegate
+    wsMenu.addItem(discardWtItem)
+
     // Edit menu — without these items, the responder chain has no
     // Cut/Copy/Paste/Select-All hooks and ⌘V silently fails inside
     // text fields (SecureField especially). Standard idioms; targets
@@ -2538,7 +2588,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @discardableResult @MainActor
     func performACSystemChord(_ key: String) -> Bool {
         switch key {
-        case "q", "h", "ctrl-q", "shift-q": break
+        case "q", "h", "ctrl-q", "shift-q", "shift-n", "shift-g", "shift-m": break
         default: return false
         }
         // Leading-edge autorepeat guard. Each of these chords pulls focus off
@@ -2572,6 +2622,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             lockScreen()
         case "shift-q":
             logOut()
+        // Workspaces-menu chords bounced from the VM. These don't pull macOS
+        // focus (no keyup synthesis needed in bromure-hostkey); they just run
+        // the same actions the menu items do.
+        case "shift-n":
+            newWorkspaceAction(nil)
+        case "shift-g":
+            newWorktreeAction(nil)
+        case "shift-m":
+            mergeWorktreeAction(nil)
         default:
             return false
         }
@@ -3560,6 +3619,64 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             item.title = BACEnrollmentStore.load() == nil
                 ? NSLocalizedString("Enroll in bromure.io…", comment: "")
                 : NSLocalizedString("bromure.io Enrollment…", comment: "")
+        }
+    }
+
+    // MARK: - Workspaces menu
+
+    /// What the Workspaces menu (and its bounced ⇧⌘N/⇧⌘G/⇧⌘M chords) act on:
+    /// the unified window's selected workspace, its pane, and the active tab
+    /// index. nil when nothing is selected/running.
+    private func currentWorkspaceContext() -> (id: Profile.ID, pane: SessionPane, index: Int)? {
+        guard let id = unifiedWindow?.selectedID, let pane = panes[id] else { return nil }
+        return (id, pane, pane.model.activeIndex)
+    }
+
+    @objc func newWorkspaceAction(_ sender: Any?) { openEditorWindow(editing: nil) }
+
+    @objc func newTabAction(_ sender: Any?) {
+        if let ctx = currentWorkspaceContext() { spawnNewTab(in: ctx.pane) }
+    }
+
+    @objc func deleteWorkspaceAction(_ sender: Any?) {
+        if let id = unifiedWindow?.selectedID, let p = profiles.first(where: { $0.id == id }) {
+            deleteProfile(p)
+        }
+    }
+
+    @objc func newWorktreeAction(_ sender: Any?) {
+        if let ctx = currentWorkspaceContext() {
+            unifiedWindow?.handleTabAction(profileID: ctx.id, index: ctx.index, action: .newWorktree)
+        }
+    }
+    @objc func mergeWorktreeAction(_ sender: Any?) {
+        if let ctx = currentWorkspaceContext() {
+            unifiedWindow?.handleTabAction(profileID: ctx.id, index: ctx.index, action: .merge)
+        }
+    }
+    @objc func discardWorktreeAction(_ sender: Any?) {
+        if let ctx = currentWorkspaceContext() {
+            unifiedWindow?.handleTabAction(profileID: ctx.id, index: ctx.index, action: .removeWorktree)
+        }
+    }
+
+    /// Grey out Workspaces items that don't apply to the current selection/tab.
+    /// Only affects items targeting this delegate; everything else stays enabled.
+    @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(newTabAction(_:)), #selector(deleteWorkspaceAction(_:)):
+            return unifiedWindow?.selectedID != nil
+        case #selector(newWorktreeAction(_:)):
+            guard let ctx = currentWorkspaceContext(),
+                  ctx.pane.model.tabs.indices.contains(ctx.index) else { return false }
+            let t = ctx.pane.model.tabs[ctx.index]
+            return t.isGitRepo || t.isWorktree   // a worktree tab can nest another
+        case #selector(mergeWorktreeAction(_:)), #selector(discardWorktreeAction(_:)):
+            guard let ctx = currentWorkspaceContext(),
+                  ctx.pane.model.tabs.indices.contains(ctx.index) else { return false }
+            return ctx.pane.model.tabs[ctx.index].isWorktree
+        default:
+            return true
         }
     }
 

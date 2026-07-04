@@ -4300,6 +4300,9 @@ public final class ProfileStore {
         <keybind key="W-h"><action name="Execute"><command>$HOSTKEY h</command></action></keybind>
         <keybind key="W-S-q"><action name="Execute"><command>$HOSTKEY shift-q</command></action></keybind>
         <keybind key="W-C-q"><action name="Execute"><command>$HOSTKEY ctrl-q</command></action></keybind>
+        <keybind key="W-S-n"><action name="Execute"><command>$HOSTKEY shift-n</command></action></keybind>
+        <keybind key="W-S-g"><action name="Execute"><command>$HOSTKEY shift-g</command></action></keybind>
+        <keybind key="W-S-m"><action name="Execute"><command>$HOSTKEY shift-m</command></action></keybind>
       </keyboard>
       <applications>
         <application class="*"><decor>no</decor><focus>yes</focus></application>

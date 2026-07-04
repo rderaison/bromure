@@ -802,3 +802,16 @@
 "This tab's working directory isn't available yet" = "This tab's working directory isn't available yet";
 "The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again." = "The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again.";
 "Worktree action failed" = "Worktree action failed";
+
+/* Menu bar — Workspaces menu */
+"Workspaces" = "Workspaces";
+"New Workspace…" = "New Workspace…";
+"New tab" = "New tab";
+"Merge worktree" = "Merge worktree";
+
+/* Menu bar — items missing from the base catalog */
+"Preferences…" = "Preferences…";
+"Remote Access…" = "Remote Access…";
+"Trace Inspector…" = "Trace Inspector…";
+"Inference Metrics…" = "Inference Metrics…";
+"Inference Engine Log…" = "Inference Engine Log…";
