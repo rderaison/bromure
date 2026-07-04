@@ -4225,6 +4225,14 @@ public final class ProfileStore {
     # foreground command (tab label) per window. Atomic rename so the host
     # never reads a partial list. Empty/absent = no tabs → host powers off.
     roster_loop() {
+        # Field separator for the tmux -F list AND the `read` below: ASCII Unit
+        # Separator (0x1f), a NON-whitespace char. `read` with a whitespace IFS
+        # (tab/space) COLLAPSES consecutive delimiters and drops empty fields —
+        # so an empty @label/@container followed by a non-empty cwd would shift
+        # every later column left (making the tab label read as the cwd and the
+        # git-repo flag land in the wrong slot). A non-whitespace IFS preserves
+        # empty fields. \037 can't appear in paths, labels, or program names.
+        US=$(printf '\037')
         while :; do
             # Catch a reboot the moment systemd queues its job — within one tick
             # of the user typing `reboot`, while dbus and this whole session are
@@ -4246,16 +4254,17 @@ public final class ProfileStore {
             #      is the primary.
             #   3. else the foreground command verbatim (a plain shell tab already
             #      follows vi/less correctly).
-            # Columns (tab-separated), padded so empty trailing fields survive
-            # the read: idx, active, cmd, tty, @label, @container, cwd,
-            # @worktree, @parent_branch, @root_repo, @display. The worktree
-            # columns are set by the `worktree-create` command below; empty for
-            # ordinary tabs. `#{pane_current_path}` is tmux's own cwd tracking —
-            # no /proc poll, no guest daemon.
+            # Columns (US-separated internally; empty fields preserved): idx,
+            # active, cmd, tty, @label, @container, cwd, @worktree,
+            # @parent_branch, @root_repo, @display. The worktree columns are set
+            # by the `worktree-create` command below; empty for ordinary tabs.
+            # `#{pane_current_path}` is tmux's own cwd tracking — no /proc poll,
+            # no guest daemon. tabs.txt (written below) stays TAB-separated: that
+            # host contract is unchanged; only this internal parse uses US.
             if raw=$(tmux list-windows -t "$TMUX_S" \
-                     -F '#{window_index}	#{?window_active,1,0}	#{pane_current_command}	#{pane_tty}	#{@label}	#{@container}	#{pane_current_path}	#{@worktree}	#{@parent_branch}	#{@root_repo}	#{@display}' 2>/dev/null); then
+                     -F "#{window_index}${US}#{?window_active,1,0}${US}#{pane_current_command}${US}#{pane_tty}${US}#{@label}${US}#{@container}${US}#{pane_current_path}${US}#{@worktree}${US}#{@parent_branch}${US}#{@root_repo}${US}#{@display}" 2>/dev/null); then
                 : > "$INBOX/.tabs.tmp" 2>/dev/null
-                printf '%s\n' "$raw" | while IFS='	' read -r idx active cmd tty label container cwd worktree pbranch rroot display; do
+                printf '%s\n' "$raw" | while IFS="$US" read -r idx active cmd tty label container cwd worktree pbranch rroot display; do
                     [ -z "$idx" ] && continue
                     name="$label"
                     if [ -z "$name" ]; then
@@ -4277,6 +4286,11 @@ public final class ProfileStore {
                                 esac ;;
                         esac
                     fi
+                    # Belt-and-suspenders: the tab label is a program name, never
+                    # a path. If it somehow reads as an absolute path (a future
+                    # column misalignment), fall back to "shell" rather than ever
+                    # showing the cwd as the tab name.
+                    case "$name" in /*) name="shell" ;; esac
                     # Is the cwd inside a git repo? (Gates the "New worktree"
                     # menu host-side.) One cheap rev-parse per tab; the toplevel
                     # doubles as the repo name in the menu. Skip for worktree
