@@ -1334,22 +1334,37 @@ private struct AgentStatusDot: View {
         case .needsInput: return NSLocalizedString("Needs your input", comment: "agent status dot")
         }
     }
-    private var working: Bool { status == .working }
-
-    var body: some View {
+    /// The bare dot — a filled circle with a thin background-colored ring so it
+    /// stays legible over any icon.
+    private var dot: some View {
         Circle()
             .fill(color)
             .frame(width: 6, height: 6)
             .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.2))
-            // Gentle pulse only while working; steady otherwise.
-            .scaleEffect(working && pulse ? 1.15 : (working ? 0.8 : 1.0))
-            .opacity(working && pulse ? 1.0 : (working ? 0.55 : 1.0))
-            .animation(working
-                       ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true)
-                       : .default, value: pulse)
-            .onAppear { pulse = working }
-            .onChange(of: status) { _, s in pulse = (s == .working) }
-            .help(help)
+    }
+
+    var body: some View {
+        // Only the working dot animates. Done/needs-input render as a plain,
+        // STEADY dot in a separate branch, so switching out of .working
+        // destroys the animated view entirely — no lingering repeatForever
+        // pulse on the green/red dot.
+        Group {
+            if status == .working {
+                dot
+                    .scaleEffect(pulse ? 1.12 : 0.82)
+                    .opacity(pulse ? 1.0 : 0.5)
+                    .onAppear {
+                        pulse = false
+                        // ~30% slower than the original 0.75s for a gentler pulse.
+                        withAnimation(.easeInOut(duration: 0.98).repeatForever(autoreverses: true)) {
+                            pulse = true
+                        }
+                    }
+            } else {
+                dot
+            }
+        }
+        .help(help)
     }
 }
 
