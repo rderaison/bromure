@@ -4032,11 +4032,72 @@ public final class ProfileStore {
         done < "$inc"
     }
 
+    # ASCII Unit Separator (0x1f): the field delimiter for the worktree registry
+    # (and the roster parse). Non-whitespace, so `read` preserves empty fields
+    # and it can't occur in paths/branches/labels. Global so every helper shares
+    # it; roster_loop also sets its own copy defensively.
+    US=$(printf '\037')
+
+    # Worktree persistence. tmux windows are runtime-only, so a reboot wipes the
+    # worktree TABS while the git worktrees survive on disk — and the metadata
+    # that made them tabs (parent branch for nesting, pretty label, tool) lived
+    # only in tmux options. Persist it: one registry file per repo, one line per
+    # worktree, US-separated: branch<US>parent_branch<US>display<US>tool.
+    _bromure_wt_registry() { printf '%s\n' "$HOME/.bromure/worktrees/$1/.registry"; }
+
+    _bromure_wt_registry_add() {  # repo_name branch parent display tool
+        reg=$(_bromure_wt_registry "$1")
+        mkdir -p "$(dirname "$reg")" 2>/dev/null || return 0
+        printf '%s%s%s%s%s%s%s\n' "$2" "$US" "$3" "$US" "$4" "$US" "$5" >> "$reg"
+    }
+
+    _bromure_wt_registry_del() {  # repo_name branch
+        reg=$(_bromure_wt_registry "$1")
+        [ -r "$reg" ] || return 0
+        tmp="$reg.tmp.$$"; : > "$tmp"
+        while IFS="$US" read -r r_branch r_parent r_display r_tool; do
+            [ -z "$r_branch" ] || [ "$r_branch" = "$2" ] && continue
+            printf '%s%s%s%s%s%s%s\n' "$r_branch" "$US" "$r_parent" "$US" "$r_display" "$US" "$r_tool" >> "$tmp"
+        done < "$reg"
+        mv -f "$tmp" "$reg" 2>/dev/null || rm -f "$tmp"
+    }
+
+    # Reboot restore: when a repo tab is active, re-open a tab for each registered
+    # worktree of that repo that still exists on disk and isn't already open —
+    # restoring branch/parent/label/display (so the nesting comes back) and
+    # relaunching its agent. Runs ONCE per boot per repo (marker in /tmp, which a
+    # reboot clears); a worktree the user closes by hand this session stays shut.
+    _bromure_restore_worktrees() {  # repo_root repo_name
+        rr_root="$1"; rr_name="$2"
+        reg=$(_bromure_wt_registry "$rr_name")
+        [ -r "$reg" ] || return 0
+        safe=$(printf '%s' "$rr_name" | tr -c 'A-Za-z0-9._-' '_')
+        marker="/tmp/.bromure-wt-restored-$safe"
+        [ -e "$marker" ] && return 0
+        : > "$marker" 2>/dev/null
+        open=$(tmux list-windows -t "$TMUX_S" -F '#{@worktree}' 2>/dev/null)
+        while IFS="$US" read -r r_branch r_parent r_display r_tool; do
+            [ -z "$r_branch" ] && continue
+            printf '%s\n' "$open" | grep -qxF "$r_branch" && continue   # already open
+            wdir=$(_bromure_worktree_dir_for_branch "$rr_root" "$r_branch")
+            [ -n "$wdir" ] && [ -d "$wdir" ] || continue                # git worktree gone
+            win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" -c "$wdir" \
+                  -e BROMURE_AC_WT_TOOL="$r_tool" "bash -l" 2>/dev/null)
+            [ -n "$win" ] || continue
+            tmux set-option -w -t "$win" @worktree "$r_branch" 2>/dev/null
+            tmux set-option -w -t "$win" @parent_branch "$r_parent" 2>/dev/null
+            tmux set-option -w -t "$win" @root_repo "$rr_root" 2>/dev/null
+            tmux set-option -w -t "$win" @label "$r_tool" 2>/dev/null
+            tmux set-option -w -t "$win" @display "$r_display" 2>/dev/null
+        done < "$reg"
+    }
+
     # Create a git worktree off <cwd>'s current HEAD and open a tab in it that
     # runs <tool>. Recursive by construction: <cwd> may itself be a worktree, so
     # the new branch descends from whatever branch is checked out there. All
     # metadata (branch, parent branch, main-worktree root, pretty label) is
-    # stashed as per-window tmux options the roster loop republishes.
+    # stashed as per-window tmux options the roster loop republishes AND in the
+    # on-disk registry so the tab survives a reboot.
     _bromure_worktree_create() {
         wc_cwd="$1"; wc_slug="$2"; wc_display="$3"; wc_tool="$4"; wc_prompt_b64="$5"
         [ "$wc_prompt_b64" = "-" ] && wc_prompt_b64=""   # "-" sentinel = no prompt
@@ -4074,7 +4135,10 @@ public final class ProfileStore {
         tmux set-option -w -t "$win" @worktree "$branch" 2>/dev/null
         tmux set-option -w -t "$win" @parent_branch "$parent_branch" 2>/dev/null
         tmux set-option -w -t "$win" @root_repo "$main_root" 2>/dev/null
+        tmux set-option -w -t "$win" @label "$wc_tool" 2>/dev/null
         tmux set-option -w -t "$win" @display "$wc_display" 2>/dev/null
+        # Persist for reboot restore (parent branch = the nesting link).
+        _bromure_wt_registry_add "$repo_name" "$branch" "$parent_branch" "$wc_display" "$wc_tool"
     }
 
     # Resolve a branch's checkout dir from the worktree list (empty if the
@@ -4138,6 +4202,8 @@ public final class ProfileStore {
             && git -C "$wr_root" worktree remove --force "$wdir" 2>/dev/null || true
         git -C "$wr_root" branch -D "$wr_branch" 2>/dev/null || true
         git -C "$wr_root" worktree prune 2>/dev/null || true
+        # Drop it from the reboot registry so it isn't restored next boot.
+        _bromure_wt_registry_del "$(basename "$wr_root")" "$wr_branch"
     }
 
     # Spawn the parent agent in the conflicted checkout to resolve an in-flight
@@ -4352,6 +4418,9 @@ public final class ProfileStore {
                         "$idx" "$active" "$name" "$container" "$cwd" \
                         "$worktree" "$pbranch" "$rroot" "$display" "$isrepo" \
                         >> "$INBOX/.tabs.tmp"
+                    # A repo tab is active → restore this repo's worktree tabs if
+                    # a reboot wiped them (self-guards; once per boot per repo).
+                    [ -n "$isrepo" ] && _bromure_restore_worktrees "$isrepo" "$(basename "$isrepo")"
                 done
                 mv -f "$INBOX/.tabs.tmp" "$INBOX/tabs.txt" 2>/dev/null
             elif ! tmux has-session -t "$TMUX_S" 2>/dev/null; then
