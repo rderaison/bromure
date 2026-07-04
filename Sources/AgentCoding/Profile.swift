@@ -4071,13 +4071,19 @@ public final class ProfileStore {
             return 1
         fi
         # A visible tab that runs the merge and stays open to show the result.
-        # @merge_* options let the host offer "have the agent resolve" on conflict.
+        # Branch names go in via -e (environment VALUES, never re-parsed by the
+        # shell), NOT interpolated into the command — git allows $, (, ), and
+        # backticks in ref names, so a branch like `$(cmd)` interpolated into a
+        # command string would execute under `sh -c`. The command is single-
+        # quoted at the build level so $WT_SRC/$WT_DST/$? reach the inner shell
+        # literally and expand from the env there.
         win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" -c "$tdir" \
-              "git merge --no-edit '$wm_branch'; \
-               ec=\$?; echo; \
-               if [ \$ec -eq 0 ]; then echo \"bromure: merged $wm_branch into $wm_target.\"; \
-               else echo \"bromure: merge hit conflicts (exit \$ec). Resolve here, or right-click this tab → 'Have the agent resolve'.\"; fi; \
-               echo; echo Press Enter to close; read _" 2>/dev/null)
+              -e WT_SRC="$wm_branch" -e WT_DST="$wm_target" \
+              'git merge --no-edit "$WT_SRC"; \
+               ec=$?; echo; \
+               if [ $ec -eq 0 ]; then echo "bromure: merged $WT_SRC into $WT_DST."; \
+               else echo "bromure: merge hit conflicts (exit $ec). Resolve here, or right-click this tab -> Have the agent resolve."; fi; \
+               echo; echo Press Enter to close; read _' 2>/dev/null)
         # @display "Merge → …" is the host's marker for a merge tab; its cwd is
         # the target checkout, which the "Have the agent resolve" action reuses.
         [ -n "$win" ] && tmux set-option -w -t "$win" @display "Merge → $wm_target" 2>/dev/null
