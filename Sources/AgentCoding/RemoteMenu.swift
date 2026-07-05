@@ -1027,7 +1027,7 @@ final class RemoteMenuApp {
             try InteractiveExec.run(
                 client: client, vm: vmID, command: cmd,
                 overlayTrigger: overlayTrigger,
-                onOverlay: { [weak self] in self?.remoteOverlay(vmID: vmID, name: name) })
+                onOverlay: { [weak self] in self?.remoteOverlay(vmID: vmID, name: name) ?? [] })
         } catch {
             let msg = "\r\nCouldn't attach: \(error.localizedDescription)\r\nPress Enter…"
             FileHandle.standardOutput.write(Data(msg.utf8))
@@ -1041,9 +1041,12 @@ final class RemoteMenuApp {
     /// to a workspace's tmux. The guest is paused — nothing here runs in the VM;
     /// every action talks to the app over the control socket. Returns to resume
     /// the tmux attach (InteractiveExec repaints the guest afterwards).
-    private func remoteOverlay(vmID: String, name: String) {
+    /// Returns bytes to forward to the guest when the overlay closes — `[]` to
+    /// resume the attach, or Ctrl-b d (`[0x02, 0x64]`) to detach ("Disconnect").
+    private func remoteOverlay(vmID: String, name: String) -> [UInt8] {
         tui.begin()
         defer { tui.end() }
+        var forward: [UInt8] = []
         while true {
             let vm = fetchVM(vmID)
             let tabs = (vm?["tabs"] as? [[String: Any]]) ?? []
@@ -1103,13 +1106,15 @@ final class RemoteMenuApp {
                 guard self.tui.confirm("Suspend \(name)? (ends this session)") else { return false }
                 _ = self.runSelf(["vm", "kill", vmID, "--suspend"]); return true
             }
+            labels.append("⏏ Disconnect")
+            actions.append { forward = [0x02, 0x64]; return true }   // Ctrl-b d → tmux detaches, ends the attach
             labels.append("↩ Resume session")
             guard let sel = tui.menu(title: "bromure · \(name)", items: labels,
                                      footer: "Enter switch/select · q resume",
-                                     header: vmDashboardLines(vm)) else { return }
+                                     header: vmDashboardLines(vm)) else { return forward }
             if sel >= 0, sel < actions.count {
-                if actions[sel]() { return }
-            } else { return }
+                if actions[sel]() { return forward }
+            } else { return forward }
         }
     }
 

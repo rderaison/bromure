@@ -1172,11 +1172,14 @@ private nonisolated(unsafe) var gWinchPending: Int32 = 0
 enum InteractiveExec {
     /// `overlayTrigger` is a single byte (e.g. Ctrl-] = 0x1D) that, when pressed
     /// alone, is intercepted host-side — it never reaches the guest — and calls
-    /// `onOverlay` (the controller draws its workspace overlay). Double-tapping
-    /// it in one read forwards a single literal byte. Both nil (the default)
-    /// disables interception, leaving a plain transparent pump.
+    /// `onOverlay` (the controller draws its workspace overlay). `onOverlay`
+    /// returns bytes to forward to the guest when it closes: `[]` just repaints
+    /// and resumes; a non-empty return is written to the guest pty (e.g. Ctrl-b
+    /// d = `[0x02, 0x64]` to detach, ending the attach). Double-tapping the
+    /// trigger in one read forwards a single literal byte. Both nil (the
+    /// default) disables interception, leaving a plain transparent pump.
     static func run(client: ControlClient, vm: String, command: String,
-                    overlayTrigger: UInt8? = nil, onOverlay: (() -> Void)? = nil) throws {
+                    overlayTrigger: UInt8? = nil, onOverlay: (() -> [UInt8])? = nil) throws {
         var ws = winsize()
         _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws)
         let cols0 = ws.ws_col == 0 ? 80 : Int(ws.ws_col)
@@ -1230,11 +1233,18 @@ enum InteractiveExec {
                     // no prefix collision. Double-tap in one read = one literal.
                     if let trigger = overlayTrigger, let onOverlay {
                         if r == 1, rbuf[0] == trigger {
-                            onOverlay()
-                            // Repaint the guest after the host-side overlay by
-                            // re-sending the window size (tmux redraws on resize).
-                            var w = winsize(); _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &w)
-                            sendFrame(fd, 1, resizePayload(cols: Int(w.ws_col), rows: Int(w.ws_row)))
+                            let forward = onOverlay()
+                            if forward.isEmpty {
+                                // Repaint the guest after the host-side overlay by
+                                // re-sending the window size (tmux redraws on resize).
+                                var w = winsize(); _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &w)
+                                sendFrame(fd, 1, resizePayload(cols: Int(w.ws_col), rows: Int(w.ws_row)))
+                            } else {
+                                // The overlay asked to forward bytes to the guest
+                                // (e.g. Ctrl-b d to detach) — tmux acts on them and
+                                // the attach command exits on its own.
+                                sendFrame(fd, 0, forward)
+                            }
                             continue
                         }
                         if r == 2, rbuf[0] == trigger, rbuf[1] == trigger {
