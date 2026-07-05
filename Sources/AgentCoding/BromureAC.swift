@@ -6358,13 +6358,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         sandbox.onWorktreeError = { [weak self] message in
             Task { @MainActor in
-                guard self != nil else { return }
+                guard let self else { return }
+                SupplyChainLog.shared.record("[worktree] \(message)")
+                // NON-BLOCKING. A modal runModal() here froze the main run loop
+                // — and with it the automation server that POST /sessions waits
+                // on — so one failed worktree wedged the whole app (and hung the
+                // E2E for 600s). Present as a sheet on the session's on-screen
+                // window; headless / detached runs just get the log line above.
+                guard let win = self.hostWindow(for: pid) ?? self.unifiedWindow,
+                      win.isVisible else { return }
                 let alert = NSAlert()
                 alert.alertStyle = .warning
                 alert.messageText = NSLocalizedString("Worktree action failed", comment: "")
                 alert.informativeText = message
                 alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
-                alert.runModal()
+                alert.beginSheetModal(for: win) { _ in }
             }
         }
         sandbox.onAgentStatus = { [weak self] index, signal in

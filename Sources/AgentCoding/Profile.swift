@@ -4606,7 +4606,13 @@ public final class ProfileStore {
     # so the foreground (below) can own the terminal's lifetime.
     command_loop() {
         while :; do
-            if [ -d "$INBOX" ]; then
+            # Every action below is a tmux op, and kitty creates the session
+            # AFTER this loop is backgrounded — so gate on the session existing.
+            # Without this, a command that races VM boot (e.g. a worktree-create
+            # fired by the automation API the moment the shell agent answers,
+            # before X/kitty/tmux is up) gets dequeued, its `new-window` fails
+            # ("could not open a tab"), and it's lost. Queued files just wait.
+            if [ -d "$INBOX" ] && tmux has-session -t "$TMUX_S" 2>/dev/null; then
                 for f in "$INBOX"/cmd-*.txt; do
                     [ -e "$f" ] || continue
                     line=$(head -1 "$f" 2>/dev/null)
