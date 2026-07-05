@@ -69,14 +69,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // HTTP API
 // ---------------------------------------------------------------------------
 
-async function api(method, path, body) {
+async function api(method, path, body, { timeoutMs = 60000 } = {}) {
   const opts = {
     method,
     headers: { "Content-Type": "application/json", Connection: "close" },
     keepalive: false,
+    // Without this, a hung endpoint waits out undici's 300s headersTimeout and
+    // surfaces as an opaque "fetch failed" ~5 min later (×2 with a finally
+    // teardown = 10 min). Fail fast with the real cause instead. The server's
+    // slowest bounded op is session-create (~30s), so 60s clears legit waits.
+    signal: AbortSignal.timeout(timeoutMs),
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch(`${API}${path}`, opts);
+  let res;
+  try {
+    res = await fetch(`${API}${path}`, opts);
+  } catch (e) {
+    const why = e?.name === "TimeoutError" ? `timed out after ${timeoutMs}ms` : (e?.message || String(e));
+    return { _status: 0, _error: `${method} ${path}: ${why}` };
+  }
   const text = await res.text();
   if (!text) {
     return { _status: res.status, _empty: true };
@@ -2153,7 +2164,27 @@ async function main() {
       assert(h.debugEnabled === true,
              "app is running without BROMURE_DEBUG_CLAUDE=1 — quit it and rerun; the harness relaunches it with the flag");
     });
-    {
+
+    // Probe whether sessions can actually start (base image present) — the
+    // same gate sections 8/10/15 use. Without it, a run with no bootable base
+    // image charges into POST /sessions and hangs (undici 300s ×2 per test)
+    // instead of skipping like the other VM-side sections.
+    let canExec = true;
+    try {
+      const id = createProfile("ACE2E_WTProbe");
+      const r = ac(`open ac session "${id}"`);
+      if (r.startsWith("error:")) canExec = false;
+      await sleep(1000);
+      ac(`close ac session "${id}"`);
+      await sleep(500);
+      deleteProfile(id);
+    } catch {
+      canExec = false;
+    }
+
+    if (!canExec) {
+      console.log("  \x1b[33mSKIP\x1b[0m  Worktree tests (no base image — run `bromure-ac init` first)");
+    } else {
       const REPO = "/home/ubuntu/wt-repo";
       const WTBASE = "/home/ubuntu/.bromure/worktrees/wt-repo";
 
