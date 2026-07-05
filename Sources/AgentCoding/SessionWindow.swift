@@ -215,6 +215,12 @@ final class TabsModel {
     var vmMemUsedKB: Int = 0
     var vmMemTotalKB: Int = 0
     var vmLoad: Double = 0
+    /// Guest root-FS usage from df (KB) — the filesystem's own truth,
+    /// preferred over the host-side CoW clone allocation (which overstates:
+    /// blocks the guest freed stay materialized in the clone). 0 = not
+    /// reported yet (booting, or an older guest agent).
+    var vmDiskUsedKB: Int = 0
+    var vmDiskTotalKB: Int = 0
     /// Listening sockets from the guest's ports loop (~every 3s). The dashboard
     /// renders the non-loopback subset.
     var vmListeningPorts: [ListeningPort] = []

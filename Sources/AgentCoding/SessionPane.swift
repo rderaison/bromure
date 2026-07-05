@@ -333,11 +333,14 @@ final class SessionPane {
         if changed { model.dockerContainers = list }
     }
 
-    func applyVMStats(cpu: Double, memUsedKB: Int, memTotalKB: Int, load: Double) {
+    func applyVMStats(cpu: Double, memUsedKB: Int, memTotalKB: Int, load: Double,
+                      diskUsedKB: Int, diskTotalKB: Int) {
         model.vmCPU = cpu
         model.vmMemUsedKB = memUsedKB
         model.vmMemTotalKB = memTotalKB
         model.vmLoad = load
+        model.vmDiskUsedKB = diskUsedKB
+        model.vmDiskTotalKB = diskTotalKB
     }
 
     func applyListeningPorts(_ ports: [ListeningPort]) {

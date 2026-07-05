@@ -1809,7 +1809,13 @@ final class RemoteMenuApp {
             ? String(format: "%.1f/%.1f GB", Double(memUsedKB) / 1_048_576, totGB)
             : "\(memGB) GB"
         let loadStr = hasStats ? String(format: "%.2f", num(vm["load"])) : "—"
-        let diskStr = diskBytes > 0 ? gbFromBytes(diskBytes) : "—"
+        // Prefer the guest's df numbers (FS truth) over the host-side CoW
+        // clone allocation, which overstates — same rule as the GUI dashboard.
+        let dUsedKB = vm["diskUsedKB"] as? Int ?? 0
+        let dTotalKB = vm["diskTotalKB"] as? Int ?? 0
+        let diskStr = dTotalKB > 0
+            ? String(format: "%.1f/%.1f GB", Double(dUsedKB) / 1_048_576, Double(dTotalKB) / 1_048_576)
+            : (diskBytes > 0 ? gbFromBytes(diskBytes) : "—")
 
         var cfg = "IP \(ip)   tool \(tool)"
         if fusionConfigurable { cfg += "   fusion \(fusion)" }

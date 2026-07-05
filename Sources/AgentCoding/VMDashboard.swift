@@ -125,9 +125,19 @@ struct VMDashboardView: View {
             StatCard(title: "vCPUs", value: "\(vCPUs)",
                      caption: isRunning ? "load \(String(format: "%.2f", model?.vmLoad ?? 0))" : "cores",
                      systemImage: "cpu.fill", tint: .blue)
-            StatCard(title: "Disk", value: gbBytes(diskAllocatedBytes),
-                     caption: "of \(gbBytes(diskCapacityBytes))",
-                     systemImage: "internaldrive.fill", tint: .teal)
+            // Prefer the GUEST's df numbers (the filesystem's own truth) over
+            // the host-side CoW clone allocation, which overstates real usage
+            // — blocks the guest FS freed stay materialized in the clone.
+            // Fall back to allocation while off / before the first report.
+            if isRunning, let m = model, m.vmDiskTotalKB > 0 {
+                StatCard(title: "Disk", value: gb(m.vmDiskUsedKB),
+                         caption: "of \(gb(m.vmDiskTotalKB))",
+                         systemImage: "internaldrive.fill", tint: .teal)
+            } else {
+                StatCard(title: "Disk", value: gbBytes(diskAllocatedBytes),
+                         caption: "of \(gbBytes(diskCapacityBytes)) (host)",
+                         systemImage: "internaldrive.fill", tint: .teal)
+            }
             StatCard(title: "Uptime", value: isRunning ? uptimeText : "—",
                      caption: isRunning ? "since boot" : "\(stateLabel.lowercased())",
                      systemImage: "clock.fill", tint: .orange)

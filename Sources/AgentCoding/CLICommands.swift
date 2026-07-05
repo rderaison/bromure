@@ -603,9 +603,16 @@ struct ProfilesDescribe: ParsableCommand {
                 row("fusion", fc ? (fe ? "engaged" : "available (off)")
                                  : "not configurable (needs ≥2 models)")
                 row("base image", vm["baseImageVersion"] as? String)
-                if let bytes = vm["diskAllocatedBytes"] as? Int {
+                if let usedKB = vm["diskUsedKB"] as? Int,
+                   let totalKB = vm["diskTotalKB"] as? Int, totalKB > 0 {
+                    // Guest df numbers (FS truth) — preferred over the host-side
+                    // CoW clone allocation, which overstates real usage.
+                    let used = ByteCountFormatter.string(fromByteCount: Int64(usedKB) * 1024, countStyle: .file)
+                    let total = ByteCountFormatter.string(fromByteCount: Int64(totalKB) * 1024, countStyle: .file)
+                    row("disk", "\(used) used of \(total)")
+                } else if let bytes = vm["diskAllocatedBytes"] as? Int {
                     let sz = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
-                    row("disk", "\(sz) used")
+                    row("disk", "\(sz) allocated on host")
                 }
                 if let tabs = vm["tabs"] as? [[String: Any]], !tabs.isEmpty {
                     print("  tabs:")

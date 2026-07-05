@@ -92,8 +92,11 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     public var onDockerStats: (([(id: String, cpu: String, mem: String)]) -> Void)?
 
     /// VM vitals for the workspace dashboard (~every 1.5s): aggregate CPU%,
-    /// memory used/total (KB), and 1-minute load average.
-    public var onVMStats: ((_ cpu: Double, _ memUsedKB: Int, _ memTotalKB: Int, _ load: Double) -> Void)?
+    /// memory used/total (KB), 1-minute load average, and the root FS's
+    /// used/total (KB) as the GUEST sees them (df) — the host-side CoW clone
+    /// allocation overstates real usage. 0/0 from an older guest agent.
+    public var onVMStats: ((_ cpu: Double, _ memUsedKB: Int, _ memTotalKB: Int, _ load: Double,
+                            _ diskUsedKB: Int, _ diskTotalKB: Int) -> Void)?
 
     /// Called ~every 2s WHILE a dashboard is open with the local image list
     /// (from `docker images`).
@@ -681,23 +684,27 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             continue
                         }
                         // vmstat.txt — VM vitals (key value per line) for the
-                        // workspace dashboard: cpu / mem_used_kb / mem_total_kb / load.
+                        // workspace dashboard: cpu / mem_used_kb / mem_total_kb /
+                        // load / disk_used_kb / disk_total_kb (guest root FS, df).
                         if name == "vmstat.txt" {
                             let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
                             var cpu = 0.0, used = 0, total = 0, load = 0.0
+                            var diskUsed = 0, diskTotal = 0
                             for line in raw.split(whereSeparator: \.isNewline) {
                                 let p = line.split(separator: " ")
                                 guard p.count == 2 else { continue }
                                 let v = String(p[1])
                                 switch p[0] {
-                                case "cpu":          cpu = Double(v) ?? 0
-                                case "mem_used_kb":  used = Int(v) ?? 0
-                                case "mem_total_kb": total = Int(v) ?? 0
-                                case "load":         load = Double(v) ?? 0
+                                case "cpu":           cpu = Double(v) ?? 0
+                                case "mem_used_kb":   used = Int(v) ?? 0
+                                case "mem_total_kb":  total = Int(v) ?? 0
+                                case "load":          load = Double(v) ?? 0
+                                case "disk_used_kb":  diskUsed = Int(v) ?? 0
+                                case "disk_total_kb": diskTotal = Int(v) ?? 0
                                 default: break
                                 }
                             }
-                            self?.onVMStats?(cpu, used, total, load)
+                            self?.onVMStats?(cpu, used, total, load, diskUsed, diskTotal)
                             continue
                         }
                         // ports.txt — raw `ss -tulnH` lines from the guest's

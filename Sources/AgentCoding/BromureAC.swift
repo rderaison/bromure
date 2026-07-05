@@ -625,7 +625,7 @@ final class RunningSession {
 /// create-profile wizard, and (once a profile launches) the
 /// VZVirtualMachineView for that session.
 @MainActor
-final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     let imageManager: UbuntuImageManager
     let store = ProfileStore()
     var profiles: [Profile] = [] {
@@ -1667,6 +1667,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         do {
             try RemoteAccessServer.shared.start(remoteAccessConfig())
             SupplyChainLog.shared.record("[remote] SSH front door started.")
+            updateStatusMenu()   // robot menu: reflect the now-running sshd
         } catch {
             SupplyChainLog.shared.record("[remote] start failed: \(error.localizedDescription)")
             // Surface it: remote access is enabled but the listener was refused
@@ -1686,6 +1687,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @MainActor func stopRemoteAccess() {
         RemoteAccessServer.shared.stop()
+        updateStatusMenu()   // robot menu: reflect the stopped sshd
     }
 
     /// Apply a config change coming from the CLI (`remote …`) or Preferences.
@@ -2275,6 +2277,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "memUsedKB": pane(for: s.profileID)?.model.vmMemUsedKB ?? 0,
                 "memTotalKB": pane(for: s.profileID)?.model.vmMemTotalKB ?? 0,
                 "load": pane(for: s.profileID)?.model.vmLoad ?? 0,
+                "diskUsedKB": pane(for: s.profileID)?.model.vmDiskUsedKB ?? 0,
+                "diskTotalKB": pane(for: s.profileID)?.model.vmDiskTotalKB ?? 0,
                 "hasStats": (pane(for: s.profileID)?.model.vmMemTotalKB ?? 0) > 0,
                 "networkMode": s.profile.networkMode.rawValue,
                 "macAddress": MACBindings.shared.macAddress(for: s.profileID),
@@ -6329,9 +6333,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self?.pane(for: pid)?.applyDockerStats(stats)
             }
         }
-        sandbox.onVMStats = { [weak self] cpu, used, total, load in
+        sandbox.onVMStats = { [weak self] cpu, used, total, load, diskUsed, diskTotal in
             Task { @MainActor in
-                self?.pane(for: pid)?.applyVMStats(cpu: cpu, memUsedKB: used, memTotalKB: total, load: load)
+                self?.pane(for: pid)?.applyVMStats(cpu: cpu, memUsedKB: used, memTotalKB: total,
+                                                   load: load, diskUsedKB: diskUsed, diskTotalKB: diskTotal)
             }
         }
         sandbox.onPortsList = { [weak self] ports in
@@ -6666,11 +6671,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updateStatusMenu()
     }
 
+    /// The status menu is rebuilt every time it OPENS (menuNeedsUpdate), so
+    /// what it shows — the session list and the Remote Access state — is
+    /// ground truth at display time, never a stale snapshot. Launch-order
+    /// bug this fixes: setupStatusItem() runs before startRemoteAccessIfNeeded()
+    /// boots sshd, so a menu baked at setup time showed Remote Access off.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === statusItem?.menu else { return }
+        MainActor.assumeIsolated { updateStatusMenu() }
+    }
+
     /// Rebuild the status-item menu from the current `runningSessions`.
     @MainActor
     func updateStatusMenu() {
         guard let statusItem else { return }
-        let menu = NSMenu()
+        // Reuse one menu instance (delegate-wired) so menuNeedsUpdate keeps
+        // firing on every open; a fresh NSMenu each time would need re-wiring.
+        let menu: NSMenu
+        if let existing = statusItem.menu {
+            menu = existing
+            menu.removeAllItems()
+        } else {
+            menu = NSMenu()
+            menu.delegate = self
+        }
         let sessions = runningSessions.values.sorted { $0.profile.name < $1.profile.name }
         if sessions.isEmpty {
             let none = NSMenuItem(title: NSLocalizedString("No running VMs", comment: ""),

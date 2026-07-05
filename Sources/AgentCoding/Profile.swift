@@ -4511,8 +4511,14 @@ public final class ProfileStore {
             memavail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)
             memused=$(( ${memtotal:-0} - ${memavail:-0} ))
             load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
-            printf 'cpu %s\nmem_used_kb %s\nmem_total_kb %s\nload %s\n' \
-                   "$cpu" "$memused" "${memtotal:-0}" "${load:-0}" \
+            # Root-FS usage as the GUEST sees it (df = statfs, cheap). The
+            # host-side CoW clone allocation overstates real usage — blocks the
+            # guest FS freed stay materialized in the clone — so the dashboard
+            # prefers these numbers.
+            dfline=$(df -kP / 2>/dev/null | awk 'NR==2{print $2 " " $3}')
+            disktotal=${dfline%% *}; diskused=${dfline##* }
+            printf 'cpu %s\nmem_used_kb %s\nmem_total_kb %s\nload %s\ndisk_used_kb %s\ndisk_total_kb %s\n' \
+                   "$cpu" "$memused" "${memtotal:-0}" "${load:-0}" "${diskused:-0}" "${disktotal:-0}" \
                 > "$INBOX/.vmstat.tmp" 2>/dev/null \
                 && mv -f "$INBOX/.vmstat.tmp" "$INBOX/vmstat.txt" 2>/dev/null
             sleep 1.5
