@@ -275,6 +275,7 @@ final class RemoteMenuApp {
         case double
         case bool
         case pick([String])            // enum raw values
+        case modelPick                 // dropdown of installed local models (stores the id; "None" clears)
     }
 
     /// Full-fidelity configuration, mirroring the app's editor panes. Fetches
@@ -322,10 +323,12 @@ final class RemoteMenuApp {
     /// The pane list shared by Configure (an existing workspace) and the new
     /// workspace form's "Full settings…". Credentials/MCP route to the raw-JSON
     /// hatch so every nested field stays reachable.
+    // Same panes, same names, same order as the GUI editor's `EditorCategory`
+    // (Automation is Preferences-only, so it's not a per-workspace pane).
     private static let configPaneNames = [
-        "General", "Agents", "Local Models", "Fusion", "Folders", "Environment",
-        "Tracing", "Guardrails", "Supply Chain", "Prompt Injection", "Appearance",
-        "Resources", "Credentials & MCP (raw JSON)",
+        "General", "Agents", "Local Models", "Fusion", "Folders", "Credentials",
+        "Environment", "MCP", "Tracing", "Guardrails", "Supply Chain",
+        "Prompt Injection", "Appearance", "Resources",
     ]
 
     /// Dispatch one pane by name onto `doc`. Returns whether it changed anything.
@@ -337,16 +340,26 @@ final class RemoteMenuApp {
         case "Local Models":     return editLocalModels(&doc)
         case "Fusion":           return editFusion(&doc)
         case "Folders":          return editFolders(&doc)
+        case "Credentials":      return editCredentials(&doc)
         case "Environment":      return editEnvironment(&doc)
+        case "MCP":              return editMCP(&doc)
         case "Tracing":          return editTracing(&doc)
         case "Guardrails":       return editGuardrails(&doc)
         case "Supply Chain":     return editSupplyChain(&doc)
         case "Prompt Injection": return editPromptInjection(&doc)
         case "Appearance":       return editAppearance(&doc)
         case "Resources":        return editResources(&doc)
-        case "Credentials & MCP (raw JSON)": return editSubtreeJSON(&doc, name: workspace)
         default: return false
         }
+    }
+
+    /// Installed local models as `(id, label)` for the model dropdowns — the
+    /// same source the GUI's pickers use (`CatalogStore`), read from disk so it
+    /// works in this out-of-app `__remote-menu` process too.
+    private func installedModels() -> [(id: String, label: String)] {
+        CatalogStore.shared.effective().models
+            .filter { CatalogStore.shared.isInstalled(repo: $0.repo) }
+            .map { (id: $0.id, label: $0.name.isEmpty ? $0.id : $0.name) }
     }
 
     /// Show the full pane list and edit `doc` in place until Back (used by the
@@ -406,6 +419,9 @@ final class RemoteMenuApp {
         case .int:    return (doc[key] as? Int).map(String.init) ?? "—"
         case .double: return (doc[key] as? Double).map { String($0) } ?? "—"
         case .pick:   return (doc[key] as? String) ?? "—"
+        case .modelPick:
+            let id = doc[key] as? String ?? ""
+            return id.isEmpty ? "—" : id
         case .text(let secret):
             let v = doc[key] as? String ?? ""
             if secret { return v.isEmpty ? "—" : "•••• (set)" }
@@ -449,6 +465,26 @@ final class RemoteMenuApp {
             let initial = options.firstIndex(of: cur ?? "") ?? 0
             guard let i = tui.menu(title: label, items: options, initial: initial) else { return false }
             if options[i] != cur { doc[key] = options[i]; return true }
+            return false
+        case .modelPick:
+            let models = installedModels()
+            guard !models.isEmpty else {
+                tui.pager(title: label,
+                          body: "No local models installed.\n\nPull one first — from the Models menu, or `bromure-ac model pull <repo>` — then it'll appear here.")
+                return false
+            }
+            let cur = doc[key] as? String
+            // "None" first, then each installed model (labelled by name, valued by id).
+            var items = ["None"]
+            items.append(contentsOf: models.map { $0.label == $0.id ? $0.id : "\($0.label)  [\($0.id)]" })
+            let initial = models.firstIndex(where: { $0.id == cur }).map { $0 + 1 } ?? 0
+            guard let i = tui.menu(title: label, items: items, initial: initial) else { return false }
+            if i == 0 {                                            // None → clear
+                if (cur ?? "").isEmpty { return false }
+                doc.removeValue(forKey: key); return true
+            }
+            let picked = models[i - 1].id
+            if picked != cur { doc[key] = picked; return true }
             return false
         }
     }
@@ -505,7 +541,7 @@ final class RemoteMenuApp {
     private func editLocalModels(_ doc: inout [String: Any]) -> Bool {
         editFields(title: "Local Models", doc: &doc, fields: [
             ("modelRouting", "Routing", .pick(["cloud", "local", "hybrid"])),
-            ("activeModelID", "Active local model id", .text(secret: false)),
+            ("activeModelID", "Active local model", .modelPick),
             ("hybridCloudTokenBudget", "Hybrid: cloud token budget / 24h (0 = ∞)", .int),
             ("hybridSoftTTFTSeconds", "Hybrid: soft TTFT fallback (seconds)", .double),
             ("hybridLocalSplitPercent", "Hybrid: % of sessions pinned local", .int),
@@ -604,8 +640,8 @@ final class RemoteMenuApp {
                                  kind: .text(secret: false)) { changed = true }
             case 3: if editField(&doc, key: "fusionJudgeLocal", label: "Judge on local engine",
                                  kind: .bool) { changed = true }
-            case 4: if editField(&doc, key: "fusionLocalLeg", label: "Local fuse leg model id",
-                                 kind: .text(secret: false)) { changed = true }
+            case 4: if editField(&doc, key: "fusionLocalLeg", label: "Local fuse leg model",
+                                 kind: .modelPick) { changed = true }
             default: return changed
             }
         }
@@ -666,21 +702,170 @@ final class RemoteMenuApp {
         return changed
     }
 
-    /// Collection-heavy panes (Credentials, MCP, Kubernetes, …) are edited via
-    /// the whole-document $EDITOR hatch so every nested field stays reachable
-    /// without a bespoke form per credential type. Reflects the edit back into
-    /// the in-memory doc so it saves with the rest.
-    private func editSubtreeJSON(_ doc: inout [String: Any], name: String) -> Bool {
-        tui.end()
-        var edited: [String: Any]?
-        do { edited = try editJSONInEditor(doc) } catch {
-            tui.begin()
-            tui.pager(title: "Edit \(name)", body: "Not applied: \(error.localizedDescription)")
-            return false
+    // MARK: MCP servers (native list editor — mirrors the GUI's MCP pane)
+
+    private func editMCP(_ doc: inout [String: Any]) -> Bool {
+        var servers = (doc["mcpServers"] as? [[String: Any]]) ?? []
+        var changed = false
+        while true {
+            var rows = servers.map { s -> String in
+                let name = s["name"] as? String ?? "?"
+                let tr = s["transport"] as? String ?? "stdio"
+                let off = (s["enabled"] as? Bool ?? true) ? "" : "  (disabled)"
+                return "\(name)  ·  \(tr)\(off)"
+            }
+            rows.append("＋ Add MCP server")
+            rows.append("Back")
+            guard let sel = tui.menu(title: "MCP servers", items: rows,
+                                     footer: "Enter: edit/remove · q back",
+                                     header: ["Model Context Protocol servers this workspace's agent can call."]) else { break }
+            if sel == rows.count - 1 { break }
+            if sel == rows.count - 2 {
+                guard let name = tui.prompt("Server name (e.g. github)"),
+                      !name.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+                let ti = tui.menu(title: "Transport", items: ["stdio", "http"]) ?? 0
+                var s: [String: Any] = [
+                    "id": UUID().uuidString,
+                    "name": name.trimmingCharacters(in: .whitespaces),
+                    "transport": ti == 0 ? "stdio" : "http",
+                    "command": "", "arguments": [String](), "url": "",
+                    "environment": [[String: Any]](),
+                    "bearerTokenEnvVar": "", "bearerToken": "",
+                    "enabled": true, "rawJSON": "",
+                ]
+                _ = editMCPServer(&s)
+                servers.append(s); changed = true
+            } else if sel >= 0, sel < servers.count {
+                guard let act = tui.menu(title: servers[sel]["name"] as? String ?? "server",
+                                         items: ["Edit", "Remove", "Cancel"]) else { continue }
+                if act == 0 { if editMCPServer(&servers[sel]) { changed = true } }
+                else if act == 1, tui.confirm("Remove \(servers[sel]["name"] as? String ?? "server")?") {
+                    servers.remove(at: sel); changed = true
+                }
+            }
         }
-        tui.begin()
-        if let edited { doc = edited; return true }
-        return false
+        if changed { doc["mcpServers"] = servers }
+        return changed
+    }
+
+    private func editMCPServer(_ s: inout [String: Any]) -> Bool {
+        var changed = false
+        while true {
+            let transport = s["transport"] as? String ?? "stdio"
+            let args = (s["arguments"] as? [String]) ?? []
+            var rows = ["Name:  \(s["name"] as? String ?? "—")",
+                        "Transport:  \(transport)"]
+            if transport == "stdio" {
+                rows.append("Command:  \(s["command"] as? String ?? "—")")
+                rows.append("Arguments:  \(args.isEmpty ? "—" : args.joined(separator: " "))")
+            } else {
+                rows.append("URL:  \(s["url"] as? String ?? "—")")
+                rows.append("Bearer token env var:  \(s["bearerTokenEnvVar"] as? String ?? "—")")
+                rows.append("Bearer token:  \((s["bearerToken"] as? String ?? "").isEmpty ? "—" : "•••• (set)")")
+            }
+            rows.append("Enabled:  \((s["enabled"] as? Bool ?? true) ? "yes" : "no")")
+            rows.append("Back")
+            guard let sel = tui.menu(title: s["name"] as? String ?? "MCP server", items: rows,
+                                     footer: "Enter edit · q back") else { return changed }
+            let backIdx = rows.count - 1, enabledIdx = backIdx - 1
+            if sel == backIdx { return changed }
+            if sel == 0 { if editField(&s, key: "name", label: "Name", kind: .text(secret: false)) { changed = true } }
+            else if sel == 1 { if editField(&s, key: "transport", label: "Transport", kind: .pick(["stdio", "http"])) { changed = true } }
+            else if sel == enabledIdx { if editField(&s, key: "enabled", label: "Enabled", kind: .bool) { changed = true } }
+            else if transport == "stdio" {
+                if sel == 2 { if editField(&s, key: "command", label: "Command", kind: .text(secret: false)) { changed = true } }
+                else if sel == 3, let v = tui.prompt("Arguments (space-separated)", initial: args.joined(separator: " ")) {
+                    s["arguments"] = v.split(separator: " ").map(String.init); changed = true
+                }
+            } else {
+                if sel == 2 { if editField(&s, key: "url", label: "URL", kind: .text(secret: false)) { changed = true } }
+                else if sel == 3 { if editField(&s, key: "bearerTokenEnvVar", label: "Bearer token env var", kind: .text(secret: false)) { changed = true } }
+                else if sel == 4 { if editField(&s, key: "bearerToken", label: "Bearer token", kind: .text(secret: true)) { changed = true } }
+            }
+        }
+    }
+
+    // MARK: Credentials (native forms — mirrors the GUI's Credentials pane)
+
+    private func editCredentials(_ doc: inout [String: Any]) -> Bool {
+        var changed = false
+        while true {
+            let git = (doc["gitHTTPSCredentials"] as? [[String: Any]])?.count ?? 0
+            let dockers = (doc["dockerRegistries"] as? [[String: Any]])?.count ?? 0
+            let tokens = (doc["manualTokens"] as? [[String: Any]])?.count ?? 0
+            let doSet = !((doc["digitalOceanToken"] as? String ?? "").isEmpty)
+            let aws = (doc["awsCredentials"] as? [String: Any]) ?? [:]
+            let awsSet = !((aws["accessKeyID"] as? String ?? "").isEmpty)
+            let rows = [
+                "Git HTTPS credentials  (\(git))",
+                "Docker registries  (\(dockers))",
+                "DigitalOcean token  \(doSet ? "•••• (set)" : "—")",
+                "AWS credentials  \(awsSet ? "set" : "—")",
+                "Manual tokens  (\(tokens))",
+                "Back",
+            ]
+            guard let sel = tui.menu(title: "Credentials", items: rows, footer: "Enter · q back") else { return changed }
+            switch sel {
+            case 0: if editCredList(&doc, key: "gitHTTPSCredentials", title: "Git HTTPS credentials",
+                                    summary: { "\($0["username"] as? String ?? "?")@\($0["host"] as? String ?? "?")" },
+                                    blank: { ["id": UUID().uuidString, "host": "", "username": "", "token": "", "requireApproval": false] },
+                                    fields: [("host", "Host (e.g. github.com)", .text(secret: false)),
+                                             ("username", "Username", .text(secret: false)),
+                                             ("token", "Token / password", .text(secret: true)),
+                                             ("requireApproval", "Require approval to use", .bool)]) { changed = true }
+            case 1: if editCredList(&doc, key: "dockerRegistries", title: "Docker registries",
+                                    summary: { "\($0["username"] as? String ?? "?")@\($0["host"] as? String ?? "?")" },
+                                    blank: { ["id": UUID().uuidString, "host": "", "username": "", "password": "", "requireApproval": false] },
+                                    fields: [("host", "Registry host", .text(secret: false)),
+                                             ("username", "Username", .text(secret: false)),
+                                             ("password", "Password", .text(secret: true)),
+                                             ("requireApproval", "Require approval to use", .bool)]) { changed = true }
+            case 2: if editField(&doc, key: "digitalOceanToken", label: "DigitalOcean API token", kind: .text(secret: true)) { changed = true }
+            case 3:
+                var awsDoc = (doc["awsCredentials"] as? [String: Any]) ?? [:]
+                if editFields(title: "AWS credentials", doc: &awsDoc, fields: [
+                    ("accessKeyID", "Access key ID", .text(secret: false)),
+                    ("secretAccessKey", "Secret access key", .text(secret: true)),
+                    ("sessionToken", "Session token", .text(secret: true)),
+                    ("region", "Region (e.g. us-east-1)", .text(secret: false)),
+                    ("requireApproval", "Require approval to use", .bool),
+                ]) { doc["awsCredentials"] = awsDoc; changed = true }
+            case 4: if editCredList(&doc, key: "manualTokens", title: "Manual tokens",
+                                    summary: { "\($0["name"] as? String ?? "?")  → $\($0["envVarName"] as? String ?? "")" },
+                                    blank: { ["id": UUID().uuidString, "name": "", "realValue": "", "envVarName": "", "hostFilter": ""] },
+                                    fields: [("name", "Name", .text(secret: false)),
+                                             ("realValue", "Secret value", .text(secret: true)),
+                                             ("envVarName", "Inject as env var (e.g. STRIPE_API_KEY)", .text(secret: false)),
+                                             ("hostFilter", "Host filter (blank = any)", .text(secret: false))]) { changed = true }
+            default: return changed
+            }
+        }
+    }
+
+    /// Generic list-of-credentials editor: list rows via `summary`, add via
+    /// `blank`, and edit each row's `fields` with the field engine.
+    private func editCredList(_ doc: inout [String: Any], key: String, title: String,
+                              summary: ([String: Any]) -> String,
+                              blank: () -> [String: Any],
+                              fields: [(key: String, label: String, kind: FieldKind)]) -> Bool {
+        var items = (doc[key] as? [[String: Any]]) ?? []
+        var changed = false
+        while true {
+            var rows = items.map(summary)
+            rows.append("＋ Add"); rows.append("Back")
+            guard let sel = tui.menu(title: title, items: rows, footer: "Enter: edit/remove · q back") else { break }
+            if sel == rows.count - 1 { break }
+            if sel == rows.count - 2 {
+                var row = blank()
+                if editFields(title: title, doc: &row, fields: fields) { items.append(row); changed = true }
+            } else if sel >= 0, sel < items.count {
+                guard let act = tui.menu(title: summary(items[sel]), items: ["Edit", "Remove", "Cancel"]) else { continue }
+                if act == 0 { if editFields(title: title, doc: &items[sel], fields: fields) { changed = true } }
+                else if act == 1, tui.confirm("Remove this entry?") { items.remove(at: sel); changed = true }
+            }
+        }
+        if changed { doc[key] = items }
+        return changed
     }
 
     /// `kubectl edit`-style round-trip: fetch the full profile JSON, open it in
