@@ -274,7 +274,8 @@ final class RemoteMenuApp {
         case int
         case double
         case bool
-        case pick([String])            // enum raw values
+        case pick([String])            // enum raw values (display == stored value)
+        case pickLabeled([(label: String, value: String)])  // GUI-friendly label → stored raw value
         case modelPick                 // dropdown of installed local models (stores the id; "None" clears)
     }
 
@@ -419,6 +420,9 @@ final class RemoteMenuApp {
         case .int:    return (doc[key] as? Int).map(String.init) ?? "—"
         case .double: return (doc[key] as? Double).map { String($0) } ?? "—"
         case .pick:   return (doc[key] as? String) ?? "—"
+        case .pickLabeled(let opts):
+            let cur = doc[key] as? String ?? ""
+            return opts.first(where: { $0.value == cur })?.label ?? (cur.isEmpty ? "—" : cur)
         case .modelPick:
             let id = doc[key] as? String ?? ""
             return id.isEmpty ? "—" : id
@@ -465,6 +469,12 @@ final class RemoteMenuApp {
             let initial = options.firstIndex(of: cur ?? "") ?? 0
             guard let i = tui.menu(title: label, items: options, initial: initial) else { return false }
             if options[i] != cur { doc[key] = options[i]; return true }
+            return false
+        case .pickLabeled(let opts):
+            let cur = doc[key] as? String
+            let initial = opts.firstIndex(where: { $0.value == cur }) ?? 0
+            guard let i = tui.menu(title: label, items: opts.map { $0.label }, initial: initial) else { return false }
+            if opts[i].value != cur { doc[key] = opts[i].value; return true }
             return false
         case .modelPick:
             let models = installedModels()
@@ -521,26 +531,35 @@ final class RemoteMenuApp {
         editFields(title: "General", doc: &doc, fields: [
             ("name",  "Name",  .text(secret: false)),
             ("color", "Color", .pick(["blue", "red", "green", "orange", "purple", "pink", "teal", "gray"])),
-            ("comments", "Notes", .text(secret: false)),
-            ("closeAction", "On window close", .pick(["background", "suspend", "shutdown", "ask"])),
-            ("bootAtStartup", "Boot at login", .bool),
-            ("keyboardLayoutOverride", "Keyboard layout (XKB, blank = auto)", .text(secret: false)),
+            ("keyboardLayoutOverride", "Keyboard layout", .text(secret: false)),
+            ("keyRepeatDelayMs", "Key repeat delay", .int),
+            ("keyRepeatRateHz", "Key repeat rate", .int),
+            ("closeAction", "When closing the window", .pickLabeled([
+                ("Run in the background", "background"), ("Suspend", "suspend"),
+                ("Shut down", "shutdown"), ("Ask", "ask")])),
+            ("bootAtStartup", "Start this VM at login", .bool),
+            ("comments", "Notes (optional)", .text(secret: false)),
         ])
     }
 
     private func editAgents(_ doc: inout [String: Any]) -> Bool {
         editFields(title: "Agents", doc: &doc, fields: [
-            ("tool", "Primary tool", .pick(["claude", "codex", "grok"])),
-            ("authMode", "Auth mode", .pick(["token", "subscription", "bedrock", "local"])),
+            ("tool", "Primary tool", .pickLabeled([
+                ("Claude Code", "claude"), ("Codex", "codex"), ("Grok Build", "grok")])),
+            ("authMode", "Auth mode", .pickLabeled([
+                ("API token", "token"), ("Subscription (interactive login)", "subscription"),
+                ("Bedrock (AWS)", "bedrock"), ("Local model", "local")])),
             ("apiKey", "API key", .text(secret: true)),
-            ("apiKeyRequiresApproval", "Require approval to use the API key", .bool),
-            ("bedrockModelID", "Bedrock model id (for Bedrock auth)", .text(secret: false)),
+            ("apiKeyRequiresApproval", "Require approval to use", .bool),
+            ("bedrockModelID", "Default Model ID", .text(secret: false)),
         ])
     }
 
     private func editLocalModels(_ doc: inout [String: Any]) -> Bool {
         editFields(title: "Local Models", doc: &doc, fields: [
-            ("modelRouting", "Routing", .pick(["cloud", "local", "hybrid"])),
+            ("modelRouting", "Routing", .pickLabeled([
+                ("Cloud", "cloud"), ("Local — always on-device", "local"),
+                ("Hybrid — cloud, fall back to local", "hybrid")])),
             ("activeModelID", "Active local model", .modelPick),
             ("hybridCloudTokenBudget", "Hybrid: cloud token budget / 24h (0 = ∞)", .int),
             ("hybridSoftTTFTSeconds", "Hybrid: soft TTFT fallback (seconds)", .double),
@@ -550,63 +569,73 @@ final class RemoteMenuApp {
 
     private func editResources(_ doc: inout [String: Any]) -> Bool {
         editFields(title: "Resources", doc: &doc, fields: [
-            ("memoryGB", "VM RAM (GB)", .int),
-            ("networkMode", "Network", .pick(["nat", "bridged"])),
+            ("memoryGB", "VM RAM", .int),
+            ("networkMode", "Network", .pickLabeled([("NAT", "nat"), ("Bridged", "bridged")])),
         ])
     }
 
     private func editTracing(_ doc: inout [String: Any]) -> Bool {
         editFields(title: "Tracing", doc: &doc, fields: [
-            ("traceLevel", "Trace level", .pick(["off", "activity", "aiDetails", "all"])),
-            ("privateMode", "Private mode (opt out of bromure.io streaming)", .bool),
+            ("traceLevel", "Session trace", .pickLabeled([
+                ("Off", "off"), ("Activity only", "activity"),
+                ("AI request details", "aiDetails"), ("Everything", "all")])),
+            ("privateMode", "Private mode", .bool),
         ])
     }
 
     private func editAppearance(_ doc: inout [String: Any]) -> Bool {
         editFields(title: "Appearance", doc: &doc, fields: [
-            ("cursorShape", "Cursor", .pick(["block", "beam", "underline"])),
-            ("customFontFamily", "Font family (blank = Terminal.app)", .text(secret: false)),
+            ("customFontFamily", "Font", .text(secret: false)),
             ("customFontSize", "Font size", .int),
+            ("cursorShape", "Cursor", .pickLabeled([
+                ("Block", "block"), ("Beam (I-cursor)", "beam"), ("Underline", "underline")])),
+            ("customBackgroundHex", "Background", .text(secret: false)),
+            ("customForegroundHex", "Text", .text(secret: false)),
+            ("windowOpacity", "Opacity", .double),
             ("fontLigatures", "Ligatures", .bool),
-            ("customBackgroundHex", "Background hex (e.g. #101010)", .text(secret: false)),
-            ("customForegroundHex", "Foreground hex", .text(secret: false)),
-            ("windowOpacity", "Opacity (0.3–1.0)", .double),
         ])
     }
 
     private func editPromptInjection(_ doc: inout [String: Any]) -> Bool {
         editNested(&doc, parent: "promptInjection", title: "Prompt Injection", fields: [
-            ("detectSourceInjection", "Detect source-code injection", .bool),
-            ("detectRulesInjection", "Detect rules-file injection", .bool),
-            ("onDetection", "On detection", .pick(["log", "ask", "block"])),
+            ("detectSourceInjection", "Detect prompt injection in source code", .bool),
+            ("detectRulesInjection", "Detect rogue instructions in CLAUDE.md files and similar", .bool),
+            ("onDetection", "When an injection is detected", .pickLabeled([
+                ("Log but continue", "log"), ("Ask me what to do", "ask"),
+                ("Block unilaterally", "block")])),
         ])
     }
 
     private func editSupplyChain(_ doc: inout [String: Any]) -> Bool {
-        editNested(&doc, parent: "supplyChain", title: "Supply Chain", fields: [
-            ("ageGateEnabled", "Age gate", .bool),
-            ("ageGateDays", "Age gate: min package age (days)", .int),
-            ("osvEnabled", "OSV vulnerability scanning", .bool),
-            ("osvSeverity", "OSV severity floor", .pick(["low", "medium", "high", "critical"])),
-            ("socketBlockCompromised", "socket.dev: block compromised", .bool),
-            ("socketBlockCVE", "socket.dev: block CVEs", .bool),
-            ("socketCVESeverity", "socket.dev: CVE severity floor", .pick(["low", "medium", "high", "critical"])),
-            ("socketAPIKey", "socket.dev API key", .text(secret: true)),
-            ("stripInstallScripts", "Strip npm install scripts", .bool),
-            ("lockfilePrompt", "Prompt to bypass for lockfile-pinned installs", .bool),
+        let severity: [(label: String, value: String)] = [
+            ("Low and above", "low"), ("Medium and above", "medium"),
+            ("High and above", "high"), ("Critical only", "critical")]
+        return editNested(&doc, parent: "supplyChain", title: "Supply Chain", fields: [
+            ("ageGateEnabled", "Refuse packages younger than the cutoff", .bool),
+            ("ageGateDays", "Minimum age", .int),
+            ("osvEnabled", "Look up packages on api.osv.dev (free, no key required)", .bool),
+            ("osvSeverity", "Block at severity", .pickLabeled(severity)),
+            ("socketAPIKey", "API key", .text(secret: true)),
+            ("socketBlockCompromised", "Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)", .bool),
+            ("socketBlockCVE", "Block packages with known CVEs", .bool),
+            ("socketCVESeverity", "CVE block threshold", .pickLabeled(severity)),
+            ("stripInstallScripts", "Strip preinstall / install / postinstall / prepare from npm tarballs on the fly", .bool),
+            ("lockfilePrompt", "Prompt before passing lockfile-pinned tarballs through unmodified (npm ci, pip --require-hashes)", .bool),
         ])
     }
 
     private func editGuardrails(_ doc: inout [String: Any]) -> Bool {
-        let modes = ["off", "promptOnWrite", "destructive", "readOnly"]
-        return editNested(&doc, parent: "guardrails", title: "Guardrails (Off / Prompt / Block-destructive / Read-only)", fields: [
-            ("kubernetes", "Kubernetes", .pick(modes)),
-            ("aws", "AWS", .pick(modes)),
-            ("digitalOcean", "DigitalOcean", .pick(modes)),
-            ("docker", "Docker", .pick(modes)),
-            ("github", "GitHub", .pick(modes)),
-            ("gitlab", "GitLab", .pick(modes)),
-            ("bitbucket", "Bitbucket", .pick(modes)),
+        let modes: [(label: String, value: String)] = [
+            ("Off", "off"), ("Prompt before write", "promptOnWrite"),
+            ("Block destructive", "destructive"), ("Read-only", "readOnly")]
+        return editNested(&doc, parent: "guardrails", title: "Guardrails", fields: [
+            ("kubernetes", "Kubernetes", .pickLabeled(modes)),
+            ("aws", "AWS", .pickLabeled(modes)),
+            ("digitalOcean", "DigitalOcean", .pickLabeled(modes)),
+            ("docker", "Docker registries", .pickLabeled(modes)),
+            ("github", "GitHub", .pickLabeled(modes)),
+            ("gitlab", "GitLab", .pickLabeled(modes)),
+            ("bitbucket", "Bitbucket", .pickLabeled(modes)),
         ])
     }
 
@@ -615,11 +644,11 @@ final class RemoteMenuApp {
         while true {
             let legs = (doc["fusionLegs"] as? [String]) ?? []
             let rows = [
-                "Fuse legs:  \(legs.isEmpty ? "—" : legs.joined(separator: ", "))",
-                "Judge provider:  \((doc["fusionJudgeProvider"] as? String) ?? "—")",
-                "Judge model:  \((doc["fusionJudgeModel"] as? String) ?? "—")",
+                "Models to fuse:  \(legs.isEmpty ? "—" : legs.joined(separator: ", "))",
+                "Provider:  \((doc["fusionJudgeProvider"] as? String) ?? "—")",
+                "Model:  \((doc["fusionJudgeModel"] as? String) ?? "—")",
                 "Judge on local engine:  \((doc["fusionJudgeLocal"] as? Bool ?? false) ? "yes" : "no")",
-                "Local fuse leg (model id):  \((doc["fusionLocalLeg"] as? String) ?? "—")",
+                "Local model:  \((doc["fusionLocalLeg"] as? String) ?? "—")",
                 "Back",
             ]
             guard let sel = tui.menu(title: "Fusion", items: rows, footer: "Enter edit · q back") else {
@@ -629,18 +658,18 @@ final class RemoteMenuApp {
             case 0:
                 let tools = ["claude", "codex", "grok"]
                 let on = Set(legs.compactMap { tools.firstIndex(of: $0) })
-                if let picked = tui.checklist(title: "Fuse legs (≥2 to engage)",
+                if let picked = tui.checklist(title: "Models to fuse (≥2 to engage)",
                                               items: ["Claude", "Codex", "Grok"], initiallyOn: on) {
                     doc["fusionLegs"] = picked.sorted().map { tools[$0] }
                     changed = true
                 }
-            case 1: if editField(&doc, key: "fusionJudgeProvider", label: "Judge provider",
+            case 1: if editField(&doc, key: "fusionJudgeProvider", label: "Provider",
                                  kind: .pick(["claude", "codex", "grok"])) { changed = true }
-            case 2: if editField(&doc, key: "fusionJudgeModel", label: "Judge model id (blank = default)",
+            case 2: if editField(&doc, key: "fusionJudgeModel", label: "Model",
                                  kind: .text(secret: false)) { changed = true }
             case 3: if editField(&doc, key: "fusionJudgeLocal", label: "Judge on local engine",
                                  kind: .bool) { changed = true }
-            case 4: if editField(&doc, key: "fusionLocalLeg", label: "Local fuse leg model",
+            case 4: if editField(&doc, key: "fusionLocalLeg", label: "Local model",
                                  kind: .modelPick) { changed = true }
             default: return changed
             }
@@ -754,14 +783,14 @@ final class RemoteMenuApp {
             let transport = s["transport"] as? String ?? "stdio"
             let args = (s["arguments"] as? [String]) ?? []
             var rows = ["Name:  \(s["name"] as? String ?? "—")",
-                        "Transport:  \(transport)"]
+                        "Transport:  \(transport.uppercased())"]
             if transport == "stdio" {
                 rows.append("Command:  \(s["command"] as? String ?? "—")")
                 rows.append("Arguments:  \(args.isEmpty ? "—" : args.joined(separator: " "))")
             } else {
                 rows.append("URL:  \(s["url"] as? String ?? "—")")
-                rows.append("Bearer token env var:  \(s["bearerTokenEnvVar"] as? String ?? "—")")
-                rows.append("Bearer token:  \((s["bearerToken"] as? String ?? "").isEmpty ? "—" : "•••• (set)")")
+                rows.append("Env var name:  \(s["bearerTokenEnvVar"] as? String ?? "—")")
+                rows.append("Token:  \((s["bearerToken"] as? String ?? "").isEmpty ? "—" : "•••• (set)")")
             }
             rows.append("Enabled:  \((s["enabled"] as? Bool ?? true) ? "yes" : "no")")
             rows.append("Back")
@@ -770,7 +799,7 @@ final class RemoteMenuApp {
             let backIdx = rows.count - 1, enabledIdx = backIdx - 1
             if sel == backIdx { return changed }
             if sel == 0 { if editField(&s, key: "name", label: "Name", kind: .text(secret: false)) { changed = true } }
-            else if sel == 1 { if editField(&s, key: "transport", label: "Transport", kind: .pick(["stdio", "http"])) { changed = true } }
+            else if sel == 1 { if editField(&s, key: "transport", label: "Transport", kind: .pickLabeled([("STDIO", "stdio"), ("HTTP", "http")])) { changed = true } }
             else if sel == enabledIdx { if editField(&s, key: "enabled", label: "Enabled", kind: .bool) { changed = true } }
             else if transport == "stdio" {
                 if sel == 2 { if editField(&s, key: "command", label: "Command", kind: .text(secret: false)) { changed = true } }
@@ -779,8 +808,8 @@ final class RemoteMenuApp {
                 }
             } else {
                 if sel == 2 { if editField(&s, key: "url", label: "URL", kind: .text(secret: false)) { changed = true } }
-                else if sel == 3 { if editField(&s, key: "bearerTokenEnvVar", label: "Bearer token env var", kind: .text(secret: false)) { changed = true } }
-                else if sel == 4 { if editField(&s, key: "bearerToken", label: "Bearer token", kind: .text(secret: true)) { changed = true } }
+                else if sel == 3 { if editField(&s, key: "bearerTokenEnvVar", label: "Env var name", kind: .text(secret: false)) { changed = true } }
+                else if sel == 4 { if editField(&s, key: "bearerToken", label: "Token", kind: .text(secret: true)) { changed = true } }
             }
         }
     }
@@ -789,57 +818,224 @@ final class RemoteMenuApp {
 
     private func editCredentials(_ doc: inout [String: Any]) -> Bool {
         var changed = false
+        func count(_ k: String) -> Int { (doc[k] as? [[String: Any]])?.count ?? 0 }
         while true {
-            let git = (doc["gitHTTPSCredentials"] as? [[String: Any]])?.count ?? 0
-            let dockers = (doc["dockerRegistries"] as? [[String: Any]])?.count ?? 0
-            let tokens = (doc["manualTokens"] as? [[String: Any]])?.count ?? 0
+            let gitName = doc["gitUserName"] as? String ?? ""
             let doSet = !((doc["digitalOceanToken"] as? String ?? "").isEmpty)
             let aws = (doc["awsCredentials"] as? [String: Any]) ?? [:]
             let awsSet = !((aws["accessKeyID"] as? String ?? "").isEmpty)
+            let gen = (doc["generateSSH"] as? Bool ?? false)
+            let imported = count("importedSSHKeys")
             let rows = [
-                "Git HTTPS credentials  (\(git))",
-                "Docker registries  (\(dockers))",
-                "DigitalOcean token  \(doSet ? "•••• (set)" : "—")",
-                "AWS credentials  \(awsSet ? "set" : "—")",
-                "Manual tokens  (\(tokens))",
+                "Git Identity  \(gitName.isEmpty ? "—" : gitName)",
+                "SSH Keys  \(gen ? "generate" : "—")\(imported > 0 ? " · \(imported) imported" : "")",
+                "GitHub / GitLab / Bitbucket tokens  (\(count("gitHTTPSCredentials")))",
+                "Kubernetes  (\(count("kubeconfigs")))",
+                "DigitalOcean  \(doSet ? "•••• (set)" : "—")",
+                "AWS  \(awsSet ? "set" : "—")",
+                "Container Registries  (\(count("dockerRegistries")))",
+                "Databases  (\(count("httpDatabases")))",
+                "Other API keys  (\(count("manualTokens")))",
                 "Back",
             ]
-            guard let sel = tui.menu(title: "Credentials", items: rows, footer: "Enter · q back") else { return changed }
+            guard let sel = tui.menu(title: "Credentials", items: rows, footer: "Enter · q back",
+                                     header: ["The same credential set as the GUI Credentials pane."]) else { return changed }
             switch sel {
-            case 0: if editCredList(&doc, key: "gitHTTPSCredentials", title: "Git HTTPS credentials",
+            case 0: if editFields(title: "Git Identity", doc: &doc, fields: [
+                        ("gitUserName", "user.name", .text(secret: false)),
+                        ("gitUserEmail", "user.email", .text(secret: false))]) { changed = true }
+            case 1: if editSSHKeys(&doc) { changed = true }
+            case 2: if editCredList(&doc, key: "gitHTTPSCredentials", title: "Git tokens",
                                     summary: { "\($0["username"] as? String ?? "?")@\($0["host"] as? String ?? "?")" },
                                     blank: { ["id": UUID().uuidString, "host": "", "username": "", "token": "", "requireApproval": false] },
-                                    fields: [("host", "Host (e.g. github.com)", .text(secret: false)),
+                                    fields: [("host", "Host", .text(secret: false)),
                                              ("username", "Username", .text(secret: false)),
-                                             ("token", "Token / password", .text(secret: true)),
+                                             ("token", "Personal access token", .text(secret: true)),
                                              ("requireApproval", "Require approval to use", .bool)]) { changed = true }
-            case 1: if editCredList(&doc, key: "dockerRegistries", title: "Docker registries",
-                                    summary: { "\($0["username"] as? String ?? "?")@\($0["host"] as? String ?? "?")" },
-                                    blank: { ["id": UUID().uuidString, "host": "", "username": "", "password": "", "requireApproval": false] },
-                                    fields: [("host", "Registry host", .text(secret: false)),
-                                             ("username", "Username", .text(secret: false)),
-                                             ("password", "Password", .text(secret: true)),
-                                             ("requireApproval", "Require approval to use", .bool)]) { changed = true }
-            case 2: if editField(&doc, key: "digitalOceanToken", label: "DigitalOcean API token", kind: .text(secret: true)) { changed = true }
-            case 3:
+            case 3: if editKubeconfigs(&doc) { changed = true }
+            case 4: if editFields(title: "DigitalOcean", doc: &doc, fields: [
+                        ("digitalOceanToken", "API token", .text(secret: true)),
+                        ("digitalOceanTokenRequiresApproval", "Require approval to use", .bool)]) { changed = true }
+            case 5:
                 var awsDoc = (doc["awsCredentials"] as? [String: Any]) ?? [:]
-                if editFields(title: "AWS credentials", doc: &awsDoc, fields: [
+                if editFields(title: "AWS", doc: &awsDoc, fields: [
                     ("accessKeyID", "Access key ID", .text(secret: false)),
                     ("secretAccessKey", "Secret access key", .text(secret: true)),
                     ("sessionToken", "Session token", .text(secret: true)),
-                    ("region", "Region (e.g. us-east-1)", .text(secret: false)),
+                    ("region", "Default region", .text(secret: false)),
                     ("requireApproval", "Require approval to use", .bool),
                 ]) { doc["awsCredentials"] = awsDoc; changed = true }
-            case 4: if editCredList(&doc, key: "manualTokens", title: "Manual tokens",
+            case 6: if editCredList(&doc, key: "dockerRegistries", title: "Container Registries",
+                                    summary: { "\($0["username"] as? String ?? "?")@\($0["host"] as? String ?? "?")" },
+                                    blank: { ["id": UUID().uuidString, "host": "", "username": "", "password": "", "requireApproval": false] },
+                                    fields: [("host", "Host", .text(secret: false)),
+                                             ("username", "Username", .text(secret: false)),
+                                             ("password", "Password", .text(secret: true)),
+                                             ("requireApproval", "Require approval to use", .bool)]) { changed = true }
+            case 7: if editDatabases(&doc) { changed = true }
+            case 8: if editCredList(&doc, key: "manualTokens", title: "Other API keys",
                                     summary: { "\($0["name"] as? String ?? "?")  → $\($0["envVarName"] as? String ?? "")" },
                                     blank: { ["id": UUID().uuidString, "name": "", "realValue": "", "envVarName": "", "hostFilter": ""] },
                                     fields: [("name", "Name", .text(secret: false)),
-                                             ("realValue", "Secret value", .text(secret: true)),
-                                             ("envVarName", "Inject as env var (e.g. STRIPE_API_KEY)", .text(secret: false)),
-                                             ("hostFilter", "Host filter (blank = any)", .text(secret: false))]) { changed = true }
+                                             ("realValue", "Real secret", .text(secret: true)),
+                                             ("envVarName", "Environment variable", .text(secret: false)),
+                                             ("hostFilter", "API host (optional)", .text(secret: false))]) { changed = true }
             default: return changed
             }
         }
+    }
+
+    // SSH Keys — the generated keypair toggle + list/remove of imported keys.
+    private func editSSHKeys(_ doc: inout [String: Any]) -> Bool {
+        var changed = false
+        var imported = (doc["importedSSHKeys"] as? [[String: Any]]) ?? []
+        while true {
+            let gen = doc["generateSSH"] as? Bool ?? false
+            var rows = ["Generate an ed25519 keypair:  \(gen ? "yes" : "no")"]
+            for k in imported {
+                rows.append("🔑 \((k["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? (k["filename"] as? String ?? "imported key"))")
+            }
+            rows.append("Back")
+            guard let sel = tui.menu(title: "SSH Keys", items: rows, footer: "Enter · q back",
+                                     header: ["Import a key from the GUI; here you can toggle generation and remove imported keys."]) else { return changed }
+            if sel == 0 {
+                if editField(&doc, key: "generateSSH", label: "Generate an ed25519 keypair", kind: .bool) { changed = true }
+            } else if sel == rows.count - 1 {
+                return changed
+            } else {
+                let idx = sel - 1
+                if idx >= 0, idx < imported.count,
+                   tui.confirm("Remove imported key “\(imported[idx]["label"] as? String ?? imported[idx]["filename"] as? String ?? "")”?") {
+                    imported.remove(at: idx); doc["importedSSHKeys"] = imported; changed = true
+                }
+            }
+        }
+    }
+
+    // Kubernetes — kubeconfig contexts (server / CA / namespace / auth).
+    private func editKubeconfigs(_ doc: inout [String: Any]) -> Bool {
+        var items = (doc["kubeconfigs"] as? [[String: Any]]) ?? []
+        var changed = false
+        while true {
+            var rows = items.map { "\($0["name"] as? String ?? "?")  ·  \($0["serverURL"] as? String ?? "")" }
+            rows.append("＋ Add context"); rows.append("Back")
+            guard let sel = tui.menu(title: "Kubernetes", items: rows, footer: "Enter: edit/remove · q back") else { break }
+            if sel == rows.count - 1 { break }
+            if sel == rows.count - 2 {
+                var k: [String: Any] = ["id": UUID().uuidString, "name": "", "serverURL": "", "caCertPEM": "",
+                                        "namespace": "", "auth": ["kind": "bearerToken", "token": ""], "requireApproval": false]
+                if editKubeconfig(&k) { items.append(k); changed = true }
+            } else if sel >= 0, sel < items.count {
+                guard let act = tui.menu(title: items[sel]["name"] as? String ?? "context", items: ["Edit", "Remove", "Cancel"]) else { continue }
+                if act == 0 { if editKubeconfig(&items[sel]) { changed = true } }
+                else if act == 1, tui.confirm("Remove this context?") { items.remove(at: sel); changed = true }
+            }
+        }
+        if changed { doc["kubeconfigs"] = items }
+        return changed
+    }
+
+    private func editKubeconfig(_ k: inout [String: Any]) -> Bool {
+        var changed = false
+        while true {
+            let auth = (k["auth"] as? [String: Any]) ?? ["kind": "bearerToken"]
+            let kind = auth["kind"] as? String ?? "bearerToken"
+            let authLabel = kind == "clientCert" ? "Client certificate" : (kind == "execPlugin" ? "Exec plugin" : "Bearer token")
+            let rows = [
+                "Name:  \(k["name"] as? String ?? "—")",
+                "Server:  \(k["serverURL"] as? String ?? "—")",
+                "CA cert:  \((k["caCertPEM"] as? String ?? "").isEmpty ? "—" : "•••• (set)")",
+                "Namespace:  \(k["namespace"] as? String ?? "—")",
+                "Auth:  \(authLabel)",
+                "Require approval to use:  \((k["requireApproval"] as? Bool ?? false) ? "yes" : "no")",
+                "Back",
+            ]
+            guard let sel = tui.menu(title: k["name"] as? String ?? "context", items: rows, footer: "Enter edit · q back") else { return changed }
+            switch sel {
+            case 0: if editField(&k, key: "name", label: "Name", kind: .text(secret: false)) { changed = true }
+            case 1: if editField(&k, key: "serverURL", label: "Server", kind: .text(secret: false)) { changed = true }
+            case 2: if editField(&k, key: "caCertPEM", label: "CA cert (PEM)", kind: .text(secret: true)) { changed = true }
+            case 3: if editField(&k, key: "namespace", label: "Namespace", kind: .text(secret: false)) { changed = true }
+            case 4: var a = auth; if editKubeAuth(&a) { k["auth"] = a; changed = true }
+            case 5: if editField(&k, key: "requireApproval", label: "Require approval to use", kind: .bool) { changed = true }
+            default: return changed
+            }
+        }
+    }
+
+    private func editKubeAuth(_ auth: inout [String: Any]) -> Bool {
+        var changed = false
+        while true {
+            let kind = auth["kind"] as? String ?? "bearerToken"
+            var rows = ["Method:  \(kind == "clientCert" ? "Client certificate" : (kind == "execPlugin" ? "Exec plugin" : "Bearer token"))"]
+            if kind == "clientCert" {
+                rows.append("Cert PEM:  \((auth["cert"] as? String ?? "").isEmpty ? "—" : "•••• (set)")")
+                rows.append("Key PEM:  \((auth["key"] as? String ?? "").isEmpty ? "—" : "•••• (set)")")
+            } else if kind == "execPlugin" {
+                rows.append("Command:  \(auth["command"] as? String ?? "—")")
+                rows.append("Args:  \((auth["args"] as? [String])?.joined(separator: " ") ?? "—")")
+                rows.append("Refresh:  \((auth["refreshSeconds"] as? Int).map(String.init) ?? "—")")
+            } else {
+                rows.append("Token:  \((auth["token"] as? String ?? "").isEmpty ? "—" : "•••• (set)")")
+            }
+            rows.append("Back")
+            guard let sel = tui.menu(title: "Auth", items: rows, footer: "Enter edit · q back") else { return changed }
+            if sel == 0 {
+                if editField(&auth, key: "kind", label: "Auth method", kind: .pickLabeled([
+                    ("Bearer token", "bearerToken"), ("Client certificate", "clientCert"), ("Exec plugin", "execPlugin")])) { changed = true }
+            } else if sel == rows.count - 1 {
+                return changed
+            } else if kind == "clientCert" {
+                if sel == 1 { if editField(&auth, key: "cert", label: "Cert PEM", kind: .text(secret: true)) { changed = true } }
+                else if sel == 2 { if editField(&auth, key: "key", label: "Key PEM", kind: .text(secret: true)) { changed = true } }
+            } else if kind == "execPlugin" {
+                if sel == 1 { if editField(&auth, key: "command", label: "Command", kind: .text(secret: false)) { changed = true } }
+                else if sel == 2, let v = tui.prompt("Args (space-separated)", initial: (auth["args"] as? [String])?.joined(separator: " ") ?? "") {
+                    auth["args"] = v.split(separator: " ").map(String.init); changed = true
+                } else if sel == 3 { if editField(&auth, key: "refreshSeconds", label: "Refresh (seconds)", kind: .int) { changed = true } }
+            } else {
+                if sel == 1 { if editField(&auth, key: "token", label: "Token", kind: .text(secret: true)) { changed = true } }
+            }
+        }
+    }
+
+    // Databases — MongoDB / ClickHouse / Elasticsearch HTTP endpoints.
+    private func editDatabases(_ doc: inout [String: Any]) -> Bool {
+        var items = (doc["httpDatabases"] as? [[String: Any]]) ?? []
+        var changed = false
+        while true {
+            var rows = items.map { d -> String in
+                let name = (d["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? (d["engine"] as? String ?? "db")
+                return "\(name)  ·  \(d["host"] as? String ?? "")"
+            }
+            rows.append("＋ Add endpoint"); rows.append("Back")
+            guard let sel = tui.menu(title: "Databases", items: rows, footer: "Enter: edit/remove · q back") else { break }
+            if sel == rows.count - 1 { break }
+            if sel == rows.count - 2 {
+                var d: [String: Any] = ["id": UUID().uuidString, "name": "", "engine": "mongoDataAPI", "host": "",
+                                        "auth": "basic", "username": "", "secret": "", "envVars": [String]()]
+                if editDatabase(&d) { items.append(d); changed = true }
+            } else if sel >= 0, sel < items.count {
+                guard let act = tui.menu(title: items[sel]["name"] as? String ?? "endpoint", items: ["Edit", "Remove", "Cancel"]) else { continue }
+                if act == 0 { if editDatabase(&items[sel]) { changed = true } }
+                else if act == 1, tui.confirm("Remove this endpoint?") { items.remove(at: sel); changed = true }
+            }
+        }
+        if changed { doc["httpDatabases"] = items }
+        return changed
+    }
+
+    private func editDatabase(_ d: inout [String: Any]) -> Bool {
+        editFields(title: "Database endpoint", doc: &d, fields: [
+            ("name", "Name (optional)", .text(secret: false)),
+            ("engine", "Engine", .pickLabeled([
+                ("MongoDB (Data API)", "mongoDataAPI"), ("ClickHouse", "clickHouse"), ("Elasticsearch", "elasticsearch")])),
+            ("host", "Host", .text(secret: false)),
+            ("auth", "Authentication", .pickLabeled([
+                ("Username + password", "basic"), ("API key", "apiKey"), ("Bearer token", "bearer")])),
+            ("username", "Username", .text(secret: false)),
+            ("secret", "Secret", .text(secret: true)),
+        ])
     }
 
     /// Generic list-of-credentials editor: list rows via `summary`, add via
