@@ -212,9 +212,13 @@ final class RemoteMenuApp {
                 let fusionConfigurable = vm?["fusionConfigurable"] as? Bool ?? false
                 let fusionEngaged = vm?["fusionEngaged"] as? Bool ?? false
                 let routing = vm?["routing"] as? String ?? "cloud"
-                var labels = ["Attach", "Describe", "Configure…"]
+                var labels = ["Attach", "New tab", "Describe", "Configure…"]
                 var actions: [() -> Bool] = [
                     { self.attachMenu(vmID: id, name: name); return false },
+                    { // create the tab (it becomes tmux's active window), then attach to it
+                      if self.postNewTab(vmID: id) { self.attach(vmID: id, name: name) }
+                      else { self.tui.toast("Couldn't open a tab") }
+                      return false },
                     { self.showOutput("describe \(name)", ["workspaces", "describe", id]); return false },
                     { self.configureWorkspace(id: id, name: name); return false },
                 ]
@@ -832,6 +836,18 @@ final class RemoteMenuApp {
         return (resp?.json["ok"] as? Bool) ?? false
     }
 
+    /// Tab command for a running workspace — SSH parity with the GUI's ⌘T /
+    /// tab switch. `action` ∈ new/select/close; `index` is the tmux window.
+    @discardableResult
+    private func postTab(vmID: String, action: String, index: Int = 0) -> Bool {
+        let resp = try? client.request(
+            "POST", "/sessions/\(ControlClient.encodeSegment(vmID))/tab",
+            body: ["action": action, "index": index])
+        return (resp?.json["ok"] as? Bool) ?? false
+    }
+    @discardableResult
+    private func postNewTab(vmID: String) -> Bool { postTab(vmID: vmID, action: "new") }
+
     /// Manage this workspace's worktrees: list repo/worktree/merge tabs, each
     /// with its available actions. Loops so an action returns here.
     private func worktreeMenu(vmID: String, name: String) {
@@ -855,21 +871,23 @@ final class RemoteMenuApp {
                         }
                     }
                 } else if t["isGitRepo"] as? Bool == true {
-                    labels.append("\(indent)📁 \(title)  (git)")
+                    labels.append("\(indent)＋ New worktree from \(title)…")
                     actions.append { self.createWorktreeRemote(vmID: vmID, tab: t, defaultTool: tool) }
                 }
             }
             if labels.isEmpty {
                 _ = tui.menu(title: "Worktrees · \(name)", items: ["Back"],
                              footer: "Enter back",
-                             header: ["No git repos or worktrees in this workspace yet.",
-                                      "Open a repo in a tab, then it'll appear here."])
+                             header: ["No git repo open in this workspace yet.",
+                                      "Open a repo in a tab (cd into it), then it'll appear",
+                                      "here as “New worktree from …”."])
                 return
             }
             labels.append("Back")
             guard let sel = tui.menu(title: "Worktrees · \(name)", items: labels,
                                      footer: "Enter select · q back",
-                                     header: ["Pick a repo to branch from, or a worktree to merge/discard."]) else { return }
+                                     header: ["＋ New worktree from … → branch a repo into its own tab.",
+                                              "🌿 an existing worktree → merge / discard / branch further."]) else { return }
             if sel >= 0, sel < actions.count { actions[sel]() } else { return }
         }
     }
@@ -900,13 +918,16 @@ final class RemoteMenuApp {
         let title = tab["title"] as? String ?? "worktree"
         guard let branch = tab["worktreeBranch"] as? String,
               let mainRoot = tab["rootRepo"] as? String else { return }
-        var items = ["Merge…", "Discard worktree"]
+        var items = ["＋ New worktree from here…", "Merge…", "Discard worktree"]
         if tab["isMergeTab"] as? Bool == true { items.insert("Resolve conflicts", at: 0) }
         items.append("Back")
         guard let sel = tui.menu(title: "Worktree: \(title)", items: items,
                                  footer: "Enter select · q back") else { return }
         let choice = items[sel]
         switch choice {
+        case "＋ New worktree from here…":
+            // Worktrees off worktrees (nested) — parity with the GUI.
+            createWorktreeRemote(vmID: vmID, tab: tab, defaultTool: tool)
         case "Resolve conflicts":
             if let dir = tab["cwd"] as? String {
                 _ = postWorktree(vmID: vmID, action: "resolve", args: [dir, tool])
@@ -1025,11 +1046,48 @@ final class RemoteMenuApp {
         defer { tui.end() }
         while true {
             let vm = fetchVM(vmID)
+            let tabs = (vm?["tabs"] as? [[String: Any]]) ?? []
             let fusionConfigurable = vm?["fusionConfigurable"] as? Bool ?? false
             let fusionEngaged = vm?["fusionEngaged"] as? Bool ?? false
             let routing = vm?["routing"] as? String ?? "cloud"
             var labels: [String] = []
-            var actions: [() -> Bool] = []       // return true → close the overlay
+            var actions: [() -> Bool] = []       // return true → close the overlay (resume the attach)
+
+            // The tab tree — names + worktree nesting — as SWITCHABLE items.
+            // Selecting a tab makes it active and closes the overlay, so the
+            // guest repaints on that tab. (▸ = current · 📁 repo · 🌿 worktree · ⇗ merge)
+            for t in tabs {
+                let title = t["title"] as? String ?? "shell"
+                let indent = String(repeating: "  ", count: Self.worktreeDepth(t, in: tabs))
+                let isActive = (t["active"] as? Bool == true)
+                let glyph: String
+                if t["isWorktree"] as? Bool == true { glyph = "🌿 " }
+                else if t["isMergeTab"] as? Bool == true { glyph = "⇗ " }
+                else if t["isGitRepo"] as? Bool == true { glyph = "📁 " }
+                else { glyph = "· " }
+                let idx = t["index"] as? Int ?? 0
+                labels.append("\(isActive ? "▸ " : "  ")\(indent)\(glyph)\(title)")
+                actions.append {
+                    if !isActive {
+                        _ = self.postTab(vmID: vmID, action: "select", index: idx)
+                        Thread.sleep(forTimeInterval: 0.35)   // let the guest switch before we repaint
+                    }
+                    return true                                // close overlay → show the tab
+                }
+            }
+            labels.append("＋ New tab")
+            actions.append {
+                _ = self.postNewTab(vmID: vmID)
+                Thread.sleep(forTimeInterval: 0.35)            // let the new window open + become active
+                return true                                    // close overlay → tmux follows to it
+            }
+            if !tabs.isEmpty {
+                labels.append("─────────────")
+                actions.append { false }
+            }
+
+            labels.append("🌿 Worktrees…")
+            actions.append { self.worktreeMenu(vmID: vmID, name: name); return false }
             if fusionConfigurable {
                 labels.append("⚡ Fusion: \(fusionEngaged ? "on ✓" : "off")")
                 actions.append { self.toggleFusion(id: vmID, name: name, currentlyOn: fusionEngaged); return false }
@@ -1047,7 +1105,7 @@ final class RemoteMenuApp {
             }
             labels.append("↩ Resume session")
             guard let sel = tui.menu(title: "bromure · \(name)", items: labels,
-                                     footer: "Enter select · q resume",
+                                     footer: "Enter switch/select · q resume",
                                      header: vmDashboardLines(vm)) else { return }
             if sel >= 0, sel < actions.count {
                 if actions[sel]() { return }

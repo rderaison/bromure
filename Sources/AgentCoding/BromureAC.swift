@@ -1875,6 +1875,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.automationWorktreeCommand(profileNameOrID: profileNameOrID,
                                             action: action, args: args) ?? false
         }
+        server.onTabCommand = { [weak self] profileNameOrID, action, index in
+            self?.automationTabCommand(profileNameOrID: profileNameOrID,
+                                       action: action, index: index) ?? false
+        }
 
         server.onGetAppState = { [weak self] in
             guard let self else { return [:] }
@@ -5524,6 +5528,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return false
         }
         let line = ([name] + encoded).joined(separator: " ")
+        let file = outbox.appendingPathComponent("cmd-\(UUID().uuidString).txt")
+        try? (line + "\n").write(to: file, atomically: true, encoding: .utf8)
+        return true
+    }
+
+    /// Tab command for a (possibly detached) running session — the SSH/CLI
+    /// counterpart of the GUI's ⌘T / tab switch. Queues the guest command
+    /// (new-tab / select-tab / close-tab) to the session's outbox.
+    @MainActor
+    func automationTabCommand(profileNameOrID: String, action: String, index: Int) -> Bool {
+        guard let p = profileByNameOrID(profileNameOrID),
+              let session = runningSessions[p.id],
+              let outbox = session.sandbox.sessionDisk?.outboxDirectory else { return false }
+        let line: String
+        switch action {
+        case "new":    line = "new-tab"
+        case "select": line = "select-tab \(index)"
+        case "close":  line = "close-tab \(index)"
+        default:       return false
+        }
         let file = outbox.appendingPathComponent("cmd-\(UUID().uuidString).txt")
         try? (line + "\n").write(to: file, atomically: true, encoding: .utf8)
         return true
