@@ -346,6 +346,19 @@ pipeline {
                 }
             }
         }
+
+        stage('24. Worktrees (VM-side)') {
+            // Boots a session VM and drives the /sessions/{id}/worktree control
+            // route (the same one the GUI right-click and the /rc TUI use):
+            // create → assert git worktree + reboot-restore registry + roster
+            // tab; commit → merge into the parent branch; then remove. Needs the
+            // base image from the Init stage; self-skips (SKIP) without one.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^24\\."'
+                }
+            }
+        }
     }
 
     post {
