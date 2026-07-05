@@ -55,6 +55,12 @@ pipeline {
             steps {
                 sh '''
                     APP_BUNDLE=$(cat .app_bundle_path)
+                    # A previous run of EITHER pipeline can leave an instance
+                    # behind — bromure or bromure-ac holding a VZ VM / port
+                    # 9222/9223 and shadowing this build's app. Kill both.
+                    pkill -x bromure 2>/dev/null || true
+                    pkill -x bromure-ac 2>/dev/null || true
+                    sleep 2
                     BROMURE_DEBUG_CLAUDE=y "$APP_BUNDLE/Contents/MacOS/bromure" &
                     echo $! > .bromure_pid
                     for i in $(seq 1 60); do

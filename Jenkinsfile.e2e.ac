@@ -87,10 +87,12 @@ pipeline {
                     # matches. Clear the harness relaunch log too (it appends
                     # across runs) so a stale copy can't get archived.
                     rm -f bromure-ac.log bromure-ac-e2e.log /tmp/bromure-ac-e2e.log
-                    # A previous run can leave an instance behind (e.g. one the
-                    # test harness relaunched, whose pid we never recorded) —
-                    # it would hold port 9223 and shadow this build's app.
+                    # A previous run of EITHER pipeline can leave an instance
+                    # behind (e.g. one the harness relaunched, whose pid we never
+                    # recorded) — bromure or bromure-ac holding a VZ VM / port
+                    # 9222/9223 and shadowing this build's app. Kill both.
                     pkill -x bromure-ac 2>/dev/null || true
+                    pkill -x bromure 2>/dev/null || true
                     sleep 2
                     BROMURE_DEBUG_CLAUDE=1 "$APP_BUNDLE/Contents/MacOS/bromure-ac" > bromure-ac.log 2>&1 &
                     echo $! > .bromure_ac_pid
