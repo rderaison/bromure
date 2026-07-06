@@ -549,6 +549,20 @@ public final class SessionDisk {
                 "export AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
                 // No private key in the VM — use the host-bridged agent.
                 "export SSH_AUTH_SOCK=/tmp/bromure-agent.sock",
+                // Claude Code OpenTelemetry export. OTLP/JSON to
+                // 127.0.0.1:4318 (in NO_PROXY above, so it skips the
+                // MITM proxy); bromure-vm-bridge.py splices that port
+                // to vsock 8448 where the host-side OTelReceiver
+                // ingests it. Both signals batch at 60 s. Content
+                // capture (prompts, responses, tool details) stays
+                // off — metadata only.
+                "export CLAUDE_CODE_ENABLE_TELEMETRY=1",
+                "export OTEL_METRICS_EXPORTER=otlp",
+                "export OTEL_LOGS_EXPORTER=otlp",
+                "export OTEL_EXPORTER_OTLP_PROTOCOL=http/json",
+                "export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318",
+                "export OTEL_METRIC_EXPORT_INTERVAL=60000",
+                "export OTEL_LOGS_EXPORT_INTERVAL=60000",
             ]
             proxyLines.append(contentsOf: ghEnv)
 

@@ -9,6 +9,7 @@ the host's MITM engine over vsock:
   • ssh-agent:   /tmp/bromure-agent.sock (Unix)    →  vsock CID 2 port 8444
   • AWS creds:   /tmp/bromure-aws-creds.sock (Unix) →  vsock CID 2 port 8445
   • Local LLM:   127.0.0.1:11434 (TCP)             →  vsock CID 2 port 8446
+  • OTel/OTLP:   127.0.0.1:4318 (TCP)              →  vsock CID 2 port 8448
 
 Bytes are pumped both directions per connection. No TLS, no inspection,
 no buffering — just a raw pipe.
@@ -43,6 +44,11 @@ AWS_CREDS_UNIX_PATH = "/tmp/bromure-aws-creds.sock"
 # OPENAI_BASE_URL; we splice that TCP to vsock 8446 → host loopback engine.
 LLM_ENGINE_TCP_PORT = 11434
 LLM_ENGINE_VSOCK_PORT = 8446
+# Claude Code's OpenTelemetry exporter posts OTLP/JSON to the standard
+# collector port 4318 (OTEL_EXPORTER_OTLP_ENDPOINT in proxy.env); we
+# splice that to vsock 8448 → host-side OTelReceiver.
+OTEL_TCP_PORT = 4318
+OTEL_VSOCK_PORT = 8448
 
 LOG_PATH = "/tmp/bromure-vm-bridge.log"
 
@@ -211,6 +217,21 @@ def serve_llm_engine() -> None:
         ).start()
 
 
+def serve_otel() -> None:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", OTEL_TCP_PORT))
+    s.listen(16)
+    log(f"[otel] listening on 127.0.0.1:{OTEL_TCP_PORT}")
+    while True:
+        conn, _addr = s.accept()
+        threading.Thread(
+            target=bridge,
+            args=(conn, OTEL_VSOCK_PORT, "otel"),
+            daemon=True,
+        ).start()
+
+
 def main() -> None:
     # Truncate log on each run.
     try:
@@ -225,6 +246,7 @@ def main() -> None:
     threading.Thread(target=serve_ssh_agent, daemon=True).start()
     threading.Thread(target=serve_aws_creds, daemon=True).start()
     threading.Thread(target=serve_llm_engine, daemon=True).start()
+    threading.Thread(target=serve_otel, daemon=True).start()
 
     # Park the main thread.
     signal.pause()

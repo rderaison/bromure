@@ -1386,6 +1386,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// this map.
     private var shellBridges: [Profile.ID: ShellBridge] = [:]
 
+    /// Per-VM OTel ingest listeners (vsock 8448). Claude Code's
+    /// telemetry export lands here and streams to the cloud when the
+    /// install is enrolled; unenrolled it's dropped in the receiver.
+    private var otelReceivers: [Profile.ID: OTelReceiver] = [:]
+
     /// Sparkle auto-updater. Retained strongly — if this deallocates,
     /// scheduled update checks stop firing. Initialised in
     /// applicationDidFinishLaunching. Silently no-ops on dev builds where
@@ -5351,6 +5356,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
             }
+            // OTel ingest (vsock 8448) — Claude Code's telemetry export.
+            if let dev = sandbox.socketDevice {
+                self.otelReceivers[profile.id] = OTelReceiver(
+                    socketDevice: dev, profileID: profile.id)
+            }
             if sessionDisk.didCloneOnLastEnsure, let current = currentBaseVersion {
                 var p = profile
                 p.baseImageVersionAtClone = current
@@ -6439,6 +6449,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: profile.id)
         shellBridges[profile.id]?.stop()
         shellBridges.removeValue(forKey: profile.id)
+        otelReceivers[profile.id]?.stop()
+        otelReceivers.removeValue(forKey: profile.id)
         // Drop this workspace's local models from the engine's union, unloading
         // any no longer wanted by an open workspace (stops the engine if none
         // remain). The engine keeps serving the others.
@@ -6896,6 +6908,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let dev = sandbox.socketDevice {
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
+            }
+            // OTel ingest — see the matching block on the warm-boot path.
+            if let dev = sandbox.socketDevice {
+                self.otelReceivers[profile.id] = OTelReceiver(
+                    socketDevice: dev, profileID: profile.id)
             }
             self.wireSandboxCallbacks(sandbox)
             self.registerSession(sandbox, profile: profile)
