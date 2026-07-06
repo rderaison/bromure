@@ -70,6 +70,13 @@ final class RemoteMenuApp {
     }
 
     func run() {
+        // If the terminal/pty vanishes mid-session (e.g. the SSH connection
+        // drops), writes to STDOUT hit EPIPE. Ignore SIGPIPE so our raw
+        // `Darwin.write` calls just return -1 instead of killing the process;
+        // the menu loop then unwinds naturally when stdin also reports EOF.
+        // (NSFileHandle.writeData used to raise an uncatchable NSException here,
+        // aborting the app — see attach()/attachContainer(), now on tui.write.)
+        signal(SIGPIPE, SIG_IGN)
         // Make sure the app/agent is up so the control socket answers.
         try? client.ensureAgentRunning()
         tui.begin()
@@ -1578,14 +1585,14 @@ final class RemoteMenuApp {
         let banner = "\u{1B}[2J\u{1B}[H" +
             "\u{1B}[1m  Type `exit` (or Ctrl-d) to leave the container\u{1B}[0m\r\n\r\n" +
             "  Attaching to \(container) (\(shell))…\r\n"
-        FileHandle.standardOutput.write(Data(banner.utf8))
+        tui.write(banner)
         Thread.sleep(forTimeInterval: 1.0)
         do {
             try InteractiveExec.run(client: client, vm: vmID,
                                     command: "docker exec -it \(container) \(shell)")
         } catch {
             let msg = "\r\nCouldn't attach: \(error.localizedDescription)\r\nPress Enter…"
-            FileHandle.standardOutput.write(Data(msg.utf8))
+            tui.write(msg)
             _ = readLine()
         }
     }
@@ -1603,7 +1610,7 @@ final class RemoteMenuApp {
             "\u{1B}[1m  \(Self.chordLabel(overlayTrigger)): workspace menu"
             + "  ·  Ctrl-b d: disconnect\u{1B}[0m\r\n\r\n" +
             "  Attaching…\r\n"
-        FileHandle.standardOutput.write(Data(banner.utf8))
+        tui.write(banner)
         Thread.sleep(forTimeInterval: 1.5)
         var cmd = "tmux attach -t bromure"
         if let tab { cmd += " \\; select-window -t bromure:\(tab)" }
@@ -1614,7 +1621,7 @@ final class RemoteMenuApp {
                 onOverlay: { [weak self] in self?.remoteOverlay(vmID: vmID, name: name) ?? [] })
         } catch {
             let msg = "\r\nCouldn't attach: \(error.localizedDescription)\r\nPress Enter…"
-            FileHandle.standardOutput.write(Data(msg.utf8))
+            tui.write(msg)
             _ = readLine()
         }
     }
