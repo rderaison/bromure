@@ -784,3 +784,43 @@
 "Your real secret. Stays on macOS — the VM only ever sees a fake stand-in." = "実際のシークレットです。macOSに保存され、VMには偽の代替値のみが渡されます。";
 "Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string." = "VM内で偽のシークレットがエクスポートされる変数（複数の場合はカンマ区切り）。コードや接続文字列からこれらを参照してください。";
 "Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox." = "Bromureが自動的に処理しないAPI（Anthropic、OpenAI、GitHub、GitLab、DigitalOcean、Kubernetesは対応済み）の認証情報を追加します。VM内のエージェントには偽のトークン（`brm_…`）のみが見えます。リクエストがVMを出る際に、Bromureが偽のトークンを実際のキーに戻すため、実際のシークレットがサンドボックスに入ることはありません。";
+
+/* Worktrees — tab context menu */
+"New worktree…" = "新規ワークツリー…";
+"New worktree…  (Not in a git repo)" = "新規ワークツリー…  （git リポジトリではありません）";
+"Merge…" = "マージ…";
+"Discard worktree" = "ワークツリーを破棄";
+"Have the agent resolve conflicts" = "エージェントにコンフリクトを解決させる";
+
+/* Worktrees — dialogs */
+"New worktree" = "新規ワークツリー";
+"Creates a git worktree branched from this tab's current commit and opens a nested agent in it." = "このタブの現在のコミットから分岐した git ワークツリーを作成し、その中でネストされたエージェントを開きます。";
+"Task name (e.g. Website refactoring)" = "タスク名（例: ウェブサイトのリファクタリング）";
+"Initial prompt (optional)" = "最初のプロンプト（任意）";
+"Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy." = "マージ先のチェックアウト内の新しいタブでマージを実行します。このブランチでコミット済みの作業だけがマージされます。コンフリクトが発生した場合は、その場でコーディングエージェントが起動し、自動的に解決します。ワークツリーは破棄されません — 問題がなければ「ワークツリーを破棄」を使用してください。";
+"This tab's working directory isn't available yet" = "このタブの作業ディレクトリはまだ利用できません";
+"The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again." = "ワークスペースが古い VM 内エージェントを実行している可能性があります。ワークスペースを再起動（シャットダウンしてから開始）してワークツリー対応を反映させ、もう一度お試しください。";
+"Worktree action failed" = "ワークツリー操作に失敗しました";
+
+/* Menu bar — Workspaces menu */
+"New Workspace…" = "新規ワークスペース…";
+"New tab" = "新規タブ";
+"Merge worktree" = "ワークツリーをマージ";
+
+/* Menu bar — items missing from the base catalog */
+"Preferences…" = "環境設定…";
+"Remote Access…" = "リモートアクセス…";
+"Trace Inspector…" = "トレースインスペクタ…";
+"Inference Metrics…" = "推論メトリクス…";
+"Inference Engine Log…" = "推論エンジンのログ…";
+"Working…" = "作業中…";
+"Needs your input" = "入力が必要です";
+
+/* Worktrees — dialog buttons & format strings */
+"Merge “%@”" = "「%@」をマージ";
+"Merge" = "マージ";
+"Discard worktree “%@”?" = "ワークツリー「%@」を破棄しますか？";
+"Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "チェックアウトを取り除き、ブランチ「%@」を削除します。このブランチでまだマージされていないコミットは失われます。";
+"Discard" = "破棄";
+"%@ (repo root)" = "%@（リポジトリのルート）";
+"%@  ⚠︎ skips intermediates" = "%@  ⚠︎ 中間をスキップ";

@@ -784,3 +784,46 @@
 "Your real secret. Stays on macOS — the VM only ever sees a fake stand-in." = "你的真實密鑰。僅保留在 macOS 上——虛擬機只會看到一個偽造的替身。";
 "Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string." = "在虛擬機中匯出偽造密鑰所用的變數——多個時以逗號分隔。請在程式碼/連線字串中參照它們。";
 "Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox." = "為任何 Bromure 不會自動處理的 API 新增憑證（Anthropic、OpenAI、GitHub、GitLab、DigitalOcean 和 Kubernetes 已自動處理）。虛擬機內的代理只會看到偽造權杖（`brm_…`）；當請求離開虛擬機時，Bromure 會在出口處把偽造權杖換回你的真實金鑰——因此你的真實密鑰永遠不會進入沙箱。";
+
+/* Worktrees — tab context menu */
+"New worktree…" = "新增工作樹…";
+"New worktree…  (Not in a git repo)" = "新增工作樹…  （不在 git 儲存庫中）";
+"Merge…" = "合併…";
+"Discard worktree" = "捨棄工作樹";
+"Have the agent resolve conflicts" = "讓代理程式解決衝突";
+
+/* Worktrees — dialogs */
+"New worktree" = "新增工作樹";
+"Creates a git worktree branched from this tab's current commit and opens a nested agent in it." = "從此分頁目前的提交分支出一個 git 工作樹，並在其中開啟巢狀代理程式。";
+"Task name (e.g. Website refactoring)" = "任務名稱（例如：網站重構）";
+"Initial prompt (optional)" = "初始提示詞（可選）";
+"Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy." = "在目標檢出的新分頁中執行合併。只有此分支上已提交的工作會被合併。若發生衝突，編碼代理程式會就地啟動並自動解決。工作樹不會被捨棄——滿意後請使用「捨棄工作樹」。";
+"This tab's working directory isn't available yet" = "此分頁的工作目錄尚無法使用";
+"The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again." = "工作區可能正在執行較舊的 VM 內代理程式。請重新啟動工作區（先關機，再啟動）以取得工作樹支援，然後再試一次。";
+"Worktree action failed" = "工作樹操作失敗";
+
+/* Menu bar — Workspaces menu */
+"New Workspace…" = "新增工作區…";
+"New tab" = "新增分頁";
+"Merge worktree" = "合併工作樹";
+
+/* Menu bar — items missing from the base catalog */
+"Preferences…" = "偏好設定…";
+"Remote Access…" = "遠端存取…";
+"Trace Inspector…" = "追蹤檢查器…";
+"Inference Metrics…" = "推論指標…";
+"Inference Engine Log…" = "推論引擎日誌…";
+"Working…" = "工作中…";
+"Needs your input" = "需要您的輸入";
+
+/* Worktrees — dialog buttons & format strings */
+"Merge “%@”" = "合併「%@」";
+"Merge" = "合併";
+"Discard worktree “%@”?" = "要捨棄工作樹「%@」嗎？";
+"Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "移除該檢出並刪除分支「%@」。此分支上尚未合併的提交將會遺失。";
+"Discard" = "捨棄";
+"%@ (repo root)" = "%@（儲存庫根目錄）";
+"%@  ⚠︎ skips intermediates" = "%@  ⚠︎ 跳過中間項目";
+
+/* Catch-up: key missing only from zh-Hant */
+"Applies to the kube API servers from this profile's kubeconfigs (e.g. `kubectl delete` fails cleanly)." = "適用於此設定檔 kubeconfig 中的 kube API 伺服器（例如 `kubectl delete` 會乾淨地失敗）。";

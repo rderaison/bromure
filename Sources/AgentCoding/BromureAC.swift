@@ -5627,7 +5627,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 chain.append((pb, parent.shownLabel))
                 parentBranch = parent.parentBranch
             } else {
-                chain.append((pb, "\(pb) (repo root)"))
+                chain.append((pb, String(format: NSLocalizedString("%@ (repo root)", comment: ""), pb)))
                 break
             }
             guardCount += 1
@@ -5647,7 +5647,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for (i, dest) in chain.enumerated() {
             // The immediate parent (index 0) is the safe default; anything above
             // skips the intermediate worktrees, which then won't get these changes.
-            popup.addItem(withTitle: i == 0 ? dest.label : "\(dest.label)  ⚠︎ skips intermediates")
+            popup.addItem(withTitle: i == 0 ? dest.label
+                : String(format: NSLocalizedString("%@  ⚠︎ skips intermediates", comment: ""), dest.label))
         }
         popup.selectItem(at: 0)
         alert.accessoryView = popup

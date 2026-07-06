@@ -786,3 +786,43 @@
 "Your real secret. Stays on macOS — the VM only ever sees a fake stand-in." = "Tu secreto real. Permanece en macOS; la VM solo ve un sustituto falso.";
 "Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string." = "Variable(s) bajo la(s) que se exporta el secreto falso en la VM; separa con comas si hay más de una. Haz referencia a ellas desde tu código / cadena de conexión.";
 "Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox." = "Agrega credenciales para cualquier API que Bromure no gestione automáticamente (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean y Kubernetes ya lo están). El agente dentro de la VM solo ve un token falso (`brm_…`); cuando una solicitud sale de la VM, Bromure vuelve a cambiar el falso por tu clave real a la salida, de modo que tu secreto real nunca entra en el sandbox.";
+
+/* Worktrees — tab context menu */
+"New worktree…" = "Nuevo worktree…";
+"New worktree…  (Not in a git repo)" = "Nuevo worktree…  (No es un repositorio git)";
+"Merge…" = "Fusionar…";
+"Discard worktree" = "Descartar worktree";
+"Have the agent resolve conflicts" = "Que el agente resuelva los conflictos";
+
+/* Worktrees — dialogs */
+"New worktree" = "Nuevo worktree";
+"Creates a git worktree branched from this tab's current commit and opens a nested agent in it." = "Crea un worktree de git ramificado desde el commit actual de esta pestaña y abre en él un agente anidado.";
+"Task name (e.g. Website refactoring)" = "Nombre de la tarea (p. ej. Refactorización del sitio web)";
+"Initial prompt (optional)" = "Prompt inicial (opcional)";
+"Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy." = "Ejecuta la fusión en una pestaña nueva dentro del checkout del destino. Solo se fusiona el trabajo con commit de esta rama. Si hay conflictos, el agente de código se inicia allí mismo para resolverlos automáticamente. El worktree no se descarta — use “Descartar worktree” cuando esté conforme.";
+"This tab's working directory isn't available yet" = "El directorio de trabajo de esta pestaña aún no está disponible";
+"The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again." = "El espacio de trabajo probablemente ejecuta un agente en la VM anticuado. Reinicie el espacio de trabajo (Apagar y luego Iniciar) para que incorpore la compatibilidad con worktrees e inténtelo de nuevo.";
+"Worktree action failed" = "La acción del worktree ha fallado";
+
+/* Menu bar — Workspaces menu */
+"New Workspace…" = "Nuevo espacio de trabajo…";
+"New tab" = "Nueva pestaña";
+"Merge worktree" = "Fusionar worktree";
+
+/* Menu bar — items missing from the base catalog */
+"Preferences…" = "Preferencias…";
+"Remote Access…" = "Acceso remoto…";
+"Trace Inspector…" = "Inspector de trazas…";
+"Inference Metrics…" = "Métricas de inferencia…";
+"Inference Engine Log…" = "Registro del motor de inferencia…";
+"Working…" = "Trabajando…";
+"Needs your input" = "Necesita su intervención";
+
+/* Worktrees — dialog buttons & format strings */
+"Merge “%@”" = "Fusionar “%@”";
+"Merge" = "Fusionar";
+"Discard worktree “%@”?" = "¿Descartar el worktree “%@”?";
+"Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "Elimina el checkout y borra la rama “%@”. Se perderán los commits de esta rama que no se hayan fusionado.";
+"Discard" = "Descartar";
+"%@ (repo root)" = "%@ (raíz del repo)";
+"%@  ⚠︎ skips intermediates" = "%@  ⚠︎ omite los intermedios";

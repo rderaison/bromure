@@ -784,3 +784,43 @@
 "Your real secret. Stays on macOS — the VM only ever sees a fake stand-in." = "Ihr echtes Geheimnis. Bleibt auf macOS – die VM sieht nur einen gefälschten Platzhalter.";
 "Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string." = "Variable(n), unter der/denen das gefälschte Geheimnis in der VM exportiert wird – bei mehreren durch Kommas getrennt. Verweisen Sie in Ihrem Code / Ihrer Verbindungszeichenfolge darauf.";
 "Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox." = "Fügen Sie Anmeldedaten für jede API hinzu, die Bromure nicht automatisch verarbeitet (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean und Kubernetes werden bereits abgedeckt). Der Agent in der VM sieht nur einen gefälschten Token (`brm_…`); wenn eine Anfrage die VM verlässt, ersetzt Bromure den gefälschten Token beim Ausgang wieder durch Ihren echten Schlüssel – Ihr echtes Geheimnis gelangt also nie in die Sandbox.";
+
+/* Worktrees — tab context menu */
+"New worktree…" = "Neuer Worktree…";
+"New worktree…  (Not in a git repo)" = "Neuer Worktree…  (Kein Git-Repository)";
+"Merge…" = "Zusammenführen…";
+"Discard worktree" = "Worktree verwerfen";
+"Have the agent resolve conflicts" = "Konflikte vom Agenten lösen lassen";
+
+/* Worktrees — dialogs */
+"New worktree" = "Neuer Worktree";
+"Creates a git worktree branched from this tab's current commit and opens a nested agent in it." = "Erstellt einen Git-Worktree, der vom aktuellen Commit dieses Tabs abzweigt, und öffnet darin einen untergeordneten Agenten.";
+"Task name (e.g. Website refactoring)" = "Aufgabenname (z. B. Website-Refactoring)";
+"Initial prompt (optional)" = "Anfänglicher Prompt (optional)";
+"Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy." = "Führt den Merge in einem neuen Tab im Checkout des Ziels aus. Es werden nur committete Änderungen dieses Branches zusammengeführt. Bei Konflikten wird der Coding-Agent direkt dort gestartet, um sie automatisch aufzulösen. Der Worktree wird dabei nicht verworfen — verwenden Sie „Worktree verwerfen“, sobald Sie zufrieden sind.";
+"This tab's working directory isn't available yet" = "Das Arbeitsverzeichnis dieses Tabs ist noch nicht verfügbar";
+"The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again." = "Der Arbeitsbereich führt vermutlich einen älteren In-VM-Agenten aus. Starten Sie den Arbeitsbereich neu (Herunterfahren, dann Starten), damit er die Worktree-Unterstützung übernimmt, und versuchen Sie es erneut.";
+"Worktree action failed" = "Worktree-Aktion fehlgeschlagen";
+
+/* Menu bar — Workspaces menu */
+"New Workspace…" = "Neuer Arbeitsbereich…";
+"New tab" = "Neuer Tab";
+"Merge worktree" = "Worktree zusammenführen";
+
+/* Menu bar — items missing from the base catalog */
+"Preferences…" = "Einstellungen…";
+"Remote Access…" = "Fernzugriff…";
+"Trace Inspector…" = "Trace-Inspektor…";
+"Inference Metrics…" = "Inferenz-Metriken…";
+"Inference Engine Log…" = "Inferenz-Engine-Protokoll…";
+"Working…" = "Arbeitet…";
+"Needs your input" = "Benötigt Ihre Eingabe";
+
+/* Worktrees — dialog buttons & format strings */
+"Merge “%@”" = "„%@“ zusammenführen";
+"Merge" = "Zusammenführen";
+"Discard worktree “%@”?" = "Worktree „%@“ verwerfen?";
+"Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "Entfernt den Checkout und löscht den Branch „%@“. Alle Commits auf diesem Branch, die noch nicht zusammengeführt wurden, gehen verloren.";
+"Discard" = "Verwerfen";
+"%@ (repo root)" = "%@ (Repo-Wurzel)";
+"%@  ⚠︎ skips intermediates" = "%@  ⚠︎ überspringt Zwischenstufen";

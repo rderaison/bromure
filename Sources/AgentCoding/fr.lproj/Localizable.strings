@@ -784,3 +784,43 @@
 "Your real secret. Stays on macOS — the VM only ever sees a fake stand-in." = "Votre véritable secret. Reste sur macOS — la VM ne voit qu'un faux substitut.";
 "Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string." = "Variable(s) sous laquelle/lesquelles le faux secret est exporté dans la VM — séparées par des virgules s'il y en a plusieurs. Référencez-les depuis votre code / chaîne de connexion.";
 "Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox." = "Ajoutez des identifiants pour toute API que Bromure ne gère pas automatiquement (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean et Kubernetes le sont déjà). L'agent dans la VM ne voit qu'un faux jeton (`brm_…`) ; lorsqu'une requête quitte la VM, Bromure remplace le faux par votre véritable clé en sortie — votre véritable secret n'entre donc jamais dans le bac à sable.";
+
+/* Worktrees — tab context menu */
+"New worktree…" = "Nouveau worktree…";
+"New worktree…  (Not in a git repo)" = "Nouveau worktree…  (Pas dans un dépôt git)";
+"Merge…" = "Fusionner…";
+"Discard worktree" = "Abandonner le worktree";
+"Have the agent resolve conflicts" = "Laisser l’agent résoudre les conflits";
+
+/* Worktrees — dialogs */
+"New worktree" = "Nouveau worktree";
+"Creates a git worktree branched from this tab's current commit and opens a nested agent in it." = "Crée un worktree git dérivé du commit actuel de cet onglet et y ouvre un agent imbriqué.";
+"Task name (e.g. Website refactoring)" = "Nom de la tâche (p. ex. Refonte du site web)";
+"Initial prompt (optional)" = "Prompt initial (facultatif)";
+"Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy." = "Exécute la fusion dans un nouvel onglet, dans le checkout de la destination. Seul le travail commité sur cette branche est fusionné. En cas de conflit, l’agent de codage est lancé sur place pour le résoudre automatiquement. Le worktree n’est pas abandonné — utilisez « Abandonner le worktree » une fois satisfait.";
+"This tab's working directory isn't available yet" = "Le répertoire de travail de cet onglet n’est pas encore disponible";
+"The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again." = "L’espace de travail exécute probablement un agent in-VM plus ancien. Redémarrez l’espace de travail (Éteindre, puis Démarrer) pour qu’il prenne en charge les worktrees, puis réessayez.";
+"Worktree action failed" = "Échec de l’action sur le worktree";
+
+/* Menu bar — Workspaces menu */
+"New Workspace…" = "Nouvel espace de travail…";
+"New tab" = "Nouvel onglet";
+"Merge worktree" = "Fusionner le worktree";
+
+/* Menu bar — items missing from the base catalog */
+"Preferences…" = "Préférences…";
+"Remote Access…" = "Accès à distance…";
+"Trace Inspector…" = "Inspecteur de traces…";
+"Inference Metrics…" = "Métriques d’inférence…";
+"Inference Engine Log…" = "Journal du moteur d’inférence…";
+"Working…" = "En cours…";
+"Needs your input" = "Votre saisie est requise";
+
+/* Worktrees — dialog buttons & format strings */
+"Merge “%@”" = "Fusionner « %@ »";
+"Merge" = "Fusionner";
+"Discard worktree “%@”?" = "Abandonner le worktree « %@ » ?";
+"Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "Supprime le checkout et efface la branche « %@ ». Les commits de cette branche qui n’ont pas été fusionnés seront perdus.";
+"Discard" = "Abandonner";
+"%@ (repo root)" = "%@ (racine du dépôt)";
+"%@  ⚠︎ skips intermediates" = "%@  ⚠︎ saute les intermédiaires";

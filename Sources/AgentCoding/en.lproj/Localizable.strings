@@ -817,3 +817,12 @@
 "Inference Engine Log…" = "Inference Engine Log…";
 "Working…" = "Working…";
 "Needs your input" = "Needs your input";
+
+/* Worktrees — dialog buttons & format strings */
+"Merge “%@”" = "Merge “%@”";
+"Merge" = "Merge";
+"Discard worktree “%@”?" = "Discard worktree “%@”?";
+"Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost.";
+"Discard" = "Discard";
+"%@ (repo root)" = "%@ (repo root)";
+"%@  ⚠︎ skips intermediates" = "%@  ⚠︎ skips intermediates";

@@ -784,3 +784,43 @@
 "Your real secret. Stays on macOS — the VM only ever sees a fake stand-in." = "Seu segredo real. Permanece no macOS — a VM só vê um substituto falso.";
 "Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string." = "Variável(is) sob a(s) qual(is) o segredo falso é exportado na VM — separadas por vírgula se houver mais de uma. Referencie-as no seu código / string de conexão.";
 "Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox." = "Adicione credenciais para qualquer API que o Bromure não trate automaticamente (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean e Kubernetes já são tratados). O agente dentro da VM só vê um token falso (`brm_…`); quando uma solicitação sai da VM, o Bromure troca o falso de volta pela sua chave real na saída — assim, seu segredo real nunca entra no sandbox.";
+
+/* Worktrees — tab context menu */
+"New worktree…" = "Novo worktree…";
+"New worktree…  (Not in a git repo)" = "Novo worktree…  (Não é um repositório git)";
+"Merge…" = "Mesclar…";
+"Discard worktree" = "Descartar worktree";
+"Have the agent resolve conflicts" = "Deixar o agente resolver os conflitos";
+
+/* Worktrees — dialogs */
+"New worktree" = "Novo worktree";
+"Creates a git worktree branched from this tab's current commit and opens a nested agent in it." = "Cria um worktree do git ramificado a partir do commit atual desta aba e abre nele um agente aninhado.";
+"Task name (e.g. Website refactoring)" = "Nome da tarefa (ex.: Refatoração do site)";
+"Initial prompt (optional)" = "Prompt inicial (opcional)";
+"Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy." = "Executa o merge em uma nova aba no checkout do destino. Apenas o trabalho com commit neste branch é mesclado. Se houver conflito, o agente de código é iniciado ali mesmo para resolvê-lo automaticamente. O worktree não é descartado — use “Descartar worktree” quando estiver satisfeito.";
+"This tab's working directory isn't available yet" = "O diretório de trabalho desta aba ainda não está disponível";
+"The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again." = "O espaço de trabalho provavelmente está executando um agente na VM desatualizado. Reinicie o espaço de trabalho (Desligar e depois Iniciar) para que ele passe a oferecer suporte a worktrees e tente novamente.";
+"Worktree action failed" = "Falha na ação do worktree";
+
+/* Menu bar — Workspaces menu */
+"New Workspace…" = "Novo espaço de trabalho…";
+"New tab" = "Nova aba";
+"Merge worktree" = "Mesclar worktree";
+
+/* Menu bar — items missing from the base catalog */
+"Preferences…" = "Preferências…";
+"Remote Access…" = "Acesso remoto…";
+"Trace Inspector…" = "Inspetor de traces…";
+"Inference Metrics…" = "Métricas de inferência…";
+"Inference Engine Log…" = "Log do motor de inferência…";
+"Working…" = "Trabalhando…";
+"Needs your input" = "Precisa da sua intervenção";
+
+/* Worktrees — dialog buttons & format strings */
+"Merge “%@”" = "Mesclar “%@”";
+"Merge" = "Mesclar";
+"Discard worktree “%@”?" = "Descartar o worktree “%@”?";
+"Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "Remove o checkout e apaga o branch “%@”. Os commits deste branch que não foram mesclados serão perdidos.";
+"Discard" = "Descartar";
+"%@ (repo root)" = "%@ (raiz do repo)";
+"%@  ⚠︎ skips intermediates" = "%@  ⚠︎ pula os intermediários";

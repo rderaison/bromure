@@ -784,3 +784,43 @@
 "Your real secret. Stays on macOS — the VM only ever sees a fake stand-in." = "你的真实密钥。仅保留在 macOS 上——虚拟机只会看到一个伪造的替身。";
 "Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string." = "在虚拟机中导出伪造密钥所用的变量——多个时用逗号分隔。请在代码/连接字符串中引用它们。";
 "Add credentials for any API that Bromure doesn't handle automatically (Anthropic, OpenAI, GitHub, GitLab, DigitalOcean and Kubernetes already are). The agent inside the VM only ever sees a fake token (`brm_…`); when a request leaves the VM, Bromure swaps the fake back to your real key on the way out — so your real secret never enters the sandbox." = "为任何 Bromure 不会自动处理的 API 添加凭据（Anthropic、OpenAI、GitHub、GitLab、DigitalOcean 和 Kubernetes 已自动处理）。虚拟机内的代理只会看到伪造令牌（`brm_…`）；当请求离开虚拟机时，Bromure 会在出口处把伪造令牌换回你的真实密钥——因此你的真实密钥永远不会进入沙盒。";
+
+/* Worktrees — tab context menu */
+"New worktree…" = "新建工作树…";
+"New worktree…  (Not in a git repo)" = "新建工作树…  （不在 git 仓库中）";
+"Merge…" = "合并…";
+"Discard worktree" = "丢弃工作树";
+"Have the agent resolve conflicts" = "让代理解决冲突";
+
+/* Worktrees — dialogs */
+"New worktree" = "新建工作树";
+"Creates a git worktree branched from this tab's current commit and opens a nested agent in it." = "从此标签页当前的提交分支出一个 git 工作树，并在其中打开一个嵌套代理。";
+"Task name (e.g. Website refactoring)" = "任务名称（例如：网站重构）";
+"Initial prompt (optional)" = "初始提示词（可选）";
+"Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy." = "在目标检出的新标签页中执行合并。只有此分支上已提交的工作会被合并。如果发生冲突，编码代理会就地启动并自动解决。工作树不会被丢弃——满意后请使用“丢弃工作树”。";
+"This tab's working directory isn't available yet" = "此标签页的工作目录尚不可用";
+"The workspace is likely running an older in-VM agent. Restart the workspace (Shutdown, then Start) so it picks up worktree support, then try again." = "工作区可能正在运行较旧的 VM 内代理。请重新启动工作区（先关机，再启动）以获得工作树支持，然后重试。";
+"Worktree action failed" = "工作树操作失败";
+
+/* Menu bar — Workspaces menu */
+"New Workspace…" = "新建工作区…";
+"New tab" = "新建标签页";
+"Merge worktree" = "合并工作树";
+
+/* Menu bar — items missing from the base catalog */
+"Preferences…" = "偏好设置…";
+"Remote Access…" = "远程访问…";
+"Trace Inspector…" = "跟踪检查器…";
+"Inference Metrics…" = "推理指标…";
+"Inference Engine Log…" = "推理引擎日志…";
+"Working…" = "工作中…";
+"Needs your input" = "需要您的输入";
+
+/* Worktrees — dialog buttons & format strings */
+"Merge “%@”" = "合并“%@”";
+"Merge" = "合并";
+"Discard worktree “%@”?" = "要丢弃工作树“%@”吗？";
+"Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "移除该检出并删除分支“%@”。此分支上尚未合并的提交将会丢失。";
+"Discard" = "丢弃";
+"%@ (repo root)" = "%@（仓库根目录）";
+"%@  ⚠︎ skips intermediates" = "%@  ⚠︎ 跳过中间层级";
