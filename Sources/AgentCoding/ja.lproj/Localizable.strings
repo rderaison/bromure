@@ -789,6 +789,7 @@
 "New worktree…" = "新規ワークツリー…";
 "New worktree…  (Not in a git repo)" = "新規ワークツリー…  （git リポジトリではありません）";
 "Merge…" = "マージ…";
+"Attach terminal" = "ターミナルをアタッチ";
 "Discard worktree" = "ワークツリーを破棄";
 "Have the agent resolve conflicts" = "エージェントにコンフリクトを解決させる";
 

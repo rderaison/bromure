@@ -47,9 +47,9 @@ final class ACAutomationServer {
     var onCreateSession: ((_ profileNameOrID: String) async -> ACAutomationSessionInfo?)?
     var onDestroySession: ((_ profileNameOrID: String) async -> Bool)?
     /// Git-worktree action for a session (SSH/CLI parity with the GUI's
-    /// right-click menu): `action` ∈ create/merge/remove/resolve, `args` are the
-    /// raw (un-encoded) fields the delegate base64-encodes into the guest
-    /// command. Returns true if the command was queued.
+    /// right-click menu): `action` ∈ create/merge/remove/resolve/terminal,
+    /// `args` are the raw (un-encoded) fields the delegate base64-encodes into
+    /// the guest command. Returns true if the command was queued.
     var onWorktreeCommand: ((_ profileNameOrID: String, _ action: String, _ args: [String]) -> Bool)?
     /// Tab command for a running session — SSH/CLI parity with the GUI. `action`
     /// ∈ new/select/close; `index` is the tmux window index (for select/close).

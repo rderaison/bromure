@@ -4253,6 +4253,22 @@ public final class ProfileStore {
         _bromure_wt_registry_del "$(basename "$wr_root")" "$wr_branch"
     }
 
+    # Open a plain terminal tab in a worktree's checkout — no agent, just a
+    # shell cd'd into the worktree so the user can inspect/test it by hand.
+    # The guest resolves the dir from the branch (robust to where the worktree
+    # lives), like merge. @parent_branch WITHOUT @worktree is how the host
+    # knows to nest the tab one step under its worktree instead of top-level.
+    # arg fields (base64): main_root, branch.
+    _bromure_worktree_terminal() {
+        wtt_root="$1"; wtt_branch="$2"
+        wtt_dir=$(_bromure_worktree_dir_for_branch "$wtt_root" "$wtt_branch")
+        [ -n "$wtt_dir" ] && [ -d "$wtt_dir" ] || { worktree_err "terminal: no checkout for '$wtt_branch'"; return 1; }
+        win=$(tmux new-window -P -F '#{window_id}' -t "$TMUX_S" -c "$wtt_dir" 2>/dev/null)
+        [ -n "$win" ] || { worktree_err "terminal: could not open a tab"; return 1; }
+        tmux set-option -w -t "$win" @parent_branch "$wtt_branch" 2>/dev/null
+        tmux set-option -w -t "$win" @root_repo "$wtt_root" 2>/dev/null
+    }
+
     # Spawn the parent agent in the conflicted checkout to resolve an in-flight
     # merge (v3). arg fields (base64): merge_dir, tool.
     _bromure_worktree_resolve() {
@@ -4654,6 +4670,11 @@ public final class ProfileStore {
                         worktree-resolve)
                             set -- $arg
                             ( _bromure_worktree_resolve \
+                                "$(printf %s "$1" | base64 -d 2>/dev/null)" \
+                                "$(printf %s "$2" | base64 -d 2>/dev/null)" ) & ;;
+                        worktree-terminal)
+                            set -- $arg
+                            ( _bromure_worktree_terminal \
                                 "$(printf %s "$1" | base64 -d 2>/dev/null)" \
                                 "$(printf %s "$2" | base64 -d 2>/dev/null)" ) & ;;
                         # Attach to a docker container in a fresh tab: arg is

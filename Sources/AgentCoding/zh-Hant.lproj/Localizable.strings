@@ -789,6 +789,7 @@
 "New worktree…" = "新增工作樹…";
 "New worktree…  (Not in a git repo)" = "新增工作樹…  （不在 git 儲存庫中）";
 "Merge…" = "合併…";
+"Attach terminal" = "附加終端機";
 "Discard worktree" = "捨棄工作樹";
 "Have the agent resolve conflicts" = "讓代理程式解決衝突";
 

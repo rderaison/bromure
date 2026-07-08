@@ -5,8 +5,10 @@ import SandboxEngine
 /// One tmux window as the guest roster reports it. `label` is the resolved
 /// foreground program (claude/codex/shell — drives the icon + thinking dots);
 /// `display` overrides the shown text for worktree tabs. The worktree fields
-/// are set only for windows created via `worktree-create` and describe where
-/// the checkout lives and where it can merge to.
+/// are set for windows created via `worktree-create` and describe where the
+/// checkout lives and where it can merge to; an attached terminal
+/// (`worktree-terminal`) carries only `parentBranch`/`rootRepo`, which nests
+/// it under its worktree without making it a worktree itself.
 public struct GuestTab: Sendable {
     public var index: Int
     public var active: Bool

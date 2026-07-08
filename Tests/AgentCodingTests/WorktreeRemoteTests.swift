@@ -37,6 +37,25 @@ struct WorktreeRemoteTests {
         #expect(RemoteMenuApp.worktreeDepth(tabs[2], in: tabs) == 2)  // off worktree A
     }
 
+    @Test("Attached terminal nests one step under its worktree")
+    func attachedTerminalDepth() {
+        // "Attach terminal" tabs carry parentBranch (the worktree they were
+        // opened in) but no worktreeBranch — they indent one past the worktree.
+        let tabs: [[String: Any]] = [
+            ["index": 0, "title": "claude", "isGitRepo": true],
+            ["index": 1, "title": "A", "isWorktree": true,
+             "worktreeBranch": "wt/a", "parentBranch": "main"],
+            ["index": 2, "title": "bash", "isGitRepo": true, "parentBranch": "wt/a"],
+            ["index": 3, "title": "B", "isWorktree": true,
+             "worktreeBranch": "wt/b", "parentBranch": "wt/a"],
+            ["index": 4, "title": "htop", "isGitRepo": true, "parentBranch": "wt/b"],
+        ]
+        #expect(RemoteMenuApp.worktreeDepth(tabs[2], in: tabs) == 2)  // under A (depth 1)
+        #expect(RemoteMenuApp.worktreeDepth(tabs[4], in: tabs) == 3)  // under B (depth 2)
+        // An ordinary tab (no parentBranch) stays at the top level.
+        #expect(RemoteMenuApp.worktreeDepth(tabs[0], in: tabs) == 0)
+    }
+
     @Test("Depth is cycle-safe and capped")
     func depthGuarded() {
         // A pathological self/mutual parent cycle must not hang; cap at 6.

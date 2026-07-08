@@ -1405,7 +1405,12 @@ final class RemoteMenuApp {
     /// following `parentBranch` → an ancestor tab's `worktreeBranch`. Mirrors
     /// the GUI's `worktreeDepth`, over the API's tab dicts.
     static func worktreeDepth(_ tab: [String: Any], in tabs: [[String: Any]]) -> Int {
-        guard tab["isWorktree"] as? Bool == true else { return 0 }
+        // Worktree tabs nest by their parent chain; an attached terminal (a
+        // plain tab tagged with parentBranch but no worktreeBranch) nests one
+        // step under the worktree it was opened in — same rule as the GUI.
+        let isWorktree = tab["isWorktree"] as? Bool == true
+        let parentBranch = tab["parentBranch"] as? String ?? ""
+        guard isWorktree || !parentBranch.isEmpty else { return 0 }
         var depth = 1
         var parent = tab["parentBranch"] as? String
         var guardCount = 0
@@ -1478,7 +1483,7 @@ final class RemoteMenuApp {
             guard let sel = tui.menu(title: "Worktrees · \(name)", items: labels,
                                      footer: "Enter select · q back",
                                      header: ["＋ New worktree from … → branch a repo into its own tab.",
-                                              "🌿 an existing worktree → merge / discard / branch further."]) else { return }
+                                              "🌿 an existing worktree → merge / terminal / discard / branch further."]) else { return }
             if sel >= 0, sel < actions.count { actions[sel]() } else { return }
         }
     }
@@ -1509,7 +1514,7 @@ final class RemoteMenuApp {
         let title = tab["title"] as? String ?? "worktree"
         guard let branch = tab["worktreeBranch"] as? String,
               let mainRoot = tab["rootRepo"] as? String else { return }
-        var items = ["＋ New worktree from here…", "Merge…", "Discard worktree"]
+        var items = ["＋ New worktree from here…", "Merge…", "Attach terminal", "Discard worktree"]
         if tab["isMergeTab"] as? Bool == true { items.insert("Resolve conflicts", at: 0) }
         items.append("Back")
         guard let sel = tui.menu(title: "Worktree: \(title)", items: items,
@@ -1522,6 +1527,14 @@ final class RemoteMenuApp {
         case "Resolve conflicts":
             if let dir = tab["cwd"] as? String {
                 _ = postWorktree(vmID: vmID, action: "resolve", args: [dir, tool])
+            }
+        case "Attach terminal":
+            // A plain shell tab cd'd into this worktree's checkout, nested
+            // under it — for inspecting/testing the worktree by hand.
+            if postWorktree(vmID: vmID, action: "terminal", args: [mainRoot, branch]) {
+                tui.toast("Opening a terminal in “\(title)”…")
+            } else {
+                tui.toast("Couldn't open a terminal.")
             }
         case "Merge…":
             // Ancestor chain: parentBranch → … → repo root (same as the GUI).

@@ -470,6 +470,12 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     mergeWtItem.target = delegate
     wsMenu.addItem(mergeWtItem)
 
+    let attachTermItem = NSMenuItem(title: L("Attach terminal"),
+                                    action: #selector(ACAppDelegate.attachTerminalAction(_:)),
+                                    keyEquivalent: "")
+    attachTermItem.target = delegate
+    wsMenu.addItem(attachTermItem)
+
     let discardWtItem = NSMenuItem(title: L("Discard worktree"),
                                    action: #selector(ACAppDelegate.discardWorktreeAction(_:)),
                                    keyEquivalent: "")
@@ -2248,11 +2254,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if t.isWorktree {
                     d["isWorktree"] = true
                     if let b = t.worktreeBranch { d["worktreeBranch"] = b }
-                    if let p = t.parentBranch { d["parentBranch"] = p }
-                    if let r = t.rootRepo { d["rootRepo"] = r }
                 } else if t.isGitRepo {
                     d["isGitRepo"] = true
                 }
+                // parentBranch/rootRepo ride on worktree tabs AND on attached
+                // terminals (plain tabs opened via "Attach terminal") — the
+                // latter nest under their worktree by parentBranch alone.
+                if let p = t.parentBranch, !p.isEmpty { d["parentBranch"] = p }
+                if let r = t.rootRepo, !r.isEmpty { d["rootRepo"] = r }
                 // A "Merge → …" tab is resolvable; expose it so SSH can offer it.
                 if t.display?.hasPrefix("Merge → ") == true { d["isMergeTab"] = true }
                 return d
@@ -3691,6 +3700,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             unifiedWindow?.handleTabAction(profileID: ctx.id, index: ctx.index, action: .removeWorktree)
         }
     }
+    @objc func attachTerminalAction(_ sender: Any?) {
+        if let ctx = currentWorkspaceContext() {
+            unifiedWindow?.handleTabAction(profileID: ctx.id, index: ctx.index, action: .attachTerminal)
+        }
+    }
 
     /// Grey out Workspaces items that don't apply to the current selection/tab.
     /// Only affects items targeting this delegate; everything else stays enabled.
@@ -3703,7 +3717,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                   ctx.pane.model.tabs.indices.contains(ctx.index) else { return false }
             let t = ctx.pane.model.tabs[ctx.index]
             return t.isGitRepo || t.isWorktree   // a worktree tab can nest another
-        case #selector(mergeWorktreeAction(_:)), #selector(discardWorktreeAction(_:)):
+        case #selector(mergeWorktreeAction(_:)), #selector(discardWorktreeAction(_:)),
+             #selector(attachTerminalAction(_:)):
             guard let ctx = currentWorkspaceContext(),
                   ctx.pane.model.tabs.indices.contains(ctx.index) else { return false }
             return ctx.pane.model.tabs[ctx.index].isWorktree
@@ -5503,6 +5518,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         sendCommand("worktree-resolve \(b64(dir)) \(b64(tool))", in: pane)
     }
 
+    /// Open a plain terminal tab in a worktree's checkout — no agent, just a
+    /// shell cd'd there so the user can inspect/test the worktree by hand.
+    /// Shown nested under the worktree (the guest tags the window with
+    /// @parent_branch only). The guest resolves the dir from the branch.
+    func requestAttachTerminal(mainRoot: String, branch: String, in pane: SessionPane) {
+        sendCommand("worktree-terminal \(b64(mainRoot)) \(b64(branch))", in: pane)
+    }
+
     /// Queue a worktree command for a (possibly detached) session — the SSH/CLI
     /// path. Builds the same guest command as the GUI request functions but
     /// writes straight to the session's outbox, so no window/pane is needed.
@@ -5528,6 +5551,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case "resolve":
             guard args.count >= 2 else { return false }   // dir, tool
             name = "worktree-resolve"; encoded = args.prefix(2).map(b64)
+        case "terminal":
+            guard args.count >= 2 else { return false }   // mainRoot, branch
+            name = "worktree-terminal"; encoded = args.prefix(2).map(b64)
         default:
             return false
         }

@@ -58,18 +58,20 @@ final class SessionListModel {
 enum TabAction {
     case newWorktree        // any tab whose cwd is a git repo
     case merge              // a worktree tab → merge into an ancestor
+    case attachTerminal     // a worktree tab → open a plain terminal in its checkout
     case removeWorktree     // a worktree tab → discard (remove + delete branch)
     case resolveConflicts   // a "Merge → …" tab → spawn the agent to resolve
 }
 
 /// Nesting depth of a tab in the worktree tree: 0 for ordinary tabs, N for a
 /// worktree whose parent chain (by `parentBranch` → an ancestor's
-/// `worktreeBranch`) is N deep. Drives the source-list indentation so
-/// worktrees-off-worktrees read as nested. Capped so a deep tree can't march
-/// off the sidebar.
+/// `worktreeBranch`) is N deep. An attached terminal — a plain tab tagged with
+/// `parentBranch` but no `worktreeBranch` — nests one step under its worktree
+/// the same way. Drives the source-list indentation so worktrees-off-worktrees
+/// read as nested. Capped so a deep tree can't march off the sidebar.
 @MainActor
 func worktreeDepth(of tab: TabsModel.Tab, in tabs: [TabsModel.Tab]) -> Int {
-    guard tab.isWorktree else { return 0 }
+    guard tab.isWorktree || !(tab.parentBranch?.isEmpty ?? true) else { return 0 }
     var depth = 1
     var parentBranch = tab.parentBranch
     var guardCount = 0
@@ -589,6 +591,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             acDelegate?.presentCreateWorktree(cwd: cwd, defaultTool: tool, in: p)
         case .merge:
             acDelegate?.presentMergeWorktree(tab: tab, allTabs: p.model.tabs, in: p)
+        case .attachTerminal:
+            guard let branch = tab.worktreeBranch, !branch.isEmpty,
+                  let root = tab.rootRepo, !root.isEmpty else { return }
+            acDelegate?.requestAttachTerminal(mainRoot: root, branch: branch, in: p)
         case .removeWorktree:
             acDelegate?.confirmRemoveWorktree(tab: tab, in: p)
         case .resolveConflicts:
@@ -1105,6 +1111,9 @@ private struct TabRow: View {
             if isWorktree {
                 Button(NSLocalizedString("Merge…", comment: "Tab context menu: merge a worktree into an ancestor")) {
                     onAction(.merge)
+                }
+                Button(NSLocalizedString("Attach terminal", comment: "Tab context menu: open a plain terminal tab in this worktree's checkout")) {
+                    onAction(.attachTerminal)
                 }
                 Divider()
                 Button(NSLocalizedString("Discard worktree", comment: "Tab context menu: remove worktree + delete branch"),

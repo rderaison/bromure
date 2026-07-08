@@ -789,6 +789,7 @@
 "New worktree…" = "Neuer Worktree…";
 "New worktree…  (Not in a git repo)" = "Neuer Worktree…  (Kein Git-Repository)";
 "Merge…" = "Zusammenführen…";
+"Attach terminal" = "Terminal anhängen";
 "Discard worktree" = "Worktree verwerfen";
 "Have the agent resolve conflicts" = "Konflikte vom Agenten lösen lassen";
 
