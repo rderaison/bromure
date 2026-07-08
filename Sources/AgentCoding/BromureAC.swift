@@ -1605,7 +1605,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         catalogVersion: catalogIsNewer ? catalogMajor : nil)
                     return
                 }
-                let catalog = remote ?? ImageCatalogStore.shared.effective()
+                // Union in bundled-baseline steps the published catalog
+                // doesn't know yet — a step shipped with this app build
+                // must be offerable before the next weekly image publish.
+                let catalog = (remote ?? ImageCatalogStore.shared.effective())
+                    .includingBaselineSteps()
                 let applied = self.imageManager.loadImageState()?.appliedStepUUIDs ?? []
                 let pending = catalog.pendingSteps(appliedUUIDs: applied)
                 if !pending.isEmpty {
@@ -5356,6 +5360,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 win.keyboardBridge = KeyboardBridge(
                     socketDevice: dev,
                     forcedLayout: profile.keyboardLayoutOverride)
+                // Image clipboard — SPICE only syncs text, so host
+                // pasteboard images ride the meta share + keyboard-agent
+                // into the guest's X11 CLIPBOARD for Claude Code's Ctrl+V.
+                win.clipboardImageBridge = ClipboardImageBridge(
+                    socketDevice: dev,
+                    metaDirectory: sessionDisk.metadataShareDirectory)
             }
             win.scrollBridge = makeScrollBridge(for: sandbox)
             // Shell-exec bridge (vsock 5800). Always created now — powers
@@ -6638,6 +6648,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let dev = sandbox.socketDevice {
             pane.keyboardBridge = KeyboardBridge(
                 socketDevice: dev, forcedLayout: profile.keyboardLayoutOverride)
+            if let disk = sandbox.sessionDisk {
+                pane.clipboardImageBridge = ClipboardImageBridge(
+                    socketDevice: dev,
+                    metaDirectory: disk.metadataShareDirectory)
+            }
         }
         pane.scrollBridge = makeScrollBridge(for: sandbox)
         // Rebuild the tab bar from the session's cached tmux window list; the
@@ -6862,6 +6877,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             var profile = profile
             self.populateMCPBearerTokens(in: &profile)
 
+            // Refresh the managed kitty.conf: the guest's kitty re-reads it
+            // on relaunch, and a reboot is often the first boot after an app
+            // update — without this it would keep the previous build's
+            // mappings (launch gets this via prepareHomeDirectory; the full
+            // home prep can't run here, see refreshTerminalConfig).
+            try? store.refreshTerminalConfig(
+                for: profile, terminalDefaults: terminalDefaults,
+                displayScale: TerminalAppDefaults.currentDisplayScale())
+
             let sessionDisk = SessionDisk(
                 profile: profile,
                 store: store,
@@ -6916,6 +6940,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 win.keyboardBridge = KeyboardBridge(
                     socketDevice: dev,
                     forcedLayout: profile.keyboardLayoutOverride)
+                win.clipboardImageBridge = ClipboardImageBridge(
+                    socketDevice: dev,
+                    metaDirectory: sessionDisk.metadataShareDirectory)
             }
             win.scrollBridge = makeScrollBridge(for: sandbox)
             // Shell-exec bridge — see the matching block on the warm-boot path.

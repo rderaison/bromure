@@ -2767,6 +2767,26 @@ public final class ProfileStore {
     /// Make sure the host-side /home/ubuntu mirror exists with the dotfiles
     /// the in-VM agent expects.
     ///
+    /// Rewrite just the managed kitty.conf in the profile's home. Called
+    /// from `prepareHomeDirectory` (full session launch) AND from the VM
+    /// reboot path: kitty re-reads its conf when the guest relaunches it,
+    /// and without this a rebooted session would keep running with the
+    /// previous app version's mappings. The reboot path can't run the full
+    /// home prep — that needs the MITM kube materialization only the
+    /// launch path builds.
+    public func refreshTerminalConfig(for profile: Profile,
+                                      terminalDefaults: TerminalAppDefaults,
+                                      displayScale: Int = 2) throws {
+        let home = homeDirectory(for: profile)
+        let kittyConfigDir = home.appendingPathComponent(".config/kitty", isDirectory: true)
+        try fm.createDirectory(at: kittyConfigDir, withIntermediateDirectories: true)
+        let kittyConfig = kittyConfigDir.appendingPathComponent("kitty.conf")
+        try TerminalAppDefaults
+            .kittyConfig(for: profile, terminalDefaults: terminalDefaults,
+                         displayScale: displayScale)
+            .write(to: kittyConfig, atomically: true, encoding: .utf8)
+    }
+
     /// `terminalDefaults` is the snapshot of Terminal.app's default profile
     /// captured at app startup — passed in so we use a stable value across
     /// the session (Terminal.app prefs may change while AC is running).
@@ -2906,13 +2926,8 @@ public final class ProfileStore {
         // (Terminal.app inheritance OR per-profile overrides). Always
         // rewritten so style edits in the profile editor take effect on
         // the next launch.
-        let kittyConfigDir = home.appendingPathComponent(".config/kitty", isDirectory: true)
-        try fm.createDirectory(at: kittyConfigDir, withIntermediateDirectories: true)
-        let kittyConfig = kittyConfigDir.appendingPathComponent("kitty.conf")
-        try TerminalAppDefaults
-            .kittyConfig(for: profile, terminalDefaults: terminalDefaults,
-                         displayScale: displayScale)
-            .write(to: kittyConfig, atomically: true, encoding: .utf8)
+        try refreshTerminalConfig(for: profile, terminalDefaults: terminalDefaults,
+                                  displayScale: displayScale)
 
         // ~/.tmux.conf — ONE tmux session per VM; each tab is a tmux window.
         // The GUI kitty and any `cm attach` are clients of this same session.
@@ -3064,13 +3079,15 @@ public final class ProfileStore {
                 perms["defaultMode"] = "auto"
                 settings["permissions"] = perms
             }
-            // Keep click-drag text selection with the terminal (kitty → macOS
-            // ⌘C), not swallowed by Claude Code's fullscreen-TUI mouse capture.
-            // Merge into env (don't clobber the Bedrock env written above), and
-            // only seed when unset so a user who wants clicks can remove it.
+            // CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1 used to be seeded here to
+            // keep click-drag selection with kitty. Retired — but the home
+            // dir persists across sessions, so strip the exact value the
+            // seeding planted or existing workspaces would keep it forever.
+            // Any other value is user-set and preserved (use "true", not
+            // "1", to deliberately keep clicks disabled).
             var claudeEnv = settings["env"] as? [String: Any] ?? [:]
-            if claudeEnv["CLAUDE_CODE_DISABLE_MOUSE_CLICKS"] == nil {
-                claudeEnv["CLAUDE_CODE_DISABLE_MOUSE_CLICKS"] = "1"
+            if claudeEnv["CLAUDE_CODE_DISABLE_MOUSE_CLICKS"] as? String == "1" {
+                claudeEnv.removeValue(forKey: "CLAUDE_CODE_DISABLE_MOUSE_CLICKS")
                 settings["env"] = claudeEnv
             }
             // Managed status hooks — report working/done/needsInput to the host
@@ -3800,7 +3817,7 @@ public final class ProfileStore {
     # before the user can type; subsequent macOS layout switches
     # propagate live (debounced 200ms host-side).
     if [ -r /mnt/bromure-meta/keyboard-agent.py ]; then
-        python3 /mnt/bromure-meta/keyboard-agent.py &
+        python3 /mnt/bromure-meta/keyboard-agent.py >> /tmp/keyboard-agent.log 2>&1 &
         echo "[xinit] keyboard-agent pid $!" >> /tmp/xinitrc.log
     fi
 

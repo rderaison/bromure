@@ -327,10 +327,18 @@ public final class SessionDisk {
     /// old node, so host writes silently land where the guest can't
     /// see them — wedging the post-reboot kitty on a black screen.
     /// See `clearContents`.
+    /// Host path of the meta share (guest: /mnt/bromure-meta). Stable
+    /// per-profile — see `prepareMetadataShare`. Exposed so runtime
+    /// writers (ClipboardImageBridge's clipboard.png) can drop files the
+    /// running guest sees live through virtiofs.
+    public var metadataShareDirectory: URL {
+        store.profileDirectory(for: profile)
+            .appendingPathComponent("meta-share", isDirectory: true)
+    }
+
     @MainActor
     public func prepareMetadataShare(forRestore: Bool = false) throws -> URL {
-        let tmp = store.profileDirectory(for: profile)
-            .appendingPathComponent("meta-share", isDirectory: true)
+        let tmp = metadataShareDirectory
         try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
         if !forRestore {
             clearContents(of: tmp)

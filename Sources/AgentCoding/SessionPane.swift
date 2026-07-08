@@ -112,6 +112,11 @@ final class SessionPane {
     /// guest's setxkbmap. nil when no socket device is available yet.
     var keyboardBridge: KeyboardBridge?
 
+    /// Ferries host pasteboard images into the guest's X11 clipboard so
+    /// ⌘V can paste screenshots into Claude Code. Same lifecycle as
+    /// `keyboardBridge` (they share the guest agent on vsock 5006).
+    var clipboardImageBridge: ClipboardImageBridge?
+
     /// Routes trackpad/wheel scroll to the guest's tmux scrollback. Held here
     /// so it outlives the call that creates it; also wired into the
     /// framebuffer view so its `scrollWheel` override can reach it.

@@ -225,7 +225,23 @@ extension TerminalAppDefaults {
 
         # macOS muscle memory: copy/paste/select-all + font size.
         map super+c    copy_to_clipboard
-        map super+v    paste_from_clipboard
+        # ⌘V dispatches on what the CLIPBOARD holds. It can NOT be a plain
+        # paste_from_clipboard combined with an image probe: kitty's paste
+        # requests UTF8_STRING without consulting TARGETS (glfw
+        # x11_window.c), and xclip — which publishes host images, see
+        # ClipboardImageBridge — serves the loaded PNG bytes for ANY data
+        # request (xclib.c has no refusal path), so an unconditional text
+        # paste dumps binary into the TTY. One script picks exactly one
+        # action, via kitty remote control rather than synthetic X keys:
+        # image on the clipboard → write the literal Ctrl+V byte (0x16) to
+        # the active window's pty, which the TUI agent (Claude Code & co.)
+        # answers by reading the image itself through xclip; otherwise →
+        # invoke kitty's own paste action. launch --allow-remote-control
+        # pre-authorizes the child over a socketpair fd, so this works
+        # with remote control globally off and needs no password.
+        # DEBUG: traces each ⌘V dispatch to /tmp/cmdv.log in the guest —
+        # remove the logging once image paste is verified end-to-end.
+        map super+v    launch --allow-remote-control --type=background sh -c 'T=$(xclip -selection clipboard -t TARGETS -o 2>&1); echo "$(date +%T) cmd-v targets: [$T]" >> /tmp/cmdv.log; if echo "$T" | grep -q "^image/"; then echo "$(date +%T) -> image branch: ctrl+v to pty" >> /tmp/cmdv.log; kitty @ send-text "\\x16" 2>>/tmp/cmdv.log; else echo "$(date +%T) -> text branch: kitty paste" >> /tmp/cmdv.log; kitty @ action paste_from_clipboard 2>>/tmp/cmdv.log; fi'
         map super+a    select_all
         map super+plus change_font_size all +2.0
         map super+minus change_font_size all -2.0

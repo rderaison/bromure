@@ -85,6 +85,28 @@ struct ImageCatalogTests {
         #expect(cat.pendingSteps(appliedUUIDs: ["z", "a"]).map(\.uuid) == ["b"])
     }
 
+    @Test("includingBaselineSteps unions by uuid without reordering or duplicating")
+    func baselineUnion() throws {
+        let published = try ImageCatalog.parse(Data(Self.publishedJSON.utf8))
+        let baseline = ImageCatalog(postinstall: [
+            // Already in the published catalog — must not duplicate.
+            PostinstallStep(uuid: "a", seq: 10, description: "First", command: "echo one"),
+            // New in this app build, not yet published — must be appended.
+            PostinstallStep(uuid: "c", seq: 30, description: "Third", command: "echo three"),
+        ])
+        let merged = published.includingBaselineSteps(baseline)
+        #expect(merged.postinstall.map(\.uuid).sorted() == ["a", "b", "c"])
+        // Execution order still honors seq across both sources.
+        #expect(merged.sortedSteps.map(\.uuid) == ["a", "b", "c"])
+        // Signature/image identity of the published catalog is untouched.
+        #expect(merged.image == published.image)
+        // pendingSteps sees the baseline-only step.
+        #expect(merged.pendingSteps(appliedUUIDs: ["a", "b"]).map(\.uuid) == ["c"])
+        // Nothing to add → the catalog comes back unchanged.
+        #expect(published.includingBaselineSteps(
+            ImageCatalog(postinstall: published.postinstall)) == published)
+    }
+
     @Test("artifactURL resolves catalog-relative paths")
     func artifactURL() {
         let url = ImageCatalogStore.artifactURL(

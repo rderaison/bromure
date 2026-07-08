@@ -384,7 +384,7 @@ step "apt-get install X + WM + fonts" \
         x11-xserver-utils x11-xkb-utils \
         keyboard-configuration console-setup \
         xkb-data \
-        openbox xdotool \
+        openbox xdotool xclip \
         spice-vdagent \
         libgl1-mesa-dri \
         fonts-jetbrains-mono fonts-noto-color-emoji \
@@ -826,8 +826,14 @@ update_check_interval 0
 # macOS muscle memory: ⌘C / ⌘V come through as Super + C / V because the
 # host's VZVirtualMachineView is set to capturesSystemKeys = true. Also
 # keep the default Ctrl+Shift+C/V working for muscle memory the other way.
+# ⌘V dispatches on the CLIPBOARD content via kitty remote control —
+# image → write the literal Ctrl+V byte to the active pty (the TUI agent
+# reads the image itself via xclip), text → kitty's own paste action.
+# A plain paste_from_clipboard must never run on image content: xclip
+# serves the raw PNG bytes for text-target requests. Mirrors
+# TerminalAppDefaults.kittyConfig.
 map super+c    copy_to_clipboard
-map super+v    paste_from_clipboard
+map super+v    launch --allow-remote-control --type=background sh -c 'if xclip -selection clipboard -t TARGETS -o 2>/dev/null | grep -q "^image/"; then kitty @ send-text "\x16"; else kitty @ action paste_from_clipboard; fi'
 map super+a    select_all
 map super+t    new_tab
 map super+w    close_tab

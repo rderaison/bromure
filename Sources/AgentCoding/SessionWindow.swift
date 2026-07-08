@@ -286,6 +286,10 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
         get { pane.keyboardBridge }
         set { pane.keyboardBridge = newValue }
     }
+    var clipboardImageBridge: ClipboardImageBridge? {
+        get { pane.clipboardImageBridge }
+        set { pane.clipboardImageBridge = newValue }
+    }
     var scrollBridge: ScrollBridge? {
         get { pane.scrollBridge }
         set { pane.scrollBridge = newValue }

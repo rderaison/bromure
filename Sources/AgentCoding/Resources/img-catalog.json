@@ -25,6 +25,12 @@
       "seq": 40,
       "description": "Google Cloud SDK (gcloud)",
       "command": "ARCH=$(uname -m)\ncase \"$ARCH\" in aarch64|arm64) K=arm ;; x86_64) K=x86_64 ;; *) echo \"unsupported arch $ARCH\"; exit 0 ;; esac\nURL=\"https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-${K}.tar.gz\"\nTMP=$(mktemp -d)\ncurl -fsSL \"$URL\" -o \"$TMP/gcloud.tar.gz\"\ntar -xzf \"$TMP/gcloud.tar.gz\" -C /opt\n/opt/google-cloud-sdk/install.sh --quiet --usage-reporting=false --path-update=false --command-completion=false || true\nln -sf /opt/google-cloud-sdk/bin/gcloud  /usr/local/bin/gcloud\nln -sf /opt/google-cloud-sdk/bin/gsutil  /usr/local/bin/gsutil\nln -sf /opt/google-cloud-sdk/bin/bq      /usr/local/bin/bq\nrm -rf \"$TMP\""
+    },
+    {
+      "uuid": "f4182acd-262f-44e9-9590-0a13f4158fae",
+      "seq": 50,
+      "description": "Image paste support (xclip)",
+      "command": "apt-get update -q\nenv DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends xclip\napt-get clean\nrm -rf /var/lib/apt/lists/*"
     }
   ]
 }

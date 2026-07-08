@@ -176,6 +176,22 @@ public struct ImageCatalog: Codable, Sendable, Equatable {
         return sortedSteps.filter { !applied.contains($0.uuid) }
     }
 
+    /// This catalog with any baseline step it doesn't already carry
+    /// appended (matched by uuid). The bundled img-catalog.json is the
+    /// canonical postinstall list, but the *published* catalog lags an app
+    /// release by up to a week — without this union, a step shipped in the
+    /// app binary can't reach existing images until the next image
+    /// publish. Bundled steps carry the app's own distribution trust, so
+    /// this doesn't weaken the signature gate on fetched catalogs.
+    public func includingBaselineSteps(_ baseline: ImageCatalog = .baseline) -> ImageCatalog {
+        let known = Set(postinstall.map(\.uuid))
+        let extra = baseline.postinstall.filter { !known.contains($0.uuid) }
+        guard !extra.isEmpty else { return self }
+        var merged = self
+        merged.postinstall += extra
+        return merged
+    }
+
     public static func parse(_ data: Data) throws -> ImageCatalog {
         try JSONDecoder().decode(ImageCatalog.self, from: data)
     }
