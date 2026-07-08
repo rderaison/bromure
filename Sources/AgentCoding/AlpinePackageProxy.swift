@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -46,6 +47,112 @@ final class AlpinePackageProxy: @unchecked Sendable {
     /// cap is purely a defence against a stuck client streaming garbage.
     private static let maxHeaderSize = 16 * 1024
 
+    // MARK: - Immutable-artifact disk cache
+
+    /// On-disk cache for upstream content that can never change under
+    /// its URL, so repeat bakes / postinstall amends stop re-downloading
+    /// the same bytes: the Alpine modloop (~40 MB per provisioner boot),
+    /// versioned .apk / .deb pool files, and apt's content-addressed
+    /// `by-hash` index files (the ~20 MB `universe` Packages list behind
+    /// every `apt-get update` against ports.ubuntu.com). Mutable
+    /// metadata (InRelease, APKINDEX, non-by-hash Packages) is never
+    /// cached — package managers keep verifying freshness and
+    /// signatures end-to-end exactly as before.
+    private let cacheDir: URL
+    /// Entries untouched for this long are swept on start(). Hits bump
+    /// the file's mtime, so anything in active use never expires.
+    private static let cacheMaxAge: TimeInterval = 30 * 24 * 3600
+
+    static var defaultCacheDirectory: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("BromureAC/pkg-proxy", isDirectory: true)
+    }
+
+    init(cacheDirectory: URL = AlpinePackageProxy.defaultCacheDirectory) {
+        cacheDir = cacheDirectory
+    }
+
+    /// Cache filename for `url`, or nil when its content isn't
+    /// immutable. Keyed on the SHA-256 of the full URL so distinct
+    /// mirrors/paths can't collide.
+    static func cacheKey(for url: URL) -> String? {
+        let path = url.path
+        // apt content-addressed indexes: the path *is* the content hash.
+        let immutable = path.contains("/by-hash/")
+            // Debian/Ubuntu pool artifacts — version is in the filename,
+            // archives never rewrite a published .deb in place.
+            || path.hasSuffix(".deb") || path.hasSuffix(".udeb")
+            // Alpine packages — same versioned-filename contract.
+            || path.hasSuffix(".apk")
+            // Alpine release artifacts (modloop-virt, netboot kernel /
+            // initramfs) live under a pinned release directory.
+            || path.contains("/releases/")
+        guard immutable else { return nil }
+        let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Existing cache entry for `url`, mtime-bumped, or nil on miss /
+    /// uncacheable. Also returns the final path a miss should populate.
+    private func cacheLookup(for url: URL) -> (hit: URL?, destination: URL?) {
+        guard let key = Self.cacheKey(for: url) else { return (nil, nil) }
+        let file = cacheDir.appendingPathComponent(key)
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            return (nil, file)
+        }
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()], ofItemAtPath: file.path)
+        return (file, file)
+    }
+
+    /// Serve a cached file: synthesized 200 + Content-Length, body
+    /// streamed in chunks. The original upstream headers are gone, but
+    /// apk / apt / busybox-wget only consume status + length.
+    private func serveCached(_ clientFD: Int32, file: URL, size: Int64, isHead: Bool) {
+        var head = "HTTP/1.1 200 OK\r\n" +
+            "Content-Length: \(isHead ? 0 : size)\r\n" +
+            "Connection: close\r\n\r\n"
+        _ = head.withUTF8 { buf -> Int in
+            guard let base = buf.baseAddress else { return 0 }
+            return Darwin.write(clientFD, base, buf.count)
+        }
+        guard !isHead, let handle = FileHandle(forReadingAtPath: file.path) else { return }
+        defer { try? handle.close() }
+        while let chunk = try? handle.read(upToCount: 512 * 1024), !chunk.isEmpty {
+            let ok = chunk.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
+                guard let base = raw.baseAddress else { return false }
+                var off = 0
+                while off < chunk.count {
+                    let w = Darwin.write(clientFD, base + off, chunk.count - off)
+                    if w <= 0 { return false }
+                    off += w
+                }
+                return true
+            }
+            if !ok { return }
+        }
+    }
+
+    /// Delete cache entries (and orphaned .partial files) untouched for
+    /// `cacheMaxAge`. Runs detached — never blocks the accept path.
+    private func sweepCache() {
+        let dir = cacheDir
+        workQueue.async {
+            let fm = FileManager.default
+            let cutoff = Date().addingTimeInterval(-Self.cacheMaxAge)
+            guard let entries = try? fm.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.contentModificationDateKey]
+            ) else { return }
+            for entry in entries {
+                let mtime = (try? entry.resourceValues(
+                    forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                if let mtime, mtime < cutoff {
+                    try? fm.removeItem(at: entry)
+                }
+            }
+        }
+    }
+
     private let acceptQueue = DispatchQueue(
         label: "io.bromure.ac.alpineproxy.accept", qos: .utility)
     private let workQueue = DispatchQueue(
@@ -73,6 +180,10 @@ final class AlpinePackageProxy: @unchecked Sendable {
         // report, just silent exit. Per-socket SO_NOSIGPIPE below is
         // belt-and-braces; this is the suspenders.
         signal(SIGPIPE, SIG_IGN)
+
+        try? FileManager.default.createDirectory(
+            at: cacheDir, withIntermediateDirectories: true)
+        sweepCache()
 
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw Error.socket(errno) }
@@ -237,6 +348,16 @@ final class AlpinePackageProxy: @unchecked Sendable {
             return
         }
 
+        let (cacheHit, cacheDestination) = cacheLookup(for: upstreamURL)
+        if let cacheHit,
+           let size = (try? FileManager.default.attributesOfItem(
+               atPath: cacheHit.path)[.size] as? Int64) ?? nil {
+            Self.log("\(pathForLog) [cache hit, \(size) bytes]")
+            serveCached(clientFD, file: cacheHit, size: size,
+                        isHead: req.method == "HEAD")
+            return
+        }
+
         var upstream = URLRequest(url: upstreamURL)
         upstream.httpMethod = req.method
         // Forward most headers verbatim. Strip:
@@ -253,7 +374,9 @@ final class AlpinePackageProxy: @unchecked Sendable {
         }
 
         Self.log(pathForLog)
-        streamRequest(clientFD: clientFD, request: upstream, isHead: req.method == "HEAD")
+        streamRequest(clientFD: clientFD, request: upstream,
+                      isHead: req.method == "HEAD",
+                      cacheDestination: req.method == "GET" ? cacheDestination : nil)
     }
 
     /// Drive the upstream request through a `URLSessionDataDelegate`
@@ -264,9 +387,15 @@ final class AlpinePackageProxy: @unchecked Sendable {
     /// allocate hundreds of MB of `Data`, plenty enough to trip
     /// macOS jetsam and silently kill the host process.
     private func streamRequest(
-        clientFD: Int32, request: URLRequest, isHead: Bool
+        clientFD: Int32, request: URLRequest, isHead: Bool,
+        cacheDestination: URL? = nil
     ) {
-        let delegate = StreamingProxyDelegate(clientFD: clientFD, isHead: isHead)
+        let delegate = StreamingProxyDelegate(
+            clientFD: clientFD, isHead: isHead,
+            cacheDestination: cacheDestination,
+            expectedBodySHA256: cacheDestination.flatMap {
+                _ in Self.byHashDigest(of: request.url)
+            })
         // Per-request URLSession so the delegate's lifetime matches
         // the task and we don't have to multiplex by task identifier.
         // Costs ~one URLSession allocation per HTTP hop; cheap.
@@ -287,6 +416,15 @@ final class AlpinePackageProxy: @unchecked Sendable {
             // change status; just close.
             writeStatus(clientFD, status: 502, reason: "Bad Gateway")
         }
+    }
+
+    /// For apt by-hash URLs the last path component IS the expected
+    /// SHA-256 of the body — verify it before promoting a cache entry.
+    static func byHashDigest(of url: URL?) -> String? {
+        guard let url, url.path.contains("/by-hash/SHA256/") else { return nil }
+        let hex = url.lastPathComponent.lowercased()
+        guard hex.count == 64, hex.allSatisfy(\.isHexDigit) else { return nil }
+        return hex
     }
 
     // MARK: - CONNECT tunnel
@@ -464,9 +602,23 @@ final class AlpinePackageProxy: @unchecked Sendable {
         var headersSent = false
         var completionError: Swift.Error?
 
-        init(clientFD: Int32, isHead: Bool) {
+        /// Cache tee — body chunks also land in `<destination>.partial-*`,
+        /// promoted in didComplete only when the transfer finished intact.
+        private let cacheDestination: URL?
+        private let expectedBodySHA256: String?
+        private var cacheTemp: URL?
+        private var cacheHandle: FileHandle?
+        private var cacheBytes: Int64 = 0
+        private var bodyHasher = SHA256()
+        private var expectedLength: Int64 = -1
+        private var statusCode = 0
+
+        init(clientFD: Int32, isHead: Bool,
+             cacheDestination: URL? = nil, expectedBodySHA256: String? = nil) {
             self.clientFD = clientFD
             self.isHead = isHead
+            self.cacheDestination = cacheDestination
+            self.expectedBodySHA256 = expectedBodySHA256
             super.init()
         }
 
@@ -508,6 +660,17 @@ final class AlpinePackageProxy: @unchecked Sendable {
             head += "Connection: close\r\n\r\n"
             _ = head.withCString { Darwin.write(clientFD, $0, strlen($0)) }
             headersSent = true
+            statusCode = http.statusCode
+            expectedLength = expected
+            // Cache only complete 200 bodies — a 206/304/404 must
+            // never become "the" content for this URL.
+            if !isHead, http.statusCode == 200, let dest = cacheDestination {
+                let temp = dest.appendingPathExtension("partial-\(UUID().uuidString)")
+                if FileManager.default.createFile(atPath: temp.path, contents: nil) {
+                    cacheTemp = temp
+                    cacheHandle = FileHandle(forWritingAtPath: temp.path)
+                }
+            }
             // HEAD: status + headers out, no body — cancel the task.
             completionHandler(isHead ? .cancel : .allow)
         }
@@ -515,6 +678,20 @@ final class AlpinePackageProxy: @unchecked Sendable {
         func urlSession(_ session: URLSession,
                          dataTask: URLSessionDataTask,
                          didReceive data: Data) {
+            // Tee into the cache temp file first — independent of the
+            // client socket's fate, so an impatient guest doesn't cost
+            // us the cache entry for the next run.
+            if let handle = cacheHandle {
+                do {
+                    try handle.write(contentsOf: data)
+                    cacheBytes += Int64(data.count)
+                    if expectedBodySHA256 != nil { bodyHasher.update(data: data) }
+                } catch {
+                    // Disk full / volume gone: stop teeing, keep proxying.
+                    try? handle.close()
+                    cacheHandle = nil
+                }
+            }
             // Write each chunk directly to the client socket. SIGPIPE
             // is masked process-wide and per-socket; writes to a
             // closed client just return EPIPE here and the underlying
@@ -534,7 +711,40 @@ final class AlpinePackageProxy: @unchecked Sendable {
                          task: URLSessionTask,
                          didCompleteWithError error: Swift.Error?) {
             completionError = error
+            finalizeCache(error: error)
             semaphore.signal()
+        }
+
+        /// Promote the temp file into the cache — only for an error-free
+        /// 200 whose byte count matches Content-Length (when known) and,
+        /// for by-hash URLs, whose body hashes to the digest in the URL.
+        /// Anything short of that is discarded: a poisoned entry would
+        /// fail apt/apk verification on every future run until swept.
+        private func finalizeCache(error: Swift.Error?) {
+            guard let temp = cacheTemp else { return }
+            try? cacheHandle?.close()
+            cacheHandle = nil
+            cacheTemp = nil
+            let fm = FileManager.default
+            let intact = error == nil
+                && statusCode == 200
+                && (expectedLength < 0 || cacheBytes == expectedLength)
+                && cacheBytes > 0
+                && verifyBodyHash()
+            guard intact, let dest = cacheDestination else {
+                try? fm.removeItem(at: temp)
+                return
+            }
+            try? fm.removeItem(at: dest)
+            do { try fm.moveItem(at: temp, to: dest) }
+            catch { try? fm.removeItem(at: temp) }
+        }
+
+        private func verifyBodyHash() -> Bool {
+            guard let expected = expectedBodySHA256 else { return true }
+            let actual = bodyHasher.finalize()
+                .map { String(format: "%02x", $0) }.joined()
+            return actual == expected
         }
     }
 

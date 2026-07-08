@@ -276,6 +276,15 @@ Acquire::https::Proxy::$_proxy_host DIRECT;
 APTCONF
 fi
 
+# Bake-time apt/dpkg speedups — removed in the cleanup below, so they
+# never ship in the image. Translations are dead weight in a headless
+# chroot, and dpkg's per-file fsync discipline guards against a power
+# loss the bake flow already handles (a torn bake is re-run from
+# scratch, never promoted).
+mkdir -p /etc/apt/apt.conf.d /etc/dpkg/dpkg.cfg.d
+printf 'Acquire::Languages "none";\n' > /etc/apt/apt.conf.d/99-bromure-fast
+printf 'force-unsafe-io\n' > /etc/dpkg/dpkg.cfg.d/99-bromure-unsafe-io
+
 log() { printf '[ac-chroot] %s (t+%ss)\n' "$*" "$SECONDS"; }
 fail() { printf 'SANDBOX_SETUP_FAILED: %s\n' "$*"; exit 1; }
 
@@ -880,8 +889,10 @@ rm -f /tmp/nodesource.sh /tmp/bromure-build.env
 # The bake-time proxy config points at the host's MITM listener
 # (192.168.64.1:<port>) which only exists while we're baking. Leaving
 # it in the final image would make every `apt update` in the user's
-# VM try to talk to a port that isn't there.
-rm -f /etc/apt/apt.conf.d/99-bromure-proxy
+# VM try to talk to a port that isn't there. Same for the bake-only
+# speed knobs (translation skip, dpkg unsafe-io).
+rm -f /etc/apt/apt.conf.d/99-bromure-proxy /etc/apt/apt.conf.d/99-bromure-fast
+rm -f /etc/dpkg/dpkg.cfg.d/99-bromure-unsafe-io
 
 log "chroot phase complete"
 CHROOT_EOF

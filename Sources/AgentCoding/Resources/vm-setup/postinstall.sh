@@ -135,6 +135,15 @@ Acquire::https::Proxy::$_proxy_host DIRECT;
 APTCONF
 fi
 
+# Build-time apt/dpkg speedups — removed in the cleanup below, so they
+# never ship in the image. Translations are dead weight in a headless
+# chroot, and dpkg's per-file fsync discipline guards against a power
+# loss the scratch-clone + atomic-promote flow already handles (a torn
+# run is discarded whole, never promoted).
+mkdir -p /etc/apt/apt.conf.d /etc/dpkg/dpkg.cfg.d
+printf 'Acquire::Languages "none";\n' > /etc/apt/apt.conf.d/99-bromure-fast
+printf 'force-unsafe-io\n' > /etc/dpkg/dpkg.cfg.d/99-bromure-unsafe-io
+
 log() { printf '[ac-postinstall-chroot] %s (t+%ss)\n' "$*" "$SECONDS"; }
 
 run_step() {
@@ -164,7 +173,8 @@ for f in /tmp/bromure-postinstall/*.sh; do
 done
 
 # Leave no bake-time residue in the image.
-rm -f /etc/apt/apt.conf.d/99-bromure-proxy
+rm -f /etc/apt/apt.conf.d/99-bromure-proxy /etc/apt/apt.conf.d/99-bromure-fast
+rm -f /etc/dpkg/dpkg.cfg.d/99-bromure-unsafe-io
 rm -rf /tmp/bromure-postinstall /tmp/bromure-build.env
 apt-get clean 2>/dev/null || true
 
