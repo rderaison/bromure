@@ -825,3 +825,14 @@
 "Discard" = "Abandonner";
 "%@ (repo root)" = "%@ (racine du dépôt)";
 "%@  ⚠︎ skips intermediates" = "%@  ⚠︎ saute les intermédiaires";
+
+/* Supply Chain panel — package filtering + Delpi */
+"Package filtering" = "Filtrage des paquets";
+"None" = "Aucun";
+"One provider at a time: socket.dev vets each package against its reputation database before Bromure lets the fetch through; Delpi replaces the npm registry outright — every npm fetch is re-routed to its filtering registry." = "Un seul fournisseur à la fois : socket.dev vérifie la réputation de chaque paquet avant que Bromure ne laisse passer la requête ; Delpi remplace entièrement le registre npm — chaque requête npm est redirigée vers son registre filtrant.";
+"Every npm registry request from the VM is re-routed to Delpi's secure registry (depi-npm-proxy.landh.tech), authenticated host-side with this key — Bromure never exports it into the VM. If Delpi rejects the key, the install fails with a clear error and Bromure alerts you." = "Chaque requête npm de la VM est redirigée vers le registre sécurisé de Delpi (depi-npm-proxy.landh.tech), authentifiée côté hôte avec cette clé — Bromure ne l’exporte jamais dans la VM. Si Delpi rejette la clé, l’installation échoue avec une erreur explicite et Bromure vous alerte.";
+"Enter an API key — Delpi stays off without one." = "Saisissez une clé API — sans elle, Delpi reste inactif.";
+"With Delpi selected, every npm registry request is logged here as it's re-routed to Delpi's secure registry." = "Avec Delpi sélectionné, chaque requête vers le registre npm est consignée ici lors de sa redirection vers le registre sécurisé de Delpi.";
+"Delpi rejected your API key" = "Delpi a rejeté votre clé API";
+"The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain." = "Le registre Delpi a répondu HTTP %d. Les installations npm de cet espace de travail passent par Delpi et échoueront tant que la clé API n’est pas corrigée dans Réglages → Chaîne d’approvisionnement.";
+"OK" = "OK";

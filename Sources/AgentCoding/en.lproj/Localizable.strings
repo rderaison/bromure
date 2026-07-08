@@ -827,3 +827,14 @@
 "Discard" = "Discard";
 "%@ (repo root)" = "%@ (repo root)";
 "%@  ⚠︎ skips intermediates" = "%@  ⚠︎ skips intermediates";
+
+/* Supply Chain panel — package filtering + Delpi */
+"Package filtering" = "Package filtering";
+"None" = "None";
+"One provider at a time: socket.dev vets each package against its reputation database before Bromure lets the fetch through; Delpi replaces the npm registry outright — every npm fetch is re-routed to its filtering registry." = "One provider at a time: socket.dev vets each package against its reputation database before Bromure lets the fetch through; Delpi replaces the npm registry outright — every npm fetch is re-routed to its filtering registry.";
+"Every npm registry request from the VM is re-routed to Delpi's secure registry (depi-npm-proxy.landh.tech), authenticated host-side with this key — Bromure never exports it into the VM. If Delpi rejects the key, the install fails with a clear error and Bromure alerts you." = "Every npm registry request from the VM is re-routed to Delpi's secure registry (depi-npm-proxy.landh.tech), authenticated host-side with this key — Bromure never exports it into the VM. If Delpi rejects the key, the install fails with a clear error and Bromure alerts you.";
+"Enter an API key — Delpi stays off without one." = "Enter an API key — Delpi stays off without one.";
+"With Delpi selected, every npm registry request is logged here as it's re-routed to Delpi's secure registry." = "With Delpi selected, every npm registry request is logged here as it's re-routed to Delpi's secure registry.";
+"Delpi rejected your API key" = "Delpi rejected your API key";
+"The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain." = "The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain.";
+"OK" = "OK";

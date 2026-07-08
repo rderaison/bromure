@@ -104,6 +104,7 @@ struct SupplyChainLogView: View {
                 bullet(NSLocalizedString("Open a session and run a package install (npm install, pip install, cargo add, …).", comment: ""))
                 bullet(NSLocalizedString("Entries appear here as soon as the MITM proxy intercepts a registry request.", comment: ""))
                 bullet(NSLocalizedString("socket.dev and OSV only fire on artifact downloads (.tgz, .whl, .crate, …) — not on plain metadata fetches. Packages cached in npm/pip's local store don't hit the network at all.", comment: ""))
+                bullet(NSLocalizedString("With Delpi selected, every npm registry request is logged here as it's re-routed to Delpi's secure registry.", comment: ""))
             }
             .font(.caption)
             .foregroundStyle(.secondary)

@@ -825,3 +825,14 @@
 "Discard" = "破棄";
 "%@ (repo root)" = "%@（リポジトリのルート）";
 "%@  ⚠︎ skips intermediates" = "%@  ⚠︎ 中間をスキップ";
+
+/* Supply Chain panel — package filtering + Delpi */
+"Package filtering" = "パッケージフィルタリング";
+"None" = "なし";
+"One provider at a time: socket.dev vets each package against its reputation database before Bromure lets the fetch through; Delpi replaces the npm registry outright — every npm fetch is re-routed to its filtering registry." = "プロバイダは同時に 1 つだけ：socket.dev は各パッケージをレピュテーションデータベースと照合してから Bromure が取得を許可します。Delpi は npm レジストリ自体を置き換え、すべての npm リクエストをそのフィルタリングレジストリへ転送します。";
+"Every npm registry request from the VM is re-routed to Delpi's secure registry (depi-npm-proxy.landh.tech), authenticated host-side with this key — Bromure never exports it into the VM. If Delpi rejects the key, the install fails with a clear error and Bromure alerts you." = "VM からのすべての npm レジストリリクエストは Delpi のセキュアレジストリ（depi-npm-proxy.landh.tech）へ転送され、このキーでホスト側から認証されます — Bromure がキーを VM に渡すことはありません。Delpi がキーを拒否した場合、インストールは明確なエラーで失敗し、Bromure が警告します。";
+"Enter an API key — Delpi stays off without one." = "API キーを入力してください — 未入力の場合 Delpi は無効のままです。";
+"With Delpi selected, every npm registry request is logged here as it's re-routed to Delpi's secure registry." = "Delpi を選択している場合、npm レジストリへの各リクエストは Delpi のセキュアレジストリへの転送時にここへ記録されます。";
+"Delpi rejected your API key" = "Delpi が API キーを拒否しました";
+"The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain." = "Delpi レジストリが HTTP %d を返しました。このワークスペースの npm インストールは Delpi 経由のため、設定 → サプライチェーンで API キーを修正するまで失敗します。";
+"OK" = "OK";

@@ -2582,41 +2582,81 @@ struct ProfileEditorView: View {
                 .padding(8)
             }
 
-            GroupBox(label: Label("socket.dev",
+            GroupBox(label: Label(NSLocalizedString("Package filtering", comment: ""),
                                   systemImage: "checkmark.shield")) {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text(NSLocalizedString("API key:", comment: ""))
-                        SecureField("", text: $draft.supplyChain.socketAPIKey)
-                            .textFieldStyle(.roundedBorder)
-                        Link(destination: URL(string: "https://socket.dev/dashboard/settings/api-tokens")!) {
-                            HStack(spacing: 2) {
-                                Text(NSLocalizedString("Get an API key", comment: ""))
-                                Image(systemName: "arrow.up.forward.square")
-                            }
-                            .font(.caption)
+                    Picker("", selection: $draft.supplyChain.packageFilter) {
+                        ForEach(SupplyChainPolicy.PackageFilter.allCases, id: \.self) { f in
+                            Text(f.displayName).tag(f)
                         }
                     }
-                    Text(NSLocalizedString("The key is stored host-side only — Bromure never exports it into the VM. Calls go directly to api.socket.dev from the host's MITM proxy.", comment: ""))
+                    .pickerStyle(.radioGroup)
+                    .labelsHidden()
+                    Text(NSLocalizedString("One provider at a time: socket.dev vets each package against its reputation database before Bromure lets the fetch through; Delpi replaces the npm registry outright — every npm fetch is re-routed to its filtering registry.", comment: ""))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Divider().padding(.vertical, 4)
-                    Toggle(NSLocalizedString("Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)", comment: ""),
-                           isOn: $draft.supplyChain.socketBlockCompromised)
-                        .disabled(draft.supplyChain.socketAPIKey.isEmpty)
-                    Toggle(NSLocalizedString("Block packages with known CVEs", comment: ""),
-                           isOn: $draft.supplyChain.socketBlockCVE)
-                        .disabled(draft.supplyChain.socketAPIKey.isEmpty)
-                    Picker(NSLocalizedString("CVE block threshold:", comment: ""),
-                           selection: $draft.supplyChain.socketCVESeverity) {
-                        ForEach(SupplyChainPolicy.Severity.allCases, id: \.self) { s in
-                            Text(s.displayName).tag(s)
+
+                    if draft.supplyChain.packageFilter == .socketDev {
+                        Divider().padding(.vertical, 4)
+                        HStack {
+                            Text(NSLocalizedString("API key:", comment: ""))
+                            SecureField("", text: $draft.supplyChain.socketAPIKey)
+                                .textFieldStyle(.roundedBorder)
+                            Link(destination: URL(string: "https://socket.dev/dashboard/settings/api-tokens")!) {
+                                HStack(spacing: 2) {
+                                    Text(NSLocalizedString("Get an API key", comment: ""))
+                                    Image(systemName: "arrow.up.forward.square")
+                                }
+                                .font(.caption)
+                            }
+                        }
+                        Text(NSLocalizedString("The key is stored host-side only — Bromure never exports it into the VM. Calls go directly to api.socket.dev from the host's MITM proxy.", comment: ""))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Toggle(NSLocalizedString("Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)", comment: ""),
+                               isOn: $draft.supplyChain.socketBlockCompromised)
+                            .disabled(draft.supplyChain.socketAPIKey.isEmpty)
+                        Toggle(NSLocalizedString("Block packages with known CVEs", comment: ""),
+                               isOn: $draft.supplyChain.socketBlockCVE)
+                            .disabled(draft.supplyChain.socketAPIKey.isEmpty)
+                        Picker(NSLocalizedString("CVE block threshold:", comment: ""),
+                               selection: $draft.supplyChain.socketCVESeverity) {
+                            ForEach(SupplyChainPolicy.Severity.allCases, id: \.self) { s in
+                                Text(s.displayName).tag(s)
+                            }
+                        }
+                        .disabled(!draft.supplyChain.socketBlockCVE || draft.supplyChain.socketAPIKey.isEmpty)
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: 280)
+                    }
+
+                    if draft.supplyChain.packageFilter == .delpi {
+                        Divider().padding(.vertical, 4)
+                        HStack {
+                            Text(NSLocalizedString("API key:", comment: ""))
+                            SecureField("", text: $draft.supplyChain.delpiAPIKey)
+                                .textFieldStyle(.roundedBorder)
+                            Link(destination: URL(string: "https://www.landh.tech/")!) {
+                                HStack(spacing: 2) {
+                                    Text(NSLocalizedString("Get an API key", comment: ""))
+                                    Image(systemName: "arrow.up.forward.square")
+                                }
+                                .font(.caption)
+                            }
+                        }
+                        Text(NSLocalizedString("Every npm registry request from the VM is re-routed to Delpi's secure registry (depi-npm-proxy.landh.tech), authenticated host-side with this key — Bromure never exports it into the VM. If Delpi rejects the key, the install fails with a clear error and Bromure alerts you.", comment: ""))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if draft.supplyChain.delpiAPIKey.isEmpty {
+                            Label(NSLocalizedString("Enter an API key — Delpi stays off without one.", comment: ""),
+                                  systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption).foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    .disabled(!draft.supplyChain.socketBlockCVE || draft.supplyChain.socketAPIKey.isEmpty)
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: 280)
                 }
                 .padding(8)
             }

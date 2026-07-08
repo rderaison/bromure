@@ -473,7 +473,9 @@ final class RemoteMenuApp {
             "ageGateDays": p.supplyChain.ageGateDays,
             "osvEnabled": p.supplyChain.osvEnabled,
             "osvSeverity": p.supplyChain.osvSeverity.rawValue,
+            "packageFilter": p.supplyChain.packageFilter.rawValue,
             "socketAPIKey": p.supplyChain.socketAPIKey,
+            "delpiAPIKey": p.supplyChain.delpiAPIKey,
             "socketBlockCompromised": p.supplyChain.socketBlockCompromised,
             "socketBlockCVE": p.supplyChain.socketBlockCVE,
             "socketCVESeverity": p.supplyChain.socketCVESeverity.rawValue,
@@ -712,15 +714,27 @@ final class RemoteMenuApp {
         let severity: [(label: String, value: String)] = [
             ("Low and above", "low"), ("Medium and above", "medium"),
             ("High and above", "high"), ("Critical only", "critical")]
+        // Mirror the decoder's legacy inference so the display doesn't
+        // show "None" for a pre-radio profile whose socket.dev key is
+        // in active use (packageFilter absent + key present → socket.dev).
+        if var sub = doc["supplyChain"] as? [String: Any],
+           sub["packageFilter"] == nil,
+           let key = sub["socketAPIKey"] as? String, !key.isEmpty {
+            sub["packageFilter"] = "socketdev"
+            doc["supplyChain"] = sub
+        }
         return editNested(&doc, parent: "supplyChain", title: "Supply Chain", fields: [
             ("ageGateEnabled", "Refuse packages younger than the cutoff", .bool),
             ("ageGateDays", "Minimum age", .int),
             ("osvEnabled", "Look up packages on api.osv.dev (free, no key required)", .bool),
             ("osvSeverity", "Block at severity", .pickLabeled(severity)),
-            ("socketAPIKey", "API key", .text(secret: true)),
+            ("packageFilter", "Package filtering", .pickLabeled([
+                ("None", "none"), ("socket.dev", "socketdev"), ("Delpi", "delpi")])),
+            ("socketAPIKey", "socket.dev API key", .text(secret: true)),
             ("socketBlockCompromised", "Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)", .bool),
             ("socketBlockCVE", "Block packages with known CVEs", .bool),
             ("socketCVESeverity", "CVE block threshold", .pickLabeled(severity)),
+            ("delpiAPIKey", "Delpi API key", .text(secret: true)),
             ("stripInstallScripts", "Strip preinstall / install / postinstall / prepare from npm tarballs on the fly", .bool),
             ("lockfilePrompt", "Prompt before passing lockfile-pinned tarballs through unmodified (npm ci, pip --require-hashes)", .bool),
         ])

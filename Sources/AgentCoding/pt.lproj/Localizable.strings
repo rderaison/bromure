@@ -825,3 +825,14 @@
 "Discard" = "Descartar";
 "%@ (repo root)" = "%@ (raiz do repo)";
 "%@  ⚠︎ skips intermediates" = "%@  ⚠︎ pula os intermediários";
+
+/* Supply Chain panel — package filtering + Delpi */
+"Package filtering" = "Filtragem de pacotes";
+"None" = "Nenhum";
+"One provider at a time: socket.dev vets each package against its reputation database before Bromure lets the fetch through; Delpi replaces the npm registry outright — every npm fetch is re-routed to its filtering registry." = "Um provedor de cada vez: o socket.dev verifica a reputação de cada pacote antes de o Bromure liberar a busca; o Delpi substitui completamente o registro npm — cada requisição npm é redirecionada para seu registro com filtragem.";
+"Every npm registry request from the VM is re-routed to Delpi's secure registry (depi-npm-proxy.landh.tech), authenticated host-side with this key — Bromure never exports it into the VM. If Delpi rejects the key, the install fails with a clear error and Bromure alerts you." = "Cada requisição ao registro npm vinda da VM é redirecionada para o registro seguro do Delpi (depi-npm-proxy.landh.tech), autenticada no host com esta chave — o Bromure nunca a exporta para a VM. Se o Delpi rejeitar a chave, a instalação falha com um erro claro e o Bromure avisa você.";
+"Enter an API key — Delpi stays off without one." = "Insira uma chave de API — sem ela, o Delpi permanece desativado.";
+"With Delpi selected, every npm registry request is logged here as it's re-routed to Delpi's secure registry." = "Com o Delpi selecionado, cada requisição ao registro npm é registrada aqui ao ser redirecionada para o registro seguro do Delpi.";
+"Delpi rejected your API key" = "O Delpi rejeitou sua chave de API";
+"The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain." = "O registro Delpi respondeu HTTP %d. As instalações npm deste espaço de trabalho passam pelo Delpi e falharão até que a chave de API seja corrigida em Ajustes → Cadeia de suprimentos.";
+"OK" = "OK";

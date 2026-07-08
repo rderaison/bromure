@@ -828,3 +828,14 @@
 
 /* Catch-up: key missing only from zh-Hant */
 "Applies to the kube API servers from this profile's kubeconfigs (e.g. `kubectl delete` fails cleanly)." = "適用於此設定檔 kubeconfig 中的 kube API 伺服器（例如 `kubectl delete` 會乾淨地失敗）。";
+
+/* Supply Chain panel — package filtering + Delpi */
+"Package filtering" = "套件過濾";
+"None" = "無";
+"One provider at a time: socket.dev vets each package against its reputation database before Bromure lets the fetch through; Delpi replaces the npm registry outright — every npm fetch is re-routed to its filtering registry." = "一次只能啟用一個供應者：socket.dev 會先比對其信譽資料庫審查每個套件，Bromure 才放行下載；Delpi 則直接取代 npm 註冊表——所有 npm 請求都會被轉送到它的過濾註冊表。";
+"Every npm registry request from the VM is re-routed to Delpi's secure registry (depi-npm-proxy.landh.tech), authenticated host-side with this key — Bromure never exports it into the VM. If Delpi rejects the key, the install fails with a clear error and Bromure alerts you." = "虛擬機發出的所有 npm 註冊表請求都會被轉送到 Delpi 的安全註冊表（depi-npm-proxy.landh.tech），並在主機端以此金鑰驗證——Bromure 絕不會將金鑰匯出到虛擬機。若 Delpi 拒絕該金鑰，安裝會以明確的錯誤失敗，且 Bromure 會向您發出警告。";
+"Enter an API key — Delpi stays off without one." = "請輸入 API 金鑰——沒有金鑰時 Delpi 保持關閉。";
+"With Delpi selected, every npm registry request is logged here as it's re-routed to Delpi's secure registry." = "選擇 Delpi 後，每個 npm 註冊表請求在被轉送到 Delpi 安全註冊表時都會記錄在這裡。";
+"Delpi rejected your API key" = "Delpi 拒絕了您的 API 金鑰";
+"The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain." = "Delpi 註冊表回應了 HTTP %d。此工作區的 npm 安裝均經由 Delpi，在「設定 → 供應鏈」中修正 API 金鑰之前將持續失敗。";
+"OK" = "好";

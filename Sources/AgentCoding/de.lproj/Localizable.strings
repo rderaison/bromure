@@ -825,3 +825,14 @@
 "Discard" = "Verwerfen";
 "%@ (repo root)" = "%@ (Repo-Wurzel)";
 "%@  ⚠︎ skips intermediates" = "%@  ⚠︎ überspringt Zwischenstufen";
+
+/* Supply Chain panel — package filtering + Delpi */
+"Package filtering" = "Paketfilterung";
+"None" = "Keine";
+"One provider at a time: socket.dev vets each package against its reputation database before Bromure lets the fetch through; Delpi replaces the npm registry outright — every npm fetch is re-routed to its filtering registry." = "Nur ein Anbieter gleichzeitig: socket.dev prüft jedes Paket gegen seine Reputationsdatenbank, bevor Bromure den Abruf durchlässt; Delpi ersetzt die npm-Registry vollständig — jeder npm-Abruf wird auf seine filternde Registry umgeleitet.";
+"Every npm registry request from the VM is re-routed to Delpi's secure registry (depi-npm-proxy.landh.tech), authenticated host-side with this key — Bromure never exports it into the VM. If Delpi rejects the key, the install fails with a clear error and Bromure alerts you." = "Jede npm-Registry-Anfrage aus der VM wird auf Delpis sichere Registry (depi-npm-proxy.landh.tech) umgeleitet und hostseitig mit diesem Schlüssel authentifiziert — Bromure exportiert ihn nie in die VM. Lehnt Delpi den Schlüssel ab, schlägt die Installation mit einer klaren Fehlermeldung fehl und Bromure alarmiert Sie.";
+"Enter an API key — Delpi stays off without one." = "Geben Sie einen API-Schlüssel ein — ohne ihn bleibt Delpi aus.";
+"With Delpi selected, every npm registry request is logged here as it's re-routed to Delpi's secure registry." = "Mit ausgewähltem Delpi wird jede npm-Registry-Anfrage hier protokolliert, während sie auf Delpis sichere Registry umgeleitet wird.";
+"Delpi rejected your API key" = "Delpi hat Ihren API-Schlüssel abgelehnt";
+"The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain." = "Die Delpi-Registry antwortete mit HTTP %d. npm-Installationen in diesem Workspace laufen über Delpi und schlagen fehl, bis der API-Schlüssel unter Einstellungen → Lieferkette korrigiert ist.";
+"OK" = "OK";

@@ -133,8 +133,13 @@ public final class MitmEngine {
                 if policy.socketBlockCompromised { sk.append("compromised") }
                 if policy.socketBlockCVE { sk.append("cve=\(policy.socketCVESeverity.rawValue)") }
                 bits.append("socket.dev=\(sk.joined(separator: "+"))")
-            } else if !policy.socketAPIKey.isEmpty {
+            } else if policy.packageFilter == .socketDev, !policy.socketAPIKey.isEmpty {
                 bits.append("socket.dev=key-set-but-no-toggle")
+            }
+            if policy.delpiActive {
+                bits.append("delpi=npm→\(DelpiRegistry.host)")
+            } else if policy.packageFilter == .delpi {
+                bits.append("delpi=selected-but-no-key")
             }
             if policy.stripInstallScripts { bits.append("strip-scripts") }
             let summary = bits.isEmpty ? "off" : bits.joined(separator: " ")
