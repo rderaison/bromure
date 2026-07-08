@@ -77,17 +77,69 @@ actor MLXEngine {
         var lastUsed = Date()
     }
 
-    /// One session cache per served repo. A single conversation per model is the
-    /// common case (one agent in one VM). Multiple concurrent conversations on
-    /// the same model share this and degrade to per-turn prefill — correctness
-    /// holds because the engine serializes generation on the model container.
-    private var sessionCaches: [String: SessionCache] = [:]
+    /// The cache slots for one repo — a small LRU set, not a single slot,
+    /// because "one conversation per model" is not what an agent actually
+    /// sends. Claude Code fires sidechains at the same model (conversation
+    /// title, sub-agents) interleaved with the main conversation; with one
+    /// slot each sidechain trims the conversation's cache down to the shared
+    /// system prefix, so the next real turn re-prefills the whole transcript —
+    /// exactly the O(transcript)-per-turn blow-up the cache exists to prevent.
+    /// With a few slots the sidechain takes its own cache and the main
+    /// conversation's prefix survives untouched.
+    ///
+    /// A reference type mutated only inside `generate` (which holds `genLock`),
+    /// the same ownership pattern as SessionCache itself; the actor only ever
+    /// swaps whole entries in/out of `sessionCaches`.
+    private final class SessionSlots {
+        var slots: [SessionCache] = []
+    }
 
-    private func sessionCache(for repo: String) -> SessionCache {
-        if let s = sessionCaches[repo] { s.lastUsed = Date(); return s }
-        let s = SessionCache()
+    private var sessionCaches: [String: SessionSlots] = [:]
+
+    private func sessionSlots(for repo: String) -> SessionSlots {
+        if let s = sessionCaches[repo] { return s }
+        let s = SessionSlots()
         sessionCaches[repo] = s
         return s
+    }
+
+    /// Max cache slots per repo. Each slot holds one conversation's KV cache
+    /// (order of 100 KB/token for the 30B MoE at fp16), so the set stays small:
+    /// the real shape is one long-lived conversation plus short sidechains.
+    /// BROMURE_CACHE_SLOTS tunes it; 1 restores the old single-slot behavior.
+    static let maxCacheSlots: Int = {
+        let raw = ProcessInfo.processInfo.environment["BROMURE_CACHE_SLOTS"]
+            .flatMap { Int($0) } ?? 4
+        return min(max(raw, 1), 8)
+    }()
+
+    /// How a request maps onto the cache slots.
+    enum SlotDecision: Equatable {
+        /// Continue in slot `i`: trim its divergent tail, prefill the suffix.
+        case reuse(Int)
+        /// No slot is safe to continue — take a fresh one (LRU-evict at cap).
+        case fresh
+    }
+
+    /// Pick the slot for a prompt. A slot may be reused *in place* only when
+    /// the prompt is a plausible continuation of it: trimming to the shared
+    /// prefix must destroy little — retokenization drift or a repaired tool
+    /// call, bounded by max(1024, prefix/4) tokens. A prompt that shares only
+    /// the system prefix with a long conversation (a sidechain) fails the test
+    /// and gets a fresh slot: it pays its own full prefill once instead of
+    /// destroying a 40k-token cache the next real turn needs. Among acceptable
+    /// slots the deepest prefix wins; an empty slot is always acceptable
+    /// (prefix 0, nothing to destroy).
+    static func chooseSlot(prompt: [Int], slotTokens: [[Int]]) -> SlotDecision {
+        var best: (index: Int, prefix: Int)?
+        for (i, tokens) in slotTokens.enumerated() {
+            let prefix = commonPrefix(tokens, prompt)
+            let lost = tokens.count - prefix
+            guard lost <= max(1024, prefix / 4) else { continue }
+            if best == nil || prefix > best!.prefix { best = (i, prefix) }
+        }
+        if let best { return .reuse(best.index) }
+        return .fresh
     }
 
     // MARK: - Generation serialization
@@ -394,7 +446,7 @@ actor MLXEngine {
         defer { genUnlock() }
         let container = try await ensureLoaded(repo: repo, estMemGB: estMemGB)
         let gp = params.toGenerateParameters()
-        let session = sessionCache(for: repo)
+        let sessions = sessionSlots(for: repo)
         let maxTokens = params.maxTokens
         let enableThinking = params.enableThinking
 
@@ -404,7 +456,7 @@ actor MLXEngine {
         // Scoped: the previous limit is restored when generation returns.
         let wiredBytes = (estMemGB > 0 ? estMemGB : max(memoryBudgetGB, 1)) << 30
         return try await MLX.Memory.withWiredLimit(wiredBytes) {
-        try await container.perform { [session] (context: ModelContext) in
+        try await container.perform { [sessions] (context: ModelContext) in
             let input = try await context.processor.prepare(
                 input: UserInput(chat: MLXEngine.withToolReminder(messages, hasTools: tools?.isEmpty == false,
                                                                   gemma: MLXEngine.isGemmaModel(repo)),
@@ -412,6 +464,33 @@ actor MLXEngine {
                                  additionalContext: ["enable_thinking": enableThinking]))
             // The full prompt as token ids — what we prefix-match the cache on.
             let promptIds = input.text.tokens.asArray(Int32.self).map(Int.init)
+
+            // --- Slot selection -----------------------------------------------
+            // Route the request to the slot it continues; a divergent prompt
+            // (sidechain, new conversation) takes a fresh slot so it can't
+            // trash the main conversation's cache. See chooseSlot.
+            let session: SessionCache
+            let slotIndex: Int
+            switch MLXEngine.chooseSlot(prompt: promptIds,
+                                        slotTokens: sessions.slots.map(\.tokens)) {
+            case .reuse(let i):
+                session = sessions.slots[i]
+                slotIndex = i
+            case .fresh:
+                session = SessionCache()
+                if sessions.slots.count >= MLXEngine.maxCacheSlots,
+                   let lru = sessions.slots.indices.min(by: {
+                       sessions.slots[$0].lastUsed < sessions.slots[$1].lastUsed }) {
+                    sessions.slots[lru] = session
+                    slotIndex = lru
+                } else {
+                    sessions.slots.append(session)
+                    slotIndex = sessions.slots.count - 1
+                }
+            }
+            // Mark now, not just after generation, so a request that dies
+            // mid-decode still counts as recent for LRU eviction.
+            session.lastUsed = Date()
 
             // --- Prefix-cache reuse -------------------------------------------
             // Reuse the longest leading run of tokens already in the KV cache and
@@ -486,7 +565,7 @@ actor MLXEngine {
             if ProcessInfo.processInfo.environment["BROMURE_INFER_DEBUG"] != nil {
                 let tps = Double(generatedIds.count) / max(decode, 0.001)
                 FileHandle.standardError.write(Data(
-                    "[mlx] prompt=\(promptIds.count) reused=\(reusedCount) prefilled=\(suffix.count) gen=\(generatedIds.count) ttft=\(String(format: "%.2f", ttft))s \(String(format: "%.1f", tps)) tok/s\n".utf8))
+                    "[mlx] slot=\(slotIndex)/\(sessions.slots.count) prompt=\(promptIds.count) reused=\(reusedCount) prefilled=\(suffix.count) gen=\(generatedIds.count) ttft=\(String(format: "%.2f", ttft))s \(String(format: "%.1f", tps)) tok/s\n".utf8))
             }
             let visible = MLXEngine.isGemmaModel(repo)
                 ? MLXEngine.stripGemmaChannels(MLXEngine.stripThinking(text))
