@@ -6274,6 +6274,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // Mirror for detached `vm ls` / API / SSH, and drive the tab bar.
                 self.runningSessions[pid]?.tabs = tabs
                 self.pane(for: pid)?.applyTabList(tabs)
+                // Keep the grid membership in sync even when the grid isn't the
+                // active stage — closing a tab in the workspace must prune its
+                // cell from the sidebar's Grid list live, not only when the grid
+                // is next shown. Skip empty rosters (reboot dip / shutdown):
+                // off/suspended workspaces keep their cells as placeholders.
+                if !tabs.isEmpty {
+                    self.unifiedWindow?.gridStore.reconcile(
+                        profileID: pid,
+                        tabs: tabs.map { ($0.index, $0.display?.isEmpty == false ? $0.display! : $0.label) })
+                }
                 // First non-empty roster = the guest booted to kitty/tmux, so the
                 // disk is proven bootable. Snapshot it (once per session) as a
                 // rollback point — a later bad shutdown can revert here instead of
