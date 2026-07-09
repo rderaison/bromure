@@ -63,7 +63,8 @@ final class TerminalSessionController {
         if let existing = views[index] { return existing }
         guard GhosttyRuntime.shared.start() else { return nil }
         guard let view = TerminalSurfaceView(command: Self.attachCommand(vmID: vmID, window: index),
-                                             windowIndex: index) else { return nil }
+                                             windowIndex: index,
+                                             profileID: profile.id) else { return nil }
         if let surface = view.surface {
             GhosttyRuntime.shared.apply(profile: profile, to: surface)
         }
