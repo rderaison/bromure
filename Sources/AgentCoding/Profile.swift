@@ -3083,14 +3083,23 @@ public final class ProfileStore {
                 perms["defaultMode"] = "auto"
                 settings["permissions"] = perms
             }
-            // Keep click-drag text selection with the terminal (kitty → macOS
-            // ⌘C), not swallowed by Claude Code's fullscreen-TUI mouse capture.
-            // Merge into env (don't clobber the Bedrock env written above), and
-            // only seed when unset so a user who wants clicks can remove it.
+            // We used to seed CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1 because the
+            // framebuffer kitty and Claude Code's fullscreen-TUI mouse capture
+            // fought over click-drag selection. tmux now owns the mouse (the
+            // native terminal views enable mouse mode; selection copies via
+            // OSC 52), so clicks can flow to the TUI again. Strip the stale
+            // seed — but only our exact value, so a user who set it on
+            // purpose keeps it.
             var claudeEnv = settings["env"] as? [String: Any] ?? [:]
-            if claudeEnv["CLAUDE_CODE_DISABLE_MOUSE_CLICKS"] == nil {
-                claudeEnv["CLAUDE_CODE_DISABLE_MOUSE_CLICKS"] = "1"
+            if claudeEnv["CLAUDE_CODE_DISABLE_MOUSE_CLICKS"] as? String == "1" {
+                claudeEnv.removeValue(forKey: "CLAUDE_CODE_DISABLE_MOUSE_CLICKS")
                 settings["env"] = claudeEnv
+            }
+            // Selection is the terminal/tmux's job (mouse-release already
+            // copies); Claude Code's own copy-on-select would double-copy
+            // and clobber the clipboard. Seed only when unset.
+            if settings["copyOnSelect"] == nil {
+                settings["copyOnSelect"] = false
             }
             // Managed status hooks — report working/done/needsInput to the host
             // for the sidebar status dot. Overwrite just these four events
