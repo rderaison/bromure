@@ -1324,6 +1324,7 @@ private struct VMSection: View {
                         }
                     }
                     DockerSection(
+                        profileID: row.id,
                         model: entry.model,
                         accentHex: row.accentHex,
                         isSelected: isSelected,
@@ -1572,6 +1573,7 @@ private struct ChordLabel: View {
 /// dashboard (onOpen); the chevron expands a sub-tree of running containers,
 /// each with its attach tabs nested underneath.
 private struct DockerSection: View {
+    let profileID: Profile.ID
     let model: TabsModel
     let accentHex: String
     let isSelected: Bool
@@ -1625,6 +1627,7 @@ private struct DockerSection: View {
             if expanded {
                 ForEach(running) { container in
                     DockerContainerRow(
+                        profileID: profileID,
                         container: container,
                         accentHex: accentHex,
                         isSelected: isSelected,
@@ -1651,6 +1654,7 @@ private struct DockerSection: View {
 /// One running container under the Docker node: a row that opens the attach
 /// popover, plus its attach tabs nested underneath.
 private struct DockerContainerRow: View {
+    let profileID: Profile.ID
     let container: DockerContainer
     let accentHex: String
     let isSelected: Bool
@@ -1699,6 +1703,9 @@ private struct DockerContainerRow: View {
                     chord: (isSelected && entry.pos < 9) ? entry.pos + 1 : nil,
                     onSelect: { onSelectTab(entry.pos) },
                     onClose: { onCloseTab(entry.pos) })
+                .draggable(GridDragPayload.encode(
+                    profileID: profileID, windowIndex: entry.tab.index,
+                    label: entry.tab.shownLabel))
             }
         }
     }
