@@ -115,6 +115,37 @@ struct HomeStorageTests {
         #expect(!FileManager.default.fileExists(atPath: disk.homeImageURL.path))
     }
 
+    @Test("Duplicating a workspace clones the ext4 home image (CoW, still sparse)")
+    func duplicateClonesHomeImage() throws {
+        let root = try tempDir()
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "ws", tool: .claude, authMode: .token)
+        let disk = SessionDisk(profile: p, store: store,
+                               baseDiskURL: root.appendingPathComponent("base.img"))
+        try disk.ensureHomeImageExists()
+        // A pre-migration backup must NOT travel to the duplicate.
+        try FileManager.default.createDirectory(
+            at: store.homeBackupDirectory(for: p), withIntermediateDirectories: true)
+
+        let copy = try store.duplicate(p, named: "ws copy")
+        let dstImg = store.homeImageURL(for: copy)
+        #expect(FileManager.default.fileExists(atPath: dstImg.path))
+
+        // Same apparent size as the source…
+        let srcAttrs = try FileManager.default.attributesOfItem(
+            atPath: store.homeImageURL(for: p).path)
+        let dstAttrs = try FileManager.default.attributesOfItem(atPath: dstImg.path)
+        #expect((dstAttrs[.size] as? NSNumber)?.int64Value
+                == (srcAttrs[.size] as? NSNumber)?.int64Value)
+        // …and still sparse: the clone shares extents, it doesn't inflate.
+        let allocated = Int64((try dstImg.resourceValues(
+            forKeys: [.totalFileAllocatedSizeKey])).totalFileAllocatedSize ?? 0)
+        #expect(allocated < 1024 * 1024)
+
+        #expect(!FileManager.default.fileExists(
+            atPath: store.homeBackupDirectory(for: copy).path))
+    }
+
     @Test("Bootstrap home carries the managed .bash_profile")
     func bootstrapHome() throws {
         let root = try tempDir()

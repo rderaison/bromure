@@ -2594,8 +2594,9 @@ public final class ProfileStore {
     /// Deep-copy a profile under a new identity. Everything that
     /// matters carries over: profile fields (incl. credentials, since
     /// they're already in `source` after `loadAll` merged the secrets
-    /// blob), the per-profile system disk, the persistent home dir,
-    /// and the host-only `agent/` + `ssh/` dirs.
+    /// blob), the per-profile system disk, the persistent home (the
+    /// virtiofs dir and/or the ext4 home.img), and the host-only
+    /// `agent/` + `ssh/` dirs.
     ///
     /// Skipped on purpose:
     ///   - `vm.state` / `tabs.json` — a RAM snapshot saved against the
@@ -2638,13 +2639,26 @@ public final class ProfileStore {
             try Self.cloneItem(at: srcDisk, to: dstDisk)
         }
 
-        // Persistent home dir. clonefile() recurses, so one call
-        // duplicates the whole tree as APFS CoW.
+        // Persistent home dir (virtiofs model). clonefile() recurses, so
+        // one call duplicates the whole tree as APFS CoW.
         let srcHome = srcDir.appendingPathComponent("home", isDirectory: true)
         if fm.fileExists(atPath: srcHome.path) {
             let dstHome = dstDir.appendingPathComponent("home", isDirectory: true)
             try? fm.removeItem(at: dstHome)
             try Self.cloneItem(at: srcHome, to: dstHome)
+        }
+
+        // Home image (ext4 model). clonefile shares the extent map, so
+        // the duplicate is instant, costs no additional space until the
+        // two diverge, and stays sparse — existing holes (and future
+        // fstrim punches on either copy) never materialize on the other.
+        // NOT cloned: boot-home/ (regenerated every launch) and
+        // home.pre-ext4/ (the source's own pre-migration backup).
+        let srcHomeImg = srcDir.appendingPathComponent("home.img")
+        if fm.fileExists(atPath: srcHomeImg.path) {
+            let dstHomeImg = dstDir.appendingPathComponent("home.img")
+            try? fm.removeItem(at: dstHomeImg)
+            try Self.cloneItem(at: srcHomeImg, to: dstHomeImg)
         }
 
         // Host-only ssh material — auto-generated keypair seed under
