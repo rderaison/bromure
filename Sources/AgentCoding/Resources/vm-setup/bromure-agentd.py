@@ -1717,7 +1717,37 @@ def _worktree_resolve(merge_dir, tool):
 _ROSTER_FMT = ("#{window_index}\t#{?window_active,1,0}\t"
                "#{pane_current_command}\t#{pane_tty}\t#{@label}\t"
                "#{@container}\t#{pane_current_path}\t#{@worktree}\t"
-               "#{@parent_branch}\t#{@root_repo}\t#{@display}")
+               "#{@parent_branch}\t#{@root_repo}\t#{@display}\t#{pane_title}")
+
+# The pane title (OSC 2) an agent sets, when it's a real session title rather
+# than tmux's default (the hostname) or a shell's "user@host" / path. Used to
+# turn a bare "claude" tab into "Refactor website (claude)".
+try:
+    _HOSTNAME = socket.gethostname()
+except Exception:
+    _HOSTNAME = ""
+
+
+def _agent_title(pane_title, agent):
+    """A cleaned agent session title, or '' if pane_title isn't meaningful.
+
+    Claude Code (and similar) set the terminal title to the current task
+    summary via OSC 2; tmux exposes it as #{pane_title}. We ignore the
+    defaults: empty, the hostname, a user@host/path form, or just the agent
+    name itself."""
+    t = (pane_title or "").strip()
+    if not t or t == _HOSTNAME or t == agent:
+        return ""
+    # Shell defaults like "ubuntu@host: ~/proj" or a bare path — not a title.
+    if "@" in t or t.startswith("/") or t.startswith("~"):
+        return ""
+    # Strip a leading status glyph/spinner + spaces some agents prepend.
+    t = t.lstrip("✳✻✽·*•◐◓◑◒⏳ \t")
+    # Collapse whitespace and cap length so the tab stays readable.
+    t = " ".join(t.split())
+    if not t or t.lower() == agent:
+        return ""
+    return t[:60]
 
 # Interpreters that hide the real program (claude/codex/grok all run as `node`).
 # Mirrors the shell case: node|node[0-9]*|deno|bun|python|python[0-9.]*|ruby|uv|tsx
@@ -1760,15 +1790,17 @@ def _foreground_script(tty):
     return ""
 
 
-def _resolve_tab_name(label, cmd, tty):
+def _resolve_tab_name(label, cmd, tty, pane_title=""):
     """Resolve a window's tab label (port of the roster shell name logic).
 
     1. explicit @label wins;
     2. else the foreground command, but map an interpreter (node/python/…) to
        the agent script it runs (claude/codex/grok/…);
-    3. an absolute-path name falls back to "shell".
+    3. an agent tab with a real session title shows "<title> (<agent>)";
+    4. an absolute-path name falls back to "shell".
     """
     name = label
+    resolved_agent = ""
     if not name:
         name = cmd
         if _INTERP_RE.match(cmd):
@@ -1782,6 +1814,15 @@ def _resolve_tab_name(label, cmd, tty):
                     if ag in script:
                         name = ag
                         break
+        if name in _AGENTS_SET:
+            resolved_agent = name
+    elif name in _AGENTS_SET:
+        resolved_agent = name
+    # Agent tab with a real OSC-2 title → "Refactor website (claude)".
+    if resolved_agent:
+        title = _agent_title(pane_title, resolved_agent)
+        if title:
+            return "%s (%s)" % (title, resolved_agent)
     if name.startswith("/"):
         name = "shell"
     return name
@@ -1812,14 +1853,14 @@ def publish_roster():
         if p.returncode == 0:
             out_lines = []
             for raw in p.stdout.splitlines():
-                cols = raw.split("\t", 10)
-                while len(cols) < 11:
+                cols = raw.split("\t", 11)
+                while len(cols) < 12:
                     cols.append("")
                 (idx, active, cmd, tty, label, container, cwd, worktree,
-                 pbranch, rroot, display) = cols[:11]
+                 pbranch, rroot, display, pane_title) = cols[:12]
                 if not idx:
                     continue
-                name = _resolve_tab_name(label, cmd, tty)
+                name = _resolve_tab_name(label, cmd, tty, pane_title)
                 # Is the cwd inside a git repo? Gates the "New worktree" menu
                 # host-side. Skip for worktree tabs (known repos) and empty cwds.
                 isrepo = ""
