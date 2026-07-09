@@ -4573,19 +4573,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // ssh-key gate is re-pushed to the ssh-agent there too. (Manual-token /
         // docker-registry / imported-SSH-key gates already ride their own
         // credential diffs.)
-        if old.cursorShape != new.cursorShape
-            || old.keyboardLayoutOverride != new.keyboardLayoutOverride
-            || old.keyRepeatDelayMs != new.keyRepeatDelayMs
-            || old.keyRepeatRateHz != new.keyRepeatRateHz {
-            changes.append(.keyboardSettings)
-        }
-        if old.useTerminalAppDefaults != new.useTerminalAppDefaults
-            || old.customFontFamily != new.customFontFamily
-            || old.customFontSize != new.customFontSize
-            || old.customBackgroundHex != new.customBackgroundHex
-            || old.customForegroundHex != new.customForegroundHex {
-            changes.append(.terminalAppearance)
-        }
+        // Terminal appearance (font, colors, cursor shape/blink) is applied
+        // LIVE now that ghostty renders host-side — applyLiveProfileUpdates →
+        // TerminalSessionController.applyProfile → ghostty_surface_update_config
+        // re-themes every open surface on save. Window opacity is applied live
+        // too (the pane container's layer). The keyboard-layout / key-repeat
+        // fields are dead (no guest X keymap post-framebuffer). None of these
+        // need a restart anymore.
         // Git identity (~/.gitconfig) is rewritten live into the home share.
         return changes.map { restartLabel(for: $0) }
     }
