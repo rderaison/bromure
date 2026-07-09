@@ -41,6 +41,58 @@ pipeline {
             }
         }
 
+        stage('Toolchain') {
+            steps {
+                // Preflight the whole build toolchain so a half-provisioned
+                // builder fails HERE with a readable message — not 10 minutes
+                // into the Package stage. Every step is idempotent: on a
+                // provisioned box this stage is a fast no-op.
+                sh '''
+                    set -euo pipefail
+
+                    # Xcode — everything downstream rides the selected Xcode
+                    # (swift build, xcodebuild, codesign, notarytool, stapler,
+                    # hdiutil, PlistBuddy).
+                    xcode-select -p
+                    xcodebuild -version
+                    swift --version
+
+                    # Basics the fetch/build scripts shell out to. node is for
+                    # the Release stage (release-upload.mjs via npx).
+                    for tool in git curl tar unzip python3 node; do
+                        command -v "$tool" >/dev/null 2>&1 || {
+                            echo "ERROR: required tool '$tool' is not on PATH" >&2
+                            exit 1
+                        }
+                    done
+                    node --version
+
+                    # Metal toolchain — a separate download since Xcode 26.
+                    # The ghostty zig build needs `metal` to compile shaders.
+                    if ! /usr/bin/xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+                        echo "Metal toolchain missing — installing (xcodebuild -downloadComponent MetalToolchain)…"
+                        xcodebuild -downloadComponent MetalToolchain
+                        /usr/bin/xcrun -sdk macosx metal --version
+                    fi
+
+                    # GhosttyKit — downloads the pinned zig (tools/build-ghostty.sh,
+                    # cached in ~/.cache/bromure-ghostty) and builds the
+                    # xcframework at tools/ghostty.commit. Stamp-cached: a no-op
+                    # when vendor/ is already at the pinned commit. Running it
+                    # here keeps the Package stage's clean-rebuild retry
+                    # (rm -rf .build) from ever re-running the zig build.
+                    ./tools/build-ghostty.sh
+
+                    # MLX Metal shader library — prebuilt + hash-pinned (curl +
+                    # unzip only, no Metal compile). Warms the cache package.sh
+                    # copies from (~/Library/Caches/io.bromure.build/mlx).
+                    ./scripts/fetch-mlx-metallib.sh >/dev/null
+
+                    echo "=== Toolchain OK ==="
+                '''
+            }
+        }
+
         stage('Resolve version') {
             steps {
                 // Read CFBundleShortVersionString out of the AC Info.plist
