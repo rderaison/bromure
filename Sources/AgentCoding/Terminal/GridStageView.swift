@@ -119,8 +119,7 @@ final class GridStageView: NSView {
                 workspaceName: profile?.name ?? "?",
                 accentHex: profile?.color.hexInUI ?? "#888888",
                 agentStatus: tab?.agentStatus,
-                runState: state,
-                focused: store.focusedCellID == cell.id)
+                runState: state)
 
             if state == .running, let profile {
                 let controller = controllers[cell.profileID]
@@ -150,9 +149,6 @@ final class GridStageView: NSView {
         store.focusedCellID = id
         if let surface = cellViews[id]?.terminalView {
             window?.makeFirstResponder(surface)
-        }
-        for (cellID, view) in cellViews {
-            view.setFocusRing(cellID == id)
         }
     }
 
@@ -253,21 +249,12 @@ final class GridCellView: NSView {
     required init?(coder: NSCoder) { fatalError("not supported") }
 
     func update(label: String, workspaceName: String, accentHex: String,
-                agentStatus: AgentStatus?, runState: SessionListModel.RunState,
-                focused: Bool) {
+                agentStatus: AgentStatus?, runState: SessionListModel.RunState) {
         header.label = label
         header.workspaceName = workspaceName
         header.accentHex = accentHex
         header.agentStatus = agentStatus
         header.runState = runState
-        setFocusRing(focused)
-    }
-
-    func setFocusRing(_ on: Bool) {
-        layer?.borderWidth = on ? 2 : 1
-        layer?.borderColor = on
-            ? NSColor(Color(hex: header.accentHex)).cgColor
-            : NSColor.separatorColor.cgColor
     }
 
     func showTerminal(_ view: TerminalSurfaceView) {
