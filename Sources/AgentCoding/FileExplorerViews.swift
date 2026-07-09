@@ -41,7 +41,7 @@ struct FileExplorerPane: View {
     /// change re-points the model and restarts the status polling task.
     private var contextKey: String {
         let id = listModel.selectedID?.uuidString ?? "-"
-        return "\(id)|\(currentRepoRoot ?? "-")|\(listModel.filePaneOpen)|\(listModel.gridSelected)"
+        return "\(id)|\(currentRepoRoot ?? "-")|\(listModel.filePaneOpen)|\(listModel.gridSelected)|\(model.poppedOut)"
     }
     /// Auto-open watches only (VM, repo) — deliberately NOT filePaneOpen, so
     /// closing the pane doesn't retrigger the transition check.
@@ -78,9 +78,11 @@ struct FileExplorerPane: View {
         }
         .task(id: contextKey) {
             // Poll git status while the pane is actually showing (not closed,
-            // not covered by the grid). 4s keeps the tree live against agent
-            // edits without meaningfully loading the guest.
-            guard listModel.filePaneOpen, !listModel.gridSelected,
+            // not covered by the grid) — or while the pop-out viewer window
+            // is up, which shows this model regardless of the pane. 4s keeps
+            // the tree live against agent edits without meaningfully loading
+            // the guest.
+            guard (listModel.filePaneOpen && !listModel.gridSelected) || model.poppedOut,
                   currentRepoRoot != nil else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
@@ -91,7 +93,7 @@ struct FileExplorerPane: View {
     }
 
     private func applyContext() {
-        guard listModel.filePaneOpen else {
+        guard listModel.filePaneOpen || model.poppedOut else {
             model.setRepo(profileID: nil, root: nil)   // park while closed
             return
         }
@@ -363,6 +365,10 @@ private struct FileRow: View {
 
 private struct FileDetailSection: View {
     @Bindable var model: FileExplorerModel
+    /// True inside the pop-out viewer window: no pop-out/close-selection
+    /// buttons (the window has its own chrome), and an idle placeholder
+    /// instead of empty space when nothing is selected.
+    var windowed = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -398,13 +404,22 @@ private struct FileDetailSection: View {
                 .controlSize(.mini)
                 .frame(width: 110)
             }
-            Button { model.select(nil) } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
+            if !windowed {
+                Button { FileViewerWindowController.shared.show(model: model) } label: {
+                    Image(systemName: "macwindow.badge.plus")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Open in a separate window (full-screen capable)")
+                Button { model.select(nil) } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Close")
             }
-            .buttonStyle(.plain)
-            .help("Close")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -414,7 +429,11 @@ private struct FileDetailSection: View {
     private var detailBody: some View {
         switch model.detail {
         case .none:
-            Color.clear
+            if windowed {
+                centered("Select a file in the Files pane")
+            } else {
+                Color.clear
+            }
         case .loading:
             VStack { Spacer(); ProgressView().controlSize(.small); Spacer() }
                 .frame(maxWidth: .infinity)
@@ -453,6 +472,74 @@ private struct FileDetailSection: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 12)
+    }
+}
+
+// MARK: - Pop-out viewer window
+
+/// One floating, full-screen-capable window hosting the pane's detail
+/// section (diff / preview). Shares the pane's model, so it follows the
+/// pane's selection live; `model.poppedOut` keeps the model un-parked and
+/// its git polling running even while the pane itself is collapsed. The
+/// green traffic light (or double-tap on the title bar) takes it full
+/// screen — the point of popping out.
+@MainActor
+final class FileViewerWindowController: NSObject, NSWindowDelegate {
+    static let shared = FileViewerWindowController()
+    private var window: NSWindow?
+    private var model: FileExplorerModel?
+
+    func show(model: FileExplorerModel) {
+        if self.model !== model {
+            self.model?.poppedOut = false
+            self.model = model
+        }
+        model.poppedOut = true
+        let hosting = NSHostingController(
+            rootView: FileViewerWindowContent(model: model))
+        if let window {
+            window.contentViewController = hosting
+        } else {
+            let w = NSWindow(contentViewController: hosting)
+            w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            w.collectionBehavior.insert(.fullScreenPrimary)
+            w.isReleasedWhenClosed = false
+            w.setContentSize(NSSize(width: 900, height: 640))
+            w.center()
+            // After the defaults above so a saved frame wins when present.
+            w.setFrameAutosaveName("ACFileViewerWindow")
+            w.delegate = self
+            window = w
+        }
+        updateTitle()
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Title follows the shown file; the content view pings on selection
+    /// changes.
+    func updateTitle() {
+        guard let window else { return }
+        let name = (model?.selectedPath as NSString?)?.lastPathComponent
+        window.title = name ?? "File Viewer"
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        model?.poppedOut = false
+        model = nil
+        window?.delegate = nil
+        window = nil
+    }
+}
+
+private struct FileViewerWindowContent: View {
+    @Bindable var model: FileExplorerModel
+
+    var body: some View {
+        FileDetailSection(model: model, windowed: true)
+            .frame(minWidth: 480, minHeight: 320)
+            .onChange(of: model.selectedPath) {
+                FileViewerWindowController.shared.updateTitle()
+            }
     }
 }
 

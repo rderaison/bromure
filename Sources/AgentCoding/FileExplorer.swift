@@ -197,6 +197,10 @@ final class FileExplorerModel {
     /// File count cap hit — tree truncated (giant repos).
     private(set) var truncated = false
     var changedOnly = false
+    /// True while the pop-out viewer window is showing this model. Keeps the
+    /// pane from parking the model when it collapses and keeps its git-status
+    /// polling alive — the window follows the pane's selection live.
+    var poppedOut = false
 
     private(set) var selectedPath: String?
 
