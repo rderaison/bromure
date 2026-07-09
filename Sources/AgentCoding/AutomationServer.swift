@@ -1103,7 +1103,11 @@ final class ACAutomationServer {
         let vsockFD = conn.fd
 
         // Tell the guest to start an interactive pty: [u32be len][JSON].
-        let req: [String: Any] = ["cmd": command, "interactive": true, "cols": cols, "rows": rows]
+        // `view`/`window` (host terminal views) pass through verbatim — the
+        // guest agent turns them into a grouped tmux-session attach.
+        var req: [String: Any] = ["cmd": command, "interactive": true, "cols": cols, "rows": rows]
+        if let view = bodyJSON["view"] as? String { req["view"] = view }
+        if let window = bodyJSON["window"] as? Int { req["window"] = window }
         guard let reqData = try? JSONSerialization.data(withJSONObject: req) else {
             sendResponse(fd: clientFD, status: 500, body: ["error": "Failed to encode request"])
             return

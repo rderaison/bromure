@@ -51,9 +51,11 @@ struct BromureAC: ParsableCommand {
         groups.append(ArgumentParser.CommandGroup(name: "Integration",
                                    subcommands: asCLI ? [Remote.self] : [MCP.self, Remote.self]))
 
-        // `run` (the GUI) + `__remote-menu` (SSH ForceCommand target) are
-        // app-internal; bromure-cli exposes neither and has no GUI default.
-        let topLevel: [ParsableCommand.Type] = asCLI ? [] : [Run.self, RemoteMenu.self]
+        // `run` (the GUI) + `__remote-menu` (SSH ForceCommand target) +
+        // `__attach-window` (native terminal view pump) are app-internal;
+        // bromure-cli exposes none of them and has no GUI default.
+        let topLevel: [ParsableCommand.Type] =
+            asCLI ? [] : [Run.self, RemoteMenu.self, VMAttachWindow.self]
         let defaultCmd: ParsableCommand.Type? = asCLI ? nil : Run.self
         return CommandConfiguration(
             commandName: name,

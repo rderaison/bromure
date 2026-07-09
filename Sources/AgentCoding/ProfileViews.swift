@@ -2116,6 +2116,23 @@ struct ProfileEditorView: View {
 
             Divider()
 
+            // Native terminal (experimental)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Display")
+                    .font(.headline)
+                Toggle(isOn: $draft.nativeTerminal) {
+                    Text("Native terminal (experimental)")
+                }
+                Text("Render the terminal on the host (crisp text, native "
+                     + "copy/paste and scrolling) instead of streaming the "
+                     + "VM's framebuffer. Both show the same tmux session — "
+                     + "safe to switch back anytime.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
             // Network
             VStack(alignment: .leading, spacing: 6) {
                 Text("Network")
@@ -2764,6 +2781,7 @@ struct ProfileEditorView: View {
                 }
                 .labelsHidden()
                 .frame(maxWidth: 240)
+                Toggle("Blinking", isOn: $draft.cursorBlink)
                 Spacer()
             }
 

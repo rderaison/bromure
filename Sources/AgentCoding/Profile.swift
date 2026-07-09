@@ -1160,6 +1160,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         return 8
     }
 
+    /// Experimental: render this workspace's terminal natively on the host
+    /// (libghostty surface fed by a PTY over vsock) instead of the guest
+    /// framebuffer. Both paths are views of the same tmux session, so the
+    /// toggle is safe to flip between launches. See NATIVE_TERMINAL_PLAN.md.
+    public var nativeTerminal: Bool
+
     /// What to do with the VM when the user closes the session window.
     /// `.suspend` saves RAM to disk and resumes instantly next launch.
     /// `.shutdown` does a clean ACPI poweroff. `.ask` prompts each time.
@@ -1224,6 +1230,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
 
     /// Cursor shape passed to kitty. Default beam matches Terminal.app.
     public var cursorShape: CursorShape
+
+    /// Blinking cursor. Off by default — matches the guest kitty config,
+    /// which pins cursor_blink_interval 0. Native terminal surfaces map
+    /// this to ghostty's cursor-style-blink.
+    public var cursorBlink: Bool
 
     /// XKB keyboard layout to force inside the VM. nil = auto-match
     /// macOS's currently-selected layout (default), with live updates
@@ -1323,6 +1334,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         color: ProfileColor = .blue,
         comments: String = "",
         memoryGB: Int = Profile.defaultMemoryGB(),
+        nativeTerminal: Bool = false,
         networkMode: NetworkMode = .nat,
         bridgedInterfaceID: String? = nil,
         gitUserName: String = "",
@@ -1334,6 +1346,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         customForegroundHex: String? = nil,
         fontLigatures: Bool = false,
         cursorShape: CursorShape = .block,
+        cursorBlink: Bool = false,
         windowOpacity: Double = 0.97,
         keyboardLayoutOverride: String? = nil,
         keyRepeatDelayMs: Int? = nil,
@@ -1389,9 +1402,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.color = color
         self.comments = comments
         self.memoryGB = memoryGB
+        self.nativeTerminal = nativeTerminal
         self.networkMode = networkMode
         self.bridgedInterfaceID = bridgedInterfaceID
         self.cursorShape = cursorShape
+        self.cursorBlink = cursorBlink
         self.windowOpacity = windowOpacity
         self.keyboardLayoutOverride = keyboardLayoutOverride
         self.keyRepeatDelayMs = keyRepeatDelayMs
@@ -1415,11 +1430,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case folderPath  // legacy: single folder, migrated to folderPaths
         case folderPaths
         case createdAt, lastUsedAt, baseImageVersionAtClone, color, comments
-        case memoryGB, gitUserName, gitUserEmail
+        case memoryGB, nativeTerminal, gitUserName, gitUserEmail
         case useTerminalAppDefaults, customFontFamily, customFontSize
         case customBackgroundHex, customForegroundHex, fontLigatures
         case networkMode, bridgedInterfaceID
-        case cursorShape, windowOpacity, keyboardLayoutOverride
+        case cursorShape, cursorBlink, windowOpacity, keyboardLayoutOverride
         case keyRepeatDelayMs, keyRepeatRateHz
         case gitHTTPSCredentials
         case additionalTools
@@ -1483,6 +1498,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         color           = try c.decodeIfPresent(ProfileColor.self, forKey: .color) ?? .blue
         comments        = try c.decodeIfPresent(String.self, forKey: .comments) ?? ""
         memoryGB        = try c.decodeIfPresent(Int.self, forKey: .memoryGB) ?? 8
+        nativeTerminal  = try c.decodeIfPresent(Bool.self, forKey: .nativeTerminal) ?? false
         gitUserName     = try c.decodeIfPresent(String.self, forKey: .gitUserName) ?? ""
         gitUserEmail    = try c.decodeIfPresent(String.self, forKey: .gitUserEmail) ?? ""
         useTerminalAppDefaults = try c.decodeIfPresent(Bool.self, forKey: .useTerminalAppDefaults) ?? true
@@ -1494,6 +1510,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         networkMode            = try c.decodeIfPresent(NetworkMode.self, forKey: .networkMode) ?? .nat
         bridgedInterfaceID     = try c.decodeIfPresent(String.self, forKey: .bridgedInterfaceID)
         cursorShape            = try c.decodeIfPresent(CursorShape.self, forKey: .cursorShape) ?? .beam
+        cursorBlink            = try c.decodeIfPresent(Bool.self, forKey: .cursorBlink) ?? false
         windowOpacity          = try c.decodeIfPresent(Double.self, forKey: .windowOpacity) ?? 1.0
         keyboardLayoutOverride = try c.decodeIfPresent(String.self, forKey: .keyboardLayoutOverride)
         keyRepeatDelayMs       = try c.decodeIfPresent(Int.self, forKey: .keyRepeatDelayMs)
@@ -1570,6 +1587,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(color, forKey: .color)
         try c.encode(comments, forKey: .comments)
         try c.encode(memoryGB, forKey: .memoryGB)
+        try c.encode(nativeTerminal, forKey: .nativeTerminal)
         try c.encode(gitUserName, forKey: .gitUserName)
         try c.encode(gitUserEmail, forKey: .gitUserEmail)
         try c.encode(useTerminalAppDefaults, forKey: .useTerminalAppDefaults)
@@ -1581,6 +1599,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(networkMode, forKey: .networkMode)
         try c.encodeIfPresent(bridgedInterfaceID, forKey: .bridgedInterfaceID)
         try c.encode(cursorShape, forKey: .cursorShape)
+        try c.encode(cursorBlink, forKey: .cursorBlink)
         try c.encode(windowOpacity, forKey: .windowOpacity)
         try c.encodeIfPresent(keyboardLayoutOverride, forKey: .keyboardLayoutOverride)
         try c.encodeIfPresent(keyRepeatDelayMs, forKey: .keyRepeatDelayMs)

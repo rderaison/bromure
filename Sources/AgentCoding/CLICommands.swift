@@ -383,6 +383,37 @@ struct VMAttach: ParsableCommand {
     }
 }
 
+/// Hidden plumbing for native terminal views (libghostty surfaces): the
+/// surface spawns `bromure-ac __attach-window <vm> <idx>` as its command and
+/// this process becomes the transparent byte pump between the surface's pty
+/// and a guest tmux client. Unlike `vm attach`, every invocation gets its own
+/// tmux *view session* grouped with `bromure` (shared windows, independent
+/// current-window), so N surfaces can show N different windows at once.
+struct VMAttachWindow: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "__attach-window",
+        abstract: "Attach a host terminal view to one tmux window (plumbing).",
+        shouldDisplay: false)
+
+    @Argument(help: "VM id or workspace name.")
+    var vm: String
+
+    @Argument(help: "tmux window index to show.")
+    var windowIndex: Int
+
+    func run() throws {
+        let client = ControlClient()
+        try client.ensureAgentRunning()
+        let vms = (try client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
+        guard let vmObj = vms.first(where: { matchesVM($0, vm) }) else {
+            throw ValidationError("VM not found: \(vm)")
+        }
+        let vmID = (vmObj["id"] as? String) ?? vm
+        try InteractiveExec.run(client: client, vm: vmID,
+                                view: UUID().uuidString, window: windowIndex)
+    }
+}
+
 /// Conservative validation for a docker container name/id used in a shell line.
 private func isSafeContainerRef(_ s: String) -> Bool {
     !s.isEmpty && s.allSatisfy { $0.isLetter || $0.isNumber || "_.-".contains($0) }
@@ -1185,16 +1216,22 @@ enum InteractiveExec {
     /// d = `[0x02, 0x64]` to detach, ending the attach). Double-tapping the
     /// trigger in one read forwards a single literal byte. Both nil (the
     /// default) disables interception, leaving a plain transparent pump.
-    static func run(client: ControlClient, vm: String, command: String,
+    /// `view`/`window` select the guest's grouped-tmux-session attach for a
+    /// host terminal view (see shell-agent.py) instead of running `command`.
+    static func run(client: ControlClient, vm: String, command: String = "",
+                    view: String? = nil, window: Int? = nil,
                     overlayTrigger: UInt8? = nil, onOverlay: (() -> [UInt8])? = nil) throws {
         var ws = winsize()
         _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws)
         let cols0 = ws.ws_col == 0 ? 80 : Int(ws.ws_col)
         let rows0 = ws.ws_row == 0 ? 24 : Int(ws.ws_row)
 
+        var body: [String: Any] = ["command": command, "interactive": true,
+                                   "cols": cols0, "rows": rows0]
+        if let view { body["view"] = view }
+        if let window { body["window"] = window }
         let fd = try client.openStream(
-            "POST", "/vms/\(ControlClient.encodeSegment(vm))/exec",
-            body: ["command": command, "interactive": true, "cols": cols0, "rows": rows0])
+            "POST", "/vms/\(ControlClient.encodeSegment(vm))/exec", body: body)
         defer { Darwin.close(fd) }
 
         // Raw terminal mode (restored on exit) so keystrokes go straight to the
@@ -1299,7 +1336,8 @@ enum InteractiveExec {
         out.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, out.count) }
     }
 
-    private static func resizePayload(cols: Int, rows: Int) -> [UInt8] {
+    // Internal (not private) for the frame-codec unit tests.
+    static func resizePayload(cols: Int, rows: Int) -> [UInt8] {
         let c = UInt16(clamping: cols), r = UInt16(clamping: rows)
         return [UInt8(c >> 8), UInt8(c & 0xff), UInt8(r >> 8), UInt8(r & 0xff)]
     }

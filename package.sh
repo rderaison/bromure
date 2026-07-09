@@ -81,6 +81,14 @@ fi
 
 # --- Build ---
 echo "=== Building $APP_NAME ($PRODUCT_NAME) ==="
+
+# GhosttyKit binaryTarget (never committed) — build from the pinned commit
+# when missing; cached under ~/.cache/bromure-ghostty (mirrors build.sh).
+if [ ! -d "$SCRIPT_DIR/vendor/GhosttyKit.xcframework" ]; then
+    echo "vendor/GhosttyKit.xcframework missing — running tools/build-ghostty.sh…"
+    "$SCRIPT_DIR/tools/build-ghostty.sh"
+fi
+
 swift build -c release --arch arm64 --product "$PRODUCT_NAME" 2>&1
 
 BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
@@ -178,6 +186,14 @@ if [ "$TARGET" = "bromure-ac" ]; then
 </dict></plist>
 PLIST
     echo "Bundled mlx.metallib (in-process MLX engine; no Python/uv)."
+
+    # Ghostty runtime resources for the native terminal surfaces (mirrors
+    # build.sh; GhosttyRuntime sets GHOSTTY_RESOURCES_DIR to Resources/ghostty).
+    if [ -d "$SCRIPT_DIR/vendor/ghostty-resources" ]; then
+        cp -R "$SCRIPT_DIR/vendor/ghostty-resources/ghostty" "$RESOURCES_DIR/ghostty"
+        cp -R "$SCRIPT_DIR/vendor/ghostty-resources/terminfo" "$RESOURCES_DIR/terminfo"
+        echo "Bundled ghostty resources (native terminal surfaces)."
+    fi
 fi
 
 # --- Sign ---

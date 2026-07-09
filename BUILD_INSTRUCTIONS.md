@@ -6,6 +6,25 @@
 - Xcode Command Line Tools (`xcode-select --install`)
 - An [Apple Developer Program](https://developer.apple.com/programs/) membership ($99/year) — required for the entitlements and provisioning profile
 
+## GhosttyKit (bromure-ac native terminals)
+
+`bromure-ac` links **GhosttyKit** (libghostty) as an SPM binary target at
+`vendor/GhosttyKit.xcframework`. It is **not** committed; `./build.sh` builds
+it automatically on first run via `tools/build-ghostty.sh`, which:
+
+- downloads a pinned zig toolchain into `~/.cache/bromure-ghostty`,
+- fetches ghostty at the commit pinned in `tools/ghostty.commit`,
+- builds `GhosttyKit.xcframework` and stages it (plus terminal runtime
+  resources) into `vendor/`.
+
+First build takes a few minutes; afterwards it's a no-op keyed on the pinned
+commit. `swift build` / `swift test` also need `vendor/` present — run
+`./tools/build-ghostty.sh` once if you skip `build.sh`. CI should cache
+`vendor/` (or `~/.cache/bromure-ghostty`) keyed on `tools/ghostty.commit`.
+The script self-heals two Xcode 26 toolchain issues: SDKs whose tbds dropped
+the `arm64-macos` slice (zig #31658) and libtool dropping zig's misaligned
+archive members; see the comments in `tools/build-ghostty.sh`.
+
 ## Apple Developer Entitlements
 
 Bromure requires several entitlements that must be registered in your Apple Developer account. Go to [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/) and configure the following.

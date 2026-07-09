@@ -399,7 +399,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             v.leadingAnchor.constraint(equalTo: paneSlot.leadingAnchor),
             v.trailingAnchor.constraint(equalTo: paneSlot.trailingAnchor),
         ])
-        makeFirstResponder(pane.vmView)
+        pane.updateNativeTerminalMount()
+        makeFirstResponder(pane.preferredFirstResponder)
         applyOpacityChrome(for: pane)
         updateEmptyState()
     }

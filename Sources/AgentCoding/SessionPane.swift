@@ -198,6 +198,65 @@ final class SessionPane {
         suspendedTintView.isHidden = !on
     }
 
+    // MARK: Native terminal (experimental)
+
+    /// Per-tab libghostty surfaces; created on first use when the profile's
+    /// `nativeTerminal` toggle is on. nil in framebuffer mode.
+    private(set) var terminalController: TerminalSessionController?
+    /// The surface currently mounted over the framebuffer (the active tab's).
+    private var mountedTerminalView: TerminalSurfaceView?
+
+    var usesNativeTerminal: Bool { profile.nativeTerminal }
+
+    /// What a host should focus when this pane mounts.
+    var preferredFirstResponder: NSView { mountedTerminalView ?? vmView }
+
+    /// Mount (or swap to) the native surface for the active tab; unmount in
+    /// framebuffer mode. The framebuffer keeps running *behind* the surface —
+    /// both are views of the same tmux session, which is what makes the
+    /// toggle safe to flip live. Falls back to the framebuffer silently if
+    /// libghostty is unavailable.
+    func updateNativeTerminalMount() {
+        guard usesNativeTerminal else {
+            if let v = mountedTerminalView {
+                v.removeFromSuperview()
+                mountedTerminalView = nil
+                terminalController?.retireAll()
+                terminalController = nil
+                vmView.isHidden = false
+            }
+            return
+        }
+        guard model.tabs.indices.contains(model.activeIndex) else { return }
+        let windowIndex = model.tabs[model.activeIndex].index
+        if terminalController == nil {
+            terminalController = TerminalSessionController(profile: profile)
+        }
+        guard let view = terminalController?.view(forWindow: windowIndex) else { return }
+        guard view !== mountedTerminalView else { return }
+        mountedTerminalView?.removeFromSuperview()
+        mountedTerminalView = view
+        view.translatesAutoresizingMaskIntoConstraints = false
+        containerView.addSubview(view, positioned: .below, relativeTo: suspendedTintView)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: containerView.topAnchor),
+            view.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+            view.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+        ])
+        vmView.isHidden = true
+        containerView.window?.makeFirstResponder(view)
+    }
+
+    /// Tear down all native surfaces (VM stopping / pane closing).
+    func retireNativeTerminals() {
+        mountedTerminalView?.removeFromSuperview()
+        mountedTerminalView = nil
+        terminalController?.retireAll()
+        terminalController = nil
+        vmView.isHidden = false
+    }
+
     /// Re-bind `profile` to a freshly-saved version and re-apply the pane-side
     /// state that depends on it (accent, framebuffer opacity). The host updates
     /// window-level chrome via `paneDidUpdateProfile`.
@@ -206,6 +265,8 @@ final class SessionPane {
         model.accentHex = newProfile.color.hexInUI
         let opacity = min(1.0, max(0.3, newProfile.windowOpacity))
         containerView.layer?.opacity = Float(opacity)
+        terminalController?.applyProfile(newProfile)   // live appearance update
+        updateNativeTerminalMount()   // nativeTerminal toggle may have flipped
         host?.paneDidUpdateProfile(self)
     }
 
@@ -230,12 +291,24 @@ final class SessionPane {
     /// Select a tab → tmux select-window. tmux's window index equals the bar
     /// position, so the array index is the target. Highlight optimistically;
     /// the next roster tick confirms.
+    /// Tab index (tmux window index) the user just selected locally, awaiting
+    /// roster confirmation. While set, roster ticks snapshotted *before* our
+    /// select-window landed don't yank the selection back — that reversal
+    /// was a pill-highlight blip on the framebuffer path but a full
+    /// view-swap flicker (B→A→B) on the native terminal path.
+    private var pendingActiveIndex: (index: Int, at: Date)?
+
     func switchTo(index: Int) {
         guard model.tabs.indices.contains(index) else { return }
         model.activeIndex = index
         // `index` is the model position; the guest wants the tmux window index,
         // which can differ once windows have been closed (gaps).
+        // In native mode the select-window still goes to the guest so the
+        // shared `bromure` session (framebuffer, CLI attaches) stays in
+        // lockstep; the visible swap happens host-side.
+        pendingActiveIndex = (model.tabs[index].index, Date())
         acDelegate?.requestSelectTab(index: model.tabs[index].index, in: self)
+        updateNativeTerminalMount()
     }
 
     /// Close a tab → tmux kill-window. The roster removes the pill. Closing the
@@ -264,6 +337,7 @@ final class SessionPane {
             // down). Only act once we've seen a populated list this session so
             // a still-booting VM (tmux not up yet) isn't powered off early.
             if sawTabList {
+                retireNativeTerminals()
                 acDelegate?.requestStopSession(profile.id, action: .shutdown)
             }
             return
@@ -291,11 +365,28 @@ final class SessionPane {
             if model.tabs[i].display != t.display { model.tabs[i].display = t.display }
             if model.tabs[i].repoRoot != t.repoRoot { model.tabs[i].repoRoot = t.repoRoot }
         }
-        if let activePos = tabs.firstIndex(where: { $0.active }), model.activeIndex != activePos {
-            model.activeIndex = activePos
+        if let activePos = tabs.firstIndex(where: { $0.active }) {
+            if let pending = pendingActiveIndex {
+                if tabs[activePos].index == pending.index
+                    || Date().timeIntervalSince(pending.at) > 3 {
+                    // Confirmed (or the switch genuinely failed) — resume
+                    // following the roster.
+                    pendingActiveIndex = nil
+                    if model.activeIndex != activePos { model.activeIndex = activePos }
+                }
+                // else: stale snapshot from before our select-window — hold.
+            } else if model.activeIndex != activePos {
+                model.activeIndex = activePos
+            }
         }
         if model.activeIndex >= model.tabs.count {
             model.activeIndex = max(0, model.tabs.count - 1)
+        }
+        if usesNativeTerminal {
+            // Windows tmux no longer reports are gone for good — drop their
+            // surfaces; then make sure the active tab has a live surface.
+            terminalController?.retire(windowsNotIn: Set(tabs.map(\.index)))
+            updateNativeTerminalMount()
         }
     }
 

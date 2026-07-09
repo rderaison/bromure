@@ -34,6 +34,14 @@ esac
 
 echo "=== Building $APP_NAME ($PRODUCT_NAME) ==="
 
+# GhosttyKit is an SPM binaryTarget at vendor/GhosttyKit.xcframework (never
+# committed); build it from the pinned commit when missing. Needed by every
+# target because SPM resolves the whole manifest.
+if [ ! -d "$SCRIPT_DIR/vendor/GhosttyKit.xcframework" ]; then
+    echo "vendor/GhosttyKit.xcframework missing — running tools/build-ghostty.sh…"
+    "$SCRIPT_DIR/tools/build-ghostty.sh"
+fi
+
 # Build the requested product in release mode.
 swift build -c release --arch arm64 --product "$PRODUCT_NAME" 2>&1
 
@@ -170,6 +178,15 @@ if [ "$TARGET" = "bromure-ac" ]; then
 </dict></plist>
 PLIST
     echo "Bundled mlx.metallib (in-process MLX engine; no Python/uv)."
+
+    # Ghostty runtime resources (shell-integration, themes + terminfo).
+    # GhosttyRuntime points GHOSTTY_RESOURCES_DIR at Resources/ghostty; the
+    # terminfo sibling matches Ghostty.app's own bundle layout.
+    if [ -d "$SCRIPT_DIR/vendor/ghostty-resources" ]; then
+        cp -R "$SCRIPT_DIR/vendor/ghostty-resources/ghostty" "$RESOURCES_DIR/ghostty"
+        cp -R "$SCRIPT_DIR/vendor/ghostty-resources/terminfo" "$RESOURCES_DIR/terminfo"
+        echo "Bundled ghostty resources (native terminal surfaces)."
+    fi
 fi
 
 # Code sign with entitlements.

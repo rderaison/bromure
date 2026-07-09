@@ -14,3 +14,6 @@ Package.resolved
 *.provisionprofile
 Tests/node_modules/
 .claude/dev/
+
+# GhosttyKit build products (tools/build-ghostty.sh output — never committed)
+vendor/

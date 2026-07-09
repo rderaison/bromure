@@ -44,6 +44,11 @@ let package = Package(
             name: "bromure-ac",
             dependencies: [
                 "SandboxEngine",
+                // libghostty (native terminal surfaces). Built from the
+                // pinned commit in tools/ghostty.commit by
+                // tools/build-ghostty.sh — build.sh runs it automatically
+                // when vendor/ is missing; it is never committed.
+                "GhosttyKit",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
@@ -71,7 +76,18 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("OpenDirectory"),
+                // GhosttyKit (static) resolves against these at link time.
+                // libc++ for its bundled glslang/spirv-cross.
+                .linkedFramework("Carbon"),
+                .linkedFramework("Metal"),
+                .linkedFramework("QuartzCore"),
+                .linkedFramework("CoreText"),
+                .linkedLibrary("c++"),
             ]
+        ),
+        .binaryTarget(
+            name: "GhosttyKit",
+            path: "vendor/GhosttyKit.xcframework"
         ),
         .systemLibrary(
             name: "CVmnet",
@@ -121,8 +137,18 @@ let package = Package(
         ),
         .testTarget(
             name: "AgentCodingTests",
-            dependencies: ["bromure-ac"],
-            path: "Tests/AgentCodingTests"
+            // GhosttyKit repeated here: SPM doesn't propagate a binaryTarget
+            // through an executable-target dependency into the test bundle's
+            // link, so the tests need it (and its frameworks) directly.
+            dependencies: ["bromure-ac", "GhosttyKit"],
+            path: "Tests/AgentCodingTests",
+            linkerSettings: [
+                .linkedFramework("Carbon"),
+                .linkedFramework("Metal"),
+                .linkedFramework("QuartzCore"),
+                .linkedFramework("CoreText"),
+                .linkedLibrary("c++"),
+            ]
         ),
     ]
 )

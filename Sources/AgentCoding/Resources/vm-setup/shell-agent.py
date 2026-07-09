@@ -6,6 +6,14 @@ Uses length-prefixed JSON protocol:
   Request:  [u32be len][{"cmd": "...", "timeout": 30}]
   Response: [u32be len][{"stdout": "...", "stderr": "...", "exit_code": 0}]
 
+Interactive requests ({"interactive": true, "cols": N, "rows": N}) switch the
+connection to the framed pty protocol (see below). Two flavors:
+  - {"cmd": "..."} — run the command (or a login shell) on a fresh pty.
+  - {"view": "<id>", "window": <idx>} — host terminal view: attach a tmux
+    session *grouped* with `bromure` (shared windows, independent
+    current-window) so N host views can show N different windows at once.
+    The view session self-destroys on detach; the real windows are untouched.
+
 Guest-initiated connection pool pattern (same as cdp-agent.py):
   1. Opens N vsock connections to the host proactively.
   2. When the host sends a command, this agent executes it.
@@ -20,6 +28,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import signal
 import socket
@@ -75,9 +84,52 @@ def _set_winsize(fd, rows, cols):
         pass
 
 
+def _view_attach_command(view, window):
+    """Build the tmux attach command for a host terminal view.
+
+    Each view gets its own session *grouped* with `bromure` (shared windows,
+    independent current-window) — two clients on the same session would
+    mirror one active window, which is exactly what a grid must not do.
+    destroy-unattached reaps the view session when the host detaches; the
+    grouped windows (the real tabs) are untouched. status goes off because
+    the host draws its own chrome; allow-passthrough lets kitty-graphics
+    escape tmux for hosts that render it.
+    """
+    name = "view-" + re.sub(r"[^A-Za-z0-9-]", "", str(view))[:32]
+    if name == "view-":
+        name = "view-" + os.urandom(4).hex()
+    tmux = (
+        "exec tmux"
+        " set-option -g allow-passthrough on \\;"
+        " set-option -s set-clipboard on \\;"
+        " set-window-option -g aggressive-resize on \\;"
+        " new-session -t bromure -s " + name + " \\;"
+        " set-option destroy-unattached on \\;"
+        " set-option status off \\;"
+        # Session-scoped mouse mode: the host terminal (libghostty) only
+        # forwards wheel/drag when the app requests mouse reporting — this
+        # is what makes scrolling and drag-selection work in a view. The
+        # kitty-attached `bromure` session keeps its own setting.
+        " set-option mouse on"
+    )
+    if window is not None:
+        try:
+            tmux += " \\; select-window -t :%d" % int(window)
+        except (TypeError, ValueError):
+            pass
+    # The bromure session normally exists (the boot terminal creates it);
+    # cover the race/headless case so the view never lands on an error.
+    return (
+        "tmux has-session -t bromure 2>/dev/null"
+        " || tmux new-session -d -s bromure; " + tmux
+    )
+
+
 def _run_interactive(vsock_sock, req):
     """Allocate a pty, run the command on it, and bridge it to the vsock."""
     cmd = req.get("cmd", "")
+    if req.get("view"):
+        cmd = _view_attach_command(req["view"], req.get("window"))
     cols = int(req.get("cols", 80) or 80)
     rows = int(req.get("rows", 24) or 24)
 
@@ -173,6 +225,7 @@ def _run_interactive(vsock_sock, req):
 
 def handle_connection(vsock_sock, replenish_fn):
     """Wait for a command from the host, execute it, return the result."""
+    replenished = False
     try:
         # Read length-prefixed JSON request
         hdr = recv_exact(vsock_sock, 4)
@@ -198,12 +251,20 @@ def handle_connection(vsock_sock, replenish_fn):
         timeout = req.get("timeout", 30)
         workdir = req.get("workdir")
 
-        # Interactive PTY session (`exec -it`, or a tab attach running
-        # `tmux attach`): allocate a pty, run the command on it, and stream
-        # raw bytes framed over the vsock until the child exits.
+        # Interactive PTY session (`exec -it`, a tab attach running
+        # `tmux attach`, or a host terminal view): allocate a pty, run the
+        # command on it, and stream raw bytes framed over the vsock until
+        # the child exits.
         if req.get("interactive"):
+            # Replenish on claim, not on close: this connection is now held
+            # for the life of the terminal session (possibly hours). Without
+            # an immediate replacement, N concurrent host terminals would
+            # drain the POOL_SIZE idle connections and starve exec/roster
+            # traffic for the whole VM.
+            replenished = True
+            replenish_fn()
             _run_interactive(vsock_sock, req)
-            return  # finally below closes the vsock + replenishes the pool
+            return  # finally below closes the vsock
 
         # Source /mnt/bromure-meta/proxy.env before running so the
         # command sees HTTPS_PROXY + the per-language CA bundle
@@ -257,7 +318,8 @@ def handle_connection(vsock_sock, replenish_fn):
             vsock_sock.close()
         except OSError:
             pass
-        replenish_fn()
+        if not replenished:
+            replenish_fn()
 
 
 def connect_to_host():
