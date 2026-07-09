@@ -197,8 +197,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private let gridSlot = NSView()
     private var gridView: GridStageView?
 
-    /// Collapsible + resizable sidebar (toolbar button / ⌃⌘S; drag handle on
-    /// the divider). Grid mode especially wants the full window width.
+    /// Collapsible + resizable sidebar (⌃⌘S / the sidebar's own collapse
+    /// button; drag handle on the divider). Grid mode especially wants the
+    /// full window width.
     private var sidebarWidthConstraint: NSLayoutConstraint?
     private var sidebarDivider: NSBox?
     private(set) var sidebarCollapsed = false
@@ -466,7 +467,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     // MARK: Sidebar collapse
 
-    /// Toolbar button + ⌃⌘S. Collapsed = a 44pt icon rail (one icon per
+    /// ⌃⌘S / the sidebar's collapse button. Collapsed = a 44pt icon rail (one icon per
     /// terminal, separators between workspaces) so the stage — especially
     /// the grid — gets nearly the full width without losing navigation.
     @objc func toggleSidebar(_ sender: Any?) {
@@ -1876,7 +1877,6 @@ private struct IconButton: View {
 // MARK: - Window toolbar (per-selected-VM controls + IP)
 
 private let unifiedToolbarItemID = NSToolbarItem.Identifier("io.bromure.ac.unified.controls")
-private let toggleSidebarItemID = NSToolbarItem.Identifier("io.bromure.ac.unified.toggleSidebar")
 
 @MainActor
 final class UnifiedToolbarDelegate: NSObject, NSToolbarDelegate {
@@ -1884,25 +1884,14 @@ final class UnifiedToolbarDelegate: NSObject, NSToolbarDelegate {
     init(rootView: UnifiedToolbarBar) { self.rootView = rootView }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [toggleSidebarItemID, .flexibleSpace, unifiedToolbarItemID]
+        [.flexibleSpace, unifiedToolbarItemID]
     }
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [toggleSidebarItemID, .flexibleSpace, unifiedToolbarItemID]
+        [.flexibleSpace, unifiedToolbarItemID]
     }
     func toolbar(_ t: NSToolbar,
                  itemForItemIdentifier id: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        if id == toggleSidebarItemID {
-            let item = NSToolbarItem(itemIdentifier: id)
-            item.image = NSImage(systemSymbolName: "sidebar.left",
-                                 accessibilityDescription: "Toggle Sidebar")
-            item.label = "Sidebar"
-            item.toolTip = "Hide or show the sidebar (⌃⌘S)"
-            // nil target → responder chain → UnifiedSessionWindow.
-            item.action = #selector(UnifiedSessionWindow.toggleSidebar(_:))
-            item.isBordered = true
-            return item
-        }
         guard id == unifiedToolbarItemID else { return nil }
         let item = NSToolbarItem(itemIdentifier: id)
         let host = FlexibleHostingView(rootView: rootView)
