@@ -1274,9 +1274,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var customBackgroundHex: String?
     public var customForegroundHex: String?
 
-    /// Render the font's programming ligatures (e.g. `<=`, `==`, `=>` drawn as
-    /// combined glyphs). Off by default — JetBrains Mono ships ligatures and
-    /// kitty renders them unless we emit `disable_ligatures`.
+    /// Deprecated: a kitty-era `disable_ligatures` toggle. The native ghostty
+    /// path doesn't use it and the editor no longer shows it. Kept for
+    /// Codable back-compat with existing profile JSON.
     public var fontLigatures: Bool
 
     public var mcpServers: [MCPServer]

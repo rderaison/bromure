@@ -2733,17 +2733,6 @@ struct ProfileEditorView: View {
                     .frame(width: 44)
             }
 
-            // Programming ligatures (off by default).
-            HStack(spacing: 12) {
-                Text("Ligatures").frame(width: 110, alignment: .trailing)
-                Toggle("", isOn: $draft.fontLigatures)
-                    .labelsHidden()
-                Text("Draw \(Text("<=").font(.system(.caption, design: .monospaced))), \(Text("==").font(.system(.caption, design: .monospaced))), \(Text("=>").font(.system(.caption, design: .monospaced))) as combined glyphs")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
             Divider().padding(.vertical, 4)
 
             HStack {
