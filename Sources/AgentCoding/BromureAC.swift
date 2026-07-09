@@ -700,7 +700,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// registered one (a re-host may have already replaced it).
     func unregisterPane(_ id: Profile.ID, ifMatches pane: SessionPane? = nil) {
         if let pane, panes[id] !== pane { return }
-        panes.removeValue(forKey: id)
+        guard let departing = panes.removeValue(forKey: id) else { return }
+        // Every path through here discards the pane's UI for good (detach,
+        // VM stopped, popped-out window closed, failed start) — retire its
+        // native terminal surfaces NOW, while we still can. A surface view
+        // that deallocates without retire() leaks its libghostty surface,
+        // whose renderer thread keeps running against the freed NSView: the
+        // "deallocated without retire()" breadcrumb, and a wedge-on-quit
+        // when those zombie renderers race AppKit's window teardown.
+        // Idempotent — panes that already retired (close action, reboot)
+        // no-op here.
+        departing.retireNativeTerminals()
     }
 
     /// True when the profile has a visible UI surface (a hosted pane), whether
