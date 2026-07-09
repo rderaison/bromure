@@ -169,6 +169,11 @@ final class GridStageView: NSView {
 
     // MARK: Focus & zoom
 
+    /// Programmatic focus (⌘D's add-and-reveal): highlight the cell and hand
+    /// it keyboard focus, exactly like clicking it. Call after `reconcile()`
+    /// so a just-added cell already has its surface.
+    func focusCell(id: String) { focus(id) }
+
     private func focus(_ id: String) {
         store.focusedCellID = id
         if let surface = cellViews[id]?.terminalView {

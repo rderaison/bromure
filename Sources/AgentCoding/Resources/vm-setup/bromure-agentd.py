@@ -1735,6 +1735,56 @@ def _worktree_merge(branch, target, root, display, tool):
         _set_window_option(win, "@display", "Merge → " + target)
 
 
+# Prompt for the PR flow ("Create Pull Request" in the merge dialog). The host
+# only offers it when the profile has a GitHub token, so `gh` is authenticated
+# here. Best practices are spelled out so the agent produces a clean PR rather
+# than a blind push of whatever the tree holds.
+_PR_PROMPT = (
+    "You are on git branch '%(src)s', a worktree of this repository. Open a"
+    " clean GitHub pull request that merges this branch into '%(dst)s', using"
+    " the `gh` CLI (it is already authenticated). Follow these practices:\n"
+    "1. Review the work first: run `git status`, `git log --oneline"
+    " %(dst)s..HEAD`, and `git diff %(dst)s...HEAD` so you know exactly what"
+    " the PR will contain.\n"
+    "2. Commit any intended-but-uncommitted changes with clear, imperative"
+    " commit messages. Never `git add -A` blindly — leave unrelated or"
+    " generated files out.\n"
+    "3. If the history is messy (WIP/fixup commits), squash it into a few"
+    " logical commits. This branch isn't shared, so rebasing is safe.\n"
+    "4. If the repo has an obvious quick check (tests, linter, build), run it"
+    " and fix trivial failures before publishing.\n"
+    "5. Push with `git push -u origin '%(src)s'`.\n"
+    "6. Create the PR with `gh pr create --base '%(dst)s'`: a concise"
+    " imperative title (72 chars max) and a body with a '## Summary' section"
+    " (what changed and why) and a '## Test plan' section (how it was"
+    " verified). Use `--draft` if the work looks unfinished. If '%(dst)s'"
+    " doesn't exist on the remote, stop and ask me whether to push it or to"
+    " target the repository's default branch instead.\n"
+    "7. Reply with the PR URL.\n"
+    "If anything looks surprising along the way — unexpected file changes,"
+    " failing tests, a force-push being needed — stop and ask me before"
+    " proceeding.")
+
+
+def _worktree_pr(branch, target, root, display, tool):
+    wdir = _worktree_dir_for_branch(root, branch)
+    if not wdir or not os.path.isdir(wdir):
+        worktree_err("pr: no checkout for '%s'" % branch)
+        return
+    p64 = _b64e(_PR_PROMPT % {"src": branch, "dst": target})
+    win = _new_window(command="bash -l", cwd=wdir,
+                      env={"BROMURE_AC_WT_TOOL": tool,
+                           "BROMURE_AC_WT_PROMPT": p64})
+    if not win:
+        worktree_err("pr: could not open a tab")
+        return
+    # Nest under the worktree like an attached terminal (@parent_branch only).
+    _set_window_option(win, "@parent_branch", branch)
+    _set_window_option(win, "@root_repo", root)
+    _set_window_option(win, "@label", tool)
+    _set_window_option(win, "@display", "PR → " + target)
+
+
 def _worktree_remove(root, branch):
     if not root:
         return
@@ -2343,6 +2393,10 @@ def _dispatch_command(action, arg):
     elif action == "worktree-merge":
         f = _fields(arg, 5)
         _bg(_worktree_merge, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
+            _b64d(f[3]), _b64d(f[4]))
+    elif action == "worktree-pr":
+        f = _fields(arg, 5)
+        _bg(_worktree_pr, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
             _b64d(f[3]), _b64d(f[4]))
     elif action == "worktree-remove":
         f = _fields(arg, 2)

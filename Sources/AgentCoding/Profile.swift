@@ -941,6 +941,18 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// config so `gh` / `glab` auth without a separate login step.
     public var gitHTTPSCredentials: [GitHTTPSCredential]
 
+    /// True when a usable github.com credential is present — the VM's `gh`
+    /// is then authenticated (GH_TOKEN + ~/.git-credentials, see
+    /// SessionDisk), so PR flows like `gh pr create` work. Host matching
+    /// mirrors SessionDisk's GH_TOKEN rule.
+    public var hasGitHubCredential: Bool {
+        gitHTTPSCredentials.contains { cred in
+            guard cred.isUsable else { return false }
+            let h = cred.host.lowercased()
+            return h == "github.com" || h.hasSuffix(".github.com")
+        }
+    }
+
     /// User-defined manual swap rules for the MITM proxy. Real values
     /// stay on the host; the VM's env carries fakes. See ManualToken.
     public var manualTokens: [ManualToken]

@@ -448,6 +448,12 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     newTabItem.target = delegate
     wsMenu.addItem(newTabItem)
 
+    let addToGridItem = NSMenuItem(title: L("Add Terminal to Grid"),
+                                   action: #selector(ACAppDelegate.addTerminalToGridAction(_:)),
+                                   keyEquivalent: "d")   // ⌘D (matches the existing chord)
+    addToGridItem.target = delegate
+    wsMenu.addItem(addToGridItem)
+
     let deleteWsItem = NSMenuItem(title: L("Delete"),
                                   action: #selector(ACAppDelegate.deleteWorkspaceAction(_:)),
                                   keyEquivalent: "")
@@ -2678,7 +2684,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return event
         }
 
-        // Host-owned chords (⌘T / ⌘W / ⌘N / ⌘1-9) → consume; every other
+        // Host-owned chords (⌘T / ⌘W / ⌘N / ⌘D / ⌘1-9) → consume; every other
         // ⌘ chord is sent on. (There is no guest-side chord grab anymore —
         // native terminal surfaces never see host-owned chords.)
         if win.performACShortcut(chars, isRepeat: event.isARepeat) { return nil }
@@ -3752,6 +3758,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let ctx = currentWorkspaceContext() { spawnNewTab(in: ctx.pane) }
     }
 
+    @objc func addTerminalToGridAction(_ sender: Any?) {
+        if let ctx = currentWorkspaceContext() { addActiveTerminalToGrid(in: ctx.pane) }
+    }
+
     @objc func deleteWorkspaceAction(_ sender: Any?) {
         if let id = unifiedWindow?.selectedID, let p = profiles.first(where: { $0.id == id }) {
             deleteProfile(p)
@@ -3785,6 +3795,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         switch item.action {
         case #selector(newTabAction(_:)), #selector(deleteWorkspaceAction(_:)):
             return unifiedWindow?.selectedID != nil
+        case #selector(addTerminalToGridAction(_:)):
+            guard let ctx = currentWorkspaceContext(),
+                  ctx.pane.model.tabs.indices.contains(ctx.index) else { return false }
+            return ctx.pane.model.tabs[ctx.index].containerID == nil
         case #selector(newWorktreeAction(_:)):
             guard let ctx = currentWorkspaceContext(),
                   ctx.pane.model.tabs.indices.contains(ctx.index) else { return false }
@@ -5732,6 +5746,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         sendCommand("new-tab", in: pane)
     }
 
+    /// Pin the workspace's active terminal into the grid and land on it —
+    /// ⌘D and the Workspaces menu. Same payload as dragging the tab onto the
+    /// sidebar's Grid node, but the stage switches to the grid with the cell
+    /// focused. Docker attach tabs live under their container, not the tab
+    /// bar, so they're not grid material.
+    func addActiveTerminalToGrid(in pane: SessionPane) {
+        guard let tab = pane.model.activeTab, tab.containerID == nil else { return }
+        unifiedWindow?.addToGridAndReveal(profileID: pane.profile.id,
+                                          windowIndex: tab.index,
+                                          label: tab.shownLabel)
+    }
+
     /// Select a tab → tmux select-window at that index (index == bar position).
     func requestSelectTab(index: Int, in pane: SessionPane) {
         sendCommand("select-tab \(index)", in: pane)
@@ -5766,6 +5792,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                               mainRoot: String, display: String, tool: String,
                               in pane: SessionPane) {
         sendCommand("worktree-merge \(b64(sourceBranch)) \(b64(targetBranch)) \(b64(mainRoot)) \(b64(display)) \(b64(tool))", in: pane)
+    }
+
+    /// Open a PR-authoring tab in the worktree's checkout: the agent gets a
+    /// best-practices prompt (guest-side `_PR_PROMPT`) to review the branch,
+    /// push it, and `gh pr create` against `targetBranch`. Only offered when
+    /// the profile carries a GitHub token — that token is what authenticates
+    /// `gh` inside the VM.
+    func requestWorktreePR(sourceBranch: String, targetBranch: String,
+                           mainRoot: String, display: String, tool: String,
+                           in pane: SessionPane) {
+        sendCommand("worktree-pr \(b64(sourceBranch)) \(b64(targetBranch)) \(b64(mainRoot)) \(b64(display)) \(b64(tool))", in: pane)
     }
 
     /// Remove a worktree and delete its branch (post-merge cleanup).
@@ -5805,6 +5842,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case "merge":
             guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
             name = "worktree-merge"; encoded = args.prefix(5).map(b64)
+        case "pr":
+            guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
+            name = "worktree-pr"; encoded = args.prefix(5).map(b64)
         case "remove":
             guard args.count >= 2 else { return false }   // mainRoot, branch
             name = "worktree-remove"; encoded = args.prefix(2).map(b64)
@@ -5928,6 +5968,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             comment: "")
         alert.addButton(withTitle: NSLocalizedString("Merge", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        // A GitHub token means the VM's `gh` is authenticated — offer opening
+        // a PR instead of merging locally. The agent drives it from a
+        // best-practices prompt (guest-side _PR_PROMPT).
+        let canPR = pane.profile.hasGitHubCredential
+        if canPR {
+            alert.informativeText += "\n\n" + NSLocalizedString(
+                "Create Pull Request instead pushes the branch and has the agent open a clean GitHub PR against the selected destination.",
+                comment: "")
+            alert.addButton(withTitle: NSLocalizedString("Create Pull Request", comment: ""))
+        }
 
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 25))
         for (i, dest) in chain.enumerated() {
@@ -5939,11 +5989,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         popup.selectItem(at: 0)
         alert.accessoryView = popup
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let response = alert.runModal()
         let target = chain[popup.indexOfSelectedItem]
-        requestMergeWorktree(sourceBranch: branch, targetBranch: target.branch,
-                             mainRoot: mainRoot, display: tab.shownLabel,
-                             tool: pane.profile.tool.rawValue, in: pane)
+        switch response {
+        case .alertFirstButtonReturn:
+            requestMergeWorktree(sourceBranch: branch, targetBranch: target.branch,
+                                 mainRoot: mainRoot, display: tab.shownLabel,
+                                 tool: pane.profile.tool.rawValue, in: pane)
+        case .alertThirdButtonReturn where canPR:
+            requestWorktreePR(sourceBranch: branch, targetBranch: target.branch,
+                              mainRoot: mainRoot, display: tab.shownLabel,
+                              tool: pane.profile.tool.rawValue, in: pane)
+        default:
+            return   // Cancel
+        }
     }
 
     /// "Discard worktree" confirmation: remove the checkout + delete the branch.
