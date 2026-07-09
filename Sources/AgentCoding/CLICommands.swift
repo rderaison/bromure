@@ -369,7 +369,7 @@ struct VMAttach: ParsableCommand {
             return
         }
 
-        // Terminal attach to the one tmux session. The GUI kitty and this CLI
+        // Terminal attach to the one tmux session. The GUI surfaces and this CLI
         // client share it (lockstep), so a tab switch on either side moves both.
         // With a tab index, jump to that tmux window first.
         var cmd = "tmux attach -t bromure"

@@ -512,7 +512,7 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var modelsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab.")
+            Text("Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first tab; other enabled agents are installed and authenticated but you run them on demand from a new tab.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -2766,7 +2766,7 @@ struct ProfileEditorView: View {
     /// We also exclude families whose name starts with `.` — those are
     /// macOS-internal identifiers (`.AppleSystemUIFontMonospaced`, …) that
     /// Linux fontconfig can't resolve, so picking one would silently fall
-    /// back in kitty.
+    /// back in the terminal.
     static let allFontFamilies: [String] = {
         NSFontManager.shared.availableFontFamilies
             .filter { !$0.hasPrefix(".") }
@@ -3554,7 +3554,7 @@ private struct StorageStackView: View {
                 accent: .gray,
                 symbol: "cube.fill",
                 title: "Base OS image",
-                subtitle: "Ubuntu Noble + Node, Claude Code, Codex, kitty, gh, glab, fonts. Shared by every workspace, immutable at runtime.",
+                subtitle: "Ubuntu Noble + Node, Claude Code, Codex, gh, glab, fonts. Shared by every workspace, immutable at runtime.",
                 metadata: baseMetadata,
                 size: baseBytes,
                 action: nil,

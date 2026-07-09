@@ -242,7 +242,7 @@ struct SetupView: View {
             }
             Text("Welcome to Bromure Agentic Coding")
                 .font(.title2.bold())
-            Text("First-time setup downloads a prebuilt Ubuntu 24.04 image (or builds it locally when the download isn't available) and installs Node.js, Claude Code, Codex, kitty, and the desktop chrome inside an isolated VM. Only happens once per base-image version.")
+            Text("First-time setup downloads a prebuilt Ubuntu 24.04 image (or builds it locally when the download isn't available) and installs Node.js, Claude Code, Codex, and the terminal tooling inside an isolated VM. Only happens once per base-image version.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
