@@ -232,10 +232,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private var filePaneResizeHandle: SidebarResizeHandle?
     private(set) var filePaneOpen = false
     /// Preferred width — restored on open, persisted at drag-end.
-    private var expandedFilePaneWidth: CGFloat = 320
+    private var expandedFilePaneWidth: CGFloat = 260
     private static let filePaneMinWidth: CGFloat = 200
     private static let filePaneMaxWidth: CGFloat = 1000
-    private static let filePaneDefaultWidth: CGFloat = 320
+    private static let filePaneDefaultWidth: CGFloat = 260
     private static let filePaneWidthKey = "ac.filePaneWidth"
     private static let filePaneOpenKey = "ac.filePaneOpen"
 
@@ -322,7 +322,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // File-explorer pane (right edge of the stage) + its drag handle.
         // Added BEFORE the docker/vm/grid overlays so those cover it — the
         // pane and its resize handle are main-window-mode surfaces only.
-        let explorerPane = FileExplorerPane(model: fileExplorerModel, listModel: listModel)
+        let explorerPane = FileExplorerPane(
+            model: fileExplorerModel, listModel: listModel,
+            onAutoSetOpen: { [weak self] open in self?.setFilePaneOpen(open, animated: true) })
         let filePaneHost = NonMovableHostingView(rootView: explorerPane)
         filePaneHost.translatesAutoresizingMaskIntoConstraints = false
         filePaneHost.clipsToBounds = true   // squish cleanly during open/close

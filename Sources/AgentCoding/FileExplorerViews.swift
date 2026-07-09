@@ -11,11 +11,23 @@ import SwiftUI
 struct FileExplorerPane: View {
     @Bindable var model: FileExplorerModel
     @Bindable var listModel: SessionListModel
+    /// Called on repo transitions: true when the active tab ENTERS a git repo
+    /// while the pane is closed (IDE-style auto-show), false when it LEAVES a
+    /// repo for a non-repo directory (auto-collapse).
+    let onAutoSetOpen: (Bool) -> Void
 
     /// Expanded directories (repo-relative paths). Reset per repo.
     @State private var expanded: Set<String> = []
     /// Repo the tree was last auto-expanded for (dirs containing changes).
     @State private var autoExpandedRepo: String?
+    /// The (VM, repo) context the pane last auto-opened for. Keeps the 0.7s
+    /// roster ticks from re-opening after a manual close: only a TRANSITION
+    /// into a repo triggers, and leaving the repo re-arms it.
+    @State private var lastAutoOpenKey: String?
+    /// Last DEFINITIVE repo-ness (a live tab with a cwd). Detects the
+    /// repo → non-repo edge for auto-collapse; unknown states (booting VM,
+    /// empty selection, no roster yet) never count as "left the repo".
+    @State private var wasInRepo = false
 
     /// The selected VM's active tab, live via @Observable.
     private var activeTab: TabsModel.Tab? {
@@ -31,6 +43,11 @@ struct FileExplorerPane: View {
         let id = listModel.selectedID?.uuidString ?? "-"
         return "\(id)|\(currentRepoRoot ?? "-")|\(listModel.filePaneOpen)|\(listModel.gridSelected)"
     }
+    /// Auto-open watches only (VM, repo) — deliberately NOT filePaneOpen, so
+    /// closing the pane doesn't retrigger the transition check.
+    private var autoRepoKey: String {
+        "\(listModel.selectedID?.uuidString ?? "-")|\(currentRepoRoot ?? "")"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,8 +61,12 @@ struct FileExplorerPane: View {
         .overlay(alignment: .leading) {
             Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1)
         }
-        .onAppear { applyContext() }
+        .onAppear {
+            applyContext()
+            handleRepoTransition()
+        }
         .onChange(of: contextKey) { applyContext() }
+        .onChange(of: autoRepoKey) { handleRepoTransition() }
         .onChange(of: model.loading) {
             // Auto-expand directories containing changes once per repo, when
             // the first listing lands. Additive only — the user's collapse
@@ -75,6 +96,31 @@ struct FileExplorerPane: View {
             return
         }
         model.setRepo(profileID: listModel.selectedID, root: currentRepoRoot)
+    }
+
+    /// IDE-style auto-show/auto-hide, both edge-triggered so the 0.7s roster
+    /// ticks can't fight a manual toggle:
+    ///  - entering a repo (cd in, or switching to a tab sitting in one) while
+    ///    closed → open. A manual close then wins for as long as the context
+    ///    stays on that repo.
+    ///  - leaving a repo for a definitively non-repo directory → close.
+    /// Only a live tab with a cwd counts as definitive; unknown states (VM
+    /// booting, nothing selected) change nothing in either direction.
+    private func handleRepoTransition() {
+        guard let tab = activeTab, let cwd = tab.cwd, !cwd.isEmpty else { return }
+        let inRepo = currentRepoRoot != nil
+        defer { wasInRepo = inRepo }
+        if inRepo {
+            if !listModel.filePaneOpen, lastAutoOpenKey != autoRepoKey {
+                lastAutoOpenKey = autoRepoKey
+                onAutoSetOpen(true)
+            }
+        } else {
+            lastAutoOpenKey = nil
+            if wasInRepo, listModel.filePaneOpen {
+                onAutoSetOpen(false)
+            }
+        }
     }
 
     private static func dirtyDirectories(_ nodes: [FileNode]) -> Set<String> {
