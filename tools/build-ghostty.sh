@@ -12,11 +12,13 @@
 #
 # Xcode 26.4+ note: those SDKs dropped the arm64-macos slice from their tbd
 # stubs, which zig 0.15.x's linker can't reconcile (fixed in zig 0.16; see
-# ziglang #31658). When we detect that, we clone the SDK via APFS
-# copy-on-write, textually re-add arm64-macos beside arm64e-macos in every
-# tbd, and answer `xcrun --show-sdk-path` with the patched clone through a
-# PATH wrapper. Ugly, self-contained, and removable once ghostty moves to a
-# zig with the fix.
+# ziglang #31658). Xcode 26.5 restored the slice in only *some* of the tbd
+# documents — libSystem.tbd's umbrella still lacks it, so zig still links
+# nothing. When we detect a target list offering arm64e-macos without
+# arm64-macos, we clone the SDK via APFS copy-on-write, textually re-add
+# arm64-macos to the lists that lack it, and answer `xcrun --show-sdk-path`
+# with the patched clone through a PATH wrapper. Ugly, self-contained, and
+# removable once ghostty moves to a zig with the fix.
 
 set -euo pipefail
 
@@ -105,15 +107,39 @@ chmod +x "$CACHE/bin/libtool"
 
 # --- Xcode 26.4+ tbd workaround ----------------------------------------------
 SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
-if ! grep -q 'arm64-macos' "$SDK/usr/lib/libSystem.tbd"; then
+# A stub is broken for zig when a target list offers arm64e-macos without
+# arm64-macos. Xcode 26.4 dropped arm64-macos wholesale; 26.5 restored it in
+# *some* of the ~40 documents inlined in libSystem.tbd but not the umbrella,
+# so a whole-file grep passes while zig still links nothing. Check every
+# bracketed target list individually (lists wrap across lines).
+NEEDS_SHADOW="$(python3 - "$SDK/usr/lib/libSystem.tbd" <<'EOF'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+broken = any("arm64e-macos" in m.group(0) and "arm64-macos" not in m.group(0)
+             for m in re.finditer(r"\[[^\]]*\]", text))
+print("yes" if broken else "no")
+EOF
+)"
+if [ "$NEEDS_SHADOW" = "yes" ]; then
     SHADOW="$CACHE/MacOSX-shadow.sdk"
     if [ ! -f "$SHADOW/.bromure-patched" ] || [ "$(cat "$SHADOW/.bromure-patched")" != "$SDK" ]; then
         echo "SDK tbds lack arm64-macos (zig #31658) — building patched shadow SDK…"
         rm -rf "$SHADOW"
-        cp -Rc "$SDK" "$SHADOW"
+        # -H: xcrun can report the SDK as a versioned symlink (Xcode 26.6:
+        # MacOSX26.5.sdk -> MacOSX.sdk); without it cp clones the bare link.
+        cp -RcH "$SDK" "$SHADOW"
         python3 - "$SHADOW" <<'EOF'
-import os, sys
+import os, re, sys
 root = sys.argv[1]
+
+# Add arm64-macos only to target lists that lack it — a blind replace would
+# duplicate the target in the lists Xcode 26.5 already restored.
+def fix_list(m):
+    s = m.group(0)
+    if "arm64e-macos" in s and "arm64-macos" not in s:
+        return s.replace("arm64e-macos", "arm64e-macos, arm64-macos", 1)
+    return s
+
 seen, patched = set(), 0
 for dirpath, dirs, files in os.walk(root):
     for fn in files:
@@ -131,10 +157,10 @@ for dirpath, dirs, files in os.walk(root):
             text = open(p, encoding="utf-8").read()
         except (UnicodeDecodeError, OSError):
             continue
-        if "arm64e-macos" in text:
+        new = re.sub(r"\[[^\]]*\]", fix_list, text)
+        if new != text:
             os.chmod(p, 0o644)
-            open(p, "w", encoding="utf-8").write(
-                text.replace("arm64e-macos", "arm64e-macos, arm64-macos"))
+            open(p, "w", encoding="utf-8").write(new)
             patched += 1
 print(f"patched {patched} tbds")
 EOF
@@ -150,6 +176,10 @@ esac
 exec /usr/bin/xcrun "\$@"
 SH
     chmod +x "$CACHE/bin/xcrun"
+else
+    # Healthy stubs — drop any wrapper left by an earlier SDK, or zig keeps
+    # linking against a stale shadow long after Apple/zig fixed the issue.
+    rm -f "$CACHE/bin/xcrun"
 fi
 
 # --- build --------------------------------------------------------------------
