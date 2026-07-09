@@ -2916,14 +2916,14 @@ public final class ProfileStore {
         // the persistent home is harmless — nothing launches kitty.)
 
         // ~/.tmux.conf — ONE tmux session per VM; each tab is a tmux window.
-        // The GUI kitty and any `cm attach` are clients of this same session.
-        // Keep tmux invisible in the GUI: no status bar, no escape delay.
-        // - mouse OFF: kitty owns selection, so a drag-select persists and
-        //   ⌘C copies it (with mouse on, tmux's copy-mode cleared the
-        //   selection on mouse-up before you could copy).
+        // The native terminal views attach as grouped clients of this
+        // session (see bromure-agentd _view_attach_command, which sets
+        // mouse on + set-clipboard off per view). Base config here:
         // - base-index 0 + renumber-windows: window indices stay 0,1,2,…
         //   contiguous, so a tab's index is also its position in the bar.
-        // - set-clipboard on: programs' OSC 52 writes reach the host clipboard.
+        // - set-clipboard off: a mouse selection must not auto-push to the
+        //   macOS clipboard (not macOS-like). Copy is Shift-drag + ⌘C via
+        //   ghostty's own selection.
         try """
         set -g status off
         set -g mouse off
@@ -2933,7 +2933,7 @@ public final class ProfileStore {
         set -g window-size latest
         set -g base-index 0
         set -g renumber-windows on
-        set -g set-clipboard on
+        set -g set-clipboard off
         """.write(to: home.appendingPathComponent(".tmux.conf"),
                   atomically: true, encoding: .utf8)
 

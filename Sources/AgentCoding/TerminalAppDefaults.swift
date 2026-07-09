@@ -145,11 +145,11 @@ extension TerminalAppDefaults {
         clipboard-paste-protection = false
         clipboard-read = allow
         clipboard-write = allow
-        # macOS muscle memory, pinned explicitly rather than trusting
-        # upstream defaults: ⌘C copies the native selection (tmux mouse
-        # selections already copy on release via OSC 52), ⌘V pastes as a
-        # bracketed paste — so cmd-c/cmd-v work even though the CLI inside
-        # the Linux guest advertises ctrl-c/ctrl-v.
+        # macOS-like selection: selecting text never copies on its own —
+        # ⌘C copies, ⌘V pastes (bracketed). A Shift-drag makes a native
+        # ghostty selection (bypassing tmux mouse reporting) that ⌘C then
+        # copies to the macOS clipboard.
+        copy-on-select = false
         keybind = super+c=copy_to_clipboard
         keybind = super+v=paste_from_clipboard
         # Font zoom, pinned for the same reason. `equal` covers the common

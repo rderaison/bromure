@@ -309,15 +309,19 @@ def _view_attach_command(view, window):
     tmux = (
         "exec tmux"
         " set-option -g allow-passthrough on \\;"
-        " set-option -s set-clipboard on \\;"
+        # set-clipboard OFF: a mouse selection copies into tmux's paste
+        # buffer but must NOT auto-push to the macOS clipboard (OSC 52) —
+        # that select-copies-everything behavior isn't macOS-like. The
+        # macOS copy path is Shift-drag (ghostty's own selection, bypasses
+        # tmux mouse reporting) + ⌘C.
+        " set-option -s set-clipboard off \\;"
         " set-window-option -g aggressive-resize on \\;"
         " new-session -t bromure -s " + name + " \\;"
         " set-option destroy-unattached on \\;"
         " set-option status off \\;"
         # Session-scoped mouse mode: the host terminal (libghostty) only
         # forwards wheel/drag when the app requests mouse reporting — this is
-        # what makes scrolling and drag-selection work in a view. The
-        # kitty-attached `bromure` session keeps its own setting.
+        # what makes scrolling and TUI (Claude/vim) clicks work in a view.
         " set-option mouse on"
     )
     if window is not None:
@@ -2260,7 +2264,7 @@ def create_session():
     """Create the single tmux session the tabs live in (startup one-shot)."""
     _tmux_ok("new-session", "-d", "-s", TMUX_S, "-c", HOME)
     _tmux_ok("set-option", "-g", "allow-passthrough", "on")
-    _tmux_ok("set-option", "-s", "set-clipboard", "on")
+    _tmux_ok("set-option", "-s", "set-clipboard", "off")
 
 
 def session_monitor_service():
