@@ -839,3 +839,40 @@
 "Delpi rejected your API key" = "Delpi 拒絕了您的 API 金鑰";
 "The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain." = "Delpi 註冊表回應了 HTTP %d。此工作區的 npm 安裝均經由 Delpi，在「設定 → 供應鏈」中修正 API 金鑰之前將持續失敗。";
 "OK" = "好";
+
+/* Home storage upgrade (virtiofs → ext4 image) */
+"Upgrade “%@”’s home storage?" = "升級「%@」的家目錄儲存空間？";
+"This workspace's home folder currently lives in a macOS folder shared into the VM. Bromure can move it onto a private ext4 disk image instead.\n\nWhy: suspended workspaces resume without confused tools (files keep their identity across suspend/resume), git repositories in the home are no longer exposed to shared-folder corruption, and the image automatically shrinks on your Mac as files are deleted inside the VM.\n\nThe move happens once, during the next boot — a large home can take a few minutes, with progress shown on the boot screen. Your current home folder is kept on the Mac as a backup." = "此工作區的家目錄目前位於與虛擬機器共享的 macOS 資料夾中。Bromure 可以將其搬移到專用的 ext4 磁碟映像檔。\n\n原因：暫停的工作區恢復後工具不再混亂（檔案在暫停/恢復之間保持同一性）；家目錄中的 git 儲存庫不再暴露於共享資料夾造成的損毀風險；且在虛擬機器內刪除檔案時，映像檔會在 Mac 上自動縮小。\n\n搬移只會在下次開機時進行一次——較大的家目錄可能需要幾分鐘，進度會顯示在開機畫面上。目前的家目錄將作為備份保留在 Mac 上。";
+"This workspace has a suspended session; upgrading restarts it fresh." = "此工作區有一個暫停中的工作階段；升級會將其重新啟動。";
+"If you choose Not Now, you can upgrade anytime from the workspace editor." = "如果選擇「暫時不要」，之後可以隨時在工作區編輯器中升級。";
+"Upgrade Now" = "立即升級";
+"Not Now" = "暫時不要";
+"UPGRADING HOME STORAGE" = "正在升級家目錄儲存空間";
+"MOVING HOME — %d%% OF %@" = "正在搬移家目錄 — %d%%（共 %@）";
+"MOVING HOME — %@ COPIED" = "正在搬移家目錄 — 已拷貝 %@";
+"Home storage upgrade armed" = "已排定家目錄儲存空間升級";
+"The next time “%@” launches, Bromure will offer to move its home folder onto a private ext4 disk image (with a one-time copy and a kept backup)." = "下次啟動「%@」時，Bromure 將提議把其家目錄搬移到專用的 ext4 磁碟映像檔（僅拷貝一次，並保留備份）。";
+"Upgrade storage…" = "升級儲存空間…";
+"Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history — on a private ext4 disk image that shrinks as files are deleted." = "專案克隆、dotfiles、.ssh 金鑰、npm-global、.cargo、shell 歷史——存放於專用的 ext4 磁碟映像檔上，刪除檔案時映像檔會自動縮小。";
+"Close the session window first." = "請先關閉工作階段視窗。";
+"Created on first launch." = "首次啟動時建立。";
+
+/* File browser (vsock-backed) */
+"Guest file access isn't available." = "無法存取虛擬機器內的檔案。";
+"The in-VM agent is updating — try again in a few seconds." = "虛擬機器內的代理程式正在更新——請幾秒後再試。";
+"The workspace must be running to browse its files." = "工作區必須正在執行才能瀏覽其檔案。";
+"Copying %@ in… %@" = "正在將 %@ 拷貝到虛擬機器… %@";
+"Copying %@ out… %@" = "正在從虛擬機器拷貝 %@… %@";
+"Files — %@" = "檔案 — %@";
+"Home" = "家目錄";
+"Locations" = "位置";
+"Enclosing folder" = "上層資料夾";
+"Path inside the VM" = "虛擬機器內的路徑";
+"New folder" = "新增資料夾";
+"New Folder" = "新增資料夾";
+"Reveal this folder in Finder" = "在 Finder 中顯示此資料夾";
+"Empty folder" = "空的資料夾";
+"Drag files here to copy them into the VM" = "將檔案拖曳到這裡即可拷貝到虛擬機器";
+"Open" = "打開";
+"Reveal in Finder" = "在 Finder 中顯示";
+"Move to Trash" = "丟到垃圾桶";

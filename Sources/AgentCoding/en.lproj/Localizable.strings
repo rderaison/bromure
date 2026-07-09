@@ -838,3 +838,40 @@
 "Delpi rejected your API key" = "Delpi rejected your API key";
 "The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain." = "The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain.";
 "OK" = "OK";
+
+/* Home storage upgrade (virtiofs → ext4 image) */
+"Upgrade “%@”’s home storage?" = "Upgrade “%@”’s home storage?";
+"This workspace's home folder currently lives in a macOS folder shared into the VM. Bromure can move it onto a private ext4 disk image instead.\n\nWhy: suspended workspaces resume without confused tools (files keep their identity across suspend/resume), git repositories in the home are no longer exposed to shared-folder corruption, and the image automatically shrinks on your Mac as files are deleted inside the VM.\n\nThe move happens once, during the next boot — a large home can take a few minutes, with progress shown on the boot screen. Your current home folder is kept on the Mac as a backup." = "This workspace's home folder currently lives in a macOS folder shared into the VM. Bromure can move it onto a private ext4 disk image instead.\n\nWhy: suspended workspaces resume without confused tools (files keep their identity across suspend/resume), git repositories in the home are no longer exposed to shared-folder corruption, and the image automatically shrinks on your Mac as files are deleted inside the VM.\n\nThe move happens once, during the next boot — a large home can take a few minutes, with progress shown on the boot screen. Your current home folder is kept on the Mac as a backup.";
+"This workspace has a suspended session; upgrading restarts it fresh." = "This workspace has a suspended session; upgrading restarts it fresh.";
+"If you choose Not Now, you can upgrade anytime from the workspace editor." = "If you choose Not Now, you can upgrade anytime from the workspace editor.";
+"Upgrade Now" = "Upgrade Now";
+"Not Now" = "Not Now";
+"UPGRADING HOME STORAGE" = "UPGRADING HOME STORAGE";
+"MOVING HOME — %d%% OF %@" = "MOVING HOME — %d%% OF %@";
+"MOVING HOME — %@ COPIED" = "MOVING HOME — %@ COPIED";
+"Home storage upgrade armed" = "Home storage upgrade armed";
+"The next time “%@” launches, Bromure will offer to move its home folder onto a private ext4 disk image (with a one-time copy and a kept backup)." = "The next time “%@” launches, Bromure will offer to move its home folder onto a private ext4 disk image (with a one-time copy and a kept backup).";
+"Upgrade storage…" = "Upgrade storage…";
+"Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history — on a private ext4 disk image that shrinks as files are deleted." = "Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history — on a private ext4 disk image that shrinks as files are deleted.";
+"Close the session window first." = "Close the session window first.";
+"Created on first launch." = "Created on first launch.";
+
+/* File browser (vsock-backed) */
+"Guest file access isn't available." = "Guest file access isn't available.";
+"The in-VM agent is updating — try again in a few seconds." = "The in-VM agent is updating — try again in a few seconds.";
+"The workspace must be running to browse its files." = "The workspace must be running to browse its files.";
+"Copying %@ in… %@" = "Copying %@ in… %@";
+"Copying %@ out… %@" = "Copying %@ out… %@";
+"Files — %@" = "Files — %@";
+"Home" = "Home";
+"Locations" = "Locations";
+"Enclosing folder" = "Enclosing folder";
+"Path inside the VM" = "Path inside the VM";
+"New folder" = "New folder";
+"New Folder" = "New Folder";
+"Reveal this folder in Finder" = "Reveal this folder in Finder";
+"Empty folder" = "Empty folder";
+"Drag files here to copy them into the VM" = "Drag files here to copy them into the VM";
+"Open" = "Open";
+"Reveal in Finder" = "Reveal in Finder";
+"Move to Trash" = "Move to Trash";

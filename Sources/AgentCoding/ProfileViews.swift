@@ -3496,32 +3496,32 @@ private struct StorageStackView: View {
             StorageLayerRow(
                 accent: .orange,
                 symbol: "house.fill",
-                title: "Your home folder",
+                title: NSLocalizedString("Your home folder", comment: ""),
                 subtitle: context.profileHomeImageURL != nil
-                    ? "Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history — on a private ext4 disk image that shrinks as files are deleted."
-                    : "Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history, anything in /home/ubuntu.",
+                    ? NSLocalizedString("Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history — on a private ext4 disk image that shrinks as files are deleted.", comment: "")
+                    : NSLocalizedString("Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history, anything in /home/ubuntu.", comment: ""),
                 metadata: homeMetadata,
                 size: homeBytes,
                 action: isNewProfile
                     ? nil
                     : .init(
-                        label: "Erase home…",
+                        label: NSLocalizedString("Erase home…", comment: ""),
                         role: .destructive,
                         enabled: !context.isRunning
                             && (context.profileHomeURL != nil
                                 || context.profileHomeImageURL != nil),
                         disabledHelp: context.isRunning
-                            ? "Close the session window first."
-                            : "Created on first launch.",
+                            ? NSLocalizedString("Close the session window first.", comment: "")
+                            : NSLocalizedString("Created on first launch.", comment: ""),
                         handler: context.onResetHome
                       ),
                 secondaryAction: (isNewProfile || context.onUpgradeHome == nil)
                     ? nil
                     : .init(
-                        label: "Upgrade storage…",
+                        label: NSLocalizedString("Upgrade storage…", comment: ""),
                         role: nil,
                         enabled: !context.isRunning,
-                        disabledHelp: "Close the session window first.",
+                        disabledHelp: NSLocalizedString("Close the session window first.", comment: ""),
                         handler: { context.onUpgradeHome?() }
                       )
             )
@@ -3532,19 +3532,19 @@ private struct StorageStackView: View {
             StorageLayerRow(
                 accent: .blue,
                 symbol: "internaldrive.fill",
-                title: "Workspace system disk",
+                title: NSLocalizedString("Workspace system disk", comment: ""),
                 subtitle: "A read-write copy of the base OS, just for this workspace. Holds anything you `sudo apt install`, edits to /etc and /var, system-level config.",
                 metadata: diskMetadata,
                 size: diskBytes,
                 action: isNewProfile
                     ? nil
                     : .init(
-                        label: "Reset to base…",
+                        label: NSLocalizedString("Reset to base…", comment: ""),
                         role: .destructive,
                         enabled: !context.isRunning && context.profileDiskURL != nil,
                         disabledHelp: context.isRunning
-                            ? "Close the session window first."
-                            : "Created on first launch.",
+                            ? NSLocalizedString("Close the session window first.", comment: "")
+                            : NSLocalizedString("Created on first launch.", comment: ""),
                         handler: context.onResetDisk
                       )
             )
@@ -3557,7 +3557,7 @@ private struct StorageStackView: View {
             StorageLayerRow(
                 accent: .gray,
                 symbol: "cube.fill",
-                title: "Base OS image",
+                title: NSLocalizedString("Base OS image", comment: ""),
                 subtitle: "Ubuntu Noble + Node, Claude Code, Codex, gh, glab, fonts. Shared by every workspace, immutable at runtime.",
                 metadata: baseMetadata,
                 size: baseBytes,
@@ -3578,7 +3578,7 @@ private struct StorageStackView: View {
     }
 
     private var homeMetadata: String {
-        if isNewProfile { return "Created on first launch." }
+        if isNewProfile { return NSLocalizedString("Created on first launch.", comment: "") }
         guard context.profileHomeURL != nil || context.profileHomeImageURL != nil else {
             return "Not yet created."
         }
@@ -3589,7 +3589,7 @@ private struct StorageStackView: View {
     }
 
     private var diskMetadata: String {
-        if isNewProfile { return "Created on first launch." }
+        if isNewProfile { return NSLocalizedString("Created on first launch.", comment: "") }
         guard context.profileDiskURL != nil else { return "Not yet cloned." }
         if let v = context.baseImageVersion {
             return "Cloned from base v\(v)."

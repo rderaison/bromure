@@ -836,3 +836,40 @@
 "Delpi rejected your API key" = "Delpi a rejeté votre clé API";
 "The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain." = "Le registre Delpi a répondu HTTP %d. Les installations npm de cet espace de travail passent par Delpi et échoueront tant que la clé API n’est pas corrigée dans Réglages → Chaîne d’approvisionnement.";
 "OK" = "OK";
+
+/* Home storage upgrade (virtiofs → ext4 image) */
+"Upgrade “%@”’s home storage?" = "Mettre à niveau le stockage du dossier personnel de « %@ » ?";
+"This workspace's home folder currently lives in a macOS folder shared into the VM. Bromure can move it onto a private ext4 disk image instead.\n\nWhy: suspended workspaces resume without confused tools (files keep their identity across suspend/resume), git repositories in the home are no longer exposed to shared-folder corruption, and the image automatically shrinks on your Mac as files are deleted inside the VM.\n\nThe move happens once, during the next boot — a large home can take a few minutes, with progress shown on the boot screen. Your current home folder is kept on the Mac as a backup." = "Le dossier personnel de cet espace de travail réside actuellement dans un dossier macOS partagé avec la VM. Bromure peut le déplacer vers une image disque ext4 privée.\n\nPourquoi : les espaces de travail suspendus reprennent sans perturber les outils (les fichiers gardent leur identité entre suspension et reprise), les dépôts git du dossier personnel ne sont plus exposés à la corruption liée aux dossiers partagés, et l'image se réduit automatiquement sur votre Mac à mesure que des fichiers sont supprimés dans la VM.\n\nLe déplacement n'a lieu qu'une seule fois, au prochain démarrage — un dossier volumineux peut prendre quelques minutes, la progression s'affiche sur l'écran de démarrage. Votre dossier personnel actuel est conservé sur le Mac comme sauvegarde.";
+"This workspace has a suspended session; upgrading restarts it fresh." = "Cet espace de travail a une session suspendue ; la mise à niveau la redémarrera à neuf.";
+"If you choose Not Now, you can upgrade anytime from the workspace editor." = "Si vous choisissez Plus tard, vous pourrez mettre à niveau à tout moment depuis l'éditeur d'espace de travail.";
+"Upgrade Now" = "Mettre à niveau";
+"Not Now" = "Plus tard";
+"UPGRADING HOME STORAGE" = "MISE À NIVEAU DU STOCKAGE";
+"MOVING HOME — %d%% OF %@" = "DÉPLACEMENT DU DOSSIER — %d%% DE %@";
+"MOVING HOME — %@ COPIED" = "DÉPLACEMENT DU DOSSIER — %@ COPIÉS";
+"Home storage upgrade armed" = "Mise à niveau du stockage programmée";
+"The next time “%@” launches, Bromure will offer to move its home folder onto a private ext4 disk image (with a one-time copy and a kept backup)." = "Au prochain lancement de « %@ », Bromure proposera de déplacer son dossier personnel vers une image disque ext4 privée (copie unique, sauvegarde conservée).";
+"Upgrade storage…" = "Mettre à niveau le stockage…";
+"Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history — on a private ext4 disk image that shrinks as files are deleted." = "Clones de projets, dotfiles, clés .ssh, npm-global, .cargo, historique du shell — sur une image disque ext4 privée qui se réduit à mesure que les fichiers sont supprimés.";
+"Close the session window first." = "Fermez d'abord la fenêtre de session.";
+"Created on first launch." = "Créé au premier lancement.";
+
+/* File browser (vsock-backed) */
+"Guest file access isn't available." = "L'accès aux fichiers de la VM n'est pas disponible.";
+"The in-VM agent is updating — try again in a few seconds." = "L'agent dans la VM se met à jour — réessayez dans quelques secondes.";
+"The workspace must be running to browse its files." = "L'espace de travail doit être en cours d'exécution pour parcourir ses fichiers.";
+"Copying %@ in… %@" = "Copie de %@ vers la VM… %@";
+"Copying %@ out… %@" = "Copie de %@ depuis la VM… %@";
+"Files — %@" = "Fichiers — %@";
+"Home" = "Dossier personnel";
+"Locations" = "Emplacements";
+"Enclosing folder" = "Dossier parent";
+"Path inside the VM" = "Chemin dans la VM";
+"New folder" = "Nouveau dossier";
+"New Folder" = "Nouveau dossier";
+"Reveal this folder in Finder" = "Afficher ce dossier dans le Finder";
+"Empty folder" = "Dossier vide";
+"Drag files here to copy them into the VM" = "Glissez des fichiers ici pour les copier dans la VM";
+"Open" = "Ouvrir";
+"Reveal in Finder" = "Afficher dans le Finder";
+"Move to Trash" = "Placer dans la corbeille";
