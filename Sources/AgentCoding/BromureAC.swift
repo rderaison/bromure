@@ -6747,6 +6747,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // poller would keep racing the new one on the same shared
         // directory and removing closed-* files out from under it.
         win.sandbox?.stopPolling()
+        // Retire the native terminal surfaces up front: their attach-pump
+        // children are already dead (VM stopped), so leaving them mounted
+        // just makes the controller thrash reattach with backoff against a
+        // down VM. The container's solid backing shows through cleanly until
+        // the fresh roster re-mounts a surface for the active tab.
+        win.retireNativeTerminals()
         // Drop the old VM from the registry (and the window borrow) so it
         // deallocates (its deinit detaches the vmnet switch port). The fresh
         // sandbox is registered below once it's built.

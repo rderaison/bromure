@@ -108,9 +108,13 @@ final class SessionPane {
 
         // The container carries the user's opacity on its own layer; the
         // terminal surface renders at full opacity and inherits the alpha
-        // when composited.
+        // when composited. The backing matches the terminal's background
+        // color so a moment with no surface mounted (VM reboot, pre-first-
+        // attach) reads as an empty terminal — NOT a hole through to the
+        // desktop, which is what a clear backing showed.
         container.wantsLayer = true
-        container.layer?.backgroundColor = .clear
+        let bgHex = profile.resolveStyle(against: .load()).backgroundHex
+        container.layer?.backgroundColor = NSColor(Color(hex: bgHex)).cgColor
         // Tint overlay sits ABOVE the terminal surface. Hidden by default;
         // the compromise handler reveals it the moment the VM is paused.
         container.addSubview(suspendedTintView)
@@ -184,6 +188,8 @@ final class SessionPane {
         model.accentHex = newProfile.color.hexInUI
         let opacity = min(1.0, max(0.3, newProfile.windowOpacity))
         containerView.layer?.opacity = Float(opacity)
+        let bgHex = newProfile.resolveStyle(against: .load()).backgroundHex
+        containerView.layer?.backgroundColor = NSColor(Color(hex: bgHex)).cgColor
         terminalController?.applyProfile(newProfile)   // live appearance update
         updateNativeTerminalMount()
         host?.paneDidUpdateProfile(self)
