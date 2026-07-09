@@ -10,6 +10,20 @@ final class NonMovableHostingView<Content: View>: NSHostingView<Content> {
     override var mouseDownCanMoveWindow: Bool { false }
 }
 
+/// Thin invisible strip over the sidebar divider that resizes the sidebar on
+/// drag. Reports the proposed new width (mouse x in its superview's coords).
+final class SidebarResizeHandle: NSView {
+    var onResize: ((CGFloat) -> Void)?
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard let sv = superview else { return }
+        onResize?(sv.convert(event.locationInWindow, from: nil).x)
+    }
+}
+
 // MARK: - Sidebar list model
 
 /// Drives the unpeel-style source-list. One `VMEntry` per running VM hosted in
@@ -183,11 +197,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private let gridSlot = NSView()
     private var gridView: GridStageView?
 
-    /// Collapsible sidebar (toolbar button / ⌃⌘S). Grid mode especially
-    /// wants the full window width.
+    /// Collapsible + resizable sidebar (toolbar button / ⌃⌘S; drag handle on
+    /// the divider). Grid mode especially wants the full window width.
     private var sidebarWidthConstraint: NSLayoutConstraint?
     private var sidebarDivider: NSBox?
     private(set) var sidebarCollapsed = false
+    /// Restored on expand from the collapse toggle.
+    private var expandedSidebarWidth: CGFloat = 264
+    private static let sidebarMinWidth: CGFloat = 200
+    private static let sidebarMaxWidth: CGFloat = 480
+    private static let sidebarWidthKey = "ac.sidebarWidth"
 
     init(acDelegate: ACAppDelegate) {
         self.acDelegate = acDelegate
@@ -316,21 +335,33 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             dockerSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
         ])
 
-        // ---- Layout: fixed-width sidebar | divider | framebuffer stage ----
-        // Plain Auto Layout (no NSSplitView) so the framebuffer deterministically
-        // fills everything to the right of a fixed 264pt sidebar — Mail.app shape.
+        // ---- Layout: resizable sidebar | divider | framebuffer stage ----
+        // Plain Auto Layout (no NSSplitView) so the stage deterministically
+        // fills everything to the right of the sidebar — Mail.app shape. Width
+        // is user-resizable via a drag handle over the divider, persisted.
         let root = NSView()
         sidebarHost.translatesAutoresizingMaskIntoConstraints = false
         let divider = NSBox()
         divider.boxType = .separator
         divider.translatesAutoresizingMaskIntoConstraints = false
+        let resizeHandle = SidebarResizeHandle()
+        resizeHandle.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(sidebarHost)
         root.addSubview(divider)
         root.addSubview(stage)
-        let sidebarWidth = sidebarHost.widthAnchor.constraint(equalToConstant: 264)
+        root.addSubview(resizeHandle)   // above the divider so it gets the drag
+        let stored = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
+        let initialWidth = stored >= Self.sidebarMinWidth ? stored : 264
+        let sidebarWidth = sidebarHost.widthAnchor.constraint(equalToConstant: initialWidth)
         self.sidebarWidthConstraint = sidebarWidth
         self.sidebarDivider = divider
         sidebarHost.clipsToBounds = true   // squish cleanly during collapse
+        resizeHandle.onResize = { [weak self] x in
+            guard let self, !self.sidebarCollapsed else { return }
+            let w = min(Self.sidebarMaxWidth, max(Self.sidebarMinWidth, x))
+            self.sidebarWidthConstraint?.constant = w
+            UserDefaults.standard.set(w, forKey: Self.sidebarWidthKey)
+        }
         NSLayoutConstraint.activate([
             sidebarHost.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             sidebarHost.topAnchor.constraint(equalTo: root.topAnchor),
@@ -341,6 +372,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             divider.topAnchor.constraint(equalTo: root.topAnchor),
             divider.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             divider.widthAnchor.constraint(equalToConstant: 1),
+
+            // 8pt grab strip centered on the divider, full height.
+            resizeHandle.centerXAnchor.constraint(equalTo: divider.centerXAnchor),
+            resizeHandle.topAnchor.constraint(equalTo: root.topAnchor),
+            resizeHandle.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            resizeHandle.widthAnchor.constraint(equalToConstant: 8),
 
             stage.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
             stage.topAnchor.constraint(equalTo: root.topAnchor),
@@ -433,11 +470,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// the grid — gets nearly the full width without losing navigation.
     @objc func toggleSidebar(_ sender: Any?) {
         sidebarCollapsed.toggle()
+        // Remember the resized width to restore on expand.
+        if sidebarCollapsed, let c = sidebarWidthConstraint?.constant, c > 44 {
+            expandedSidebarWidth = c
+        }
         listModel.sidebarCollapsed = sidebarCollapsed   // SwiftUI swaps to the rail
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.18
             ctx.allowsImplicitAnimation = true
-            sidebarWidthConstraint?.animator().constant = sidebarCollapsed ? 44 : 264
+            sidebarWidthConstraint?.animator().constant =
+                sidebarCollapsed ? 44 : expandedSidebarWidth
             contentView?.layoutSubtreeIfNeeded()
         }
     }
