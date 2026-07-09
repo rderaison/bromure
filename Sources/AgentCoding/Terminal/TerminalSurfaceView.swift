@@ -24,6 +24,11 @@ final class TerminalSurfaceView: NSView {
     /// round-trip so the key event carries the translated text.
     private var keyTextAccumulator: [String]?
 
+    /// Live IME composition (the underlined preedit), if any. Tracked so a
+    /// commit (`insertText`) clears it — AppKit's contract is that
+    /// insertText *replaces* marked text, it doesn't send unmarkText first.
+    private var preeditText: String?
+
     init?(command: String, workingDirectory: String? = nil, windowIndex: Int) {
         guard let app = GhosttyRuntime.shared.app else { return nil }
         self.windowIndex = windowIndex
@@ -173,7 +178,11 @@ final class TerminalSurfaceView: NSView {
         interpretKeyEvents([event])
         let text = keyTextAccumulator?.joined() ?? ""
 
-        sendKey(event: event, action: GHOSTTY_ACTION_PRESS, surface: surface, text: text)
+        // While the IME is composing, the key event must be marked as such
+        // (and carries no text) or ghostty would also encode the raw
+        // keystroke underneath the preedit.
+        sendKey(event: event, action: GHOSTTY_ACTION_PRESS, surface: surface,
+                text: text, composing: preeditText != nil)
     }
 
     override func keyUp(with event: NSEvent) {
@@ -199,13 +208,14 @@ final class TerminalSurfaceView: NSView {
     }
 
     private func sendKey(event: NSEvent, action: ghostty_input_action_e,
-                         surface: ghostty_surface_t, text: String) {
+                         surface: ghostty_surface_t, text: String,
+                         composing: Bool = false) {
         var key = ghostty_input_key_s()
         key.action = action
         key.mods = Self.mods(event.modifierFlags)
         key.consumed_mods = GHOSTTY_MODS_NONE
         key.keycode = UInt32(event.keyCode)
-        key.composing = false
+        key.composing = composing
         key.unshifted_codepoint = 0
         if event.type == .keyDown || event.type == .keyUp,
            let chars = event.charactersIgnoringModifiers,
@@ -293,6 +303,12 @@ extension TerminalSurfaceView: NSTextInputClient {
         case let a as NSAttributedString: text = a.string
         default: return
         }
+        // A commit replaces any live composition — clear the preedit or the
+        // underlined text stays on screen forever.
+        if preeditText != nil {
+            preeditText = nil
+            if let surface { ghostty_surface_preedit(surface, nil, 0) }
+        }
         if keyTextAccumulator != nil {
             // Mid-keyDown: ride the key event (correct encoding of e.g.
             // ctrl/alt-modified text happens in libghostty).
@@ -309,8 +325,8 @@ extension TerminalSurfaceView: NSTextInputClient {
         // actions here would double-handle them.
     }
 
-    // Marked text (IME composition) — minimal: we don't render inline
-    // preedit in phase 1; composition still works via the IME's own panel.
+    // Marked text (IME composition): ghostty renders the preedit inline
+    // (underlined); we track it so commits and cancellations clear it.
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         guard let surface else { return }
         let text: String
@@ -319,17 +335,27 @@ extension TerminalSurfaceView: NSTextInputClient {
         case let a as NSAttributedString: text = a.string
         default: return
         }
-        text.withCString { ghostty_surface_preedit(surface, $0, UInt(text.utf8.count)) }
+        if text.isEmpty {
+            preeditText = nil
+            ghostty_surface_preedit(surface, nil, 0)
+        } else {
+            preeditText = text
+            text.withCString { ghostty_surface_preedit(surface, $0, UInt(text.utf8.count)) }
+        }
     }
 
     func unmarkText() {
+        preeditText = nil
         guard let surface else { return }
         ghostty_surface_preedit(surface, nil, 0)
     }
 
     func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
-    func markedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
-    func hasMarkedText() -> Bool { false }
+    func markedRange() -> NSRange {
+        guard let preeditText else { return NSRange(location: NSNotFound, length: 0) }
+        return NSRange(location: 0, length: preeditText.utf16.count)
+    }
+    func hasMarkedText() -> Bool { preeditText != nil }
     func attributedSubstring(forProposedRange range: NSRange,
                              actualRange: NSRangePointer?) -> NSAttributedString? { nil }
     func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
