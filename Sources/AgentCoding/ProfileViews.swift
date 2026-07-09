@@ -198,13 +198,6 @@ struct ProfileEditorView: View {
     @State private var discoveredSSOProfiles: [DiscoveredSSOProfile] = []
     @State private var awsFolderGranted: Bool = false
 
-    /// Snapshot of the host's macOS key-repeat values, captured when
-    /// the editor opens. Used as the visible default in the Key
-    /// repeat fields and as the "treat as auto" sentinel — if the
-    /// user leaves the field at the macOS value, we save nil (track
-    /// macOS live); if they change it, we save their explicit value.
-    @State private var hostKeyRepeat: VMConfig.KeyRepeatSettings = VMConfig.detectKeyRepeat()
-
     struct ImportSheetState: Identifiable {
         let id = UUID()
         var sourceURL: URL
