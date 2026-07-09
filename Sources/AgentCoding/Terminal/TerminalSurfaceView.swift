@@ -12,6 +12,9 @@ final class TerminalSurfaceView: NSView {
     private(set) var surface: ghostty_surface_t?
     /// tmux window index this view is attached to (grid cell identity).
     let windowIndex: Int
+    /// Profile (VM) this surface serves — image pastes upload into this
+    /// guest. nil disables image paste (surface without VM context).
+    let profileID: Profile.ID?
     /// Guest title (from OSC / tmux), updated via the runtime's action fan-out.
     private(set) var title: String = ""
 
@@ -29,9 +32,11 @@ final class TerminalSurfaceView: NSView {
     /// insertText *replaces* marked text, it doesn't send unmarkText first.
     private var preeditText: String?
 
-    init?(command: String, workingDirectory: String? = nil, windowIndex: Int) {
+    init?(command: String, workingDirectory: String? = nil, windowIndex: Int,
+          profileID: Profile.ID? = nil) {
         guard let app = GhosttyRuntime.shared.app else { return nil }
         self.windowIndex = windowIndex
+        self.profileID = profileID
         super.init(frame: .zero)
 
         var cfg = ghostty_surface_config_new()

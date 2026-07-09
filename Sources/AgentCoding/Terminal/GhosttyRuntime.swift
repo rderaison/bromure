@@ -120,6 +120,16 @@ final class GhosttyRuntime: @unchecked Sendable {
                   let userdata, let state,
                   let view = GhosttyRuntime.surfaceView(for: userdata),
                   let surface = view.surface else { return false }
+            // An image on the clipboard pastes as a *guest file path*: the
+            // request completes empty right away (libghostty is blocked on
+            // it) and the path arrives as its own paste once the transfer
+            // into the guest lands.
+            if TerminalImagePaste.beginImagePaste(surfaceUserdata: userdata) {
+                "".withCString {
+                    ghostty_surface_complete_clipboard_request(surface, $0, state, false)
+                }
+                return true
+            }
             let text = NSPasteboard.general.string(forType: .string) ?? ""
             text.withCString {
                 ghostty_surface_complete_clipboard_request(surface, $0, state, false)
