@@ -95,7 +95,13 @@ final class GridStageView: NSView {
         for cell in store.cells where cellViews[cell.id] == nil {
             let view = GridCellView(
                 cell: cell,
-                onRemove: { [weak self] in self?.store.remove(id: cell.id) },
+                onRemove: { [weak self] in
+                    // Remove + reconcile now, so the cell disappears on click
+                    // instead of on the next ~1s timer tick (which felt like
+                    // "✕ does nothing", especially on placeholder/off cells).
+                    self?.store.remove(id: cell.id)
+                    self?.reconcile()
+                },
                 onJump: { [weak self] in
                     self?.dataSource.onJump(cell.profileID, cell.windowIndex)
                 },
