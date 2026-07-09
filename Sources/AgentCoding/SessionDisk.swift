@@ -64,13 +64,18 @@ public final class SessionDisk {
         /// guest opened — used to deliver OAuth redirect callbacks (grok-cli,
         /// gh, gcloud, …) back into the in-VM CLI. nil = no AC bundle.
         public let loopbackRelayAgentURL: URL?
+        /// The consolidated guest daemon (bromure-agentd.py). Staged every
+        /// session prep; the running daemon watches this file's hash and
+        /// exits for systemd to respawn the new version (hot upgrade).
+        public let agentdURL: URL?
         public init(caCertificatePEM: String,
                     bridgeScriptURL: URL,
                     awsCredsHelperURL: URL? = nil,
                     claudeTokenAgentURL: URL? = nil,
                     codexTokenAgentURL: URL? = nil,
                     shellAgentURL: URL? = nil,
-                    loopbackRelayAgentURL: URL? = nil) {
+                    loopbackRelayAgentURL: URL? = nil,
+                    agentdURL: URL? = nil) {
             self.caCertificatePEM = caCertificatePEM
             self.bridgeScriptURL = bridgeScriptURL
             self.awsCredsHelperURL = awsCredsHelperURL
@@ -78,6 +83,7 @@ public final class SessionDisk {
             self.codexTokenAgentURL = codexTokenAgentURL
             self.shellAgentURL = shellAgentURL
             self.loopbackRelayAgentURL = loopbackRelayAgentURL
+            self.agentdURL = agentdURL
         }
     }
 
@@ -435,6 +441,21 @@ public final class SessionDisk {
                     ofItemAtPath: lrDest.path)
             }
 
+            // Consolidated guest daemon. Only rewrite when the content
+            // actually changed: the running daemon re-hashes on mtime
+            // change and exits to upgrade — a byte-identical rewrite is
+            // harmless, but skipping it keeps resume-from-suspend quiet.
+            if let adURL = assets.agentdURL {
+                let adDest = tmp.appendingPathComponent("bromure-agentd.py")
+                let newData = try Data(contentsOf: adURL)
+                if (try? Data(contentsOf: adDest)) != newData {
+                    try newData.write(to: adDest, options: .atomic)
+                    try fm.setAttributes(
+                        [.posixPermissions: NSNumber(value: 0o755)],
+                        ofItemAtPath: adDest.path)
+                }
+            }
+
             if let shURL = assets.shellAgentURL {
                 let shDest = tmp.appendingPathComponent("shell-agent.py")
                 try? fm.removeItem(at: shDest)
@@ -600,15 +621,6 @@ public final class SessionDisk {
         try Self.sanitizeHostname(profile.name).appending("\n").write(
             to: tmp.appendingPathComponent("hostname.txt"),
             atomically: true, encoding: .utf8)
-
-        // display_scale.txt — host's backingScaleFactor. xinitrc passes
-        // it to `xrandr --dpi` so kitty's pt → px conversion produces a
-        // visually similar font size to Terminal.app at the same pt.
-        let scale = Self.detectDisplayScale()
-        try "\(scale)\n".write(
-            to: tmp.appendingPathComponent("display_scale.txt"),
-            atomically: true, encoding: .utf8
-        )
 
         // tz — host's current TimeZone identifier (e.g. "Europe/Paris").
         // xinitrc passes it to timedatectl so date/log timestamps inside

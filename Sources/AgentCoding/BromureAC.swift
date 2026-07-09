@@ -1184,9 +1184,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                              withExtension: "py")
     }()
 
+    /// The consolidated guest daemon (phase 3): creates the tmux session,
+    /// runs the roster/command loops and every absorbed vsock service.
+    /// Runs from the meta share under systemd; re-staging a changed copy
+    /// hot-upgrades it (self-hash watcher → exit(0) → Restart=always).
+    private lazy var agentdURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/bromure-agentd",
+                             withExtension: "py")
+    }()
+
     /// Loopback-callback relay (vsock 5010). Shipped in the meta share and
-    /// started from xinitrc; lets OAuth logins inside the VM receive their
-    /// 127.0.0.1 redirect callback from the host browser.
+    /// started by bromure-agentd; lets OAuth logins inside the VM receive
+    /// their 127.0.0.1 redirect callback from the host browser.
     lazy var loopbackRelayAgentURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/loopback-relay-agent",
                              withExtension: "py")
@@ -4295,8 +4304,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         try store.save(profile)
-        try store.prepareHomeDirectory(for: profile, terminalDefaults: terminalDefaults,
-                                       displayScale: TerminalAppDefaults.currentDisplayScale())
+        try store.prepareHomeDirectory(for: profile, terminalDefaults: terminalDefaults)
         let agentDir = store.profileDirectory(for: profile)
             .appendingPathComponent("agent", isDirectory: true)
         if generateSSH {
@@ -4735,8 +4743,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         try? store.prepareHomeDirectory(for: profile,
                                         terminalDefaults: terminalDefaults,
                                         tokenPlan: plan,
-                                        kubeconfigYAML: kubeYAML,
-                                        displayScale: TerminalAppDefaults.currentDisplayScale())
+                                        kubeconfigYAML: kubeYAML)
 
         // Rewrite api_key.env / proxy.env / MCP configs into the stable
         // meta-share dir and bump env.generation for the guest's
@@ -5057,8 +5064,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         try? store.prepareHomeDirectory(for: profile,
                                         terminalDefaults: terminalDefaults,
                                         tokenPlan: plan,
-                                        kubeconfigYAML: kubeYAMLForVM,
-                                        displayScale: TerminalAppDefaults.currentDisplayScale())
+                                        kubeconfigYAML: kubeYAMLForVM)
         // Codex subscription: seed a bogus ~/.codex/auth.json before boot so
         // the guest runs without logging in (host owns the real token).
         seedCodexAuthFile(for: profile)
@@ -5233,7 +5239,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // Always ship the shell agent now — `exec` is a first-class
                     // CLI verb, gated by the owner-only control socket.
                     shellAgentURL: shellAgentURL,
-                    loopbackRelayAgentURL: loopbackRelayAgentURL)
+                    loopbackRelayAgentURL: loopbackRelayAgentURL,
+                    agentdURL: agentdURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
             do {
@@ -6789,7 +6796,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     claudeTokenAgentURL: claudeTokenAgentURL,
                     codexTokenAgentURL: codexTokenAgentURL,
                     shellAgentURL: self.shellAgentURL,   // always ship (see warm-boot path)
-                    loopbackRelayAgentURL: loopbackRelayAgentURL)
+                    loopbackRelayAgentURL: loopbackRelayAgentURL,
+                    agentdURL: self.agentdURL)
             }
             let sandbox = UbuntuSandboxVM(imageManager: imageManager,
                                           sessionDisk: sessionDisk)

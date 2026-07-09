@@ -723,13 +723,11 @@ EOG
 # Defense-in-depth: if the host hasn't pre-populated /home/ubuntu (e.g.
 # someone runs the VM without going through ProfileStore), give the
 # guest a bare-minimum .bash_profile via /etc/skel. The host's own
-# version (written by Profile.prepareHomeDirectory) handles X auto-start
-# + .bashrc sourcing more thoroughly.
+# version (written by Profile.prepareHomeDirectory) additionally
+# bootstraps the bromure-agentd systemd unit. Boot is headless (plan
+# phase 3): X11/kitty remain installed but nothing starts them.
 install -d /etc/skel
 cat > /etc/skel/.bash_profile <<'EOB'
-if [ -z "${DISPLAY-}" ] && [ "$(tty)" = "/dev/tty1" ]; then
-    exec startx
-fi
 [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 EOB
 
