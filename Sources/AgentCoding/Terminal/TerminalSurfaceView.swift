@@ -330,8 +330,14 @@ final class TerminalSurfaceView: NSView {
     /// to the alternate screen, so ghostty has no scrollback of its own —
     /// left alone it fakes arrow keys for the wheel, which pages the shell's
     /// command history instead of the terminal text.
-    private static let tmuxScrollUpSeq = "\u{1b}[1000001~"
-    private static let tmuxScrollDownSeq = "\u{1b}[1000002~"
+    ///
+    /// Sent as a `text:` binding action (zig string-literal escapes), which
+    /// writes raw bytes to the pty. NOT `ghostty_surface_text` — that is the
+    /// clipboard-paste path, and with bracketed paste on (readline at any
+    /// shell prompt) it wraps the bytes in \e[200~..\e[201~, making tmux
+    /// paste "[1000001~" literally instead of matching the User0/1 keys.
+    private static let tmuxScrollUpSeq = "\\x1b[1000001~"
+    private static let tmuxScrollDownSeq = "\\x1b[1000002~"
     /// Sub-line remainder of precise (trackpad) scrolling, carried across
     /// events so slow drags still accumulate into whole lines.
     private var scrollLineRemainder: CGFloat = 0
@@ -378,9 +384,9 @@ final class TerminalSurfaceView: NSView {
         let count = min(Int(abs(lines)), 40)
         guard count > 0 else { return }
         let seq = lines > 0 ? Self.tmuxScrollUpSeq : Self.tmuxScrollDownSeq
-        let payload = String(repeating: seq, count: count)
-        payload.withCString {
-            ghostty_surface_text(surface, $0, UInt(payload.utf8.count))
+        let action = "text:" + String(repeating: seq, count: count)
+        action.withCString {
+            _ = ghostty_surface_binding_action(surface, $0, UInt(action.utf8.count))
         }
     }
 }
