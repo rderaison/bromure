@@ -1334,14 +1334,14 @@ private struct GridSection: View {
                                 Circle().fill(Color.secondary.opacity(0.35))
                                     .frame(width: 6, height: 6)
                             }
-                            Text(workspace?.name ?? "?")
+                            // Just the process name, tinted with the
+                            // workspace's accent — the workspace is already
+                            // conveyed by the dot color + grouping.
+                            Text(cell.label)
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(Color(hex: workspace?.accentHex ?? "#888888"))
                                 .lineLimit(1)
-                            Text(cell.label)
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                                .help(workspace.map { "\($0.name) — \(cell.label)" } ?? cell.label)
                             Spacer(minLength: 0)
                         }
                         .padding(.leading, 30)

@@ -69,6 +69,16 @@ final class GridLayoutStore {
         save()
     }
 
+    /// Swap two cells' grid positions (drag-to-rearrange). No-op if either id
+    /// is unknown or they're the same cell.
+    func swap(_ idA: String, _ idB: String) {
+        guard idA != idB,
+              let a = cells.firstIndex(where: { $0.id == idA }),
+              let b = cells.firstIndex(where: { $0.id == idB }) else { return }
+        cells.swapAt(a, b)
+        save()
+    }
+
     /// Roster reconciliation for a *running* workspace: drop cells whose
     /// window no longer exists; refresh labels of the ones that do.
     func reconcile(profileID: UUID, tabs: [(index: Int, label: String)]) {

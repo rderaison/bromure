@@ -107,7 +107,8 @@ final class GridStageView: NSView {
                 },
                 onStart: { [weak self] in self?.dataSource.onStart(cell.profileID) },
                 onToggleZoom: { [weak self] in self?.toggleZoom(cell.id) },
-                onFocus: { [weak self] in self?.focus(cell.id) })
+                onFocus: { [weak self] in self?.focus(cell.id) },
+                onSwap: { [weak self] draggedID in self?.swapCells(draggedID, cell.id) })
             cellViews[cell.id] = view
             addSubview(view)
         }
@@ -147,6 +148,23 @@ final class GridStageView: NSView {
         }
 
         needsLayout = true
+    }
+
+    // MARK: Rearrange
+
+    /// Swap two cells' positions (drag one cell's header onto another) and
+    /// animate the layout so the terminals glide to their new slots.
+    private func swapCells(_ draggedID: String, _ targetID: String) {
+        guard draggedID != targetID else { return }
+        store.swap(draggedID, targetID)
+        // A zoomed cell would hide everything mid-animation; clear it.
+        store.zoomedCellID = nil
+        needsLayout = true
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.22
+            ctx.allowsImplicitAnimation = true
+            layoutSubtreeIfNeeded()
+        }
     }
 
     // MARK: Focus & zoom
@@ -222,6 +240,8 @@ final class GridCellView: NSView {
     private let onStart: () -> Void
     private let onToggleZoom: () -> Void
     private let onFocus: () -> Void
+    /// Given the DRAGGED cell's id, swap it with this cell.
+    private let onSwap: (String) -> Void
 
     private var header = GridCellHeader.Model()
 
@@ -230,23 +250,27 @@ final class GridCellView: NSView {
          onJump: @escaping () -> Void,
          onStart: @escaping () -> Void,
          onToggleZoom: @escaping () -> Void,
-         onFocus: @escaping () -> Void) {
+         onFocus: @escaping () -> Void,
+         onSwap: @escaping (String) -> Void) {
         self.onRemove = onRemove
         self.onJump = onJump
         self.onStart = onStart
         self.onToggleZoom = onToggleZoom
         self.onFocus = onFocus
+        self.onSwap = onSwap
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 6
         layer?.masksToBounds = true
         layer?.borderWidth = 1
         layer?.borderColor = NSColor.separatorColor.cgColor
+        header.cellID = cell.id
 
         let headerView = GridCellHeader(
             model: header,
             onRemove: onRemove, onJump: onJump,
-            onDoubleClick: onToggleZoom)
+            onDoubleClick: onToggleZoom,
+            onSwap: onSwap)
         let host = NSHostingView(rootView: headerView)
         headerHost = host
         addSubview(host)
@@ -314,16 +338,30 @@ struct GridCellHeader: View {
         var accentHex = "#888888"
         var agentStatus: AgentStatus?
         var runState: SessionListModel.RunState = .off
+        /// This cell's grid id — the drag payload for rearranging.
+        var cellID = ""
     }
 
     @Bindable var model: Model
     let onRemove: () -> Void
     let onJump: () -> Void
     let onDoubleClick: () -> Void
+    /// Given the dragged cell's id, swap it into this cell's slot.
+    let onSwap: (String) -> Void
     @State private var hovering = false
+    @State private var dropTargeted = false
 
     var body: some View {
         HStack(spacing: 6) {
+            // Drag handle: grab here to swap this cell with another. Shown on
+            // hover so it doesn't clutter the header at rest.
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .opacity(hovering ? 1 : 0)
+                .frame(width: hovering ? 10 : 0)
+                .draggable(model.cellID)
+                .help("Drag to rearrange")
             if let status = model.agentStatus {
                 AgentStatusDot(status: status)
             } else {
@@ -355,10 +393,18 @@ struct GridCellHeader: View {
         }
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(dropTargeted ? Color.accentColor.opacity(0.25)
+                                 : Color(nsColor: .windowBackgroundColor))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .gesture(TapGesture(count: 2).onEnded { onDoubleClick() })
+        // Drop another cell's header here to swap the two. Ignore a drop of
+        // this same cell onto itself.
+        .dropDestination(for: String.self) { items, _ in
+            guard let dragged = items.first, dragged != model.cellID else { return false }
+            onSwap(dragged)
+            return true
+        } isTargeted: { dropTargeted = $0 }
         .contextMenu {
             Button("Open in Workspace", action: onJump)
             Divider()
