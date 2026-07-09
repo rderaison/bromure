@@ -175,9 +175,54 @@ Only after Phase 2 has soaked.
 
 - Default new workspaces to native; framebuffer becomes a per-workspace
   "Legacy display" escape hatch for one release, then removed.
-- Image (`Resources/vm-setup/setup.sh`): drop kitty/xterm, xinit/Xorg + all
-  xorg confs, the kitty config block, spice-vdagent; boot target becomes
-  tmux on a getty (keep a serial console for recovery).
+- Image (`Resources/vm-setup/setup.sh`) — revised scope: X11 + kitty stay
+  on disk (cheap insurance, removed later) but NOTHING starts them — no
+  autostart, no on-demand path. Boot is headless, period.
+- One consolidated guest agent replaces the xinitrc script pile.
+  Today's boot chain is: tty1 auto-login → startx → host-generated
+  `~/.xinitrc` (Profile.swift ~3700–3965: resume unit, vm-bridge,
+  docker proxy rewiring, binfmt, tz, share symlinks, IP reporter,
+  spice resume-watcher, token/keyboard/scroll/shell/loopback agents,
+  openbox/spice) → `exec ~/.bromure-tab-agent.sh` (Profile.swift
+  `tabAgentContent`: kitty→tmux launch, roster publishing, tab-command
+  loop, reboot-vs-poweroff detection, worktree restore).
+
+  ### bromure-agentd.py spec (tranche 2)
+  Single stdlib-only python3 daemon, staged in the meta share, run by a
+  `bromure-agentd.service` systemd unit (User=ubuntu, Restart=always,
+  RestartSec=1, After=mnt-bromure\x2dmeta.mount) installed at image
+  build. tty1 auto-login stops exec'ing startx (plain shell for
+  recovery); X11/kitty/openbox/spice stay on disk, never started.
+
+  Supervised service threads (ports + wire protocols identical, host
+  untouched): shell-agent (vsock 5800 pool, exec + interactive + view
+  attach), bromure-vm-bridge (127.0.0.1:8080 + agent.sock → host MITM),
+  claude-token-agent (8446), codex-token-agent (8447), loopback-relay
+  (5010), IP reporter (outbox/ip.txt), resume watcher (.resume-signal →
+  clock re-sync; replaces the root systemd watcher + spice respawner),
+  and the tab engine — a headless port of tab-agent.sh: create
+  `tmux new-session -d -s bromure`, publish the window roster in the
+  exact format the host's applyTabList consumes, process
+  new/select/close-tab + worktree command files, keep the
+  reboot-vs-poweroff distinction and worktree restore behavior.
+
+  One-shot session tasks at startup (absorbed from ~/.xinitrc): tz from
+  meta share, stale apt-proxy cleanup, docker proxy fragment + restart,
+  binfmt reapply, share symlink sweep+create.
+
+  Hot upgrade: the daemon's version is the SHA-256 of its own source;
+  it watches the staged file (mtime → rehash) and honors an
+  `agentVersion` field on host pings — mismatch → log + exit(0) →
+  systemd respawns the new file. Host re-stages the bundled agentd into
+  running VMs' meta shares on launch/reconnect when hashes differ, so
+  an app rebuild upgrades live guests without a VM reboot.
+
+  Explicitly not absorbed: bromure-aws-creds.py (exec'd by AWS CLI as
+  credential_process — stays a standalone file); keyboard-agent.py and
+  scroll-agent.py (X11-only — deleted along with host KeyboardBridge /
+  ScrollBridge wiring); openbox/spice/kitty/xrandr handling (X never
+  starts). Host-side: Profile.swift stops generating ~/.xinitrc and
+  ~/.bromure-tab-agent.sh once the daemon owns their duties.
 - Remove the legacy guest Python agents that exist only to serve the
   framebuffer/X11 path, plus their launch wiring (xinitrc/setup.sh) and
   host-side twins:
