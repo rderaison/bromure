@@ -177,9 +177,19 @@ Only after Phase 2 has soaked.
   "Legacy display" escape hatch for one release, then removed.
 - Image (`Resources/vm-setup/setup.sh`): drop kitty/xterm, xinit/Xorg + all
   xorg confs, the kitty config block, spice-vdagent; boot target becomes
-  tmux on a getty (keep a serial console for recovery). Audit before deleting:
-  `keyboard-agent.py`, `scroll-agent.py`, shortcut markers, CJK input agent —
-  each exists for the framebuffer; confirm no second consumer.
+  tmux on a getty (keep a serial console for recovery).
+- Remove the legacy guest Python agents that exist only to serve the
+  framebuffer/X11 path, plus their launch wiring (xinitrc/setup.sh) and
+  host-side twins:
+  - `keyboard-agent.py` (vsock 5006, host layout → setxkbmap) + the
+    host `KeyboardBridge` — native surfaces encode keys host-side, no
+    guest X keymap to sync;
+  - `scroll-agent.py` (host wheel → tmux copy-mode for the framebuffer)
+    + the host `ScrollBridge` — native views use tmux mouse mode;
+  - the kitty shortcut marker-file chain and CJK/X11 input plumbing.
+  Audit before deleting: confirm no second consumer of each (the
+  transport/credential agents — `shell-agent.py`, `bromure-vm-bridge.py`,
+  token/AWS/loopback agents — all stay).
 - Drop `VZVirtioGraphicsDeviceConfiguration` from `UbuntuSandboxVM` (keep the
   vsock + virtiofs devices). Measure and record: image size, boot time, idle
   CPU/RAM deltas (expect all four to improve; llvmpipe compositing goes away).

@@ -52,6 +52,8 @@ final class SessionListModel {
     var dockerSelectedID: Profile.ID?
     /// True when the Grid is the active stage surface.
     var gridSelected = false
+    /// True when the sidebar is collapsed to the icon rail.
+    var sidebarCollapsed = false
 }
 
 /// Right-click actions on a tab row. Handled by the window, which reads the
@@ -174,6 +176,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private let gridSlot = NSView()
     private var gridView: GridStageView?
 
+    /// Collapsible sidebar (toolbar button / ⌃⌘S). Grid mode especially
+    /// wants the full window width.
+    private var sidebarWidthConstraint: NSLayoutConstraint?
+    private var sidebarDivider: NSBox?
+    private(set) var sidebarCollapsed = false
+
     init(acDelegate: ACAppDelegate) {
         self.acDelegate = acDelegate
         self.paneSlot = NSView()
@@ -215,6 +223,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 return true
             },
             onAddAllToGrid: { [weak self] id in self?.addAllWorktreesToGrid(profileID: id) },
+            onToggleSidebar: { [weak self] in self?.toggleSidebar(nil) },
             onSelect:    { [weak self] id in self?.selectWorkspaceName(id) },
             onSelectTab: { [weak self] id, idx in self?.selectTab(profileID: id, index: idx) },
             onNewTab:    { [weak self] id in self?.newTab(profileID: id) },
@@ -308,11 +317,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         root.addSubview(sidebarHost)
         root.addSubview(divider)
         root.addSubview(stage)
+        let sidebarWidth = sidebarHost.widthAnchor.constraint(equalToConstant: 264)
+        self.sidebarWidthConstraint = sidebarWidth
+        self.sidebarDivider = divider
+        sidebarHost.clipsToBounds = true   // squish cleanly during collapse
         NSLayoutConstraint.activate([
             sidebarHost.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             sidebarHost.topAnchor.constraint(equalTo: root.topAnchor),
             sidebarHost.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            sidebarHost.widthAnchor.constraint(equalToConstant: 264),
+            sidebarWidth,
 
             divider.leadingAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
             divider.topAnchor.constraint(equalTo: root.topAnchor),
@@ -401,6 +414,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         selectedID = id
         listModel.selectedID = id
         mountSelected(pane)
+    }
+
+    // MARK: Sidebar collapse
+
+    /// Toolbar button + ⌃⌘S. Collapsed = a 44pt icon rail (one icon per
+    /// terminal, separators between workspaces) so the stage — especially
+    /// the grid — gets nearly the full width without losing navigation.
+    @objc func toggleSidebar(_ sender: Any?) {
+        sidebarCollapsed.toggle()
+        listModel.sidebarCollapsed = sidebarCollapsed   // SwiftUI swaps to the rail
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            ctx.allowsImplicitAnimation = true
+            sidebarWidthConstraint?.animator().constant = sidebarCollapsed ? 44 : 264
+            contentView?.layoutSubtreeIfNeeded()
+        }
     }
 
     // MARK: Grid overlay
@@ -773,6 +802,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     override func sendEvent(_ event: NSEvent) {
+        // ⌃⌘S — hide/show the sidebar (classic macOS chord).
+        if event.type == .keyDown,
+           event.modifierFlags.contains([.command, .control]),
+           event.charactersIgnoringModifiers?.lowercased() == "s" {
+            toggleSidebar(nil)
+            return
+        }
         if event.type == .keyDown, handleACShortcut(event) { return }
         super.sendEvent(event)
     }
@@ -795,6 +831,8 @@ private struct SessionSidebar: View {
     /// Drop of a `GridDragPayload` string onto the Grid node.
     let onDropGridPayload: (String) -> Bool
     let onAddAllToGrid: (Profile.ID) -> Void
+    /// Collapse/expand the sidebar (the rail ↔ full toggle).
+    let onToggleSidebar: () -> Void
     let onSelect: (Profile.ID) -> Void
     let onSelectTab: (Profile.ID, Int) -> Void
     let onNewTab: (Profile.ID) -> Void
@@ -818,6 +856,19 @@ private struct SessionSidebar: View {
     let onNewProfile: () -> Void
 
     var body: some View {
+        if model.sidebarCollapsed {
+            CompactRail(model: model,
+                        onToggle: onToggleSidebar,
+                        onSelectGrid: onSelectGrid,
+                        onSelectTab: onSelectTab)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .background(Color(nsColor: .windowBackgroundColor))
+        } else {
+            fullSidebar
+        }
+    }
+
+    private var fullSidebar: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("Workspaces")
@@ -826,6 +877,13 @@ private struct SessionSidebar: View {
                     .textCase(.uppercase)
                     .tracking(0.7)
                 Spacer()
+                Button(action: onToggleSidebar) {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Collapse the sidebar (⌃⌘S)")
             }
             .padding(.leading, 16)
             .padding(.trailing, 12)
@@ -878,6 +936,108 @@ private struct SessionSidebar: View {
         // Solid (opaque) so the window's transparency for translucent profiles
         // only shows through the framebuffer, never the sidebar.
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+/// Collapsed sidebar: a flat icon rail — the Grid button, then one icon per
+/// terminal (status dot riding it), workspaces separated by thin dividers.
+/// No nesting, no names; tooltips carry the full context.
+private struct CompactRail: View {
+    @Bindable var model: SessionListModel
+    let onToggle: () -> Void
+    let onSelectGrid: () -> Void
+    let onSelectTab: (Profile.ID, Int) -> Void
+
+    var body: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(spacing: 5) {
+                Button(action: onToggle) {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help("Expand the sidebar (⌃⌘S)")
+
+                Button(action: onSelectGrid) {
+                    Image(systemName: "square.grid.2x2")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(model.gridSelected ? Color.accentColor : .secondary)
+                        .frame(width: 30, height: 26)
+                        .background(RoundedRectangle(cornerRadius: 6)
+                            .fill(model.gridSelected ? Color.accentColor.opacity(0.16) : .clear))
+                }
+                .buttonStyle(.plain)
+                .help("Grid")
+
+                ForEach(model.entries) { entry in
+                    let accentHex = model.profileRows.first { $0.id == entry.id }?
+                        .accentHex ?? "#888888"
+                    let workspaceName = model.profileRows.first { $0.id == entry.id }?
+                        .name ?? ""
+                    Divider().padding(.horizontal, 10)
+                    ForEach(Array(entry.model.tabs.enumerated()), id: \.element.id) { idx, tab in
+                        if tab.containerID == nil {
+                            RailTabButton(
+                                tab: tab,
+                                accentHex: accentHex,
+                                workspaceName: workspaceName,
+                                isActive: tab.id == entry.model.activeTab?.id
+                                    && model.selectedID == entry.id
+                                    && !model.gridSelected,
+                                onSelect: { onSelectTab(entry.id, idx) })
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+/// One rail icon: the terminal's agent glyph (or a shell prompt) with its
+/// status dot; active tab gets the workspace-accent backing.
+private struct RailTabButton: View {
+    let tab: TabsModel.Tab
+    let accentHex: String
+    let workspaceName: String
+    let isActive: Bool
+    let onSelect: () -> Void
+    @State private var hovering = false
+
+    private var agentKind: String? { BromureIcons.agentKind(forLabel: tab.shownLabel) }
+    private var iconName: String {
+        switch agentKind {
+        case "claude", "codex", "grok": return agentKind ?? "robot"
+        default: return "robot"
+        }
+    }
+
+    var body: some View {
+        Button(action: onSelect) {
+            Group {
+                if agentKind != nil {
+                    SVGIcon(name: iconName, fallbackSymbol: "sparkles", size: 13)
+                        .foregroundStyle(isActive ? Color(hex: accentHex) : .secondary)
+                } else {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 11))
+                        .foregroundStyle(isActive ? Color(hex: accentHex) : .secondary)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                AgentStatusDot(status: tab.agentStatus).offset(x: 2, y: 1)
+            }
+            .frame(width: 30, height: 26)
+            .background(RoundedRectangle(cornerRadius: 6)
+                .fill(isActive ? Color(hex: accentHex).opacity(0.16)
+                               : (hovering ? Color.primary.opacity(0.05) : .clear)))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("\(workspaceName) — \(tab.shownLabel)")
     }
 }
 
@@ -1657,6 +1817,7 @@ private struct IconButton: View {
 // MARK: - Window toolbar (per-selected-VM controls + IP)
 
 private let unifiedToolbarItemID = NSToolbarItem.Identifier("io.bromure.ac.unified.controls")
+private let toggleSidebarItemID = NSToolbarItem.Identifier("io.bromure.ac.unified.toggleSidebar")
 
 @MainActor
 final class UnifiedToolbarDelegate: NSObject, NSToolbarDelegate {
@@ -1664,14 +1825,25 @@ final class UnifiedToolbarDelegate: NSObject, NSToolbarDelegate {
     init(rootView: UnifiedToolbarBar) { self.rootView = rootView }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, unifiedToolbarItemID]
+        [toggleSidebarItemID, .flexibleSpace, unifiedToolbarItemID]
     }
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, unifiedToolbarItemID]
+        [toggleSidebarItemID, .flexibleSpace, unifiedToolbarItemID]
     }
     func toolbar(_ t: NSToolbar,
                  itemForItemIdentifier id: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if id == toggleSidebarItemID {
+            let item = NSToolbarItem(itemIdentifier: id)
+            item.image = NSImage(systemSymbolName: "sidebar.left",
+                                 accessibilityDescription: "Toggle Sidebar")
+            item.label = "Sidebar"
+            item.toolTip = "Hide or show the sidebar (⌃⌘S)"
+            // nil target → responder chain → UnifiedSessionWindow.
+            item.action = #selector(UnifiedSessionWindow.toggleSidebar(_:))
+            item.isBordered = true
+            return item
+        }
         guard id == unifiedToolbarItemID else { return nil }
         let item = NSToolbarItem(itemIdentifier: id)
         let host = FlexibleHostingView(rootView: rootView)
