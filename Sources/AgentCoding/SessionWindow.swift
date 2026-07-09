@@ -390,16 +390,18 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
 
     /// Apply the profile's window opacity to the chrome. The framebuffer alpha
     /// itself lives on the pane's container layer; this only flips the window
-    /// to non-opaque/clear so that alpha composites against the desktop rather
-    /// than an opaque backing.
+    /// to non-opaque/clear so that alpha composites against the desktop —
+    /// frosted by the window-server blur — rather than an opaque backing.
     private func applyOpacityChrome(for profile: Profile) {
         let opacity = min(1.0, max(0.3, profile.windowOpacity))
         if opacity < 1.0 {
             isOpaque = false
             backgroundColor = .clear
+            setBackgroundFrost(radius: Self.terminalFrostRadius)
         } else {
             isOpaque = true
             backgroundColor = nil
+            setBackgroundFrost(radius: 0)
         }
     }
 

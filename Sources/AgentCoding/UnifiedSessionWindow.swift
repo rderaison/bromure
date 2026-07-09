@@ -727,18 +727,21 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Honour the selected profile's terminal-transparency setting. The pane's
     /// own container layer carries the alpha; here we flip the *window* to
     /// non-opaque and clear the *stage* backing so that alpha composites against
-    /// the desktop — and ONLY the framebuffer: the sidebar/divider/titlebar stay
-    /// opaque. Opaque profiles keep the solid black stage (nice during boot).
+    /// the desktop — frosted by the window-server blur — and ONLY the
+    /// framebuffer: the sidebar/divider/titlebar stay opaque. Opaque profiles
+    /// keep the solid black stage (nice during boot).
     private func applyOpacityChrome(for pane: SessionPane?) {
         let opacity = pane.map { min(1.0, max(0.3, $0.profile.windowOpacity)) } ?? 1.0
         if opacity < 1.0 {
             isOpaque = false
             backgroundColor = .clear
             stage.layer?.backgroundColor = NSColor.clear.cgColor
+            setBackgroundFrost(radius: Self.terminalFrostRadius)
         } else {
             isOpaque = true
             backgroundColor = nil
             stage.layer?.backgroundColor = NSColor.black.cgColor
+            setBackgroundFrost(radius: 0)
         }
     }
 
