@@ -716,6 +716,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if listModel.gridSelected { gridView?.reconcile() }
     }
 
+    /// ⌘D: pin a terminal AND land on it — switches the stage to the grid
+    /// and hands the (possibly pre-existing) cell keyboard focus.
+    func addToGridAndReveal(profileID: Profile.ID, windowIndex: Int, label: String) {
+        gridStore.add(profileID: profileID, windowIndex: windowIndex, label: label)
+        showGrid()   // creates the grid view if needed + reconciles, so the cell exists
+        gridView?.focusCell(id: GridCell.id(profileID: profileID, windowIndex: windowIndex))
+    }
+
     /// Bulk convenience: every worktree tab of a workspace into the grid.
     func addAllWorktreesToGrid(profileID: Profile.ID) {
         guard let entry = listModel.entries.first(where: { $0.id == profileID }) else { return }

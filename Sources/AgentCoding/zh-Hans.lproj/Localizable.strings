@@ -806,6 +806,7 @@
 /* Menu bar — Workspaces menu */
 "New Workspace…" = "新建工作区…";
 "New tab" = "新建标签页";
+"Add Terminal to Grid" = "将终端添加到网格";
 "Merge worktree" = "合并工作树";
 
 /* Menu bar — items missing from the base catalog */
@@ -820,6 +821,8 @@
 /* Worktrees — dialog buttons & format strings */
 "Merge “%@”" = "合并“%@”";
 "Merge" = "合并";
+"Create Pull Request" = "创建 Pull Request";
+"Create Pull Request instead pushes the branch and has the agent open a clean GitHub PR against the selected destination." = "“创建 Pull Request”会推送该分支，并让智能体针对所选目标在 GitHub 上创建一个干净的 PR。";
 "Discard worktree “%@”?" = "要丢弃工作树“%@”吗？";
 "Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "移除该检出并删除分支“%@”。此分支上尚未合并的提交将会丢失。";
 "Discard" = "丢弃";

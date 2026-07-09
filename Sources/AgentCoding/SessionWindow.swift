@@ -432,7 +432,7 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
 
     // MARK: - Shortcut interception
 
-    /// ⌘T / ⌘W / ⌘1-9 / ⌘N dispatch for `sendEvent`, `performKeyEquivalent` and
+    /// ⌘T / ⌘W / ⌘D / ⌘1-9 / ⌘N dispatch for `sendEvent`, `performKeyEquivalent` and
     /// the app delegate's NSEvent monitor. Host-owned chords are intercepted
     /// before the terminal surface sees them. Returns true when the shortcut
     /// matched and the event should be consumed.

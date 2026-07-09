@@ -252,7 +252,7 @@ struct VMRun: ParsableCommand {
         }
         if let memory { spec["memoryGB"] = memory }
         if !volume.isEmpty {
-            spec["mounts"] = volume.map { ($0 as NSString).expandingTildeInPath }
+            spec["mounts"] = volume.map(absoluteHostPath)
         }
         let resp = try client.request("POST", "/vms", body: spec)
         guard resp.status == 201 else {
@@ -776,7 +776,7 @@ struct WorkspacesCreate: ParsableCommand {
         if let memory { body["memoryGB"] = memory }
         if let color { body["color"] = color }
         if !folder.isEmpty {
-            body["folderPaths"] = folder.map { ($0 as NSString).expandingTildeInPath }
+            body["folderPaths"] = folder.map(absoluteHostPath)
         }
         if generateSsh { body["generateSSH"] = true }
         guard (body["name"] as? String)?.isEmpty == false else {
@@ -944,6 +944,18 @@ struct WorkspacePorts: ParsableCommand {
             print(pad("\(r.port)", 7) + pad(r.proto, 7) + pad(r.addr, 22) + r.process + scope)
         }
     }
+}
+
+/// Absolute form of a user-typed host path: `~` expanded, and a relative
+/// path (`./`, `src`) resolved against the CLI's cwd. Resolution must happen
+/// here — the app receives the path over the control socket and its own cwd
+/// is `/`, so `-v ./` sent verbatim would come back as the root directory.
+func absoluteHostPath(_ raw: String) -> String {
+    let expanded = (raw as NSString).expandingTildeInPath
+    let absolute = expanded.hasPrefix("/")
+        ? expanded
+        : (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(expanded)
+    return (absolute as NSString).standardizingPath
 }
 
 /// Load a JSON object from a file path, or from stdin when `spec == "-"`.

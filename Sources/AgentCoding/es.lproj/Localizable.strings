@@ -808,6 +808,7 @@
 /* Menu bar — Workspaces menu */
 "New Workspace…" = "Nuevo espacio de trabajo…";
 "New tab" = "Nueva pestaña";
+"Add Terminal to Grid" = "Añadir terminal a la cuadrícula";
 "Merge worktree" = "Fusionar worktree";
 
 /* Menu bar — items missing from the base catalog */
@@ -822,6 +823,8 @@
 /* Worktrees — dialog buttons & format strings */
 "Merge “%@”" = "Fusionar “%@”";
 "Merge" = "Fusionar";
+"Create Pull Request" = "Crear pull request";
+"Create Pull Request instead pushes the branch and has the agent open a clean GitHub PR against the selected destination." = "“Crear pull request” sube la rama y hace que el agente abra un PR limpio en GitHub contra el destino seleccionado.";
 "Discard worktree “%@”?" = "¿Descartar el worktree “%@”?";
 "Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "Elimina el checkout y borra la rama “%@”. Se perderán los commits de esta rama que no se hayan fusionado.";
 "Discard" = "Descartar";

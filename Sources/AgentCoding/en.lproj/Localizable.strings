@@ -808,6 +808,7 @@
 "Workspaces" = "Workspaces";
 "New Workspace…" = "New Workspace…";
 "New tab" = "New tab";
+"Add Terminal to Grid" = "Add Terminal to Grid";
 "Merge worktree" = "Merge worktree";
 
 /* Menu bar — items missing from the base catalog */
@@ -822,6 +823,8 @@
 /* Worktrees — dialog buttons & format strings */
 "Merge “%@”" = "Merge “%@”";
 "Merge" = "Merge";
+"Create Pull Request" = "Create Pull Request";
+"Create Pull Request instead pushes the branch and has the agent open a clean GitHub PR against the selected destination." = "Create Pull Request instead pushes the branch and has the agent open a clean GitHub PR against the selected destination.";
 "Discard worktree “%@”?" = "Discard worktree “%@”?";
 "Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost.";
 "Discard" = "Discard";

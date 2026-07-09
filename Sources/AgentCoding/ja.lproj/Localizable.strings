@@ -806,6 +806,7 @@
 /* Menu bar — Workspaces menu */
 "New Workspace…" = "新規ワークスペース…";
 "New tab" = "新規タブ";
+"Add Terminal to Grid" = "ターミナルをグリッドに追加";
 "Merge worktree" = "ワークツリーをマージ";
 
 /* Menu bar — items missing from the base catalog */
@@ -820,6 +821,8 @@
 /* Worktrees — dialog buttons & format strings */
 "Merge “%@”" = "「%@」をマージ";
 "Merge" = "マージ";
+"Create Pull Request" = "プルリクエストを作成";
+"Create Pull Request instead pushes the branch and has the agent open a clean GitHub PR against the selected destination." = "「プルリクエストを作成」はブランチをプッシュし、選択した宛先に対してエージェントがクリーンな GitHub PR を作成します。";
 "Discard worktree “%@”?" = "ワークツリー「%@」を破棄しますか？";
 "Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost." = "チェックアウトを取り除き、ブランチ「%@」を削除します。このブランチでまだマージされていないコミットは失われます。";
 "Discard" = "破棄";

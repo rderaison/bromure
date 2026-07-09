@@ -508,7 +508,7 @@ final class SessionPane {
         if changed { model.dockerContainers = containers }
     }
 
-    /// Run a host-owned keychord by its bare key ("t"/"w"/"n"/"1"…"9").
+    /// Run a host-owned keychord by its bare key ("t"/"w"/"n"/"d"/"1"…"9").
     /// Single sink for every delivery route so the ⌘T action can't drift
     /// between paths. Returns true when the key matched (and the event, if
     /// any, should be consumed).
@@ -521,6 +521,9 @@ final class SessionPane {
             return true
         case "w":
             if fire { closeTab(at: model.activeIndex) }
+            return true
+        case "d":
+            if fire { acDelegate?.addActiveTerminalToGrid(in: self) }
             return true
         case "n":
             if fire { acDelegate?.openProfileManagerAction(nil) }
