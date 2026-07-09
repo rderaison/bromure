@@ -319,7 +319,9 @@ def _view_attach_command(view, window):
         " set-option status off \\;"
         # mouse OFF: tmux does not capture the mouse, so a plain drag is
         # ghostty's own native selection (macOS-like — select never copies,
-        # ⌘C copies) and the wheel scrolls ghostty's native scrollback.
+        # ⌘C copies). The wheel scrolls tmux history through the user-keys
+        # bridge bound in create_session (the client pins the surface to the
+        # alternate screen, so there is no host-side scrollback to scroll).
         # tmux still forwards mouse events to apps that request them
         # (Claude/vim), so TUI clicks keep working.
         " set-option mouse off"
@@ -1781,15 +1783,19 @@ def _worktree_resolve(merge_dir, tool):
 
 
 # ── roster: tab list published to /mnt/bromure-outbox/tabs.txt ───────────────
-# Internal tmux -F list is TAB-separated with 11 columns (idx, active, cmd, tty,
-# @label, @container, cwd, @worktree, @parent_branch, @root_repo, @display).
+# Internal tmux -F list is TAB-separated with 13 columns (idx, active, cmd, tty,
+# @label, @container, cwd, @worktree, @parent_branch, @root_repo, @display,
+# mouse_any, title). The free-text pane_title stays LAST so a stray tab inside
+# a title can't shift the fixed columns (the parse's maxsplit folds it in).
 # The PUBLISHED tabs.txt line is TAB-separated with 10 columns (the host
 # contract): idx, active, name, container, cwd, worktree, pbranch, rroot,
-# display, isrepo. (cmd + tty are consumed to compute `name`.)
+# display, isrepo. (cmd + tty are consumed to compute `name`; mouse_any feeds
+# the stuck-mouse heal.)
 _ROSTER_FMT = ("#{window_index}\t#{?window_active,1,0}\t"
                "#{pane_current_command}\t#{pane_tty}\t#{@label}\t"
                "#{@container}\t#{pane_current_path}\t#{@worktree}\t"
-               "#{@parent_branch}\t#{@root_repo}\t#{@display}\t#{pane_title}")
+               "#{@parent_branch}\t#{@root_repo}\t#{@display}\t"
+               "#{mouse_any_flag}\t#{pane_title}")
 
 # The pane title (OSC 2) an agent sets, when it's a real session title rather
 # than tmux's default (the hostname) or a shell's "user@host" / path. Used to
@@ -1914,6 +1920,39 @@ def _git_toplevel(cwd):
 
 _ROSTER_LOCK = threading.Lock()
 
+# ── stuck mouse-tracking heal ────────────────────────────────────────────────
+# A TUI that dies uncleanly (SIGKILL, crash, lost connection) never sends the
+# DECSET resets, so tmux keeps the pane's mouse-tracking mode on and forwards
+# the host terminal's mouse reports into the pane — where the now-foreground
+# shell echoes them as escape garbage on every mouse move. When a plain shell
+# is in the foreground but a tracking mode is still set, write the resets to
+# the pane tty ourselves: tmux parses pane output no matter who wrote it, so
+# this clears the pane's modes and propagates the disable out to the host
+# surface without touching the screen (unlike `send-keys -R`). Requires two
+# consecutive roster sightings (~1.4s) so it can't race a TUI mid-startup
+# that has enabled the mouse before tmux reports it as the foreground command.
+_PLAIN_SHELLS = frozenset(("bash", "zsh", "fish", "sh", "dash", "ash"))
+_MOUSE_RESET = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"
+_stuck_mouse = {}  # pane tty → consecutive stuck sightings
+
+
+def _heal_stuck_mouse(tty, cmd, mouse_any):
+    """One roster row's stuck-mouse check; see the block comment above."""
+    if (mouse_any != "1" or cmd.lstrip("-") not in _PLAIN_SHELLS
+            or not tty.startswith("/dev/")):
+        _stuck_mouse.pop(tty, None)
+        return
+    if _stuck_mouse.get(tty, 0) < 1:
+        _stuck_mouse[tty] = 1
+        return
+    _stuck_mouse.pop(tty, None)
+    try:
+        with open(tty, "wb", buffering=0) as f:
+            f.write(_MOUSE_RESET)
+        log("roster", "cleared stuck mouse-tracking on", tty)
+    except OSError:
+        pass
+
 
 def publish_roster():
     """Build and atomically publish the window list to tabs.txt. Safe to call
@@ -1924,14 +1963,17 @@ def publish_roster():
         p = _tmux("list-windows", "-t", TMUX_S, "-F", _ROSTER_FMT)
         if p.returncode == 0:
             out_lines = []
+            seen_ttys = set()
             for raw in p.stdout.splitlines():
-                cols = raw.split("\t", 11)
-                while len(cols) < 12:
+                cols = raw.split("\t", 12)
+                while len(cols) < 13:
                     cols.append("")
                 (idx, active, cmd, tty, label, container, cwd, worktree,
-                 pbranch, rroot, display, pane_title) = cols[:12]
+                 pbranch, rroot, display, mouse_any, pane_title) = cols[:13]
                 if not idx:
                     continue
+                seen_ttys.add(tty)
+                _heal_stuck_mouse(tty, cmd, mouse_any)
                 name = _resolve_tab_name(label, cmd, tty, pane_title)
                 # Is the cwd inside a git repo? Gates the "New worktree" menu
                 # host-side. Skip for worktree tabs (known repos) and empty cwds.
@@ -1945,6 +1987,8 @@ def publish_roster():
                 # wiped them (self-guards; once per boot per repo).
                 if isrepo:
                     _restore_worktrees(isrepo, os.path.basename(isrepo))
+            for gone in [t for t in _stuck_mouse if t not in seen_ttys]:
+                _stuck_mouse.pop(gone, None)
             content = "".join(line + "\n" for line in out_lines)
             _atomic_publish(".tabs.tmp", "tabs.txt", content)
         elif not _has_session():
@@ -2378,6 +2422,24 @@ def create_session():
     _tmux_ok("new-session", "-d", "-s", TMUX_S, "-c", HOME)
     _tmux_ok("set-option", "-g", "allow-passthrough", "on")
     _tmux_ok("set-option", "-s", "set-clipboard", "on")
+    # Wheel-scroll bridge. The attached client keeps the host surface in the
+    # alternate screen, so ghostty has no scrollback of its own and would
+    # fake arrow keys for wheel ticks (= shell history at a prompt). Instead
+    # the host injects one of these private sequences per wheel line (see
+    # TerminalSurfaceView.scrollWheel) and we scroll tmux history via
+    # copy-mode. A pane running its own alt-screen app (vim, less) gets real
+    # arrow keys — same split tmux's native wheel handling makes. Bound in
+    # both copy-mode tables so vi mode-keys keeps scrolling. Re-run on every
+    # daemon start, so a restart refreshes a live session's bindings.
+    _tmux_ok("set-option", "-s", "user-keys[0]", "\x1b[1000001~")
+    _tmux_ok("set-option", "-s", "user-keys[1]", "\x1b[1000002~")
+    _tmux_ok("bind-key", "-n", "User0", "if", "-F", "#{alternate_on}",
+             "send-keys Up", "copy-mode -e ; send-keys -X scroll-up")
+    _tmux_ok("bind-key", "-n", "User1", "if", "-F", "#{alternate_on}",
+             "send-keys Down")
+    for table in ("copy-mode", "copy-mode-vi"):
+        _tmux_ok("bind-key", "-T", table, "User0", "send-keys", "-X", "scroll-up")
+        _tmux_ok("bind-key", "-T", table, "User1", "send-keys", "-X", "scroll-down")
 
 
 def session_monitor_service():

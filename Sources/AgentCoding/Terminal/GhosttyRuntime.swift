@@ -25,26 +25,42 @@ final class GhosttyRuntime: @unchecked Sendable {
     /// Posted when the guest sets a title (object = the view, userInfo["title"]).
     static let titleChangedNotification = Notification.Name("io.bromure.ghostty.titleChanged")
 
-    /// Surface-userdata pointers (each a `TerminalSurfaceView`) that are still
-    /// alive. libghostty holds these as *unretained* pointers, so a queued
-    /// action firing after the view is freed — notably while AppKit tears the
-    /// window hierarchy down on ⌘Q — would resolve a dangling pointer and crash
-    /// in `swift_unknownObjectRetain`. `handleAction` consults this before
-    /// resolving. Main-thread confined (register/unregister + action dispatch
-    /// all run on main), so no lock is needed.
-    nonisolated(unsafe) private static var liveSurfaceUserdata: Set<UnsafeMutableRawPointer> = []
+    /// Weak reference to the `TerminalSurfaceView` behind each surface
+    /// userdata pointer. libghostty holds userdata *unretained*, so callbacks
+    /// must never resurrect the raw pointer directly: a membership set can't
+    /// close the race where the view's last release happens between the check
+    /// and the retain (a set entry also goes stale if an owner drops a view
+    /// without `retire()`, or lies if the heap reuses the address for a new
+    /// view). A weak load is safely nil the moment deallocation begins — on
+    /// any thread — so resolving through this map can't retain a dead view.
+    /// Locked: registration/dealloc and libghostty callbacks aren't all
+    /// main-confined in the failure cases that matter.
+    private final class WeakViewBox {
+        weak var view: TerminalSurfaceView?
+        init(_ view: TerminalSurfaceView) { self.view = view }
+    }
+    private static let surfaceMapLock = NSLock()
+    nonisolated(unsafe) private static var liveSurfaceViews:
+        [UnsafeMutableRawPointer: WeakViewBox] = [:]
 
-    static func registerSurfaceUserdata(_ ptr: UnsafeMutableRawPointer) {
-        liveSurfaceUserdata.insert(ptr)
+    static func registerSurfaceUserdata(_ ptr: UnsafeMutableRawPointer,
+                                        view: TerminalSurfaceView) {
+        surfaceMapLock.lock()
+        defer { surfaceMapLock.unlock() }
+        liveSurfaceViews[ptr] = WeakViewBox(view)
     }
     static func unregisterSurfaceUserdata(_ ptr: UnsafeMutableRawPointer) {
-        liveSurfaceUserdata.remove(ptr)
+        surfaceMapLock.lock()
+        defer { surfaceMapLock.unlock() }
+        liveSurfaceViews.removeValue(forKey: ptr)
     }
-    /// True while the view behind this surface userdata is still alive — every
-    /// callback that resolves a surface pointer must check this first, or it
-    /// crashes retaining a freed view (window teardown on quit / registration).
-    static func isLiveSurface(_ ptr: UnsafeMutableRawPointer) -> Bool {
-        liveSurfaceUserdata.contains(ptr)
+    /// The still-alive view behind a surface userdata pointer, or nil once it
+    /// has been retired or has begun deallocating. Every callback that gets a
+    /// userdata pointer from libghostty must resolve through this.
+    static func surfaceView(for ptr: UnsafeMutableRawPointer) -> TerminalSurfaceView? {
+        surfaceMapLock.lock()
+        defer { surfaceMapLock.unlock() }
+        return liveSurfaceViews[ptr]?.view
     }
 
     private init() {}
@@ -102,9 +118,8 @@ final class GhosttyRuntime: @unchecked Sendable {
             // completion must happen for libghostty to unblock the requester.
             guard location == GHOSTTY_CLIPBOARD_STANDARD,
                   let userdata, let state,
-                  GhosttyRuntime.isLiveSurface(userdata) else { return false }
-            let view = Unmanaged<TerminalSurfaceView>.fromOpaque(userdata).takeUnretainedValue()
-            guard let surface = view.surface else { return false }
+                  let view = GhosttyRuntime.surfaceView(for: userdata),
+                  let surface = view.surface else { return false }
             let text = NSPasteboard.general.string(forType: .string) ?? ""
             text.withCString {
                 ghostty_surface_complete_clipboard_request(surface, $0, state, false)
@@ -116,9 +131,8 @@ final class GhosttyRuntime: @unchecked Sendable {
             // confirmation still arrives, approve it — the "guest" is the
             // user's own tmux session, not an untrusted remote.
             guard let userdata, let state,
-                  GhosttyRuntime.isLiveSurface(userdata) else { return }
-            let view = Unmanaged<TerminalSurfaceView>.fromOpaque(userdata).takeUnretainedValue()
-            guard let surface = view.surface else { return }
+                  let view = GhosttyRuntime.surfaceView(for: userdata),
+                  let surface = view.surface else { return }
             ghostty_surface_complete_clipboard_request(surface, text, state, true)
         }
         runtime.write_clipboard_cb = { _, location, contents, count, _ in
@@ -141,8 +155,8 @@ final class GhosttyRuntime: @unchecked Sendable {
         }
         runtime.close_surface_cb = { userdata, _ in
             // userdata here is the *surface's* userdata (the view).
-            guard let userdata, GhosttyRuntime.isLiveSurface(userdata) else { return }
-            let view = Unmanaged<AnyObject>.fromOpaque(userdata).takeUnretainedValue()
+            guard let userdata,
+                  let view = GhosttyRuntime.surfaceView(for: userdata) else { return }
             DispatchQueue.main.async {
                 NotificationCenter.default.post(
                     name: GhosttyRuntime.closeSurfaceNotification, object: view)
@@ -178,13 +192,13 @@ final class GhosttyRuntime: @unchecked Sendable {
         // Resolve the surface's view for surface-targeted actions — but only
         // if the view is still alive. A freed userdata (view torn down while
         // libghostty still held the surface, e.g. during app termination)
-        // would crash on the retain inside `takeUnretainedValue`.
-        var view: AnyObject?
+        // would crash on the retain of a dangling pointer; the weak map
+        // resolves to nil instead.
+        var view: TerminalSurfaceView?
         if target.tag == GHOSTTY_TARGET_SURFACE,
            let surface = target.target.surface,
-           let userdata = ghostty_surface_userdata(surface),
-           liveSurfaceUserdata.contains(userdata) {
-            view = Unmanaged<AnyObject>.fromOpaque(userdata).takeUnretainedValue()
+           let userdata = ghostty_surface_userdata(surface) {
+            view = surfaceView(for: userdata)
         }
 
         switch action.tag {
