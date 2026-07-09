@@ -14,6 +14,12 @@ final class BootOverlayModel {
     var accentHex: String = "#38f9d7"
     /// Flipped by the watchdog: swap the dive HUD for the failure panel.
     var failed = false
+    /// Optional status line under the scan bar — e.g. the home-storage
+    /// migration's "MOVING HOME — 42% OF 7.9 GB". nil = plain boot.
+    var statusText: String?
+    /// When non-nil, the scan bar turns determinate at this fraction
+    /// (0…1). nil = indeterminate sweep.
+    var progress: Double?
     /// When the boot began — the HUD elapsed counter + rain seed.
     let startedAt = Date()
 }
@@ -66,8 +72,22 @@ private struct DiveHUD: View {
                     .tracking(4)
                     .foregroundStyle(.white.opacity(0.9))
 
-                IndeterminateBar(accent: accent, elapsed: elapsed)
-                    .frame(width: 220, height: 3)
+                if let fraction = model.progress {
+                    DeterminateBar(accent: accent, fraction: fraction)
+                        .frame(width: 220, height: 3)
+                } else {
+                    IndeterminateBar(accent: accent, elapsed: elapsed)
+                        .frame(width: 220, height: 3)
+                }
+
+                if let status = model.statusText, !status.isEmpty {
+                    Text(status)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .tracking(2)
+                        .foregroundStyle(accent.opacity(0.85))
+                        .lineLimit(1)
+                        .transition(.opacity)
+                }
             }
         }
     }
@@ -107,6 +127,25 @@ private struct Reticle: View {
                 .frame(width: 8, height: 8)
                 .opacity(0.5 + 0.5 * pulse)
                 .shadow(color: accent, radius: 6 * pulse)
+        }
+    }
+}
+
+/// Determinate progress bar — same track as IndeterminateBar, filled to
+/// `fraction`. Used while the home-storage migration reports real numbers.
+private struct DeterminateBar: View {
+    let accent: Color
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(accent.opacity(0.15))
+                Capsule()
+                    .fill(accent)
+                    .frame(width: max(4, geo.size.width * min(1, max(0, fraction))))
+                    .shadow(color: accent.opacity(0.7), radius: 4)
+            }
         }
     }
 }

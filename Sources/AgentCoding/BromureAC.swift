@@ -618,6 +618,11 @@ final class RunningSession {
     /// Set once this session has snapshotted its disk (on first boot-ready), so
     /// the repeated tab-roster callbacks only checkpoint once per boot.
     var didCheckpoint: Bool = false
+    /// Set when this boot migrated the home into the ext4 image. The boot's
+    /// dual-attach (virtiofs + image) VZ config won't be rebuilt next launch,
+    /// so a suspend snapshot could never restore — close-time suspend is
+    /// coerced to a clean shutdown instead.
+    var homeJustMigrated: Bool = false
 
     init(profileID: Profile.ID, profile: Profile, sandbox: UbuntuSandboxVM) {
         self.profileID = profileID
@@ -1424,6 +1429,44 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                                        stderr: result.stderr)
                 }
                 return result.stdout
+            case .deadConnection:
+                connection = attempt < 3 ? shellBridges[profileID]?.dequeueConnection() : nil
+            case .protocolFailure:
+                throw GuestExecError.connectionFailed
+            }
+        }
+        throw GuestExecError.connectionFailed
+    }
+
+    /// Run one native file op ({"file": {...}}) in `profileID`'s guest over
+    /// the vsock shell channel — the file browser's data plane. Same pooled
+    /// connection + stale-retry dance as `guestExec`, but payloads travel as
+    /// base64 inside the JSON (no shell, so no 128 KB argv-string cap).
+    /// Throws `commandFailed` with the guest's error string when the op
+    /// itself failed; returns the raw response dict otherwise.
+    func guestFileOp(profileID: Profile.ID, op: [String: Any],
+                     timeout: Int = 30) async throws -> [String: Any] {
+        var connection: VZVirtioSocketConnection?
+        for _ in 0..<30 {
+            guard let bridge = shellBridges[profileID] else { throw GuestExecError.vmNotRunning }
+            if let c = bridge.dequeueConnection() { connection = c; break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        for attempt in 0..<4 {
+            guard let conn = connection else { throw GuestExecError.connectionFailed }
+            let fd = conn.fileDescriptor
+            let request: [String: Any] = ["file": op, "timeout": timeout]
+            let outcome = await Task.detached(priority: .userInitiated) {
+                ACAutomationServer.exchangeJSON(fd: fd, request: request)
+            }.value
+            withExtendedLifetime(conn) {}   // fd must outlive the exchange
+            switch outcome {
+            case .success(let obj):
+                if let err = obj["error"] as? String {
+                    throw GuestExecError.commandFailed(
+                        exitCode: obj["exit_code"] as? Int ?? 1, stderr: err)
+                }
+                return obj
             case .deadConnection:
                 connection = attempt < 3 ? shellBridges[profileID]?.dequeueConnection() : nil
             case .protocolFailure:
@@ -3856,26 +3899,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
 
-        let home = store.homeDirectory(for: profile)
-        // The home dir is created during session prep; make sure it
-        // exists in case the browser is opened very early in boot.
-        try? FileManager.default.createDirectory(
-            at: home, withIntermediateDirectories: true)
-
+        // Home browses the guest's REAL /home/ubuntu over the vsock file
+        // service — required for ext4-model homes (they live inside
+        // home.img, invisible to macOS) and used for legacy virtiofs
+        // workspaces too so there's one code path that always shows what
+        // the guest sees.
         var locations: [FileBrowserLocation] = [
             FileBrowserLocation(
                 name: NSLocalizedString("Home", comment: ""),
-                url: home,
+                backing: .guest,
                 guestPath: "/home/ubuntu",
                 symbol: "house")
         ]
         // Shared folders are symlinked to ~/<basename> inside the guest
-        // on first boot — surface them as their guest-side path.
+        // on first boot — they're real host dirs, so browse them directly
+        // (drag-out hands Finder the actual file; Reveal works).
         for path in profile.folderPaths.prefix(8) {
             let base = (path as NSString).lastPathComponent
             locations.append(FileBrowserLocation(
                 name: base,
-                url: URL(fileURLWithPath: path),
+                backing: .host(URL(fileURLWithPath: path)),
                 guestPath: "/home/ubuntu/\(base)",
                 symbol: "folder"))
         }
@@ -3889,8 +3932,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             profile.name)
         win.center()
         win.animationBehavior = .none
+        let profileID = profile.id
         win.contentView = NSHostingView(rootView: FileBrowserView(
-            model: FileBrowserModel(locations: locations)))
+            model: FileBrowserModel(
+                locations: locations,
+                cacheKey: profileID.uuidString,
+                guestOp: { [weak self] op in
+                    guard let self else {
+                        throw GuestExecError.vmNotRunning
+                    }
+                    return try await self.guestFileOp(profileID: profileID, op: op)
+                })))
         win.delegate = self
         win.isReleasedWhenClosed = false
         win.makeKeyAndOrderFront(nil)
@@ -4222,20 +4274,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 baseImageBuildDate: buildDate,
                 profileDiskURL: nil,
                 profileHomeURL: nil,
+                profileHomeImageURL: nil,
                 isRunning: false,
                 onResetDisk: {},
-                onResetHome: {}
+                onResetHome: {},
+                onUpgradeHome: nil
             )
         }
+        let homeImage = store.homeImageURL(for: editing)
+        let hasHomeImage = editing.homeModel == .ext4
+            && FileManager.default.fileExists(atPath: homeImage.path)
         return ProfileStorageContext(
             baseImageURL: baseURL,
             baseImageVersion: readCurrentBaseVersion(),
             baseImageBuildDate: buildDate,
             profileDiskURL: store.diskURL(for: editing),
-            profileHomeURL: store.homeDirectory(for: editing),
+            profileHomeURL: editing.homeModel == .virtiofs
+                ? store.homeDirectory(for: editing) : nil,
+            profileHomeImageURL: hasHomeImage ? homeImage : nil,
             isRunning: isAttached(editing.id),
             onResetDisk: { [weak self] in self?.resetProfile(editing) },
-            onResetHome: { [weak self] in self?.resetHomeProfile(editing) }
+            onResetHome: { [weak self] in self?.resetHomeProfile(editing) },
+            onUpgradeHome: editing.homeModel == .virtiofs
+                ? { [weak self] in self?.armHomeStorageUpgrade(editing) }
+                : nil
         )
     }
 
@@ -4265,6 +4327,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     // MARK: - Profile actions
+
+    /// Editor "Upgrade storage…": re-arm the home-storage upgrade offer for
+    /// a legacy (virtiofs-home) workspace that previously declined it. The
+    /// actual migration still runs through the launch-time dialog + migrate
+    /// boot, so the user gets the same explainer and progress UI.
+    @MainActor
+    private func armHomeStorageUpgrade(_ profile: Profile) {
+        var p = profiles.first(where: { $0.id == profile.id }) ?? profile
+        guard p.homeModel == .virtiofs else { return }
+        p.homeUpgradeDeclined = false
+        try? store.save(p)
+        profiles = store.loadAll()
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Home storage upgrade armed", comment: "")
+        alert.informativeText = String(
+            format: NSLocalizedString(
+                "The next time “%@” launches, Bromure will offer to move its home folder onto a private ext4 disk image (with a one-time copy and a kept backup).",
+                comment: ""),
+            p.name)
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
 
     private func handleEditorSave(profile: Profile, generateSSH: Bool, editing: Profile?) {
         var profile = profile
@@ -4792,14 +4877,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                   for: profile.id)
         }
 
-        // Rewrite the guest-side credential files into the live home share
-        // with fakes. This also overwrites any real-token copy the
-        // plan-less editor-save `prepareHomeDirectory` (above) just wrote
-        // there, closing that window for a running session.
-        try? store.prepareHomeDirectory(for: profile,
-                                        terminalDefaults: terminalDefaults,
-                                        tokenPlan: plan,
-                                        kubeconfigYAML: kubeYAML)
+        // Rewrite the guest-side credential files with fakes. virtiofs
+        // homes are written directly (this also overwrites any real-token
+        // copy the plan-less editor-save `prepareHomeDirectory` just wrote
+        // there, closing that window for a running session). ext4 homes
+        // can't be written from the host — restage the home-seed and bump
+        // seed.generation so the in-VM agent re-applies it.
+        if profile.homeModel == .virtiofs {
+            try? store.prepareHomeDirectory(for: profile,
+                                            terminalDefaults: terminalDefaults,
+                                            tokenPlan: plan,
+                                            kubeconfigYAML: kubeYAML)
+        }
 
         // Rewrite api_key.env / proxy.env / MCP configs into the stable
         // meta-share dir and bump env.generation for the guest's
@@ -4809,6 +4898,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 profile: profile, tokenPlan: plan)
         } catch {
             NSLog("[bromure-ac] live env refresh failed: \(error)")
+        }
+
+        if profile.homeModel == .ext4,
+           let session = win.sandbox?.sessionDisk,
+           let seedDir = session.homeSeedDirectory {
+            do {
+                try store.writeHomeSeedFiles(for: profile, into: seedDir,
+                                             terminalDefaults: terminalDefaults,
+                                             tokenPlan: plan,
+                                             kubeconfigYAML: kubeYAML)
+                let files = seedDir.appendingPathComponent("files", isDirectory: true)
+                seedCodexAuthFile(for: profile, homeRoot: files)
+                seedGrokAuthFile(for: profile, homeRoot: files)
+                try store.finalizeHomeSeed(for: profile, seedDir: seedDir)
+                session.bumpSeedGeneration()
+            } catch {
+                NSLog("[bromure-ac] live home-seed refresh failed: \(error)")
+            }
         }
     }
 
@@ -5059,12 +5166,37 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         try? store.touch(profile)
 
+        var profile = profile
+
+        // Home-storage upgrade offer (virtiofs → ext4 image). Asked once:
+        // "Not Now" persists via homeUpgradeDeclined and the workspace
+        // editor's "Upgrade Home Storage" button re-arms it. Accepting
+        // makes THIS boot a migrate boot — the guest agent copies the old
+        // home into a fresh image before the session starts, with progress
+        // on the boot overlay.
+        var migrateHomeThisBoot = false
+        // Headless (CLI/remote) launches never modal-prompt; the workspace
+        // keeps its current storage and the offer waits for a GUI launch.
+        if profile.homeModel == .virtiofs && !profile.homeUpgradeDeclined && !headless {
+            if promptHomeStorageUpgrade(profile: profile) {
+                migrateHomeThisBoot = true
+                // The dual-attach migrate config can't restore a snapshot
+                // saved against the old config — boot fresh (the dialog
+                // said so).
+                SessionDisk(profile: profile, store: store,
+                            baseDiskURL: imageManager.baseDiskURL).clearSavedState()
+            } else {
+                profile.homeUpgradeDeclined = true
+                try? store.save(profile)
+                self.profiles = store.loadAll()
+            }
+        }
+
         // Build the per-session token plan up front: real values stay
         // here (and on the host's MITM engine); fakes flow into the VM
         // via prepareHomeDirectory and the meta share. The plan is
         // deterministic in (real value, install salt) so Claude Code
         // doesn't see the fake rotate session-to-session.
-        var profile = profile
         populateMCPBearerTokens(in: &profile)
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
         let plan = self.sessionTokenPlan(for: profile, salt: salt)
@@ -5114,17 +5246,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                         swapper: engine.swapper)
             }
         }
-        // Drop the synthetic kubeconfig + every other managed
-        // dotfile into the VM's home dir. Done after the engine
-        // block so kubeYAMLForVM is materialized.
-        try? store.prepareHomeDirectory(for: profile,
-                                        terminalDefaults: terminalDefaults,
-                                        tokenPlan: plan,
-                                        kubeconfigYAML: kubeYAMLForVM)
-        // Codex subscription: seed a bogus ~/.codex/auth.json before boot so
-        // the guest runs without logging in (host owns the real token).
-        seedCodexAuthFile(for: profile)
-        seedGrokAuthFile(for: profile)
+        // Drop the synthetic kubeconfig + every other managed dotfile
+        // where the guest picks them up. virtiofs (and migrate) boots
+        // write the live host-side home directly — a migrate boot then
+        // copies that home into the image. Pure-ext4 boots can't be
+        // written from here; they get a home-seed staged into the meta
+        // share after sandbox.prepare() below (which builds the share).
+        if profile.homeModel == .virtiofs {
+            try? store.prepareHomeDirectory(for: profile,
+                                            terminalDefaults: terminalDefaults,
+                                            tokenPlan: plan,
+                                            kubeconfigYAML: kubeYAMLForVM)
+            // Codex subscription: seed a bogus ~/.codex/auth.json before boot
+            // so the guest runs without logging in (host owns the real token).
+            seedCodexAuthFile(for: profile)
+            seedGrokAuthFile(for: profile)
+        }
         if let engine = mitmEngine {
             // Tell the trace store what level + session id to record
             // under for traffic from this profile.
@@ -5285,6 +5422,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 baseDiskURL: imageManager.baseDiskURL
             )
             sessionDisk.tokenPlan = plan
+            sessionDisk.migrateHomeThisBoot = migrateHomeThisBoot
             if let engine = mitmEngine, let scriptURL = bridgeScriptURL {
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
@@ -5301,6 +5439,37 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
             do {
                 try sandbox.prepare()
+                // ext4 home (and migrate boots, so post-migration seed
+                // refreshes have a full baseline): stage the managed
+                // dotfiles + manifest into the meta share prepare() just
+                // built. The guest agent applies them before the session
+                // starts.
+                if profile.homeModel == .ext4 || migrateHomeThisBoot,
+                   let seedDir = sessionDisk.homeSeedDirectory {
+                    do {
+                        try store.writeHomeSeedFiles(
+                            for: profile, into: seedDir,
+                            terminalDefaults: terminalDefaults,
+                            tokenPlan: plan, kubeconfigYAML: kubeYAMLForVM)
+                        let files = seedDir.appendingPathComponent("files", isDirectory: true)
+                        seedCodexAuthFile(for: profile, homeRoot: files)
+                        seedGrokAuthFile(for: profile, homeRoot: files)
+                        try store.finalizeHomeSeed(for: profile, seedDir: seedDir)
+                        // Bump even on a fresh boot (harmless — the agent
+                        // baselines after its startup apply): on a RESTORE
+                        // boot this is what tells the resumed agent that the
+                        // seed changed while the workspace was suspended.
+                        sessionDisk.bumpSeedGeneration()
+                    } catch {
+                        FileHandle.standardError.write(Data(
+                            "[ac] home-seed staging failed: \(error)\n".utf8))
+                    }
+                }
+                // Migration progress → the pane's boot overlay; completion
+                // stamps the profile so the next boot is image-only.
+                if migrateHomeThisBoot {
+                    self.wireHomeMigration(sandbox: sandbox, pane: win, profile: profile)
+                }
                 // Investigation mode: the saved snapshot was taken with
                 // a NIC attached, but `prepare()` just built a config
                 // with no network device — VZ would reject `restore`
@@ -5388,6 +5557,88 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if profile.networkMode == .nat {
                 self.startNetworkHealerWatch(profile: profile, pane: win)
             }
+        }
+    }
+
+    /// One-time home-storage upgrade offer for a legacy (virtiofs-home)
+    /// workspace. Returns true when the user picked "Upgrade Now".
+    @MainActor
+    private func promptHomeStorageUpgrade(profile: Profile) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Upgrade “%@”’s home storage?", comment: ""),
+            profile.name)
+        var info = NSLocalizedString(
+            "This workspace's home folder currently lives in a macOS folder shared into the VM. Bromure can move it onto a private ext4 disk image instead.\n\nWhy: suspended workspaces resume without confused tools (files keep their identity across suspend/resume), git repositories in the home are no longer exposed to shared-folder corruption, and the image automatically shrinks on your Mac as files are deleted inside the VM.\n\nThe move happens once, during the next boot — a large home can take a few minutes, with progress shown on the boot screen. Your current home folder is kept on the Mac as a backup.",
+            comment: "")
+        let probe = SessionDisk(profile: profile, store: store,
+                                baseDiskURL: imageManager.baseDiskURL)
+        if probe.hasSavedState {
+            info += "\n\n" + NSLocalizedString(
+                "This workspace has a suspended session; upgrading restarts it fresh.",
+                comment: "")
+        }
+        info += "\n\n" + NSLocalizedString(
+            "If you choose Not Now, you can upgrade anytime from the workspace editor.",
+            comment: "")
+        alert.informativeText = info
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: NSLocalizedString("Upgrade Now", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Not Now", comment: ""))
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Wire a migrate boot's guest-agent signals: progress → the pane's
+    /// boot overlay, completion → stamp the profile `.ext4`, park the old
+    /// host-side home as a backup, and mark the session so close-time
+    /// suspend becomes a clean shutdown (the migrate boot's dual-attach
+    /// config won't exist next launch, so its snapshot couldn't restore).
+    @MainActor
+    private func wireHomeMigration(sandbox: UbuntuSandboxVM,
+                                   pane: SessionPane,
+                                   profile: Profile) {
+        pane.updateBootStatus(
+            NSLocalizedString("UPGRADING HOME STORAGE", comment: ""), progress: nil)
+        sandbox.onHomeMigrationProgress = { [weak pane] phase, done, total in
+            guard phase == "copy" || phase == "verify" else { return }
+            let text: String
+            let fraction: Double?
+            if total > 0 {
+                let pct = min(100, Int((Double(done) / Double(total)) * 100))
+                text = String(
+                    format: NSLocalizedString("MOVING HOME — %d%% OF %@", comment: ""),
+                    pct, ByteCountFormatter.string(fromByteCount: total, countStyle: .file))
+                fraction = min(1.0, Double(done) / Double(total))
+            } else {
+                text = String(
+                    format: NSLocalizedString("MOVING HOME — %@ COPIED", comment: ""),
+                    ByteCountFormatter.string(fromByteCount: done, countStyle: .file))
+                fraction = nil
+            }
+            pane?.updateBootStatus(text, progress: fraction)
+        }
+        sandbox.onHomeMigrated = { [weak self, weak pane] in
+            guard let self else { return }
+            pane?.updateBootStatus(nil, progress: nil)
+            // Stamp: from now on this workspace boots from home.img and
+            // never attaches the old virtiofs home again.
+            if var p = self.profiles.first(where: { $0.id == profile.id }) {
+                p.homeModel = .ext4
+                try? self.store.save(p)
+                self.profiles = self.store.loadAll()
+            }
+            self.runningSessions[profile.id]?.homeJustMigrated = true
+            // Park the old home as a backup (inode is unchanged, so the
+            // still-attached — but now fully shadowed — virtiofs share in
+            // THIS session keeps working). Surfaced in the storage UI.
+            let old = self.store.homeDirectory(for: profile)
+            let backup = self.store.homeBackupDirectory(for: profile)
+            if FileManager.default.fileExists(atPath: old.path),
+               !FileManager.default.fileExists(atPath: backup.path) {
+                try? FileManager.default.moveItem(at: old, to: backup)
+            }
+            FileHandle.standardError.write(Data(
+                "[ac] '\(profile.name)' home migrated to ext4 image\n".utf8))
         }
     }
 
@@ -6514,7 +6765,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // `.ask` and `.background` both collapse to `.suspend` — a programmatic
         // stop isn't the moment for a modal, and "background" can't survive the
         // agent exiting, so suspend keeps state and the user decides next launch.
-        let resolved: Profile.CloseAction = (action == .ask || action == .background) ? .suspend : action
+        var resolved: Profile.CloseAction = (action == .ask || action == .background) ? .suspend : action
+        // A boot that just migrated its home ran with the one-time dual-attach
+        // config (virtiofs + image); the next launch is image-only and could
+        // never restore that snapshot. Shut down cleanly instead of writing a
+        // doomed vm.state.
+        if session.homeJustMigrated && resolved == .suspend { resolved = .shutdown }
         switch resolved {
         case .suspend:
             sandbox.sessionDisk?.saveTabs(currentTabsSnapshot(for: profileID))
@@ -6858,8 +7114,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let salt = self.mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
             let plan = self.sessionTokenPlan(for: profile, salt: salt)
             sessionDisk.tokenPlan = plan
-            self.seedCodexAuthFile(for: profile)
-            self.seedGrokAuthFile(for: profile)
+            if profile.homeModel == .virtiofs {
+                self.seedCodexAuthFile(for: profile)
+                self.seedGrokAuthFile(for: profile)
+            }
             if let engine = self.mitmEngine, let scriptURL = self.bridgeScriptURL {
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
@@ -6875,6 +7133,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                           sessionDisk: sessionDisk)
             do {
                 try sandbox.prepare()
+                // ext4 home: the reboot wiped the meta share, so restage the
+                // home-seed the guest agent applies before the session starts
+                // (same block as the warm-boot path; no kubeconfig here — the
+                // reboot path never rebuilt it, dotfiles persist in the image).
+                if profile.homeModel == .ext4, let seedDir = sessionDisk.homeSeedDirectory {
+                    do {
+                        try store.writeHomeSeedFiles(
+                            for: profile, into: seedDir,
+                            terminalDefaults: self.terminalDefaults,
+                            tokenPlan: plan, kubeconfigYAML: nil)
+                        let files = seedDir.appendingPathComponent("files", isDirectory: true)
+                        self.seedCodexAuthFile(for: profile, homeRoot: files)
+                        self.seedGrokAuthFile(for: profile, homeRoot: files)
+                        try store.finalizeHomeSeed(for: profile, seedDir: seedDir)
+                    } catch {
+                        FileHandle.standardError.write(Data(
+                            "[ac] home-seed staging (reboot) failed: \(error)\n".utf8))
+                    }
+                }
                 try await sandbox.start()
             } catch {
                 self.showError(error, message:
@@ -7335,7 +7612,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// guest never refreshes; the host owns the real token + refresh and the
     /// proxy swaps the bogus Bearer for the live one on chatgpt.com/openai.com.
     /// No-op unless this profile is Codex+subscription with a registered cred.
-    func seedCodexAuthFile(for profile: Profile) {
+    ///
+    /// `homeRoot` — where "~" lives for this write: nil = the profile's
+    /// host-side virtiofs home (legacy model); ext4-model launches pass the
+    /// home-seed `files/` staging dir instead (the guest agent copies it in).
+    func seedCodexAuthFile(for profile: Profile, homeRoot: URL? = nil) {
         guard let engine = mitmEngine,
               profile.allToolSpecs.contains(where: { $0.tool == .codex && $0.authMode == .subscription }),
               let real = engine.codexSubscriptionStore.record(for: profile.id) else { return }
@@ -7364,7 +7645,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "tokens": tokens,
             "last_refresh": ISO8601DateFormatter().string(from: Date()),
         ]
-        let dir = store.homeDirectory(for: profile).appendingPathComponent(".codex", isDirectory: true)
+        let dir = (homeRoot ?? store.homeDirectory(for: profile))
+            .appendingPathComponent(".codex", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("auth.json")
         if let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted]) {
@@ -7379,7 +7661,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// logging in. The bogus token carries a far-future `expires_at` so the
     /// guest never refreshes; the host owns refresh and the proxy swaps the
     /// bogus Bearer for the live one on cli-chat-proxy.grok.com.
-    func seedGrokAuthFile(for profile: Profile) {
+    /// `homeRoot`: see seedCodexAuthFile.
+    func seedGrokAuthFile(for profile: Profile, homeRoot: URL? = nil) {
         guard let engine = mitmEngine,
               profile.allToolSpecs.contains(where: { $0.tool == .grok && $0.authMode == .subscription }),
               let real = engine.grokSubscriptionStore.record(for: profile.id) else { return }
@@ -7412,7 +7695,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         entry["refresh_token"] = bogusRefresh
         entry["expires_at"] = farFuture
         let doc: [String: Any] = [real.scopeKey: entry]
-        let dir = store.homeDirectory(for: profile).appendingPathComponent(".grok", isDirectory: true)
+        let dir = (homeRoot ?? store.homeDirectory(for: profile))
+            .appendingPathComponent(".grok", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("auth.json")
         if let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted]) {

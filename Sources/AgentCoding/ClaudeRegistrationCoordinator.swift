@@ -107,8 +107,11 @@ extension ACAppDelegate {
 
         // Scratch profile: the right tool + subscription, no folders / SSH /
         // creds / MCP / env, fresh random id → unique throwaway dir we delete.
+        // Deliberately on the legacy virtiofs home: the VM lives minutes, and
+        // the Grok flow harvests ~/.grok/auth.json by polling the host-side
+        // home dir — which only exists in the virtiofs model.
         let scratch = Profile(name: provider.scratchName, tool: provider.scratchTool,
-                              authMode: .subscription)
+                              authMode: .subscription, homeModel: .virtiofs)
         let scratchDir = store.profileDirectory(for: scratch)
         let state = ClaudeRegistrationState(provider: provider, scope: scope,
                                             scratchProfile: scratch, scratchDir: scratchDir)

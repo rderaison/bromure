@@ -441,6 +441,71 @@ def _version_mismatch(req):
     return bool(v) and SELF_HASH is not None and v != SELF_HASH
 
 
+# Native file ops on the shell channel — the host file browser's data
+# plane. JSON in/out on the same length-prefixed framing as exec, but no
+# shell: payloads ride base64 inside the JSON, so they aren't subject to
+# the kernel's 128 KB per-argv-string cap that a `printf '%s' <b64>`
+# round-trip would hit. Chunk caps: requests ≤ 10 MB (MAX_REQUEST_SIZE),
+# reads ≤ FILE_READ_MAX per call (host re-calls with offset).
+FILE_READ_MAX = 8 * 1024 * 1024
+
+
+def _file_op(spec):
+    """Execute one {"file": {...}} request. Runs as ubuntu — the same
+    authority a shell request has, minus the shell."""
+    op = spec.get("op", "")
+    path = spec.get("path", "")
+    try:
+        if not path.startswith("/"):
+            return {"error": "path must be absolute", "exit_code": 1}
+        if op == "list":
+            entries = []
+            with os.scandir(path) as it:
+                for e in it:
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                        isdir = e.is_dir(follow_symlinks=True)
+                    except OSError:
+                        continue
+                    entries.append({
+                        "name": e.name,
+                        "dir": bool(isdir),
+                        "link": e.is_symlink(),
+                        "size": int(st.st_size),
+                        "mtime": int(st.st_mtime),
+                    })
+            return {"entries": entries, "exit_code": 0}
+        if op == "read":
+            offset = int(spec.get("offset", 0) or 0)
+            length = int(spec.get("length", FILE_READ_MAX) or FILE_READ_MAX)
+            length = max(0, min(length, FILE_READ_MAX))
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                f.seek(offset)
+                data = f.read(length)
+            return {"data": base64.b64encode(data).decode("ascii"),
+                    "size": size,
+                    "eof": offset + len(data) >= size,
+                    "exit_code": 0}
+        if op == "write":
+            data = base64.b64decode(spec.get("data", "") or "")
+            with open(path, "ab" if spec.get("append") else "wb") as f:
+                f.write(data)
+            return {"exit_code": 0}
+        if op == "mkdir":
+            os.makedirs(path, exist_ok=True)
+            return {"exit_code": 0}
+        if op == "remove":
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+            return {"exit_code": 0}
+        return {"error": "unknown file op %r" % op, "exit_code": 1}
+    except Exception as e:
+        return {"error": str(e), "exit_code": 1}
+
+
 def _shell_handle_connection(vsock_sock, replenish_fn):
     """Wait for a command from the host, execute it, return the result."""
     replenished = False
@@ -469,6 +534,13 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
         timeout = req.get("timeout", 30)
         workdir = req.get("workdir")
         version_exit = _version_mismatch(req)
+
+        # Native file op (host file browser) — no shell involved.
+        fileop = req.get("file")
+        if isinstance(fileop, dict):
+            resp_data = json.dumps(_file_op(fileop)).encode("utf-8")
+            vsock_sock.sendall(struct.pack(">I", len(resp_data)) + resp_data)
+            return  # finally: close + replenish (+ version-pinned respawn)
 
         # Interactive PTY session (`exec -it`, a tab attach running
         # `tmux attach`, or a host terminal view): allocate a pty, run the
@@ -2330,6 +2402,375 @@ def session_monitor_service():
         time.sleep(0.7)
 
 
+# ─────────── §8b Home storage (ext4 image: format / mount / seed / migrate) ─
+# For ext4-model workspaces the host attaches a sparse raw image as a second
+# virtio-blk device and writes /mnt/bromure-meta/home.mode:
+#   virtiofs → legacy home share; nothing to do here.
+#   ext4     → format the device if blank, mount it OVER /home/ubuntu
+#              (shadowing the tiny virtiofs bootstrap share that got us
+#              running), apply the home seed, then let the session start.
+#   migrate  → one-time upgrade boot: the old virtiofs home is still at
+#              /home/ubuntu; copy it into the blank image (progress →
+#              outbox/home-migrate.txt), then mount + seed like ext4 and
+#              drop outbox/home-migrated.txt so the host stamps the profile.
+# All of this runs BEFORE create_session(), so the tmux session (and every
+# shell in it) only ever sees the final home.
+
+HOME_LABEL = "bromure-home"
+HOME_MOUNT = "/home/ubuntu"
+HOME_STAGING = "/mnt/bromure-newhome"
+# Dotfile stamped at the fs root once a migration copy completed — makes a
+# crashed post-copy boot skip the (already finished) copy on retry.
+HOME_MIGRATED_STAMP = ".bromure-home-migrated"
+SEED_DIR = os.path.join(META, "home-seed")
+
+
+def _read_text(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _home_mode():
+    return _read_text(os.path.join(META, "home.mode")) or "virtiofs"
+
+
+def _home_mounted_fstype():
+    """Filesystem type of the TOP mount at /home/ubuntu ('' if none)."""
+    return _capture(["findmnt", "-n", "-o", "FSTYPE", HOME_MOUNT]).strip()
+
+
+def _find_home_device():
+    """Locate the attached home image's block device."""
+    # After any previous boot's mkfs the label resolves directly.
+    bylabel = "/dev/disk/by-label/" + HOME_LABEL
+    if os.path.exists(bylabel):
+        return os.path.realpath(bylabel)
+    out = _capture(["lsblk", "-J", "-b", "-o", "NAME,TYPE,FSTYPE,LABEL"])
+    try:
+        tree = json.loads(out).get("blockdevices") or []
+    except ValueError:
+        return ""
+    blank = ""
+    for dev in tree:
+        if dev.get("type") != "disk":
+            continue
+        if dev.get("children"):
+            continue   # the system disk always has children (GPT partitions)
+        name = dev.get("name", "")
+        if not name:
+            continue
+        # Formatted home whose by-label symlink hasn't materialized yet
+        # (udev still settling early in boot).
+        if dev.get("label") == HOME_LABEL:
+            return "/dev/" + name
+        # First boot: the image is a blank, partitionless, childless disk.
+        if not dev.get("fstype") and not blank:
+            blank = "/dev/" + name
+    return blank
+
+
+def _publish_migrate(phase, done, total):
+    """outbox/home-migrate.txt: '<phase> <copied-bytes> <total-bytes>'."""
+    try:
+        with open(os.path.join(OUTBOX, "home-migrate.txt"), "w") as f:
+            f.write("%s %d %d\n" % (phase, done, total))
+    except OSError:
+        pass
+
+
+def _migrate_home_into(dev):
+    """Copy the (still virtiofs-mounted) /home/ubuntu into the ext4 fs on
+    `dev`, publishing progress. Idempotent: a completed copy is stamped
+    inside the fs and skipped on retry; a partial copy is simply re-run
+    (tar overwrites). Returns True when the fs on `dev` holds the home."""
+    _sudo(["mkdir", "-p", HOME_STAGING])
+    if _sudo(["mount", "-o", "noatime", dev, HOME_STAGING]).returncode != 0:
+        log("home", "migrate: staging mount of %s failed" % dev)
+        return False
+    try:
+        stamp = os.path.join(HOME_STAGING, HOME_MIGRATED_STAMP)
+        if os.path.exists(stamp):
+            log("home", "migrate: previous copy already complete")
+            return True
+        # Let the unprivileged copy write to the fresh fs root.
+        _sudo(["chown", "ubuntu:ubuntu", HOME_STAGING])
+        _sudo(["chmod", "755", HOME_STAGING])
+
+        # Total size lands asynchronously — du over virtiofs can take a
+        # while on big homes, and the copy shouldn't wait for it. The
+        # host shows plain bytes until total flips nonzero.
+        total = [0]
+
+        def _du():
+            out = _capture(["du", "-sb", HOME_MOUNT], timeout=600)
+            try:
+                total[0] = int(out.split()[0])
+            except (ValueError, IndexError):
+                pass
+
+        threading.Thread(target=_du, daemon=True).start()
+        _publish_migrate("copy", 0, 0)
+
+        # tar|tar preserves modes/mtimes/symlinks/hardlinks. The READ side
+        # runs as root so the odd root-owned file (a stray `sudo` artifact
+        # in ~) can't abort the copy; the EXTRACT side runs unprivileged so
+        # everything lands owned by ubuntu — which is what a home is.
+        # Sockets/fifos are session junk; warnings off.
+        src = subprocess.Popen(
+            ["sudo", "tar", "-cf", "-", "--warning=none", "-C", HOME_MOUNT, "."],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        dst = subprocess.Popen(
+            ["tar", "-xpf", "-", "-C", HOME_STAGING],
+            stdin=src.stdout, stderr=subprocess.DEVNULL)
+        src.stdout.close()
+        while dst.poll() is None:
+            try:
+                st = os.statvfs(HOME_STAGING)
+                used = (st.f_blocks - st.f_bfree) * st.f_frsize
+            except OSError:
+                used = 0
+            _publish_migrate("copy", used, total[0])
+            time.sleep(0.5)
+        src.wait()
+        # tar exit 1 on the read side = "file changed while we read it" —
+        # expected on a live-ish tree and fine for a home snapshot.
+        if dst.returncode != 0 or src.returncode not in (0, 1):
+            log("home", "migrate: tar failed (src=%s dst=%s)"
+                % (src.returncode, dst.returncode))
+            _publish_migrate("error", 0, total[0])
+            return False
+        _publish_migrate("verify", total[0] or 1, total[0] or 1)
+        with open(stamp, "w") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n")
+        return True
+    finally:
+        _sudo(["umount", HOME_STAGING])
+
+
+def apply_home_seed():
+    """Apply /mnt/bromure-meta/home-seed to the (ext4) home per its
+    manifest.tsv. Runs unprivileged — everything lands owned by ubuntu.
+    Entry format (tab-separated):
+      D <perms> <rel>          mkdir -p
+      o <perms> <rel>          copy from files/, always overwrite
+      m <perms> <rel>          copy from files/ only if missing
+      d -      <rel>           delete
+      p -      <rel> <prefix>  delete if the file starts with <prefix>
+      j -      <rel> <key>     delete if the JSON object has top-level <key>
+    """
+    manifest = os.path.join(SEED_DIR, "manifest.tsv")
+    if not os.access(manifest, os.R_OK):
+        return
+    files_root = os.path.join(SEED_DIR, "files")
+    with open(manifest) as f:
+        lines = f.read().splitlines()
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        mode, perms, rel = parts[0], parts[1], parts[2]
+        arg = parts[3] if len(parts) > 3 else ""
+        # The manifest is host-authored, but stay paranoid about escapes.
+        if rel.startswith("/") or ".." in rel.split("/"):
+            continue
+        dst = os.path.join(HOME_MOUNT, rel)
+        try:
+            if mode == "D":
+                os.makedirs(dst, exist_ok=True)
+                os.chmod(dst, int(perms, 8))
+            elif mode in ("o", "m"):
+                if mode == "m" and os.path.lexists(dst):
+                    continue
+                src = os.path.join(files_root, rel)
+                os.makedirs(os.path.dirname(dst) or dst, exist_ok=True)
+                tmp = dst + ".bromure-seed-tmp"
+                shutil.copyfile(src, tmp)
+                os.chmod(tmp, int(perms, 8))
+                os.replace(tmp, dst)
+            elif mode == "d":
+                if os.path.lexists(dst):
+                    os.unlink(dst)
+            elif mode == "p":
+                with open(dst, "r", errors="replace") as f:
+                    head = f.read(len(arg))
+                if arg and head == arg:
+                    os.unlink(dst)
+            elif mode == "j":
+                with open(dst) as f:
+                    obj = json.load(f)
+                if isinstance(obj, dict) and arg in obj:
+                    os.unlink(dst)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            log("home", "seed entry failed (%s %s):\n%s"
+                % (mode, rel, traceback.format_exc()))
+    try:
+        _seed_claude_settings()
+    except Exception:
+        log("home", "claude-settings merge failed:\n" + traceback.format_exc())
+
+
+def _seed_claude_settings():
+    """Guest-side twin of the ~/.claude/settings.json logic in
+    ProfileStore.populateManagedHome (virtiofs branch) — the one managed
+    file that must merge with the guest's CURRENT content instead of being
+    overwritten. Inputs come from home-seed/claude-settings.spec.json."""
+    spec_path = os.path.join(SEED_DIR, "claude-settings.spec.json")
+    if not os.access(spec_path, os.R_OK):
+        return
+    with open(spec_path) as f:
+        spec = json.load(f)
+    uses_claude = bool(spec.get("usesClaude"))
+    bedrock_env = spec.get("bedrockEnv")
+
+    claude_dir = os.path.join(HOME_MOUNT, ".claude")
+    path = os.path.join(claude_dir, "settings.json")
+
+    def _read():
+        try:
+            with open(path) as f:
+                obj = json.load(f)
+            return obj if isinstance(obj, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _write(obj):
+        os.makedirs(claude_dir, exist_ok=True)
+        os.chmod(claude_dir, 0o700)
+        tmp = path + ".bromure-seed-tmp"
+        with open(tmp, "w") as f:
+            json.dump(obj, f, indent=2, sort_keys=True)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+
+    if isinstance(bedrock_env, dict):
+        # Bedrock on: settings restart from the managed env block (same
+        # wholesale rewrite the virtiofs path does), then the usesClaude
+        # merge below layers the defaults/hooks back on.
+        _write({"env": dict(bedrock_env)})
+    else:
+        # Bedrock off: drop a previously-managed bedrock settings file.
+        existing = _read()
+        env = existing.get("env")
+        if isinstance(env, dict) and "CLAUDE_CODE_USE_BEDROCK" in env:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    if not uses_claude:
+        return
+    settings = _read()
+    perms = settings.get("permissions")
+    perms = perms if isinstance(perms, dict) else {}
+    if "defaultMode" not in perms:
+        perms["defaultMode"] = "auto"
+        settings["permissions"] = perms
+    env = settings.get("env")
+    env = env if isinstance(env, dict) else {}
+    if env.get("CLAUDE_CODE_DISABLE_MOUSE_CLICKS") == "1":
+        env.pop("CLAUDE_CODE_DISABLE_MOUSE_CLICKS", None)
+        settings["env"] = env
+    if "copyOnSelect" not in settings:
+        settings["copyOnSelect"] = False
+    hook = "/home/ubuntu/.bromure/agent-status.sh"
+
+    def _hook_cmd(arg):
+        return [{"hooks": [{"type": "command", "command": hook + " " + arg}]}]
+
+    hooks = settings.get("hooks")
+    hooks = hooks if isinstance(hooks, dict) else {}
+    hooks["UserPromptSubmit"] = _hook_cmd("working")
+    hooks["PreToolUse"] = _hook_cmd("working")
+    hooks["Stop"] = _hook_cmd("done")
+    hooks["Notification"] = _hook_cmd("needsInput")
+    settings["hooks"] = hooks
+    _write(settings)
+
+
+def task_home_setup():
+    """One-shot (before create_session): make /home/ubuntu real per
+    home.mode. Idempotent — a hot-upgrade respawn mid-session sees the
+    ext4 already mounted and only freshens the seed."""
+    mode = _home_mode()
+    if mode not in ("ext4", "migrate"):
+        return
+    if _home_mounted_fstype() == "ext4":
+        apply_home_seed()
+        return
+    dev = _find_home_device()
+    if not dev:
+        log("home", "mode=%s but no home device found — home left as-is" % mode)
+        return
+    if not _capture(["lsblk", "-no", "FSTYPE", dev]).strip():
+        log("home", "formatting %s (ext4, label %s)" % (dev, HOME_LABEL))
+        if _sudo(["mkfs.ext4", "-q", "-L", HOME_LABEL, dev]).returncode != 0:
+            log("home", "mkfs.ext4 failed on %s" % dev)
+            return
+    if mode == "migrate":
+        # The old home must actually be mounted before we snapshot it —
+        # racing fstab here would migrate the base image's empty skeleton.
+        for _ in range(60):
+            if _home_mounted_fstype() == "virtiofs":
+                break
+            time.sleep(0.25)
+        else:
+            log("home", "migrate: virtiofs home never mounted — skipping")
+            return
+        if not _migrate_home_into(dev):
+            return
+    # Mount the image OVER whatever /home/ubuntu currently is (the
+    # bootstrap share on ext4 boots, the old home on a migrate boot).
+    # Stacked mounts are fine — every subsequent open resolves to ext4.
+    if _sudo(["mount", "-o", "noatime", dev, HOME_MOUNT]).returncode != 0:
+        log("home", "mount %s over %s failed" % (dev, HOME_MOUNT))
+        return
+    _sudo(["chown", "ubuntu:ubuntu", HOME_MOUNT])
+    _sudo(["chmod", "755", HOME_MOUNT])
+    apply_home_seed()
+    log("home", "ext4 home mounted (%s)" % dev)
+    if mode == "migrate":
+        _publish_migrate("done", 1, 1)
+        try:
+            with open(os.path.join(OUTBOX, "home-migrated.txt"), "w") as f:
+                f.write("ok\n")
+        except OSError:
+            pass
+
+
+def seed_watcher_service():
+    """Re-apply the home seed when the host bumps seed.generation (live
+    credential/env refresh against an ext4 home the host can't write).
+    virtiofs homes are written directly by the host and never signal."""
+    gen_path = os.path.join(META, "seed.generation")
+    last = _read_text(gen_path)
+    while _RUNNING.is_set():
+        cur = _read_text(gen_path)
+        if cur and cur != last:
+            last = cur
+            if _home_mode() != "virtiofs":
+                try:
+                    apply_home_seed()
+                    log("home", "seed re-applied (generation %s)" % cur)
+                except Exception:
+                    log("home", "seed re-apply failed:\n" + traceback.format_exc())
+        time.sleep(2)
+
+
+def task_fstrim():
+    """Discard free blocks a little after boot so the host's sparse images
+    shrink back (VZ virtio-blk discard → APFS hole punch). Home + root;
+    harmless non-zero exit where discard isn't supported."""
+    time.sleep(45)
+    for mnt in (HOME_MOUNT, "/"):
+        _sudo(["fstrim", mnt])
+    log("home", "fstrim pass done")
+
+
 # ─────────────────── §9 Session tasks (one-shot + long-lived) ───────────────
 # Ported from xinitrcContent, keep-marked blocks only. Everything X-related
 # (xset/xsetroot/openbox/spice/xrandr/LIBGL) is dropped.
@@ -2582,11 +3023,15 @@ def main():
     _run_once("ca", task_install_ca)
     _run_once("docker-proxy", task_apt_and_docker_proxy)
     _run_once("timezone", task_set_timezone)
+    # Home storage BEFORE anything that touches ~ (folder-share symlinks,
+    # the tmux session): on ext4/migrate boots this mounts the real home.
+    _run_once("home", task_home_setup)
     _run_once("folder-shares", task_folder_shares)
     _run_once("session", create_session)
 
     # One-shot background jobs (fire-and-forget, not supervised).
     threading.Thread(target=task_reapply_binfmt, daemon=True).start()
+    threading.Thread(target=task_fstrim, daemon=True).start()
 
     # 3. Supervised services — each isolated so one crash never kills the process.
     services = [
@@ -2606,6 +3051,7 @@ def main():
         ("resume", resume_watcher_service),
         ("ip", ip_reporter_service),
         ("session-monitor", session_monitor_service),
+        ("seed", seed_watcher_service),
         ("upgrade", upgrade_watcher),
     ]
     for name, fn in services:

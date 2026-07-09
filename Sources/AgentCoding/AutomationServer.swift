@@ -1202,10 +1202,35 @@ final class ACAutomationServer {
         case protocolFailure
     }
 
+    /// Outcome of one framed JSON round-trip on a pooled shell-agent
+    /// connection. Same retry semantics as ShellExecOutcome: `deadConnection`
+    /// = nothing was exchanged, safe to retry on another connection.
+    enum JSONExchangeOutcome {
+        case success([String: Any])
+        case deadConnection
+        case protocolFailure
+    }
+
     /// Internal (not private): the file-explorer pane's guest exec reuses this
     /// exact framed exchange via `ACAppDelegate.guestExec`.
     static func executeShellCommand(fd: Int32, command: String, timeout: Int) -> ShellExecOutcome {
-        let request: [String: Any] = ["cmd": command, "timeout": timeout]
+        switch exchangeJSON(fd: fd, request: ["cmd": command, "timeout": timeout]) {
+        case .deadConnection: return .deadConnection
+        case .protocolFailure: return .protocolFailure
+        case .success(let obj):
+            return .success(ACShellExecResult(
+                stdout: obj["stdout"] as? String ?? "",
+                stderr: obj["stderr"] as? String ?? "",
+                exitCode: obj["exit_code"] as? Int ?? -1
+            ))
+        }
+    }
+
+    /// One length-prefixed JSON request/response on the shell channel.
+    /// Factored out of `executeShellCommand` so the file-service ops
+    /// (`{"file": {...}}`, the file browser's data plane) share the wire
+    /// code without pretending to be shell commands.
+    static func exchangeJSON(fd: Int32, request: [String: Any]) -> JSONExchangeOutcome {
         guard let bodyData = try? JSONSerialization.data(withJSONObject: request) else {
             return .protocolFailure
         }
@@ -1245,11 +1270,7 @@ final class ACAutomationServer {
         guard let obj = try? JSONSerialization.jsonObject(with: Data(bodyBuf)) as? [String: Any] else {
             return .protocolFailure
         }
-        return .success(ACShellExecResult(
-            stdout: obj["stdout"] as? String ?? "",
-            stderr: obj["stderr"] as? String ?? "",
-            exitCode: obj["exit_code"] as? Int ?? -1
-        ))
+        return .success(obj)
     }
 
     // MARK: - Response helpers

@@ -98,6 +98,66 @@ public final class SessionDisk {
     /// Persistent host-side /home/ubuntu mirror, shared into the guest.
     public var homeDirectory: URL { store.homeDirectory(for: profile) }
 
+    // MARK: - Home storage model
+
+    /// How this boot provides /home/ubuntu.
+    public enum HomeAttachMode: String {
+        /// Legacy: virtiofs share of the host home dir (pre-upgrade profiles).
+        case virtiofs
+        /// Sparse ext4 image as a second virtio-blk device; the virtiofs
+        /// `bromure-home` tag carries only the tiny bootstrap home.
+        case ext4
+        /// One-time upgrade boot: BOTH the old virtiofs home and a blank
+        /// image are attached; the guest agent copies across, then mounts
+        /// the image over /home/ubuntu for the rest of the session.
+        case migrate
+    }
+
+    /// Set by the launcher when the user accepted the storage upgrade
+    /// for this boot. Cleared implicitly on the next launch (the profile
+    /// is stamped `.ext4` once the guest reports the copy done).
+    public var migrateHomeThisBoot = false
+
+    public var homeAttachMode: HomeAttachMode {
+        if migrateHomeThisBoot { return .migrate }
+        return profile.homeModel == .ext4 ? .ext4 : .virtiofs
+    }
+
+    public var homeImageURL: URL { store.homeImageURL(for: profile) }
+    public var bootstrapHomeDirectory: URL { store.bootstrapHomeDirectory(for: profile) }
+
+    /// Write (or refresh) the bootstrap home dir shared as `bromure-home`
+    /// on ext4-model boots. See ProfileStore.prepareBootstrapHomeDirectory.
+    public func prepareBootstrapHomeDirectory() throws {
+        try store.prepareBootstrapHomeDirectory(for: profile)
+    }
+
+    /// Apparent (guest-visible) size of a freshly-created home image, GiB.
+    /// The host file is sparse, so this costs nothing up front; growing it
+    /// later is an online truncate + resize2fs, shrinking is not supported.
+    /// Override: defaults write io.bromure.agentic-coding vm.homeImageGB -int 128
+    public static func resolvedHomeImageGB() -> Int {
+        let raw = UserDefaults.standard.object(forKey: "vm.homeImageGB") as? Int ?? 64
+        return min(1024, max(8, raw))
+    }
+
+    /// Create the sparse home image if missing. ftruncate on APFS makes an
+    /// all-holes file — apparent size fixed, allocated size ~0. The guest
+    /// agent detects the blank device and mkfs.ext4's it on first boot.
+    public func ensureHomeImageExists() throws {
+        guard !fm.fileExists(atPath: homeImageURL.path) else { return }
+        try fm.createDirectory(at: homeImageURL.deletingLastPathComponent(),
+                               withIntermediateDirectories: true)
+        try EphemeralDisk.checkDiskSpace(at: homeImageURL.deletingLastPathComponent().path)
+        guard fm.createFile(atPath: homeImageURL.path, contents: nil),
+              let handle = FileHandle(forWritingAtPath: homeImageURL.path) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        defer { try? handle.close() }
+        let bytes = UInt64(Self.resolvedHomeImageGB()) * 1024 * 1024 * 1024
+        try handle.truncate(atOffset: bytes)
+    }
+
     /// Saved-state file path for VM suspend/restore. Lives in the profile
     /// directory so it survives across app launches. The matching
     /// configuration is reconstructed deterministically from the
@@ -157,6 +217,11 @@ public final class SessionDisk {
         let dir = store.profileDirectory(for: profile)
         try? fm.removeItem(at: diskURL)
         try? fm.removeItem(at: homeDirectory)
+        // ext4-model home + its bootstrap dir + any pre-migration backup
+        // are all just as contaminated as the virtiofs home was.
+        try? fm.removeItem(at: homeImageURL)
+        try? fm.removeItem(at: bootstrapHomeDirectory)
+        try? fm.removeItem(at: store.homeBackupDirectory(for: profile))
         try? fm.removeItem(at: dir.appendingPathComponent("vm.state"))
         try? fm.removeItem(at: dir.appendingPathComponent("tabs.json"))
         try? fm.removeItem(at: dir.appendingPathComponent("meta-share"))
@@ -733,12 +798,25 @@ public final class SessionDisk {
                 atomically: true, encoding: .utf8)
         }
 
+        // home.mode — tells the guest agent how /home/ubuntu arrives this
+        // boot: "virtiofs" (legacy, agent does nothing), "ext4" (format if
+        // blank + mount + seed), or "migrate" (copy the virtiofs home into
+        // the blank image first). Rewritten every prep — it's derived
+        // state, and a restore's mode can't differ from the saved boot's.
+        try (homeAttachMode.rawValue + "\n").write(
+            to: tmp.appendingPathComponent("home.mode"),
+            atomically: true, encoding: .utf8)
+
         // env.generation — the counter the guest's .bashrc PROMPT_COMMAND
         // polls to know when to re-source the env files. Only *initialize*
         // it here (1 on a fresh boot, where the wipe removed it; left as-is
         // on resume so resumed shells don't see a phantom bump). The
         // explicit live-refresh path is what increments it.
         ensureEnvGeneration(in: tmp)
+        // seed.generation — same pattern for the home-seed dir: the guest
+        // agent re-applies the seed when this bumps (live refresh of
+        // .git-credentials & co. on an ext4 home the host can't write to).
+        ensureGenerationCounter(named: "seed.generation", in: tmp)
 
         self.metadataDirectory = tmp
         return tmp
@@ -748,7 +826,14 @@ public final class SessionDisk {
     /// Never overwrites an existing counter — a resume preserves the dir,
     /// and rewriting would falsely signal a refresh to resumed shells.
     private func ensureEnvGeneration(in dir: URL) {
-        let url = dir.appendingPathComponent("env.generation")
+        ensureGenerationCounter(named: "env.generation", in: dir)
+    }
+
+    /// Create a generation counter file with a starting value of 1 if it's
+    /// missing. Never overwrites an existing counter — a resume preserves
+    /// the dir, and rewriting would falsely signal a refresh.
+    private func ensureGenerationCounter(named name: String, in dir: URL) {
+        let url = dir.appendingPathComponent(name)
         guard !fm.fileExists(atPath: url.path) else { return }
         try? "1\n".write(to: url, atomically: true, encoding: .utf8)
     }
@@ -757,10 +842,29 @@ public final class SessionDisk {
     /// write back `value + 1`. Strictly increasing regardless of the wall
     /// clock, so two refreshes never collide on the same token.
     private func bumpEnvGeneration(in dir: URL) {
-        let url = dir.appendingPathComponent("env.generation")
+        bumpGenerationCounter(named: "env.generation", in: dir)
+    }
+
+    private func bumpGenerationCounter(named name: String, in dir: URL) {
+        let url = dir.appendingPathComponent(name)
         let current = (try? String(contentsOf: url, encoding: .utf8))
             .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
         try? "\(current + 1)\n".write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Signal the guest agent to re-apply the home seed (ext4 homes only;
+    /// the virtiofs path writes dotfiles straight into the host dir and
+    /// needs no signal). Call after rewriting `home-seed/` on a running
+    /// session.
+    public func bumpSeedGeneration() {
+        guard let dir = metadataDirectory else { return }
+        bumpGenerationCounter(named: "seed.generation", in: dir)
+    }
+
+    /// The home-seed directory inside the (already prepared) meta share.
+    /// nil before `prepareMetadataShare()` ran for this launch.
+    public var homeSeedDirectory: URL? {
+        metadataDirectory?.appendingPathComponent("home-seed", isDirectory: true)
     }
 
     /// Re-emit the metadata share for a *running* session after an env-var,

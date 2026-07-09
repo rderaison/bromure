@@ -1281,6 +1281,29 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
 
     public var mcpServers: [MCPServer]
 
+    /// Where /home/ubuntu lives.
+    /// - `.virtiofs` (legacy): a host directory (`profiles/<id>/home`)
+    ///   shared into the guest. Inodes churn across suspend/restore and
+    ///   git-over-virtiofs is fragile — kept only so existing workspaces
+    ///   keep working until the user opts into the upgrade.
+    /// - `.ext4`: a sparse raw image (`profiles/<id>/home.img`) attached
+    ///   as a second virtio-blk device; the guest agent formats, mounts
+    ///   and seeds it. Stable inodes across suspend/restore, real POSIX
+    ///   semantics, and the host file shrinks back via fstrim/discard.
+    public enum HomeModel: String, Codable, Sendable {
+        case virtiofs
+        case ext4
+    }
+
+    /// Missing in pre-upgrade JSON → decoder defaults to `.virtiofs`.
+    /// New profiles are created `.ext4`.
+    public var homeModel: HomeModel
+
+    /// The user answered "Not Now" to the home-storage upgrade dialog.
+    /// Never ask again at launch; the workspace editor's "Upgrade Home
+    /// Storage" button clears this so the next launch re-offers it.
+    public var homeUpgradeDeclined: Bool
+
     public init(
         id: UUID = UUID(),
         name: String,
@@ -1355,7 +1378,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         keyRepeatRateHz: Int? = nil,
         closeAction: CloseAction = .ask,
         bootAtStartup: Bool = false,
-        mcpServers: [MCPServer] = []
+        mcpServers: [MCPServer] = [],
+        // New profiles get the ext4 home image; only the decoder (old
+        // JSON) and the registration scratch profile use .virtiofs.
+        homeModel: HomeModel = .ext4,
+        homeUpgradeDeclined: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -1424,6 +1451,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.closeAction = closeAction
         self.bootAtStartup = bootAtStartup
         self.mcpServers = mcpServers
+        self.homeModel = homeModel
+        self.homeUpgradeDeclined = homeUpgradeDeclined
     }
 
     /// Default-tolerant decoder so old JSON files (missing newer fields) load.
@@ -1473,6 +1502,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case closeAction
         case bootAtStartup
         case mcpServers
+        case homeModel
+        case homeUpgradeDeclined
     }
 
     public init(from decoder: Decoder) throws {
@@ -1570,6 +1601,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .ask
         bootAtStartup = try c.decodeIfPresent(Bool.self, forKey: .bootAtStartup) ?? false
         mcpServers = try c.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
+        // Pre-upgrade profiles have no homeModel key → they stay on the
+        // legacy virtiofs home until the user accepts the migration.
+        homeModel = try c.decodeIfPresent(HomeModel.self, forKey: .homeModel) ?? .virtiofs
+        homeUpgradeDeclined = try c.decodeIfPresent(Bool.self, forKey: .homeUpgradeDeclined) ?? false
     }
 
     /// Explicit encoder — skips the legacy `folderPath` key (we only ever
@@ -1707,6 +1742,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if sshKeyRequiresApproval { try c.encode(true, forKey: .sshKeyRequiresApproval) }
         try c.encode(closeAction, forKey: .closeAction)
         if bootAtStartup { try c.encode(bootAtStartup, forKey: .bootAtStartup) }
+        // Encode homeModel unconditionally: its ABSENCE is what marks a
+        // pre-upgrade profile (decoder defaults to .virtiofs), so a new
+        // ext4 profile must always carry the key explicitly.
+        try c.encode(homeModel, forKey: .homeModel)
+        if homeUpgradeDeclined { try c.encode(true, forKey: .homeUpgradeDeclined) }
         if !mcpServers.isEmpty {
             try c.encode(mcpServers, forKey: .mcpServers)
         }
@@ -2311,6 +2351,12 @@ public final class ProfileStore {
         // shadow a real profile by saving over the template.
         template.id = Self.templateID
         template.name = "Defaults"
+        // The template never has a home of its own, and profiles derived
+        // from it must get the modern ext4 home — a template persisted
+        // before the upgrade would otherwise decode as .virtiofs and
+        // stamp every NEW workspace legacy.
+        template.homeModel = .ext4
+        template.homeUpgradeDeclined = false
         // Merge the encrypted secrets blob (default OAuth tokens etc).
         let blobURL = templateSecretsURL
         if let cipher = try? Data(contentsOf: blobURL),
@@ -2374,11 +2420,50 @@ public final class ProfileStore {
         profileDirectory(for: profile).appendingPathComponent("disk.img")
     }
 
-    /// The host-side dir mounted as /home/ubuntu in the guest. Persistent
-    /// across `Reset disk` — anything the user installs into their home
-    /// (npm-global, cargo, .ssh, .bash_history, etc.) survives.
+    /// The host-side dir mounted as /home/ubuntu in the guest (legacy
+    /// `.virtiofs` home model). Persistent across `Reset disk` — anything
+    /// the user installs into their home (npm-global, cargo, .ssh,
+    /// .bash_history, etc.) survives.
     public func homeDirectory(for profile: Profile) -> URL {
         profileDirectory(for: profile).appendingPathComponent("home", isDirectory: true)
+    }
+
+    /// Sparse raw ext4 image backing /home/ubuntu for `.ext4`-model
+    /// profiles. Created as an all-holes file (apparent size fixed,
+    /// allocated size ~0); the guest agent formats it on first boot and
+    /// fstrim/discard punches freed blocks back out of the host file.
+    public func homeImageURL(for profile: Profile) -> URL {
+        profileDirectory(for: profile).appendingPathComponent("home.img")
+    }
+
+    /// Tiny host dir attached as the `bromure-home` virtiofs tag for
+    /// `.ext4`-model profiles. Existing base images' fstab mounts that tag
+    /// at /home/ubuntu, and tty1's autologin shell sources its
+    /// `.bash_profile` — which is how the guest agent gets bootstrapped on
+    /// a freshly-cloned system disk (nothing else Bromure controls runs
+    /// that early). The agent then mounts the ext4 home image OVER
+    /// /home/ubuntu, shadowing this dir for the rest of the boot.
+    public func bootstrapHomeDirectory(for profile: Profile) -> URL {
+        profileDirectory(for: profile).appendingPathComponent("boot-home", isDirectory: true)
+    }
+
+    /// Where the pre-migration virtiofs home is parked after a successful
+    /// move into home.img. Kept so a migration the user regrets (or a bug)
+    /// loses nothing; surfaced in the storage UI for deletion.
+    public func homeBackupDirectory(for profile: Profile) -> URL {
+        profileDirectory(for: profile).appendingPathComponent("home.pre-ext4", isDirectory: true)
+    }
+
+    /// Write the bootstrap home for an `.ext4` profile: just the managed
+    /// `.bash_profile` (hostname + agentd bootstrap). No `.bashrc` — the
+    /// real dotfiles live in the ext4 image, seeded by the guest agent.
+    public func prepareBootstrapHomeDirectory(for profile: Profile) throws {
+        let dir = bootstrapHomeDirectory(for: profile)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: NSNumber(value: 0o755)])
+        try Self.bashProfileContent.write(
+            to: dir.appendingPathComponent(".bash_profile"),
+            atomically: true, encoding: .utf8)
     }
 
     /// Legacy SSH dir (pre-home-mount profiles). Kept so we can migrate.
@@ -2717,6 +2802,13 @@ public final class ProfileStore {
         if fm.fileExists(atPath: home.path) {
             try fm.removeItem(at: home)
         }
+        // ext4 model: the home IS the image. Delete it — the next launch
+        // creates a blank sparse image and the guest agent re-formats +
+        // re-seeds it.
+        let img = homeImageURL(for: profile)
+        if fm.fileExists(atPath: img.path) {
+            try fm.removeItem(at: img)
+        }
     }
 
     /// Logical size of a per-profile disk image (sparse — what it
@@ -2726,18 +2818,27 @@ public final class ProfileStore {
         Self.allocatedBytes(at: diskURL(for: profile))
     }
 
-    /// Recursive sum of every regular file under the profile's home
-    /// directory. Walks lazily; suitable for backgrounding via Task.
-    /// Returns 0 if the directory doesn't exist.
+    /// Bytes the profile's home occupies on the host. ext4 model: the
+    /// image's *allocated* size (sparse-aware, O(1)) plus any leftover
+    /// pre-migration backup. virtiofs model: recursive walk of the home
+    /// dir (lazily; suitable for backgrounding via Task). Returns 0 if
+    /// nothing exists yet.
     public func homeSizeBytes(for profile: Profile) -> Int64 {
-        Self.directoryBytes(at: homeDirectory(for: profile))
+        let img = homeImageURL(for: profile)
+        if fm.fileExists(atPath: img.path) {
+            return Self.allocatedBytes(at: img)
+                + Self.directoryBytes(at: homeBackupDirectory(for: profile))
+        }
+        return Self.directoryBytes(at: homeDirectory(for: profile))
     }
 
-    /// Last-modified timestamp of the profile's home directory, or nil
-    /// if it doesn't exist. Used by the storage stack to show "active
-    /// X minutes ago" labels.
+    /// Last-modified timestamp of the profile's home (the image file for
+    /// ext4 profiles, the home dir otherwise), or nil if it doesn't
+    /// exist. Used by the storage stack to show "active X minutes ago"
+    /// labels.
     public func homeLastModified(for profile: Profile) -> Date? {
-        let url = homeDirectory(for: profile)
+        let img = homeImageURL(for: profile)
+        let url = fm.fileExists(atPath: img.path) ? img : homeDirectory(for: profile)
         guard let attrs = try? fm.attributesOfItem(atPath: url.path) else { return nil }
         return attrs[.modificationDate] as? Date
     }
@@ -2812,7 +2913,28 @@ public final class ProfileStore {
                 attributes: [.posixPermissions: NSNumber(value: 0o755)]
             )
         }
+        try populateManagedHome(in: home, profile: profile,
+                                tokenPlan: tokenPlan,
+                                kubeconfigYAML: kubeconfigYAML,
+                                seedMode: false)
+    }
 
+    /// Write the managed home files into `home`. Two callers:
+    /// - `prepareHomeDirectory` (virtiofs model): `home` is the live
+    ///   host-side /home/ubuntu mirror. Read-modify-write against the
+    ///   guest's actual state is fine here (`seedMode == false`).
+    /// - `writeHomeSeedFiles` (ext4 model): `home` is the `home-seed/files`
+    ///   staging dir inside the meta share. The guest agent copies these
+    ///   into the ext4 home per `manifest.tsv`. Anything that must merge
+    ///   with the guest's *current* state (`.claude/settings.json`) or
+    ///   that touches other host dirs (legacy ssh migration) is skipped
+    ///   (`seedMode == true`) and handled by the agent from
+    ///   `claude-settings.spec.json` instead.
+    private func populateManagedHome(in home: URL,
+                                     profile: Profile,
+                                     tokenPlan: SessionTokenPlan?,
+                                     kubeconfigYAML: String?,
+                                     seedMode: Bool) throws {
         // Managed dotfiles — always rewrite.
         try Self.bashrcContent.write(
             to: home.appendingPathComponent(".bashrc"),
@@ -3016,9 +3138,16 @@ public final class ProfileStore {
         }
 
         // ~/.claude/settings.json — Bedrock configuration for Claude Code.
+        // Seed mode: the merge below reads the guest's CURRENT settings,
+        // which the host can't see inside an ext4 image — the guest agent
+        // does the equivalent merge from `claude-settings.spec.json`
+        // (written by finalizeHomeSeed). Only the RMW parts are skipped;
+        // the plain status-script file is emitted in both modes.
         let claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
         let claudeSettingsURL = claudeDir.appendingPathComponent("settings.json")
-        if profile.bedrockEnabled {
+        if seedMode {
+            // fallthrough to the usesClaude block below
+        } else if profile.bedrockEnabled {
             try fm.createDirectory(at: claudeDir, withIntermediateDirectories: true,
                                    attributes: [.posixPermissions: NSNumber(value: 0o700)])
             var env: [String: String] = [
@@ -3057,7 +3186,7 @@ public final class ProfileStore {
         // Claude Code (primary or additional tool).
         let usesClaude = profile.tool == .claude
             || profile.additionalTools.contains { $0.tool == .claude }
-        if usesClaude {
+        if usesClaude && !seedMode {
             try? fm.createDirectory(at: claudeDir, withIntermediateDirectories: true,
                                     attributes: [.posixPermissions: NSNumber(value: 0o700)])
             var settings: [String: Any] = [:]
@@ -3108,8 +3237,10 @@ public final class ProfileStore {
             try data.write(to: claudeSettingsURL, options: .atomic)
             try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
                                   ofItemAtPath: claudeSettingsURL.path)
-
+        }
+        if usesClaude {
             // The reporter script the hooks call (idempotent overwrite).
+            // Written in BOTH modes — it's a plain managed file, no merge.
             let bromureDir = home.appendingPathComponent(".bromure", isDirectory: true)
             try? fm.createDirectory(at: bromureDir, withIntermediateDirectories: true,
                                     attributes: [.posixPermissions: NSNumber(value: 0o755)])
@@ -3185,19 +3316,187 @@ public final class ProfileStore {
             try? fm.removeItem(at: dockerConfigURL)
         }
 
-        // Migrate legacy SSH keys: profiles/<id>/ssh → home/.ssh
-        let legacySSH = sshDirectory(for: profile)
-        let newSSH = home.appendingPathComponent(".ssh", isDirectory: true)
-        if fm.fileExists(atPath: legacySSH.path) && !fm.fileExists(atPath: newSSH.path) {
-            try fm.moveItem(at: legacySSH, to: newSSH)
+        // Migrate legacy SSH keys: profiles/<id>/ssh → home/.ssh. Host-dir
+        // move — meaningless (and destructive) against a seed staging dir,
+        // so virtiofs mode only. Seed mode ships the public key explicitly
+        // (writeHomeSeedFiles) and tombstones the private key in the
+        // manifest instead.
+        if !seedMode {
+            let legacySSH = sshDirectory(for: profile)
+            let newSSH = home.appendingPathComponent(".ssh", isDirectory: true)
+            if fm.fileExists(atPath: legacySSH.path) && !fm.fileExists(atPath: newSSH.path) {
+                try fm.moveItem(at: legacySSH, to: newSSH)
+            }
+
+            // Enforce the no-private-key-in-the-VM rule: any private key
+            // file Bromure may have written here in the past is removed
+            // every launch. The agent-forwarded key (held only on host)
+            // takes over via SSH_AUTH_SOCK.
+            let privateKeyFile = newSSH.appendingPathComponent("id_ed25519")
+            try? fm.removeItem(at: privateKeyFile)
+        }
+    }
+
+    // MARK: - Home seed (ext4 home model)
+    //
+    // For `.ext4`-model profiles the host can't write /home/ubuntu directly
+    // (it lives inside home.img). Instead each launch stages the SAME
+    // managed files under `<meta-share>/home-seed/`:
+    //
+    //   home-seed/
+    //     files/<relpath>              payloads, mirroring $HOME layout
+    //     manifest.tsv                 how to apply each entry (below)
+    //     claude-settings.spec.json    inputs for the guest-side settings merge
+    //
+    // manifest.tsv — one entry per line, tab-separated:
+    //   D <perms> <relpath>            mkdir -p with perms
+    //   o <perms> <relpath>            copy from files/, always overwrite
+    //   m <perms> <relpath>            copy from files/ only if missing
+    //   d -      <relpath>             delete
+    //   p -      <relpath> <prefix>    delete if file starts with <prefix>
+    //   j -      <relpath> <key>       delete if JSON object has top-level <key>
+    //
+    // The guest agent (bromure-agentd.py, apply_home_seed) executes it at
+    // boot before the tmux session starts, and again whenever
+    // seed.generation bumps (live credential/env refresh).
+
+    /// Sentinel prefix shared by every "ours, safe to delete" text config.
+    static let managedSentinel = "# Managed by Bromure Agentic Coding."
+
+    /// Relpaths applied create-if-missing instead of overwrite.
+    private static let seedIfMissing: Set<String> = [".bashrc.local"]
+    /// Relpaths chmod 600 (everything else is 644).
+    private static let seed600: Set<String> = [
+        ".git-credentials", ".kube/config", ".config/doctl/config.yaml",
+        ".aws/config", ".docker/config.json", ".config/gh/hosts.yml",
+        ".config/glab-cli/config.yml", ".codex/auth.json", ".grok/auth.json",
+    ]
+    /// Relpaths chmod 755 (scripts).
+    private static let seed755: Set<String> = [".bromure/agent-status.sh"]
+    /// Directories created 0700 (everything else 0755).
+    private static let seedDir700: Set<String> = [
+        ".kube", ".aws", ".claude", ".docker", ".ssh", ".codex", ".grok",
+    ]
+
+    /// Stage the managed dotfiles into `<seedDir>/files`. Clears previous
+    /// seed contents in place (never removes `seedDir` itself — same
+    /// virtiofs inode-preservation rule as the meta share it lives in).
+    /// Call `finalizeHomeSeed` after any extra files (codex/grok auth
+    /// seeds) have been added, to emit the manifest + merge spec.
+    public func writeHomeSeedFiles(for profile: Profile,
+                                   into seedDir: URL,
+                                   terminalDefaults: TerminalAppDefaults,
+                                   tokenPlan: SessionTokenPlan? = nil,
+                                   kubeconfigYAML: String? = nil) throws {
+        try fm.createDirectory(at: seedDir, withIntermediateDirectories: true)
+        if let entries = try? fm.contentsOfDirectory(at: seedDir,
+                                                     includingPropertiesForKeys: nil) {
+            for entry in entries { try? fm.removeItem(at: entry) }
+        }
+        let files = seedDir.appendingPathComponent("files", isDirectory: true)
+        try fm.createDirectory(at: files, withIntermediateDirectories: true)
+        try populateManagedHome(in: files, profile: profile,
+                                tokenPlan: tokenPlan,
+                                kubeconfigYAML: kubeconfigYAML,
+                                seedMode: true)
+
+        // Public half of the profile's generated SSH key, for the user's
+        // reference (`cat ~/.ssh/id_ed25519.pub`). The private half never
+        // enters the VM — signing goes through the vsock-bridged agent.
+        if let pub = profile.sshPublicKey, !pub.isEmpty {
+            let sshDir = files.appendingPathComponent(".ssh", isDirectory: true)
+            try fm.createDirectory(at: sshDir, withIntermediateDirectories: true)
+            try (pub.hasSuffix("\n") ? pub : pub + "\n").write(
+                to: sshDir.appendingPathComponent("id_ed25519.pub"),
+                atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// Emit `manifest.tsv` + `claude-settings.spec.json` for the staged
+    /// seed. Walks `files/` so late additions (codex/grok auth seeds) are
+    /// picked up; then appends the cleanup entries for the conditional
+    /// files that were NOT generated this launch (mirroring the
+    /// delete-if-managed logic of the virtiofs path).
+    public func finalizeHomeSeed(for profile: Profile, seedDir: URL) throws {
+        let files = seedDir.appendingPathComponent("files", isDirectory: true)
+        var dirLines: [String] = []
+        var fileLines: [String] = []
+        var present: Set<String> = []
+
+        let keys: [URLResourceKey] = [.isDirectoryKey]
+        if let walker = fm.enumerator(at: files, includingPropertiesForKeys: keys,
+                                      options: [], errorHandler: nil) {
+            let rootPath = files.standardizedFileURL.path
+            for case let url as URL in walker {
+                let full = url.standardizedFileURL.path
+                guard full.hasPrefix(rootPath + "/") else { continue }
+                let rel = String(full.dropFirst(rootPath.count + 1))
+                let isDir = (try? url.resourceValues(forKeys: Set(keys)))?.isDirectory ?? false
+                if isDir {
+                    let perms = Self.seedDir700.contains(rel) ? "700" : "755"
+                    dirLines.append("D\t\(perms)\t\(rel)")
+                } else {
+                    present.insert(rel)
+                    let mode = Self.seedIfMissing.contains(rel) ? "m" : "o"
+                    let perms = Self.seed600.contains(rel) ? "600"
+                        : Self.seed755.contains(rel) ? "755" : "644"
+                    fileLines.append("\(mode)\t\(perms)\t\(rel)")
+                }
+            }
         }
 
-        // Enforce the no-private-key-in-the-VM rule: any private key
-        // file Bromure may have written here in the past is removed
-        // every launch. The agent-forwarded key (held only on host)
-        // takes over via SSH_AUTH_SOCK.
-        let privateKeyFile = newSSH.appendingPathComponent("id_ed25519")
-        try? fm.removeItem(at: privateKeyFile)
+        // Unconditional sweeps, mirroring the virtiofs path.
+        var cleanupLines: [String] = [
+            "d\t-\t.xinitrc",
+            "d\t-\t.bromure-tab-agent.sh",
+            "d\t-\t.ssh/id_ed25519",
+            // ~/.aws/credentials is nuked whenever it's ours — we never
+            // want a stale secret left behind (see populateManagedHome).
+            "p\t-\t.aws/credentials\t\(Self.managedSentinel)",
+        ]
+        // Conditional cleanups: only when the file was NOT staged this
+        // launch (the user cleared the creds / config that produced it).
+        if !present.contains(".git-credentials") {
+            cleanupLines.append("d\t-\t.git-credentials")
+        }
+        if !present.contains(".gitconfig") {
+            cleanupLines.append("p\t-\t.gitconfig\t\(Self.managedSentinel)")
+        }
+        if !present.contains(".aws/config") {
+            cleanupLines.append("p\t-\t.aws/config\t\(Self.managedSentinel)")
+        }
+        if !present.contains(".docker/config.json") {
+            cleanupLines.append("j\t-\t.docker/config.json\t_bromureManaged")
+        }
+
+        let manifest = (dirLines.sorted() + fileLines.sorted() + cleanupLines)
+            .joined(separator: "\n") + "\n"
+        try manifest.write(to: seedDir.appendingPathComponent("manifest.tsv"),
+                           atomically: true, encoding: .utf8)
+
+        // Inputs for the guest-side ~/.claude/settings.json merge — the
+        // one managed file that must be reconciled with the guest's
+        // current content rather than overwritten. Mirrors the virtiofs
+        // branch of populateManagedHome; the python side lives in
+        // bromure-agentd.py (_seed_claude_settings).
+        let usesClaude = profile.tool == .claude
+            || profile.additionalTools.contains { $0.tool == .claude }
+        var spec: [String: Any] = ["usesClaude": usesClaude]
+        if profile.bedrockEnabled {
+            var env: [String: String] = [
+                "CLAUDE_CODE_USE_BEDROCK": "1",
+                "AWS_PROFILE": "default",
+            ]
+            let region = profile.awsCredentials.region.trimmingCharacters(in: .whitespaces)
+            if !region.isEmpty { env["AWS_REGION"] = region }
+            let modelID = profile.bedrockModelID.trimmingCharacters(in: .whitespaces)
+            if !modelID.isEmpty { env["ANTHROPIC_MODEL"] = modelID }
+            spec["bedrockEnv"] = env
+        }
+        let specData = try JSONSerialization.data(
+            withJSONObject: spec, options: [.prettyPrinted, .sortedKeys])
+        try specData.write(to: seedDir.appendingPathComponent("claude-settings.spec.json"),
+                           options: .atomic)
     }
 
     /// Percent-encode a string for use in the userinfo portion of a URL

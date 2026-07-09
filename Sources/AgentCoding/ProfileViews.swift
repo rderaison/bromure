@@ -142,6 +142,10 @@ struct ProfileStorageContext {
     var profileDiskURL: URL?
     /// Per-profile home dir; nil for new profiles.
     var profileHomeURL: URL?
+    /// Per-profile home *image* (ext4 model); nil for virtiofs-model and
+    /// new profiles. When set, the home row sizes/labels against the
+    /// image instead of walking the directory.
+    var profileHomeImageURL: URL?
     /// True if the profile's VM is currently open in a session window —
     /// reset actions are unsafe in that state.
     var isRunning: Bool
@@ -149,6 +153,9 @@ struct ProfileStorageContext {
     /// handle their own confirmation alerts.
     var onResetDisk: () -> Void
     var onResetHome: () -> Void
+    /// Non-nil only for saved legacy (virtiofs-home) profiles: re-arms the
+    /// home-storage upgrade offer for the next launch.
+    var onUpgradeHome: (() -> Void)?
 
     static func empty(baseImageURL: URL) -> ProfileStorageContext {
         ProfileStorageContext(
@@ -157,9 +164,11 @@ struct ProfileStorageContext {
             baseImageBuildDate: nil,
             profileDiskURL: nil,
             profileHomeURL: nil,
+            profileHomeImageURL: nil,
             isRunning: false,
             onResetDisk: {},
-            onResetHome: {}
+            onResetHome: {},
+            onUpgradeHome: nil
         )
     }
 }
@@ -3488,7 +3497,9 @@ private struct StorageStackView: View {
                 accent: .orange,
                 symbol: "house.fill",
                 title: "Your home folder",
-                subtitle: "Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history, anything in /home/ubuntu.",
+                subtitle: context.profileHomeImageURL != nil
+                    ? "Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history — on a private ext4 disk image that shrinks as files are deleted."
+                    : "Project clones, dotfiles, .ssh keys, npm-global, .cargo, shell history, anything in /home/ubuntu.",
                 metadata: homeMetadata,
                 size: homeBytes,
                 action: isNewProfile
@@ -3496,11 +3507,22 @@ private struct StorageStackView: View {
                     : .init(
                         label: "Erase home…",
                         role: .destructive,
-                        enabled: !context.isRunning && context.profileHomeURL != nil,
+                        enabled: !context.isRunning
+                            && (context.profileHomeURL != nil
+                                || context.profileHomeImageURL != nil),
                         disabledHelp: context.isRunning
                             ? "Close the session window first."
                             : "Created on first launch.",
                         handler: context.onResetHome
+                      ),
+                secondaryAction: (isNewProfile || context.onUpgradeHome == nil)
+                    ? nil
+                    : .init(
+                        label: "Upgrade storage…",
+                        role: nil,
+                        enabled: !context.isRunning,
+                        disabledHelp: "Close the session window first.",
+                        handler: { context.onUpgradeHome?() }
                       )
             )
 
@@ -3557,7 +3579,9 @@ private struct StorageStackView: View {
 
     private var homeMetadata: String {
         if isNewProfile { return "Created on first launch." }
-        guard context.profileHomeURL != nil else { return "Not yet created." }
+        guard context.profileHomeURL != nil || context.profileHomeImageURL != nil else {
+            return "Not yet created."
+        }
         if let mtime = homeMTime {
             return "Active \(relativeAge(of: mtime))."
         }
@@ -3589,13 +3613,18 @@ private struct StorageStackView: View {
         let baseURL = context.baseImageURL
         let diskURL = context.profileDiskURL
         let homeURL = context.profileHomeURL
+        let homeImageURL = context.profileHomeImageURL
         let (b, d, h, m) = await Task.detached(priority: .utility) {
             let base = (try? baseURL.resourceValues(forKeys: [.fileAllocatedSizeKey]))
                 .flatMap { $0.fileAllocatedSize }
                 .map(Int64.init) ?? 0
             let disk = diskURL.map { Self.allocatedBytes(at: $0) } ?? 0
-            let home = homeURL.map { Self.directoryBytes(at: $0) } ?? 0
-            let mtime = homeURL.flatMap { url -> Date? in
+            // ext4 home: the image's allocated (sparse-aware) size — O(1),
+            // and it's the real cost on the Mac. virtiofs home: the walk.
+            let home = homeImageURL.map { Self.allocatedBytes(at: $0) }
+                ?? homeURL.map { Self.directoryBytes(at: $0) } ?? 0
+            let mURL = homeImageURL ?? homeURL
+            let mtime = mURL.flatMap { url -> Date? in
                 guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
                 return attrs[.modificationDate] as? Date
             }
@@ -3668,6 +3697,9 @@ private struct StorageLayerRow: View {
     let metadata: String
     let size: Int64?
     let action: Action?
+    /// Optional non-destructive action rendered left of `action` (e.g. the
+    /// home row's "Upgrade storage…").
+    var secondaryAction: Action? = nil
     var bottomNote: String? = nil
     var noteHelp: String? = nil
 
@@ -3710,6 +3742,16 @@ private struct StorageLayerRow: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                     Spacer()
+                    if let secondaryAction {
+                        Button(role: secondaryAction.role) {
+                            secondaryAction.handler()
+                        } label: {
+                            Text(secondaryAction.label)
+                        }
+                        .controlSize(.small)
+                        .disabled(!secondaryAction.enabled)
+                        .help(secondaryAction.enabled ? "" : (secondaryAction.disabledHelp ?? ""))
+                    }
                     if let action {
                         Button(role: action.role) {
                             action.handler()

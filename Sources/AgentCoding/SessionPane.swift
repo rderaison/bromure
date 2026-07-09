@@ -167,6 +167,8 @@ final class SessionPane {
         bootOverlayModel.workspaceName = profile.name
         bootOverlayModel.accentHex = accentForBoot(profile.color.hexInUI)
         bootOverlayModel.failed = false
+        bootOverlayModel.statusText = nil
+        bootOverlayModel.progress = nil
         let item = DispatchWorkItem { [weak self] in self?.presentBootOverlay() }
         bootOverlayShowItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: item)
@@ -194,6 +196,16 @@ final class SessionPane {
         ])
         bootOverlayHost = host
         armBootWatchdog()
+    }
+
+    /// Status line + optional determinate progress (0…1) on the dive
+    /// screen — the home-storage migration's surface. Each update re-arms
+    /// the watchdog: a multi-minute home copy is *progress*, not a hang,
+    /// and must not flip the overlay to "dive failed" mid-copy.
+    func updateBootStatus(_ text: String?, progress: Double?) {
+        bootOverlayModel.statusText = text
+        bootOverlayModel.progress = progress
+        if text != nil { armBootWatchdog() }
     }
 
     private func armBootWatchdog() {

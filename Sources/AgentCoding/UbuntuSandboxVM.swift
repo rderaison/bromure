@@ -134,6 +134,16 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// then behaves like the app's Reboot rather than a shutdown.
     public var onGuestReboot: (() -> Void)?
 
+    /// Home-storage upgrade progress from the guest agent (migrate boots
+    /// only): (phase, copiedBytes, totalBytes). totalBytes is 0 until the
+    /// guest's size scan finishes. Feeds the boot-overlay status line.
+    public var onHomeMigrationProgress: ((String, Int64, Int64) -> Void)?
+
+    /// One-shot: the guest agent verified the home copy and mounted the
+    /// image over /home/ubuntu. The host stamps the profile `.ext4` so the
+    /// next boot stops attaching the old virtiofs home.
+    public var onHomeMigrated: (() -> Void)?
+
     /// Listening sockets published by the guest's ports loop (`ss -tulnH` →
     /// ports.txt, every ~3s). Fired only when the set changes. Drives the
     /// workspace dashboard's Ports row and the `/vms` record.
@@ -239,6 +249,22 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             VZVirtioBlockDeviceConfiguration(attachment: diskAttachment),
         ]
 
+        // ext4 home model: the persistent /home/ubuntu is a sparse raw
+        // image attached as a SECOND virtio-blk device (stable inodes
+        // across suspend/restore; fstrim punches freed blocks back out of
+        // the host file). The guest agent formats it when blank, mounts it
+        // over /home/ubuntu and applies the home seed — no fstab change
+        // needed, so existing base images work as-is. Attached for both
+        // .ext4 and .migrate boots (a migrate boot copies the virtiofs
+        // home into it first).
+        if let session = sessionDisk, session.homeAttachMode != .virtiofs {
+            try session.ensureHomeImageExists()
+            let homeAttachment = try VZDiskImageStorageDeviceAttachment(
+                url: session.homeImageURL, readOnly: false)
+            config.storageDevices.append(
+                VZVirtioBlockDeviceConfiguration(attachment: homeAttachment))
+        }
+
         let net = VZVirtioNetworkDeviceConfiguration()
         // Pick attachment based on profile's networkMode. Bridged falls
         // back to NAT if the chosen interface isn't available.
@@ -328,13 +354,28 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         var sharingDevices: [VZDirectorySharingDeviceConfiguration] = []
 
         if let session = sessionDisk {
-            // Persistent home (mounts AT /home/ubuntu in guest, overlays the
-            // base image's empty home). Holds .bashrc, .npm-global, .cargo,
-            // .ssh, .bash_history, etc. — everything that should survive a
-            // disk reset.
+            // The `bromure-home` virtiofs tag — every base image's fstab
+            // mounts it at /home/ubuntu (nofail). What it carries depends
+            // on the home model:
+            // - .virtiofs (legacy): the full persistent host-side home.
+            // - .migrate: same — this boot's guest agent copies it into
+            //   the blank home image, then mounts the image on top.
+            // - .ext4: a tiny bootstrap dir holding just the managed
+            //   .bash_profile. tty1's autologin shell sources it, which
+            //   installs/starts the guest agent even on a freshly-cloned
+            //   system disk (Reset Disk); the agent then mounts the ext4
+            //   image OVER /home/ubuntu, shadowing this share entirely.
+            let homeShareURL: URL
+            switch session.homeAttachMode {
+            case .virtiofs, .migrate:
+                homeShareURL = session.homeDirectory
+            case .ext4:
+                try session.prepareBootstrapHomeDirectory()
+                homeShareURL = session.bootstrapHomeDirectory
+            }
             let homeFS = VZVirtioFileSystemDeviceConfiguration(tag: "bromure-home")
             homeFS.share = VZSingleDirectoryShare(
-                directory: VZSharedDirectory(url: session.homeDirectory, readOnly: false)
+                directory: VZSharedDirectory(url: homeShareURL, readOnly: false)
             )
             sharingDevices.append(homeFS)
 
@@ -625,6 +666,25 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // tabs.txt is read on the fast tick above (mtime-gated),
                         // not here — skip it in the heavy scan.
                         if name == "tabs.txt" { continue }
+                        // home-migrate.txt — live progress of the home-storage
+                        // upgrade copy ("<phase> <copied> <total>"), rewritten
+                        // by the guest agent ~2×/s. Read, never consumed.
+                        if name == "home-migrate.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            let p = raw.split(whereSeparator: { $0 == " " || $0.isNewline })
+                            if p.count >= 3, let done = Int64(p[1]), let total = Int64(p[2]) {
+                                self?.onHomeMigrationProgress?(String(p[0]), done, total)
+                            }
+                            continue
+                        }
+                        // home-migrated.txt — one-shot completion marker: the
+                        // copy is verified and the image is mounted over
+                        // /home/ubuntu. Consumed; host stamps homeModel=.ext4.
+                        if name == "home-migrated.txt" {
+                            try? fm.removeItem(at: entry)
+                            self?.onHomeMigrated?()
+                            continue
+                        }
                         // docker.txt — `docker ps -a --format '{{json .}}'`, one
                         // JSON object per line (running + stopped). Rewritten
                         // atomically every ~2s; empty when there's no docker.
