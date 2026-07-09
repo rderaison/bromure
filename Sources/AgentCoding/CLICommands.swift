@@ -404,13 +404,44 @@ struct VMAttachWindow: ParsableCommand {
     func run() throws {
         let client = ControlClient()
         try client.ensureAgentRunning()
-        let vms = (try client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
-        guard let vmObj = vms.first(where: { matchesVM($0, vm) }) else {
-            throw ValidationError("VM not found: \(vm)")
+
+        // Stay patient through VM boot instead of exiting: a fresh workspace
+        // isn't in /vms and its tmux session isn't up for a few seconds after
+        // launch. If this process exits, TerminalSessionController reattaches
+        // with backoff, spawning a new surface each time — which the user sees
+        // as the terminal flickering through several shell attempts at boot.
+        // Retry connecting (up to ~60s) so ONE surface waits for the VM. Only
+        // a genuine end (the pump returns after the tmux client exits) or a
+        // hard timeout ends this process.
+        let deadline = Date().addingTimeInterval(60)
+        var attempted = false
+        while true {
+            let vms = (try? client.request("GET", "/vms"))?.json["vms"] as? [[String: Any]]
+            if let vmObj = vms?.first(where: { matchesVM($0, vm) }) {
+                let vmID = (vmObj["id"] as? String) ?? vm
+                let start = Date()
+                do {
+                    try InteractiveExec.run(client: client, vm: vmID,
+                                            view: UUID().uuidString, window: windowIndex)
+                    // A real attach runs until the tmux client exits. If it
+                    // returned almost immediately AND we're still early in
+                    // boot, the session probably wasn't ready — retry rather
+                    // than exit (which would spawn a fresh, flickering surface).
+                    if Date().timeIntervalSince(start) >= 2 || Date() >= deadline {
+                        return
+                    }
+                    attempted = true
+                } catch {
+                    // Stream couldn't be established (agent/session not up yet).
+                    attempted = true
+                }
+            }
+            if Date() >= deadline {
+                if attempted { return }   // gave the surface its chance; exit quietly.
+                throw ValidationError("VM not found: \(vm)")
+            }
+            Thread.sleep(forTimeInterval: 0.5)
         }
-        let vmID = (vmObj["id"] as? String) ?? vm
-        try InteractiveExec.run(client: client, vm: vmID,
-                                view: UUID().uuidString, window: windowIndex)
     }
 }
 
