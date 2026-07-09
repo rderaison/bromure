@@ -294,6 +294,12 @@ extension TerminalAppDefaults {
         # the Linux guest advertises ctrl-c/ctrl-v.
         keybind = super+c=copy_to_clipboard
         keybind = super+v=paste_from_clipboard
+        # Font zoom, pinned for the same reason. `equal` covers the common
+        # unshifted ⌘= press on ANSI layouts; `plus` the shifted/keypad one.
+        keybind = super+equal=increase_font_size:1
+        keybind = super+plus=increase_font_size:1
+        keybind = super+minus=decrease_font_size:1
+        keybind = super+zero=reset_font_size
         """
     }
 

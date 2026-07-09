@@ -269,6 +269,37 @@ final class TerminalSurfaceView: NSView {
     override func rightMouseDragged(with event: NSEvent) { mouseMoved(with: event) }
     override func otherMouseDragged(with event: NSEvent) { mouseMoved(with: event) }
 
+    /// Accumulated trackpad magnification; each ±0.25 of pinch steps the
+    /// font size once, mirroring ⌘+/⌘-.
+    private var pinchAccumulator: CGFloat = 0
+
+    override func magnify(with event: NSEvent) {
+        guard let surface else { return }
+        if event.phase == .began { pinchAccumulator = 0 }
+        pinchAccumulator += event.magnification
+        let step: CGFloat = 0.25
+        while pinchAccumulator >= step {
+            pinchAccumulator -= step
+            "increase_font_size:1".withCString {
+                _ = ghostty_surface_binding_action(surface, $0, UInt("increase_font_size:1".utf8.count))
+            }
+        }
+        while pinchAccumulator <= -step {
+            pinchAccumulator += step
+            "decrease_font_size:1".withCString {
+                _ = ghostty_surface_binding_action(surface, $0, UInt("decrease_font_size:1".utf8.count))
+            }
+        }
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        // Two-finger double-tap: reset zoom.
+        guard let surface else { return }
+        "reset_font_size".withCString {
+            _ = ghostty_surface_binding_action(surface, $0, UInt("reset_font_size".utf8.count))
+        }
+    }
+
     override func scrollWheel(with event: NSEvent) {
         guard let surface else { return }
         var x = event.scrollingDeltaX

@@ -50,6 +50,8 @@ final class SessionListModel {
     /// Set when a VM's Docker dashboard is the active stage surface — highlights
     /// that VM's Docker node in the source list.
     var dockerSelectedID: Profile.ID?
+    /// True when the Grid is the active stage surface.
+    var gridSelected = false
 }
 
 /// Right-click actions on a tab row. Handled by the window, which reads the
@@ -166,6 +168,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private var vmDashboardSelectedID: Profile.ID?
     private var toolbarDelegate: UnifiedToolbarDelegate?
 
+    /// The user-curated terminal grid (phase 2): membership persists here,
+    /// surfaces live in `gridView` while the grid is showing.
+    let gridStore = GridLayoutStore()
+    private let gridSlot = NSView()
+    private var gridView: GridStageView?
+
     init(acDelegate: ACAppDelegate) {
         self.acDelegate = acDelegate
         self.paneSlot = NSView()
@@ -191,6 +199,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // ---- Sidebar (left) ----
         let sidebar = SessionSidebar(
             model: listModel,
+            gridStore: gridStore,
+            onSelectGrid: { [weak self] in self?.showGrid() },
+            onRemoveGridCell: { [weak self] id in self?.gridStore.remove(id: id) },
+            onFocusGridCell: { [weak self] id in
+                self?.showGrid()
+                self?.gridStore.focusedCellID = id
+            },
+            onDropGridPayload: { [weak self] payload in
+                guard let self,
+                      let decoded = GridDragPayload.decode(payload) else { return false }
+                self.addToGrid(profileID: decoded.profileID,
+                               windowIndex: decoded.windowIndex,
+                               label: decoded.label)
+                return true
+            },
+            onAddAllToGrid: { [weak self] id in self?.addAllWorktreesToGrid(profileID: id) },
             onSelect:    { [weak self] id in self?.selectWorkspaceName(id) },
             onSelectTab: { [weak self] id, idx in self?.selectTab(profileID: id, index: idx) },
             onNewTab:    { [weak self] id in self?.newTab(profileID: id) },
@@ -240,6 +264,18 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         vmDashboardSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         vmDashboardSlot.isHidden = true
         stage.addSubview(vmDashboardSlot)
+        // Grid overlay — topmost stage surface.
+        gridSlot.translatesAutoresizingMaskIntoConstraints = false
+        gridSlot.wantsLayer = true
+        gridSlot.layer?.backgroundColor = NSColor.black.cgColor
+        gridSlot.isHidden = true
+        stage.addSubview(gridSlot)
+        NSLayoutConstraint.activate([
+            gridSlot.topAnchor.constraint(equalTo: stage.topAnchor),
+            gridSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
+            gridSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            gridSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+        ])
         NSLayoutConstraint.activate([
             vmDashboardSlot.topAnchor.constraint(equalTo: stage.topAnchor),
             vmDashboardSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
@@ -367,10 +403,81 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         mountSelected(pane)
     }
 
+    // MARK: Grid overlay
+
+    /// Show the terminal grid as the stage surface.
+    func showGrid() {
+        clearDockerDashboard()
+        clearVMDashboard()
+        listModel.gridSelected = true
+        if gridView == nil {
+            let dataSource = GridStageView.DataSource(
+                profile: { [weak self] pid in
+                    self?.acDelegate?.profiles.first { $0.id == pid }
+                },
+                tabsModel: { [weak self] pid in
+                    self?.listModel.entries.first { $0.id == pid }?.model
+                },
+                runState: { [weak self] pid in
+                    self?.listModel.profileRows.first { $0.id == pid }?.state ?? .off
+                },
+                onStart: { [weak self] pid in self?.acDelegate?.startProfile(pid) },
+                onJump: { [weak self] pid, windowIndex in
+                    self?.jumpFromGrid(profileID: pid, windowIndex: windowIndex)
+                })
+            let v = GridStageView(store: gridStore, dataSource: dataSource)
+            v.translatesAutoresizingMaskIntoConstraints = false
+            gridSlot.addSubview(v)
+            NSLayoutConstraint.activate([
+                v.topAnchor.constraint(equalTo: gridSlot.topAnchor),
+                v.leadingAnchor.constraint(equalTo: gridSlot.leadingAnchor),
+                v.trailingAnchor.constraint(equalTo: gridSlot.trailingAnchor),
+                v.bottomAnchor.constraint(equalTo: gridSlot.bottomAnchor),
+            ])
+            gridView = v
+        }
+        gridSlot.isHidden = false
+        gridView?.reconcile()
+    }
+
+    /// Hide the grid and release its surfaces (membership persists).
+    func hideGrid() {
+        guard listModel.gridSelected else { return }
+        listModel.gridSelected = false
+        gridSlot.isHidden = true
+        gridView?.retireAll()
+    }
+
+    /// Grid cell "open in workspace": leave the grid on that terminal's tab.
+    private func jumpFromGrid(profileID: Profile.ID, windowIndex: Int) {
+        hideGrid()
+        if let entry = listModel.entries.first(where: { $0.id == profileID }),
+           let position = entry.model.tabs.firstIndex(where: { $0.index == windowIndex }) {
+            selectTab(profileID: profileID, index: position)
+        } else {
+            selectRow(profileID)
+        }
+    }
+
+    func addToGrid(profileID: Profile.ID, windowIndex: Int, label: String) {
+        gridStore.add(profileID: profileID, windowIndex: windowIndex, label: label)
+        if listModel.gridSelected { gridView?.reconcile() }
+    }
+
+    /// Bulk convenience: every worktree tab of a workspace into the grid.
+    func addAllWorktreesToGrid(profileID: Profile.ID) {
+        guard let entry = listModel.entries.first(where: { $0.id == profileID }) else { return }
+        for tab in entry.model.tabs where tab.isWorktree {
+            gridStore.add(profileID: profileID, windowIndex: tab.index, label: tab.shownLabel)
+        }
+        if listModel.gridSelected { gridView?.reconcile() }
+    }
+
     /// Select any profile row — running or not. A running, attached profile
     /// mounts its framebuffer; a running-but-detached one reattaches; an
     /// off/suspended one shows its Start card in the stage.
     func selectRow(_ id: Profile.ID) {
+        hideGrid()
         clearDockerDashboard()
         clearVMDashboard()
         selectedID = id
@@ -417,6 +524,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// and turn on the guest's expensive stats/images polling for the duration.
     func showDockerDashboard(_ id: Profile.ID, container: String? = nil) {
         guard let selPane = pane(id) else { return }
+        hideGrid()
         clearVMDashboard()
         if let prev = dockerSelectedID, prev != id, let p = pane(prev) {
             acDelegate?.setDockerWatch(false, in: p)   // hand off watch between VMs
@@ -554,12 +662,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     // MARK: Tab actions (forward to the pane)
 
     func selectTab(profileID id: Profile.ID, index: Int) {
+        hideGrid()
         clearDockerDashboard()
         clearVMDashboard()
         if selectedID != id { select(profileID: id) }
         pane(id)?.switchTo(index: index)
     }
     func newTab(profileID id: Profile.ID) {
+        hideGrid()
         clearDockerDashboard()
         clearVMDashboard()
         if selectedID != id { select(profileID: id) }
@@ -677,6 +787,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
 private struct SessionSidebar: View {
     @Bindable var model: SessionListModel
+    /// Grid membership — drives the pinned Grid node and its children.
+    let gridStore: GridLayoutStore
+    let onSelectGrid: () -> Void
+    let onRemoveGridCell: (String) -> Void
+    let onFocusGridCell: (String) -> Void
+    /// Drop of a `GridDragPayload` string onto the Grid node.
+    let onDropGridPayload: (String) -> Bool
+    let onAddAllToGrid: (Profile.ID) -> Void
     let onSelect: (Profile.ID) -> Void
     let onSelectTab: (Profile.ID, Int) -> Void
     let onNewTab: (Profile.ID) -> Void
@@ -716,6 +834,13 @@ private struct SessionSidebar: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
+                    GridSection(
+                        store: gridStore,
+                        model: model,
+                        onSelect: onSelectGrid,
+                        onRemoveCell: onRemoveGridCell,
+                        onFocusCell: onFocusGridCell,
+                        onDropPayload: onDropGridPayload)
                     ForEach(model.profileRows) { row in
                         VMSection(
                             row: row,
@@ -738,7 +863,8 @@ private struct SessionSidebar: View {
                             onEdit: onEdit,
                             onDuplicate: onDuplicate,
                             onReset: onReset,
-                            onDelete: onDelete)
+                            onDelete: onDelete,
+                            onAddAllToGrid: onAddAllToGrid)
                     }
                 }
                 .padding(.horizontal, 8)
@@ -752,6 +878,124 @@ private struct SessionSidebar: View {
         // Solid (opaque) so the window's transparency for translucent profiles
         // only shows through the framebuffer, never the sidebar.
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+/// Pinned "Grid" node atop the source list: drop target for terminal drags,
+/// expandable to show its members, click to make the grid the stage surface.
+private struct GridSection: View {
+    let store: GridLayoutStore
+    @Bindable var model: SessionListModel
+    let onSelect: () -> Void
+    let onRemoveCell: (String) -> Void
+    let onFocusCell: (String) -> Void
+    let onDropPayload: (String) -> Bool
+
+    @State private var expanded = true
+    @State private var dropTargeted = false
+    @State private var hovering = false
+
+    private func agentStatus(for cell: GridCell) -> AgentStatus? {
+        model.entries.first { $0.id == cell.profileID }?
+            .model.tabs.first { $0.index == cell.windowIndex }?.agentStatus
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 8) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(model.gridSelected ? Color.accentColor : .secondary)
+                    .frame(width: 22)
+                Text("Grid")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .lineLimit(1)
+                if !store.cells.isEmpty {
+                    Text("\(store.cells.count)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.primary.opacity(0.08)))
+                }
+                Spacer()
+                if !store.cells.isEmpty {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() }
+                    } label: {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(model.gridSelected ? Color.accentColor.opacity(0.16)
+                          : dropTargeted ? Color.accentColor.opacity(0.22)
+                          : (hovering ? Color.primary.opacity(0.04) : .clear)))
+            .overlay {
+                if dropTargeted {
+                    RoundedRectangle(cornerRadius: 7)
+                        .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onSelect)
+            .onHover { hovering = $0 }
+            .dropDestination(for: String.self) { items, _ in
+                var accepted = false
+                for item in items where onDropPayload(item) { accepted = true }
+                return accepted
+            } isTargeted: { dropTargeted = $0 }
+            .help(store.cells.isEmpty
+                  ? "Drag terminals here to watch them side by side"
+                  : "Show the terminal grid")
+
+            if expanded, !store.cells.isEmpty {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(store.cells) { cell in
+                        let workspace = model.profileRows.first { $0.id == cell.profileID }
+                        HStack(spacing: 6) {
+                            if let status = agentStatus(for: cell) {
+                                AgentStatusDot(status: status)
+                            } else {
+                                Circle().fill(Color.secondary.opacity(0.35))
+                                    .frame(width: 6, height: 6)
+                            }
+                            Text(workspace?.name ?? "?")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Color(hex: workspace?.accentHex ?? "#888888"))
+                                .lineLimit(1)
+                            Text(cell.label)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.leading, 30)
+                        .padding(.trailing, 8)
+                        .padding(.vertical, 3)
+                        .contentShape(Rectangle())
+                        .onTapGesture { onFocusCell(cell.id) }
+                        .contextMenu {
+                            Button("Remove from Grid") { onRemoveCell(cell.id) }
+                        }
+                    }
+                }
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.10))
+                        .frame(width: 1)
+                        .padding(.leading, 17)
+                        .padding(.vertical, 4)
+                }
+            }
+        }
+        .padding(.bottom, 5)
     }
 }
 
@@ -804,6 +1048,7 @@ private struct VMSection: View {
     let onDuplicate: (Profile.ID) -> Void
     let onReset: (Profile.ID) -> Void
     let onDelete: (Profile.ID) -> Void
+    let onAddAllToGrid: (Profile.ID) -> Void
 
     @State private var hovering = false
 
@@ -856,7 +1101,8 @@ private struct VMSection: View {
                 ControlMenu(row: row,
                             onStart: onStart, onShutdown: onShutdown, onSuspend: onSuspend, onRestart: onRestart,
                             onEdit: onEdit, onDuplicate: onDuplicate,
-                            onReset: onReset, onDelete: onDelete)
+                            onReset: onReset, onDelete: onDelete,
+                            onAddAllToGrid: onAddAllToGrid)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -902,6 +1148,10 @@ private struct VMSection: View {
                                 onSelect: { onSelectTab(row.id, idx) },
                                 onClose: { onCloseTab(row.id, idx) },
                                 onAction: { action in onTabAction(row.id, idx, action) })
+                            // Draggable onto the sidebar's Grid node.
+                            .draggable(GridDragPayload.encode(
+                                profileID: row.id, windowIndex: tab.index,
+                                label: tab.shownLabel))
                         }
                     }
                     DockerSection(
@@ -940,6 +1190,7 @@ private struct ControlMenu: View {
     let onDuplicate: (Profile.ID) -> Void
     let onReset: (Profile.ID) -> Void
     let onDelete: (Profile.ID) -> Void
+    let onAddAllToGrid: (Profile.ID) -> Void
 
     var body: some View {
         Menu {
@@ -952,6 +1203,10 @@ private struct ControlMenu: View {
                 Button("Shutdown") { onShutdown(row.id) }
                 Button("Suspend") { onSuspend(row.id) }
                 Button("Reboot") { onRestart(row.id) }
+            }
+            if row.state == .running {
+                Divider()
+                Button("Add Worktrees to Grid") { onAddAllToGrid(row.id) }
             }
             Divider()
             Button("Edit…") { onEdit(row.id) }
@@ -1326,7 +1581,7 @@ private struct DockerTabRow: View {
 /// Small status dot overlaid on an agent's icon. Orange gently pulses while the
 /// agent is working; green means it finished its turn; red means it's waiting
 /// on the user. A thin ring keeps it legible over any icon/background.
-private struct AgentStatusDot: View {
+struct AgentStatusDot: View {
     let status: AgentStatus
     @State private var pulse = false
 
