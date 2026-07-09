@@ -1196,13 +1196,15 @@ final class ACAutomationServer {
     /// response byte) — the guest can't have run the command, so the caller may
     /// safely retry on another connection. `protocolFailure` is a mid-stream
     /// error — the command may have executed, so don't retry.
-    private enum ShellExecOutcome {
+    enum ShellExecOutcome {
         case success(ACShellExecResult)
         case deadConnection
         case protocolFailure
     }
 
-    private static func executeShellCommand(fd: Int32, command: String, timeout: Int) -> ShellExecOutcome {
+    /// Internal (not private): the file-explorer pane's guest exec reuses this
+    /// exact framed exchange via `ACAppDelegate.guestExec`.
+    static func executeShellCommand(fd: Int32, command: String, timeout: Int) -> ShellExecOutcome {
         let request: [String: Any] = ["cmd": command, "timeout": timeout]
         guard let bodyData = try? JSONSerialization.data(withJSONObject: request) else {
             return .protocolFailure

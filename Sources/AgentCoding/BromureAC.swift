@@ -1365,11 +1365,68 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return UInt16(port)
     }
 
-    /// Per-profile shell bridges, populated when the user enables
-    /// BROMURE_DEBUG_CLAUDE and a session is launched. The
-    /// AutomationServer's `onGetShellConnection` callback reads from
-    /// this map.
+    /// Per-profile shell bridges (vsock 5800), created for every session.
+    /// Consumed by the AutomationServer's `onGetShellConnection` callback,
+    /// `bromure-ac exec`, and `guestExec` (the file-explorer pane).
     private var shellBridges: [Profile.ID: ShellBridge] = [:]
+
+    /// Errors from `guestExec`.
+    enum GuestExecError: LocalizedError {
+        case vmNotRunning
+        case connectionFailed
+        case commandFailed(exitCode: Int, stderr: String)
+        var errorDescription: String? {
+            switch self {
+            case .vmNotRunning: "The VM isn't running"
+            case .connectionFailed: "Couldn't reach the VM's shell agent"
+            case .commandFailed(let code, let stderr):
+                stderr.isEmpty ? "Command failed (exit \(code))"
+                               : stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+    }
+
+    /// Run a shell command in `profileID`'s guest over the vsock shell channel
+    /// and return stdout. Async flavor of the AutomationServer exec route:
+    /// same framed protocol and same stale-pool retry, but the blocking socket
+    /// IO happens off the main actor, and a non-zero exit throws with stderr.
+    /// vsock-only on purpose — keeps working with no virtiofs share mounted
+    /// (the future remote-access case), which is why the file explorer uses it.
+    func guestExec(profileID: Profile.ID, command: String, timeout: Int = 30) async throws -> String {
+        // Wait up to ~3s for a pooled connection (covers boot races) without
+        // blocking the main actor.
+        var connection: VZVirtioSocketConnection?
+        for _ in 0..<30 {
+            guard let bridge = shellBridges[profileID] else { throw GuestExecError.vmNotRunning }
+            if let c = bridge.dequeueConnection() { connection = c; break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        // A dequeued connection can be dead without the pool knowing (stale
+        // sockets from a previous guest boot). A dead socket fails before the
+        // command ever runs, so falling through to the next pooled connection
+        // is safe; a mid-stream failure is NOT retried (it may have executed).
+        for attempt in 0..<4 {
+            guard let conn = connection else { throw GuestExecError.connectionFailed }
+            let fd = conn.fileDescriptor
+            let outcome = await Task.detached(priority: .userInitiated) {
+                ACAutomationServer.executeShellCommand(fd: fd, command: command, timeout: timeout)
+            }.value
+            withExtendedLifetime(conn) {}   // fd must outlive the exchange
+            switch outcome {
+            case .success(let result):
+                guard result.exitCode == 0 else {
+                    throw GuestExecError.commandFailed(exitCode: result.exitCode,
+                                                       stderr: result.stderr)
+                }
+                return result.stdout
+            case .deadConnection:
+                connection = attempt < 3 ? shellBridges[profileID]?.dequeueConnection() : nil
+            case .protocolFailure:
+                throw GuestExecError.connectionFailed
+            }
+        }
+        throw GuestExecError.connectionFailed
+    }
 
     /// Sparkle auto-updater. Retained strongly — if this deallocates,
     /// scheduled update checks stop firing. Initialised in

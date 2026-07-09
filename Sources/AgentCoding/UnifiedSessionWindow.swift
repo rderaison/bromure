@@ -11,9 +11,12 @@ final class NonMovableHostingView<Content: View>: NSHostingView<Content> {
 }
 
 /// Thin invisible strip over the sidebar divider that resizes the sidebar on
-/// drag. Reports the proposed new width (mouse x in its superview's coords).
+/// drag. Reports the proposed new width (mouse x in its superview's coords),
+/// then fires `onResizeEnd` on mouse-up so the final width can be persisted
+/// without writing every intermediate drag position.
 final class SidebarResizeHandle: NSView {
     var onResize: ((CGFloat) -> Void)?
+    var onResizeEnd: (() -> Void)?
     override var mouseDownCanMoveWindow: Bool { false }
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .resizeLeftRight)
@@ -21,6 +24,9 @@ final class SidebarResizeHandle: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard let sv = superview else { return }
         onResize?(sv.convert(event.locationInWindow, from: nil).x)
+    }
+    override func mouseUp(with event: NSEvent) {
+        onResizeEnd?()
     }
 }
 
@@ -75,6 +81,9 @@ final class SessionListModel {
     var gridSelected = false
     /// True when the sidebar is collapsed to the icon rail.
     var sidebarCollapsed = false
+    /// True when the right-hand file-explorer pane is open. Drives the
+    /// toolbar button tint and the pane's own context/polling.
+    var filePaneOpen = false
 }
 
 /// Right-click actions on a tab row. Handled by the window, which reads the
@@ -197,18 +206,38 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private let gridSlot = NSView()
     private var gridView: GridStageView?
 
-    /// Collapsible + resizable sidebar (⌃⌘S / the sidebar's own collapse
-    /// button; drag handle on the divider). Grid mode especially wants the
-    /// full window width.
+    /// Collapsible + resizable sidebar. ⌃⌘S toggles; the divider drag handle
+    /// resizes, collapsing to the rail under `sidebarMinWidth` and expanding
+    /// back past it. Grid mode especially wants the full window width.
     private var sidebarWidthConstraint: NSLayoutConstraint?
     private var sidebarDivider: NSBox?
     private(set) var sidebarCollapsed = false
-    /// Restored on expand from the collapse toggle.
+    /// The preferred (expanded) width: what ⌃⌘S expand restores, and what is
+    /// persisted to defaults. Set at init and at drag-end while expanded.
     private var expandedSidebarWidth: CGFloat = 220
+    /// Below this, a drag collapses to the rail; above it, expands back.
     private static let sidebarMinWidth: CGFloat = 100
     private static let sidebarMaxWidth: CGFloat = 600
     private static let sidebarDefaultWidth: CGFloat = 220
+    private static let sidebarRailWidth: CGFloat = 44
     private static let sidebarWidthKey = "ac.sidebarWidth"
+
+    /// Right-hand file explorer (⌃⌘E / toolbar button; drag its divider under
+    /// the min width to close). Lives INSIDE the stage so the grid/docker/vm
+    /// overlays cover it — it's a main-window-mode surface only. Data comes
+    /// from the guest over the shell vsock (see FileExplorer.swift).
+    let fileExplorerModel = FileExplorerModel()
+    private var filePaneHost: NonMovableHostingView<FileExplorerPane>!
+    private var filePaneWidthConstraint: NSLayoutConstraint?
+    private var filePaneResizeHandle: SidebarResizeHandle?
+    private(set) var filePaneOpen = false
+    /// Preferred width — restored on open, persisted at drag-end.
+    private var expandedFilePaneWidth: CGFloat = 320
+    private static let filePaneMinWidth: CGFloat = 200
+    private static let filePaneMaxWidth: CGFloat = 1000
+    private static let filePaneDefaultWidth: CGFloat = 320
+    private static let filePaneWidthKey = "ac.filePaneWidth"
+    private static let filePaneOpenKey = "ac.filePaneOpen"
 
     init(acDelegate: ACAppDelegate) {
         self.acDelegate = acDelegate
@@ -251,7 +280,6 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 return true
             },
             onAddAllToGrid: { [weak self] id in self?.addAllWorktreesToGrid(profileID: id) },
-            onToggleSidebar: { [weak self] in self?.toggleSidebar(nil) },
             onSelect:    { [weak self] id in self?.selectWorkspaceName(id) },
             onSelectTab: { [weak self] id, idx in self?.selectTab(profileID: id, index: idx) },
             onNewTab:    { [weak self] id in self?.newTab(profileID: id) },
@@ -291,6 +319,24 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         emptyStateHost.translatesAutoresizingMaskIntoConstraints = false
         stage.addSubview(paneSlot)
         stage.addSubview(emptyStateHost)
+        // File-explorer pane (right edge of the stage) + its drag handle.
+        // Added BEFORE the docker/vm/grid overlays so those cover it — the
+        // pane and its resize handle are main-window-mode surfaces only.
+        let explorerPane = FileExplorerPane(model: fileExplorerModel, listModel: listModel)
+        let filePaneHost = NonMovableHostingView(rootView: explorerPane)
+        filePaneHost.translatesAutoresizingMaskIntoConstraints = false
+        filePaneHost.clipsToBounds = true   // squish cleanly during open/close
+        // Our width constraint is the ONLY size authority. By default an
+        // NSHostingView adds a REQUIRED min-width from its SwiftUI content,
+        // which beats the width-0 "closed" constant and leaves a phantom
+        // strip of window (desktop shows through on translucent profiles).
+        filePaneHost.sizingOptions = []
+        self.filePaneHost = filePaneHost
+        stage.addSubview(filePaneHost)
+        let filePaneHandle = SidebarResizeHandle()
+        filePaneHandle.translatesAutoresizingMaskIntoConstraints = false
+        self.filePaneResizeHandle = filePaneHandle
+        stage.addSubview(filePaneHandle)
         // Docker dashboard overlay — added last so it sits above the framebuffer
         // and empty-state. Opaque background so it fully covers the VM behind it.
         dockerSlot.translatesAutoresizingMaskIntoConstraints = false
@@ -322,11 +368,55 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             vmDashboardSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
             vmDashboardSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
         ])
+        // File-pane sizing: restore the persisted width; closed = 0pt + hidden.
+        // High-but-not-required priority so the framebuffer's minimum width
+        // wins over the pane on narrow windows.
+        let fpStored = UserDefaults.standard.double(forKey: Self.filePaneWidthKey)
+        expandedFilePaneWidth = fpStored >= Self.filePaneMinWidth
+            ? fpStored : Self.filePaneDefaultWidth
+        filePaneOpen = UserDefaults.standard.bool(forKey: Self.filePaneOpenKey)
+        listModel.filePaneOpen = filePaneOpen
+        filePaneHost.isHidden = !filePaneOpen
+        filePaneHandle.isHidden = !filePaneOpen
+        let filePaneWidth = filePaneHost.widthAnchor.constraint(
+            equalToConstant: filePaneOpen ? expandedFilePaneWidth : 0)
+        filePaneWidth.priority = .defaultHigh
+        self.filePaneWidthConstraint = filePaneWidth
+        // Same shape as the sidebar handle: proposed width from the mouse x,
+        // measured from the RIGHT edge; under the minimum closes the pane.
+        filePaneHandle.onResize = { [weak self] x in
+            guard let self, self.filePaneOpen else { return }
+            let width = self.stage.bounds.width - x
+            if width < Self.filePaneMinWidth {
+                self.setFilePaneOpen(false, animated: true)
+            } else {
+                self.filePaneWidthConstraint?.constant = min(Self.filePaneMaxWidth, width)
+            }
+        }
+        filePaneHandle.onResizeEnd = { [weak self] in
+            guard let self, self.filePaneOpen,
+                  let w = self.filePaneWidthConstraint?.constant,
+                  w >= Self.filePaneMinWidth else { return }
+            self.expandedFilePaneWidth = w
+            UserDefaults.standard.set(w, forKey: Self.filePaneWidthKey)
+        }
+        let paneSlotMin = paneSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: 240)
+        paneSlotMin.priority = .init(999)   // beats the pane width, yields last
         NSLayoutConstraint.activate([
             paneSlot.topAnchor.constraint(equalTo: stage.topAnchor),
             paneSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
-            paneSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            paneSlot.trailingAnchor.constraint(equalTo: filePaneHost.leadingAnchor),
             paneSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+            paneSlotMin,
+            filePaneHost.topAnchor.constraint(equalTo: stage.topAnchor),
+            filePaneHost.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+            filePaneHost.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            filePaneWidth,
+            // 8pt grab strip over the pane's leading edge, full height.
+            filePaneHandle.centerXAnchor.constraint(equalTo: filePaneHost.leadingAnchor),
+            filePaneHandle.topAnchor.constraint(equalTo: stage.topAnchor),
+            filePaneHandle.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+            filePaneHandle.widthAnchor.constraint(equalToConstant: 8),
             emptyStateHost.topAnchor.constraint(equalTo: paneSlot.topAnchor),
             emptyStateHost.leadingAnchor.constraint(equalTo: paneSlot.leadingAnchor),
             emptyStateHost.trailingAnchor.constraint(equalTo: paneSlot.trailingAnchor),
@@ -345,6 +435,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         sidebarHost.translatesAutoresizingMaskIntoConstraints = false
         let divider = NSBox()
         divider.boxType = .separator
+        // Opaque backing behind the hairline. `separatorColor` has alpha, and
+        // on translucent-profile windows (isOpaque = false, clear background)
+        // this 1pt column would otherwise composite straight onto the desktop
+        // — a see-through slit between the sidebar and the terminal.
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         divider.translatesAutoresizingMaskIntoConstraints = false
         let resizeHandle = SidebarResizeHandle()
         resizeHandle.translatesAutoresizingMaskIntoConstraints = false
@@ -354,14 +450,28 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         root.addSubview(resizeHandle)   // above the divider so it gets the drag
         let stored = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
         let initialWidth = stored >= Self.sidebarMinWidth ? stored : Self.sidebarDefaultWidth
+        expandedSidebarWidth = initialWidth
         let sidebarWidth = sidebarHost.widthAnchor.constraint(equalToConstant: initialWidth)
         self.sidebarWidthConstraint = sidebarWidth
         self.sidebarDivider = divider
         sidebarHost.clipsToBounds = true   // squish cleanly during collapse
+        // Dragging under the minimum snaps to the icon rail; dragging back
+        // past it expands again — the drag handle IS the collapse control.
         resizeHandle.onResize = { [weak self] x in
-            guard let self, !self.sidebarCollapsed else { return }
-            let w = min(Self.sidebarMaxWidth, max(Self.sidebarMinWidth, x))
-            self.sidebarWidthConstraint?.constant = w
+            guard let self else { return }
+            if x < Self.sidebarMinWidth {
+                self.setSidebarCollapsed(true, animated: true)
+            } else {
+                self.setSidebarCollapsed(false, animated: false)
+                self.sidebarWidthConstraint?.constant = min(Self.sidebarMaxWidth, x)
+            }
+        }
+        // Persist the preferred width once, at drag end — never the transient
+        // widths passed through on the way to a collapse.
+        resizeHandle.onResizeEnd = { [weak self] in
+            guard let self, !self.sidebarCollapsed,
+                  let w = self.sidebarWidthConstraint?.constant else { return }
+            self.expandedSidebarWidth = w
             UserDefaults.standard.set(w, forKey: Self.sidebarWidthKey)
         }
         NSLayoutConstraint.activate([
@@ -396,7 +506,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onTrace:     { [weak self] id in if let p = self?.pane(id) { self?.acDelegate?.openTraceInspector(for: p.profile) } },
             onSettings:  { [weak self] id in if let p = self?.pane(id) { self?.acDelegate?.openEditorWindow(editing: p.profile) } },
             onDetach:    { [weak self] id in self?.acDelegate?.popOutVM(id) },
-            onToggleFusion: { [weak self] id, on in if let p = self?.pane(id) { self?.acDelegate?.setFusionEngaged(on, for: p.profile) } })
+            onToggleFusion: { [weak self] id, on in if let p = self?.pane(id) { self?.acDelegate?.setFusionEngaged(on, for: p.profile) } },
+            onToggleFilePane: { [weak self] in self?.toggleFilePane(nil) })
         let tbDelegate = UnifiedToolbarDelegate(rootView: toolbarBar)
         self.toolbarDelegate = tbDelegate
         let bar = NSToolbar(identifier: "io.bromure.ac.unified")
@@ -407,7 +518,52 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         toolbarStyle = .unified
         self.toolbar = bar
 
+        // The file explorer's queries run in the selected VM's guest over the
+        // shell vsock — never the virtio share (remote-access friendly).
+        fileExplorerModel.execProvider = { [weak self] id, command, timeout in
+            guard let delegate = self?.acDelegate else {
+                throw ACAppDelegate.GuestExecError.vmNotRunning
+            }
+            return try await delegate.guestExec(profileID: id, command: command,
+                                                timeout: timeout)
+        }
+
         updateEmptyState()
+    }
+
+    // MARK: File-explorer pane
+
+    /// ⌃⌘E / the toolbar's sidebar.right button.
+    @objc func toggleFilePane(_ sender: Any?) {
+        setFilePaneOpen(!filePaneOpen, animated: true)
+    }
+
+    /// Open/close the right file pane. Closed = width 0 and hidden (no rail);
+    /// drag-to-close under the min width lands here too. Open state persists
+    /// so the pane comes back after an app restart.
+    func setFilePaneOpen(_ open: Bool, animated: Bool) {
+        guard open != filePaneOpen else { return }
+        filePaneOpen = open
+        listModel.filePaneOpen = open
+        UserDefaults.standard.set(open, forKey: Self.filePaneOpenKey)
+        filePaneResizeHandle?.isHidden = !open
+        if open { filePaneHost.isHidden = false }
+        let target = open ? expandedFilePaneWidth : 0
+        let hideWhenClosed: () -> Void = { [weak self] in
+            guard let self, !self.filePaneOpen else { return }
+            self.filePaneHost.isHidden = true
+        }
+        if animated {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.18
+                ctx.allowsImplicitAnimation = true
+                filePaneWidthConstraint?.animator().constant = target
+                contentView?.layoutSubtreeIfNeeded()
+            }, completionHandler: hideWhenClosed)
+        } else {
+            filePaneWidthConstraint?.constant = target
+            hideWhenClosed()
+        }
     }
 
     // MARK: Hosting
@@ -467,22 +623,33 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     // MARK: Sidebar collapse
 
-    /// ⌃⌘S / the sidebar's collapse button. Collapsed = a 44pt icon rail (one icon per
-    /// terminal, separators between workspaces) so the stage — especially
-    /// the grid — gets nearly the full width without losing navigation.
+    /// ⌃⌘S. Collapsed = a 44pt icon rail (one icon per terminal, separators
+    /// between workspaces) so the stage — especially the grid — gets nearly
+    /// the full width without losing navigation.
     @objc func toggleSidebar(_ sender: Any?) {
-        sidebarCollapsed.toggle()
-        // Remember the resized width to restore on expand.
-        if sidebarCollapsed, let c = sidebarWidthConstraint?.constant, c > 44 {
-            expandedSidebarWidth = c
-        }
-        listModel.sidebarCollapsed = sidebarCollapsed   // SwiftUI swaps to the rail
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            ctx.allowsImplicitAnimation = true
-            sidebarWidthConstraint?.animator().constant =
-                sidebarCollapsed ? 44 : expandedSidebarWidth
-            contentView?.layoutSubtreeIfNeeded()
+        setSidebarCollapsed(!sidebarCollapsed, animated: true)
+    }
+
+    /// Collapse/expand — animated from ⌃⌘S, immediate when the drag handle
+    /// crosses the width threshold (the cursor is already mid-motion, so a
+    /// snap tracks better than an animation). `expandedSidebarWidth` is NOT
+    /// captured here: it's maintained at init and drag-end only, so a
+    /// drag-to-collapse can't overwrite the preferred width with the ~100pt
+    /// value it passed through on the way down.
+    func setSidebarCollapsed(_ collapsed: Bool, animated: Bool) {
+        guard collapsed != sidebarCollapsed else { return }
+        sidebarCollapsed = collapsed
+        listModel.sidebarCollapsed = collapsed   // SwiftUI swaps to the rail
+        let target = collapsed ? Self.sidebarRailWidth : expandedSidebarWidth
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.allowsImplicitAnimation = true
+                sidebarWidthConstraint?.animator().constant = target
+                contentView?.layoutSubtreeIfNeeded()
+            }
+        } else {
+            sidebarWidthConstraint?.constant = target
         }
     }
 
@@ -859,10 +1026,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     override func sendEvent(_ event: NSEvent) {
         // ⌃⌘S — hide/show the sidebar (classic macOS chord).
+        // ⌃⌘E — hide/show the file-explorer pane.
         if event.type == .keyDown,
            event.modifierFlags.contains([.command, .control]),
-           event.charactersIgnoringModifiers?.lowercased() == "s" {
-            toggleSidebar(nil)
+           let chord = event.charactersIgnoringModifiers?.lowercased(),
+           chord == "s" || chord == "e" {
+            if chord == "s" { toggleSidebar(nil) } else { toggleFilePane(nil) }
             return
         }
         if event.type == .keyDown, handleACShortcut(event) { return }
@@ -887,8 +1056,6 @@ private struct SessionSidebar: View {
     /// Drop of a `GridDragPayload` string onto the Grid node.
     let onDropGridPayload: (String) -> Bool
     let onAddAllToGrid: (Profile.ID) -> Void
-    /// Collapse/expand the sidebar (the rail ↔ full toggle).
-    let onToggleSidebar: () -> Void
     let onSelect: (Profile.ID) -> Void
     let onSelectTab: (Profile.ID, Int) -> Void
     let onNewTab: (Profile.ID) -> Void
@@ -914,7 +1081,6 @@ private struct SessionSidebar: View {
     var body: some View {
         if model.sidebarCollapsed {
             CompactRail(model: model,
-                        onToggle: onToggleSidebar,
                         onSelectGrid: onSelectGrid,
                         onSelectTab: onSelectTab)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -933,13 +1099,6 @@ private struct SessionSidebar: View {
                     .textCase(.uppercase)
                     .tracking(0.7)
                 Spacer()
-                Button(action: onToggleSidebar) {
-                    Image(systemName: "sidebar.left")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Collapse the sidebar (⌃⌘S)")
             }
             .padding(.leading, 16)
             .padding(.trailing, 12)
@@ -997,25 +1156,16 @@ private struct SessionSidebar: View {
 
 /// Collapsed sidebar: a flat icon rail — the Grid button, then one icon per
 /// terminal (status dot riding it), workspaces separated by thin dividers.
-/// No nesting, no names; tooltips carry the full context.
+/// No nesting, no names; tooltips carry the full context. Expand by dragging
+/// the divider past the width threshold, or ⌃⌘S.
 private struct CompactRail: View {
     @Bindable var model: SessionListModel
-    let onToggle: () -> Void
     let onSelectGrid: () -> Void
     let onSelectTab: (Profile.ID, Int) -> Void
 
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 5) {
-                Button(action: onToggle) {
-                    Image(systemName: "sidebar.left")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 30, height: 24)
-                }
-                .buttonStyle(.plain)
-                .help("Expand the sidebar (⌃⌘S)")
-
                 Button(action: onSelectGrid) {
                     Image(systemName: "square.grid.2x2")
                         .font(.system(size: 13, weight: .semibold))
@@ -1924,6 +2074,7 @@ struct UnifiedToolbarBar: View {
     let onSettings: (Profile.ID) -> Void
     let onDetach: (Profile.ID) -> Void
     let onToggleFusion: (Profile.ID, Bool) -> Void
+    let onToggleFilePane: () -> Void
 
     private var entry: SessionListModel.VMEntry? {
         model.entries.first { $0.id == model.selectedID }
@@ -1942,6 +2093,8 @@ struct UnifiedToolbarBar: View {
                 HeaderIcon(system: "doc.text.magnifyingglass", help: "Inspect trace (⇧⌘I)") { onTrace(entry.id) }
                 HeaderIcon(system: "gearshape", help: "Edit workspace") { onSettings(entry.id) }
                 HeaderIcon(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") { onDetach(entry.id) }
+                HeaderIcon(system: "sidebar.right", help: "Show or hide repo files (⌃⌘E)",
+                           active: model.filePaneOpen) { onToggleFilePane() }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
@@ -1975,13 +2128,16 @@ private struct ToolbarIP: View {
 private struct HeaderIcon: View {
     let system: String
     let help: String
+    /// Tinted accent while the surface the button controls is showing.
+    var active = false
     let action: () -> Void
     @State private var hovering = false
     var body: some View {
         Button(action: action) {
             Image(systemName: system)
                 .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(active ? AnyShapeStyle(Color.accentColor)
+                                        : AnyShapeStyle(.secondary))
                 .frame(width: 26, height: 24)
                 .background(hovering ? Color.primary.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 6))
                 .contentShape(Rectangle())
