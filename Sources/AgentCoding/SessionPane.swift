@@ -3,35 +3,6 @@ import SandboxEngine
 import SwiftUI
 @preconcurrency import Virtualization
 
-// MARK: - Framebuffer view
-
-/// `VZVirtualMachineView` that never lets a drag move the host window. The
-/// unified / pop-out windows are `isMovableByWindowBackground` (so empty
-/// toolbar areas drag the window), but `VZVirtualMachineView` defaults
-/// `mouseDownCanMoveWindow` to `true` — which means a drag inside the
-/// framebuffer would move the window instead of selecting text in the guest.
-/// Returning `false` hands the drag to the VM (text selection, drag-to-select)
-/// while the toolbar still drags. Only the titlebar/toolbar moves the window.
-final class FramebufferView: VZVirtualMachineView {
-    override var mouseDownCanMoveWindow: Bool { false }
-
-    /// When connected, the host owns the wheel: scroll deltas are routed to
-    /// the guest's tmux scrollback instead of being injected as VZ wheel
-    /// events (which kitty would turn into arrow keys — see `ScrollBridge`).
-    weak var scrollBridge: ScrollBridge?
-
-    override func scrollWheel(with event: NSEvent) {
-        if let bridge = scrollBridge, bridge.isConnected {
-            // Consume it: do NOT call super, so VZ never injects a wheel event
-            // into the guest. That's what kills the arrow-keys-through-history
-            // behavior. The guest scrolls tmux's history out-of-band instead.
-            bridge.handleScroll(deltaY: event.scrollingDeltaY)
-            return
-        }
-        super.scrollWheel(with: event)
-    }
-}
-
 // MARK: - Pane host
 
 /// The window currently displaying a `SessionPane`. A pane is host-agnostic —
@@ -78,14 +49,9 @@ final class SessionPane {
     /// `containerView`; cleared on detach.
     weak var host: SessionPaneHost?
 
-    /// The single shared VM display — every tmux window for this VM renders
-    /// into this view because they all live in the same X session.
-    let vmView: VZVirtualMachineView
-
-    /// Wraps `vmView` so we can toggle decorations (the suspended-VM tint, the
-    /// window-opacity blend) without touching the VZ view's own layer — poking
-    /// VZVirtualMachineView's `wantsLayer`/`layer.opacity` has been observed to
-    /// crash AppKit's window transform animator. A host embeds *this* view.
+    /// The pane's display: hosts the active tab's native terminal surface
+    /// plus decorations (suspended tint, the window-opacity blend). A host
+    /// window embeds *this* view.
     let containerView: NSView
 
     /// Red translucent overlay over the framebuffer while the VM is paused for
@@ -107,17 +73,6 @@ final class SessionPane {
     /// `runningSessions` registry — this is a borrow that drops on detach while
     /// the registry keeps the VM alive (the persistent-agent model).
     var sandbox: UbuntuSandboxVM?
-
-    /// Keyboard-layout bridge that ferries macOS layout changes into the
-    /// guest's setxkbmap. nil when no socket device is available yet.
-    var keyboardBridge: KeyboardBridge?
-
-    /// Routes trackpad/wheel scroll to the guest's tmux scrollback. Held here
-    /// so it outlives the call that creates it; also wired into the
-    /// framebuffer view so its `scrollWheel` override can reach it.
-    var scrollBridge: ScrollBridge? {
-        didSet { (vmView as? FramebufferView)?.scrollBridge = scrollBridge }
-    }
 
     /// What the close pipeline resolved from the profile's `closeAction` (`.ask`
     /// turned into a prompt). nil for a programmatic close (compromise /
@@ -147,38 +102,17 @@ final class SessionPane {
         self.profile = profile
         self.acDelegate = acDelegate
 
-        let view = FramebufferView()
-        // capturesSystemKeys = false → macOS handles ⌘Tab/⌘H/⌘Space/⌘Q at the
-        // WindowServer level instead of routing them to the guest. We lose
-        // F-key forwarding but agent-coding workflows almost never use them and
-        // ⌘Tab is constant — the right trade-off.
-        view.capturesSystemKeys = false
-        view.automaticallyReconfiguresDisplay = true
-        self.vmView = view
-
         let container = NSView()
         self.containerView = container
         model.accentHex = profile.color.hexInUI
 
-        // Wrap the VZ view in a plain NSView container. We apply the user's
-        // opacity to the *container's* layer, not the VZ view itself — touching
-        // VZVirtualMachineView's own layer.opacity has been observed to crash
-        // AppKit's window transform animator. The container takes the layer
-        // alpha cleanly; the framebuffer renders at full opacity and inherits
-        // the alpha when composited.
+        // The container carries the user's opacity on its own layer; the
+        // terminal surface renders at full opacity and inherits the alpha
+        // when composited.
         container.wantsLayer = true
         container.layer?.backgroundColor = .clear
-        view.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(view)
-        NSLayoutConstraint.activate([
-            view.topAnchor.constraint(equalTo: container.topAnchor),
-            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-        ])
-        // Tint overlay sits ABOVE the VZ view so it composites on top of the
-        // framebuffer. Hidden by default; the compromise handler reveals it the
-        // moment the VM is paused.
+        // Tint overlay sits ABOVE the terminal surface. Hidden by default;
+        // the compromise handler reveals it the moment the VM is paused.
         container.addSubview(suspendedTintView)
         NSLayoutConstraint.activate([
             suspendedTintView.topAnchor.constraint(equalTo: container.topAnchor),
@@ -198,18 +132,15 @@ final class SessionPane {
         suspendedTintView.isHidden = !on
     }
 
-    // MARK: Native terminal (experimental)
+    // MARK: Native terminal (the pane's display)
 
-    /// Per-tab libghostty surfaces; created on first use when the profile's
-    /// `nativeTerminal` toggle is on. nil in framebuffer mode.
+    /// Per-tab libghostty surfaces; created on first use.
     private(set) var terminalController: TerminalSessionController?
-    /// The surface currently mounted over the framebuffer (the active tab's).
+    /// The surface currently mounted (the active tab's).
     private var mountedTerminalView: TerminalSurfaceView?
 
-    var usesNativeTerminal: Bool { profile.nativeTerminal }
-
     /// What a host should focus when this pane mounts.
-    var preferredFirstResponder: NSView { mountedTerminalView ?? vmView }
+    var preferredFirstResponder: NSView { mountedTerminalView ?? containerView }
 
     /// Mount (or swap to) the native surface for the active tab; unmount in
     /// framebuffer mode. The framebuffer keeps running *behind* the surface —
@@ -217,16 +148,6 @@ final class SessionPane {
     /// toggle safe to flip live. Falls back to the framebuffer silently if
     /// libghostty is unavailable.
     func updateNativeTerminalMount() {
-        guard usesNativeTerminal else {
-            if let v = mountedTerminalView {
-                v.removeFromSuperview()
-                mountedTerminalView = nil
-                terminalController?.retireAll()
-                terminalController = nil
-                vmView.isHidden = false
-            }
-            return
-        }
         guard model.tabs.indices.contains(model.activeIndex) else { return }
         let windowIndex = model.tabs[model.activeIndex].index
         if terminalController == nil {
@@ -244,7 +165,6 @@ final class SessionPane {
             view.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
             view.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
         ])
-        vmView.isHidden = true
         containerView.window?.makeFirstResponder(view)
     }
 
@@ -254,19 +174,18 @@ final class SessionPane {
         mountedTerminalView = nil
         terminalController?.retireAll()
         terminalController = nil
-        vmView.isHidden = false
     }
 
     /// Re-bind `profile` to a freshly-saved version and re-apply the pane-side
-    /// state that depends on it (accent, framebuffer opacity). The host updates
-    /// window-level chrome via `paneDidUpdateProfile`.
+    /// state that depends on it (accent, opacity, terminal appearance). The
+    /// host updates window-level chrome via `paneDidUpdateProfile`.
     func applyLiveProfileUpdates(_ newProfile: Profile) {
         profile = newProfile
         model.accentHex = newProfile.color.hexInUI
         let opacity = min(1.0, max(0.3, newProfile.windowOpacity))
         containerView.layer?.opacity = Float(opacity)
         terminalController?.applyProfile(newProfile)   // live appearance update
-        updateNativeTerminalMount()   // nativeTerminal toggle may have flipped
+        updateNativeTerminalMount()
         host?.paneDidUpdateProfile(self)
     }
 
@@ -382,12 +301,10 @@ final class SessionPane {
         if model.activeIndex >= model.tabs.count {
             model.activeIndex = max(0, model.tabs.count - 1)
         }
-        if usesNativeTerminal {
-            // Windows tmux no longer reports are gone for good — drop their
-            // surfaces; then make sure the active tab has a live surface.
-            terminalController?.retire(windowsNotIn: Set(tabs.map(\.index)))
-            updateNativeTerminalMount()
-        }
+        // Windows tmux no longer reports are gone for good — drop their
+        // surfaces; then make sure the active tab has a live surface.
+        terminalController?.retire(windowsNotIn: Set(tabs.map(\.index)))
+        updateNativeTerminalMount()
     }
 
     /// Last per-container CPU/mem from `docker stats`, kept so a fresh container
@@ -472,22 +389,10 @@ final class SessionPane {
         if changed { model.dockerContainers = containers }
     }
 
-    /// True when the host window is key AND the embedded VZ view holds keyboard
-    /// focus — i.e. a keystroke is being delivered into the guest. In that state
-    /// host-owned chords (⌘T/⌘W/⌘N/⌘1-9) must NOT be acted on by the host key
-    /// monitor / `sendEvent`: the chord reaches the guest, Openbox grabs it, and
-    /// the bounce (`UbuntuSandboxVM.onShortcut` → `performACShortcut`) runs the
-    /// action. Acting in BOTH places double-processes one press.
-    var vmHasKeyboardFocus: Bool {
-        guard let window = host?.paneHostWindow, window.isKeyWindow,
-              let fr = window.firstResponder as? NSView else { return false }
-        return fr === vmView || fr.isDescendant(of: vmView)
-    }
-
-    /// Run a host-owned keychord by its bare key ("t"/"w"/"n"/"1"…"9"). Single
-    /// sink shared by BOTH delivery routes (native-focus key monitor and the
-    /// guest bounce), so the ⌘T action can't drift between paths. Returns true
-    /// when the key matched (and the event, if any, should be consumed).
+    /// Run a host-owned keychord by its bare key ("t"/"w"/"n"/"1"…"9").
+    /// Single sink for every delivery route so the ⌘T action can't drift
+    /// between paths. Returns true when the key matched (and the event, if
+    /// any, should be consumed).
     @discardableResult
     func performACShortcut(_ key: String, isRepeat: Bool = false) -> Bool {
         let fire = !isRepeat && acAutorepeatGuard(key)

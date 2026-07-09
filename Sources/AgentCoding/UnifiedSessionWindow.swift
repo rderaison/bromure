@@ -791,7 +791,6 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let userMods: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
         guard event.modifierFlags.intersection(userMods) == [.command] else { return false }
         guard let pane = selectedPane() else { return false }
-        if pane.vmHasKeyboardFocus { return false }
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
         return pane.performACShortcut(chars, isRepeat: event.isARepeat)
     }

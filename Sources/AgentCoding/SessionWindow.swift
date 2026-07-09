@@ -277,18 +277,9 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
         set { pane.profile = newValue }
     }
     var model: TabsModel { pane.model }
-    var vmView: VZVirtualMachineView { pane.vmView }
     var sandbox: UbuntuSandboxVM? {
         get { pane.sandbox }
         set { pane.sandbox = newValue }
-    }
-    var keyboardBridge: KeyboardBridge? {
-        get { pane.keyboardBridge }
-        set { pane.keyboardBridge = newValue }
-    }
-    var scrollBridge: ScrollBridge? {
-        get { pane.scrollBridge }
-        set { pane.scrollBridge = newValue }
     }
     var closeIntent: Profile.CloseAction? {
         get { pane.closeIntent }
@@ -298,8 +289,6 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
         get { pane.rebootRequested }
         set { pane.rebootRequested = newValue }
     }
-    var vmHasKeyboardFocus: Bool { pane.vmHasKeyboardFocus }
-
     func setSuspendedTint(_ on: Bool) { pane.setSuspendedTint(on) }
     func applyLiveProfileUpdates(_ newProfile: Profile) { pane.applyLiveProfileUpdates(newProfile) }
     func rehydrateTabs(from state: SessionDisk.TabsState) { pane.rehydrateTabs(from: state) }
@@ -442,16 +431,13 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
     // MARK: - Shortcut interception
 
     /// ⌘T / ⌘W / ⌘1-9 / ⌘N dispatch for `sendEvent`, `performKeyEquivalent` and
-    /// the app delegate's NSEvent monitor (the native-focus path; the VM-focus
-    /// path comes through the guest bounce → `pane.performACShortcut`). Returns
-    /// true when the shortcut matched and the event should be consumed.
+    /// the app delegate's NSEvent monitor. Host-owned chords are intercepted
+    /// before the terminal surface sees them. Returns true when the shortcut
+    /// matched and the event should be consumed.
     func handleACShortcut(_ event: NSEvent) -> Bool {
         let userMods: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
         let mods = event.modifierFlags.intersection(userMods)
         guard mods == [.command] else { return false }
-        // VM has focus → the chord reaches the guest and comes back via the
-        // bounce. Don't also act here.
-        if pane.vmHasKeyboardFocus { return false }
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
         return pane.performACShortcut(chars, isRepeat: event.isARepeat)
     }

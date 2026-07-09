@@ -128,16 +128,6 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// is pulling/starting — (state, image, done, total). state is "" when idle.
     public var onDockerRunStatus: (((state: String, image: String, done: Int, total: Int)) -> Void)?
 
-    /// Called when the guest bounces a host-owned keychord (⌘T/⌘W/⌘N/⌘1-9)
-    /// back to the host. While the VM holds keyboard focus the VZ view
-    /// forwards every chord to the guest before AppKit can intercept it, so
-    /// Openbox in the guest globally grabs these chords (consuming them so
-    /// kitty never acts) and drops a `shortcut-<key>.txt` marker in the
-    /// outbox. The value is the bare key ("t", "w", "n", "1"…"9"). Wire to
-    /// the same action the host key monitor runs — the two paths are mutually
-    /// exclusive by focus, so a single press fires exactly one of them.
-    public var onShortcut: ((String) -> Void)?
-
     /// Fired when the guest signals it's going down for a *reboot* (the guest
     /// writes a `reboot-intent` marker before halting). Lets the host relaunch
     /// the VM in place instead of tearing the session down — a guest `reboot`
@@ -307,12 +297,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
 
         config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
 
-        // Graphics + input.
-        let gpu = VZVirtioGraphicsDeviceConfiguration()
-        gpu.scanouts = [VZVirtioGraphicsScanoutConfiguration(widthInPixels: 1920, heightInPixels: 1200)]
-        config.graphicsDevices = [gpu]
-        config.keyboards = [VZUSBKeyboardConfiguration()]
-        config.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
+        // No graphics or USB input devices: the terminal renders host-side
+        // (libghostty over the vsock pty pump) and keystrokes travel as
+        // bytes, not HID events. X11/kitty stay on the image's disk but
+        // nothing starts them (plan phase 3).
 
         // Serial console: tee guest stdout to host stderr so we can see boot.
         let serialIn = Pipe()
@@ -328,18 +316,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             if !data.isEmpty { FileHandle.standardError.write(data) }
         }
 
-        // SPICE console for clipboard sharing. VZ syncs the host's
-        // NSPasteboard with the guest's selection clipboard automatically;
-        // the guest just needs spice-vdagent running (apt-installed in
-        // setup.sh, auto-started by systemd).
-        let spiceConsole = VZVirtioConsoleDeviceConfiguration()
-        let spicePort = VZVirtioConsolePortConfiguration()
-        spicePort.name = VZSpiceAgentPortAttachment.spiceAgentPortName
-        let spiceAttachment = VZSpiceAgentPortAttachment()
-        spiceAttachment.sharesClipboard = true
-        spicePort.attachment = spiceAttachment
-        spiceConsole.ports[0] = spicePort
-        config.consoleDevices.append(spiceConsole)
+        // (SPICE clipboard console removed with the framebuffer: clipboard
+        // now flows through the terminal surfaces — OSC 52 out of tmux,
+        // bracketed paste in.)
 
         // Virtiofs shares: project (user's folder) + bromure-meta (env, ssh).
         // Both tags are referenced by /etc/fstab in the base image so they
@@ -510,32 +489,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         outboxPollTask?.cancel()
         outboxPollTask = Task { @MainActor [weak self] in
             let fm = FileManager.default
-            // One task, two cadences. Host-owned keychords (⌘T/⌘W/⌘N/⌘1-9)
-            // that the guest bounced are drained every tick (~40ms) so the pill
-            // appears the instant the chord lands — routing them through the
-            // 500ms heavy cadence is what made ⌘T feel sluggish. Everything else
-            // in the outbox (ip / url relay / titles / roster) is latency-
-            // tolerant and stays on the ~480ms cadence via the tick gate below.
+            // One task, two cadences. The reboot-intent marker is drained
+            // every tick (~40ms); everything else in the outbox (ip / url
+            // relay / titles / roster) is latency-tolerant and stays on the
+            // ~480ms cadence via the tick gate below.
             var ticks = 0
             while !Task.isCancelled {
-                // FAST PATH — shortcut-<key>.txt: a host-owned chord Openbox
-                // grabbed in the guest and bounced back while the VM held
-                // keyboard focus. Fixed filename per key, so a held chord's
-                // autorepeat just overwrites it; we delete on read and the sink
-                // (performACShortcut) collapses what's left. Body is empty —
-                // the key is in the filename.
-                if let entries = try? fm.contentsOfDirectory(
-                    at: outbox, includingPropertiesForKeys: nil) {
-                    for entry in entries
-                    where entry.lastPathComponent.hasPrefix("shortcut-") {
-                        try? fm.removeItem(at: entry)
-                        let key = entry.lastPathComponent
-                            .replacingOccurrences(of: "shortcut-", with: "")
-                            .replacingOccurrences(of: ".txt", with: "")
-                        if !key.isEmpty { self?.onShortcut?(key) }
-                    }
-                }
-
                 // FAST PATH — reboot-intent: the guest is going down for a
                 // reboot (systemd reboot.target), not a user-closed session.
                 // Drained on the fast tick so the host flags the reboot BEFORE

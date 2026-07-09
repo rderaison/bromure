@@ -479,10 +479,9 @@ struct ProfileEditorView: View {
             }
             .pickerStyle(.menu)
 
-            keyboardLayoutPicker
-
-            keyRepeatDelayRow
-            keyRepeatRateRow
+            // (Keyboard layout / key-repeat rows removed with the
+            // framebuffer: the native terminal path uses macOS input
+            // directly, so there is no guest X keymap to configure.)
 
             closeActionPicker
 
@@ -505,65 +504,6 @@ struct ProfileEditorView: View {
                selection: $draft.closeAction) {
             ForEach(Profile.CloseAction.allCases, id: \.self) { action in
                 Text(action.displayName).tag(action)
-            }
-        }
-        .pickerStyle(.menu)
-    }
-
-    /// Pre-filled with the host's current macOS value. If the user
-    /// types a different number we save it as an explicit override; if
-    /// they restore the macOS value we save nil so the profile keeps
-    /// tracking macOS live.
-    @ViewBuilder
-    private var keyRepeatDelayRow: some View {
-        LabeledContent(NSLocalizedString("Key repeat delay", comment: "")) {
-            HStack(spacing: 6) {
-                TextField("",
-                          value: Binding(
-                            get: { draft.keyRepeatDelayMs ?? hostKeyRepeat.delayMs },
-                            set: { draft.keyRepeatDelayMs = ($0 == hostKeyRepeat.delayMs) ? nil : $0 }),
-                          format: .number)
-                    .frame(width: 64)
-                    .multilineTextAlignment(.trailing)
-                    .textFieldStyle(.roundedBorder)
-                Text("ms").foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var keyRepeatRateRow: some View {
-        LabeledContent(NSLocalizedString("Key repeat rate", comment: "")) {
-            HStack(spacing: 6) {
-                TextField("",
-                          value: Binding(
-                            get: { draft.keyRepeatRateHz ?? hostKeyRepeat.rateHz },
-                            set: { draft.keyRepeatRateHz = ($0 == hostKeyRepeat.rateHz) ? nil : $0 }),
-                          format: .number)
-                    .frame(width: 64)
-                    .multilineTextAlignment(.trailing)
-                    .textFieldStyle(.roundedBorder)
-                Text("Hz").foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    /// "Auto" follows the macOS keyboard input source live (the same
-    /// dynamic-match behaviour Bromure Web uses); selecting any other
-    /// entry pins the VM to that XKB layout regardless of host state.
-    @ViewBuilder
-    private var keyboardLayoutPicker: some View {
-        let autoTag = "__auto__"
-        let binding = Binding<String>(
-            get: { draft.keyboardLayoutOverride ?? autoTag },
-            set: { draft.keyboardLayoutOverride = ($0 == autoTag) ? nil : $0 }
-        )
-        Picker(NSLocalizedString("Keyboard layout", comment: ""), selection: binding) {
-            Text(NSLocalizedString("Auto (match macOS)", comment: ""))
-                .tag(autoTag)
-            Divider()
-            ForEach(VMConfig.commonKeyboardLayouts, id: \.value) { layout in
-                Text(layout.label).tag(layout.value)
             }
         }
         .pickerStyle(.menu)
@@ -2116,22 +2056,6 @@ struct ProfileEditorView: View {
 
             Divider()
 
-            // Display: native terminal (default) vs legacy framebuffer.
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Display")
-                    .font(.headline)
-                Toggle(isOn: $draft.nativeTerminal) {
-                    Text("Native terminal")
-                }
-                Text("Crisp host-side rendering with native copy/paste, "
-                     + "scrolling and the Grid. Uncheck for the legacy VM "
-                     + "framebuffer display; both show the same tmux "
-                     + "session, so switching back is always safe.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
 
             // Network
             VStack(alignment: .leading, spacing: 6) {

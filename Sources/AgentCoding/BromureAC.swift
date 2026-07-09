@@ -429,9 +429,7 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                     keyEquivalent: "q")
 
     // Workspaces menu — before Edit. Acts on the unified window's selected
-    // workspace + active tab. Its ⇧⌘N / ⇧⌘G / ⇧⌘M equivalents also arrive from
-    // the VM: Openbox grabs W-S-n/g/m and bounces them to `onShortcut`, which
-    // routes to these same actions (see performACSystemChord).
+    // workspace + active tab.
     let wsMenuItem = NSMenuItem()
     main.addItem(wsMenuItem)
     let wsMenu = NSMenu(title: L("Workspaces"))
@@ -738,9 +736,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if runningSessions[id] != nil {
             runningSessions[id]?.lastTabsSnapshot = pane.snapshotTabs()
         }
-        pane.vmView.virtualMachine = nil
-        pane.keyboardBridge = nil
-        pane.scrollBridge = nil
         pane.sandbox = nil
         if let unified = pane.host as? UnifiedSessionWindow {
             unified.removePane(id)
@@ -1154,33 +1149,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         acResourceBundle.url(forResource: "vm-setup/bromure-vm-bridge",
                              withExtension: "py")
     }()
-
-    /// SPM-resource-bundle path to the in-VM keyboard agent. Pushed
-    /// into the meta share so xinitrc can launch it; the host-side
-    /// `KeyboardBridge` then ferries macOS layout changes to it.
-    lazy var keyboardAgentURL: URL? = {
-        acResourceBundle.url(forResource: "vm-setup/keyboard-agent",
-                             withExtension: "py")
-    }()
-
-    /// SPM-resource-bundle path to the in-VM scroll agent. Same
-    /// pattern: dropped in the meta share, launched from xinitrc,
-    /// fed by the host-side `ScrollBridge`.
-    private lazy var scrollAgentURL: URL? = {
-        acResourceBundle.url(forResource: "vm-setup/scroll-agent",
-                             withExtension: "py")
-    }()
-
-    /// Build a `ScrollBridge` for a freshly-bound pane, honoring the
-    /// `vm.terminalScroll` kill switch (default on). nil → fall back to VZ's
-    /// native wheel path. Shared by every pane-binding site (warm boot,
-    /// reattach, reboot) so the behavior can't drift between them.
-    @MainActor private func makeScrollBridge(for sandbox: UbuntuSandboxVM) -> ScrollBridge? {
-        guard let dev = sandbox.socketDevice,
-              UserDefaults.standard.object(forKey: "vm.terminalScroll") as? Bool ?? true
-        else { return nil }
-        return ScrollBridge(socketDevice: dev)
-    }
 
     /// SPM-resource-bundle path to the AWS `credential_process` helper.
     /// Shipped to /mnt/bromure-meta and referenced from the per-profile
@@ -2571,17 +2539,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         // Find the owning session window. keyWindow first, then any visible
-        // session — mirrors the Browser monitor's keyWindow fallback so we
-        // still own the chord when the VZ view has grabbed focus and AppKit
-        // hands us a keyDown with a nil/foreign event.window.
-        //
-        // NOTE: this monitor is only ONE of the two routes for host-owned
-        // chords. When the VM holds keyboard focus the VZ view forwards the
-        // chord to the guest before AppKit dispatches keyDown, so this monitor
-        // typically never fires for it — Openbox grabs it in the guest and
-        // bounces it back via UbuntuSandboxVM.onShortcut instead. This path
-        // covers the other case: a native control in the session window holds
-        // focus. Both funnel into win.performACShortcut, which debounces.
+        // session — keeps the chord working when AppKit hands us a keyDown
+        // with a nil/foreign event.window.
         let sessions = NSApp.windows.compactMap { $0 as? TabbedSessionWindow }
         let win = (NSApp.keyWindow as? TabbedSessionWindow)
             ?? sessions.first(where: { $0.isVisible })
@@ -2595,18 +2554,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return event
         }
 
-        // When the VM holds keyboard focus, DON'T act here: the chord reaches
-        // the guest, Openbox grabs it, and it bounces back via onShortcut →
-        // performACShortcut. Acting here too would double-process one press
-        // (⌘T → two kittys racing on X startup, ⌘W → two tabs closed) — the
-        // bounce's up-to-500ms poll latency is longer than performACShortcut's
-        // debounce, so the debounce alone can't dedupe the two paths. Return
-        // the event so it flows to the guest and the bounce owns it.
-        if win.vmHasKeyboardFocus { return event }
-
-        // Native control in the session window has focus → the chord won't
-        // reach the guest, so this is the path that runs it. Host-owned chords
-        // (⌘T / ⌘W / ⌘N / ⌘1-9) → consume; every other ⌘ chord is sent on.
+        // Host-owned chords (⌘T / ⌘W / ⌘N / ⌘1-9) → consume; every other
+        // ⌘ chord is sent on. (There is no guest-side chord grab anymore —
+        // native terminal surfaces never see host-owned chords.)
         if win.performACShortcut(chars, isRepeat: event.isARepeat) { return nil }
         return event
     }
@@ -3100,9 +3050,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if runningSessions[id] != nil {
                 runningSessions[id]?.lastTabsSnapshot = session.snapshotTabs()
             }
-            session.vmView.virtualMachine = nil
-            session.keyboardBridge = nil
-            session.scrollBridge = nil
             session.sandbox = nil
             profileWindows.removeValue(forKey: id)
             unregisterPane(id, ifMatches: session.pane)
@@ -5280,8 +5227,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
-                    keyboardAgentURL: keyboardAgentURL,
-                    scrollAgentURL: scrollAgentURL,
                     awsCredsHelperURL: awsCredsHelperURL,
                     claudeTokenAgentURL: claudeTokenAgentURL,
                     codexTokenAgentURL: codexTokenAgentURL,
@@ -5293,7 +5238,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let sandbox = UbuntuSandboxVM(imageManager: imageManager, sessionDisk: sessionDisk)
             do {
                 try sandbox.prepare()
-                win.vmView.virtualMachine = sandbox.vm
                 // Investigation mode: the saved snapshot was taken with
                 // a NIC attached, but `prepare()` just built a config
                 // with no network device — VZ would reject `restore`
@@ -5315,7 +5259,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         // VZ leaves the VM in an indeterminate state
                         // after a failed restore; rebuild it.
                         try sandbox.prepare()
-                        win.vmView.virtualMachine = sandbox.vm
                         try await sandbox.start()
                         // Restore failed → this is now a fresh boot. Drop the
                         // rehydrated pills; the agent creates tmux window 0 and
@@ -5351,15 +5294,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.applyRouting(engine, for: profile)
                 self.startLocalEngineIfNeeded(for: profile)
             }
-            // Keyboard layout bridge — pushes the macOS layout into the
-            // guest at boot and follows live changes (or pins an
-            // override layout when the profile sets one).
-            if let dev = sandbox.socketDevice {
-                win.keyboardBridge = KeyboardBridge(
-                    socketDevice: dev,
-                    forcedLayout: profile.keyboardLayoutOverride)
-            }
-            win.scrollBridge = makeScrollBridge(for: sandbox)
             // Shell-exec bridge (vsock 5800). Always created now — powers
             // `bromure-ac exec` and the control socket's /exec route. The guest
             // ships shell-agent.py unconditionally; the surface is gated by the
@@ -6432,19 +6366,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.pane(for: pid)?.model.ipAddress = ip
             }
         }
-        sandbox.onShortcut = { [weak self] key in
-            // A host-owned chord that Openbox grabbed in the guest and bounced
-            // back because the VM held keyboard focus. The macOS system chords
-            // (⌘Q/⌘H/⇧⌘Q/⌃⌘Q) are app-global, so they run first and independent
-            // of any pane; the tab chords (⌘T/⌘W/⌘N/⌘1-9) go through
-            // performACShortcut — the shared sink the key monitor also uses, so
-            // the two delivery paths can't drift. No-op when detached.
-            Task { @MainActor in
-                guard let self else { return }
-                if self.performACSystemChord(key) { return }
-                self.pane(for: pid)?.performACShortcut(key)
-            }
-        }
     }
 
     // MARK: - Session lifetime (persistent-agent model)
@@ -6483,9 +6404,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         cleanupSessionRegistrations(for: session.profile)
         unregisterSession(profileID)
         if let win = profileWindows[profileID] {
-            win.vmView.virtualMachine = nil
-            win.keyboardBridge = nil
-            win.scrollBridge = nil
             win.sandbox = nil
             profileWindows.removeValue(forKey: profileID)
             unregisterPane(profileID, ifMatches: win.pane)
@@ -6634,14 +6552,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // shared unified window.
         let pane = SessionPane(profile: profile, acDelegate: self)
         pane.sandbox = sandbox
-        // Bind the fresh view to the already-running VM (the guest keeps
-        // rendering into the virtio framebuffer regardless of any host view).
-        pane.vmView.virtualMachine = sandbox.vm
-        if let dev = sandbox.socketDevice {
-            pane.keyboardBridge = KeyboardBridge(
-                socketDevice: dev, forcedLayout: profile.keyboardLayoutOverride)
-        }
-        pane.scrollBridge = makeScrollBridge(for: sandbox)
         // Rebuild the tab bar from the session's cached tmux window list; the
         // live roster keeps it current. tmux is already running in the VM, so
         // there's nothing to spawn or raise.
@@ -6830,14 +6740,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // poller would keep racing the new one on the same shared
         // directory and removing closed-* files out from under it.
         win.sandbox?.stopPolling()
-        win.vmView.virtualMachine = nil
         // Drop the old VM from the registry (and the window borrow) so it
         // deallocates (its deinit detaches the vmnet switch port). The fresh
         // sandbox is registered below once it's built.
         unregisterSession(profile.id)
         win.sandbox = nil
-        win.keyboardBridge = nil
-        win.scrollBridge = nil
         win.model.activeIndex = 0
         win.model.ipAddress = nil
         // Reusing this pane for a fresh VM: reset boot-detection so the new VM's
@@ -6878,8 +6785,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
                     bridgeScriptURL: scriptURL,
-                    keyboardAgentURL: keyboardAgentURL,
-                    scrollAgentURL: scrollAgentURL,
                     awsCredsHelperURL: awsCredsHelperURL,
                     claudeTokenAgentURL: claudeTokenAgentURL,
                     codexTokenAgentURL: codexTokenAgentURL,
@@ -6890,7 +6795,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                           sessionDisk: sessionDisk)
             do {
                 try sandbox.prepare()
-                win.vmView.virtualMachine = sandbox.vm
                 try await sandbox.start()
             } catch {
                 self.showError(error, message:
@@ -6914,12 +6818,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.applyRouting(engine, for: profile)
                 self.startLocalEngineIfNeeded(for: profile)
             }
-            if let dev = sandbox.socketDevice {
-                win.keyboardBridge = KeyboardBridge(
-                    socketDevice: dev,
-                    forcedLayout: profile.keyboardLayoutOverride)
-            }
-            win.scrollBridge = makeScrollBridge(for: sandbox)
             // Shell-exec bridge — see the matching block on the warm-boot path.
             if let dev = sandbox.socketDevice {
                 let bridge = ShellBridge(socketDevice: dev)
@@ -6928,7 +6826,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             self.wireSandboxCallbacks(sandbox)
             self.registerSession(sandbox, profile: profile)
             win.sandbox = sandbox
-            // The agent launches the kitty → tmux session itself; the roster
+            // The guest daemon creates the tmux session itself; the roster
             // fills the bar. No host-driven spawn.
         }
     }

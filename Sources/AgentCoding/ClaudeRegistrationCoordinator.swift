@@ -122,7 +122,6 @@ extension ACAppDelegate {
             sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                 caCertificatePEM: engine.ca.certificatePEM,
                 bridgeScriptURL: scriptURL,
-                keyboardAgentURL: keyboardAgentURL,
                 awsCredsHelperURL: awsCredsHelperURL,
                 claudeTokenAgentURL: claudeTokenAgentURL,
                 codexTokenAgentURL: codexTokenAgentURL,
@@ -152,15 +151,9 @@ extension ACAppDelegate {
                 // the agent (kicking off the OAuth login). Without this the home
                 // virtiofs share points at a missing path and VZ rejects the
                 // config ("directory sharing configuration is invalid").
-                // Detect the real display scale like every other boot path —
-                // otherwise prepareHomeDirectory defaults to displayScale 2
-                // (retina) and a non-retina Mac gets grotesquely large kitty
-                // fonts in the registration window.
                 try self.store.prepareHomeDirectory(
-                    for: scratch, terminalDefaults: self.terminalDefaults,
-                    displayScale: TerminalAppDefaults.currentDisplayScale())
+                    for: scratch, terminalDefaults: self.terminalDefaults)
                 try sandbox.prepare()
-                win.vmView.virtualMachine = sandbox.vm
                 try await sandbox.start()
             } catch {
                 self.showError(error, message: NSLocalizedString(

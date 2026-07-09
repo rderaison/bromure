@@ -42,15 +42,6 @@ public final class SessionDisk {
     public struct MitmSessionAssets: Sendable {
         public let caCertificatePEM: String
         public let bridgeScriptURL: URL
-        /// Optional keyboard agent script URL — copied into the meta
-        /// share so the guest's xinitrc can launch it. nil = no
-        /// keyboard layout matching for this session.
-        public let keyboardAgentURL: URL?
-        /// Optional scroll agent script URL. Same delivery pattern as
-        /// the keyboard agent — copied to the meta share, launched
-        /// from xinitrc, listens on vsock 5008 for batched scroll
-        /// directions from the host's `ScrollBridge`.
-        public let scrollAgentURL: URL?
         /// AWS `credential_process` helper. Referenced from the
         /// per-profile ~/.aws/config; pulls JSON creds on demand from
         /// the bridge's Unix socket.
@@ -75,8 +66,6 @@ public final class SessionDisk {
         public let loopbackRelayAgentURL: URL?
         public init(caCertificatePEM: String,
                     bridgeScriptURL: URL,
-                    keyboardAgentURL: URL? = nil,
-                    scrollAgentURL: URL? = nil,
                     awsCredsHelperURL: URL? = nil,
                     claudeTokenAgentURL: URL? = nil,
                     codexTokenAgentURL: URL? = nil,
@@ -84,8 +73,6 @@ public final class SessionDisk {
                     loopbackRelayAgentURL: URL? = nil) {
             self.caCertificatePEM = caCertificatePEM
             self.bridgeScriptURL = bridgeScriptURL
-            self.keyboardAgentURL = keyboardAgentURL
-            self.scrollAgentURL = scrollAgentURL
             self.awsCredsHelperURL = awsCredsHelperURL
             self.claudeTokenAgentURL = claudeTokenAgentURL
             self.codexTokenAgentURL = codexTokenAgentURL
@@ -411,24 +398,6 @@ public final class SessionDisk {
             try fm.setAttributes(
                 [.posixPermissions: NSNumber(value: 0o755)],
                 ofItemAtPath: scriptDest.path)
-
-            if let kbURL = assets.keyboardAgentURL {
-                let kbDest = tmp.appendingPathComponent("keyboard-agent.py")
-                try? fm.removeItem(at: kbDest)
-                try fm.copyItem(at: kbURL, to: kbDest)
-                try fm.setAttributes(
-                    [.posixPermissions: NSNumber(value: 0o755)],
-                    ofItemAtPath: kbDest.path)
-            }
-
-            if let scURL = assets.scrollAgentURL {
-                let scDest = tmp.appendingPathComponent("scroll-agent.py")
-                try? fm.removeItem(at: scDest)
-                try fm.copyItem(at: scURL, to: scDest)
-                try fm.setAttributes(
-                    [.posixPermissions: NSNumber(value: 0o755)],
-                    ofItemAtPath: scDest.path)
-            }
 
             if let awsURL = assets.awsCredsHelperURL {
                 let awsDest = tmp.appendingPathComponent("bromure-aws-creds.py")
