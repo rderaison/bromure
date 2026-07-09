@@ -1160,10 +1160,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         return 8
     }
 
-    /// Experimental: render this workspace's terminal natively on the host
-    /// (libghostty surface fed by a PTY over vsock) instead of the guest
-    /// framebuffer. Both paths are views of the same tmux session, so the
-    /// toggle is safe to flip between launches. See NATIVE_TERMINAL_PLAN.md.
+    /// Render this workspace's terminal natively on the host (libghostty
+    /// surface fed by a PTY over vsock) instead of the guest framebuffer.
+    /// Default for new workspaces since plan phase 3; existing profiles
+    /// keep whatever they had (decode default false) until edited. Both
+    /// paths are views of the same tmux session, so the toggle is safe to
+    /// flip between launches. See NATIVE_TERMINAL_PLAN.md.
     public var nativeTerminal: Bool
 
     /// What to do with the VM when the user closes the session window.
@@ -1334,7 +1336,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         color: ProfileColor = .blue,
         comments: String = "",
         memoryGB: Int = Profile.defaultMemoryGB(),
-        nativeTerminal: Bool = false,
+        nativeTerminal: Bool = true,
         networkMode: NetworkMode = .nat,
         bridgedInterfaceID: String? = nil,
         gitUserName: String = "",

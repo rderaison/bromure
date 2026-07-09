@@ -2116,17 +2116,17 @@ struct ProfileEditorView: View {
 
             Divider()
 
-            // Native terminal (experimental)
+            // Display: native terminal (default) vs legacy framebuffer.
             VStack(alignment: .leading, spacing: 6) {
                 Text("Display")
                     .font(.headline)
                 Toggle(isOn: $draft.nativeTerminal) {
-                    Text("Native terminal (experimental)")
+                    Text("Native terminal")
                 }
-                Text("Render the terminal on the host (crisp text, native "
-                     + "copy/paste and scrolling) instead of streaming the "
-                     + "VM's framebuffer. Both show the same tmux session — "
-                     + "safe to switch back anytime.")
+                Text("Crisp host-side rendering with native copy/paste, "
+                     + "scrolling and the Grid. Uncheck for the legacy VM "
+                     + "framebuffer display; both show the same tmux "
+                     + "session, so switching back is always safe.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

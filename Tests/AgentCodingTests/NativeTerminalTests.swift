@@ -33,6 +33,8 @@ struct NativeTerminalTests {
     @Test("nativeTerminal round-trips and defaults to false for old JSON")
     func profileRoundTrip() throws {
         var p = Profile(name: "t", tool: .claude, authMode: .subscription)
+        // Phase 3: native is the default for NEW workspaces…
+        #expect(p.nativeTerminal)
         p.nativeTerminal = true
         let data = try JSONEncoder().encode(p)
         let back = try JSONDecoder().decode(Profile.self, from: data)
