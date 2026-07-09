@@ -325,27 +325,63 @@ final class TerminalSurfaceView: NSView {
         }
     }
 
+    /// Private key sequences the guest tmux binds to copy-mode scrolling
+    /// (bromure-agentd `create_session`). The attach client pins this surface
+    /// to the alternate screen, so ghostty has no scrollback of its own —
+    /// left alone it fakes arrow keys for the wheel, which pages the shell's
+    /// command history instead of the terminal text.
+    private static let tmuxScrollUpSeq = "\u{1b}[1000001~"
+    private static let tmuxScrollDownSeq = "\u{1b}[1000002~"
+    /// Sub-line remainder of precise (trackpad) scrolling, carried across
+    /// events so slow drags still accumulate into whole lines.
+    private var scrollLineRemainder: CGFloat = 0
+
     override func scrollWheel(with event: NSEvent) {
         guard let surface else { return }
-        var x = event.scrollingDeltaX
-        var y = event.scrollingDeltaY
-        let precision = event.hasPreciseScrollingDeltas
-        if precision { x *= 2; y *= 2 }   // matches the reference feel
 
-        // scroll_mods packed struct: bit 0 = precision, bits 1-3 = momentum.
-        var mods: Int32 = precision ? 1 : 0
-        let momentum: Int32
-        switch event.momentumPhase {
-        case .began: momentum = 1
-        case .stationary: momentum = 2
-        case .changed: momentum = 3
-        case .ended: momentum = 4
-        case .cancelled: momentum = 5
-        case .mayBegin: momentum = 6
-        default: momentum = 0
+        // A guest TUI that requested mouse tracking gets real wheel reports —
+        // tmux forwards those to the pane, so the app scrolls natively.
+        if ghostty_surface_mouse_captured(surface) {
+            var x = event.scrollingDeltaX
+            var y = event.scrollingDeltaY
+            let precision = event.hasPreciseScrollingDeltas
+            if precision { x *= 2; y *= 2 }   // matches the reference feel
+
+            // scroll_mods packed struct: bit 0 = precision, bits 1-3 = momentum.
+            var mods: Int32 = precision ? 1 : 0
+            let momentum: Int32
+            switch event.momentumPhase {
+            case .began: momentum = 1
+            case .stationary: momentum = 2
+            case .changed: momentum = 3
+            case .ended: momentum = 4
+            case .cancelled: momentum = 5
+            case .mayBegin: momentum = 6
+            default: momentum = 0
+            }
+            mods |= momentum << 1
+            ghostty_surface_mouse_scroll(surface, x, y, mods)
+            return
         }
-        mods |= momentum << 1
-        ghostty_surface_mouse_scroll(surface, x, y, mods)
+
+        // Otherwise scroll the tmux history: one injected sequence per line.
+        var lines: CGFloat
+        if event.hasPreciseScrollingDeltas {
+            let scale = window?.backingScaleFactor ?? 2.0
+            let cellPoints = max(CGFloat(ghostty_surface_size(surface).cell_height_px) / scale, 1)
+            scrollLineRemainder += event.scrollingDeltaY / cellPoints
+            lines = scrollLineRemainder.rounded(.towardZero)
+            scrollLineRemainder -= lines
+        } else {
+            lines = event.scrollingDeltaY * 3   // classic 3 lines per detent
+        }
+        let count = min(Int(abs(lines)), 40)
+        guard count > 0 else { return }
+        let seq = lines > 0 ? Self.tmuxScrollUpSeq : Self.tmuxScrollDownSeq
+        let payload = String(repeating: seq, count: count)
+        payload.withCString {
+            ghostty_surface_text(surface, $0, UInt(payload.utf8.count))
+        }
     }
 }
 

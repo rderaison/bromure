@@ -319,7 +319,9 @@ def _view_attach_command(view, window):
         " set-option status off \\;"
         # mouse OFF: tmux does not capture the mouse, so a plain drag is
         # ghostty's own native selection (macOS-like — select never copies,
-        # ⌘C copies) and the wheel scrolls ghostty's native scrollback.
+        # ⌘C copies). The wheel scrolls tmux history through the user-keys
+        # bridge bound in create_session (the client pins the surface to the
+        # alternate screen, so there is no host-side scrollback to scroll).
         # tmux still forwards mouse events to apps that request them
         # (Claude/vim), so TUI clicks keep working.
         " set-option mouse off"
@@ -2348,6 +2350,24 @@ def create_session():
     _tmux_ok("new-session", "-d", "-s", TMUX_S, "-c", HOME)
     _tmux_ok("set-option", "-g", "allow-passthrough", "on")
     _tmux_ok("set-option", "-s", "set-clipboard", "on")
+    # Wheel-scroll bridge. The attached client keeps the host surface in the
+    # alternate screen, so ghostty has no scrollback of its own and would
+    # fake arrow keys for wheel ticks (= shell history at a prompt). Instead
+    # the host injects one of these private sequences per wheel line (see
+    # TerminalSurfaceView.scrollWheel) and we scroll tmux history via
+    # copy-mode. A pane running its own alt-screen app (vim, less) gets real
+    # arrow keys — same split tmux's native wheel handling makes. Bound in
+    # both copy-mode tables so vi mode-keys keeps scrolling. Re-run on every
+    # daemon start, so a restart refreshes a live session's bindings.
+    _tmux_ok("set-option", "-s", "user-keys[0]", "\x1b[1000001~")
+    _tmux_ok("set-option", "-s", "user-keys[1]", "\x1b[1000002~")
+    _tmux_ok("bind-key", "-n", "User0", "if", "-F", "#{alternate_on}",
+             "send-keys Up", "copy-mode -e ; send-keys -X scroll-up")
+    _tmux_ok("bind-key", "-n", "User1", "if", "-F", "#{alternate_on}",
+             "send-keys Down")
+    for table in ("copy-mode", "copy-mode-vi"):
+        _tmux_ok("bind-key", "-T", table, "User0", "send-keys", "-X", "scroll-up")
+        _tmux_ok("bind-key", "-T", table, "User1", "send-keys", "-X", "scroll-down")
 
 
 def session_monitor_service():
