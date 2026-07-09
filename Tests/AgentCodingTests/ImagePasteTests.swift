@@ -200,4 +200,98 @@ struct ImagePasteTests {
         #expect(paths.count == 2)
         #expect(Set(paths).count == 2)
     }
+
+    @Test("Upload reports monotonic progress per chunk, ending at 1")
+    @MainActor
+    func uploadProgress() async throws {
+        var big = Data(count: TerminalImagePaste.chunkBytes)
+        big.append(contentsOf: [1, 2, 3])
+        let recorder = OpRecorder()
+        final class Fractions { var values: [Double] = [] }
+        let seen = Fractions()
+        _ = try await TerminalImagePaste.upload(
+            [.bitmap(big, ext: "png")], via: recorder.run,
+            progress: { seen.values.append($0) })
+        #expect(seen.values.count == 2)   // one per chunk
+        #expect(seen.values == seen.values.sorted())
+        #expect(seen.values.last == 1.0)
+    }
+}
+
+@Suite("PasteThumbnailOverlay")
+@MainActor
+struct PasteThumbnailOverlayTests {
+
+    // MARK: Thumbnail sizing
+
+    @Test("fitSize aspect-fits into the limit without upscaling")
+    func fitSize() {
+        let limit = NSSize(width: 160, height: 100)
+        // Wide image: width-bound.
+        #expect(PasteThumbnailOverlay.fitSize(NSSize(width: 320, height: 200),
+                                              within: limit)
+                == NSSize(width: 160, height: 100))
+        // Tall image: height-bound.
+        #expect(PasteThumbnailOverlay.fitSize(NSSize(width: 200, height: 400),
+                                              within: limit)
+                == NSSize(width: 50, height: 100))
+        // Small image: kept as-is, no upscale.
+        #expect(PasteThumbnailOverlay.fitSize(NSSize(width: 50, height: 30),
+                                              within: limit)
+                == NSSize(width: 50, height: 30))
+        // Tiny image: floored so the chip stays visible.
+        #expect(PasteThumbnailOverlay.fitSize(NSSize(width: 2, height: 2),
+                                              within: limit)
+                == NSSize(width: 32, height: 24))
+    }
+
+    // MARK: Chip placement
+
+    private let bounds = NSRect(x: 0, y: 0, width: 800, height: 600)
+    private let chip = NSSize(width: 160, height: 100)
+
+    @Test("Chip sits just above the caret line")
+    func chipAboveCaret() {
+        let caret = NSRect(x: 100, y: 50, width: 8, height: 17)
+        let frame = PasteThumbnailOverlay.chipFrame(chipSize: chip, caret: caret,
+                                                    bounds: bounds)
+        #expect(frame.origin == NSPoint(x: 100, y: 73))   // caret.maxY + 6pt gap
+    }
+
+    @Test("Chip flips below the caret when it would clip at the top")
+    func chipFlipsBelow() {
+        let caret = NSRect(x: 100, y: 560, width: 8, height: 17)
+        let frame = PasteThumbnailOverlay.chipFrame(chipSize: chip, caret: caret,
+                                                    bounds: bounds)
+        #expect(frame.origin == NSPoint(x: 100, y: 454))   // caret.minY - 6 - height
+    }
+
+    @Test("Chip clamps inside the surface bounds horizontally")
+    func chipClampsX() {
+        let caret = NSRect(x: 780, y: 300, width: 8, height: 17)
+        let frame = PasteThumbnailOverlay.chipFrame(chipSize: chip, caret: caret,
+                                                    bounds: bounds)
+        #expect(frame.maxX <= bounds.maxX - 4)
+        let expectedX: CGFloat = 800 - 160 - 4
+        #expect(frame.origin.x == expectedX)
+    }
+
+    // MARK: Thumbnail decode
+
+    @Test("firstImage skips undecodable sources and decodes the next one")
+    func firstImageSkipsBroken() {
+        let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0)!
+        let png = rep.representation(using: .png, properties: [:])!
+        let sources: [TerminalImagePaste.Source] = [
+            .bitmap(Data([0xde, 0xad]), ext: "png"),   // not an image
+            .bitmap(png, ext: "png"),
+        ]
+        #expect(PasteThumbnailOverlay.firstImage(of: sources) != nil)
+        #expect(PasteThumbnailOverlay.firstImage(
+            of: [.bitmap(Data([0xde, 0xad]), ext: "png")]) == nil)
+    }
 }

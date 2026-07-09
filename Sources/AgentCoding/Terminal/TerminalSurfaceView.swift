@@ -18,6 +18,10 @@ final class TerminalSurfaceView: NSView {
     /// Guest title (from OSC / tmux), updated via the runtime's action fan-out.
     private(set) var title: String = ""
 
+    /// Live image-paste chip, if any (subview; the hierarchy owns it).
+    /// Weak so a faded-out chip nils itself away.
+    weak var pasteThumbnail: PasteThumbnailOverlay?
+
     /// Retire-don't-free: freeing a surface while its renderer thread is
     /// mid-present races (upstream teardown bugs); we drop it from the view
     /// hierarchy immediately but delay the free.
@@ -156,6 +160,19 @@ final class TerminalSurfaceView: NSView {
         ghostty_surface_set_size(surface, UInt32(backing.width), UInt32(backing.height))
     }
 
+    /// The caret cell in view coordinates (bottom-left origin, points),
+    /// straight from libghostty's IME point. Shared by the IME candidate
+    /// window and the paste-thumbnail chip; nil once the surface is gone.
+    var caretRect: NSRect? {
+        guard let surface, let window else { return nil }
+        var x: Double = 0, y: Double = 0, w: Double = 0, h: Double = 0
+        ghostty_surface_ime_point(surface, &x, &y, &w, &h)
+        let cellHeightPoints = Double(ghostty_surface_size(surface).cell_height_px)
+            / Double(window.backingScaleFactor)
+        return NSRect(x: x, y: Double(frame.height) - y,
+                      width: w, height: max(h, cellHeightPoints))
+    }
+
     // MARK: Focus
 
     override var acceptsFirstResponder: Bool { true }
@@ -199,6 +216,9 @@ final class TerminalSurfaceView: NSView {
 
     override func keyDown(with event: NSEvent) {
         guard let surface else { return }
+
+        // Typing walks over a lingering paste thumbnail — dismiss it.
+        pasteThumbnail?.keystrokeDismiss()
 
         // Route through the input context so dead keys and basic IME
         // composition produce insertText; the translated text rides on the
@@ -463,18 +483,11 @@ extension TerminalSurfaceView: NSTextInputClient {
                              actualRange: NSRangePointer?) -> NSAttributedString? { nil }
     func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
     /// Where the IME should place its candidate window: the caret cell,
-    /// straight from libghostty (top-left view coords, points) converted to
-    /// bottom-left screen coords.
+    /// converted to bottom-left screen coords.
     func firstRect(forCharacterRange range: NSRange,
                    actualRange: NSRangePointer?) -> NSRect {
-        guard let surface, let window else { return .zero }
-        var x: Double = 0, y: Double = 0, w: Double = 0, h: Double = 0
-        ghostty_surface_ime_point(surface, &x, &y, &w, &h)
-        let cellHeightPoints = Double(ghostty_surface_size(surface).cell_height_px)
-            / Double(window.backingScaleFactor)
-        let viewRect = NSRect(x: x, y: Double(frame.height) - y,
-                              width: w, height: max(h, cellHeightPoints))
-        return window.convertToScreen(convert(viewRect, to: nil))
+        guard let window, let rect = caretRect else { return .zero }
+        return window.convertToScreen(convert(rect, to: nil))
     }
     func characterIndex(for point: NSPoint) -> Int { 0 }
 }

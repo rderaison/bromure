@@ -114,7 +114,20 @@ enum TerminalImagePaste {
 
     /// Write every source into the guest's pastes dir, chunked; returns
     /// the guest paths in source order. Throws on the first failed op.
-    static func upload(_ sources: [Source], via op: GuestFileOp) async throws -> [String] {
+    /// `progress` (0…1, monotonic) is reported after every chunk; the
+    /// denominator uses directory sizes for file sources, so drift only
+    /// skews the fraction, never the bytes.
+    static func upload(_ sources: [Source], via op: GuestFileOp,
+                       progress: (@MainActor (Double) -> Void)? = nil) async throws -> [String] {
+        let estimatedTotal = max(1, sources.reduce(0) { sum, source in
+            switch source {
+            case .bitmap(let d, _): return sum + d.count
+            case .file(let url, _):
+                return sum + ((try? url.resourceValues(
+                    forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            }
+        })
+        var sent = 0
         _ = try await op(["op": "mkdir", "path": pastesDir])
         var paths: [String] = []
         for source in sources {
@@ -142,7 +155,11 @@ enum TerminalImagePaste {
                     "append": !first,
                 ])
                 first = false
+                sent += end - offset
                 offset = end
+                if let progress {
+                    await progress(min(1, Double(sent) / Double(estimatedTotal)))
+                }
             } while offset < data.count
             paths.append(path)
         }
@@ -172,10 +189,15 @@ enum TerminalImagePaste {
                 NSSound.beep()
                 return
             }
+            // Host-side thumbnail chip at the caret — the human sees what
+            // was pasted; the pty still only ever gets the path text.
+            let overlay = PasteThumbnailOverlay.present(over: view, sources: sources)
             do {
-                let paths = try await upload(sources) {
-                    try await delegate.guestFileOp(profileID: profileID, op: $0)
-                }
+                let paths = try await upload(
+                    sources,
+                    via: { try await delegate.guestFileOp(profileID: profileID, op: $0) },
+                    progress: { overlay?.setProgress($0) })
+                overlay?.markDone()
                 // The transfer can outlive the surface (retire/reattach,
                 // VM shutdown) — re-resolve; if it's gone, drop the paste.
                 guard let live = GhosttyRuntime.surfaceView(for: ptr),
@@ -193,6 +215,7 @@ enum TerminalImagePaste {
                         timeout: 10)
                 }
             } catch {
+                overlay?.markFailed()
                 NSLog("[ghostty] image paste failed: %@", String(describing: error))
                 NSSound.beep()
             }
