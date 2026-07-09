@@ -2922,8 +2922,14 @@ public final class ProfileStore {
         //   ghostty's own native selection (select never copies, ⌘C copies)
         //   and the wheel scrolls the native scrollback. tmux still forwards
         //   mouse to apps that request it (Claude/vim), so TUI clicks work.
-        // - base-index 0 + renumber-windows: window indices stay 0,1,2,…
-        //   contiguous, so a tab's index is also its position in the bar.
+        // - renumber-windows OFF: a window's index must be STABLE for its
+        //   lifetime. Native terminal surfaces bind to a window index
+        //   (grouped view session + select-window), and the controller
+        //   caches surfaces by index — so renumbering on close would swap
+        //   which window a cached surface shows (killing an early tab shifted
+        //   e.g. logs↔sh). The host tracks tabs by model position and maps to
+        //   the (now gap-tolerant) index via model.tabs[i].index, so the tab
+        //   bar stays contiguous regardless.
         try """
         set -g status off
         set -g mouse off
@@ -2932,7 +2938,7 @@ public final class ProfileStore {
         set -g default-terminal "screen-256color"
         set -g window-size latest
         set -g base-index 0
-        set -g renumber-windows on
+        set -g renumber-windows off
         set -g set-clipboard on
         """.write(to: home.appendingPathComponent(".tmux.conf"),
                   atomically: true, encoding: .utf8)
