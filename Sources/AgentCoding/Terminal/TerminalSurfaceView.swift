@@ -38,7 +38,8 @@ final class TerminalSurfaceView: NSView {
         cfg.platform_tag = GHOSTTY_PLATFORM_MACOS
         cfg.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(
             nsview: Unmanaged.passUnretained(self).toOpaque()))
-        cfg.userdata = Unmanaged.passUnretained(self).toOpaque()
+        let userdataPtr = Unmanaged.passUnretained(self).toOpaque()
+        cfg.userdata = userdataPtr
         cfg.scale_factor = Double(NSScreen.main?.backingScaleFactor ?? 2.0)
         cfg.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
 
@@ -54,9 +55,21 @@ final class TerminalSurfaceView: NSView {
         }
         guard let created else { return nil }
         self.surface = created
+        // Mark this view's userdata live so `GhosttyRuntime.handleAction` will
+        // resolve actions targeting it — and stop resolving once it's gone.
+        self.userdataPtr = userdataPtr
+        GhosttyRuntime.registerSurfaceUserdata(userdataPtr)
     }
 
     required init?(coder: NSCoder) { fatalError("not supported") }
+
+    /// Our surface-userdata pointer (== the address of `self`), registered with
+    /// the runtime's live set for the view's lifetime.
+    private var userdataPtr: UnsafeMutableRawPointer?
+
+    deinit {
+        if let userdataPtr { GhosttyRuntime.unregisterSurfaceUserdata(userdataPtr) }
+    }
 
     /// Detach and schedule the surface free. Idempotent. The view must not
     /// receive further events after this (callers remove it from the
@@ -64,6 +77,9 @@ final class TerminalSurfaceView: NSView {
     func retire() {
         guard let s = surface else { return }
         surface = nil
+        // Stop resolving actions to this view immediately — the surface free is
+        // delayed below, and any action in that window must be ignored.
+        if let userdataPtr { GhosttyRuntime.unregisterSurfaceUserdata(userdataPtr) }
         ghostty_surface_set_focus(s, false)
         ghostty_surface_set_occlusion(s, false)
         // Delayed free, and keep `self` alive with it: libghostty holds our

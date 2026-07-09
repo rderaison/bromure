@@ -25,6 +25,22 @@ final class GhosttyRuntime: @unchecked Sendable {
     /// Posted when the guest sets a title (object = the view, userInfo["title"]).
     static let titleChangedNotification = Notification.Name("io.bromure.ghostty.titleChanged")
 
+    /// Surface-userdata pointers (each a `TerminalSurfaceView`) that are still
+    /// alive. libghostty holds these as *unretained* pointers, so a queued
+    /// action firing after the view is freed — notably while AppKit tears the
+    /// window hierarchy down on ⌘Q — would resolve a dangling pointer and crash
+    /// in `swift_unknownObjectRetain`. `handleAction` consults this before
+    /// resolving. Main-thread confined (register/unregister + action dispatch
+    /// all run on main), so no lock is needed.
+    nonisolated(unsafe) private static var liveSurfaceUserdata: Set<UnsafeMutableRawPointer> = []
+
+    static func registerSurfaceUserdata(_ ptr: UnsafeMutableRawPointer) {
+        liveSurfaceUserdata.insert(ptr)
+    }
+    static func unregisterSurfaceUserdata(_ ptr: UnsafeMutableRawPointer) {
+        liveSurfaceUserdata.remove(ptr)
+    }
+
     private init() {}
 
     /// Idempotent; returns false (and logs) if libghostty failed to start —
@@ -151,11 +167,15 @@ final class GhosttyRuntime: @unchecked Sendable {
     private static func handleAction(app: ghostty_app_t?,
                                      target: ghostty_target_s,
                                      action: ghostty_action_s) -> Bool {
-        // Resolve the surface's view for surface-targeted actions.
+        // Resolve the surface's view for surface-targeted actions — but only
+        // if the view is still alive. A freed userdata (view torn down while
+        // libghostty still held the surface, e.g. during app termination)
+        // would crash on the retain inside `takeUnretainedValue`.
         var view: AnyObject?
         if target.tag == GHOSTTY_TARGET_SURFACE,
            let surface = target.target.surface,
-           let userdata = ghostty_surface_userdata(surface) {
+           let userdata = ghostty_surface_userdata(surface),
+           liveSurfaceUserdata.contains(userdata) {
             view = Unmanaged<AnyObject>.fromOpaque(userdata).takeUnretainedValue()
         }
 
