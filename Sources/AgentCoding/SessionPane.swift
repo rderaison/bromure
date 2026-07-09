@@ -88,11 +88,28 @@ final class SessionPane {
     /// tabs closed".
     private var sawTabList = false
 
+    // MARK: Boot overlay (animation + watchdog)
+
+    /// The Ghost-in-the-Shell boot screen shown over the pane until the first
+    /// roster lands. nil when not showing.
+    private var bootOverlayHost: NSHostingView<BootAnimationView>?
+    private let bootOverlayModel = BootOverlayModel()
+    /// Deferred `showBootOverlay` — cancelled if the roster beats it (fast
+    /// resume), so a quick reconnect never flashes the animation.
+    private var bootOverlayShowItem: DispatchWorkItem?
+    /// 30s watchdog — flips the overlay to its failure panel if no terminal
+    /// shows up.
+    private var bootWatchdogItem: DispatchWorkItem?
+    private static let bootWatchdogSeconds: TimeInterval = 30
+
     /// Reset boot-detection when the same pane is reused for a fresh VM (a
     /// reboot relaunch). Without this the stale `sawTabList == true` makes the
     /// relaunched VM's early empty roster — published before its tmux is up —
     /// read as "all tabs closed" and power the fresh VM straight back off.
-    func resetBootDetection() { sawTabList = false }
+    func resetBootDetection() {
+        sawTabList = false
+        beginBootOverlay()   // reboot → show the dive screen again
+    }
 
     /// Per-key timestamp of the last host-owned chord seen, feeding
     /// `acAutorepeatGuard`.
@@ -127,6 +144,10 @@ final class SessionPane {
 
         let opacity = min(1.0, max(0.3, profile.windowOpacity))
         container.layer?.opacity = Float(opacity)
+
+        // A freshly-created pane means a VM is booting — show the dive screen
+        // until the guest's first roster proves the terminal is live.
+        beginBootOverlay()
     }
 
     /// Show / hide the red tint overlay on the framebuffer. Called by the
@@ -134,6 +155,81 @@ final class SessionPane {
     /// reads as "stopped, do not trust this".
     func setSuspendedTint(_ on: Bool) {
         suspendedTintView.isHidden = !on
+    }
+
+    // MARK: - Boot overlay
+
+    /// Arm the boot screen. Deferred ~400ms so a fast resume (roster already
+    /// coming) never flashes it; starts the watchdog when it actually shows.
+    private func beginBootOverlay() {
+        guard bootOverlayHost == nil, !sawTabList else { return }
+        bootOverlayShowItem?.cancel()
+        bootOverlayModel.workspaceName = profile.name
+        bootOverlayModel.accentHex = accentForBoot(profile.color.hexInUI)
+        bootOverlayModel.failed = false
+        let item = DispatchWorkItem { [weak self] in self?.presentBootOverlay() }
+        bootOverlayShowItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: item)
+    }
+
+    private func presentBootOverlay() {
+        guard bootOverlayHost == nil, !sawTabList else { return }
+        let view = BootAnimationView(
+            model: bootOverlayModel,
+            onReset: { [weak self] in self?.acDelegate?.rebuildBaseImageAction(nil) },
+            onKeepWaiting: { [weak self] in
+                // Back to the dive HUD and re-arm the watchdog for another round.
+                self?.bootOverlayModel.failed = false
+                self?.armBootWatchdog()
+            })
+        let host = NSHostingView(rootView: view)
+        host.translatesAutoresizingMaskIntoConstraints = false
+        // Topmost — above the terminal surface AND the suspended tint.
+        containerView.addSubview(host, positioned: .above, relativeTo: suspendedTintView)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: containerView.topAnchor),
+            host.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+            host.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+        ])
+        bootOverlayHost = host
+        armBootWatchdog()
+    }
+
+    private func armBootWatchdog() {
+        bootWatchdogItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            // Still booting after the timeout → surface the failure panel.
+            guard let self, self.bootOverlayHost != nil, !self.sawTabList else { return }
+            self.bootOverlayModel.failed = true
+        }
+        bootWatchdogItem = item
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.bootWatchdogSeconds, execute: item)
+    }
+
+    /// The first live roster arrived (or the pane is going away): tear the boot
+    /// screen down so the terminal underneath is visible.
+    private func endBootOverlay() {
+        bootOverlayShowItem?.cancel(); bootOverlayShowItem = nil
+        bootWatchdogItem?.cancel(); bootWatchdogItem = nil
+        guard let host = bootOverlayHost else { return }
+        bootOverlayHost = nil
+        // Brief fade so the terminal doesn't pop in.
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.35
+            host.animator().alphaValue = 0
+        }, completionHandler: { host.removeFromSuperview() })
+    }
+
+    /// Boot-screen accent: fall back to the GITS cyan when the profile color is
+    /// near-black/near-white and would read poorly over the dark rain.
+    private func accentForBoot(_ hex: String) -> String {
+        let c = NSColor(Color(hex: hex))
+        guard let rgb = c.usingColorSpace(.sRGB) else { return "#38f9d7" }
+        let lum = 0.299 * rgb.redComponent + 0.587 * rgb.greenComponent
+                + 0.114 * rgb.blueComponent
+        return (lum < 0.12 || lum > 0.9) ? "#38f9d7" : hex
     }
 
     // MARK: Native terminal (the pane's display)
@@ -178,6 +274,8 @@ final class SessionPane {
         mountedTerminalView = nil
         terminalController?.retireAll()
         terminalController = nil
+        // A stop mid-boot: drop the dive screen + its watchdog, don't leak them.
+        endBootOverlay()
     }
 
     /// Re-bind `profile` to a freshly-saved version and re-apply the pane-side
@@ -267,6 +365,9 @@ final class SessionPane {
             }
             return
         }
+        // First live roster → the guest tmux is up and the terminal is
+        // attaching. Retire the boot screen.
+        if !sawTabList { endBootOverlay() }
         sawTabList = true
         if model.tabs.count > tabs.count {
             model.tabs.removeLast(model.tabs.count - tabs.count)
