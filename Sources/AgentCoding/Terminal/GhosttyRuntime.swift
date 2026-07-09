@@ -40,6 +40,12 @@ final class GhosttyRuntime: @unchecked Sendable {
     static func unregisterSurfaceUserdata(_ ptr: UnsafeMutableRawPointer) {
         liveSurfaceUserdata.remove(ptr)
     }
+    /// True while the view behind this surface userdata is still alive — every
+    /// callback that resolves a surface pointer must check this first, or it
+    /// crashes retaining a freed view (window teardown on quit / registration).
+    static func isLiveSurface(_ ptr: UnsafeMutableRawPointer) -> Bool {
+        liveSurfaceUserdata.contains(ptr)
+    }
 
     private init() {}
 
@@ -95,7 +101,8 @@ final class GhosttyRuntime: @unchecked Sendable {
             // `userdata` is the requesting surface's userdata (the view);
             // completion must happen for libghostty to unblock the requester.
             guard location == GHOSTTY_CLIPBOARD_STANDARD,
-                  let userdata, let state else { return false }
+                  let userdata, let state,
+                  GhosttyRuntime.isLiveSurface(userdata) else { return false }
             let view = Unmanaged<TerminalSurfaceView>.fromOpaque(userdata).takeUnretainedValue()
             guard let surface = view.surface else { return false }
             let text = NSPasteboard.general.string(forType: .string) ?? ""
@@ -108,7 +115,8 @@ final class GhosttyRuntime: @unchecked Sendable {
             // Paste protection is disabled in our generated config; if a
             // confirmation still arrives, approve it — the "guest" is the
             // user's own tmux session, not an untrusted remote.
-            guard let userdata, let state else { return }
+            guard let userdata, let state,
+                  GhosttyRuntime.isLiveSurface(userdata) else { return }
             let view = Unmanaged<TerminalSurfaceView>.fromOpaque(userdata).takeUnretainedValue()
             guard let surface = view.surface else { return }
             ghostty_surface_complete_clipboard_request(surface, text, state, true)
@@ -133,7 +141,7 @@ final class GhosttyRuntime: @unchecked Sendable {
         }
         runtime.close_surface_cb = { userdata, _ in
             // userdata here is the *surface's* userdata (the view).
-            guard let userdata else { return }
+            guard let userdata, GhosttyRuntime.isLiveSurface(userdata) else { return }
             let view = Unmanaged<AnyObject>.fromOpaque(userdata).takeUnretainedValue()
             DispatchQueue.main.async {
                 NotificationCenter.default.post(

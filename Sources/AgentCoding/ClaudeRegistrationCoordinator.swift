@@ -373,11 +373,11 @@ extension ACAppDelegate {
         var overrideProfile: UUID? = nil
         if case .askPerSession(let pid) = state.scope {
             let ask = NSAlert()
-            ask.messageText = NSLocalizedString("Share with every session?", comment: "")
+            ask.messageText = NSLocalizedString("Share with every workspace?", comment: "")
             ask.informativeText = String(format: NSLocalizedString(
-                "Use this %@ sign-in for every Bromure session, or only for this workspace?",
+                "Use this %@ sign-in for every Bromure workspace, or only for this one?",
                 comment: ""), state.provider.displayName)
-            ask.addButton(withTitle: NSLocalizedString("Every session", comment: ""))
+            ask.addButton(withTitle: NSLocalizedString("Every workspace", comment: ""))
             ask.addButton(withTitle: NSLocalizedString("Just this workspace", comment: ""))
             sharedEverywhere = (ask.runModal() == .alertFirstButtonReturn)
             if !sharedEverywhere { overrideProfile = pid }
@@ -434,7 +434,7 @@ extension ACAppDelegate {
             let done = NSAlert()
             done.messageText = String(format: NSLocalizedString("Registered with %@", comment: ""), providerName)
             done.informativeText = sharedEverywhere
-                ? NSLocalizedString("Saved for all sessions. New sessions will use it automatically.", comment: "")
+                ? NSLocalizedString("Saved for all workspaces. New workspaces will use it automatically.", comment: "")
                 : NSLocalizedString("Saved for this workspace.", comment: "")
             done.runModal()
         }
@@ -457,6 +457,13 @@ extension ACAppDelegate {
         mitmEngine?.claudeSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
         mitmEngine?.codexSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
         mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
+
+        // Retire the pane's native terminal surfaces up front, while the view
+        // is still alive, so closing the window below can't leave libghostty
+        // firing an action against a freed surface (a use-after-free crash on
+        // the success path). `retire()` unregisters each surface from the
+        // runtime's live set and delays the free.
+        state.window?.pane.retireNativeTerminals()
 
         // Drop the registry entry + the window borrow so the close path below
         // sees no VM and won't try to suspend/poweroff it — we own the stop

@@ -538,13 +538,13 @@
 "Couldn't start the registration VM." = "登録用 VM を起動できませんでした。";
 "Registration timed out" = "登録がタイムアウトしました";
 "Bromure didn't receive a %@ sign-in in time. You can try again." = "Bromure は %@ のサインインを時間内に受け取れませんでした。もう一度お試しください。";
-"Share with every session?" = "すべてのセッションで共有しますか？";
-"Use this %@ sign-in for every Bromure session, or only for this workspace?" = "この %@ のサインインを、すべての Bromure セッションで使用しますか、それともこのワークスペースのみで使用しますか？";
-"Every session" = "すべてのセッション";
+"Share with every workspace?" = "すべてのワークスペースで共有しますか？";
+"Use this %@ sign-in for every Bromure workspace, or only for this one?" = "この %@ のサインインを、すべての Bromure ワークスペースで使用しますか、それともこのワークスペースのみで使用しますか？";
+"Every workspace" = "すべてのワークスペース";
 "Just this workspace" = "このワークスペースのみ";
 "Couldn't save the captured credentials." = "取得した認証情報を保存できませんでした。";
 "Registered with %@" = "%@ に登録しました";
-"Saved for all sessions. New sessions will use it automatically." = "すべてのセッション用に保存しました。新しいセッションでは自動的に使用されます。";
+"Saved for all workspaces. New workspaces will use it automatically." = "すべてのワークスペース用に保存しました。新しいワークスペースでは自動的に使用されます。";
 "Saved for this workspace." = "このワークスペース用に保存しました。";
 
 /* bromure.io enrollment sheet */

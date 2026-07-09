@@ -539,13 +539,13 @@
 "Couldn't start the registration VM." = "Couldn't start the registration VM.";
 "Registration timed out" = "Registration timed out";
 "Bromure didn't receive a %@ sign-in in time. You can try again." = "Bromure didn't receive a %@ sign-in in time. You can try again.";
-"Share with every session?" = "Share with every session?";
-"Use this %@ sign-in for every Bromure session, or only for this workspace?" = "Use this %@ sign-in for every Bromure session, or only for this workspace?";
-"Every session" = "Every session";
+"Share with every workspace?" = "Share with every workspace?";
+"Use this %@ sign-in for every Bromure workspace, or only for this one?" = "Use this %@ sign-in for every Bromure workspace, or only for this one?";
+"Every workspace" = "Every workspace";
 "Just this workspace" = "Just this workspace";
 "Couldn't save the captured credentials." = "Couldn't save the captured credentials.";
 "Registered with %@" = "Registered with %@";
-"Saved for all sessions. New sessions will use it automatically." = "Saved for all sessions. New sessions will use it automatically.";
+"Saved for all workspaces. New workspaces will use it automatically." = "Saved for all workspaces. New workspaces will use it automatically.";
 "Saved for this workspace." = "Saved for this workspace.";
 
 /* bromure.io enrollment sheet */

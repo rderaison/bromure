@@ -538,13 +538,13 @@
 "Couldn't start the registration VM." = "無法啟動註冊用的 VM。";
 "Registration timed out" = "註冊逾時";
 "Bromure didn't receive a %@ sign-in in time. You can try again." = "Bromure 未及時收到 %@ 的登入。您可以重試。";
-"Share with every session?" = "要與每個工作階段共用嗎？";
-"Use this %@ sign-in for every Bromure session, or only for this workspace?" = "要在每個 Bromure 工作階段使用此 %@ 登入，還是僅限此工作區？";
-"Every session" = "每個工作階段";
+"Share with every workspace?" = "要與每個工作區共用嗎？";
+"Use this %@ sign-in for every Bromure workspace, or only for this one?" = "要在每個 Bromure 工作區使用此 %@ 登入，還是僅限此工作區？";
+"Every workspace" = "每個工作區";
 "Just this workspace" = "僅此工作區";
 "Couldn't save the captured credentials." = "無法儲存已擷取的憑證。";
 "Registered with %@" = "已向 %@ 註冊";
-"Saved for all sessions. New sessions will use it automatically." = "已為所有工作階段儲存。新的工作階段會自動使用它。";
+"Saved for all workspaces. New workspaces will use it automatically." = "已為所有工作區儲存。新的工作區會自動使用它。";
 "Saved for this workspace." = "已為此工作區儲存。";
 
 /* bromure.io enrollment sheet */

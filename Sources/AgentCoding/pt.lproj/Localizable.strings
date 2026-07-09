@@ -538,13 +538,13 @@
 "Couldn't start the registration VM." = "Não foi possível iniciar a VM de registro.";
 "Registration timed out" = "Tempo de registro esgotado";
 "Bromure didn't receive a %@ sign-in in time. You can try again." = "O Bromure não recebeu um login do %@ a tempo. Você pode tentar novamente.";
-"Share with every session?" = "Compartilhar com todas as sessões?";
-"Use this %@ sign-in for every Bromure session, or only for this workspace?" = "Usar este login do %@ em todas as sessões do Bromure, ou apenas neste espaço de trabalho?";
-"Every session" = "Todas as sessões";
+"Share with every workspace?" = "Compartilhar com todos os espaços de trabalho?";
+"Use this %@ sign-in for every Bromure workspace, or only for this one?" = "Usar este login do %@ em todos os espaços de trabalho do Bromure, ou apenas neste?";
+"Every workspace" = "Todos os espaços de trabalho";
 "Just this workspace" = "Apenas este espaço de trabalho";
 "Couldn't save the captured credentials." = "Não foi possível salvar as credenciais capturadas.";
 "Registered with %@" = "Registrado com %@";
-"Saved for all sessions. New sessions will use it automatically." = "Salvo para todas as sessões. Novas sessões o usarão automaticamente.";
+"Saved for all workspaces. New workspaces will use it automatically." = "Salvo para todos os espaços de trabalho. Novos espaços de trabalho o usarão automaticamente.";
 "Saved for this workspace." = "Salvo para este espaço de trabalho.";
 
 /* bromure.io enrollment sheet */
