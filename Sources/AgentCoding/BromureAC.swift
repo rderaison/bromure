@@ -1179,7 +1179,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// runs with BROMURE_DEBUG_CLAUDE set — keeps the surface invisible
     /// in regular user sessions while powering the AutomationServer's
     /// /sessions/{id}/exec endpoint for tests.
-    private lazy var shellAgentURL: URL? = {
+    /// Internal (not private): the registration flow stages it too.
+    lazy var shellAgentURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/shell-agent",
                              withExtension: "py")
     }()
@@ -1188,7 +1189,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// runs the roster/command loops and every absorbed vsock service.
     /// Runs from the meta share under systemd; re-staging a changed copy
     /// hot-upgrades it (self-hash watcher → exit(0) → Restart=always).
-    private lazy var agentdURL: URL? = {
+    /// Internal (not private): the registration flow stages it too — without
+    /// agentd the scratch VM has no tmux session, no roster, and no vsock
+    /// shell channel for the native terminal to attach through.
+    lazy var agentdURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/bromure-agentd",
                              withExtension: "py")
     }()
@@ -1365,10 +1369,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return UInt16(port)
     }
 
-    /// Per-profile shell bridges (vsock 5800), created for every session.
-    /// Consumed by the AutomationServer's `onGetShellConnection` callback,
-    /// `bromure-ac exec`, and `guestExec` (the file-explorer pane).
-    private var shellBridges: [Profile.ID: ShellBridge] = [:]
+    /// Per-profile shell bridges (vsock 5800), created for every session —
+    /// including the registration scratch VM, whose native terminal attaches
+    /// through it. Consumed by the AutomationServer's `onGetShellConnection`
+    /// callback, `bromure-ac exec`, and `guestExec` (the file-explorer pane).
+    var shellBridges: [Profile.ID: ShellBridge] = [:]
 
     /// Errors from `guestExec`.
     enum GuestExecError: LocalizedError {

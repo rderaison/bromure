@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SandboxEngine
 import Virtualization
 
 /// "Register with Claude / ChatGPT": capture a real subscription credential
@@ -61,6 +62,9 @@ final class ClaudeRegistrationState {
     var window: TabbedSessionWindow?
     var pollTask: Task<Void, Never>?
     var finished = false
+    /// True once the host has kicked (or confirmed) the agent launch in the
+    /// guest's tmux window, so the roster ticks don't retry it.
+    var agentLaunchStarted = false
 
     init(provider: SubscriptionProvider, scope: SubscriptionRegistrationScope,
          scratchProfile: Profile, scratchDir: URL) {
@@ -119,14 +123,19 @@ extension ACAppDelegate {
         sessionDisk.tokenPlan = nil
         sessionDisk.registrationMode = true   // auto-launch the agent for login
         if let scriptURL = bridgeScriptURL {
+            // agentd included: it creates the guest tmux session, publishes
+            // the tab roster, and serves the vsock shell channel the native
+            // ghostty surface attaches through — without it the login runs on
+            // the invisible tty1 console and the window stays blank.
             sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                 caCertificatePEM: engine.ca.certificatePEM,
                 bridgeScriptURL: scriptURL,
                 awsCredsHelperURL: awsCredsHelperURL,
                 claudeTokenAgentURL: claudeTokenAgentURL,
                 codexTokenAgentURL: codexTokenAgentURL,
-                shellAgentURL: nil,
-                loopbackRelayAgentURL: loopbackRelayAgentURL)
+                shellAgentURL: shellAgentURL,
+                loopbackRelayAgentURL: loopbackRelayAgentURL,
+                agentdURL: agentdURL)
         }
 
         let win = TabbedSessionWindow(profile: scratch, acDelegate: self)
@@ -168,7 +177,10 @@ extension ACAppDelegate {
             // Proxy listeners for egress — but deliberately NO swapper.setMap,
             // so this profile id has an empty swap map and tokens pass through.
             engine.register(socketDevice: dev, profileID: scratch.id)
-            self.wireRegistrationSandbox(sandbox)
+            // Shell bridge (vsock 5800): the native surface's __attach-window
+            // resolves its PTY through this, exactly like a normal session.
+            self.shellBridges[scratch.id] = ShellBridge(socketDevice: dev)
+            self.wireRegistrationSandbox(sandbox, window: win)
             self.registerSession(sandbox, profile: win.profile)
             win.sandbox = sandbox
 
@@ -178,28 +190,86 @@ extension ACAppDelegate {
             case .grok:   break  // no vsock agent — captured from the home-dir file
             }
 
-            // The guest agent auto-launches the kitty → tmux session, whose
-            // .bashrc runs the OAuth login (URL → host browser). No host spawn.
+            // Window 0 of the guest tmux session sources .bashrc, whose
+            // BROMURE_AC_REGISTER auto-launch runs the OAuth login (URL →
+            // host browser). The first roster tick mounts the native ghostty
+            // surface on that window via applyTabList. No host spawn.
             self.pollForSubscriptionRegistration(state: state)
         }
     }
 
     /// Host-browser login + teardown-on-stop wiring for the throwaway VM.
-    private func wireRegistrationSandbox(_ sandbox: UbuntuSandboxVM) {
+    /// Deliberately NOT `wireSandboxCallbacks`: its onStopped routes into the
+    /// session relaunch machinery, which would fight the throwaway teardown.
+    private func wireRegistrationSandbox(_ sandbox: UbuntuSandboxVM,
+                                         window: TabbedSessionWindow) {
         sandbox.onStopped = { [weak self] _ in
             Task { @MainActor in self?.teardownClaudeRegistration(reason: .windowClosed) }
         }
+        // Roster → tab pills + native terminal mount (applyTabList calls
+        // updateNativeTerminalMount). The registration pane isn't in the
+        // shared pane registry, so target the window's pane directly. Once
+        // the session is up, directly invoke the login agent in the guest —
+        // don't rely on the .bashrc auto-launch heuristic.
+        sandbox.onTabList = { [weak self, weak window] tabs in
+            Task { @MainActor in
+                window?.pane.applyTabList(tabs)
+                if !tabs.isEmpty { self?.launchRegistrationAgentIfNeeded() }
+            }
+        }
+        let providerName = self.claudeRegistration?.provider.displayName ?? "your account"
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
             Task { @MainActor in
                 if let self, let sandbox,
                    let port = ACAppDelegate.loopbackCallbackPort(from: url),
                    let dev = sandbox.socketDevice,
-                   let fwd = LoopbackCallbackForwarder(port: port, socketDevice: dev) {
+                   // Registration answers the browser itself with a clean
+                   // success page — the CLI callback servers otherwise leave
+                   // Safari on an error even though login succeeded.
+                   let fwd = LoopbackCallbackForwarder(
+                        port: port, socketDevice: dev,
+                        browserResponse: LoopbackCallbackForwarder
+                            .registrationSuccessResponse(provider: providerName)) {
                     self.loopbackForwarders.removeAll { !$0.isRunning }
                     self.loopbackForwarders.append(fwd)
                 }
                 NSWorkspace.shared.open(url)
             }
+        }
+    }
+
+    /// Directly start the login agent in the scratch VM's tmux window rather
+    /// than trusting the guest `.bashrc` auto-launch (which has proven
+    /// unreliable under the native-terminal boot — the window can land on a
+    /// bare shell). Idempotent: fires once, and only types the command if the
+    /// active pane is still a shell, so it can't fight or double the `.bashrc`
+    /// path if that one did run.
+    private func launchRegistrationAgentIfNeeded() {
+        guard let state = claudeRegistration, !state.finished,
+              !state.agentLaunchStarted else { return }
+        state.agentLaunchStarted = true
+        let tool = state.provider.scratchTool.rawValue   // claude | codex | grok
+        let pid = state.scratchProfile.id
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Let the guest .bashrc launch first (and the shell settle) so we
+            // only step in when it didn't. tmux send-keys buffers into the pty
+            // regardless, but gating on pane_current_command avoids a double
+            // start.
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard let live = self.claudeRegistration, live === state, !live.finished
+            else { return }
+            // If the active pane is already running the tool (or anything
+            // that isn't a shell), the .bashrc path won or the user started
+            // it — leave it alone. Otherwise type the command in.
+            let script = """
+            cur=$(tmux display-message -p -t bromure '#{pane_current_command}' 2>/dev/null); \
+            case "$cur" in \
+              bash|sh|zsh|dash|fish|-bash|-sh|-zsh) \
+                tmux send-keys -t bromure \(tool) Enter ;; \
+            esac
+            """
+            _ = try? await self.guestExec(profileID: pid, command: script, timeout: 10)
         }
     }
 
@@ -345,14 +415,29 @@ extension ACAppDelegate {
         let providerName = state.provider.displayName
         // Let any open profile editor flip its inline Register → Re-register.
         NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
-        teardownClaudeRegistration(reason: .success)
 
-        let done = NSAlert()
-        done.messageText = String(format: NSLocalizedString("Registered with %@", comment: ""), providerName)
-        done.informativeText = sharedEverywhere
-            ? NSLocalizedString("Saved for all sessions. New sessions will use it automatically.", comment: "")
-            : NSLocalizedString("Saved for this workspace.", comment: "")
-        done.runModal()
+        // Don't stop the VM out from under the OAuth callback: tokens land
+        // while the CLI's 127.0.0.1 server may still be answering the host
+        // browser through the loopback relay, and killing the guest mid-splice
+        // makes Safari report "the remote host closed the connection
+        // abruptly". Wait for in-flight relays to drain (bounded), plus a
+        // short linger for the TCP close to propagate, then tear down.
+        Task { @MainActor in
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline,
+                  self.loopbackForwarders.contains(where: { $0.activeRelays > 0 }) {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            self.teardownClaudeRegistration(reason: .success)
+
+            let done = NSAlert()
+            done.messageText = String(format: NSLocalizedString("Registered with %@", comment: ""), providerName)
+            done.informativeText = sharedEverywhere
+                ? NSLocalizedString("Saved for all sessions. New sessions will use it automatically.", comment: "")
+                : NSLocalizedString("Saved for this workspace.", comment: "")
+            done.runModal()
+        }
     }
 
     /// Idempotent teardown: stop polling + bridge, kill + delete the VM, close
@@ -365,6 +450,8 @@ extension ACAppDelegate {
         state.pollTask?.cancel()
         state.claudeBridge?.stop()
         state.codexBridge?.stop()
+        shellBridges[state.scratchProfile.id]?.stop()
+        shellBridges.removeValue(forKey: state.scratchProfile.id)
 
         mitmEngine?.unregister(profileID: state.scratchProfile.id)
         mitmEngine?.claudeSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
