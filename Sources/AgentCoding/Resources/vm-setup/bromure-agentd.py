@@ -99,6 +99,10 @@ META = "/mnt/bromure-meta"
 OUTBOX = "/mnt/bromure-outbox"
 AGENTD_LOG = os.path.join(OUTBOX, "agentd.log")
 TMUX_S = "bromure"
+# New shells (the initial window + plain new-tab) open here. Without an
+# explicit -c, tmux windows inherit the server's start directory, which
+# under systemd is "/" — so pin it to the user's home.
+HOME = os.path.expanduser("~")
 
 # token-agent validators
 ACCESS_FAKE_PREFIX = "sk-ant-oat01-brm-"
@@ -2150,7 +2154,7 @@ def _fields(arg, n):
 
 def _dispatch_command(action, arg):
     if action == "new-tab":
-        _tmux_ok("new-window", "-t", TMUX_S)
+        _tmux_ok("new-window", "-t", TMUX_S, "-c", HOME)
     elif action == "select-tab":
         _tmux_ok("select-window", "-t", "%s:%s" % (TMUX_S, arg))
     elif action == "close-tab":
@@ -2233,7 +2237,7 @@ def command_loop_service():
 # ── session lifecycle ───────────────────────────────────────────────────────
 def create_session():
     """Create the single tmux session the tabs live in (startup one-shot)."""
-    _tmux_ok("new-session", "-d", "-s", TMUX_S)
+    _tmux_ok("new-session", "-d", "-s", TMUX_S, "-c", HOME)
     _tmux_ok("set-option", "-g", "allow-passthrough", "on")
     _tmux_ok("set-option", "-s", "set-clipboard", "on")
 
