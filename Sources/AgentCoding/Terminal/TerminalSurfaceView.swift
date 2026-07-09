@@ -359,10 +359,19 @@ extension TerminalSurfaceView: NSTextInputClient {
     func attributedSubstring(forProposedRange range: NSRange,
                              actualRange: NSRangePointer?) -> NSAttributedString? { nil }
     func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+    /// Where the IME should place its candidate window: the caret cell,
+    /// straight from libghostty (top-left view coords, points) converted to
+    /// bottom-left screen coords.
     func firstRect(forCharacterRange range: NSRange,
                    actualRange: NSRangePointer?) -> NSRect {
-        guard let window else { return .zero }
-        return window.convertToScreen(convert(bounds, to: nil))
+        guard let surface, let window else { return .zero }
+        var x: Double = 0, y: Double = 0, w: Double = 0, h: Double = 0
+        ghostty_surface_ime_point(surface, &x, &y, &w, &h)
+        let cellHeightPoints = Double(ghostty_surface_size(surface).cell_height_px)
+            / Double(window.backingScaleFactor)
+        let viewRect = NSRect(x: x, y: Double(frame.height) - y,
+                              width: w, height: max(h, cellHeightPoints))
+        return window.convertToScreen(convert(viewRect, to: nil))
     }
     func characterIndex(for point: NSPoint) -> Int { 0 }
 }
