@@ -58,7 +58,7 @@ final class TerminalSurfaceView: NSView {
         // Mark this view's userdata live so `GhosttyRuntime.handleAction` will
         // resolve actions targeting it — and stop resolving once it's gone.
         self.userdataPtr = userdataPtr
-        GhosttyRuntime.registerSurfaceUserdata(userdataPtr)
+        GhosttyRuntime.registerSurfaceUserdata(userdataPtr, view: self)
     }
 
     required init?(coder: NSCoder) { fatalError("not supported") }
@@ -69,6 +69,15 @@ final class TerminalSurfaceView: NSView {
 
     deinit {
         if let userdataPtr { GhosttyRuntime.unregisterSurfaceUserdata(userdataPtr) }
+        // Deallocating with a live surface means an owner dropped this view
+        // without retire(): the ghostty surface (and its renderer, holding
+        // our now-dangling nsview pointer) leaks and keeps running. Can't
+        // free here — deinit isn't guaranteed on-main and the API is
+        // main-only — so leave a breadcrumb for the crash report instead.
+        if surface != nil {
+            NSLog("[ghostty] BUG: TerminalSurfaceView(window %d) deallocated without retire()",
+                  windowIndex)
+        }
     }
 
     /// Detach and schedule the surface free. Idempotent. The view must not
