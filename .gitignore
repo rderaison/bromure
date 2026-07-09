@@ -15,5 +15,7 @@ Package.resolved
 Tests/node_modules/
 .claude/dev/
 
-# GhosttyKit build products (tools/build-ghostty.sh output — never committed)
-vendor/
+# GhosttyKit build products (tools/build-ghostty.sh output — never committed).
+# Anchored to the repo root: unanchored `vendor/` also swallowed
+# Sources/AgentCoding/Vendor/ (vendored source that IS committed).
+/vendor/

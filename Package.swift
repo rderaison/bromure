@@ -27,6 +27,11 @@ let package = Package(
         // artifacts from the previous swift-syntax otherwise fail to load.
         .package(url: "https://github.com/ml-explore/mlx-swift.git", .upToNextMinor(from: "0.31.5")),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", "3.31.4" ..< "3.32.0"),
+        // File-explorer pane: rendered Markdown previews. (Syntax highlighting
+        // is vendored — Sources/AgentCoding/Vendor/Highlightr — because the
+        // upstream package's Bundle.module accessor breaks in relocated .app
+        // bundles built with `swift build`.)
+        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", from: "2.4.0"),
     ],
     targets: [
         .executableTarget(
@@ -67,12 +72,14 @@ let package = Package(
                 // HuggingFace tokenizer/downloader integration (split out of
                 // MLXLMCommon in 3.x); provides #huggingFaceTokenizerLoader().
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "MarkdownUI", package: "swift-markdown-ui"),
             ],
             path: "Sources/AgentCoding",
             exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef"],
             resources: [.copy("Resources/vm-setup"), .copy("Resources/icons"),
                         .copy("Resources/catalog.json"),
-                        .copy("Resources/img-catalog.json")],
+                        .copy("Resources/img-catalog.json"),
+                        .copy("Resources/highlightr")],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("OpenDirectory"),
