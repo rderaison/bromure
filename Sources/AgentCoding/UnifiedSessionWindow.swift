@@ -3,6 +3,13 @@ import SandboxEngine
 import SwiftUI
 @preconcurrency import Virtualization
 
+/// NSHostingView that never lets a mouse-down move the host window, so a
+/// drag inside SwiftUI content (row drag-and-drop, selection) isn't stolen by
+/// the window's `isMovableByWindowBackground`.
+final class NonMovableHostingView<Content: View>: NSHostingView<Content> {
+    override var mouseDownCanMoveWindow: Bool { false }
+}
+
 // MARK: - Sidebar list model
 
 /// Drives the unpeel-style source-list. One `VMEntry` per running VM hosted in
@@ -153,7 +160,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Shown when the selected profile has no mounted framebuffer — a Start
     /// card for an off/suspended profile, or a generic empty state.
     private var emptyStateHost: NSHostingView<EmptyStageView>!
-    private var sidebarHost: NSHostingView<SessionSidebar>!
+    private var sidebarHost: NonMovableHostingView<SessionSidebar>!
     /// The pane currently mounted in the stage, if any. Drives the empty state.
     private var mountedPane: SessionPane?
 
@@ -242,7 +249,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onReset:     { [weak self] id in self?.acDelegate?.sidebarResetProfile(id) },
             onDelete:    { [weak self] id in self?.acDelegate?.sidebarDeleteProfile(id) },
             onNewProfile: { [weak self] in self?.acDelegate?.openEditorWindow(editing: nil) })
-        let sidebarHost = NSHostingView(rootView: sidebar)
+        // NonMovable so a drag inside the sidebar — notably dragging a tab
+        // row onto the Grid — selects/drags the row instead of moving the
+        // whole window (the window is isMovableByWindowBackground).
+        let sidebarHost = NonMovableHostingView(rootView: sidebar)
         sidebarHost.translatesAutoresizingMaskIntoConstraints = false
         self.sidebarHost = sidebarHost
 
