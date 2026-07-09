@@ -179,23 +179,6 @@ struct Init: ParsableCommand {
                         try await buildLocally()
                     }
                 }
-                // The prompt-guard detector models are part of the default
-                // install. Skipped for --storage-dir runs (pipeline tests
-                // must not write the real Application Support or pull
-                // ~900 MB); non-fatal otherwise — the app heals missing
-                // models at every launch.
-                if storageDirURL == nil {
-                    for kind in PromptInjectionModels.Kind.allCases
-                        where !PromptInjectionModels.isInstalled(kind) {
-                        do {
-                            progress("Downloading the \(kind.dirName) detector model (~\(kind.approxSizeString))…")
-                            try await PromptInjectionModels.download(kind)
-                            progress("\(kind.dirName) detector model installed.")
-                        } catch {
-                            progress("WARNING: \(kind.dirName) model download failed (\(error.localizedDescription)) — the app will retry at next launch.")
-                        }
-                    }
-                }
                 result = .success(())
             } catch {
                 result = .failure(error)
@@ -1496,14 +1479,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // catalog.json on any network failure, so this never blocks launch.
         // No-op when the `catalog.refreshDisabled` default is set (testing).
         Task.detached(priority: .background) { await CatalogStore.shared.refresh() }
-
-        // The prompt-guard detector models are part of the default install:
-        // heal a missing/interrupted install at every start, with a visible
-        // progress panel (GUI) so the ~900 MB first-run fetch doesn't look
-        // like nothing is happening. No-op when both are on disk; deduped
-        // against any fetch already in flight. Headless falls back to a silent
-        // background fetch — the proxy's classifiers still need them.
-        DefaultModelDownloader.shared.ensureModels(headless: headless)
 
         // Surface any model download a previous crash/kill left half-finished as
         // a resumable entry in the Local Models picker (Bug#2). GUI only.
@@ -3262,10 +3237,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.installTask = nil
                 self.startRemoteAccessIfNeeded()
             }
-            // Detector models are handled by the launch-time
-            // DefaultModelDownloader (fired in applicationDidFinishLaunching,
-            // which runs before any install), so they're already downloading
-            // with their own progress panel by the time we get here.
             // High-level checkpoints: drive the status pill + weighted
             // progress bar + bookmark the console log with a leading
             // marker so they're easy to find in the firehose.
