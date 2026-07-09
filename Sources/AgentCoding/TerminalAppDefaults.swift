@@ -145,10 +145,9 @@ extension TerminalAppDefaults {
         clipboard-paste-protection = false
         clipboard-read = allow
         clipboard-write = allow
-        # macOS-like selection: selecting text never copies on its own —
-        # ⌘C copies, ⌘V pastes (bracketed). A Shift-drag makes a native
-        # ghostty selection (bypassing tmux mouse reporting) that ⌘C then
-        # copies to the macOS clipboard.
+        # macOS-like selection: a plain drag selects (tmux mouse is off, so
+        # it's ghostty's own selection), selecting never copies on its own,
+        # ⌘C copies and ⌘V pastes (bracketed).
         copy-on-select = false
         keybind = super+c=copy_to_clipboard
         keybind = super+v=paste_from_clipboard

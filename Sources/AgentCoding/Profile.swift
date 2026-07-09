@@ -2917,13 +2917,13 @@ public final class ProfileStore {
 
         // ~/.tmux.conf — ONE tmux session per VM; each tab is a tmux window.
         // The native terminal views attach as grouped clients of this
-        // session (see bromure-agentd _view_attach_command, which sets
-        // mouse on + set-clipboard off per view). Base config here:
+        // session. Base config here:
+        // - mouse OFF: tmux doesn't capture the mouse, so a plain drag is
+        //   ghostty's own native selection (select never copies, ⌘C copies)
+        //   and the wheel scrolls the native scrollback. tmux still forwards
+        //   mouse to apps that request it (Claude/vim), so TUI clicks work.
         // - base-index 0 + renumber-windows: window indices stay 0,1,2,…
         //   contiguous, so a tab's index is also its position in the bar.
-        // - set-clipboard off: a mouse selection must not auto-push to the
-        //   macOS clipboard (not macOS-like). Copy is Shift-drag + ⌘C via
-        //   ghostty's own selection.
         try """
         set -g status off
         set -g mouse off
@@ -2933,7 +2933,7 @@ public final class ProfileStore {
         set -g window-size latest
         set -g base-index 0
         set -g renumber-windows on
-        set -g set-clipboard off
+        set -g set-clipboard on
         """.write(to: home.appendingPathComponent(".tmux.conf"),
                   atomically: true, encoding: .utf8)
 

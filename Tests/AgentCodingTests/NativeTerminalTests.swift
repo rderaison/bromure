@@ -89,7 +89,7 @@ struct NativeTerminalTests {
         #expect(cmd.contains("status off"))
         #expect(cmd.contains("aggressive-resize on"))
         #expect(cmd.contains("allow-passthrough on"))
-        #expect(cmd.contains("mouse on"))
+        #expect(cmd.contains("mouse off"))
         #expect(cmd.contains("set-clipboard on"))
         #expect(cmd.contains("select-window -t :7"))
         // Bootstraps the bromure session if it isn't up yet (boot race).

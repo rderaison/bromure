@@ -106,11 +106,12 @@ def _view_attach_command(view, window):
         " new-session -t bromure -s " + name + " \\;"
         " set-option destroy-unattached on \\;"
         " set-option status off \\;"
-        # Session-scoped mouse mode: the host terminal (libghostty) only
-        # forwards wheel/drag when the app requests mouse reporting — this
-        # is what makes scrolling and drag-selection work in a view. The
-        # kitty-attached `bromure` session keeps its own setting.
-        " set-option mouse on"
+        # mouse OFF: tmux doesn't capture the mouse, so a plain drag is
+        # ghostty's own native selection (macOS-like) and the wheel scrolls
+        # native scrollback; tmux still forwards mouse to apps that request
+        # it (Claude/vim). (Kept in sync with bromure-agentd, which is the
+        # live daemon; this file is the pre-consolidation copy.)
+        " set-option mouse off"
     )
     if window is not None:
         try:
