@@ -1795,12 +1795,15 @@ def _git_toplevel(cwd):
         return ""
 
 
-def roster_loop_service():
-    """Every 0.7s publish the window list atomically to tabs.txt."""
-    while _RUNNING.is_set():
-        # Catch a reboot the moment systemd queues its job (within one tick of
-        # the user typing `reboot`, while dbus is still alive).
-        signal_reboot_if_pending()
+_ROSTER_LOCK = threading.Lock()
+
+
+def publish_roster():
+    """Build and atomically publish the window list to tabs.txt. Safe to call
+    from both the roster loop (periodic) and the command loop (immediately
+    after a tab-mutating command, so a new/closed tab shows up without waiting
+    for the next 0.7s tick). The lock serializes the shared .tabs.tmp writer."""
+    with _ROSTER_LOCK:
         p = _tmux("list-windows", "-t", TMUX_S, "-F", _ROSTER_FMT)
         if p.returncode == 0:
             out_lines = []
@@ -1834,6 +1837,18 @@ def roster_loop_service():
             # applyTabList([]) runs the close action.
             signal_reboot_if_pending()
             _atomic_publish(".tabs.tmp", "tabs.txt", "")
+
+
+def roster_loop_service():
+    """Every 0.7s publish the window list atomically to tabs.txt. (Tab-mutating
+    commands also publish immediately via publish_roster(), so this tick is the
+    catch-all for changes the host didn't drive — e.g. a program the agent ran
+    that opened its own window.)"""
+    while _RUNNING.is_set():
+        # Catch a reboot the moment systemd queues its job (within one tick of
+        # the user typing `reboot`, while dbus is still alive).
+        signal_reboot_if_pending()
+        publish_roster()
         time.sleep(0.7)
 
 
@@ -2231,7 +2246,13 @@ def command_loop_service():
                 except Exception:
                     log("tabs", "command %s failed:\n%s"
                         % (action, traceback.format_exc()))
-        time.sleep(0.2)
+                # Publish immediately so the new/closed/renamed tab reaches the
+                # host now, not up to 0.7s later on the next roster tick.
+                try:
+                    publish_roster()
+                except Exception:
+                    pass
+        time.sleep(0.1)
 
 
 # ── session lifecycle ───────────────────────────────────────────────────────

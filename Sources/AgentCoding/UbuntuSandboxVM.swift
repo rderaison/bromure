@@ -482,6 +482,32 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         vm?.socketDevices.first as? VZVirtioSocketDevice
     }
 
+    /// Parse a tabs.txt body into the tmux window list. Columns: idx, active,
+    /// label, container, cwd, worktree, parent_branch, root_repo, display,
+    /// repoRoot. Older guests send only the first 4 — trailing fields default
+    /// to nil, so a stale image degrades to plain tabs instead of misparsing.
+    static func parseRoster(_ raw: String) -> [GuestTab] {
+        var tabs: [GuestTab] = []
+        for line in raw.split(whereSeparator: \.isNewline) {
+            let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard cols.count >= 3, let idx = Int(cols[0]) else { continue }
+            func col(_ i: Int) -> String? {
+                guard cols.count > i else { return nil }
+                let s = String(cols[i]).trimmingCharacters(in: .whitespaces)
+                return s.isEmpty ? nil : s
+            }
+            tabs.append(GuestTab(
+                index: idx, active: cols[1] == "1",
+                label: String(cols[2]).trimmingCharacters(in: .whitespaces),
+                containerID: col(3),
+                cwd: col(4), worktreeBranch: col(5),
+                parentBranch: col(6), rootRepo: col(7),
+                display: col(8), repoRoot: col(9)))
+        }
+        tabs.sort { $0.index < $1.index }
+        return tabs
+    }
+
     /// Watches the outbox share for files dropped by the guest's
     /// `bromure-open` script and forwards each one to `onURLOpen`.
     private func startOutboxPolling() {
@@ -489,6 +515,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         outboxPollTask?.cancel()
         outboxPollTask = Task { @MainActor [weak self] in
             let fm = FileManager.default
+            // Roster mtime seen last, so the fast tick can re-parse tabs.txt
+            // only when it actually changed (a new/closed tab shows up in
+            // ~one fast tick instead of waiting for the ~480ms heavy scan).
+            var lastTabsMTime: Date?
             // One task, two cadences. The reboot-intent marker is drained
             // every tick (~40ms); everything else in the outbox (ip / url
             // relay / titles / roster) is latency-tolerant and stays on the
@@ -506,8 +536,22 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                     self?.onGuestReboot?()
                 }
 
+                // FAST PATH — roster. Tab open/close/switch is felt directly
+                // (the pill appears / the grid cell mounts), so read tabs.txt
+                // on the fast tick, but only re-parse when its mtime changed —
+                // the guest publishes it immediately after any tab command, so
+                // this picks the change up in ~one 40ms tick instead of up to
+                // the ~480ms heavy cadence.
+                let tabsFile = outbox.appendingPathComponent("tabs.txt")
+                if let mtime = try? fm.attributesOfItem(atPath: tabsFile.path)[.modificationDate] as? Date,
+                   mtime != lastTabsMTime {
+                    lastTabsMTime = mtime
+                    let raw = (try? String(contentsOf: tabsFile, encoding: .utf8)) ?? ""
+                    self?.onTabList?(Self.parseRoster(raw))
+                }
+
                 // Throttle the heavier scan to ~every 12th tick (~480ms) so
-                // titles / roster / url relay keep their original cadence.
+                // titles / url relay keep their original cadence.
                 ticks &+= 1
                 if ticks % 12 != 0 {
                     try? await Task.sleep(nanoseconds: 40_000_000)
@@ -578,40 +622,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             self?.onURLOpen?(url)
                             continue
                         }
-                        // tabs.txt — the tmux window list, one line per tab:
-                        // "<index>\t<active 0|1>\t<foreground command>\t<@container>".
-                        // The 4th column is empty unless the window is a docker
-                        // attach tab. Constantly rewritten atomically; don't
-                        // delete. tmux is the source of truth, so the host
-                        // mirrors it directly (no liveness guessing).
-                        if name == "tabs.txt" {
-                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
-                            // Columns: idx, active, label, container, cwd,
-                            // worktree, parent_branch, root_repo, display.
-                            // Older guests send only the first 4 — the trailing
-                            // fields default to nil, so a stale image degrades to
-                            // plain tabs instead of misparsing.
-                            var tabs: [GuestTab] = []
-                            for line in raw.split(whereSeparator: \.isNewline) {
-                                let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
-                                guard cols.count >= 3, let idx = Int(cols[0]) else { continue }
-                                func col(_ i: Int) -> String? {
-                                    guard cols.count > i else { return nil }
-                                    let s = String(cols[i]).trimmingCharacters(in: .whitespaces)
-                                    return s.isEmpty ? nil : s
-                                }
-                                tabs.append(GuestTab(
-                                    index: idx, active: cols[1] == "1",
-                                    label: String(cols[2]).trimmingCharacters(in: .whitespaces),
-                                    containerID: col(3),
-                                    cwd: col(4), worktreeBranch: col(5),
-                                    parentBranch: col(6), rootRepo: col(7),
-                                    display: col(8), repoRoot: col(9)))
-                            }
-                            tabs.sort { $0.index < $1.index }
-                            self?.onTabList?(tabs)
-                            continue
-                        }
+                        // tabs.txt is read on the fast tick above (mtime-gated),
+                        // not here — skip it in the heavy scan.
+                        if name == "tabs.txt" { continue }
                         // docker.txt — `docker ps -a --format '{{json .}}'`, one
                         // JSON object per line (running + stopped). Rewritten
                         // atomically every ~2s; empty when there's no docker.
