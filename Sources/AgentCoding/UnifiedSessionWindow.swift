@@ -203,9 +203,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private var sidebarDivider: NSBox?
     private(set) var sidebarCollapsed = false
     /// Restored on expand from the collapse toggle.
-    private var expandedSidebarWidth: CGFloat = 264
-    private static let sidebarMinWidth: CGFloat = 200
-    private static let sidebarMaxWidth: CGFloat = 480
+    private var expandedSidebarWidth: CGFloat = 220
+    private static let sidebarMinWidth: CGFloat = 100
+    private static let sidebarMaxWidth: CGFloat = 600
+    private static let sidebarDefaultWidth: CGFloat = 220
     private static let sidebarWidthKey = "ac.sidebarWidth"
 
     init(acDelegate: ACAppDelegate) {
@@ -351,7 +352,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         root.addSubview(stage)
         root.addSubview(resizeHandle)   // above the divider so it gets the drag
         let stored = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
-        let initialWidth = stored >= Self.sidebarMinWidth ? stored : 264
+        let initialWidth = stored >= Self.sidebarMinWidth ? stored : Self.sidebarDefaultWidth
         let sidebarWidth = sidebarHost.widthAnchor.constraint(equalToConstant: initialWidth)
         self.sidebarWidthConstraint = sidebarWidth
         self.sidebarDivider = divider
