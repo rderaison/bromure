@@ -1,9 +1,15 @@
 # Native Terminal Plan — replace Framebuffer+X11 with host-rendered PTYs
 
-Status: Phases 0–1 implemented on branch `worktree-ghostty` (ghostty pinned
-at v1.3.1 via `tools/ghostty.commit`; xcframework built by
-`tools/build-ghostty.sh`; native path behind the per-workspace
-"Native terminal (experimental)" toggle). Phases 2–4 not started.
+Status: Phases 0–3 implemented on branch `worktree-ghostty`. Phase 0:
+GhosttyKit pinned at v1.3.1 (`tools/ghostty.commit`, built by
+`tools/build-ghostty.sh`). Phase 1: native terminal path. Phase 2: the
+Grid + collapsible sidebar rail. Phase 3: framebuffer DELETED — headless
+guest boot via the consolidated `bromure-agentd.py` (systemd, sha256
+hot-upgrade), X11/kitty remain on disk but nothing starts them; the
+X-era guest agents, host bridges, VZ graphics/input/SPICE devices and
+kitty config plumbing are gone. Pending validation: first live boot of
+a workspace on the headless path. Phase 4 (remote stage mirroring) not
+started.
 Scope: bromure-ac only. The browser product keeps its framebuffer; nothing in
 `Sources/SandboxEngine/Resources/vm-setup` (browser image) changes.
 
