@@ -529,7 +529,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         self.browserPaneWidthConstraint = browserPaneWidth
         browserPaneHandle.onResize = { [weak self] x in
             guard let self, self.browserPaneOpen else { return }
-            let width = self.stage.bounds.width - x
+            // Middle pane: its right edge is the file pane's left edge, so
+            // subtract the file pane's width (0 when closed) from the stage
+            // right edge before measuring.
+            let fileW = self.filePaneOpen ? (self.filePaneWidthConstraint?.constant ?? 0) : 0
+            let width = self.stage.bounds.width - fileW - x
             if width < Self.browserPaneMinWidth {
                 self.setBrowserPaneOpen(false, animated: true)
             } else {
@@ -548,15 +552,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         NSLayoutConstraint.activate([
             paneSlot.topAnchor.constraint(equalTo: stage.topAnchor),
             paneSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
-            paneSlot.trailingAnchor.constraint(equalTo: filePaneHost.leadingAnchor),
+            paneSlot.trailingAnchor.constraint(equalTo: browserPaneHost.leadingAnchor),
             paneSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
             paneSlotMin,
             filePaneHost.topAnchor.constraint(equalTo: stage.topAnchor),
             filePaneHost.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
-            // Right-split chain: paneSlot | filePane | browserPane | stage edge.
-            // Both right panes collapse to width 0 when closed, so paneSlot
-            // fills whatever they leave.
-            filePaneHost.trailingAnchor.constraint(equalTo: browserPaneHost.leadingAnchor),
+            // Right-split chain: paneSlot | browserPane | filePane | stage edge
+            // (terminal, browser, files). Both right panes collapse to width 0
+            // when closed, so paneSlot fills whatever they leave.
+            filePaneHost.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
             filePaneWidth,
             // 8pt grab strip over the pane's leading edge, full height.
             filePaneHandle.centerXAnchor.constraint(equalTo: filePaneHost.leadingAnchor),
@@ -565,7 +569,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             filePaneHandle.widthAnchor.constraint(equalToConstant: 8),
             browserPaneHost.topAnchor.constraint(equalTo: stage.topAnchor),
             browserPaneHost.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
-            browserPaneHost.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            browserPaneHost.trailingAnchor.constraint(equalTo: filePaneHost.leadingAnchor),
             browserPaneWidth,
             browserPaneHandle.centerXAnchor.constraint(equalTo: browserPaneHost.leadingAnchor),
             browserPaneHandle.topAnchor.constraint(equalTo: stage.topAnchor),
