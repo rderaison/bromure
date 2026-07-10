@@ -31,7 +31,6 @@ struct HomeStorageTests {
     func newProfileIsExt4() {
         let p = Profile(name: "ws", tool: .claude, authMode: .token)
         #expect(p.homeModel == .ext4)
-        #expect(p.homeUpgradeDeclined == false)
     }
 
     @Test("Pre-upgrade JSON (no homeModel key) decodes as virtiofs")
@@ -41,20 +40,21 @@ struct HomeStorageTests {
         var obj = try JSONSerialization.jsonObject(
             with: encoder.encode(p)) as! [String: Any]
         obj.removeValue(forKey: "homeModel")
+        // Profiles that declined the offer while it was once-only carry
+        // this retired key; it must decode fine (and be ignored — the
+        // offer now re-arms every launch).
+        obj["homeUpgradeDeclined"] = true
         let data = try JSONSerialization.data(withJSONObject: obj)
         let decoded = try decoder.decode(Profile.self, from: data)
         #expect(decoded.homeModel == .virtiofs)
-        #expect(decoded.homeUpgradeDeclined == false)
     }
 
-    @Test("homeModel + declined flag round-trip through Codable")
+    @Test("homeModel round-trips through Codable")
     func roundTrip() throws {
         var p = Profile(name: "ws", tool: .codex, authMode: .subscription)
         p.homeModel = .ext4
-        p.homeUpgradeDeclined = true
         let decoded = try decoder.decode(Profile.self, from: encoder.encode(p))
         #expect(decoded.homeModel == .ext4)
-        #expect(decoded.homeUpgradeDeclined == true)
     }
 
     // MARK: SessionDisk

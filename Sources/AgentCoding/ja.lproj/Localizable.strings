@@ -847,7 +847,7 @@
 "Upgrade “%@”’s home storage?" = "「%@」のホームストレージをアップグレードしますか？";
 "This workspace's home folder currently lives in a macOS folder shared into the VM. Bromure can move it onto a private ext4 disk image instead.\n\nWhy: suspended workspaces resume without confused tools (files keep their identity across suspend/resume), git repositories in the home are no longer exposed to shared-folder corruption, and the image automatically shrinks on your Mac as files are deleted inside the VM.\n\nThe move happens once, during the next boot — a large home can take a few minutes, with progress shown on the boot screen. Your current home folder is kept on the Mac as a backup." = "このワークスペースのホームフォルダは現在、VMと共有されたmacOSのフォルダにあります。Bromureはこれを専用のext4ディスクイメージへ移動できます。\n\n理由：サスペンドしたワークスペースがツールを混乱させずに再開できます（ファイルはサスペンド／再開をまたいで同一性を保ちます）。ホーム内のgitリポジトリが共有フォルダに起因する破損にさらされなくなります。また、VM内でファイルを削除するとMac上のイメージが自動的に縮小します。\n\n移行は次回起動時に一度だけ行われます。大きなホームでは数分かかることがあり、進行状況は起動画面に表示されます。現在のホームフォルダはバックアップとしてMacに保持されます。";
 "This workspace has a suspended session; upgrading restarts it fresh." = "このワークスペースにはサスペンド中のセッションがあります。アップグレードすると新規に再起動されます。";
-"If you choose Not Now, you can upgrade anytime from the workspace editor." = "「後で」を選んでも、ワークスペースエディタからいつでもアップグレードできます。";
+"If you choose Not Now, Bromure will ask again the next time this workspace starts." = "「後で」を選んだ場合、このワークスペースの次回起動時に再度確認します。";
 "Upgrade Now" = "今すぐアップグレード";
 "Not Now" = "後で";
 "UPGRADING HOME STORAGE" = "ホームストレージをアップグレード中";

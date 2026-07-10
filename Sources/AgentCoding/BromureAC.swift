@@ -4384,17 +4384,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - Profile actions
 
-    /// Editor "Upgrade storage…": re-arm the home-storage upgrade offer for
-    /// a legacy (virtiofs-home) workspace that previously declined it. The
-    /// actual migration still runs through the launch-time dialog + migrate
-    /// boot, so the user gets the same explainer and progress UI.
+    /// Editor "Upgrade storage…" for a legacy (virtiofs-home) workspace.
+    /// The actual migration runs through the launch-time dialog + migrate
+    /// boot (which re-offers itself every launch), so this just points the
+    /// user at the next launch.
     @MainActor
     private func armHomeStorageUpgrade(_ profile: Profile) {
-        var p = profiles.first(where: { $0.id == profile.id }) ?? profile
+        let p = profiles.first(where: { $0.id == profile.id }) ?? profile
         guard p.homeModel == .virtiofs else { return }
-        p.homeUpgradeDeclined = false
-        try? store.save(p)
-        profiles = store.loadAll()
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Home storage upgrade armed", comment: "")
         alert.informativeText = String(
@@ -5227,16 +5224,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         var profile = profile
 
-        // Home-storage upgrade offer (virtiofs → ext4 image). Asked once:
-        // "Not Now" persists via homeUpgradeDeclined and the workspace
-        // editor's "Upgrade Home Storage" button re-arms it. Accepting
-        // makes THIS boot a migrate boot — the guest agent copies the old
-        // home into a fresh image before the session starts, with progress
-        // on the boot overlay.
+        // Home-storage upgrade offer (virtiofs → ext4 image). Asked on
+        // every GUI launch (boot or resume) until the user accepts —
+        // "Not Now" only skips this launch. Accepting makes THIS boot a
+        // migrate boot — the guest agent copies the old home into a fresh
+        // image before the session starts, with progress on the boot
+        // overlay.
         var migrateHomeThisBoot = false
         // Headless (CLI/remote) launches never modal-prompt; the workspace
         // keeps its current storage and the offer waits for a GUI launch.
-        if profile.homeModel == .virtiofs && !profile.homeUpgradeDeclined && !headless {
+        if profile.homeModel == .virtiofs && !headless {
             if promptHomeStorageUpgrade(profile: profile) {
                 migrateHomeThisBoot = true
                 // The dual-attach migrate config can't restore a snapshot
@@ -5244,10 +5241,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // said so).
                 SessionDisk(profile: profile, store: store,
                             baseDiskURL: imageManager.baseDiskURL).clearSavedState()
-            } else {
-                profile.homeUpgradeDeclined = true
-                try? store.save(profile)
-                self.profiles = store.loadAll()
             }
         }
 
@@ -5630,8 +5623,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    /// One-time home-storage upgrade offer for a legacy (virtiofs-home)
-    /// workspace. Returns true when the user picked "Upgrade Now".
+    /// Home-storage upgrade offer for a legacy (virtiofs-home) workspace,
+    /// shown on every GUI launch until the user accepts. Returns true when
+    /// the user picked "Upgrade Now".
     @MainActor
     private func promptHomeStorageUpgrade(profile: Profile) -> Bool {
         let alert = NSAlert()
@@ -5649,7 +5643,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 comment: "")
         }
         info += "\n\n" + NSLocalizedString(
-            "If you choose Not Now, you can upgrade anytime from the workspace editor.",
+            "If you choose Not Now, Bromure will ask again the next time this workspace starts.",
             comment: "")
         alert.informativeText = info
         alert.alertStyle = .informational

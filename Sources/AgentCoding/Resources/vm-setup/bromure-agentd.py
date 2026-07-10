@@ -1340,9 +1340,13 @@ def _has_session():
     return _tmux_ok("has-session", "-t", TMUX_S)
 
 
-def _new_window(command=None, cwd=None, env=None):
-    """tmux new-window -P -F '#{window_id}' … → window id ('' on failure)."""
+def _new_window(command=None, cwd=None, env=None, background=False):
+    """tmux new-window -P -F '#{window_id}' … → window id ('' on failure).
+    background=True adds -d so the new window doesn't become the active tab
+    (for windows the daemon opens on its own, not on a user action)."""
     args = ["tmux", "new-window", "-P", "-F", "#{window_id}", "-t", TMUX_S]
+    if background:
+        args.append("-d")
     if cwd:
         args += ["-c", cwd]
     if env:
@@ -1626,8 +1630,12 @@ def _restore_worktrees(repo_root, repo_name):
         wdir = _worktree_dir_for_branch(repo_root, r_branch)
         if not wdir or not os.path.isdir(wdir):   # git worktree gone
             continue
+        # -d (background): this runs off the roster loop, not a user
+        # action — the restored tabs must not steal focus from the
+        # terminal the user is typing in.
         win = _new_window(command="bash -l", cwd=wdir,
-                          env={"BROMURE_AC_WT_TOOL": r_tool})
+                          env={"BROMURE_AC_WT_TOOL": r_tool},
+                          background=True)
         if not win:
             continue
         _set_window_option(win, "@worktree", r_branch)

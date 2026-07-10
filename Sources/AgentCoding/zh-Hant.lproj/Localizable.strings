@@ -850,7 +850,7 @@
 "Upgrade “%@”’s home storage?" = "升級「%@」的家目錄儲存空間？";
 "This workspace's home folder currently lives in a macOS folder shared into the VM. Bromure can move it onto a private ext4 disk image instead.\n\nWhy: suspended workspaces resume without confused tools (files keep their identity across suspend/resume), git repositories in the home are no longer exposed to shared-folder corruption, and the image automatically shrinks on your Mac as files are deleted inside the VM.\n\nThe move happens once, during the next boot — a large home can take a few minutes, with progress shown on the boot screen. Your current home folder is kept on the Mac as a backup." = "此工作區的家目錄目前位於與虛擬機器共享的 macOS 資料夾中。Bromure 可以將其搬移到專用的 ext4 磁碟映像檔。\n\n原因：暫停的工作區恢復後工具不再混亂（檔案在暫停/恢復之間保持同一性）；家目錄中的 git 儲存庫不再暴露於共享資料夾造成的損毀風險；且在虛擬機器內刪除檔案時，映像檔會在 Mac 上自動縮小。\n\n搬移只會在下次開機時進行一次——較大的家目錄可能需要幾分鐘，進度會顯示在開機畫面上。目前的家目錄將作為備份保留在 Mac 上。";
 "This workspace has a suspended session; upgrading restarts it fresh." = "此工作區有一個暫停中的工作階段；升級會將其重新啟動。";
-"If you choose Not Now, you can upgrade anytime from the workspace editor." = "如果選擇「暫時不要」，之後可以隨時在工作區編輯器中升級。";
+"If you choose Not Now, Bromure will ask again the next time this workspace starts." = "如果選擇「暫時不要」，Bromure 會在下次啟動此工作區時再次詢問。";
 "Upgrade Now" = "立即升級";
 "Not Now" = "暫時不要";
 "UPGRADING HOME STORAGE" = "正在升級家目錄儲存空間";

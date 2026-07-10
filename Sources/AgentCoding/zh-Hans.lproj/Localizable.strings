@@ -847,7 +847,7 @@
 "Upgrade “%@”’s home storage?" = "升级“%@”的主目录存储？";
 "This workspace's home folder currently lives in a macOS folder shared into the VM. Bromure can move it onto a private ext4 disk image instead.\n\nWhy: suspended workspaces resume without confused tools (files keep their identity across suspend/resume), git repositories in the home are no longer exposed to shared-folder corruption, and the image automatically shrinks on your Mac as files are deleted inside the VM.\n\nThe move happens once, during the next boot — a large home can take a few minutes, with progress shown on the boot screen. Your current home folder is kept on the Mac as a backup." = "此工作区的主目录目前位于与虚拟机共享的 macOS 文件夹中。Bromure 可以将其迁移到专用的 ext4 磁盘映像上。\n\n原因：挂起的工作区恢复后工具不再错乱（文件在挂起/恢复之间保持同一性）；主目录中的 git 仓库不再面临共享文件夹导致的损坏风险；并且在虚拟机内删除文件时，映像会在 Mac 上自动收缩。\n\n迁移只在下次启动时进行一次——较大的主目录可能需要几分钟，进度会显示在启动画面上。当前的主目录将作为备份保留在 Mac 上。";
 "This workspace has a suspended session; upgrading restarts it fresh." = "此工作区有一个挂起的会话；升级会将其重新启动。";
-"If you choose Not Now, you can upgrade anytime from the workspace editor." = "如果选择“暂不”，之后可以随时在工作区编辑器中升级。";
+"If you choose Not Now, Bromure will ask again the next time this workspace starts." = "如果选择“暂不”，Bromure 会在下次启动此工作区时再次询问。";
 "Upgrade Now" = "立即升级";
 "Not Now" = "暂不";
 "UPGRADING HOME STORAGE" = "正在升级主目录存储";

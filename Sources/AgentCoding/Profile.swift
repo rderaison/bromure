@@ -1321,11 +1321,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// New profiles are created `.ext4`.
     public var homeModel: HomeModel
 
-    /// The user answered "Not Now" to the home-storage upgrade dialog.
-    /// Never ask again at launch; the workspace editor's "Upgrade Home
-    /// Storage" button clears this so the next launch re-offers it.
-    public var homeUpgradeDeclined: Bool
-
     public init(
         id: UUID = UUID(),
         name: String,
@@ -1405,8 +1400,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         mcpServers: [MCPServer] = [],
         // New profiles get the ext4 home image; only the decoder (old
         // JSON) and the registration scratch profile use .virtiofs.
-        homeModel: HomeModel = .ext4,
-        homeUpgradeDeclined: Bool = false
+        homeModel: HomeModel = .ext4
     ) {
         self.id = id
         self.name = name
@@ -1478,7 +1472,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.bootAtStartup = bootAtStartup
         self.mcpServers = mcpServers
         self.homeModel = homeModel
-        self.homeUpgradeDeclined = homeUpgradeDeclined
     }
 
     /// Default-tolerant decoder so old JSON files (missing newer fields) load.
@@ -1531,7 +1524,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case bootAtStartup
         case mcpServers
         case homeModel
-        case homeUpgradeDeclined
     }
 
     public init(from decoder: Decoder) throws {
@@ -1634,7 +1626,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // Pre-upgrade profiles have no homeModel key → they stay on the
         // legacy virtiofs home until the user accepts the migration.
         homeModel = try c.decodeIfPresent(HomeModel.self, forKey: .homeModel) ?? .virtiofs
-        homeUpgradeDeclined = try c.decodeIfPresent(Bool.self, forKey: .homeUpgradeDeclined) ?? false
     }
 
     /// Explicit encoder — skips the legacy `folderPath` key (we only ever
@@ -1782,7 +1773,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // pre-upgrade profile (decoder defaults to .virtiofs), so a new
         // ext4 profile must always carry the key explicitly.
         try c.encode(homeModel, forKey: .homeModel)
-        if homeUpgradeDeclined { try c.encode(true, forKey: .homeUpgradeDeclined) }
         if !mcpServers.isEmpty {
             try c.encode(mcpServers, forKey: .mcpServers)
         }
@@ -2402,7 +2392,6 @@ public final class ProfileStore {
         // before the upgrade would otherwise decode as .virtiofs and
         // stamp every NEW workspace legacy.
         template.homeModel = .ext4
-        template.homeUpgradeDeclined = false
         // Merge the encrypted secrets blob (default OAuth tokens etc).
         let blobURL = templateSecretsURL
         if let cipher = try? Data(contentsOf: blobURL),
