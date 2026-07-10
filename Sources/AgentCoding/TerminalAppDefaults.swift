@@ -168,10 +168,9 @@ extension Profile {
     ///
     /// Default font intentionally falls back to **JetBrains Mono** rather
     /// than Terminal.app's font — we install JetBrains Mono via apt at
-    /// base-image build time, so it's *guaranteed* to render. macOS
-    /// fonts copied into /usr/share/fonts/macos may or may not match
-    /// kitty's fontconfig query (e.g. "SF Mono" → fontconfig may not
-    /// register it under that exact name). Users can override via the
+    /// base-image build time, so it's *guaranteed* to render in the guest;
+    /// the image carries no macOS fonts, so Terminal.app families like
+    /// "SF Mono" wouldn't resolve there. Users can override via the
     /// Appearance picker.
     public mutating func seedAppearance(from terminalDefaults: TerminalAppDefaults) {
         // Hard-coded defaults the team standardized on (matches the

@@ -93,17 +93,16 @@ extension UbuntuImageManager {
 
             // 2. Postinstall: every catalog step, unprompted — the setup
             //    screen the user clicked through is the consent for the
-            //    initial set. Fonts ride along in the same boot (the
-            //    published image can't contain Apple's fonts; the user's
-            //    own Mac provides them here).
+            //    initial set. Runs even with zero steps: the postinstall
+            //    boot also restores resolv.conf and e2fsck-gates the
+            //    downloaded image before promotion.
             let steps = catalog.sortedSteps
             progress(steps.isEmpty
-                ? "Finalizing image (fonts)…"
+                ? "Finalizing image…"
                 : "Installing recommended packages (\(steps.count) step(s), ~2-5 min)…")
             try await runPostinstall(
                 steps: steps,
                 targetDisk: scratchDisk,
-                includeMacFonts: true,
                 progress: progress,
                 output: output
             )
@@ -173,7 +172,6 @@ extension UbuntuImageManager {
             try await runPostinstall(
                 steps: steps,
                 targetDisk: scratchDisk,
-                includeMacFonts: false,
                 progress: progress,
                 output: output
             )

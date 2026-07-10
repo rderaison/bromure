@@ -197,9 +197,9 @@ struct Init: ParsableCommand {
 /// Publisher-side build (Jenkinsfile.image → scripts/publish-image.sh):
 /// produce the redistributable base image containing free software only —
 /// no Claude Code / Codex / Grok / gcloud (those are img-catalog.json
-/// postinstall steps applied on the end-user's machine) and no Apple
-/// fonts. The artifacts land in --output, never in Application Support,
-/// so a publish run can't clobber a developer's own base image.
+/// postinstall steps applied on the end-user's machine). The artifacts
+/// land in --output, never in Application Support, so a publish run
+/// can't clobber a developer's own base image.
 struct InitFossImage: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "init-foss-image",
@@ -224,7 +224,6 @@ struct InitFossImage: ParsableCommand {
                         FileHandle.standardError.write(Data("[init-foss-image] \(msg)\n".utf8))
                     },
                     force: true,
-                    includeMacFonts: false,
                     postinstallSteps: []
                 )
                 result = .success(())

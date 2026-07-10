@@ -879,47 +879,6 @@ log "chroot phase complete"
 CHROOT_EOF
 
 # ---------------------------------------------------------------------------
-# Copy macOS fonts into the installed system BEFORE we unmount /mnt.
-# The host shares /System/Library/Fonts (and optionally /Library/Fonts)
-# read-only via virtiofs; we mount them, cp -a into /usr/share/fonts/macos/,
-# then fc-cache so the in-chroot fontconfig picks them up.
-#
-# Apple's fonts are NOT redistributable, so the publish pipeline
-# (init-foss-image) never attaches these shares — every mount below
-# is a no-op there and the published image ships without them. End-user
-# machines get the fonts from their own /System/Library/Fonts, either here
-# (local build) or via postinstall.sh (downloaded image).
-# ---------------------------------------------------------------------------
-
-log "copying macOS fonts into base image (skipped unless the host shared them — never in the published FOSS image)"
-mkdir -p /tmp/macfonts-sys /tmp/macfonts-usr /tmp/macfonts-term
-modprobe virtiofs 2>/dev/null || true
-if mount -t virtiofs macos-fonts /tmp/macfonts-sys 2>/dev/null; then
-    mkdir -p /mnt/usr/share/fonts/macos
-    cp -a /tmp/macfonts-sys/. /mnt/usr/share/fonts/macos/ 2>/dev/null || \
-        log "  copy of macOS system fonts had warnings (some sealed-system fonts skipped)"
-    umount /tmp/macfonts-sys
-fi
-if mount -t virtiofs macos-user-fonts /tmp/macfonts-usr 2>/dev/null; then
-    mkdir -p /mnt/usr/share/fonts/macos-user
-    cp -a /tmp/macfonts-usr/. /mnt/usr/share/fonts/macos-user/ 2>/dev/null || true
-    umount /tmp/macfonts-usr
-fi
-# Terminal.app's bundled SF Mono (incl. "SF Mono Terminal"). Tag is only
-# present when the host found the Terminal.app Fonts dir, so the mount is
-# best-effort. Land it alongside the system fonts so fontconfig indexes it.
-if mount -t virtiofs macos-terminal-fonts /tmp/macfonts-term 2>/dev/null; then
-    mkdir -p /mnt/usr/share/fonts/macos
-    cp -a /tmp/macfonts-term/. /mnt/usr/share/fonts/macos/ 2>/dev/null || true
-    umount /tmp/macfonts-term
-fi
-rmdir /tmp/macfonts-sys /tmp/macfonts-usr /tmp/macfonts-term 2>/dev/null || true
-
-# /proc /sys /dev are still bound from the chroot phase — fc-cache just
-# needs them to read /etc/fonts/conf.d/* normally.
-chroot /mnt /bin/bash -c 'fc-cache -f >/dev/null 2>&1 || true'
-
-# ---------------------------------------------------------------------------
 # Tear down chroot mounts and unmount target.
 # ---------------------------------------------------------------------------
 

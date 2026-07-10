@@ -206,15 +206,11 @@ public final class UbuntuImageManager {
     ///
     /// `postinstallSteps` are the img-catalog.json commands to apply after
     /// the free-software install completes (Claude Code, Codex, … — see
-    /// ImageCatalog). `includeMacFonts` shares the host's font dirs with
-    /// the installer so they're copied into the image; the publish
-    /// pipeline (init-foss-image) turns it off because Apple's
-    /// fonts must not ship in the redistributable image.
+    /// ImageCatalog).
     public func createBaseImage(
         progress: @escaping (String) -> Void,
         output: @escaping (String) -> Void = { _ in },
         force: Bool = false,
-        includeMacFonts: Bool = true,
         postinstallSteps: [PostinstallStep] = []
     ) async throws {
         let fm = FileManager.default
@@ -288,7 +284,6 @@ public final class UbuntuImageManager {
             do {
                 try await runInstaller(
                     targetDisk: scratchDisk,
-                    includeMacFonts: includeMacFonts,
                     progress: progress,
                     output: output
                 )
@@ -299,22 +294,18 @@ public final class UbuntuImageManager {
                 try createSparseDisk(at: scratchDisk, sizeBytes: Self.baseDiskBytes)
                 try await runInstaller(
                     targetDisk: scratchDisk,
-                    includeMacFonts: includeMacFonts,
                     progress: progress,
                     output: output
                 )
             }
 
             // 3b. Apply the catalog's postinstall steps (agent installs)
-            //     to the still-unpromoted disk. Fonts were already copied
-            //     by the installer run above (when enabled), so the
-            //     postinstall boot doesn't attach the font shares again.
+            //     to the still-unpromoted disk.
             if !postinstallSteps.isEmpty {
                 progress("Installing recommended packages (\(postinstallSteps.count) step(s))…")
                 try await runPostinstall(
                     steps: postinstallSteps,
                     targetDisk: scratchDisk,
-                    includeMacFonts: false,
                     progress: progress,
                     output: output
                 )
@@ -477,7 +468,6 @@ public final class UbuntuImageManager {
     @MainActor
     private func runInstaller(
         targetDisk: URL,
-        includeMacFonts: Bool,
         progress: @escaping (String) -> Void,
         output: @escaping (String) -> Void
     ) async throws {
@@ -487,7 +477,6 @@ public final class UbuntuImageManager {
             script: "setup.sh",
             scriptArgs: "\(scale)",
             extraShares: [],
-            includeMacFonts: includeMacFonts,
             successMarker: "SANDBOX_SETUP_DONE",
             failureMarker: "SANDBOX_SETUP_FAILED:",
             markerTimeout: 30 * 60,
@@ -499,13 +488,12 @@ public final class UbuntuImageManager {
 
     /// Boot Alpine against an already-installed Ubuntu disk and run
     /// postinstall.sh: chroot into the image and execute the given
-    /// img-catalog steps, plus the macOS font copy when enabled. Internal
-    /// so the download path (UbuntuImageManager+Remote.swift) drives it too.
+    /// img-catalog steps. Internal so the download path
+    /// (UbuntuImageManager+Remote.swift) drives it too.
     @MainActor
     func runPostinstall(
         steps: [PostinstallStep],
         targetDisk: URL,
-        includeMacFonts: Bool,
         progress: @escaping (String) -> Void,
         output: @escaping (String) -> Void
     ) async throws {
@@ -541,7 +529,6 @@ public final class UbuntuImageManager {
             script: "postinstall.sh",
             scriptArgs: "",
             extraShares: [("postinstall", shareDir)],
-            includeMacFonts: includeMacFonts,
             successMarker: "SANDBOX_POSTINSTALL_DONE",
             failureMarker: "SANDBOX_POSTINSTALL_FAILED:",
             markerTimeout: 20 * 60,
@@ -561,7 +548,6 @@ public final class UbuntuImageManager {
         script: String,
         scriptArgs: String,
         extraShares: [(tag: String, url: URL)],
-        includeMacFonts: Bool,
         successMarker: String,
         failureMarker: String,
         markerTimeout: TimeInterval,
@@ -682,45 +668,6 @@ public final class UbuntuImageManager {
         )
 
         var shares: [VZDirectorySharingDeviceConfiguration] = [setupFS]
-
-        // Share the host's macOS system + user fonts read-only so the
-        // guest script can `cp -a` them into /usr/share/fonts/macos/.
-        // After that, the fonts live on base.img — no runtime mount
-        // needed. Skipped by the publish pipeline: Apple's fonts are not
-        // redistributable and must never reach the published image.
-        if includeMacFonts {
-            let systemFontsURL = URL(fileURLWithPath: "/System/Library/Fonts")
-            let macFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "macos-fonts")
-            macFontsFS.share = VZSingleDirectoryShare(
-                directory: VZSharedDirectory(url: systemFontsURL, readOnly: true)
-            )
-            shares.append(macFontsFS)
-
-            let userFontsURL = URL(fileURLWithPath: "/Library/Fonts")
-            if FileManager.default.fileExists(atPath: userFontsURL.path) {
-                let userFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "macos-user-fonts")
-                userFontsFS.share = VZSingleDirectoryShare(
-                    directory: VZSharedDirectory(url: userFontsURL, readOnly: true)
-                )
-                shares.append(userFontsFS)
-            }
-
-            // Terminal.app bundles SF Mono (including "SF Mono Terminal"), which is
-            // NOT in the system/user font directories above — it lives inside the
-            // app bundle. Share it too so those families actually render in the
-            // guest's kitty when a profile picks them.
-            let terminalFontDirs = [
-                "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts",
-                "/Applications/Utilities/Terminal.app/Contents/Resources/Fonts",
-            ]
-            if let termFonts = terminalFontDirs.first(where: { FileManager.default.fileExists(atPath: $0) }) {
-                let termFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "macos-terminal-fonts")
-                termFontsFS.share = VZSingleDirectoryShare(
-                    directory: VZSharedDirectory(url: URL(fileURLWithPath: termFonts), readOnly: true)
-                )
-                shares.append(termFontsFS)
-            }
-        }
 
         // Caller-provided shares (e.g. the postinstall steps dir).
         for extra in extraShares {

@@ -17,17 +17,12 @@
 #   postinstall  — a host temp dir containing steps/NNN-<slug>.sh, one file
 #                  per accepted catalog step, executed in lexical order.
 #                  Line 1 of each file is `# <human description>`.
-#   macos-fonts / macos-user-fonts / macos-terminal-fonts — optional; when
-#                  present the host's fonts are copied in, mirroring the
-#                  setup.sh bake path (fonts never ship in the published
-#                  image — Apple's fonts are not redistributable).
 #
 # Pipeline:
 #   1. Mount vda2 (root) + vda1 (ESP) and bind /dev /proc /sys.
 #   2. Mount the postinstall share, copy the step files into the chroot.
 #   3. chroot: proxy env up, run each step with retries, markers per step.
-#   4. Copy macOS fonts (when shared) + fc-cache.
-#   5. Restore resolv.conf, umount, sync, print marker.
+#   4. Restore resolv.conf, umount, sync, print marker.
 
 set -e
 
@@ -170,34 +165,6 @@ apt-get clean 2>/dev/null || true
 
 log "chroot phase complete"
 CHROOT_EOF
-
-# ---------------------------------------------------------------------------
-# Copy macOS fonts (same blocks as setup.sh — no-ops when the host didn't
-# attach the shares, e.g. when amending an image that already has them).
-# ---------------------------------------------------------------------------
-
-log "copying macOS fonts into image (when shared)"
-mkdir -p /tmp/macfonts-sys /tmp/macfonts-usr /tmp/macfonts-term
-modprobe virtiofs 2>/dev/null || true
-if mount -t virtiofs macos-fonts /tmp/macfonts-sys 2>/dev/null; then
-    mkdir -p /mnt/usr/share/fonts/macos
-    cp -a /tmp/macfonts-sys/. /mnt/usr/share/fonts/macos/ 2>/dev/null || \
-        log "  copy of macOS system fonts had warnings (some sealed-system fonts skipped)"
-    umount /tmp/macfonts-sys
-fi
-if mount -t virtiofs macos-user-fonts /tmp/macfonts-usr 2>/dev/null; then
-    mkdir -p /mnt/usr/share/fonts/macos-user
-    cp -a /tmp/macfonts-usr/. /mnt/usr/share/fonts/macos-user/ 2>/dev/null || true
-    umount /tmp/macfonts-usr
-fi
-if mount -t virtiofs macos-terminal-fonts /tmp/macfonts-term 2>/dev/null; then
-    mkdir -p /mnt/usr/share/fonts/macos
-    cp -a /tmp/macfonts-term/. /mnt/usr/share/fonts/macos/ 2>/dev/null || true
-    umount /tmp/macfonts-term
-fi
-rmdir /tmp/macfonts-sys /tmp/macfonts-usr /tmp/macfonts-term 2>/dev/null || true
-
-chroot /mnt /bin/bash -c 'fc-cache -f >/dev/null 2>&1 || true'
 
 # ---------------------------------------------------------------------------
 # Restore runtime resolv.conf and tear down.
