@@ -516,25 +516,37 @@ struct AutomationEditorView: View {
 
     private var editor: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 22) {
                 header
+                Divider()
                 triggerSection
                 taskSection
                 finishSection
                 if !askLabels.isEmpty { unattendedWarning }
                 if !isNew { runsSection }
-                footer
             }
-            .padding(24)
-            .frame(maxWidth: 620, alignment: .leading)
+            .padding(.horizontal, 30)
+            .padding(.top, 26)
+            .padding(.bottom, 12)
+            .frame(maxWidth: 660, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        // Pinned action bar so Save/Run are always reachable without scrolling.
+        .safeAreaInset(edge: .bottom, spacing: 0) { footerBar }
         // Reload the repo/team dropdowns whenever the workspace (and so the
         // tokens) changes. Doubles as a live token check.
         .task(id: draft.profileID) { await loadTriggerSources() }
         // Branches + directories depend on the chosen repo AND branch.
         .task(id: repoBranchKey) { await loadRepoDetails() }
+    }
+
+    /// Standardised secondary helper text under a control.
+    private func hint(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// Refetch branches/dirs when the repo or the commit branch changes.
@@ -586,21 +598,55 @@ struct AutomationEditorView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            TextField(NSLocalizedString("Automation name", comment: ""), text: $draft.name)
-                .textFieldStyle(.plain)
-                .font(.system(size: 20, weight: .bold))
-            Toggle(NSLocalizedString("Enabled", comment: ""), isOn: $draft.enabled)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .labelsHidden()
-                .help(NSLocalizedString("Enabled", comment: ""))
+        HStack(alignment: .center, spacing: 14) {
+            Image(systemName: "bolt.badge.clock.fill")
+                .font(.system(size: 24, weight: .medium))
+                .foregroundStyle(.tint)
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(Color.accentColor.opacity(0.12)))
+            VStack(alignment: .leading, spacing: 2) {
+                TextField(NSLocalizedString("Automation name", comment: ""), text: $draft.name)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 22, weight: .bold))
+                Text(headerSubtitle)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            VStack(spacing: 3) {
+                Toggle(NSLocalizedString("Enabled", comment: ""), isOn: $draft.enabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                Text(draft.enabled
+                     ? NSLocalizedString("Enabled", comment: "")
+                     : NSLocalizedString("Paused", comment: ""))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
+    /// One-line context under the name: where it runs and what fires it.
+    private var headerSubtitle: String {
+        let ws = selectedProfile?.name ?? NSLocalizedString("no workspace", comment: "")
+        let trigger: String
+        switch draft.trigger {
+        case .schedule:          trigger = NSLocalizedString("on a schedule", comment: "")
+        case .githubPullRequest: trigger = NSLocalizedString("on new pull requests", comment: "")
+        case .githubIssue:       trigger = NSLocalizedString("on new issues", comment: "")
+        case .githubCommit:      trigger = NSLocalizedString("on new commits", comment: "")
+        case .linearIssue:       trigger = NSLocalizedString("on new Linear issues", comment: "")
+        }
+        return String(format: NSLocalizedString("Runs in %1$@ · %2$@", comment: "workspace · trigger"),
+                      ws, trigger)
+    }
+
     private var triggerSection: some View {
-        GroupBox(NSLocalizedString("Trigger", comment: "automation editor")) {
-            VStack(alignment: .leading, spacing: 10) {
+        GroupBox(label: sectionLabel(NSLocalizedString("Trigger", comment: "automation editor"),
+                                     "bolt.fill")) {
+            VStack(alignment: .leading, spacing: 13) {
                 triggerKindControl
                 switch draft.trigger {
                 case .schedule:                        scheduleControls
@@ -609,8 +655,16 @@ struct AutomationEditorView: View {
                 case .linearIssue:                     linearControls
                 }
             }
-            .padding(6)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 10)
         }
+    }
+
+    /// GroupBox title with a leading SF Symbol, for scannable sections.
+    private func sectionLabel(_ title: String, _ symbol: String) -> some View {
+        Label(title, systemImage: symbol)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
     }
 
     /// Segmented-style trigger switch. The GitHub option stays visible when
@@ -858,16 +912,13 @@ struct AutomationEditorView: View {
     private var backlogToggle: some View {
         Toggle(NSLocalizedString("Ignore backlog", comment: ""),
                isOn: $draft.ignoreBacklog)
-        Text(draft.ignoreBacklog
+        hint(draft.ignoreBacklog
              ? NSLocalizedString(
                 "Only items appearing after you save fire. The existing open items are skipped.",
                 comment: "")
              : NSLocalizedString(
                 "The existing open backlog is processed once, too, then new items as they appear.",
                 comment: ""))
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder
@@ -938,8 +989,9 @@ struct AutomationEditorView: View {
     }
 
     private var taskSection: some View {
-        GroupBox(NSLocalizedString("Task", comment: "automation editor")) {
-            VStack(alignment: .leading, spacing: 10) {
+        GroupBox(label: sectionLabel(NSLocalizedString("Task", comment: "automation editor"),
+                                     "terminal.fill")) {
+            VStack(alignment: .leading, spacing: 13) {
                 Picker(NSLocalizedString("Workspace", comment: ""), selection: $draft.profileID) {
                     ForEach(profiles) { p in
                         Text(p.name).tag(p.id)
@@ -981,36 +1033,34 @@ struct AutomationEditorView: View {
                         .frame(minHeight: 88)
                         .overlay(RoundedRectangle(cornerRadius: 5)
                             .strokeBorder(Color.primary.opacity(0.12)))
-                    Text(NSLocalizedString(
+                    hint(NSLocalizedString(
                         "Each run starts the agent with this prompt — in a fresh worktree when the path is a git repo, in a plain tab at that path otherwise.",
                         comment: ""))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
                 }
             }
-            .padding(6)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 10)
         }
     }
 
     private var finishSection: some View {
-        GroupBox(NSLocalizedString("When it finishes", comment: "automation editor")) {
-            VStack(alignment: .leading, spacing: 6) {
+        GroupBox(label: sectionLabel(NSLocalizedString("When it finishes", comment: "automation editor"),
+                                     "checkmark.circle.fill")) {
+            VStack(alignment: .leading, spacing: 8) {
                 Toggle(NSLocalizedString(
                     "Close the tab when the agent finishes", comment: ""),
                        isOn: $draft.closeWhenDone)
                     .disabled(draft.tool != .claude)
-                Text(draft.tool == .claude
+                hint(draft.tool == .claude
                      ? NSLocalizedString(
                         "The transcript is saved to .bromure-automation/transcript.jsonl in the worktree first. Turn off to leave the session up for inspection.",
                         comment: "")
                      : NSLocalizedString(
                         "Only Claude reports completion reliably (its Stop hook); other agents' tabs stay open.",
                         comment: ""))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(6)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 10)
         }
     }
 
@@ -1049,59 +1099,72 @@ struct AutomationEditorView: View {
     }
 
     private var runsSection: some View {
-        GroupBox(NSLocalizedString("Recent runs", comment: "automation editor")) {
+        GroupBox(label: sectionLabel(NSLocalizedString("Recent runs", comment: "automation editor"),
+                                     "clock.arrow.circlepath")) {
             let recent = Array(store.runs(for: draft.id).prefix(8))
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 7) {
                 if recent.isEmpty {
-                    Text(NSLocalizedString("No runs yet.", comment: ""))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                    hint(NSLocalizedString("No runs yet.", comment: ""))
                 }
                 ForEach(recent) { run in
                     HStack(spacing: 8) {
                         Image(systemName: run.outcome.glyph)
                             .font(.system(size: 11))
                             .foregroundStyle(run.outcome.tint)
+                            .frame(width: 14)
                         Text(run.firedAt.formatted(date: .abbreviated, time: .shortened))
                             .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(.secondary)
                         Text(run.detail)
                             .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
                             .lineLimit(1)
                         Spacer(minLength: 0)
                     }
                 }
             }
-            .padding(6)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 10)
         }
     }
 
-    private var footer: some View {
-        HStack {
-            if !isNew {
-                Button(NSLocalizedString("Delete Automation…", comment: ""), role: .destructive) {
-                    onDelete(draft.id)
+    /// Pinned action bar at the bottom of the editor.
+    private var footerBar: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 10) {
+                if !isNew {
+                    Button(NSLocalizedString("Delete…", comment: ""), role: .destructive) {
+                        onDelete(draft.id)
+                    }
+                    .controlSize(.large)
                 }
+                if !canSave {
+                    Label(String(format: NSLocalizedString("To save: %@", comment: ""),
+                                 saveBlockers.joined(separator: ", ")),
+                          systemImage: "exclamationmark.circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 12)
+                Button(NSLocalizedString("Run Now", comment: "")) {
+                    onRunNow(draft)
+                }
+                .controlSize(.large)
+                .disabled(!canSave)
+                .help(NSLocalizedString("Saves, then fires immediately — the schedule is untouched.",
+                                        comment: ""))
+                Button(NSLocalizedString("Save", comment: "")) {
+                    onSave(draft)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canSave)
             }
-            Spacer()
-            if !canSave {
-                Text(String(format: NSLocalizedString("To save: %@", comment: ""),
-                            saveBlockers.joined(separator: ", ")))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
-            }
-            Button(NSLocalizedString("Run Now", comment: "")) {
-                onRunNow(draft)
-            }
-            .disabled(!canSave)
-            .help(NSLocalizedString("Saves, then fires immediately — the schedule is untouched.",
-                                    comment: ""))
-            Button(NSLocalizedString("Save", comment: "")) {
-                onSave(draft)
-            }
-            .keyboardShortcut(.defaultAction)
-            .disabled(!canSave)
+            .padding(.horizontal, 30)
+            .padding(.vertical, 12)
         }
+        .background(.bar)
     }
 }
