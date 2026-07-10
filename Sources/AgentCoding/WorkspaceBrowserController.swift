@@ -38,6 +38,9 @@ final class WorkspaceBrowserController {
     /// Native-tabs bridge (vsock 5810) — the shared machinery that streams the
     /// guest's tab list/favicons and drives navigate/activate/close/back/…
     private var tabBridge: TabBridge?
+    /// CDP driver (vsock 5200) for screenshot/eval/page-text — what TabBridge
+    /// can't do. Exposed for the browser MCP server + devtools.
+    private(set) var cdp: BrowserCDP?
     /// Default landing page for a fresh ephemeral browser.
     private let homePage = "https://bromure.io/hello"
 
@@ -198,6 +201,8 @@ final class WorkspaceBrowserController {
         // chrome drives it. Chromium already opens on the config home page.
         if let socketDevice = warm.vm.socketDevices.first as? VZVirtioSocketDevice {
             wireTabBridge(TabBridge(socketDevice: socketDevice))
+            // CDP driver shares the same vsock device (different port, 5200).
+            cdp = BrowserCDP(socketDevice: socketDevice)
         } else {
             print("[browser] no vsock device — tabs/navigation disabled")
         }
@@ -252,6 +257,8 @@ final class WorkspaceBrowserController {
         model.framebufferContainer.unmountAll()
         tabBridge?.stop()
         tabBridge = nil
+        cdp?.stop()
+        cdp = nil
         vmView?.virtualMachine = nil
         vmView = nil
         if let warm {
