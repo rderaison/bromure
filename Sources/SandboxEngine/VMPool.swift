@@ -76,6 +76,11 @@ public final class VMPool {
     /// the browser loading the agent's dev server). Default true preserves
     /// Web's behaviour.
     private let isolatePeers: Bool
+    /// Web owns/rebuilds its image, so it boots only a version-matching one.
+    /// AC reuses Web's shared image without controlling its version, so it
+    /// sets this false to boot whatever complete boot set is present. Default
+    /// true preserves Web's behaviour.
+    private let requireImageVersion: Bool
     private var warmVM: WarmVM?
     private var isWarming = false
     private var configListenerDelegate: ConfigListenerDelegate?
@@ -99,12 +104,14 @@ public final class VMPool {
         self.config = config
     }
 
-    public init(config: VMConfig, storageDir: URL? = nil, isolatePeers: Bool = true) {
+    public init(config: VMConfig, storageDir: URL? = nil, isolatePeers: Bool = true,
+                requireImageVersion: Bool = true) {
         self.config = config
         let dir = storageDir ?? VMConfig.defaultStorageDirectory
         self.storageDir = dir
         self.imageManager = LinuxImageManager(storageDir: dir)
         self.isolatePeers = isolatePeers
+        self.requireImageVersion = requireImageVersion
     }
 
     /// Pre-warm a VM by booting it to an idle shell prompt.
@@ -158,7 +165,10 @@ public final class VMPool {
     /// - Parameter bridgedInterface: Interface name for bridged mode, or nil for NAT.
     /// - Returns: A booted WarmVM ready for claim.
     private func bootVM(bridgedInterface: String?) async throws -> WarmVM {
-        guard imageManager.baseImageExists else {
+        let imageOK = requireImageVersion
+            ? imageManager.baseImageExists       // files + version stamp
+            : imageManager.hasBootFiles          // files only (reused image)
+        guard imageOK else {
             throw SandboxError.baseImageNotFound
         }
 

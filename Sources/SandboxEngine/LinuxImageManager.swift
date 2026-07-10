@@ -26,6 +26,17 @@ public final class LinuxImageManager {
         FileManager.default.fileExists(atPath: linuxDiskURL.path)
     }
 
+    /// Whether all three boot artifacts (disk + kernel + initrd) are present,
+    /// regardless of the version stamp. Used when booting an image this
+    /// process doesn't own/rebuild (AC reusing Bromure Web's shared image),
+    /// where the version constant needn't match.
+    public var hasBootFiles: Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: linuxDiskURL.path)
+            && fm.fileExists(atPath: linuxKernelURL.path)
+            && fm.fileExists(atPath: linuxInitrdURL.path)
+    }
+
     /// Whether a valid Linux base image exists and matches the current image version.
     public var baseImageExists: Bool {
         let fm = FileManager.default

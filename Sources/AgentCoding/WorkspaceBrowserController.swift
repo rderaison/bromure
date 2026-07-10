@@ -111,8 +111,10 @@ final class WorkspaceBrowserController {
         let config = browserConfig()
         // isolatePeers: false → the browser VM shares the workspace VMs' subnet
         // (VMNetSwitch.shared, peer bridging on) so the agent and the browser
-        // can reach each other.
-        let pool = VMPool(config: config, storageDir: storageDir, isolatePeers: false)
+        // can reach each other. requireImageVersion: false → boot Bromure Web's
+        // shared image whatever its version stamp (AC doesn't rebuild it).
+        let pool = VMPool(config: config, storageDir: storageDir,
+                          isolatePeers: false, requireImageVersion: false)
         self.pool = pool
         print("[browser] booting ephemeral browser VM (storageDir=\(storageDir.path))")
 
