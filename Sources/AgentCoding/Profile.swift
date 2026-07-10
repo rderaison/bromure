@@ -1101,6 +1101,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// api.digitalocean.com requests. Empty = not configured.
     public var digitalOceanToken: String
 
+    /// Linear personal API key (`lin_api_…`). Injected as LINEAR_API_KEY
+    /// env in the VM as a fake — SDKs, MCP servers and CLI tools that
+    /// honour that variable are authenticated automatically; the proxy
+    /// swaps to the real value on linear.app requests (api.linear.app,
+    /// mcp.linear.app). Empty = not configured.
+    public var linearToken: String
+
     /// AWS credentials injected into ~/.aws/credentials + environment
     /// for the AWS CLI / SDKs. See `AWSCredentials` for the SigV4
     /// reasoning. Empty struct (`isUsable == false`) = not configured.
@@ -1132,6 +1139,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
 
     /// Gate the DigitalOcean PAT behind a consent prompt. Default false.
     public var digitalOceanTokenRequiresApproval: Bool
+
+    /// Gate the Linear API key behind a consent prompt. Default false.
+    public var linearTokenRequiresApproval: Bool
 
     /// Gate the auto-generated bromure SSH key behind a consent prompt
     /// (per-sign). Imported keys carry their own flag on the struct.
@@ -1357,6 +1367,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         supplyChain: SupplyChainPolicy = SupplyChainPolicy(),
         promptInjection: PromptInjectionPolicy = PromptInjectionPolicy(),
         digitalOceanToken: String = "",
+        linearToken: String = "",
         awsCredentials: AWSCredentials = AWSCredentials(),
         bedrockEnabled: Bool = false,
         bedrockModelID: String = "",
@@ -1364,6 +1375,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         httpDatabases: [HTTPDatabaseEndpoint] = [],
         apiKeyRequiresApproval: Bool = false,
         digitalOceanTokenRequiresApproval: Bool = false,
+        linearTokenRequiresApproval: Bool = false,
         sshKeyRequiresApproval: Bool = false,
         createdAt: Date = Date(),
         lastUsedAt: Date? = nil,
@@ -1429,6 +1441,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.supplyChain = supplyChain
         self.promptInjection = promptInjection
         self.digitalOceanToken = digitalOceanToken
+        self.linearToken = linearToken
         self.awsCredentials = awsCredentials
         self.bedrockEnabled = bedrockEnabled
         self.bedrockModelID = bedrockModelID
@@ -1436,6 +1449,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.httpDatabases = httpDatabases
         self.apiKeyRequiresApproval = apiKeyRequiresApproval
         self.digitalOceanTokenRequiresApproval = digitalOceanTokenRequiresApproval
+        self.linearTokenRequiresApproval = linearTokenRequiresApproval
         self.sshKeyRequiresApproval = sshKeyRequiresApproval
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
@@ -1504,12 +1518,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case supplyChain
         case promptInjection
         case digitalOceanToken
+        case linearToken
         case awsCredentials
         case bedrockEnabled, bedrockModelID
         case dockerRegistries
         case httpDatabases
         case apiKeyRequiresApproval
         case digitalOceanTokenRequiresApproval
+        case linearTokenRequiresApproval
         case sshKeyRequiresApproval
         case closeAction
         case bootAtStartup
@@ -1602,6 +1618,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
         promptInjection = try c.decodeIfPresent(PromptInjectionPolicy.self, forKey: .promptInjection) ?? PromptInjectionPolicy()
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
+        linearToken = try c.decodeIfPresent(String.self, forKey: .linearToken) ?? ""
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
         bedrockEnabled = try c.decodeIfPresent(Bool.self, forKey: .bedrockEnabled) ?? false
         bedrockModelID = try c.decodeIfPresent(String.self, forKey: .bedrockModelID) ?? ""
@@ -1609,6 +1626,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         httpDatabases = try c.decodeIfPresent([HTTPDatabaseEndpoint].self, forKey: .httpDatabases) ?? []
         apiKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .apiKeyRequiresApproval) ?? false
         digitalOceanTokenRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .digitalOceanTokenRequiresApproval) ?? false
+        linearTokenRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .linearTokenRequiresApproval) ?? false
         sshKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .sshKeyRequiresApproval) ?? false
         closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .ask
         bootAtStartup = try c.decodeIfPresent(Bool.self, forKey: .bootAtStartup) ?? false
@@ -1733,6 +1751,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if !digitalOceanToken.isEmpty {
             try c.encode(digitalOceanToken, forKey: .digitalOceanToken)
         }
+        if !linearToken.isEmpty {
+            try c.encode(linearToken, forKey: .linearToken)
+        }
         if awsCredentials.isUsable
             || !awsCredentials.region.isEmpty
             || !awsCredentials.accessKeyID.isEmpty
@@ -1750,6 +1771,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if apiKeyRequiresApproval { try c.encode(true, forKey: .apiKeyRequiresApproval) }
         if digitalOceanTokenRequiresApproval {
             try c.encode(true, forKey: .digitalOceanTokenRequiresApproval)
+        }
+        if linearTokenRequiresApproval {
+            try c.encode(true, forKey: .linearTokenRequiresApproval)
         }
         if sshKeyRequiresApproval { try c.encode(true, forKey: .sshKeyRequiresApproval) }
         try c.encode(closeAction, forKey: .closeAction)
@@ -1973,6 +1997,9 @@ struct ProfileSecrets: Codable {
     var kubeconfigs: [KubeconfigEntry]?
     /// DigitalOcean PAT.
     var digitalOceanToken: String?
+    /// Linear personal API key. Optional so older `secrets.enc` blobs
+    /// (written before this field existed) keep decoding cleanly.
+    var linearToken: String?
     /// AWS secret access key + session token (the two real secrets in
     /// an AWS credential set — accessKeyID is identity-only).
     var awsSecretAccessKey: String?
@@ -2004,6 +2031,7 @@ struct ProfileSecrets: Codable {
             && manualTokenValues.isEmpty
             && (kubeconfigs?.isEmpty ?? true)
             && (digitalOceanToken?.isEmpty ?? true)
+            && (linearToken?.isEmpty ?? true)
             && (awsSecretAccessKey?.isEmpty ?? true)
             && (awsSessionToken?.isEmpty ?? true)
             && (dockerRegistryPasswords?.isEmpty ?? true)
@@ -2054,6 +2082,10 @@ struct ProfileSecrets: Codable {
         if !profile.digitalOceanToken.isEmpty {
             s.digitalOceanToken = profile.digitalOceanToken
             profile.digitalOceanToken = ""
+        }
+        if !profile.linearToken.isEmpty {
+            s.linearToken = profile.linearToken
+            profile.linearToken = ""
         }
         if !profile.awsCredentials.secretAccessKey.isEmpty {
             s.awsSecretAccessKey = profile.awsCredentials.secretAccessKey
@@ -2131,6 +2163,7 @@ struct ProfileSecrets: Codable {
 
         if let kcs = kubeconfigs { profile.kubeconfigs = kcs }
         if let do_ = digitalOceanToken { profile.digitalOceanToken = do_ }
+        if let lin = linearToken { profile.linearToken = lin }
         if let sk = awsSecretAccessKey { profile.awsCredentials.secretAccessKey = sk }
         if let st = awsSessionToken { profile.awsCredentials.sessionToken = st }
         if let map = dockerRegistryPasswords {
@@ -2180,6 +2213,7 @@ struct ProfileSecrets: Codable {
         manualTokenValues.merge(newer.manualTokenValues) { _, n in n }
         if let v = newer.kubeconfigs, !v.isEmpty { kubeconfigs = v }
         if let v = newer.digitalOceanToken { digitalOceanToken = v }
+        if let v = newer.linearToken { linearToken = v }
         if let v = newer.awsSecretAccessKey { awsSecretAccessKey = v }
         if let v = newer.awsSessionToken { awsSessionToken = v }
         if let m = newer.dockerRegistryPasswords {

@@ -289,6 +289,7 @@
 "No other API tokens configured." = "未配置其他 API 令牌。";
 "Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as workspace secrets. View at App → Trace Inspector (⇧⌘I)." = "关闭 → 不记录任何内容。活动 → 仅元数据（主机、状态、延迟、替换报告、泄漏警告）。AI 请求详情 → 同时捕获已知 LLM 主机（Anthropic、OpenAI、Google、Cohere、Mistral、Perplexity、x.ai、Groq、Replicate、HuggingFace）的请求体。全部 → 所有主机的请求体。请求体使用与工作区机密相同的钥匙串密钥进行 AES-GCM 加密。请在 App → Trace Inspector (⇧⌘I) 中查看。";
 "Open DigitalOcean token page in your browser" = "在浏览器中打开 DigitalOcean 令牌页面";
+"Open Linear API settings in your browser" = "在浏览器中打开 Linear API 设置";
 "Open this host's token-creation page in your browser" = "在浏览器中打开此主机的令牌创建页面";
 "Optional. Leave blank to trust the Bromure CA only (the proxy still validates the upstream)." = "可选。留空则仅信任 Bromure CA（代理仍会验证上游）。";
 "Passphrase (leave blank if none)" = "口令(没有则留空)";
@@ -639,6 +640,7 @@
 "Keyboard layout" = "键盘布局";
 "Kubernetes" = "Kubernetes";
 "Ligatures" = "连字";
+"Linear" = "Linear";
 "Local" = "本地";
 "Local model" = "本地模型";
 "Local — always on-device" = "本地 — 始终在设备端";
@@ -769,6 +771,7 @@
 "e.g. Production cluster" = "例如 生产集群";
 "Hide value" = "隐藏值";
 "Show value" = "显示值";
+"Personal API key from linear.app → Settings → API. Injected into the VM as `LINEAR_API_KEY` env — the Linear SDK, MCP servers and CLI tools pick it up automatically. Swapped fake→real only on requests to linear.app." = "来自 linear.app → Settings → API 的个人 API 密钥。以 `LINEAR_API_KEY` 环境变量注入 VM —— Linear SDK、MCP 服务器和 CLI 工具会自动使用。仅在发往 linear.app 的请求中将假密钥替换为真密钥。";
 "Hide token" = "隐藏令牌";
 "Show token" = "显示令牌";
 "No extra credentials yet." = "尚无额外凭据。";

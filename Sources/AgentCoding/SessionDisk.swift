@@ -562,6 +562,11 @@ public final class SessionDisk {
                 if let doFake = plan.fakeForDigitalOcean() {
                     ghEnv.append("export DIGITALOCEAN_ACCESS_TOKEN=\(shellQuote(doFake))")
                 }
+                // Linear: the SDK, MCP servers and CLI tools all read
+                // LINEAR_API_KEY. No config file to write — env only.
+                if let linFake = plan.fakeForLinear() {
+                    ghEnv.append("export LINEAR_API_KEY=\(shellQuote(linFake))")
+                }
             }
             // AWS: secret stays on host. The SDK pulls credentials on
             // demand via the `credential_process` line in ~/.aws/config,

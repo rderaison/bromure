@@ -289,6 +289,7 @@
 "No other API tokens configured." = "No hay otros tokens de API configurados.";
 "Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as workspace secrets. View at App → Trace Inspector (⇧⌘I)." = "Off → no se registra nada. Actividad → solo metadatos (host, estado, latencia, informe de swap, advertencias de fugas). Detalles de solicitudes IA → también captura los cuerpos para hosts LLM conocidos (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Todo → cuerpos para todos los hosts. Los cuerpos se cifran con AES-GCM con la misma clave del llavero que los secretos del espacio de trabajo. Ver en App → Trace Inspector (⇧⌘I).";
 "Open DigitalOcean token page in your browser" = "Abrir la página de tokens de DigitalOcean en tu navegador";
+"Open Linear API settings in your browser" = "Abrir la configuración de la API de Linear en tu navegador";
 "Open this host's token-creation page in your browser" = "Abrir la página de creación de tokens de este host en tu navegador";
 "Optional. Leave blank to trust the Bromure CA only (the proxy still validates the upstream)." = "Opcional. Déjalo en blanco para confiar solo en la CA de Bromure (el proxy seguirá validando el upstream).";
 "Passphrase (leave blank if none)" = "Frase de contraseña (déjala en blanco si no hay)";
@@ -641,6 +642,7 @@
 "Keyboard layout" = "Distribución del teclado";
 "Kubernetes" = "Kubernetes";
 "Ligatures" = "Ligaduras";
+"Linear" = "Linear";
 "Local" = "Local";
 "Local model" = "Modelo local";
 "Local — always on-device" = "Local — siempre en el dispositivo";
@@ -771,6 +773,7 @@
 "e.g. Production cluster" = "p. ej. Clúster de producción";
 "Hide value" = "Ocultar valor";
 "Show value" = "Mostrar valor";
+"Personal API key from linear.app → Settings → API. Injected into the VM as `LINEAR_API_KEY` env — the Linear SDK, MCP servers and CLI tools pick it up automatically. Swapped fake→real only on requests to linear.app." = "Clave de API personal desde linear.app → Settings → API. Inyectada en la VM como variable de entorno `LINEAR_API_KEY`: el SDK de Linear, los servidores MCP y las herramientas CLI la detectan automáticamente. El falso solo se sustituye por el real en solicitudes a linear.app.";
 "Hide token" = "Ocultar token";
 "Show token" = "Mostrar token";
 "No extra credentials yet." = "Aún no hay credenciales adicionales.";

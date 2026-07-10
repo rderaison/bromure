@@ -464,6 +464,7 @@ final class RemoteMenuApp {
             "gitUserName": p.gitUserName,
             "gitUserEmail": p.gitUserEmail,
             "digitalOceanTokenRequiresApproval": p.digitalOceanTokenRequiresApproval,
+            "linearTokenRequiresApproval": p.linearTokenRequiresApproval,
             // Prompt Injection (nested pane — flat keys are unique across panes)
             "detectSourceInjection": p.promptInjection.detectSourceInjection,
             "detectRulesInjection": p.promptInjection.detectRulesInjection,
@@ -955,6 +956,7 @@ final class RemoteMenuApp {
                 || !((doc["sshPublicKey"] as? String ?? "").isEmpty)
             let sshCount = count("importedSSHKeys") + (gen ? 1 : 0)
             let doSet = !((doc["digitalOceanToken"] as? String ?? "").isEmpty)
+            let linSet = !((doc["linearToken"] as? String ?? "").isEmpty)
             let aws = (doc["awsCredentials"] as? [String: Any]) ?? [:]
             let awsSet = !((aws["accessKeyID"] as? String ?? "").isEmpty)
                 || !((aws["ssoProfileName"] as? String ?? "").isEmpty)
@@ -965,6 +967,7 @@ final class RemoteMenuApp {
                 "GitHub Tokens  (\(forgeCount(isGitHub)))",
                 "GitLab Tokens  (\(forgeCount(isGitLab)))",
                 "Bitbucket Tokens  (\(forgeCount(isBitbucket)))",
+                "Linear  (\(linSet ? 1 : 0))",
                 "Kubernetes  (\(count("kubeconfigs")))",
                 "DigitalOcean  (\(doSet ? 1 : 0))",
                 "AWS  (\(awsSet ? 1 : 0))",
@@ -987,25 +990,28 @@ final class RemoteMenuApp {
                                      defaultHost: "gitlab.com", matches: isGitLab) { changed = true }
             case 4: if editGitTokens(&doc, title: "Bitbucket Tokens", displayName: "Bitbucket",
                                      defaultHost: "bitbucket.org", matches: isBitbucket) { changed = true }
-            case 5: if editKubeconfigs(&doc) { changed = true }
-            case 6: if editFields(title: "DigitalOcean", doc: &doc, fields: [
+            case 5: if editFields(title: "Linear", doc: &doc, fields: [
+                        ("linearToken", "API key (lin_api_…)", .text(secret: true)),
+                        ("linearTokenRequiresApproval", "Require approval to use", .bool)]) { changed = true }
+            case 6: if editKubeconfigs(&doc) { changed = true }
+            case 7: if editFields(title: "DigitalOcean", doc: &doc, fields: [
                         ("digitalOceanToken", "API token (dop_v1_…)", .text(secret: true)),
                         ("digitalOceanTokenRequiresApproval", "Require approval to use", .bool)]) { changed = true }
-            case 7: if editAWS(&doc) { changed = true }
-            case 8: if editCredList(&doc, key: "dockerRegistries", title: "Container Registries",
+            case 8: if editAWS(&doc) { changed = true }
+            case 9: if editCredList(&doc, key: "dockerRegistries", title: "Container Registries",
                                     summary: { "\($0["username"] as? String ?? "?")@\($0["host"] as? String ?? "?")" },
                                     blank: { ["id": UUID().uuidString, "host": "", "username": "", "password": "", "requireApproval": false] },
                                     fields: [("host", "Host", .text(secret: false)),
                                              ("username", "Username", .text(secret: false)),
                                              ("password", "Password", .text(secret: true)),
                                              ("requireApproval", "Require approval to use", .bool)]) { changed = true }
-            case 9: if editDatabaseSection(&doc, title: "MongoDB", engine: "mongoDataAPI",
-                                           defaultAuth: "apiKey") { changed = true }
-            case 10: if editDatabaseSection(&doc, title: "ClickHouse", engine: "clickHouse",
+            case 10: if editDatabaseSection(&doc, title: "MongoDB", engine: "mongoDataAPI",
+                                            defaultAuth: "apiKey") { changed = true }
+            case 11: if editDatabaseSection(&doc, title: "ClickHouse", engine: "clickHouse",
                                             defaultAuth: "basic") { changed = true }
-            case 11: if editDatabaseSection(&doc, title: "Elasticsearch", engine: "elasticsearch",
+            case 12: if editDatabaseSection(&doc, title: "Elasticsearch", engine: "elasticsearch",
                                             defaultAuth: "basic") { changed = true }
-            case 12: if editCredList(&doc, key: "manualTokens", title: "Other API keys",
+            case 13: if editCredList(&doc, key: "manualTokens", title: "Other API keys",
                                     summary: { "\($0["name"] as? String ?? "?")  → $\($0["envVarName"] as? String ?? "")" },
                                     blank: { ["id": UUID().uuidString, "name": "", "realValue": "", "envVarName": "", "hostFilter": "", "requireApproval": false] },
                                     fields: [("name", "Name", .text(secret: false)),
