@@ -107,31 +107,54 @@ final class BrowserFramebufferContainer: NSView {
 /// Clips Chromium's own chrome (tab strip + omnibox) out of the top of the
 /// framebuffer in native-chrome mode. The guest scanout is `displayHeight +
 /// inset` tall and Chromium maximizes into it with its chrome in the top
-/// `inset` rows; this view is `masksToBounds` and the VZ view is pinned to its
-/// bottom with `height == cropper.height + insetPoints`, so the top
-/// `insetPoints` extends above the cropper and is clipped. Ported from Bromure
-/// Web's NativeChromeCropper.
+/// `inset` DEVICE-pixel rows; this view is `masksToBounds` and the VZ view is
+/// pinned to its bottom with `height == cropper.height + insetPoints`, so the
+/// top `insetPoints` extends above the cropper and is clipped. Ported from
+/// Bromure Web's NativeChromeCropper.
 @MainActor
 final class NativeChromeCropper: NSView {
-    /// Chromium's two-row chrome height in points (== nativeChromeCSSHeight);
-    /// the crop is scale-independent because the VZ display reconfigures to the
-    /// view's pixel size (automaticallyReconfiguresDisplay).
-    static let insetPoints = CGFloat(VMConfig.nativeChromeCSSHeight)
+    /// The scanout inset in DEVICE pixels (== VMConfig.nativeChromeInset,
+    /// `nativeChromeCSSHeight * displayScale`). The crop in POINTS is this
+    /// divided by the view's actual backing scale — 86pt on a 2× display
+    /// whose inset was baked at 2×, but different on a 1× display or when the
+    /// window moves between displays, so it's recomputed live.
+    private var deviceInset: CGFloat = 0
+    private var insetConstraint: NSLayoutConstraint?
 
-    /// Mount the VZ view with the inset overhang so its top `insetPoints` are
-    /// clipped.
-    func clip(_ vzView: NSView) {
+    func clip(_ vzView: NSView, deviceInset: Int) {
+        self.deviceInset = CGFloat(deviceInset)
         wantsLayer = true
         layer?.masksToBounds = true
         subviews.forEach { $0.removeFromSuperview() }
         vzView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(vzView)
+        let inset = vzView.heightAnchor.constraint(
+            equalTo: heightAnchor, constant: insetPoints())
+        insetConstraint = inset
         NSLayoutConstraint.activate([
             vzView.leadingAnchor.constraint(equalTo: leadingAnchor),
             vzView.trailingAnchor.constraint(equalTo: trailingAnchor),
             vzView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            vzView.heightAnchor.constraint(equalTo: heightAnchor, constant: Self.insetPoints),
+            inset,
         ])
+    }
+
+    /// Device inset → points via the live backing scale (2 on retina, 1 on a
+    /// non-retina display).
+    private func insetPoints() -> CGFloat {
+        let dpr = max(window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor ?? 2, 1)
+        return deviceInset / dpr
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        insetConstraint?.constant = insetPoints()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        insetConstraint?.constant = insetPoints()
     }
 }
 

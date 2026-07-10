@@ -180,9 +180,12 @@ final class WorkspaceBrowserController {
         view.capturesSystemKeys = true
         self.vmView = view
         // Native chrome: crop Chromium's own chrome out of the top of the
-        // framebuffer; the host BrowserPane chrome is the only chrome.
+        // framebuffer; the host BrowserPane chrome is the only chrome. The
+        // device inset must match the one baked into the config's scanout.
+        let deviceInset = VMConfig.defaultNativeChromeInset(
+            forDisplayScale: VMConfig.resolvedDisplayScale())
         let cropper = NativeChromeCropper()
-        cropper.clip(view)
+        cropper.clip(view, deviceInset: deviceInset)
         model.framebufferContainer.mount(cropper)
         model.hasFramebuffer = true
         model.placeholderStatus = ""
