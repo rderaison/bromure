@@ -9,10 +9,11 @@ import SandboxEngine
 // tears it all down on close. One instance per workspace (keyed by
 // Profile.id), always ephemeral. See BROWSER_PANE_PLAN.md.
 //
-// Phase 2 scope: prove boot + framebuffer render alongside the workspace's
-// Ubuntu VM. Chromium shows its own UI (nativeChrome=false) — the host-drawn
-// chrome + CDP tabs/nav land in phase 3, so the pane's BrowserChrome is shown
-// only in the placeholder state for now.
+// Native-chrome mode (phase 3a): Chromium's own tab strip/omnibox are cropped
+// out of the framebuffer and the host BrowserPane chrome is the browser's
+// chrome. Navigation currently uses the serial launch path; CDP-driven tab
+// control, the full key monitor, MCP, and the devtools button land in phases
+// 3c-e.
 //
 // Runtime-untested: nested virtualization isn't available in the dev sandbox,
 // so this is build-verified only; it runs for real on a Mac host.
@@ -148,17 +149,20 @@ final class WorkspaceBrowserController {
         }
     }
 
-    /// A minimal ephemeral browser config. nativeChrome off for phase 2 (see
-    /// file header); clipboard + file transfer + automation on so ⌘C/⌘V bridge
-    /// to the host (SPICE vdagent) and phases 3-4 can wire downloads and CDP
-    /// without a reboot.
+    /// The ephemeral browser config. nativeChrome on: Chromium's own tab
+    /// strip/omnibox are cropped out of the framebuffer and our host chrome
+    /// (BrowserPane) is the browser's chrome. Clipboard + file transfer +
+    /// automation on so ⌘C/⌘V bridge to the host (SPICE vdagent) and CDP
+    /// (needed by native-chrome tab state, and phases 3c-e) are available.
     private func browserConfig() -> VMConfig {
-        VMConfig(
+        let scale = VMConfig.resolvedDisplayScale()
+        return VMConfig(
             homePage: homePage,
             enableFileTransfer: true,
             enableClipboardSharing: true,
             enableAutomation: true,
-            nativeChrome: false
+            nativeChrome: true,
+            nativeChromeInset: VMConfig.defaultNativeChromeInset(forDisplayScale: scale)
         )
     }
 
@@ -167,13 +171,19 @@ final class WorkspaceBrowserController {
         let view = VZVirtualMachineView()
         view.virtualMachine = warm.vm
         view.automaticallyReconfiguresDisplay = true
-        // Route ⌘-key combos (⌘C/⌘V, ⌘L, …) to Chromium instead of the macOS
-        // menus so copy/paste and browser shortcuts work. Paired with the
-        // SPICE clipboard bridge (enableClipboardSharing) this makes host↔guest
-        // copy/paste work. Revisited in native-chrome mode (phase 3a).
+        // Keep capturing ⌘-keys so ⌘C/⌘V (and other in-page chords) reach
+        // Chromium — paired with the SPICE clipboard bridge this makes
+        // host↔guest copy/paste work. Tradeoff vs. Web's native-chrome key
+        // monitor: ⌘Q/⌘Tab are also captured while this view has focus (click
+        // the terminal/sidebar to regain them). The full monitor + CDP-driven
+        // tab shortcuts land with phase 3c.
         view.capturesSystemKeys = true
         self.vmView = view
-        model.framebufferContainer.mount(view)
+        // Native chrome: crop Chromium's own chrome out of the top of the
+        // framebuffer; the host BrowserPane chrome is the only chrome.
+        let cropper = NativeChromeCropper()
+        cropper.clip(view)
+        model.framebufferContainer.mount(cropper)
         model.hasFramebuffer = true
         model.placeholderStatus = ""
         state = .running

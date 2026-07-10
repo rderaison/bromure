@@ -1,4 +1,5 @@
 import AppKit
+import SandboxEngine
 import SwiftUI
 import Virtualization
 
@@ -103,6 +104,37 @@ final class BrowserFramebufferContainer: NSView {
     }
 }
 
+/// Clips Chromium's own chrome (tab strip + omnibox) out of the top of the
+/// framebuffer in native-chrome mode. The guest scanout is `displayHeight +
+/// inset` tall and Chromium maximizes into it with its chrome in the top
+/// `inset` rows; this view is `masksToBounds` and the VZ view is pinned to its
+/// bottom with `height == cropper.height + insetPoints`, so the top
+/// `insetPoints` extends above the cropper and is clipped. Ported from Bromure
+/// Web's NativeChromeCropper.
+@MainActor
+final class NativeChromeCropper: NSView {
+    /// Chromium's two-row chrome height in points (== nativeChromeCSSHeight);
+    /// the crop is scale-independent because the VZ display reconfigures to the
+    /// view's pixel size (automaticallyReconfiguresDisplay).
+    static let insetPoints = CGFloat(VMConfig.nativeChromeCSSHeight)
+
+    /// Mount the VZ view with the inset overhang so its top `insetPoints` are
+    /// clipped.
+    func clip(_ vzView: NSView) {
+        wantsLayer = true
+        layer?.masksToBounds = true
+        subviews.forEach { $0.removeFromSuperview() }
+        vzView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(vzView)
+        NSLayoutConstraint.activate([
+            vzView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            vzView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            vzView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            vzView.heightAnchor.constraint(equalTo: heightAnchor, constant: Self.insetPoints),
+        ])
+    }
+}
+
 // MARK: - SwiftUI
 
 /// Bridges the stable framebuffer container into SwiftUI.
@@ -118,13 +150,11 @@ struct BrowserPaneView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Phase 2 renders Chromium's own UI in the framebuffer, so the
-            // host chrome shows only in the placeholder/booting state. Phase 3
-            // switches to native-chrome cropping and keeps this bar live.
-            if !model.hasFramebuffer {
-                BrowserChrome(model: model)
-                Divider().overlay(Color.black.opacity(0.4))
-            }
+            // Native-chrome mode crops Chromium's own tab strip/omnibox out of
+            // the framebuffer, so our host chrome is always shown and is the
+            // browser's only chrome.
+            BrowserChrome(model: model)
+            Divider().overlay(Color.black.opacity(0.4))
             content
         }
         .background(Color(white: 0.10))
