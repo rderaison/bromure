@@ -38,8 +38,18 @@ final class BrowserPaneModel {
     /// spaces-or-no-dot string as a search.
     static func normalize(_ raw: String) -> String {
         let raw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if raw.hasPrefix("http://") || raw.hasPrefix("https://") { return raw }
-        let looksLikeURL = raw.contains(".") && !raw.contains(" ")
+        // Already has a scheme (http/https/chrome/about/file/view-source/…) →
+        // pass through untouched. `scheme:` (with or without //) counts, so
+        // chrome://version and about:blank aren't turned into searches.
+        if let colon = raw.firstIndex(of: ":") {
+            let scheme = raw[raw.startIndex..<colon]
+            if !scheme.isEmpty, scheme.first!.isLetter,
+               scheme.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "+" || $0 == "-" || $0 == "." }),
+               !scheme.contains(" ") {
+                return raw
+            }
+        }
+        let looksLikeURL = (raw.contains(".") && !raw.contains(" "))
             || raw.hasPrefix("localhost")
         if looksLikeURL { return "https://" + raw }
         let q = raw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? raw

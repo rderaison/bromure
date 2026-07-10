@@ -735,6 +735,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         setBrowserPaneOpen(!browserPaneOpen, animated: true)
     }
 
+    /// The live browser controller, if the pane has been opened (for the
+    /// browser MCP server to drive).
+    var currentBrowserController: WorkspaceBrowserController? { browserController }
+
     /// Stop and discard the ephemeral browser VM (window close / app quit).
     func teardownBrowserVM() {
         browserController?.stop()

@@ -1506,6 +1506,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// through it. Consumed by the AutomationServer's `onGetShellConnection`
     /// callback, `bromure-ac exec`, and `guestExec` (the file-explorer pane).
     var shellBridges: [Profile.ID: ShellBridge] = [:]
+    /// Per-workspace browser MCP listeners (vsock 5830) — the in-VM agents'
+    /// stdio shim connects here to drive the embedded browser.
+    var browserMCPBridges: [Profile.ID: BrowserMCPVsockBridge] = [:]
 
     /// Errors from `guestExec`.
     enum GuestExecError: LocalizedError {
@@ -5778,6 +5781,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let dev = sandbox.socketDevice {
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
+                // Browser MCP listener (vsock 5830): the agents' stdio shim
+                // connects here; we serve the browser tools, driving the
+                // unified window's embedded browser (opening it on demand).
+                let mcpServer = BrowserMCPServer(
+                    browser: { [weak self] in self?.unifiedWindow?.currentBrowserController },
+                    ensureBrowser: { [weak self] in
+                        self?.unifiedWindow?.setBrowserPaneOpen(true, animated: true)
+                    })
+                self.browserMCPBridges[profile.id] =
+                    BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
             }
             if sessionDisk.didCloneOnLastEnsure, let current = currentBaseVersion {
                 var p = profile
@@ -7064,6 +7077,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: profile.id)
         shellBridges[profile.id]?.stop()
         shellBridges.removeValue(forKey: profile.id)
+        browserMCPBridges[profile.id]?.stop()
+        browserMCPBridges.removeValue(forKey: profile.id)
         // Drop this workspace's local models from the engine's union, unloading
         // any no longer wanted by an open workspace (stops the engine if none
         // remain). The engine keeps serving the others.
@@ -7534,6 +7549,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let dev = sandbox.socketDevice {
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
+                // Browser MCP listener (vsock 5830): the agents' stdio shim
+                // connects here; we serve the browser tools, driving the
+                // unified window's embedded browser (opening it on demand).
+                let mcpServer = BrowserMCPServer(
+                    browser: { [weak self] in self?.unifiedWindow?.currentBrowserController },
+                    ensureBrowser: { [weak self] in
+                        self?.unifiedWindow?.setBrowserPaneOpen(true, animated: true)
+                    })
+                self.browserMCPBridges[profile.id] =
+                    BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
             }
             self.wireSandboxCallbacks(sandbox)
             self.registerSession(sandbox, profile: profile)

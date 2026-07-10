@@ -743,8 +743,11 @@ public final class SessionDisk {
         // or Codex discovers them on launch. Claude Code uses JSON
         // (~/.claude.json mcpServers key), Codex uses TOML
         // (~/.codex/config.toml [mcp_servers.*] tables).
+        // Always write the MCP configs (and the browser shim): the built-in
+        // `browser` server is included even when the user configured none, so
+        // every agent can drive the embedded browser.
         let enabledMCP = profile.mcpServers.filter(\.enabled)
-        if !enabledMCP.isEmpty {
+        do {
             let mcpDir = tmp.appendingPathComponent("mcp", isDirectory: true)
             try fm.createDirectory(at: mcpDir, withIntermediateDirectories: true)
 
@@ -757,19 +760,20 @@ public final class SessionDisk {
                 }
             }
 
-            // Claude Code format
-            let claudeJSON = Self.claudeCodeMCPConfig(servers: enabledMCP, fakes: mcpFakes)
-            try claudeJSON.write(
+            // Claude Code format (browser + user servers).
+            try Self.claudeCodeMCPConfig(servers: enabledMCP, fakes: mcpFakes).write(
                 to: mcpDir.appendingPathComponent("claude.json"),
-                atomically: true, encoding: .utf8
-            )
+                atomically: true, encoding: .utf8)
 
-            // Codex format
-            let codexTOML = Self.codexMCPConfig(servers: enabledMCP, fakes: mcpFakes)
-            try codexTOML.write(
+            // Codex format.
+            try Self.codexMCPConfig(servers: enabledMCP, fakes: mcpFakes).write(
                 to: mcpDir.appendingPathComponent("codex.toml"),
-                atomically: true, encoding: .utf8
-            )
+                atomically: true, encoding: .utf8)
+
+            // Guest stdio↔vsock shim the browser MCP server launches.
+            try Self.browserMCPShimScript.write(
+                to: tmp.appendingPathComponent("bromure-browser-mcp.py"),
+                atomically: true, encoding: .utf8)
         }
 
         // Codex local inference: Codex uses the Responses API via a config-file
@@ -893,15 +897,73 @@ public final class SessionDisk {
         bumpEnvGeneration(in: dir)
     }
 
+    // MARK: - Built-in browser MCP server
+
+    /// Host vsock port the guest browser-MCP stdio shim connects to (host CID
+    /// 2). The host serves line-delimited JSON-RPC (BrowserMCPServer) there.
+    public static let browserMCPVsockPort: UInt32 = 5830
+    /// Guest path of the stdio shim, staged into the (read-only) meta share.
+    static let browserMCPShimGuestPath = "/mnt/bromure-meta/bromure-browser-mcp.py"
+
+    /// The built-in `browser` MCP server entry (Claude JSON shape): a stdio
+    /// shim the agent launches, which pipes JSON-RPC over vsock to the host.
+    static var browserMCPClaudeEntry: [String: Any] {
+        ["command": "python3", "args": [browserMCPShimGuestPath]]
+    }
+
+    /// Guest stdio ⇄ host-vsock shim. The MCP client (claude/codex/grok)
+    /// launches this; it connects to the host over vsock and pipes the
+    /// agent's stdin/stdout to the host BrowserMCPServer. Kept tiny and
+    /// dependency-free (stdlib only).
+    static let browserMCPShimScript = """
+    #!/usr/bin/env python3
+    # Bromure AC — browser MCP stdio↔vsock shim. Generated; do not edit.
+    # Bridges an MCP client's stdio to the host's BrowserMCPServer over vsock.
+    import os, socket, sys, threading
+    HOST_CID = socket.VMADDR_CID_HOST if hasattr(socket, "VMADDR_CID_HOST") else 2
+    PORT = \(browserMCPVsockPort)
+    try:
+        s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        s.connect((HOST_CID, PORT))
+    except OSError as e:
+        sys.stderr.write("bromure-browser-mcp: cannot reach host: %s\\n" % e)
+        sys.exit(1)
+    def stdin_to_sock():
+        try:
+            while True:
+                line = sys.stdin.buffer.readline()
+                if not line:
+                    break
+                s.sendall(line)
+        except OSError:
+            pass
+        try:
+            s.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+    threading.Thread(target=stdin_to_sock, daemon=True).start()
+    try:
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+    except OSError:
+        pass
+
+    """
+
     /// Serialize MCP servers into Claude Code's ~/.claude.json format.
     /// `fakes` maps server name → (envVarName, fake token). When present
     /// the fake is set as an env var value so the real token never
-    /// reaches the VM; the MITM proxy swaps it on the wire.
+    /// reaches the VM; the MITM proxy swaps it on the wire. The built-in
+    /// `browser` server is always included.
     static func claudeCodeMCPConfig(
         servers: [MCPServer],
         fakes: [String: (envVar: String, fake: String)] = [:]
     ) -> String {
-        var mcpServers: [String: Any] = [:]
+        var mcpServers: [String: Any] = ["browser": browserMCPClaudeEntry]
         for server in servers {
             // Raw JSON mode: parse and use as-is (allows OAuth blocks,
             // custom fields, or any config shape the form can't express).
@@ -1003,7 +1065,13 @@ public final class SessionDisk {
         servers: [MCPServer],
         fakes: [String: (envVar: String, fake: String)] = [:]
     ) -> String {
-        var lines: [String] = ["# Generated by Bromure AC; do not edit."]
+        var lines: [String] = [
+            "# Generated by Bromure AC; do not edit.",
+            "",
+            "[mcp_servers.browser]",
+            "command = \"python3\"",
+            "args = [\(tomlQuote(browserMCPShimGuestPath))]",
+        ]
         for server in servers {
             // Raw JSON servers are written to Claude Code config only;
             // TOML can't represent arbitrary JSON shapes.

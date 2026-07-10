@@ -3861,32 +3861,34 @@ public final class ProfileStore {
         cat /mnt/bromure-meta/grok-local.toml >> "$HOME/.grok/config.toml"
     fi
 
-    # MCP server configs from the profile. The host generates both
-    # Claude Code and Codex formats; we install whichever matches
-    # the active tool.
+    # MCP server configs. Installed for EVERY agent (claude/codex/grok), not
+    # just the primary tool — the built-in `browser` server (plus any user
+    # servers) must reach whichever agent the user runs. Each install is
+    # idempotent so re-boots don't duplicate.
     if [ -d /mnt/bromure-meta/mcp ]; then
-        case "$BROMURE_AC_TOOL" in
-            claude)
-                if [ -r /mnt/bromure-meta/mcp/claude.json ]; then
-                    mkdir -p "$HOME/.claude"
-                    # Merge into existing .claude.json if present,
-                    # otherwise create a new one with just mcpServers.
-                    if [ -f "$HOME/.claude.json" ]; then
-                        python3 -c "import json,sys;e=json.load(open(sys.argv[1]));m=json.load(open(sys.argv[2]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};json.dump(e,open(sys.argv[1],'w'),indent=2)" "$HOME/.claude.json" /mnt/bromure-meta/mcp/claude.json 2>/dev/null
-                    else
-                        cp /mnt/bromure-meta/mcp/claude.json "$HOME/.claude.json"
-                    fi
-                fi
-                ;;
-            codex)
-                if [ -r /mnt/bromure-meta/mcp/codex.toml ]; then
-                    mkdir -p "$HOME/.codex"
-                    # Append MCP server blocks to config.toml (Codex
-                    # merges [mcp_servers.*] tables additively).
-                    cat /mnt/bromure-meta/mcp/codex.toml >> "$HOME/.codex/config.toml"
-                fi
-                ;;
-        esac
+        # Claude Code — dict-merge mcpServers into ~/.claude.json.
+        if [ -r /mnt/bromure-meta/mcp/claude.json ]; then
+            mkdir -p "$HOME/.claude"
+            if [ -f "$HOME/.claude.json" ]; then
+                python3 -c "import json,sys;e=json.load(open(sys.argv[1]));m=json.load(open(sys.argv[2]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};json.dump(e,open(sys.argv[1],'w'),indent=2)" "$HOME/.claude.json" /mnt/bromure-meta/mcp/claude.json 2>/dev/null
+            else
+                cp /mnt/bromure-meta/mcp/claude.json "$HOME/.claude.json"
+            fi
+        fi
+        # Grok CLI — same mcpServers JSON shape, merged into its settings.
+        # Best-effort: the exact grok settings path can vary by version.
+        if [ -r /mnt/bromure-meta/mcp/claude.json ]; then
+            mkdir -p "$HOME/.grok"
+            python3 -c "import json,os,sys;p=os.path.expanduser('~/.grok/user-settings.json');e=(json.load(open(p)) if os.path.exists(p) else {});m=json.load(open(sys.argv[1]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};json.dump(e,open(p,'w'),indent=2)" /mnt/bromure-meta/mcp/claude.json 2>/dev/null || true
+        fi
+        # Codex — marker-guarded install into config.toml (strip a prior
+        # bromure block, then append) so [mcp_servers.*] tables don't stack up.
+        if [ -r /mnt/bromure-meta/mcp/codex.toml ]; then
+            mkdir -p "$HOME/.codex"
+            touch "$HOME/.codex/config.toml"
+            sed '/# >>> bromure-mcp/,/# <<< bromure-mcp/d' "$HOME/.codex/config.toml" > "$HOME/.codex/config.toml.tmp" 2>/dev/null && mv "$HOME/.codex/config.toml.tmp" "$HOME/.codex/config.toml"
+            { echo "# >>> bromure-mcp"; cat /mnt/bromure-meta/mcp/codex.toml; echo "# <<< bromure-mcp"; } >> "$HOME/.codex/config.toml"
+        fi
     fi
 
     # Stay in $HOME (~ubuntu) on shell start. Shared folders are
