@@ -1637,6 +1637,17 @@ def _restore_worktrees(repo_root, repo_name):
         _set_window_option(win, "@display", r_display)
 
 
+# Per-tool CLI flags that make an unattended run skip the tool's interactive
+# "do you trust this folder" / permission gate. Only ever applied to
+# automation launches (never manual worktrees). Kept here — with the rest of
+# the launch logic — rather than in the profile's persisted .bashrc, so the
+# dangerous strings live in the fresh-staged daemon, not the user's home.
+_YOLO_FLAGS = {
+    "claude": "--dangerously-skip-permissions",
+    "codex": "--dangerously-bypass-approvals-and-sandbox",
+}
+
+
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
     if prompt_b64 == "-":
         prompt_b64 = ""   # "-" sentinel = no prompt
@@ -1681,8 +1692,8 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
     _worktree_include(main_root, wt_dir)
 
     _env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
-    if yolo:
-        _env["BROMURE_AC_WT_YOLO"] = "1"
+    if yolo and _YOLO_FLAGS.get(tool):
+        _env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
     win = _new_window(command="bash -l", cwd=wt_dir, env=_env)
     if not win:
         worktree_err("worktree: could not open a tab (created %s at %s)"
@@ -1704,10 +1715,10 @@ def _automation_tab(cwd, display, tool, prompt_b64):
         prompt_b64 = ""
     if not os.path.isdir(cwd):
         cwd = HOME
-    win = _new_window(command="bash -l", cwd=cwd,
-                      env={"BROMURE_AC_WT_TOOL": tool,
-                           "BROMURE_AC_WT_PROMPT": prompt_b64,
-                           "BROMURE_AC_WT_YOLO": "1"})
+    env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    if _YOLO_FLAGS.get(tool):
+        env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
+    win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
         worktree_err("automation: could not open a tab at %s" % cwd)
         return
