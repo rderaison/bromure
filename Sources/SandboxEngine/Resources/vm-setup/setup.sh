@@ -161,6 +161,24 @@ retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools 
     sqlite-libs v4l-utils nss-tools bash wireguard-tools strongswan openvpn openssl
 
 # ---------------------------------------------------------------------------
+# DEBUG: passwordless root SSH for network debugging of the browser VM.
+# The VM has no serial shell and no exec channel, so this is the only way to
+# get inside it. INSECURE (empty root password, root login, empty-password
+# auth) — this image is for local development only and is regenerated before
+# any real distribution. Remove this block for a production/redistributable
+# image.
+# ---------------------------------------------------------------------------
+retry chroot /mnt apk add openssh
+chroot /mnt rc-update add sshd default
+# Generate host keys at build so sshd is up on first boot (not on first login).
+chroot /mnt ssh-keygen -A
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /mnt/etc/ssh/sshd_config
+sed -i 's/^#\?PermitEmptyPasswords.*/PermitEmptyPasswords yes/' /mnt/etc/ssh/sshd_config
+grep -q '^PermitRootLogin yes' /mnt/etc/ssh/sshd_config || echo 'PermitRootLogin yes' >> /mnt/etc/ssh/sshd_config
+grep -q '^PermitEmptyPasswords yes' /mnt/etc/ssh/sshd_config || echo 'PermitEmptyPasswords yes' >> /mnt/etc/ssh/sshd_config
+chroot /mnt passwd -d root   # empty root password
+
+# ---------------------------------------------------------------------------
 # Configuration files (static)
 # ---------------------------------------------------------------------------
 
