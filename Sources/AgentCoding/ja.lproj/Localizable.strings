@@ -289,6 +289,7 @@
 "No other API tokens configured." = "他の API トークンは構成されていません。";
 "Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as workspace secrets. View at App → Trace Inspector (⇧⌘I)." = "オフ → 記録なし。アクティビティ → メタデータのみ（ホスト、ステータス、レイテンシ、スワップレポート、漏洩警告）。AI リクエスト詳細 → 既知の LLM ホスト（Anthropic、OpenAI、Google、Cohere、Mistral、Perplexity、x.ai、Groq、Replicate、HuggingFace）のボディも取得します。すべて → 全ホストのボディを取得します。ボディはワークスペース秘密と同じキーチェーン鍵で AES-GCM 暗号化されます。App → Trace Inspector（⇧⌘I）で確認します。";
 "Open DigitalOcean token page in your browser" = "DigitalOcean のトークンページをブラウザで開く";
+"Open Linear API settings in your browser" = "ブラウザで Linear の API 設定を開く";
 "Open this host's token-creation page in your browser" = "このホストのトークン作成ページをブラウザで開く";
 "Optional. Leave blank to trust the Bromure CA only (the proxy still validates the upstream)." = "任意。空欄のままにすると Bromure CA のみが信頼されます（プロキシは引き続き上流を検証します）。";
 "Passphrase (leave blank if none)" = "パスフレーズ（なければ空欄）";
@@ -639,6 +640,7 @@
 "Keyboard layout" = "キーボードレイアウト";
 "Kubernetes" = "Kubernetes";
 "Ligatures" = "合字";
+"Linear" = "Linear";
 "Local" = "ローカル";
 "Local model" = "ローカルモデル";
 "Local — always on-device" = "Local — 常に端末上";
@@ -769,6 +771,7 @@
 "e.g. Production cluster" = "例：本番クラスター";
 "Hide value" = "値を隠す";
 "Show value" = "値を表示";
+"Personal API key from linear.app → Settings → API. Injected into the VM as `LINEAR_API_KEY` env — the Linear SDK, MCP servers and CLI tools pick it up automatically. Swapped fake→real only on requests to linear.app." = "linear.app → Settings → API で取得したパーソナル API キー。VM には環境変数 `LINEAR_API_KEY` として注入され、Linear SDK・MCP サーバー・CLI ツールが自動的に利用します。偽キーが本物に置き換わるのは linear.app へのリクエストのみです。";
 "Hide token" = "トークンを隠す";
 "Show token" = "トークンを表示";
 "No extra credentials yet." = "追加の認証情報はまだありません。";

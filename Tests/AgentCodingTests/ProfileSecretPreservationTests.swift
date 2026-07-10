@@ -29,6 +29,7 @@ struct ProfileSecretPreservationTests {
     func blankKeepsSecrets() {
         var existing = Profile(name: "ws", tool: .claude, authMode: .token, apiKey: "sk-ant-REAL")
         existing.digitalOceanToken = "do-REAL"
+        existing.linearToken = "lin_api_REAL"
         existing.awsCredentials.secretAccessKey = "aws-REAL"
 
         // The edited document changed a non-secret field but left secrets blank
@@ -36,12 +37,14 @@ struct ProfileSecretPreservationTests {
         var incoming = existing
         incoming.apiKey = nil
         incoming.digitalOceanToken = ""
+        incoming.linearToken = ""
         incoming.awsCredentials.secretAccessKey = ""
         incoming.memoryGB = 16   // the actual edit
 
         let out = merged(existing: existing, incoming: incoming)
         #expect(out.apiKey == "sk-ant-REAL")
         #expect(out.digitalOceanToken == "do-REAL")
+        #expect(out.linearToken == "lin_api_REAL")
         #expect(out.awsCredentials.secretAccessKey == "aws-REAL")
         #expect(out.memoryGB == 16)
     }

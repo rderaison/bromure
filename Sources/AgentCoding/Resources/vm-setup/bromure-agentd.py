@@ -2926,6 +2926,12 @@ def task_home_setup():
         return
     _sudo(["chown", "ubuntu:ubuntu", HOME_MOUNT])
     _sudo(["chmod", "755", HOME_MOUNT])
+    # mkfs scaffolding: lost+found is only e2fsck's relink target, and it
+    # reads as clutter in every home listing (ls, the agent, the file
+    # browser). rmdir removes it only when empty — after a real fsck
+    # repair relinked orphans into it, it stays visible with its contents
+    # (exactly when it matters). e2fsck recreates it on demand.
+    _sudo(["rmdir", os.path.join(HOME_MOUNT, "lost+found")])
     apply_home_seed()
     log("home", "ext4 home mounted (%s)" % dev)
     if mode == "migrate":

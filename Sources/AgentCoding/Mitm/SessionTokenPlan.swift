@@ -47,6 +47,10 @@ public struct SessionTokenPlan: Sendable {
         /// DigitalOcean PAT. Injected as DIGITALOCEAN_ACCESS_TOKEN env
         /// + ~/.config/doctl/config.yaml in the VM.
         case digitalOcean
+        /// Linear personal API key. Injected as LINEAR_API_KEY env in
+        /// the VM; swapped on requests to linear.app (the GraphQL API at
+        /// api.linear.app and the MCP server at mcp.linear.app).
+        case linear
         /// Container-registry Basic auth. The realValue / fakeValue are
         /// the full `base64("<user>:<password>")` strings — that's what
         /// docker writes in `~/.docker/config.json` and sends as
@@ -159,6 +163,7 @@ public struct SessionTokenPlan: Sendable {
         case .gitHTTPS(let host, _):  return host
         case .manual(_, _, let host): return host.isEmpty ? nil : host
         case .digitalOcean:           return "digitalocean.com"
+        case .linear:                 return "linear.app"
         case .dockerRegistry(let host, _): return host
         case .mcpBearer(_, _, let host): return host.isEmpty ? nil : host
         case .httpDatabase(let host, _, _, _): return host.isEmpty ? nil : host
@@ -215,6 +220,15 @@ public struct SessionTokenPlan: Sendable {
     public func fakeForDigitalOcean() -> String? {
         for e in entries {
             if case .digitalOcean = e.purpose { return e.fakeValue }
+        }
+        return nil
+    }
+
+    /// Fake to expose to the VM as LINEAR_API_KEY. nil = no Linear key
+    /// configured.
+    public func fakeForLinear() -> String? {
+        for e in entries {
+            if case .linear = e.purpose { return e.fakeValue }
         }
         return nil
     }
@@ -380,6 +394,23 @@ public extension Profile {
                 purpose: .digitalOcean,
                 consentCredentialID: doConsentID,
                 consentDisplayName: doDisplay))
+        }
+
+        // Linear personal API key.
+        let linRaw = linearToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !linRaw.isEmpty {
+            let linConsentID: String? = linearTokenRequiresApproval
+                ? ConsentCredentialID.linear() : nil
+            entries.append(.init(
+                realValue: linRaw,
+                // Real Linear keys are `lin_api_` + 40 chars; match the
+                // shape so client-side validators accept the fake.
+                fakeValue: SessionTokenPlan.deriveFake(prefix: "lin_api_",
+                                                       real: linRaw, salt: salt,
+                                                       targetLength: 48),
+                purpose: .linear,
+                consentCredentialID: linConsentID,
+                consentDisplayName: "Linear API key"))
         }
 
         for reg in dockerRegistries where reg.isUsable {

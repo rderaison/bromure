@@ -957,6 +957,15 @@ struct ProfileEditorView: View {
             }
 
             credentialsDisclosure(
+                key: "linear",
+                title: NSLocalizedString("Linear", comment: ""),
+                symbol: "line.diagonal",
+                count: draft.linearToken.isEmpty ? 0 : 1
+            ) {
+                linearSubsection
+            }
+
+            credentialsDisclosure(
                 key: "k8s",
                 title: NSLocalizedString("Kubernetes", comment: ""),
                 symbol: "shippingbox.fill",
@@ -1311,6 +1320,32 @@ struct ProfileEditorView: View {
                 .help("Open DigitalOcean token page in your browser")
             }
             requireApprovalToggle(isOn: $draft.digitalOceanTokenRequiresApproval)
+        }
+    }
+
+    // MARK: - Linear
+
+    @ViewBuilder
+    private var linearSubsection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Personal API key from linear.app → Settings → API. Injected into the VM as `LINEAR_API_KEY` env — the Linear SDK, MCP servers and CLI tools pick it up automatically. Swapped fake→real only on requests to linear.app.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                SecureField("lin_api_…", text: $draft.linearToken)
+                    .textFieldStyle(.roundedBorder)
+                Button {
+                    if let url = URL(string: "https://linear.app/settings/api") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.right.square")
+                }
+                .buttonStyle(.borderless)
+                .help("Open Linear API settings in your browser")
+            }
+            requireApprovalToggle(isOn: $draft.linearTokenRequiresApproval)
         }
     }
 

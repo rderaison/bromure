@@ -4794,6 +4794,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             || old.manualTokens != new.manualTokens
             || old.gitHTTPSCredentials != new.gitHTTPSCredentials
             || old.digitalOceanToken != new.digitalOceanToken
+            || old.linearToken != new.linearToken
             || old.dockerRegistries != new.dockerRegistries
             || old.awsCredentials != new.awsCredentials
             || old.kubeconfigs != new.kubeconfigs
@@ -4804,6 +4805,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // token map, so the live refresh must re-emit it.
             || old.apiKeyRequiresApproval != new.apiKeyRequiresApproval
             || old.digitalOceanTokenRequiresApproval != new.digitalOceanTokenRequiresApproval
+            || old.linearTokenRequiresApproval != new.linearTokenRequiresApproval
     }
 
     /// Apply env-var / credential / guardrail edits to a running session

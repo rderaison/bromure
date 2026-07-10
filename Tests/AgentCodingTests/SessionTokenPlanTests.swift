@@ -32,6 +32,9 @@ struct SessionTokenPlanScopingTests {
     @Test("digitalOcean → digitalocean.com") func digitalOcean() {
         #expect(host(.digitalOcean) == "digitalocean.com")
     }
+    @Test("linear → linear.app") func linear() {
+        #expect(host(.linear) == "linear.app")
+    }
     @Test("docker registry → registry host") func docker() {
         #expect(host(.dockerRegistry(host: "registry.example.io", username: "u")) == "registry.example.io")
     }
@@ -151,7 +154,42 @@ struct SessionTokenPlanBogusKeyTests {
         #expect(plan.fakeForAnthropic() == nil)
         #expect(plan.fakeForOpenAI() == nil)
         #expect(plan.fakeForDigitalOcean() == nil)
+        #expect(plan.fakeForLinear() == nil)
         #expect(plan.tokenMap().entries.isEmpty)
+    }
+
+    @Test("Linear token plans a lin_api_ fake matching the real key shape") func linearPlan() {
+        var p = Profile(name: "ws", tool: .claude, authMode: .subscription)
+        p.linearToken = "lin_api_realREALrealREALrealREALrealREALreal"
+        let plan = p.makeTokenPlan(salt: salt)
+
+        let fake = plan.fakeForLinear()
+        #expect(fake != nil)
+        #expect(fake?.hasPrefix("lin_api_") == true)
+        #expect(fake?.count == 48)   // real Linear keys: lin_api_ + 40
+        #expect(fake != p.linearToken)
+        // Swap entry scoped to linear.app; ungated by default.
+        let entry = plan.tokenMap().entries.first { $0.fake == fake }
+        #expect(entry?.host == "linear.app")
+        #expect(entry?.real == p.linearToken)
+        #expect(entry?.consentCredentialID == nil)
+        // Deterministic in (real, salt) so the fake never rotates mid-profile.
+        #expect(p.makeTokenPlan(salt: salt).fakeForLinear() == fake)
+    }
+
+    @Test("Gated Linear token carries the linear consent ID") func linearConsent() {
+        var p = Profile(name: "ws", tool: .claude, authMode: .subscription)
+        p.linearToken = "lin_api_x"
+        p.linearTokenRequiresApproval = true
+        let plan = p.makeTokenPlan(salt: salt)
+        let entry = plan.tokenMap().entries.first { $0.fake == plan.fakeForLinear() }
+        #expect(entry?.consentCredentialID == ConsentCredentialID.linear())
+    }
+
+    @Test("Whitespace-only Linear token plans nothing") func linearBlank() {
+        var p = Profile(name: "ws", tool: .claude, authMode: .subscription)
+        p.linearToken = "  \n"
+        #expect(p.makeTokenPlan(salt: salt).fakeForLinear() == nil)
     }
 }
 

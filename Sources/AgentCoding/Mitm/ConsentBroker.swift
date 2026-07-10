@@ -313,6 +313,7 @@ public enum ConsentCredentialID {
     public static func primaryToolAPIKey(tool: String) -> String { "tool-apikey:" + tool }
     public static func aws() -> String                            { "aws" }
     public static func digitalOcean() -> String                   { "do-pat" }
+    public static func linear() -> String                         { "linear-key" }
     public static func sshKey(_ id: String) -> String             { "ssh:" + id }
     public static func bromureSSHKey() -> String                  { "ssh:bromure-auto" }
     public static func gitHTTPS(_ id: UUID) -> String             { "git-https:" + id.uuidString }
