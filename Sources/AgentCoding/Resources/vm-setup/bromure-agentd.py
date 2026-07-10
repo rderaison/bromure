@@ -1666,10 +1666,42 @@ _YOLO_FLAGS = {
 def _preaccept_yolo(tool):
     """Claude Code shows a one-time interactive "Bypass Permissions mode"
     acceptance screen the first time it runs with its YOLO flag — which
-    hangs an unattended automation run. Pre-record the acceptance the same
-    way Claude Code itself does (~/.claude.json) before launching."""
+    hangs an unattended automation run. Pre-record the acceptance in BOTH
+    places Claude Code honors:
+
+      - ~/.claude/settings.json skipDangerousModePermissionPrompt — what
+        the dialog's Accept button writes today (current builds migrate the
+        legacy key here and honor either location).
+      - ~/.claude.json bypassPermissionsModeAccepted — the legacy key,
+        still read, but that file is Claude's own mutable state and any
+        concurrently-running interactive claude (the boot tab) rewrites it
+        wholesale from memory — clobbering a key injected after it started.
+        That race is why cloned workspaces (fresh home, acceptance never
+        recorded) kept prompting. settings.json is only written on explicit
+        user action, so the acceptance there survives.
+    """
     if tool != "claude":
         return
+    claude_dir = os.path.join(HOME, ".claude")
+    spath = os.path.join(claude_dir, "settings.json")
+    try:
+        settings = {}
+        try:
+            with open(spath) as f:
+                obj = json.load(f)
+            settings = obj if isinstance(obj, dict) else {}
+        except (OSError, ValueError):
+            pass
+        if settings.get("skipDangerousModePermissionPrompt") is not True:
+            settings["skipDangerousModePermissionPrompt"] = True
+            os.makedirs(claude_dir, exist_ok=True)
+            tmp = spath + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(settings, f, indent=2)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, spath)
+    except Exception as e:
+        log("worktree", "yolo pre-accept (settings.json) failed:", e)
     path = os.path.join(HOME, ".claude.json")
     try:
         cfg = {}
@@ -2154,16 +2186,22 @@ def publish_roster():
                 _heal_stuck_mouse(tty, cmd, mouse_any)
                 name = _resolve_tab_name(label, cmd, tty, pane_title)
                 # Is the cwd inside a git repo? Gates the "New worktree" menu
-                # host-side. Skip for worktree tabs (known repos) and empty cwds.
+                # host-side and roots the file-explorer pane. Worktree tabs
+                # need it too — rev-parse returns the worktree checkout dir,
+                # which is exactly the tree the file pane should show;
+                # skipping them left repoRoot empty on the host, so the pane
+                # never auto-opened for a fresh worktree.
                 isrepo = ""
-                if cwd and not worktree:
+                if cwd:
                     isrepo = _git_toplevel(cwd)
                 out_lines.append(roster_format_line(
                     idx, active, name, container, cwd, worktree, pbranch,
                     rroot, display, isrepo))
                 # A repo tab is active → restore its worktree tabs if a reboot
-                # wiped them (self-guards; once per boot per repo).
-                if isrepo:
+                # wiped them (self-guards; once per boot per repo). Worktree
+                # tabs don't drive restores: their toplevel is the checkout,
+                # not the main repo the worktree registry is keyed on.
+                if isrepo and not worktree:
                     _restore_worktrees(isrepo, os.path.basename(isrepo))
             for gone in [t for t in _stuck_mouse if t not in seen_ttys]:
                 _stuck_mouse.pop(gone, None)
@@ -2617,17 +2655,31 @@ def create_session():
     # alternate screen, so ghostty has no scrollback of its own and would
     # fake arrow keys for wheel ticks (= shell history at a prompt). Instead
     # the host injects one of these private sequences per wheel line (see
-    # TerminalSurfaceView.scrollWheel) and we scroll tmux history via
-    # copy-mode. A pane running its own alt-screen app (vim, less) gets real
-    # arrow keys — same split tmux's native wheel handling makes. Bound in
-    # both copy-mode tables so vi mode-keys keeps scrolling. Re-run on every
-    # daemon start, so a restart refreshes a live session's bindings.
+    # TerminalSurfaceView.scrollWheel) and we route it per pane state:
+    #   1. Pane app tracks the mouse (claude, vim +mouse, htop): hand it a
+    #      real SGR wheel event (send-keys -H = raw bytes to the pane app;
+    #      coords 1;1 — claude scrolls its transcript wherever the wheel
+    #      lands). Arrow keys here would be misread — Claude Code walks its
+    #      prompt history and shows "the mouse is sending arrow up and down".
+    #      This branch also catches wheel ticks the host mistook for
+    #      uncaptured: tmux flaps the client's mouse modes off/on around
+    #      every redraw, so ghostty_surface_mouse_captured races false while
+    #      claude scrolls. #{mouse_any_flag} is the pane's own state — no
+    #      flap.
+    #   2. Alt-screen app without mouse (less, plain vim): arrow keys, same
+    #      split tmux's native wheel handling makes.
+    #   3. Plain shell: scroll tmux history via copy-mode.
+    # Bound in both copy-mode tables so vi mode-keys keeps scrolling. Re-run
+    # on every daemon start, so a restart refreshes a live session's bindings.
     _tmux_ok("set-option", "-s", "user-keys[0]", "\x1b[1000001~")
     _tmux_ok("set-option", "-s", "user-keys[1]", "\x1b[1000002~")
-    _tmux_ok("bind-key", "-n", "User0", "if", "-F", "#{alternate_on}",
-             "send-keys Up", "copy-mode -e ; send-keys -X scroll-up")
-    _tmux_ok("bind-key", "-n", "User1", "if", "-F", "#{alternate_on}",
-             "send-keys Down")
+    _tmux_ok("bind-key", "-n", "User0", "if", "-F", "#{mouse_any_flag}",
+             "send-keys -H 1b 5b 3c 36 34 3b 31 3b 31 4d",   # \x1b[<64;1;1M
+             "if -F '#{alternate_on}' 'send-keys Up' "
+             "'copy-mode -e ; send-keys -X scroll-up'")
+    _tmux_ok("bind-key", "-n", "User1", "if", "-F", "#{mouse_any_flag}",
+             "send-keys -H 1b 5b 3c 36 35 3b 31 3b 31 4d",   # \x1b[<65;1;1M
+             "if -F '#{alternate_on}' 'send-keys Down'")
     for table in ("copy-mode", "copy-mode-vi"):
         _tmux_ok("bind-key", "-T", table, "User0", "send-keys", "-X", "scroll-up")
         _tmux_ok("bind-key", "-T", table, "User1", "send-keys", "-X", "scroll-down")

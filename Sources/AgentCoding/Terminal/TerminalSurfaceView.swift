@@ -350,11 +350,20 @@ final class TerminalSurfaceView: NSView {
         }
     }
 
-    /// Private key sequences the guest tmux binds to copy-mode scrolling
-    /// (bromure-agentd `create_session`). The attach client pins this surface
-    /// to the alternate screen, so ghostty has no scrollback of its own —
-    /// left alone it fakes arrow keys for the wheel, which pages the shell's
-    /// command history instead of the terminal text.
+    /// Private key sequences the guest tmux routes per pane state (bromure-
+    /// agentd `create_session`): a mouse-tracking pane (claude, vim +mouse)
+    /// gets a synthetic SGR wheel event, an alt-screen pane without mouse
+    /// (less) gets arrow keys, a plain shell scrolls tmux history via
+    /// copy-mode. The attach client pins this surface to the alternate
+    /// screen, so ghostty has no scrollback of its own — left alone it fakes
+    /// arrow keys for the wheel, which pages the shell's command history
+    /// instead of the terminal text.
+    ///
+    /// These sequences are also the safety net for the mouse-captured branch
+    /// above: tmux flaps the client tty's mouse modes off/on around every
+    /// redraw, so `ghostty_surface_mouse_captured` can read false mid-gesture
+    /// while the pane app is tracking the mouse. Ticks that fall through land
+    /// here and still reach the app as wheel events via the guest binding.
     ///
     /// Sent as a `text:` binding action (zig string-literal escapes), which
     /// writes raw bytes to the pty. NOT `ghostty_surface_text` — that is the

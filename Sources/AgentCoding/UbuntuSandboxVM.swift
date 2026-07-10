@@ -24,12 +24,14 @@ public struct GuestTab: Sendable {
     public var rootRepo: String?
     /// Pretty label ("Website refactoring") shown instead of `label`.
     public var display: String?
-    /// The cwd's git toplevel, if it's inside a repo (gates "New worktree").
-    /// Empty for non-repo cwds and for worktree tabs (already known repos).
+    /// The cwd's git toplevel, if it's inside a repo (gates "New worktree"
+    /// and roots the file-explorer pane). Empty for non-repo cwds. For a
+    /// worktree tab this is the worktree checkout dir.
     public var repoRoot: String?
 
     public var isWorktree: Bool { !(worktreeBranch?.isEmpty ?? true) }
-    /// A non-worktree tab sitting inside a git repo → eligible to spawn one.
+    /// A tab sitting inside a git repo (worktree checkouts included) →
+    /// eligible to spawn a (nested) worktree; roots the file pane.
     public var isGitRepo: Bool { !(repoRoot?.isEmpty ?? true) }
 }
 

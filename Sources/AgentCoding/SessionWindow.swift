@@ -154,8 +154,9 @@ final class TabsModel {
         var rootRepo: String?
         /// Pretty label shown instead of `label` for worktree tabs.
         var display: String?
-        /// The cwd's git toplevel if it's a repo (gates "New worktree"); empty
-        /// for non-repo cwds and worktree tabs.
+        /// The cwd's git toplevel if it's a repo (gates "New worktree" and
+        /// roots the file-explorer pane); empty for non-repo cwds. For a
+        /// worktree tab this is the worktree checkout dir.
         var repoRoot: String?
         /// This tab's coding-agent status — per agent, per tab. Driven by the
         /// MITM proxy (working, non-Claude) and Claude's per-window hooks
