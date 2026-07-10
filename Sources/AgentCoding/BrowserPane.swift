@@ -18,17 +18,10 @@ import Virtualization
 @MainActor
 @Observable
 final class BrowserPaneModel {
-    /// Editable address-bar text. Distinct from the active tab's committed URL
-    /// so typing doesn't fight live navigation updates.
-    var urlText: String = ""
-    /// Live tab list from TabBridge (guest tab-agent).
-    var tabs: [TabInfo] = []
-    var activeTabID: String?
-    /// Progress spinner in the URL bar while a navigation is in flight.
-    var isLoading = false
-    /// True while the address field has keyboard focus — the controller then
-    /// won't overwrite `urlText` from live tab updates (don't fight typing).
-    var urlFieldEditing = false
+    /// The Safari-compact native-tabs model (ported from Bromure Web), driven
+    /// by TabBridge in WorkspaceBrowserController. Owns the tab list, address
+    /// field state, and nav callbacks.
+    let tabBar = NativeTabBarModel()
     /// True once the VM controller has mounted a framebuffer into
     /// `framebufferContainer`; drives placeholder vs. live view.
     var hasFramebuffer = false
@@ -40,34 +33,12 @@ final class BrowserPaneModel {
     /// owning the VM's view lifecycle.
     let framebufferContainer = BrowserFramebufferContainer()
 
-    // Actions wired by WorkspaceBrowserController to TabBridge. nil until a VM
-    // is attached.
-    var onNavigate: ((String) -> Void)?
-    var onBack: (() -> Void)?
-    var onForward: (() -> Void)?
-    var onReload: (() -> Void)?
-    var onNewTab: (() -> Void)?
-    var onSelectTab: ((String) -> Void)?
-    var onCloseTab: ((String) -> Void)?
-    /// Close the whole browser pane (the ✕ in the chrome).
-    var onClosePane: (() -> Void)?
-
-    var activeTab: TabInfo? {
-        tabs.first { $0.id == activeTabID }
-    }
-
-    /// Submit the address bar: prepend https:// for a bare host, treat a
-    /// spaces-or-no-dot string as a search. Mirrors a browser omnibox loosely;
-    /// the guest ultimately resolves it.
-    func submitAddress() {
-        let raw = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return }
-        onNavigate?(Self.normalize(raw))
-    }
-
+    /// Normalize address-bar input to a URL / search (used by the controller's
+    /// onNavigate handler). Prepend https:// for a bare host; treat a
+    /// spaces-or-no-dot string as a search.
     static func normalize(_ raw: String) -> String {
+        let raw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if raw.hasPrefix("http://") || raw.hasPrefix("https://") { return raw }
-        // Looks like a host[:port][/path] → assume https. Otherwise search.
         let looksLikeURL = raw.contains(".") && !raw.contains(" ")
             || raw.hasPrefix("localhost")
         if looksLikeURL { return "https://" + raw }
@@ -171,20 +142,22 @@ struct BrowserPaneView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Native-chrome mode crops Chromium's own tab strip/omnibox out of
-            // the framebuffer, so our host chrome is always shown and is the
-            // browser's only chrome.
-            BrowserChrome(model: model)
-            Divider().overlay(Color.black.opacity(0.4))
+            // The exact Safari-compact tab bar from Bromure Web. Native-chrome
+            // mode crops Chromium's own chrome out of the framebuffer, so this
+            // is the browser's only chrome.
+            NativeCompactBarView(model: model.tabBar)
+                .frame(minHeight: 34)
+                .padding(.vertical, 3)
+                .background(Color(nsColor: .windowBackgroundColor))
+            Divider()
             content
         }
-        .background(Color(white: 0.10))
-        .environment(\.colorScheme, .dark)   // chrome reads as a browser
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     @ViewBuilder private var content: some View {
         ZStack {
-            Color(white: 0.14)
+            Color.black
             placeholder.opacity(model.hasFramebuffer ? 0 : 1)
             if model.hasFramebuffer {
                 FramebufferHost(container: model.framebufferContainer)
@@ -196,150 +169,12 @@ struct BrowserPaneView: View {
         VStack(spacing: 14) {
             Image(systemName: "globe")
                 .font(.system(size: 40, weight: .thin))
-                .foregroundStyle(.white.opacity(0.35))
+                .foregroundStyle(.secondary)
             if !model.placeholderStatus.isEmpty {
                 Text(model.placeholderStatus)
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.5))
+                    .foregroundStyle(.secondary)
             }
         }
-    }
-}
-
-/// Tab strip + window buttons + URL bar — the dark browser chrome from
-/// browser.png.
-private struct BrowserChrome: View {
-    @Bindable var model: BrowserPaneModel
-    @FocusState private var urlFocused: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            tabStrip
-            addressBar
-        }
-        .background(Color(white: 0.10))
-    }
-
-    private var tabStrip: some View {
-        HStack(spacing: 6) {
-            ForEach(model.tabs) { tab in
-                tabPill(tab)
-            }
-            Button {
-                model.onNewTab?()
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .frame(width: 22, height: 22)
-            }
-            .buttonStyle(.plain)
-            .help("New tab")
-            Spacer()
-            windowButtons
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-    }
-
-    private func tabPill(_ tab: TabInfo) -> some View {
-        let active = tab.id == model.activeTabID
-        return HStack(spacing: 6) {
-            favicon(tab)
-            Text(tab.title.isEmpty ? "New tab" : tab.title)
-                .font(.system(size: 11, weight: active ? .medium : .regular))
-                .foregroundStyle(.white.opacity(active ? 0.95 : 0.6))
-                .lineLimit(1)
-            Button {
-                model.onCloseTab?(tab.id)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .frame(maxWidth: 180)
-        .background(
-            RoundedRectangle(cornerRadius: 7)
-                .fill(Color.white.opacity(active ? 0.12 : 0.0)))
-        .contentShape(Rectangle())
-        .onTapGesture { model.onSelectTab?(tab.id) }
-    }
-
-    @ViewBuilder private func favicon(_ tab: TabInfo) -> some View {
-        if let png = tab.faviconPNG, let img = NSImage(data: png) {
-            Image(nsImage: img).resizable().frame(width: 13, height: 13)
-        } else {
-            Image(systemName: "globe")
-                .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.5))
-        }
-    }
-
-    private var windowButtons: some View {
-        HStack(spacing: 12) {
-            chromeButton("rectangle.righthalf.inset.filled", help: "Layout") {}
-            chromeButton("ellipsis", help: "More") {}
-            chromeButton("arrow.up.left.and.arrow.down.right", help: "Full width") {}
-            chromeButton("xmark", help: "Close browser") { model.onClosePane?() }
-        }
-    }
-
-    private func chromeButton(_ symbol: String, help: String,
-                              _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.55))
-                .frame(width: 20, height: 20)
-        }
-        .buttonStyle(.plain)
-        .help(help)
-    }
-
-    private var addressBar: some View {
-        HStack(spacing: 10) {
-            navButton("chevron.left", help: "Back") { model.onBack?() }
-            navButton("chevron.right", help: "Forward") { model.onForward?() }
-            HStack(spacing: 6) {
-                if model.isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                        .scaleEffect(0.6)
-                        .frame(width: 12, height: 12)
-                }
-                TextField("Search or enter address", text: $model.urlText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .multilineTextAlignment(.center)
-                    .focused($urlFocused)
-                    .onChange(of: urlFocused) { model.urlFieldEditing = urlFocused }
-                    .onSubmit { model.submitAddress() }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.white.opacity(0.07)))
-            navButton("arrow.clockwise", help: "Reload") { model.onReload?() }
-        }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 8)
-    }
-
-    private func navButton(_ symbol: String, help: String,
-                           _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.6))
-                .frame(width: 22, height: 22)
-        }
-        .buttonStyle(.plain)
-        .help(help)
     }
 }

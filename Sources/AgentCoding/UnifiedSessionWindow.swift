@@ -446,10 +446,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserPaneHandle.isHidden = true
         self.browserPaneResizeHandle = browserPaneHandle
         stage.addSubview(browserPaneHandle)
-        // Closing the browser from its own chrome ✕.
-        browserPaneModel.onClosePane = { [weak self] in
-            self?.setBrowserPaneOpen(false, animated: true)
-        }
+        // The browser pane closes via ⌃⌘B / the toolbar globe (the compact tab
+        // bar has no close-pane control of its own).
         // Docker dashboard overlay — added last so it sits above the framebuffer
         // and empty-state. Opaque background so it fully covers the VM behind it.
         dockerSlot.translatesAutoresizingMaskIntoConstraints = false

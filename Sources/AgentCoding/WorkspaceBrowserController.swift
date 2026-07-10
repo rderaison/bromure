@@ -206,51 +206,49 @@ final class WorkspaceBrowserController {
 
     private func wireTabBridge(_ bridge: TabBridge) {
         tabBridge = bridge
-        bridge.onTabsChanged = { [weak self] tabs in
-            guard let self else { return }
-            self.model.tabs = tabs
-            let active = tabs.first(where: { $0.active })
-            self.model.activeTabID = active?.id
-            // Reflect the active tab's URL unless the user is editing the field.
-            if !self.model.urlFieldEditing, let url = active?.url {
-                self.model.urlText = url
-            }
-        }
-        bridge.onShortcut = { [weak self] key in
-            guard let self else { return }
+        let bar = model.tabBar
+        bridge.onTabsChanged = { tabs in bar.setTabs(tabs) }
+        bridge.onShortcut = { key in
             switch key {
-            case "t": bridge.newTab(url: "")
-            case "w": bridge.closeActive()
-            case "r": if let id = self.model.activeTabID { bridge.reload(id: id) }
-            case "l": self.model.urlFieldEditing = true   // ⌘L focuses the address bar
+            case "t": bar.onNewTab?()
+            case "w": if let id = bar.activeTab?.id { bar.onClose?(id) }
+            case "r": if let id = bar.activeTab?.id { bar.onReload?(id) }
+            case "l": bar.pendingFocusOnActiveChange = true   // ⌘L → focus the address bar
             default: break
             }
         }
-        // Host chrome → guest, via the bridge.
-        model.onNavigate = { [weak self] raw in
-            guard let self else { return }
+        // Host chrome (NativeTabBarModel) → guest, via the bridge. onNavigate
+        // gets the raw address-bar text; normalize it to a URL/search.
+        bar.onNavigate = { [weak bar] raw in
             let url = BrowserPaneModel.normalize(raw)
-            self.model.urlText = url
-            if let id = self.model.activeTabID {
+            if let id = bar?.activeTab?.id {
+                bar?.beginNavigating(id)
                 bridge.navigate(id: id, url: url)
             } else {
                 bridge.newTab(url: url)
             }
         }
-        model.onBack = { [weak self] in if let id = self?.model.activeTabID { bridge.back(id: id) } }
-        model.onForward = { [weak self] in if let id = self?.model.activeTabID { bridge.forward(id: id) } }
-        model.onReload = { [weak self] in if let id = self?.model.activeTabID { bridge.reload(id: id) } }
-        model.onNewTab = { bridge.newTab(url: "") }
-        model.onSelectTab = { id in bridge.activate(id: id) }
-        model.onCloseTab = { id in bridge.close(id: id) }
+        bar.onBack = { id in bridge.back(id: id) }
+        bar.onForward = { id in bridge.forward(id: id) }
+        bar.onReload = { id in bridge.reload(id: id) }
+        bar.onNewTab = {
+            bridge.newTab(url: "")
+            bar.pendingFocusOnActiveChange = true   // land the cursor in the new tab's URL bar
+        }
+        bar.onActivate = { [weak bar] id in
+            bar?.markActiveLocally(id)   // optimistic; the guest echo confirms
+            bridge.activate(id: id)
+        }
+        bar.onClose = { id in bridge.close(id: id) }
+        // Site-info popover's on-demand certificate fetch.
+        bar.fetchCertificate = { origin in await bridge.fetchCertificate(origin: origin) }
     }
 
     /// Tear the browser VM down and clear the pane. Idempotent.
     func stop() {
         model.hasFramebuffer = false
         model.placeholderStatus = ""
-        model.tabs = []
-        model.activeTabID = nil
+        model.tabBar.setTabs([])
         model.framebufferContainer.unmountAll()
         tabBridge?.stop()
         tabBridge = nil
