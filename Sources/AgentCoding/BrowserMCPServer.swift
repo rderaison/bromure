@@ -106,12 +106,15 @@ final class BrowserMCPServer {
         }
     }
 
-    /// The controller, opening the browser and waiting for the guest agents if
-    /// needed (up to ~12s). Throws if it never comes up.
+    /// The controller, opening the browser and waiting for it to come up if
+    /// needed. The browser VM isn't pre-warmed, so the first call cold-boots it
+    /// (VM + Chromium + guest agents) — allow a generous 90s so the agent's
+    /// first navigate doesn't spuriously time out and retry. Throws if it never
+    /// comes up.
     private func readyBrowser() async throws -> WorkspaceBrowserController {
         if browser()?.isReady == true { return browser()! }
         ensureBrowser()
-        for _ in 0..<120 {   // ~12s
+        for _ in 0..<900 {   // ~90s @ 100ms
             if let b = browser(), b.isReady { return b }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }

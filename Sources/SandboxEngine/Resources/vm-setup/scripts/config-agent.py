@@ -305,7 +305,11 @@ def write_chrome_env(cfg):
 
     if cfg.get("darkMode"):
         extra_flags.append("--force-dark-mode")
-    if cfg.get("proxyHost"):
+    if cfg.get("directConnection"):
+        # Direct-connection mode (Bromure AC's embedded browser): no proxy
+        # flag at all — Chromium connects straight out via the VM's NAT.
+        pass
+    elif cfg.get("proxyHost"):
         # Custom proxy: point Chrome directly at the external proxy
         proxy_host = cfg["proxyHost"]
         proxy_port = cfg.get("proxyPort", 8080)

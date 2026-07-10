@@ -221,6 +221,12 @@ public struct VMConfig {
     /// An interface name (e.g. "en0") = force bridged mode on that interface.
     public var networkInterface: String?
 
+    /// Skip Chromium's proxy entirely — no `--proxy-server` flag, direct
+    /// connections via the VM's NAT. Default false keeps Bromure Web's
+    /// internal-squid routing; Bromure AC's embedded browser sets it true so
+    /// nothing sits between Chromium and the network.
+    public var directConnection: Bool
+
     /// Custom HTTP proxy hostname (e.g. "proxy.example.com").
     public var proxyHost: String?
 
@@ -340,6 +346,7 @@ public struct VMConfig {
         isolateFromLAN: Bool = false,
         allowedPorts: String? = nil,
         networkInterface: String? = nil,
+        directConnection: Bool = false,
         proxyHost: String? = nil,
         proxyPort: Int? = nil,
         proxyUsername: String? = nil,
@@ -422,6 +429,7 @@ public struct VMConfig {
         self.isolateFromLAN = isolateFromLAN
         self.allowedPorts = allowedPorts
         self.networkInterface = networkInterface
+        self.directConnection = directConnection
         self.proxyHost = proxyHost
         self.proxyPort = proxyPort
         self.proxyUsername = proxyUsername

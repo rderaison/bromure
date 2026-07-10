@@ -478,6 +478,8 @@ public final class VMPool {
         if config.forceDarkMode { cfg["darkMode"] = true }
         // Squid always runs (unless custom proxy is set), so always flag useProxy
         if config.proxyHost == nil { cfg["useProxy"] = true }
+        // Direct-connection mode (AC's embedded browser): no proxy flag at all.
+        if config.directConnection { cfg["directConnection"] = true }
         if !config.enableGPU { cfg["disableGPU"] = true }
         if !config.enableWebGL { cfg["disableWebGL"] = true }
         if config.enableGPU { cfg["gpuAccel"] = true }

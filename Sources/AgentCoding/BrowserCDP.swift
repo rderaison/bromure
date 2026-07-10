@@ -130,9 +130,21 @@ final class CDPWSConnection: @unchecked Sendable {
         self.fd = connection.fileDescriptor
     }
 
+    /// Cap blocking reads so a stalled guest can't hang a tool call forever —
+    /// a timed-out read returns ≤0, ending the loop and failing any pending
+    /// request rather than blocking indefinitely.
+    static func setReadTimeout(_ fd: Int32, seconds: Int) {
+        var tv = timeval(tv_sec: seconds, tv_usec: 0)
+        _ = withUnsafePointer(to: &tv) {
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, $0,
+                       socklen_t(MemoryLayout<timeval>.size))
+        }
+    }
+
     /// WebSocket upgrade handshake on the vsock fd, then start the read loop.
     func connect(path: String) async throws {
         let fd = self.fd
+        Self.setReadTimeout(fd, seconds: 20)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 var keyBytes = [UInt8](repeating: 0, count: 16)
@@ -195,6 +207,7 @@ final class CDPWSConnection: @unchecked Sendable {
     static func httpGet(fd: Int32, path: String) async throws -> Data {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, any Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
+                setReadTimeout(fd, seconds: 20)
                 let req = "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:9222\r\nConnection: close\r\n\r\n"
                 _ = req.withCString { Darwin.write(fd, $0, strlen($0)) }
                 var raw = Data()

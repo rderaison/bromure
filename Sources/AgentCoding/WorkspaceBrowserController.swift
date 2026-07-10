@@ -165,6 +165,7 @@ final class WorkspaceBrowserController {
             homePage: homePage,
             enableFileTransfer: true,
             enableClipboardSharing: true,
+            directConnection: true,   // no proxy — Chromium connects straight out
             enableAutomation: true,
             nativeChrome: true,
             nativeChromeInset: VMConfig.defaultNativeChromeInset(forDisplayScale: scale)
