@@ -49,6 +49,9 @@ let package = Package(
             name: "bromure-ac",
             dependencies: [
                 "SandboxEngine",
+                // CDP / tab / file bridges (vsock) for the embedded agentic
+                // web browser — shared with Bromure Web.
+                "BrowserBridges",
                 // libghostty (native terminal surfaces). Built from the
                 // pinned commit in tools/ghostty.commit by
                 // tools/build-ghostty.sh — build.sh runs it automatically
