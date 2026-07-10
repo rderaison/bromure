@@ -18,4 +18,8 @@ Tests/node_modules/
 # GhosttyKit build products (tools/build-ghostty.sh output — never committed).
 # Anchored to the repo root: unanchored `vendor/` also swallowed
 # Sources/AgentCoding/Vendor/ (vendored source that IS committed).
-/vendor/
+# No trailing slash: `/vendor/` matched only a directory, so a dev setup
+# where vendor is a SYMLINK (e.g. into a shared worktree) wasn't ignored —
+# that's how a dangling absolute symlink got committed and broke fresh CI
+# checkouts once.
+/vendor
