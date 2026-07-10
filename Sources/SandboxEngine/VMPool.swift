@@ -646,9 +646,17 @@ public final class VMPool {
         // Developer perf knobs, applied by config-agent in the guest:
         //   defaults write io.bromure.app vm.extraChromeFlags -string "--foo --bar"
         //   defaults write io.bromure.app vm.chromeEnvExtra -string "LP_NUM_THREADS=8"
-        if let extraFlags = UserDefaults.standard.string(forKey: "vm.extraChromeFlags"),
-           !extraFlags.isEmpty {
-            cfg["extraChromeFlags"] = extraFlags
+        var extraChromeFlags = UserDefaults.standard.string(forKey: "vm.extraChromeFlags") ?? ""
+        // Direct connection: force DIRECT even on an already-built image whose
+        // baked config-agent still emits --proxy-server. Chromium honors
+        // --no-proxy-server over --proxy-server regardless of order, and
+        // config-agent appends extraChromeFlags AFTER its proxy flag.
+        if config.directConnection {
+            extraChromeFlags = (extraChromeFlags + " --no-proxy-server")
+                .trimmingCharacters(in: .whitespaces)
+        }
+        if !extraChromeFlags.isEmpty {
+            cfg["extraChromeFlags"] = extraChromeFlags
         }
         if let envExtra = UserDefaults.standard.string(forKey: "vm.chromeEnvExtra"),
            !envExtra.isEmpty {

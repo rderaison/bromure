@@ -41,8 +41,10 @@ final class WorkspaceBrowserController {
     /// CDP driver (vsock 5200) for screenshot/eval/page-text — what TabBridge
     /// can't do. Exposed for the browser MCP server + devtools.
     private(set) var cdp: BrowserCDP?
-    /// Default landing page for a fresh ephemeral browser.
-    private let homePage = "https://bromure.io/hello"
+    /// Default landing page for a fresh ephemeral browser — blank, so an
+    /// agent-driven navigate reuses the tab with no homepage flash, and a
+    /// manual open starts clean.
+    private let homePage = "about:blank"
 
     init(model: BrowserPaneModel) {
         self.model = model
@@ -246,7 +248,7 @@ final class WorkspaceBrowserController {
             bridge.activate(id: id)
         }
         bar.onClose = { [weak self] id in self?.closeTab(id) }
-        bar.onDevTools = { bridge.sendChord("F12") }
+        bar.onDevTools = { [weak self] in self?.toggleDevTools() }
         // Site-info popover's on-demand certificate fetch.
         bar.fetchCertificate = { origin in await bridge.fetchCertificate(origin: origin) }
     }
@@ -274,11 +276,41 @@ final class WorkspaceBrowserController {
 
     func navigate(_ raw: String) {
         let url = BrowserPaneModel.normalize(raw)
-        if let id = model.tabBar.activeTab?.id {
-            model.tabBar.beginNavigating(id)
-            tabBridge?.navigate(id: id, url: url)
-        } else {
-            tabBridge?.newTab(url: url)
+        // Reuse the current tab. On a fresh cold boot Chromium has already
+        // opened the home-page tab but tab-agent may not have reported it yet;
+        // wait briefly so we navigate THAT tab instead of opening a duplicate.
+        Task { @MainActor [weak self] in
+            for _ in 0..<80 {   // ~8s
+                guard let self, self.tabBridge != nil else { return }
+                if let id = self.model.tabBar.activeTab?.id {
+                    self.model.tabBar.beginNavigating(id)
+                    self.tabBridge?.navigate(id: id, url: url)
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            self?.tabBridge?.newTab(url: url)   // no tab appeared — open one
+        }
+    }
+
+    /// Toggle Chromium DevTools by synthesizing F12 straight to the VM view —
+    /// host-side, so it doesn't depend on the guest tab-agent's chord
+    /// allowlist (which is baked into the image and may not include F12).
+    private func toggleDevTools() {
+        guard let view = vmView, let window = view.window else { return }
+        _ = window.makeFirstResponder(view)
+        let ch = String(UnicodeScalar(0xF70F)!)   // NSF12FunctionKey
+        let keyCode: UInt16 = 0x6F                 // kVK_F12
+        let ts = ProcessInfo.processInfo.systemUptime
+        if let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ts, windowNumber: window.windowNumber, context: nil,
+            characters: ch, charactersIgnoringModifiers: ch, isARepeat: false, keyCode: keyCode) {
+            view.keyDown(with: down)
+        }
+        if let up = NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: [],
+            timestamp: ts, windowNumber: window.windowNumber, context: nil,
+            characters: ch, charactersIgnoringModifiers: ch, isARepeat: false, keyCode: keyCode) {
+            view.keyUp(with: up)
         }
     }
 
