@@ -1,0 +1,324 @@
+import Foundation
+import Testing
+@testable import bromure_ac
+
+@Suite("ScheduledAutomations")
+struct ScheduledAutomationTests {
+
+    private var utcCalendar: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return c
+    }
+
+    private func date(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int) -> Date {
+        utcCalendar.date(from: DateComponents(year: y, month: mo, day: d,
+                                              hour: h, minute: mi))!
+    }
+
+    private func automation(frequency: ScheduledAutomation.Frequency,
+                            weekday: Int = 2, hour: Int, minute: Int) -> ScheduledAutomation {
+        ScheduledAutomation(profileID: UUID(), frequency: frequency,
+                            weekday: weekday, hour: hour, minute: minute)
+    }
+
+    // MARK: Schedule math
+
+    @Test("Daily fires later the same day when the time hasn't passed")
+    func dailySameDay() {
+        let a = automation(frequency: .daily, hour: 9, minute: 0)
+        // Wed Jul 8 2026, 08:00 UTC → Wed 09:00.
+        let next = AutomationSchedule.nextFire(for: a, after: date(2026, 7, 8, 8, 0),
+                                               calendar: utcCalendar)
+        #expect(next == date(2026, 7, 8, 9, 0))
+    }
+
+    @Test("Daily rolls to tomorrow when the time has passed")
+    func dailyTomorrow() {
+        let a = automation(frequency: .daily, hour: 9, minute: 0)
+        let next = AutomationSchedule.nextFire(for: a, after: date(2026, 7, 8, 10, 0),
+                                               calendar: utcCalendar)
+        #expect(next == date(2026, 7, 9, 9, 0))
+    }
+
+    @Test("Weekdays skips the weekend")
+    func weekdaysSkipsWeekend() {
+        let a = automation(frequency: .weekdays, hour: 9, minute: 30)
+        // Sat Jul 11 2026, noon → Mon Jul 13, 09:30.
+        let next = AutomationSchedule.nextFire(for: a, after: date(2026, 7, 11, 12, 0),
+                                               calendar: utcCalendar)
+        #expect(next == date(2026, 7, 13, 9, 30))
+    }
+
+    @Test("Weekdays fires Friday when due Friday")
+    func weekdaysFriday() {
+        let a = automation(frequency: .weekdays, hour: 9, minute: 0)
+        // Fri Jul 10 2026, 08:00 → Fri 09:00 (not Monday).
+        let next = AutomationSchedule.nextFire(for: a, after: date(2026, 7, 10, 8, 0),
+                                               calendar: utcCalendar)
+        #expect(next == date(2026, 7, 10, 9, 0))
+    }
+
+    @Test("Weekly lands on the chosen weekday")
+    func weeklyWeekday() {
+        // weekday 6 = Friday in the Gregorian calendar (1 = Sunday).
+        let a = automation(frequency: .weekly, weekday: 6, hour: 17, minute: 0)
+        // Wed Jul 8 2026 → Fri Jul 10, 17:00.
+        let next = AutomationSchedule.nextFire(for: a, after: date(2026, 7, 8, 12, 0),
+                                               calendar: utcCalendar)
+        #expect(next == date(2026, 7, 10, 17, 0))
+    }
+
+    @Test("Next fire is strictly in the future")
+    func strictlyFuture() {
+        let a = automation(frequency: .daily, hour: 9, minute: 0)
+        // Exactly at fire time → tomorrow, not "now".
+        let next = AutomationSchedule.nextFire(for: a, after: date(2026, 7, 8, 9, 0),
+                                               calendar: utcCalendar)
+        #expect(next == date(2026, 7, 9, 9, 0))
+    }
+
+    // MARK: Slug + guest path
+
+    @Test("Branch slug is filesystem-safe and timestamped")
+    func slug() {
+        let s = ScheduledAutomationEngine.branchSlug(
+            for: "Nightly dependency audit!", at: date(2026, 7, 8, 9, 5))
+        #expect(s.hasPrefix("nightly-dependency-audit-"))
+        #expect(!s.contains(" "))
+        #expect(!s.contains("!"))
+    }
+
+    @Test("Empty name still yields a usable slug")
+    func slugEmpty() {
+        let s = ScheduledAutomationEngine.branchSlug(for: "  ", at: date(2026, 7, 8, 9, 5))
+        #expect(s.hasPrefix("automation-"))
+    }
+
+    @Test("Guest paths expand to the fixed guest home")
+    func guestPaths() {
+        #expect(ScheduledAutomationEngine.guestPath("~") == "/home/ubuntu")
+        #expect(ScheduledAutomationEngine.guestPath("") == "/home/ubuntu")
+        #expect(ScheduledAutomationEngine.guestPath("~/repo") == "/home/ubuntu/repo")
+        #expect(ScheduledAutomationEngine.guestPath("repo") == "/home/ubuntu/repo")
+        #expect(ScheduledAutomationEngine.guestPath("/opt/x") == "/opt/x")
+    }
+
+    // MARK: Store persistence
+
+    private func tempStoreURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("bromure-test-\(UUID().uuidString)")
+            .appendingPathComponent("automations.json")
+    }
+
+    @MainActor
+    @Test("Store round-trips automations, runs, and planned fires")
+    func storeRoundTrip() {
+        let url = tempStoreURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let store = ScheduledAutomationStore(fileURL: url)
+        var a = ScheduledAutomation(profileID: UUID(), tool: .codex, prompt: "audit deps")
+        a.name = "Nightly audit"
+        a.frequency = .daily
+        // ISO-8601 storage is whole-second; a fractional createdAt would
+        // make the reloaded copy compare unequal.
+        a.createdAt = date(2026, 7, 8, 12, 0)
+        store.upsert(a)
+        let fire = date(2026, 7, 9, 9, 0)
+        store.setNextFire(fire, for: a.id)
+        store.record(AutomationRunRecord(automationID: a.id, firedAt: Date(),
+                                         outcome: .launched, detail: "slug-1"))
+
+        let reloaded = ScheduledAutomationStore(fileURL: url)
+        #expect(reloaded.automations == [a])
+        #expect(reloaded.nextFire(for: a.id) == fire)
+        #expect(reloaded.runs(for: a.id).count == 1)
+        #expect(reloaded.runs(for: a.id).first?.outcome == .launched)
+    }
+
+    @MainActor
+    @Test("Editing an automation drops its planned fire for rescheduling")
+    func upsertClearsNextFire() {
+        let url = tempStoreURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let store = ScheduledAutomationStore(fileURL: url)
+        let a = ScheduledAutomation(profileID: UUID())
+        store.upsert(a)
+        store.setNextFire(date(2026, 7, 9, 9, 0), for: a.id)
+        store.upsert(a)   // edit-and-save
+        #expect(store.nextFire(for: a.id) == nil)
+    }
+
+    // MARK: Engine tick semantics
+
+    @MainActor
+    @Test("First tick plants a next fire without firing")
+    func tickPlants() {
+        let url = tempStoreURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let store = ScheduledAutomationStore(fileURL: url)
+        store.upsert(ScheduledAutomation(profileID: UUID()))
+        let engine = ScheduledAutomationEngine(store: store, delegate: nil)
+        let now = Date()
+        engine.tick(now: now)
+        let a = store.automations[0]
+        #expect(store.nextFire(for: a.id) != nil)
+        #expect(store.nextFire(for: a.id)! > now)
+        #expect(store.runs.isEmpty)
+    }
+
+    @MainActor
+    @Test("A fire missed beyond the grace window is skipped and recorded")
+    func missedFireSkips() {
+        let url = tempStoreURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let store = ScheduledAutomationStore(fileURL: url)
+        let a = ScheduledAutomation(profileID: UUID())   // policy .skip by default
+        store.upsert(a)
+        let now = Date()
+        // The fire time passed 2 hours ago — well beyond the grace window.
+        store.setNextFire(now.addingTimeInterval(-7200), for: a.id)
+
+        let engine = ScheduledAutomationEngine(store: store, delegate: nil)
+        engine.tick(now: now)
+
+        #expect(store.runs(for: a.id).first?.outcome == .skipped)
+        #expect(store.nextFire(for: a.id)! > now)
+    }
+
+    @MainActor
+    @Test("Disabled automations never fire or advance")
+    func disabledInert() {
+        let url = tempStoreURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let store = ScheduledAutomationStore(fileURL: url)
+        var a = ScheduledAutomation(profileID: UUID())
+        a.enabled = false
+        store.upsert(a)
+        let engine = ScheduledAutomationEngine(store: store, delegate: nil)
+        engine.tick(now: Date())
+        #expect(store.nextFire(for: a.id) == nil)
+        #expect(store.runs.isEmpty)
+    }
+
+    // MARK: GitHub PR trigger
+
+    private func item(_ number: Int, createdAt: Date, title: String = "t",
+                      body: String = "") -> GitHubItem {
+        GitHubItem(number: number, title: title, url: "https://github.com/o/r/pull/\(number)",
+                   branch: "feat", author: "alice", body: body, createdAt: createdAt)
+    }
+
+    @Test("Baseline poll never fires, only sets the high-water mark")
+    func prBaseline() {
+        let newest = date(2026, 7, 8, 10, 0)
+        let (fire, hw) = GitHubPRPoller.newItems(
+            fetched: [item(2, createdAt: newest), item(1, createdAt: date(2026, 7, 1, 9, 0))],
+            highWater: nil)
+        #expect(fire.isEmpty)
+        #expect(hw == newest)
+    }
+
+    @Test("Only items newer than the high-water mark fire, oldest first")
+    func prIncremental() {
+        let hw = date(2026, 7, 8, 10, 0)
+        let a = item(3, createdAt: date(2026, 7, 8, 11, 0))
+        let b = item(4, createdAt: date(2026, 7, 8, 12, 0))
+        let old = item(1, createdAt: date(2026, 7, 1, 9, 0))
+        let (fire, newHW) = GitHubPRPoller.newItems(fetched: [b, old, a], highWater: hw)
+        #expect(fire.map(\.number) == [3, 4])
+        #expect(newHW == b.createdAt)
+    }
+
+    @Test("Empty fetch keeps the existing high-water mark")
+    func prEmptyFetch() {
+        let hw = date(2026, 7, 8, 10, 0)
+        let (fire, newHW) = GitHubPRPoller.newItems(fetched: [], highWater: hw)
+        #expect(fire.isEmpty)
+        #expect(newHW == hw)
+    }
+
+    @Test("PR prompt variables are substituted")
+    func prSubstitution() {
+        let p = item(7, createdAt: date(2026, 7, 8, 10, 0), title: "Fix leak",
+                     body: "Repro steps here")
+        let out = GitHubPRPoller.substitute(
+            "Review PR #{{pr.number}} ({{pr.title}}): {{pr.body}}", item: p,
+            kind: .githubPullRequest)
+        #expect(out == "Review PR #7 (Fix leak): Repro steps here")
+    }
+
+    @Test("Issue prompt variables use the issue namespace")
+    func issueSubstitution() {
+        let p = item(9, createdAt: date(2026, 7, 8, 10, 0), title: "Crash on quit",
+                     body: "Stack trace")
+        let out = GitHubPRPoller.substitute(
+            "Triage issue {{issue.number}}: {{issue.title}} — {{issue.body}}",
+            item: p, kind: .githubIssue)
+        #expect(out == "Triage issue 9: Crash on quit — Stack trace")
+    }
+
+    @Test("Prompts without variables get the item context appended")
+    func prAutoAppend() {
+        let p = item(7, createdAt: date(2026, 7, 8, 10, 0), title: "Fix leak",
+                     body: "Repro steps here")
+        let out = GitHubPRPoller.substitute("Review this PR.", item: p,
+                                            kind: .githubPullRequest)
+        #expect(out.hasPrefix("Review this PR."))
+        #expect(out.contains("PR #7"))
+        #expect(out.contains("Fix leak"))
+        #expect(out.contains("Repro steps here"))
+    }
+
+    @Test("Issue auto-append labels the context as an issue")
+    func issueAutoAppend() {
+        var p = item(9, createdAt: date(2026, 7, 8, 10, 0), title: "Crash on quit",
+                     body: "Stack trace")
+        p.branch = ""
+        let out = GitHubPRPoller.substitute("Fix this.", item: p, kind: .githubIssue)
+        #expect(out.contains("Issue #9"))
+        #expect(!out.contains("Branch:"))
+    }
+
+    @Test("Repo slug validation")
+    func repoSlug() {
+        #expect(GitHubPRPoller.isValidRepoSlug("rderaison/bromure"))
+        #expect(GitHubPRPoller.isValidRepoSlug("a-b.c_d/x.y-z_w"))
+        #expect(!GitHubPRPoller.isValidRepoSlug("bromure"))
+        #expect(!GitHubPRPoller.isValidRepoSlug("a/b/c"))
+        #expect(!GitHubPRPoller.isValidRepoSlug("/b"))
+        #expect(!GitHubPRPoller.isValidRepoSlug("a/"))
+        #expect(!GitHubPRPoller.isValidRepoSlug("a b/c"))
+    }
+
+    @Test("Automations saved before triggers existed decode as schedules")
+    func triggerDecodeDefault() throws {
+        let json = """
+        {"id":"6B29FC40-CA47-1067-B31D-00DD010662DA",
+         "name":"old","profileID":"6B29FC40-CA47-1067-B31D-00DD010662DB"}
+        """
+        let a = try JSONDecoder().decode(ScheduledAutomation.self, from: Data(json.utf8))
+        #expect(a.trigger == .schedule)
+        #expect(a.githubRepo.isEmpty)
+    }
+
+    // MARK: Unattended-run warnings
+
+    @MainActor
+    @Test("Ask-before-use credentials surface in the warning labels")
+    func askLabels() {
+        var p = Profile(name: "ws", tool: .claude, authMode: .token)
+        #expect(p.askBeforeUseCredentialLabels.isEmpty)
+        p.gitHTTPSCredentials = [
+            GitHTTPSCredential(host: "github.com", username: "u", token: "t",
+                               requireApproval: true)
+        ]
+        #expect(p.askBeforeUseCredentialLabels == ["Git token (github.com)"])
+    }
+}

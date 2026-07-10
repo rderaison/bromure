@@ -1695,6 +1695,76 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64):
     _wt_registry_add(repo_name, branch, parent_branch, display, tool)
 
 
+def _automation_tab(cwd, display, tool, prompt_b64):
+    """Plain agent tab for an automation whose path isn't a git repo: same
+    launch env as a worktree tab, no git anything."""
+    if prompt_b64 == "-":
+        prompt_b64 = ""
+    if not os.path.isdir(cwd):
+        cwd = HOME
+    win = _new_window(command="bash -l", cwd=cwd,
+                      env={"BROMURE_AC_WT_TOOL": tool,
+                           "BROMURE_AC_WT_PROMPT": prompt_b64})
+    if not win:
+        worktree_err("automation: could not open a tab at %s" % cwd)
+        return
+    _set_window_option(win, "@label", tool)
+    _set_window_option(win, "@display", display)
+
+
+def _automation_run(cwd, slug, display, tool, prompt_b64):
+    """Automation fire: a worktree when cwd is inside a git repo, a plain
+    agent tab otherwise (the host can't tell — the guest decides here)."""
+    if os.path.isdir(cwd) and _worktree_main_root(cwd):
+        _worktree_create(cwd, slug, display, tool, prompt_b64)
+    else:
+        _automation_tab(cwd, display, tool, prompt_b64)
+
+
+def _save_claude_transcript(wt_dir):
+    """Copy the newest Claude Code transcript for wt_dir into the worktree
+    (.bromure-automation/transcript.jsonl) so it survives the tab closing.
+    Claude encodes the project path with '/' and '.' mapped to '-'."""
+    projects = os.path.join(HOME, ".claude", "projects")
+    candidates = []
+    for enc in {wt_dir.replace("/", "-"),
+                wt_dir.replace(".", "-").replace("/", "-")}:
+        candidates.extend(glob.glob(os.path.join(projects, enc, "*.jsonl")))
+    if not candidates:
+        log("automation", "no transcript found for %s" % wt_dir)
+        return
+    newest = max(candidates, key=os.path.getmtime)
+    dest = os.path.join(wt_dir, ".bromure-automation")
+    try:
+        os.makedirs(dest, exist_ok=True)
+        shutil.copy2(newest, os.path.join(dest, "transcript.jsonl"))
+        log("automation", "transcript saved to %s" % dest)
+    except OSError as e:
+        log("automation", "transcript copy failed: %s" % e)
+
+
+def _automation_finish(branch):
+    """End-of-run cleanup for an automation worktree tab: stash the Claude
+    transcript in the worktree, then close the tab. The worktree itself is
+    kept — it's the run's result."""
+    out = _capture(["tmux", "list-windows", "-t", TMUX_S, "-F",
+                    "#{window_id}\t#{@worktree}\t#{@label}\t"
+                    "#{pane_current_path}"])
+    win_id = tool = wt_dir = ""
+    for line in out.splitlines():
+        parts = (line.split("\t") + ["", "", "", ""])[:4]
+        if parts[1] == branch:
+            win_id, tool, wt_dir = parts[0], parts[2], parts[3]
+            break
+    if not win_id:
+        log("automation", "finish: no window for %s" % branch)
+        return
+    if wt_dir and tool == "claude":
+        _save_claude_transcript(wt_dir)
+    _tmux_ok("kill-window", "-t", win_id)
+    log("automation", "finished %s — transcript saved, tab closed" % branch)
+
+
 # Prompt the coding agent gets when a merge conflicts (verbatim from source).
 _MERGE_PROMPT = ("A git merge in this directory hit conflicts. Run 'git status'"
                  " to see them, then resolve every conflicted file, keeping both"
@@ -2390,6 +2460,15 @@ def _dispatch_command(action, arg):
         f = _fields(arg, 5)
         _bg(_worktree_create, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
             _b64d(f[3]), f[4])
+    elif action == "automation-run":
+        # Same field layout as worktree-create; falls back to a plain agent
+        # tab when the path isn't a git repo.
+        f = _fields(arg, 5)
+        _bg(_automation_run, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
+            _b64d(f[3]), f[4])
+    elif action == "automation-finish":
+        f = _fields(arg, 1)
+        _bg(_automation_finish, _b64d(f[0]))
     elif action == "worktree-merge":
         f = _fields(arg, 5)
         _bg(_worktree_merge, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),

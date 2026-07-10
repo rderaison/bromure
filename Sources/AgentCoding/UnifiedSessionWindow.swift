@@ -79,6 +79,9 @@ final class SessionListModel {
     var dockerSelectedID: Profile.ID?
     /// True when the Grid is the active stage surface.
     var gridSelected = false
+    /// Set when an automation's editor is the active stage surface —
+    /// highlights its row in the Automations section.
+    var automationSelectedID: UUID?
     /// True when the sidebar is collapsed to the icon rail.
     var sidebarCollapsed = false
     /// True when the right-hand file-explorer pane is open. Drives the
@@ -198,6 +201,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private let vmDashboardSlot = NSView()
     private var vmDashboardHosting: NSHostingView<VMDashboardView>?
     private var vmDashboardSelectedID: Profile.ID?
+    /// Full-bleed overlay hosting the automation editor (sidebar
+    /// "Automations" section). nil id + visible slot = composing a new one.
+    private let automationSlot = NSView()
+    private var automationHosting: NSHostingView<AutomationEditorView>?
+    private var automationEditorVisible = false
     private var toolbarDelegate: UnifiedToolbarDelegate?
 
     /// The user-curated terminal grid (phase 2): membership persists here,
@@ -297,7 +305,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onDuplicate: { [weak self] id in self?.acDelegate?.sidebarDuplicateProfile(id) },
             onReset:     { [weak self] id in self?.acDelegate?.sidebarResetProfile(id) },
             onDelete:    { [weak self] id in self?.acDelegate?.sidebarDeleteProfile(id) },
-            onNewProfile: { [weak self] in self?.acDelegate?.openEditorWindow(editing: nil) })
+            onNewProfile: { [weak self] in self?.acDelegate?.openEditorWindow(editing: nil) },
+            automationStore: acDelegate.scheduledAutomationStore,
+            onSelectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
+            onNewAutomation:    { [weak self] in self?.showAutomationEditor(nil) },
+            onRunAutomation:    { [weak self] id in self?.acDelegate?.runAutomationNow(id) },
+            onToggleAutomation: { [weak self] id in self?.acDelegate?.toggleAutomation(id) },
+            onDeleteAutomation: { [weak self] id in self?.acDelegate?.confirmDeleteAutomation(id) })
         // NonMovable so a drag inside the sidebar — notably dragging a tab
         // row onto the Grid — selects/drags the row instead of moving the
         // whole window (the window is isMovableByWindowBackground).
@@ -346,6 +360,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         dockerSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         dockerSlot.isHidden = true
         stage.addSubview(dockerSlot)
+        // Automation editor overlay — same full-bleed pattern as Docker.
+        automationSlot.translatesAutoresizingMaskIntoConstraints = false
+        automationSlot.wantsLayer = true
+        automationSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        automationSlot.isHidden = true
+        stage.addSubview(automationSlot)
         // VM dashboard overlay — same treatment as the Docker overlay.
         vmDashboardSlot.translatesAutoresizingMaskIntoConstraints = false
         vmDashboardSlot.wantsLayer = true
@@ -427,6 +447,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             dockerSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
             dockerSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
             dockerSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+            automationSlot.topAnchor.constraint(equalTo: stage.topAnchor),
+            automationSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
+            automationSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            automationSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
         ])
 
         // ---- Layout: resizable sidebar | divider | framebuffer stage ----
@@ -661,6 +685,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func showGrid() {
         clearDockerDashboard()
         clearVMDashboard()
+        clearAutomationEditor()
         listModel.gridSelected = true
         if gridView == nil {
             let dataSource = GridStageView.DataSource(
@@ -786,6 +811,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard let selPane = pane(id) else { return }
         hideGrid()
         clearVMDashboard()
+        clearAutomationEditor()
         if let prev = dockerSelectedID, prev != id, let p = pane(prev) {
             acDelegate?.setDockerWatch(false, in: p)   // hand off watch between VMs
         }
@@ -850,6 +876,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func showVMDashboard(_ id: Profile.ID) {
         guard let profile = acDelegate?.profile(for: id) else { return }
         clearDockerDashboard()
+        clearAutomationEditor()
         let p = pane(id)
         let state = listModel.profileRows.first { $0.id == id }?.state ?? (p != nil ? .running : .off)
         vmDashboardSelectedID = id
@@ -894,6 +921,62 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         vmDashboardSlot.isHidden = (vmDashboardSelectedID == nil)
     }
 
+    // MARK: Automation editor overlay
+
+    /// Show the automation editor as the stage surface — an existing
+    /// automation's, or a blank one (id = nil, the sidebar "+").
+    /// Rebuilt on every show so the profile snapshot (names, credentials,
+    /// ask-before-use flags) is current.
+    func showAutomationEditor(_ id: UUID?) {
+        guard let delegate = acDelegate else { return }
+        hideGrid()
+        clearDockerDashboard()
+        clearVMDashboard()
+        automationEditorVisible = true
+        listModel.automationSelectedID = id
+        automationHosting?.removeFromSuperview()
+        let view = AutomationEditorView(
+            store: delegate.scheduledAutomationStore,
+            profiles: delegate.profiles,
+            editing: id,
+            onSave: { [weak self] automation in
+                self?.acDelegate?.saveAutomation(automation)
+                self?.clearAutomationEditor()
+            },
+            onRunNow: { [weak self] automation in
+                self?.acDelegate?.saveAutomation(automation)
+                self?.acDelegate?.runAutomationNow(automation.id)
+                self?.clearAutomationEditor()
+            },
+            onDelete: { [weak self] automationID in
+                self?.acDelegate?.confirmDeleteAutomation(automationID)
+            },
+            onEditWorkspace: { [weak self] profileID in
+                self?.acDelegate?.sidebarEditProfile(profileID)
+            })
+        let host = NSHostingView(rootView: view)
+        host.translatesAutoresizingMaskIntoConstraints = false
+        automationSlot.addSubview(host)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: automationSlot.topAnchor),
+            host.bottomAnchor.constraint(equalTo: automationSlot.bottomAnchor),
+            host.leadingAnchor.constraint(equalTo: automationSlot.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: automationSlot.trailingAnchor),
+        ])
+        automationHosting = host
+        automationSlot.isHidden = false
+        makeFirstResponder(host)
+    }
+
+    func clearAutomationEditor() {
+        guard automationEditorVisible else { return }
+        automationEditorVisible = false
+        listModel.automationSelectedID = nil
+        automationHosting?.removeFromSuperview()
+        automationHosting = nil
+        automationSlot.isHidden = true
+    }
+
     /// Workspace name clicked in the source list → select it and surface its
     /// dashboard, whether the VM is running, suspended, or off.
     func selectWorkspaceName(_ id: Profile.ID) {
@@ -928,6 +1011,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         hideGrid()
         clearDockerDashboard()
         clearVMDashboard()
+        clearAutomationEditor()
         if selectedID != id { select(profileID: id) }
         pane(id)?.switchTo(index: index)
     }
@@ -935,6 +1019,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         hideGrid()
         clearDockerDashboard()
         clearVMDashboard()
+        clearAutomationEditor()
         if selectedID != id { select(profileID: id) }
         if let p = pane(id) { acDelegate?.spawnNewTab(in: p) }
     }
@@ -1087,6 +1172,14 @@ private struct SessionSidebar: View {
     let onReset: (Profile.ID) -> Void
     let onDelete: (Profile.ID) -> Void
     let onNewProfile: () -> Void
+    /// Scheduled automations — the third sidebar group, after the
+    /// workspace rows.
+    var automationStore: ScheduledAutomationStore
+    let onSelectAutomation: (UUID) -> Void
+    let onNewAutomation: () -> Void
+    let onRunAutomation: (UUID) -> Void
+    let onToggleAutomation: (UUID) -> Void
+    let onDeleteAutomation: (UUID) -> Void
 
     var body: some View {
         if model.sidebarCollapsed {
@@ -1149,6 +1242,14 @@ private struct SessionSidebar: View {
                             onDelete: onDelete,
                             onAddAllToGrid: onAddAllToGrid)
                     }
+                    AutomationsSection(
+                        store: automationStore,
+                        model: model,
+                        onSelect: onSelectAutomation,
+                        onNew: onNewAutomation,
+                        onRunNow: onRunAutomation,
+                        onToggle: onToggleAutomation,
+                        onDelete: onDeleteAutomation)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)

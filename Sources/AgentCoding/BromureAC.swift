@@ -1025,6 +1025,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus) {
         guard let tab = pane(for: id)?.model.tabs.first(where: { $0.index == index }) else { return }
         tab.agentStatus = status
+        // A finished Claude tab may be an automation run — the engine saves
+        // its transcript and closes the tab if so.
+        if status == .done {
+            scheduledAutomationEngine.agentFinished(
+                profileID: id, worktreeBranch: tab.worktreeBranch)
+        }
     }
 
     /// Pop a VM out of the unified window into its own standalone window. The
@@ -1068,6 +1074,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// attached (detached / headless). The persistent-agent model — where
     /// VMs survive the GUI being closed — hangs off this split.
     var runningSessions: [Profile.ID: RunningSession] = [:]
+
+    /// Scheduled automations (sidebar "Automations"): recurring, unattended
+    /// agent runs. The store persists next to the profiles dir; the engine
+    /// ticks on the main run loop and fires due automations through the same
+    /// outbox path the CLI/SSH surface uses.
+    let scheduledAutomationStore = ScheduledAutomationStore()
+    private(set) lazy var scheduledAutomationEngine =
+        ScheduledAutomationEngine(store: scheduledAutomationStore, delegate: self)
 
     /// Profiles created with `vm run --rm`: deleted (profile + disk) when their
     /// VM stops, mirroring `docker run --rm`.
@@ -1553,6 +1567,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // boot any profiles flagged "Start at login".
         reconcileBootLaunchAgent()
         DispatchQueue.main.async { [weak self] in self?.bootFlaggedProfilesAtStartup() }
+
+        // Scheduled automations: start the tick loop in every mode (GUI and
+        // headless login agent alike) — an automation due while only the
+        // background agent is running should still fire. The first tick also
+        // routes fires missed while the app was quit through each
+        // automation's missed-run policy.
+        scheduledAutomationEngine.start()
 
         // Default SSH key: every new profile inherits this keypair via
         // the user's preferences template. Generate it on first launch
@@ -5839,6 +5860,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             name = "worktree-create"
             let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
             encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
+        case "run":
+            // Automation fire: same layout as "create", but the guest falls
+            // back to a plain agent tab when cwd isn't a git repo.
+            guard args.count >= 4 else { return false }   // cwd, slug, display, tool[, prompt]
+            name = "automation-run"
+            let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
+            encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
+        case "finish":
+            guard args.count >= 1 else { return false }   // worktree branch
+            name = "automation-finish"; encoded = [b64(args[0])]
         case "merge":
             guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
             name = "worktree-merge"; encoded = args.prefix(5).map(b64)
@@ -5881,6 +5912,47 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let file = outbox.appendingPathComponent("cmd-\(UUID().uuidString).txt")
         try? (line + "\n").write(to: file, atomically: true, encoding: .utf8)
         return true
+    }
+
+    // MARK: - Scheduled automations
+
+    /// Persist an automation from the editor and replant its next fire
+    /// immediately, so the sidebar row shows "next …" without waiting for
+    /// the engine's 30-second tick.
+    func saveAutomation(_ automation: ScheduledAutomation) {
+        scheduledAutomationStore.upsert(automation)
+        scheduledAutomationEngine.tick()
+    }
+
+    func runAutomationNow(_ id: UUID) {
+        guard let automation = scheduledAutomationStore.automation(id) else { return }
+        scheduledAutomationEngine.runNow(automation)
+    }
+
+    func toggleAutomation(_ id: UUID) {
+        guard var automation = scheduledAutomationStore.automation(id) else { return }
+        automation.enabled.toggle()
+        saveAutomation(automation)
+    }
+
+    /// Delete with a confirmation — automations are cheap to recreate, but a
+    /// misclick on a context menu shouldn't silently drop a schedule.
+    func confirmDeleteAutomation(_ id: UUID) {
+        guard let automation = scheduledAutomationStore.automation(id) else { return }
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Delete “%@”?", comment: "delete automation"),
+            automation.name.isEmpty
+                ? NSLocalizedString("Untitled automation", comment: "") : automation.name)
+        alert.informativeText = NSLocalizedString(
+            "The schedule and its run history are removed. Worktrees already created by past runs are kept.",
+            comment: "delete automation")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        scheduledAutomationStore.remove(id)
+        unifiedWindow?.clearAutomationEditor()
     }
 
     // MARK: Worktree dialogs
