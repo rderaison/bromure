@@ -249,6 +249,50 @@ final class WorkspaceBrowserController {
         bar.fetchCertificate = { origin in await bridge.fetchCertificate(origin: origin) }
     }
 
+    // MARK: - Browser tools (MCP surface)
+    //
+    // navigate/tabs/history go through TabBridge; screenshot/eval/text through
+    // BrowserCDP. `isReady` gates calls before the guest agents connect.
+
+    var isReady: Bool { state == .running && tabBridge != nil }
+
+    /// Ensure the browser is up (open the pane if needed). Returns once the VM
+    /// is running; tools still race the guest agents' connect, which they
+    /// handle themselves.
+    func ensureRunning() { if state == .idle { start() } }
+
+    func tabs() -> [TabInfo] { model.tabBar.tabs }
+
+    func navigate(_ raw: String) {
+        let url = BrowserPaneModel.normalize(raw)
+        if let id = model.tabBar.activeTab?.id {
+            model.tabBar.beginNavigating(id)
+            tabBridge?.navigate(id: id, url: url)
+        } else {
+            tabBridge?.newTab(url: url)
+        }
+    }
+
+    func newTab(_ raw: String) { tabBridge?.newTab(url: raw.isEmpty ? "" : BrowserPaneModel.normalize(raw)) }
+    func activateTab(_ id: String) { model.tabBar.markActiveLocally(id); tabBridge?.activate(id: id) }
+    func closeTab(_ id: String) { tabBridge?.close(id: id) }
+    func back() { if let id = model.tabBar.activeTab?.id { tabBridge?.back(id: id) } }
+    func forward() { if let id = model.tabBar.activeTab?.id { tabBridge?.forward(id: id) } }
+    func reload() { if let id = model.tabBar.activeTab?.id { tabBridge?.reload(id: id) } }
+
+    func screenshot(fullPage: Bool) async throws -> Data {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        return try await cdp.screenshot(fullPage: fullPage)
+    }
+    func evaluate(_ js: String) async throws -> Any? {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        return try await cdp.evaluate(js)
+    }
+    func pageText() async throws -> String {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        return try await cdp.pageText()
+    }
+
     /// Tear the browser VM down and clear the pane. Idempotent.
     func stop() {
         model.hasFramebuffer = false
