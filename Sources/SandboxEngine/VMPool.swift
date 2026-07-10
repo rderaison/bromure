@@ -69,6 +69,13 @@ public final class VMPool {
     private var config: VMConfig
     private let storageDir: URL
     private let imageManager: LinuxImageManager
+    /// Web isolates its browser VMs on their own ascending subnet with peer
+    /// bridging OFF. AC's embedded browser sets this false so the browser VM
+    /// joins the SAME shared-switch subnet as the workspace VMs with peer
+    /// bridging ON — the agents and the browser must reach each other (e.g.
+    /// the browser loading the agent's dev server). Default true preserves
+    /// Web's behaviour.
+    private let isolatePeers: Bool
     private var warmVM: WarmVM?
     private var isWarming = false
     private var configListenerDelegate: ConfigListenerDelegate?
@@ -92,11 +99,12 @@ public final class VMPool {
         self.config = config
     }
 
-    public init(config: VMConfig, storageDir: URL? = nil) {
+    public init(config: VMConfig, storageDir: URL? = nil, isolatePeers: Bool = true) {
         self.config = config
         let dir = storageDir ?? VMConfig.defaultStorageDirectory
         self.storageDir = dir
         self.imageManager = LinuxImageManager(storageDir: dir)
+        self.isolatePeers = isolatePeers
     }
 
     /// Pre-warm a VM by booting it to an idle shell prompt.
@@ -176,8 +184,11 @@ public final class VMPool {
                     // NAT: route through the process-wide shared switch — one vmnet
                     // interface for the whole app, with our own DHCP handing each
                     // VM a distinct lease (kills #24's same-IP collision and Apple's
-                    // bootpd). Web walks the subnet up and keeps VMs isolated.
-                    VMNetSwitch.shared.configure(ascendingSubnet: true, bridgePeers: false)
+                    // bootpd). Web walks the subnet up and keeps VMs isolated; AC's
+                    // embedded browser joins the workspace VMs' subnet with peer
+                    // bridging on so they can reach each other.
+                    VMNetSwitch.shared.configure(ascendingSubnet: isolatePeers,
+                                                 bridgePeers: !isolatePeers)
                     if let port = VMNetSwitch.shared.attachPort() {
                         networkFilter = NetworkFilter(networkInfo: netInfo, switchPort: port)
                         if networkFilter == nil { VMNetSwitch.shared.detachPort(port) }

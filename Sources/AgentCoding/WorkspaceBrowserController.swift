@@ -44,8 +44,13 @@ final class WorkspaceBrowserController {
 
     // MARK: - Image resolution (shared / AC-owned)
 
+    /// The three files the browser VM boots from, all in one storage dir
+    /// (LinuxImageManager derives them from `storageDir`).
+    private static let bootFiles = ["linux-base.img", "vmlinuz", "initrd"]
+
     /// AC-owned browser storage dir: `~/Library/Application Support/BromureAC/browser`.
-    /// All VMPool scratch + ephemeral CoW clones live here.
+    /// Used when AC downloads its own image (phase 2b). Ephemeral CoW clones
+    /// live in the temp dir regardless, so we never write into the shared dir.
     static var browserStorageDir: URL {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -54,39 +59,34 @@ final class WorkspaceBrowserController {
             .appendingPathComponent("browser", isDirectory: true)
     }
 
-    /// Bromure Web's base image, shared when the app is installed.
-    static var sharedBrowserImage: URL {
-        VMConfig.defaultStorageDirectory.appendingPathComponent("linux-base.img")
+    private static func hasAllBootFiles(in dir: URL) -> Bool {
+        let fm = FileManager.default
+        return bootFiles.allSatisfy {
+            fm.fileExists(atPath: dir.appendingPathComponent($0).path)
+        }
     }
 
-    /// Ensure `<browserStorageDir>/linux-base.img` resolves to a usable image:
-    /// symlinked to Bromure Web's shared image when present, else a
-    /// previously-downloaded real file. Returns false when neither exists
-    /// (phase 2b will download here — for now the pane reports it).
-    ///
-    /// VMPool derives `linuxDiskURL = <storageDir>/linux-base.img`, and
-    /// clonefile(2) follows the symlink to clone the shared file, so all
-    /// scratch/clones stay AC-owned while the base is shared read-only.
-    private func ensureBrowserImage() -> Bool {
-        let fm = FileManager.default
-        let dir = Self.browserStorageDir
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        let local = dir.appendingPathComponent("linux-base.img")
-        let shared = Self.sharedBrowserImage
-
-        if fm.fileExists(atPath: shared.path) {
-            // Point (or re-point) the local name at the shared image.
-            let dest = (try? fm.destinationOfSymbolicLink(atPath: local.path))
-            if dest != shared.path {
-                try? fm.removeItem(at: local)
-                try? fm.createSymbolicLink(at: local, withDestinationURL: shared)
-            }
-            return fm.fileExists(atPath: local.path)   // resolves through the link
+    /// Pick the storage dir that has a complete boot set: Bromure Web's shared
+    /// dir if present, else AC's own (downloaded) dir. nil when neither is
+    /// complete. The pool only READS these; clones go to temp, so sharing the
+    /// Web dir never writes into it.
+    private func resolveStorageDir() -> URL? {
+        let shared = VMConfig.defaultStorageDirectory   // ~/…/Bromure
+        if Self.hasAllBootFiles(in: shared) {
+            print("[browser] using shared Bromure image dir: \(shared.path)")
+            return shared
         }
-        // No shared image — only a previously-downloaded real file counts
-        // (a dangling symlink from a since-removed Web install does not).
-        return fm.fileExists(atPath: local.path)
-            && (try? fm.destinationOfSymbolicLink(atPath: local.path)) == nil
+        let acDir = Self.browserStorageDir
+        if Self.hasAllBootFiles(in: acDir) {
+            print("[browser] using AC-owned browser image dir: \(acDir.path)")
+            return acDir
+        }
+        let fm = FileManager.default
+        let missing = Self.bootFiles.filter {
+            !fm.fileExists(atPath: shared.appendingPathComponent($0).path)
+        }
+        print("[browser] no complete image — shared dir \(shared.path) missing: \(missing.joined(separator: ", "))")
+        return nil
     }
 
     // MARK: - Lifecycle
@@ -94,8 +94,11 @@ final class WorkspaceBrowserController {
     /// Boot the ephemeral browser and mount its framebuffer. Idempotent while
     /// already booting/running.
     func start() {
-        guard state == .idle else { return }
-        guard ensureBrowserImage() else {
+        guard state == .idle else {
+            print("[browser] start ignored (state=\(state))")
+            return
+        }
+        guard let storageDir = resolveStorageDir() else {
             fail(NSLocalizedString(
                 "No browser image found. Install Bromure Web, or a prebuilt image (coming soon).",
                 comment: "browser image missing"))
@@ -106,8 +109,12 @@ final class WorkspaceBrowserController {
         model.placeholderStatus = NSLocalizedString("Booting browser…", comment: "")
 
         let config = browserConfig()
-        let pool = VMPool(config: config, storageDir: Self.browserStorageDir)
+        // isolatePeers: false → the browser VM shares the workspace VMs' subnet
+        // (VMNetSwitch.shared, peer bridging on) so the agent and the browser
+        // can reach each other.
+        let pool = VMPool(config: config, storageDir: storageDir, isolatePeers: false)
         self.pool = pool
+        print("[browser] booting ephemeral browser VM (storageDir=\(storageDir.path))")
 
         Task { [weak self] in
             // Ephemeral: no profileID / profileImageDir → the guest's virtio-fs
@@ -118,9 +125,11 @@ final class WorkspaceBrowserController {
                 return
             }
             guard let warm else {
+                print("[browser] claim returned nil — VM did not start (see [VMPool] logs)")
                 self.fail(NSLocalizedString("The browser VM did not start.", comment: ""))
                 return
             }
+            print("[browser] claim ok (vm state=\(warm.vm.state.rawValue)) — attaching view")
             self.attach(warm)
         }
     }
@@ -147,6 +156,8 @@ final class WorkspaceBrowserController {
         model.hasFramebuffer = true
         model.placeholderStatus = ""
         state = .running
+        let ip = warm.networkReady ? "ready" : "pending"
+        print("[browser] view attached; network \(ip). Loading \(homePage)")
         // Land on the home page (serial launch of chromium-browser <url>).
         navigate(homePage)
     }
