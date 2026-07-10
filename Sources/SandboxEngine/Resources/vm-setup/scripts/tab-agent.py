@@ -97,7 +97,7 @@ def _is_safe_id(s):
 # Browser-chrome accelerators the host may inject via xdotool (menu clicks
 # that bypass the VZ keyboard path). xdotool sees the guest X server directly,
 # so these are the real Chromium chords (no Cmd↔Ctrl swap).
-_ALLOWED_CHORDS = {"ctrl+shift+b", "ctrl+d"}
+_ALLOWED_CHORDS = {"ctrl+shift+b", "ctrl+d", "F12", "ctrl+shift+i"}
 
 VSOCK_PORT = 5810
 HOST_CID = 2

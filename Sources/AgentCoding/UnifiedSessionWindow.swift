@@ -757,7 +757,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             let controller = browserController
                 ?? WorkspaceBrowserController(model: browserPaneModel)
             browserController = controller
-            controller.start()
+            controller.ensureRunning()   // reboots if the previous browser VM died
         }
         let target = open ? expandedBrowserPaneWidth : 0
         let hideWhenClosed: () -> Void = { [weak self] in

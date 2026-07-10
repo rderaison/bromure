@@ -115,6 +115,10 @@ final class NativeTabBarModel {
     /// Called when the user clicks the forward button.
     var onForward: ((String) -> Void)?
 
+    /// Called when the user clicks the DevTools button (Bromure AC addition —
+    /// Claude users want the inspector).
+    var onDevTools: (() -> Void)?
+
     init() {}
 
     var activeTab: TabInfo? { tabs.first(where: { $0.active }) }
@@ -305,6 +309,13 @@ struct NativeCompactBarView: View {
             }
             .buttonStyle(.plain)
             .help("New tab (⌘T)")
+
+            Button(action: { model.onDevTools?() }) {
+                Image(systemName: "curlybraces")
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .help("Toggle DevTools (F12)")
 
             shareButton
         }

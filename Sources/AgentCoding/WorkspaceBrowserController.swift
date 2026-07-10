@@ -245,7 +245,8 @@ final class WorkspaceBrowserController {
             bar?.markActiveLocally(id)   // optimistic; the guest echo confirms
             bridge.activate(id: id)
         }
-        bar.onClose = { id in bridge.close(id: id) }
+        bar.onClose = { [weak self] id in self?.closeTab(id) }
+        bar.onDevTools = { bridge.sendChord("F12") }
         // Site-info popover's on-demand certificate fetch.
         bar.fetchCertificate = { origin in await bridge.fetchCertificate(origin: origin) }
     }
@@ -255,12 +256,19 @@ final class WorkspaceBrowserController {
     // navigate/tabs/history go through TabBridge; screenshot/eval/text through
     // BrowserCDP. `isReady` gates calls before the guest agents connect.
 
-    var isReady: Bool { state == .running && tabBridge != nil }
+    var isReady: Bool { state == .running && tabBridge != nil && vmAlive }
 
-    /// Ensure the browser is up (open the pane if needed). Returns once the VM
-    /// is running; tools still race the guest agents' connect, which they
-    /// handle themselves.
-    func ensureRunning() { if state == .idle { start() } }
+    private var vmAlive: Bool {
+        guard let s = warm?.vm.state else { return false }
+        return s == .running || s == .paused
+    }
+
+    /// Ensure the browser is up, rebooting if the previous VM died (e.g. the
+    /// user closed the last tab and the guest powered off). Opens the pane.
+    func ensureRunning() {
+        if state != .idle, !vmAlive { stop() }   // dead VM → reset so start() reboots
+        if state == .idle { start() }
+    }
 
     func tabs() -> [TabInfo] { model.tabBar.tabs }
 
@@ -276,7 +284,12 @@ final class WorkspaceBrowserController {
 
     func newTab(_ raw: String) { tabBridge?.newTab(url: raw.isEmpty ? "" : BrowserPaneModel.normalize(raw)) }
     func activateTab(_ id: String) { model.tabBar.markActiveLocally(id); tabBridge?.activate(id: id) }
-    func closeTab(_ id: String) { tabBridge?.close(id: id) }
+    /// Close a tab. Closing the LAST tab would quit Chromium and power off the
+    /// browser VM, so open a fresh tab first to keep the browser alive.
+    func closeTab(_ id: String) {
+        if model.tabBar.tabs.count <= 1 { tabBridge?.newTab(url: "") }
+        tabBridge?.close(id: id)
+    }
     func back() { if let id = model.tabBar.activeTab?.id { tabBridge?.back(id: id) } }
     func forward() { if let id = model.tabBar.activeTab?.id { tabBridge?.forward(id: id) } }
     func reload() { if let id = model.tabBar.activeTab?.id { tabBridge?.reload(id: id) } }
