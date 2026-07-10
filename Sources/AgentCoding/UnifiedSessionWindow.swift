@@ -314,6 +314,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private var browserPaneWidthConstraint: NSLayoutConstraint?
     private var browserPaneResizeHandle: SidebarResizeHandle?
     private(set) var browserPaneOpen = false
+    /// The ephemeral browser VM controller — created lazily when the pane
+    /// first opens, torn down when it closes (always ephemeral). One per
+    /// window/workspace.
+    private var browserController: WorkspaceBrowserController?
     private var expandedBrowserPaneWidth: CGFloat = 640
     private static let browserPaneMinWidth: CGFloat = 380
     private static let browserPaneMaxWidth: CGFloat = 1400
@@ -729,12 +733,26 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         setBrowserPaneOpen(!browserPaneOpen, animated: true)
     }
 
+    /// Stop and discard the ephemeral browser VM (window close / app quit).
+    func teardownBrowserVM() {
+        browserController?.stop()
+        browserController = nil
+    }
+
     func setBrowserPaneOpen(_ open: Bool, animated: Bool) {
         guard open != browserPaneOpen else { return }
         browserPaneOpen = open
         listModel.browserPaneOpen = open
         browserPaneResizeHandle?.isHidden = !open
-        if open { browserPaneHost.isHidden = false }
+        if open {
+            browserPaneHost.isHidden = false
+            // Lazily boot the ephemeral browser VM the first time the pane
+            // opens; keep it across close/reopen within the session.
+            let controller = browserController
+                ?? WorkspaceBrowserController(model: browserPaneModel)
+            browserController = controller
+            controller.start()
+        }
         let target = open ? expandedBrowserPaneWidth : 0
         let hideWhenClosed: () -> Void = { [weak self] in
             guard let self, !self.browserPaneOpen else { return }

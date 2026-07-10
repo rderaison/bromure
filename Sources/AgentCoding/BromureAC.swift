@@ -3027,6 +3027,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Discard the ephemeral browser VM (if any) so we don't orphan it.
+        unifiedWindow?.teardownBrowserVM()
         // Nuke our private ssh-agent. The orphaned-process risk is
         // small (it's idle and tiny) but worth tidying up at least
         // for the clean-quit path.
@@ -3287,6 +3289,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         if win === unifiedWindow {
+            // The ephemeral browser VM is window-scoped and disposable — tear
+            // it down (unlike the workspace VMs, which detach and keep running).
+            unifiedWindow?.teardownBrowserVM()
             // Closing the shared window detaches every hosted VM to the
             // background (persistent-agent model): the VMs keep running and are
             // reattachable via the menu bar / `vm attach`. Per-VM stop happens

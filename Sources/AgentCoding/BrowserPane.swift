@@ -118,8 +118,13 @@ struct BrowserPaneView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            BrowserChrome(model: model)
-            Divider().overlay(Color.black.opacity(0.4))
+            // Phase 2 renders Chromium's own UI in the framebuffer, so the
+            // host chrome shows only in the placeholder/booting state. Phase 3
+            // switches to native-chrome cropping and keeps this bar live.
+            if !model.hasFramebuffer {
+                BrowserChrome(model: model)
+                Divider().overlay(Color.black.opacity(0.4))
+            }
             content
         }
         .background(Color(white: 0.10))
