@@ -149,12 +149,14 @@ final class WorkspaceBrowserController {
     }
 
     /// A minimal ephemeral browser config. nativeChrome off for phase 2 (see
-    /// file header); file transfer + automation on so phases 3-4 can wire
-    /// downloads and CDP without a reboot.
+    /// file header); clipboard + file transfer + automation on so ⌘C/⌘V bridge
+    /// to the host (SPICE vdagent) and phases 3-4 can wire downloads and CDP
+    /// without a reboot.
     private func browserConfig() -> VMConfig {
         VMConfig(
             homePage: homePage,
             enableFileTransfer: true,
+            enableClipboardSharing: true,
             enableAutomation: true,
             nativeChrome: false
         )
@@ -165,6 +167,11 @@ final class WorkspaceBrowserController {
         let view = VZVirtualMachineView()
         view.virtualMachine = warm.vm
         view.automaticallyReconfiguresDisplay = true
+        // Route ⌘-key combos (⌘C/⌘V, ⌘L, …) to Chromium instead of the macOS
+        // menus so copy/paste and browser shortcuts work. Paired with the
+        // SPICE clipboard bridge (enableClipboardSharing) this makes host↔guest
+        // copy/paste work. Revisited in native-chrome mode (phase 3a).
+        view.capturesSystemKeys = true
         self.vmView = view
         model.framebufferContainer.mount(view)
         model.hasFramebuffer = true
