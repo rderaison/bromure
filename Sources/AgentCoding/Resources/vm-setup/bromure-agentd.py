@@ -1721,6 +1721,7 @@ def _preaccept_yolo(tool):
 
 
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
+    _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""   # "-" sentinel = no prompt
     if not os.path.isdir(cwd):
@@ -1784,6 +1785,7 @@ def _automation_tab(cwd, display, tool, prompt_b64):
     """Plain agent tab for an automation whose path isn't a git repo: same
     launch env as a worktree tab, no git anything. Always yolo — an
     automation is unattended."""
+    _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""
     if not os.path.isdir(cwd):
@@ -1879,6 +1881,7 @@ _MERGE_WINDOW_CMD = (
 
 
 def _worktree_merge(branch, target, root, display, tool):
+    _ensure_seed_current()
     tdir = _worktree_dir_for_branch(root, target)
     if not tdir:
         tdir = root
@@ -1927,6 +1930,7 @@ _PR_PROMPT = (
 
 
 def _worktree_pr(branch, target, root, display, tool):
+    _ensure_seed_current()
     wdir = _worktree_dir_for_branch(root, branch)
     if not wdir or not os.path.isdir(wdir):
         worktree_err("pr: no checkout for '%s'" % branch)
@@ -1981,6 +1985,7 @@ _RESOLVE_PROMPT = ("A git merge in this directory has conflicts. Run 'git"
 
 
 def _worktree_resolve(merge_dir, tool):
+    _ensure_seed_current()
     if not os.path.isdir(merge_dir):
         worktree_err("resolve: checkout is gone: " + merge_dir)
         return
@@ -2855,6 +2860,17 @@ def _migrate_home_into(dev):
         _sudo(["umount", HOME_STAGING])
 
 
+# seed.generation as of the last completed apply_home_seed(). Lets agent
+# launches check staleness without re-walking the manifest; guarded by
+# _SEED_LOCK (the watcher thread and command threads both apply).
+_SEED_LOCK = threading.Lock()
+_seed_gen_applied = None
+
+
+def _seed_generation():
+    return _read_text(os.path.join(META, "seed.generation"))
+
+
 def apply_home_seed():
     """Apply /mnt/bromure-meta/home-seed to the (ext4) home per its
     manifest.tsv. Runs unprivileged — everything lands owned by ubuntu.
@@ -2866,6 +2882,36 @@ def apply_home_seed():
       p -      <rel> <prefix>  delete if the file starts with <prefix>
       j -      <rel> <key>     delete if the JSON object has top-level <key>
     """
+    global _seed_gen_applied
+    with _SEED_LOCK:
+        # Capture BEFORE applying: a bump landing mid-apply leaves the
+        # marker stale, so the next check runs another pass.
+        gen = _seed_generation()
+        _apply_home_seed_locked()
+        _seed_gen_applied = gen
+
+
+def _ensure_seed_current():
+    """Converge the home to the CURRENT seed generation — call before
+    launching an agent. The host bumps seed.generation while preparing a
+    restore/clone boot (a clone's fresh per-profile key ships a fresh
+    ~/.claude.json approval in the seed), but the re-apply rides
+    seed_watcher's 2s poll while automation commands ride the 0.1s command
+    loop — so claude could launch with the new key in its env before the
+    key's approval landed, and hang on the "use this API key?" prompt.
+    Idempotent; a no-op when already current."""
+    if _home_mode() == "virtiofs":
+        return   # the host writes a virtiofs home directly — never stale
+    if _seed_generation() == _seed_gen_applied:
+        return
+    try:
+        apply_home_seed()
+        log("home", "seed applied pre-launch (generation %r)" % _seed_gen_applied)
+    except Exception:
+        log("home", "pre-launch seed apply failed:\n" + traceback.format_exc())
+
+
+def _apply_home_seed_locked():
     manifest = os.path.join(SEED_DIR, "manifest.tsv")
     if not os.access(manifest, os.R_OK):
         return
@@ -3094,20 +3140,21 @@ def task_home_setup():
 
 def seed_watcher_service():
     """Re-apply the home seed when the host bumps seed.generation (live
-    credential/env refresh against an ext4 home the host can't write).
-    virtiofs homes are written directly by the host and never signal."""
-    gen_path = os.path.join(META, "seed.generation")
-    last = _read_text(gen_path)
+    credential/env refresh against an ext4 home the host can't write, and
+    restore/clone boots, where the host staged a fresh seed for the resumed
+    daemon). Agent launches don't wait for this tick — _ensure_seed_current
+    converges synchronously; this loop covers everything else. virtiofs
+    homes are written directly by the host and never signal. Baselines
+    against the shared applied marker, so a launch-path apply also
+    satisfies the watcher."""
     while _RUNNING.is_set():
-        cur = _read_text(gen_path)
-        if cur and cur != last:
-            last = cur
-            if _home_mode() != "virtiofs":
-                try:
-                    apply_home_seed()
-                    log("home", "seed re-applied (generation %s)" % cur)
-                except Exception:
-                    log("home", "seed re-apply failed:\n" + traceback.format_exc())
+        cur = _seed_generation()
+        if cur and cur != _seed_gen_applied and _home_mode() != "virtiofs":
+            try:
+                apply_home_seed()
+                log("home", "seed re-applied (generation %s)" % cur)
+            except Exception:
+                log("home", "seed re-apply failed:\n" + traceback.format_exc())
         time.sleep(2)
 
 
