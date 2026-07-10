@@ -3849,21 +3849,35 @@ public final class ProfileStore {
     # above has already run for this interactive shell.
     if [ -n "${BROMURE_AC_WT_TOOL:-}" ] && [ -t 1 ]; then
         _wt_tool="$BROMURE_AC_WT_TOOL"; unset BROMURE_AC_WT_TOOL
+        _wt_yolo="${BROMURE_AC_WT_YOLO:-}"; unset BROMURE_AC_WT_YOLO
         if ! command -v "$_wt_tool" >/dev/null 2>&1; then
             _bromure_install_tool "$_wt_tool" || true
             hash -r 2>/dev/null || true
         fi
         if command -v "$_wt_tool" >/dev/null 2>&1; then
+            # Automation runs are unattended (BROMURE_AC_WT_YOLO=1): pass each
+            # tool's skip-confirmation flag so the "do you trust this folder"
+            # / permission prompt can't hang the run. Safe here — the whole VM
+            # is disposable and the host MITM proxy is the real guardrail, not
+            # the in-agent prompt. Flags have no spaces, so $_wt_flags is left
+            # unquoted to word-split (empty → nothing) for the non-yolo path.
+            _wt_flags=""
+            if [ -n "$_wt_yolo" ]; then
+                case "$_wt_tool" in
+                    claude) _wt_flags="--dangerously-skip-permissions" ;;
+                    codex)  _wt_flags="--dangerously-bypass-approvals-and-sandbox" ;;
+                esac
+            fi
             printf '\\033[2m[bromure-ac] starting %s in worktree…\\033[0m\\n' "$_wt_tool"
             if [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
                 _wt_prompt=$(printf '%s' "$BROMURE_AC_WT_PROMPT" | base64 -d 2>/dev/null)
                 unset BROMURE_AC_WT_PROMPT
-                "$_wt_tool" "$_wt_prompt"
+                "$_wt_tool" $_wt_flags "$_wt_prompt"
             else
-                "$_wt_tool"
+                "$_wt_tool" $_wt_flags
             fi
         fi
-        unset _wt_tool _wt_prompt
+        unset _wt_tool _wt_prompt _wt_yolo _wt_flags
     fi
 
     if [ "$BROMURE_AC_REGISTER" = "1" ] \\

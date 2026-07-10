@@ -1637,7 +1637,7 @@ def _restore_worktrees(repo_root, repo_name):
         _set_window_option(win, "@display", r_display)
 
 
-def _worktree_create(cwd, slug, display, tool, prompt_b64):
+def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
     if prompt_b64 == "-":
         prompt_b64 = ""   # "-" sentinel = no prompt
     if not os.path.isdir(cwd):
@@ -1680,9 +1680,10 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64):
         return
     _worktree_include(main_root, wt_dir)
 
-    win = _new_window(command="bash -l", cwd=wt_dir,
-                      env={"BROMURE_AC_WT_TOOL": tool,
-                           "BROMURE_AC_WT_PROMPT": prompt_b64})
+    _env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    if yolo:
+        _env["BROMURE_AC_WT_YOLO"] = "1"
+    win = _new_window(command="bash -l", cwd=wt_dir, env=_env)
     if not win:
         worktree_err("worktree: could not open a tab (created %s at %s)"
                      % (branch, wt_dir))
@@ -1697,14 +1698,16 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64):
 
 def _automation_tab(cwd, display, tool, prompt_b64):
     """Plain agent tab for an automation whose path isn't a git repo: same
-    launch env as a worktree tab, no git anything."""
+    launch env as a worktree tab, no git anything. Always yolo — an
+    automation is unattended."""
     if prompt_b64 == "-":
         prompt_b64 = ""
     if not os.path.isdir(cwd):
         cwd = HOME
     win = _new_window(command="bash -l", cwd=cwd,
                       env={"BROMURE_AC_WT_TOOL": tool,
-                           "BROMURE_AC_WT_PROMPT": prompt_b64})
+                           "BROMURE_AC_WT_PROMPT": prompt_b64,
+                           "BROMURE_AC_WT_YOLO": "1"})
     if not win:
         worktree_err("automation: could not open a tab at %s" % cwd)
         return
@@ -1714,9 +1717,11 @@ def _automation_tab(cwd, display, tool, prompt_b64):
 
 def _automation_run(cwd, slug, display, tool, prompt_b64):
     """Automation fire: a worktree when cwd is inside a git repo, a plain
-    agent tab otherwise (the host can't tell — the guest decides here)."""
+    agent tab otherwise (the host can't tell — the guest decides here).
+    Unattended, so the agent launches in yolo mode (no trust/permission
+    prompt to hang on)."""
     if os.path.isdir(cwd) and _worktree_main_root(cwd):
-        _worktree_create(cwd, slug, display, tool, prompt_b64)
+        _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=True)
     else:
         _automation_tab(cwd, display, tool, prompt_b64)
 

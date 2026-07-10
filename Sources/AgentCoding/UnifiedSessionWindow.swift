@@ -98,6 +98,7 @@ enum TabAction {
     case attachTerminal     // a worktree tab → open a plain terminal in its checkout
     case removeWorktree     // a worktree tab → discard (remove + delete branch)
     case resolveConflicts   // a "Merge → …" tab → spawn the agent to resolve
+    case createAutomation   // any tab → automation editor seeded with its cwd
 }
 
 /// Nesting depth of a tab in the worktree tree: 0 for ordinary tabs, N for a
@@ -927,7 +928,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// automation's, or a blank one (id = nil, the sidebar "+").
     /// Rebuilt on every show so the profile snapshot (names, credentials,
     /// ask-before-use flags) is current.
-    func showAutomationEditor(_ id: UUID?) {
+    func showAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil) {
         guard let delegate = acDelegate else { return }
         hideGrid()
         clearDockerDashboard()
@@ -939,6 +940,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             store: delegate.scheduledAutomationStore,
             profiles: delegate.profiles,
             editing: id,
+            prefill: prefill,
             onSave: { [weak self] automation in
                 self?.acDelegate?.saveAutomation(automation)
                 self?.clearAutomationEditor()
@@ -1059,6 +1061,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         case .resolveConflicts:
             guard let dir = tab.cwd else { return }
             acDelegate?.requestResolveWorktree(dir: dir, tool: tool, in: p)
+        case .createAutomation:
+            showAutomationEditor(nil, prefill: AutomationPrefill(
+                profileID: id, repoPath: tab.cwd ?? "~"))
         }
     }
     func dockerAttach(profileID id: Profile.ID, containerID: String, shell: String) {
@@ -1841,6 +1846,13 @@ private struct TabRow: View {
                 onAction(.newWorktree)
             }
             .disabled(!inRepo)
+
+            // Always available: automations run in a plain tab when the cwd
+            // isn't a git repo, so there's no gating to explain.
+            Button(NSLocalizedString("New automation…",
+                                     comment: "Tab context menu: create an automation seeded with this tab's directory")) {
+                onAction(.createAutomation)
+            }
 
             if isWorktree {
                 Button(NSLocalizedString("Merge…", comment: "Tab context menu: merge a worktree into an ancestor")) {

@@ -210,38 +210,20 @@ struct ScheduledAutomationTests {
     // MARK: GitHub PR trigger
 
     private func item(_ number: Int, createdAt: Date, title: String = "t",
-                      body: String = "") -> GitHubItem {
-        GitHubItem(number: number, title: title, url: "https://github.com/o/r/pull/\(number)",
+                      body: String = "") -> TriggerItem {
+        TriggerItem(number: number, title: title, url: "https://github.com/o/r/pull/\(number)",
                    branch: "feat", author: "alice", body: body, createdAt: createdAt)
     }
 
-    @Test("Baseline poll never fires, only sets the high-water mark")
-    func prBaseline() {
-        let newest = date(2026, 7, 8, 10, 0)
-        let (fire, hw) = GitHubPRPoller.newItems(
-            fetched: [item(2, createdAt: newest), item(1, createdAt: date(2026, 7, 1, 9, 0))],
-            highWater: nil)
-        #expect(fire.isEmpty)
-        #expect(hw == newest)
-    }
-
-    @Test("Only items newer than the high-water mark fire, oldest first")
-    func prIncremental() {
-        let hw = date(2026, 7, 8, 10, 0)
-        let a = item(3, createdAt: date(2026, 7, 8, 11, 0))
-        let b = item(4, createdAt: date(2026, 7, 8, 12, 0))
-        let old = item(1, createdAt: date(2026, 7, 1, 9, 0))
-        let (fire, newHW) = GitHubPRPoller.newItems(fetched: [b, old, a], highWater: hw)
-        #expect(fire.map(\.number) == [3, 4])
-        #expect(newHW == b.createdAt)
-    }
-
-    @Test("Empty fetch keeps the existing high-water mark")
-    func prEmptyFetch() {
-        let hw = date(2026, 7, 8, 10, 0)
-        let (fire, newHW) = GitHubPRPoller.newItems(fetched: [], highWater: hw)
-        #expect(fire.isEmpty)
-        #expect(newHW == hw)
+    @Test("Event keys are stable and namespaced per trigger kind")
+    func eventKeys() {
+        var i = item(123, createdAt: date(2026, 7, 8, 10, 0))
+        #expect(GitHubPRPoller.eventKey(i, kind: .githubPullRequest) == "pr:123")
+        #expect(GitHubPRPoller.eventKey(i, kind: .githubIssue) == "issue:123")
+        i.identifier = "abc1234"
+        #expect(GitHubPRPoller.eventKey(i, kind: .githubCommit) == "commit:abc1234")
+        i.identifier = "ENG-7"
+        #expect(GitHubPRPoller.eventKey(i, kind: .linearIssue) == "linear:ENG-7")
     }
 
     @Test("PR prompt variables are substituted")
@@ -306,6 +288,75 @@ struct ScheduledAutomationTests {
         let a = try JSONDecoder().decode(ScheduledAutomation.self, from: Data(json.utf8))
         #expect(a.trigger == .schedule)
         #expect(a.githubRepo.isEmpty)
+    }
+
+    // MARK: Trigger filters
+
+    @Test("Label filter is any-of and case-insensitive")
+    func labelFilter() {
+        var f = ScheduledAutomation.TriggerFilters()
+        f.labels = ["Bug", "agent-ok"]
+        var i = item(1, createdAt: date(2026, 7, 8, 10, 0))
+        i.labels = ["BUG", "docs"]
+        #expect(f.matches(i, kind: .githubIssue))
+        i.labels = ["docs"]
+        #expect(!f.matches(i, kind: .githubIssue))
+        i.labels = []
+        #expect(!f.matches(i, kind: .githubIssue))
+    }
+
+    @Test("Draft PRs are excluded by default, but only for the PR trigger")
+    func draftFilter() {
+        let f = ScheduledAutomation.TriggerFilters()
+        var i = item(2, createdAt: date(2026, 7, 8, 10, 0))
+        i.isDraft = true
+        #expect(!f.matches(i, kind: .githubPullRequest))
+        #expect(f.matches(i, kind: .githubIssue))
+        var allow = f
+        allow.excludeDrafts = false
+        #expect(allow.matches(i, kind: .githubPullRequest))
+    }
+
+    @Test("Bot authors are kept by default and dropped when ignored")
+    func botFilter() {
+        var i = item(3, createdAt: date(2026, 7, 8, 10, 0))
+        i.isBot = true
+        let keep = ScheduledAutomation.TriggerFilters()
+        #expect(keep.matches(i, kind: .githubIssue))
+        var drop = keep
+        drop.ignoreBots = true
+        #expect(!drop.matches(i, kind: .githubIssue))
+    }
+
+    @Test("Title filter is case-insensitive substring")
+    func titleFilter() {
+        var f = ScheduledAutomation.TriggerFilters()
+        f.titleContains = "crash"
+        var i = item(4, createdAt: date(2026, 7, 8, 10, 0), title: "Fix CRASH on quit")
+        #expect(f.matches(i, kind: .githubIssue))
+        i.title = "Improve docs"
+        #expect(!f.matches(i, kind: .githubIssue))
+    }
+
+    @Test("Default filters pass everything non-draft")
+    func defaultFilters() {
+        let f = ScheduledAutomation.TriggerFilters()
+        let i = item(5, createdAt: date(2026, 7, 8, 10, 0))
+        #expect(f.matches(i, kind: .githubPullRequest))
+        #expect(f.matches(i, kind: .githubIssue))
+        #expect(f.matches(i, kind: .linearIssue))
+    }
+
+    @Test("Automations saved before filters existed decode with defaults")
+    func filtersDecodeDefault() throws {
+        let json = """
+        {"id":"6B29FC40-CA47-1067-B31D-00DD010662DA",
+         "name":"old","profileID":"6B29FC40-CA47-1067-B31D-00DD010662DB",
+         "trigger":"githubIssue"}
+        """
+        let a = try JSONDecoder().decode(ScheduledAutomation.self, from: Data(json.utf8))
+        #expect(a.filters == ScheduledAutomation.TriggerFilters())
+        #expect(a.filters.excludeDrafts)
     }
 
     // MARK: Unattended-run warnings

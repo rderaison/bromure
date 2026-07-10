@@ -864,6 +864,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         launch(profile)
     }
 
+    /// Automation-initiated start: boots an off workspace and resumes a
+    /// suspended one, but never trades saved state for a cold boot — if the
+    /// snapshot won't restore (config drift after an update, bad state), the
+    /// start is aborted and the automation records a failure instead of the
+    /// interactive path's fresh-boot fallback, which would silently destroy
+    /// the suspended session's terminals and running work.
+    func startProfileForAutomation(_ id: Profile.ID) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        launch(profile, freshBootFallback: false)
+    }
+
     /// Picker "Stop": power the VM down, honoring `.shutdown` but mapping the
     /// keep-running actions (`.background`/`.ask`) to `.suspend` so Stop always
     /// actually stops.
@@ -5139,7 +5150,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// boots window-less — no pane is hosted, the session runs headless from the
     /// start (the `vm run -d` / login-boot / remote-menu path), reattachable
     /// later.
-    func launch(_ profile: Profile, detached: Bool = false) {
+    func launch(_ profile: Profile, detached: Bool = false,
+                freshBootFallback: Bool = true) {
         // Already shown → just focus + select it (unless we were asked to detach,
         // in which case drop the window and leave the VM running headless).
         if isAttached(profile.id) {
@@ -5530,7 +5542,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                             "[ac] restored '\(profile.name)' from saved state\n".utf8))
                     } catch {
                         // Restore failed — bad snapshot, configuration
-                        // drift, or VZ refused. Drop the state file and
+                        // drift, or VZ refused.
+                        guard freshBootFallback else {
+                            // Automation-initiated start: refuse to cold-boot
+                            // over the user's suspended session. Keep the
+                            // state file for a manual resume and abort.
+                            FileHandle.standardError.write(Data(
+                                "[ac] restore failed (\(error)) — automation start aborted to protect the suspended session\n".utf8))
+                            self.unifiedWindow?.removePane(profile.id)
+                            self.unregisterPane(profile.id, ifMatches: win)
+                            return
+                        }
+                        // Interactive start: drop the state file and
                         // do a fresh boot.
                         FileHandle.standardError.write(Data(
                             "[ac] restore failed (\(error)) — booting fresh\n".utf8))
