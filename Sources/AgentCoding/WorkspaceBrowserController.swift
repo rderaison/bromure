@@ -1,4 +1,5 @@
 import AppKit
+import BrowserBridges
 import Foundation
 import SandboxEngine
 @preconcurrency import Virtualization
@@ -34,13 +35,14 @@ final class WorkspaceBrowserController {
     private var pool: VMPool?
     private var warm: VMPool.WarmVM?
     private var vmView: VZVirtualMachineView?
+    /// Native-tabs bridge (vsock 5810) — the shared machinery that streams the
+    /// guest's tab list/favicons and drives navigate/activate/close/back/…
+    private var tabBridge: TabBridge?
     /// Default landing page for a fresh ephemeral browser.
     private let homePage = "https://bromure.io/hello"
 
     init(model: BrowserPaneModel) {
         self.model = model
-        model.onReload = { [weak self] in self?.navigate(self?.model.urlText ?? "") }
-        model.onNavigate = { [weak self] url in self?.navigate(url) }
     }
 
     // MARK: - Image resolution (shared / AC-owned)
@@ -190,29 +192,68 @@ final class WorkspaceBrowserController {
         model.hasFramebuffer = true
         model.placeholderStatus = ""
         state = .running
-        let ip = warm.networkReady ? "ready" : "pending"
-        print("[browser] view attached; network \(ip). Loading \(homePage)")
-        // Land on the home page (serial launch of chromium-browser <url>).
-        navigate(homePage)
+
+        // Native-tabs bridge: the guest's tab-agent (started by native-chrome
+        // mode) connects on vsock 5810 and streams the tab list; our host
+        // chrome drives it. Chromium already opens on the config home page.
+        if let socketDevice = warm.vm.socketDevices.first as? VZVirtioSocketDevice {
+            wireTabBridge(TabBridge(socketDevice: socketDevice))
+        } else {
+            print("[browser] no vsock device — tabs/navigation disabled")
+        }
+        print("[browser] view attached; network \(warm.networkReady ? "ready" : "pending")")
     }
 
-    /// Navigate the guest browser. Phase 2 uses the serial path Bromure Web
-    /// uses (launch `chromium-browser <url>` as the chrome user) — CDP-driven
-    /// navigation replaces this in phase 3.
-    private func navigate(_ raw: String) {
-        guard state == .running, let warm else { return }
-        let url = BrowserPaneModel.normalize(raw.isEmpty ? homePage : raw)
-        model.urlText = url
-        let inner = "DISPLAY=:0 chromium-browser \(Self.shellEscape(url))"
-        let cmd = "su chrome -c \(Self.shellEscape(inner)) &\n"
-        warm.serialInput.fileHandleForWriting.write(Data(cmd.utf8))
+    private func wireTabBridge(_ bridge: TabBridge) {
+        tabBridge = bridge
+        bridge.onTabsChanged = { [weak self] tabs in
+            guard let self else { return }
+            self.model.tabs = tabs
+            let active = tabs.first(where: { $0.active })
+            self.model.activeTabID = active?.id
+            // Reflect the active tab's URL unless the user is editing the field.
+            if !self.model.urlFieldEditing, let url = active?.url {
+                self.model.urlText = url
+            }
+        }
+        bridge.onShortcut = { [weak self] key in
+            guard let self else { return }
+            switch key {
+            case "t": bridge.newTab(url: "")
+            case "w": bridge.closeActive()
+            case "r": if let id = self.model.activeTabID { bridge.reload(id: id) }
+            case "l": self.model.urlFieldEditing = true   // ⌘L focuses the address bar
+            default: break
+            }
+        }
+        // Host chrome → guest, via the bridge.
+        model.onNavigate = { [weak self] raw in
+            guard let self else { return }
+            let url = BrowserPaneModel.normalize(raw)
+            self.model.urlText = url
+            if let id = self.model.activeTabID {
+                bridge.navigate(id: id, url: url)
+            } else {
+                bridge.newTab(url: url)
+            }
+        }
+        model.onBack = { [weak self] in if let id = self?.model.activeTabID { bridge.back(id: id) } }
+        model.onForward = { [weak self] in if let id = self?.model.activeTabID { bridge.forward(id: id) } }
+        model.onReload = { [weak self] in if let id = self?.model.activeTabID { bridge.reload(id: id) } }
+        model.onNewTab = { bridge.newTab(url: "") }
+        model.onSelectTab = { id in bridge.activate(id: id) }
+        model.onCloseTab = { id in bridge.close(id: id) }
     }
 
     /// Tear the browser VM down and clear the pane. Idempotent.
     func stop() {
         model.hasFramebuffer = false
         model.placeholderStatus = ""
+        model.tabs = []
+        model.activeTabID = nil
         model.framebufferContainer.unmountAll()
+        tabBridge?.stop()
+        tabBridge = nil
         vmView?.virtualMachine = nil
         vmView = nil
         if let warm {
@@ -247,10 +288,5 @@ final class WorkspaceBrowserController {
         try? warm.serialInput.fileHandleForReading.close()
         try? warm.serialInput.fileHandleForWriting.close()
         try? warm.ephemeralDisk.destroy()
-    }
-
-    /// Single-quote a string for `sh -c` (wrap in '…', escape embedded quotes).
-    private static func shellEscape(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

@@ -1,4 +1,5 @@
 import AppKit
+import BrowserBridges
 import SandboxEngine
 import SwiftUI
 import Virtualization
@@ -6,21 +7,13 @@ import Virtualization
 // The agentic web browser pane: a right-hand split in the workspace window
 // (agent/terminal on the left, live Chromium on the right — see browser.png).
 // It renders its own browser chrome (tab strip + URL bar) above a framebuffer
-// container that hosts the sidecar browser VM's VZVirtualMachineView. Phase 1
-// is the shell only: with no VM attached it shows a globe placeholder. The VM
-// lifecycle (WorkspaceBrowserController) and the CDP/MCP wiring land in later
-// phases; this model is the seam they drive through the `on*` callbacks.
+// container that hosts the sidecar browser VM's VZVirtualMachineView. The tab
+// list, favicons and navigation are driven by the shared TabBridge (vsock
+// 5810) — the same native-tabs machinery Bromure Web uses — wired in by
+// WorkspaceBrowserController through the `on*` callbacks. With no VM attached
+// it shows a globe placeholder.
 //
 // See BROWSER_PANE_PLAN.md.
-
-/// One browser tab as the guest/CDP reports it. `id` is the CDP target /
-/// guest tab id; the emoji favicon is a placeholder until real favicons ride
-/// in over TabBridge (phase 3).
-struct BrowserTab: Identifiable, Equatable {
-    let id: Int
-    var title: String
-    var faviconEmoji: String = "🌐"
-}
 
 @MainActor
 @Observable
@@ -28,10 +21,14 @@ final class BrowserPaneModel {
     /// Editable address-bar text. Distinct from the active tab's committed URL
     /// so typing doesn't fight live navigation updates.
     var urlText: String = ""
-    var tabs: [BrowserTab] = []
-    var activeTabID: BrowserTab.ID?
+    /// Live tab list from TabBridge (guest tab-agent).
+    var tabs: [TabInfo] = []
+    var activeTabID: String?
     /// Progress spinner in the URL bar while a navigation is in flight.
     var isLoading = false
+    /// True while the address field has keyboard focus — the controller then
+    /// won't overwrite `urlText` from live tab updates (don't fight typing).
+    var urlFieldEditing = false
     /// True once the VM controller has mounted a framebuffer into
     /// `framebufferContainer`; drives placeholder vs. live view.
     var hasFramebuffer = false
@@ -43,18 +40,19 @@ final class BrowserPaneModel {
     /// owning the VM's view lifecycle.
     let framebufferContainer = BrowserFramebufferContainer()
 
-    // Actions wired by the window / WorkspaceBrowserController. nil in phase 1.
+    // Actions wired by WorkspaceBrowserController to TabBridge. nil until a VM
+    // is attached.
     var onNavigate: ((String) -> Void)?
     var onBack: (() -> Void)?
     var onForward: (() -> Void)?
     var onReload: (() -> Void)?
     var onNewTab: (() -> Void)?
-    var onSelectTab: ((BrowserTab.ID) -> Void)?
-    var onCloseTab: ((BrowserTab.ID) -> Void)?
+    var onSelectTab: ((String) -> Void)?
+    var onCloseTab: ((String) -> Void)?
     /// Close the whole browser pane (the ✕ in the chrome).
     var onClosePane: (() -> Void)?
 
-    var activeTab: BrowserTab? {
+    var activeTab: TabInfo? {
         tabs.first { $0.id == activeTabID }
     }
 
@@ -212,6 +210,7 @@ struct BrowserPaneView: View {
 /// browser.png.
 private struct BrowserChrome: View {
     @Bindable var model: BrowserPaneModel
+    @FocusState private var urlFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -243,10 +242,10 @@ private struct BrowserChrome: View {
         .padding(.vertical, 6)
     }
 
-    private func tabPill(_ tab: BrowserTab) -> some View {
+    private func tabPill(_ tab: TabInfo) -> some View {
         let active = tab.id == model.activeTabID
         return HStack(spacing: 6) {
-            Text(tab.faviconEmoji).font(.system(size: 11))
+            favicon(tab)
             Text(tab.title.isEmpty ? "New tab" : tab.title)
                 .font(.system(size: 11, weight: active ? .medium : .regular))
                 .foregroundStyle(.white.opacity(active ? 0.95 : 0.6))
@@ -268,6 +267,16 @@ private struct BrowserChrome: View {
                 .fill(Color.white.opacity(active ? 0.12 : 0.0)))
         .contentShape(Rectangle())
         .onTapGesture { model.onSelectTab?(tab.id) }
+    }
+
+    @ViewBuilder private func favicon(_ tab: TabInfo) -> some View {
+        if let png = tab.faviconPNG, let img = NSImage(data: png) {
+            Image(nsImage: img).resizable().frame(width: 13, height: 13)
+        } else {
+            Image(systemName: "globe")
+                .font(.system(size: 10))
+                .foregroundStyle(.white.opacity(0.5))
+        }
     }
 
     private var windowButtons: some View {
@@ -307,6 +316,8 @@ private struct BrowserChrome: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.9))
                     .multilineTextAlignment(.center)
+                    .focused($urlFocused)
+                    .onChange(of: urlFocused) { model.urlFieldEditing = urlFocused }
                     .onSubmit { model.submitAddress() }
             }
             .padding(.horizontal, 12)
