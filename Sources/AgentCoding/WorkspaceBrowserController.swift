@@ -25,9 +25,16 @@ final class WorkspaceBrowserController {
         case idle
         case booting
         case running
+        /// VM paused in memory (collapsed >10s) — resumes on demand.
+        case suspended
         /// Provisioning/boot failed; the pane shows `message`.
         case failed(String)
     }
+
+    /// Collapsed (not visible) this long → suspend the VM in memory.
+    private static let suspendAfter: TimeInterval = 10
+    /// Collapsed this long → tear the VM down entirely.
+    private static let shutdownAfter: TimeInterval = 300
 
     private(set) var state: State = .idle
 
@@ -265,11 +272,17 @@ final class WorkspaceBrowserController {
         return s == .running || s == .paused
     }
 
-    /// Ensure the browser is up, rebooting if the previous VM died (e.g. the
-    /// user closed the last tab and the guest powered off). Opens the pane.
+    /// Ensure the browser is up: boot if idle, resume if suspended, reboot if
+    /// the previous VM died (e.g. the user closed the last tab and the guest
+    /// powered off). Counts as activity, so it cancels the idle timers.
     func ensureRunning() {
-        if state != .idle, !vmAlive { stop() }   // dead VM → reset so start() reboots
-        if state == .idle { start() }
+        cancelIdleTimers()
+        if state != .idle, state != .suspended, !vmAlive { stop() }   // dead VM → reboot
+        switch state {
+        case .idle: start()
+        case .suspended: resume()
+        default: break
+        }
     }
 
     func tabs() -> [TabInfo] { model.tabBar.tabs }
@@ -339,8 +352,83 @@ final class WorkspaceBrowserController {
         return try await cdp.pageText()
     }
 
+    // MARK: - Collapse lifecycle (suspend / shutdown / resume)
+
+    private(set) var isVisible = false
+    private var suspendWork: DispatchWorkItem?
+    private var shutdownWork: DispatchWorkItem?
+
+    /// Called by the window when this workspace's browser becomes shown/hidden
+    /// (pane opened/closed, or the workspace selected/deselected). Visible →
+    /// resume/boot and cancel timers; hidden → arm the suspend + shutdown
+    /// timers. An MCP tool call resolves through `ensureRunning`, which also
+    /// resumes, so agent activity keeps a collapsed-but-in-use browser alive.
+    func setVisible(_ v: Bool) {
+        isVisible = v
+        if v {
+            cancelIdleTimers()
+            switch state {
+            case .suspended: resume()
+            case .idle: start()
+            default: break
+            }
+        } else {
+            armIdleTimers()
+        }
+    }
+
+    private func armIdleTimers() {
+        cancelIdleTimers()
+        guard state == .running || state == .suspended else { return }
+        let s = DispatchWorkItem { [weak self] in
+            guard let self, !self.isVisible else { return }
+            self.suspend()
+        }
+        let d = DispatchWorkItem { [weak self] in
+            guard let self, !self.isVisible else { return }
+            print("[browser] collapsed \(Int(Self.shutdownAfter))s — shutting down")
+            self.stop()
+        }
+        suspendWork = s
+        shutdownWork = d
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.suspendAfter, execute: s)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.shutdownAfter, execute: d)
+    }
+
+    private func cancelIdleTimers() {
+        suspendWork?.cancel(); suspendWork = nil
+        shutdownWork?.cancel(); shutdownWork = nil
+    }
+
+    /// Pause the VM in memory (not to disk). Keeps the ephemeral disk +
+    /// bridges; resume brings it back instantly.
+    private func suspend() {
+        guard state == .running, let warm, warm.vm.state == .running else { return }
+        state = .suspended
+        model.placeholderStatus = ""
+        print("[browser] collapsed \(Int(Self.suspendAfter))s — suspending VM")
+        let vm = warm.vm
+        Task { @MainActor in
+            do { try await vm.pause() }
+            catch { print("[browser] suspend failed: \(error)") }
+        }
+    }
+
+    /// Resume a suspended VM.
+    private func resume() {
+        guard state == .suspended, let warm else { return }
+        state = .running
+        print("[browser] resuming suspended VM")
+        let vm = warm.vm
+        Task { @MainActor [weak self] in
+            do { try await vm.resume() }
+            catch { print("[browser] resume failed: \(error)"); self?.stop() }
+        }
+    }
+
     /// Tear the browser VM down and clear the pane. Idempotent.
     func stop() {
+        cancelIdleTimers()
         model.hasFramebuffer = false
         model.placeholderStatus = ""
         model.tabBar.setTabs([])

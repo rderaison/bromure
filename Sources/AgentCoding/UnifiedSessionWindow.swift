@@ -752,12 +752,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserPaneResizeHandle?.isHidden = !open
         if open {
             browserPaneHost.isHidden = false
-            // Lazily boot the ephemeral browser VM the first time the pane
-            // opens; keep it across close/reopen within the session.
+            // Lazily create the ephemeral browser controller; setVisible(true)
+            // boots it (or resumes a suspended VM).
             let controller = browserController
                 ?? WorkspaceBrowserController(model: browserPaneModel)
             browserController = controller
-            controller.ensureRunning()   // reboots if the previous browser VM died
+            controller.setVisible(true)
+        } else {
+            // Collapsed: arm the suspend (10s) + shutdown (5min) timers.
+            browserController?.setVisible(false)
         }
         let target = open ? expandedBrowserPaneWidth : 0
         let hideWhenClosed: () -> Void = { [weak self] in
