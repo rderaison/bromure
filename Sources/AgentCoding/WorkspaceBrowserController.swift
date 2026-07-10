@@ -117,6 +117,18 @@ final class WorkspaceBrowserController {
         print("[browser] booting ephemeral browser VM (storageDir=\(storageDir.path))")
 
         Task { [weak self] in
+            // Boot explicitly first so the real error surfaces — claim()
+            // swallows warmUp() failures (`try?`) and only logs the generic
+            // "no warm VM available".
+            do {
+                try await pool.warmUp()
+            } catch {
+                print("[browser] warmUp failed: \(error)")
+                self?.fail(String(
+                    format: NSLocalizedString("The browser VM did not start: %@", comment: ""),
+                    "\(error)"))
+                return
+            }
             // Ephemeral: no profileID / profileImageDir → the guest's virtio-fs
             // share is disconnected and nothing persists past teardown.
             let warm = await pool.claim(config: config)
@@ -125,8 +137,8 @@ final class WorkspaceBrowserController {
                 return
             }
             guard let warm else {
-                print("[browser] claim returned nil — VM did not start (see [VMPool] logs)")
-                self.fail(NSLocalizedString("The browser VM did not start.", comment: ""))
+                print("[browser] claim returned nil after warmUp — see [VMPool] logs")
+                self.fail(NSLocalizedString("The browser VM did not start (claim failed).", comment: ""))
                 return
             }
             print("[browser] claim ok (vm state=\(warm.vm.state.rawValue)) — attaching view")
