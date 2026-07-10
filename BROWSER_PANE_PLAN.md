@@ -116,14 +116,92 @@ transport, loopback URL, no auth needed).
   download handoff into the workspace home (FileTransferBridge → existing
   upload path), MITM network inspection, per-automation browser instances.
 
+## Browser image provisioning (shared + prebuilt download)
+
+The browser VM boots Bromure Web's Alpine+Chromium disk. AC **shares** it with
+Bromure Web and **downloads a prebuilt copy** when absent (mirroring how AC
+already fetches its Ubuntu base) — no ~10-minute local Alpine build on end-user
+machines.
+
+### Storage layout (today)
+
+| App | Storage dir | Base image |
+|---|---|---|
+| Bromure Web (`SandboxEngine.LinuxImageManager`) | `~/Library/Application Support/Bromure/` | `linux-base.img` (Alpine+Chromium) |
+| Bromure AC (`UbuntuImageManager`) | `~/Library/Application Support/BromureAC/` | `base.img` (Ubuntu) |
+
+`VMPool` clones `LinuxImageManager.linuxDiskURL` = `<storageDir>/linux-base.img`.
+
+### Image resolution order (WorkspaceBrowserController)
+
+1. **Shared, in place** — if `~/Library/Application Support/Bromure/linux-base.img`
+   exists (Bromure Web installed), reuse it. On the test machine this is the
+   path: instant, zero extra disk.
+2. **AC-owned** — else use `~/Library/Application Support/BromureAC/browser/linux-base.img`.
+3. **Download** — if neither exists, fetch the prebuilt browser image into the
+   AC-owned location (never write into Bromure Web's dir).
+
+**Sharing mechanism:** the browser `VMPool` runs with
+`storageDir = BromureAC/browser` (all pool scratch + ephemeral CoW clones stay
+AC-owned). When the shared Web image exists, symlink
+`BromureAC/browser/linux-base.img → Bromure/linux-base.img`; `clonefile(2)`
+(flag 0) follows the symlink to clone the shared file, and a Web rebuild
+(atomic rename) is transparently picked up. When downloading, the real file
+lands at that path instead. Either way AC never mutates the shared image — it's
+only ever a read/clone source.
+
+### Prebuilt distribution (the piece to add on the Web side)
+
+Today `LinuxImageManager` only builds the browser image locally. The
+distribution pipeline needs to publish a prebuilt one, exactly like the Ubuntu
+`img-catalog.json` flow. Concretely:
+
+- **Artifact:** `linux-base.img.gz` (gzip of the raw 24 GB sparse disk) under a
+  per-build CDN prefix, e.g. `https://dl.bromure.io/browser-images/<uuid>/linux-base.img.gz`.
+- **Manifest:** a signed `browser-catalog.json` alongside it (a separate file
+  from `img-catalog.json` — the browser image has **no** postinstall steps, so
+  it's just the image identity + disk descriptor). Reuse the existing
+  `RemoteBaseImage`/`Signature` shapes and the same ed25519 Sparkle signing key:
+  ```json
+  {
+    "formatVersion": 1,
+    "signature": { "signedAt": "<iso8601>", "edSignature": "<base64>" },
+    "image": {
+      "uuid": "<per-build>",
+      "version": "<n[.rev]>",
+      "description": "Alpine + Chromium",
+      "builtAt": "<iso8601>",
+      "disk": {
+        "path": "browser-images/<uuid>/linux-base.img.gz",
+        "sha256": "<hex of the .gz>",
+        "compressedBytes": <int>,
+        "uncompressedBytes": <int>,   // logical raw size
+        "compression": "gzip"
+      }
+    }
+  }
+  ```
+  The signature covers the image identity + sha256 (same rollback + integrity
+  guarantees as the Ubuntu catalog; a compromised bucket can't swap the disk).
+
+### AC-side refactor to enable reuse
+
+The generic download/verify/expand helpers currently live in
+`AgentCoding/UbuntuImageManager+Remote.swift`: `LargeFileDownloader`,
+`sha256Streaming`, `expandGzipSparse`. Hoist these into **SandboxEngine** (they
+have no Ubuntu specifics) so both the AC browser downloader and Bromure Web's
+own prebuilt path use one implementation. The Ubuntu-specific bits
+(postinstall, EFI vars, version stamps) stay in AC.
+
 ## Open questions / risks
 
 - **Two `VZVirtualMachine`s in one process** (Ubuntu workspace + Alpine
   browser). Expected fine (separate configs/sockets) but unverified at runtime —
   first thing to prove in phase 2.
-- **Base image availability.** AC ships the Ubuntu base; the browser needs the
-  Alpine+Chromium base built/downloaded. Decide: bundle both, or fetch the
-  browser image on first use (like `img-catalog` postinstall).
+- **Base image availability.** Resolved: share Bromure Web's
+  `linux-base.img` when present, else download a prebuilt copy into
+  `BromureAC/browser/` (see Provisioning above). Depends on the Web side adding
+  a `browser-catalog.json` + prebuilt `.gz` to the CDN.
 - **Name collisions.** `MCPServer`, `AutomationServer` exist in both `Browser`
   and `AgentCoding`. The extracted browser MCP core must be namespaced to avoid
   clashing when AC links it.
