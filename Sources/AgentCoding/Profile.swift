@@ -4058,22 +4058,32 @@ public final class ProfileStore {
 
     # Headless boot (plan phase 3): on tty1 (the agetty autologin terminal)
     # bootstrap the bromure-agentd systemd unit and hand the session to it —
-    # X11/kitty stay on disk but never start. Idempotent, and it upgrades
-    # existing images without a rebuild: the unit runs the daemon straight
-    # from the meta share, Restart=always makes a daemon exit(0) (the
-    # hot-upgrade path) a respawn of the freshly staged file.
+    # X11/kitty stay on disk but never start. Rewritten whenever the marker
+    # line is missing, so existing images converge without a rebuild (agentd's
+    # task_fix_systemd_unit is the twin for images that don't reboot — keep
+    # the unit text byte-identical with _UNIT_CONTENT there). KillMode=process
+    # is the load-bearing line: the tmux server and every agent in it live in
+    # this service's cgroup, and the default control-group kill made the
+    # hot-upgrade exit(0) SIGTERM the whole session and stall the respawn for
+    # TimeoutStopSec (default 90s) — a frozen, then emptied, workspace.
+    # StartLimitIntervalSec=0: the daemon must respawn forever; the default
+    # 5-in-10s limit permanently failed the unit on a crash loop even after
+    # the host restaged a fixed source.
     if [ "$(tty)" = "/dev/tty1" ] && [ -r /mnt/bromure-meta/bromure-agentd.py ]; then
-        if [ ! -f /etc/systemd/system/bromure-agentd.service ]; then
+        if ! grep -sq "KillMode=process" /etc/systemd/system/bromure-agentd.service; then
             sudo tee /etc/systemd/system/bromure-agentd.service >/dev/null <<'UNIT'
     [Unit]
     Description=Bromure guest agent daemon
     After=mnt-bromure\x2dmeta.mount network.target
+    StartLimitIntervalSec=0
     [Service]
     Type=simple
     User=ubuntu
     ExecStart=/usr/bin/python3 /mnt/bromure-meta/bromure-agentd.py
     Restart=always
     RestartSec=1
+    KillMode=process
+    TimeoutStopSec=5
     [Install]
     WantedBy=multi-user.target
     UNIT

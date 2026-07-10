@@ -3164,6 +3164,55 @@ def task_set_mtu():
         log("session", "set %s mtu %s" % (nic, mtu))
 
 
+# Twin of the unit the .bashrc tty1 bootstrap writes (Profile.swift,
+# bashrcContent) — keep the two byte-identical. KillMode=process is the
+# load-bearing line: the tmux server (and every shell/agent in it) lives in
+# this service's cgroup, so with the default control-group kill our
+# hot-upgrade exit(0) made systemd SIGTERM the whole session and wait
+# TimeoutStopSec (default 90s!) for stragglers — the workspace froze, then
+# came back empty. StartLimitIntervalSec=0: a supervisor must respawn
+# forever; the default 5-in-10s limit permanently failed the unit (and the
+# VM's whole control plane) on a crash loop, even after the host restaged a
+# fixed source.
+_UNIT_PATH = "/etc/systemd/system/bromure-agentd.service"
+_UNIT_CONTENT = r"""[Unit]
+Description=Bromure guest agent daemon
+After=mnt-bromure\x2dmeta.mount network.target
+StartLimitIntervalSec=0
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/usr/bin/python3 /mnt/bromure-meta/bromure-agentd.py
+Restart=always
+RestartSec=1
+KillMode=process
+TimeoutStopSec=5
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def task_fix_systemd_unit():
+    """Converge an already-installed unit to _UNIT_CONTENT (existing images
+    booted with the old control-group-kill unit; the .bashrc bootstrap only
+    writes the unit when the file is missing). daemon-reload only — never
+    restart the service from inside itself; the reloaded KillMode applies to
+    the next stop, i.e. the next hot-upgrade exit."""
+    try:
+        with open(_UNIT_PATH) as f:
+            current = f.read()
+    except OSError:
+        return   # not installed (dev run) — the tty1 bootstrap owns creation
+    if "KillMode=process" in current:
+        return
+    tmp = "/tmp/.bromure-agentd-unit"
+    with open(tmp, "w") as f:
+        f.write(_UNIT_CONTENT)
+    _sudo(["install", "-m", "644", tmp, _UNIT_PATH])
+    _sudo(["systemctl", "daemon-reload"])
+    log("session", "systemd unit upgraded (KillMode=process)")
+
+
 def task_install_ca():
     """Install the host's MITM CA into the system trust store so every TLS
     client in the VM trusts the forged per-host leaves the proxy presents."""
@@ -3294,17 +3343,23 @@ def resume_watcher_service():
     """Resume-time clock resync: VZ freezes CLOCK_REALTIME during
     saveMachineState, so on resume the wall clock lags until timesyncd notices.
     The host writes the current Unix ts into /mnt/bromure-meta/.resume-signal
-    right after vm.resume(); on change we set the clock. Polling (not inotify):
-    virtiofs doesn't reliably deliver inotify for host-side writes. Absorbs both
-    the old root systemd watcher and the spice respawner (spice is gone)."""
+    right after vm.resume(); we set the clock when the signal is AHEAD of our
+    own clock. Polling (not inotify): virtiofs doesn't reliably deliver inotify
+    for host-side writes. Absorbs both the old root systemd watcher and the
+    spice respawner (spice is gone).
+
+    Forward-only, not skip-stale-at-start: the meta share is restaged (with
+    the new daemon source) BEFORE the VM resumes, so a hot upgrade can exit
+    the old daemon between the host writing the signal and this loop's next
+    poll — the old behaviour (treat whatever value exists at daemon start as
+    already handled) then swallowed the pending resync and left the clock at
+    suspend time until timesyncd noticed (TLS through the proxy fails with
+    "certificate not yet valid" meanwhile). A resume signal is only ever
+    meaningful when it's ahead of the guest clock — the clock only LAGS after
+    a resume — so "apply iff ts > now" is race-free across respawns and
+    ignores genuinely stale values without needing persisted state."""
     signal_path = os.path.join(META, ".resume-signal")
-    # Skip whatever stale value is present at start — only react to *changes*.
     last = ""
-    try:
-        with open(signal_path) as f:
-            last = f.read().strip()
-    except OSError:
-        pass
     while _RUNNING.is_set():
         ts = ""
         try:
@@ -3313,12 +3368,12 @@ def resume_watcher_service():
         except OSError:
             ts = ""
         if ts and ts != last:
-            if ts.isdigit():
+            last = ts
+            if ts.isdigit() and int(ts) > time.time():
                 _sudo(["date", "-u", "-s", "@" + ts])
                 log("resume", "clock set (target ts=%s)" % ts)
             else:
-                log("resume", "signal not numeric: %r" % ts)
-            last = ts
+                log("resume", "ignoring stale/non-forward signal: %r" % ts)
         time.sleep(2)
 
 
@@ -3369,6 +3424,7 @@ def main():
         pass
 
     # 2. One-shot session tasks (each isolated; a failure never aborts boot).
+    _run_once("unit", task_fix_systemd_unit)
     _run_once("mtu", task_set_mtu)
     _run_once("ca", task_install_ca)
     _run_once("docker-proxy", task_apt_and_docker_proxy)
