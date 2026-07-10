@@ -108,10 +108,22 @@ transport, loopback URL, no auth needed).
   boot/claim an Alpine Chromium VM (VMPool + EphemeralDisk), one per workspace,
   mount its framebuffer, tear down on pane-close / workspace-close / suspend.
   Resize/scale plumbing (resize-watcher already handles the guest side).
-- **Phase 3 — MCP.** Extract CDP tool core to a shared lib; host loopback MCP
-  HTTP server; agentd vsock bridge; auto-inject MCP config; tool set v1
-  (open/navigate/back/reload, tab list/activate/close, screenshot, evaluate JS,
-  click/type, console + network readout, `browser_open` lifecycle).
+- **Phase 3 — native chrome, instrumentation, polish.** Broken into:
+  - **3a native chrome:** switch `browserConfig` to `nativeChrome` + inset;
+    reimplement the `NativeChromeCropper` in AC (host-side AppKit) so the
+    host-drawn chrome (tab strip + URL bar from `browser.png`) replaces
+    Chromium's, which is cropped into the inset. Wire the host chrome to drive
+    the browser (nav/back/reload/tabs) via CDP.
+  - **3b copy/paste:** enable clipboard sharing for the browser VM (SPICE, as
+    Web does) and make ⌘C/⌘V reach Chromium in native-chrome mode.
+  - **3c CDP foundation:** add `BrowserBridges` dep; extract `CDPConnection` +
+    screenshot/eval/nav/input from `Browser/MCPServer.swift` into a shared lib
+    so AC drives Chromium's `:9222` over `CDPBridge` (vsock 5200).
+  - **3d MCP:** host loopback MCP HTTP server (navigate/screenshot/eval/tabs/
+    click/type/console/network); agentd vsock bridge so workspace agents reach
+    it at `127.0.0.1:<port>`; auto-inject MCP config via `claudeCodeMCPConfig`.
+  - **3e devtools:** a devtools toggle button in the host chrome (Claude users
+    want DevTools) — open via CDP/keybinding.
 - **Phase 4 — polish.** VMPool pre-warm for sub-second open, SPICE clipboard,
   download handoff into the workspace home (FileTransferBridge → existing
   upload path), MITM network inspection, per-automation browser instances.
