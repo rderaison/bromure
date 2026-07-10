@@ -87,6 +87,8 @@ final class SessionListModel {
     /// True when the right-hand file-explorer pane is open. Drives the
     /// toolbar button tint and the pane's own context/polling.
     var filePaneOpen = false
+    /// True when the agentic browser pane is open. Drives the toolbar tint.
+    var browserPaneOpen = false
 }
 
 /// Right-click actions on a tab row. Handled by the window, which reads the
@@ -301,6 +303,23 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private static let filePaneWidthKey = "ac.filePaneWidth"
     private static let filePaneOpenKey = "ac.filePaneOpen"
 
+    /// Right-hand agentic browser pane (⌃⌘B). A split like the file explorer
+    /// but wider (default ~half the stage — see browser.png), and the
+    /// outermost right split (sits right of the file pane when both are open).
+    /// Lives inside the stage so the grid/docker/vm overlays cover it. The
+    /// per-workspace ephemeral browser VM mounts its framebuffer into the
+    /// model's container (WorkspaceBrowserController, phase 2).
+    let browserPaneModel = BrowserPaneModel()
+    private var browserPaneHost: NonMovableHostingView<BrowserPaneView>!
+    private var browserPaneWidthConstraint: NSLayoutConstraint?
+    private var browserPaneResizeHandle: SidebarResizeHandle?
+    private(set) var browserPaneOpen = false
+    private var expandedBrowserPaneWidth: CGFloat = 640
+    private static let browserPaneMinWidth: CGFloat = 380
+    private static let browserPaneMaxWidth: CGFloat = 1400
+    private static let browserPaneDefaultWidth: CGFloat = 640
+    private static let browserPaneWidthKey = "ac.browserPaneWidth"
+
     init(acDelegate: ACAppDelegate) {
         self.acDelegate = acDelegate
         self.paneSlot = NSView()
@@ -407,6 +426,26 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         filePaneHandle.translatesAutoresizingMaskIntoConstraints = false
         self.filePaneResizeHandle = filePaneHandle
         stage.addSubview(filePaneHandle)
+        // Browser pane (outermost right split) + its drag handle. Same
+        // main-window-mode treatment as the file pane: added before the
+        // docker/vm/grid overlays so those cover it.
+        let browserPane = BrowserPaneView(model: browserPaneModel)
+        let browserPaneHost = NonMovableHostingView(rootView: browserPane)
+        browserPaneHost.translatesAutoresizingMaskIntoConstraints = false
+        browserPaneHost.clipsToBounds = true
+        browserPaneHost.sizingOptions = []   // our width constraint is the sole authority
+        browserPaneHost.isHidden = true
+        self.browserPaneHost = browserPaneHost
+        stage.addSubview(browserPaneHost)
+        let browserPaneHandle = SidebarResizeHandle()
+        browserPaneHandle.translatesAutoresizingMaskIntoConstraints = false
+        browserPaneHandle.isHidden = true
+        self.browserPaneResizeHandle = browserPaneHandle
+        stage.addSubview(browserPaneHandle)
+        // Closing the browser from its own chrome ✕.
+        browserPaneModel.onClosePane = { [weak self] in
+            self?.setBrowserPaneOpen(false, animated: true)
+        }
         // Docker dashboard overlay — added last so it sits above the framebuffer
         // and empty-state. Opaque background so it fully covers the VM behind it.
         dockerSlot.translatesAutoresizingMaskIntoConstraints = false
@@ -476,6 +515,30 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             self.expandedFilePaneWidth = w
             UserDefaults.standard.set(w, forKey: Self.filePaneWidthKey)
         }
+        // Browser-pane sizing: closed = 0pt + hidden (opened on demand, not
+        // persisted — the ephemeral browser doesn't survive a restart).
+        let bpStored = UserDefaults.standard.double(forKey: Self.browserPaneWidthKey)
+        expandedBrowserPaneWidth = bpStored >= Self.browserPaneMinWidth
+            ? bpStored : Self.browserPaneDefaultWidth
+        let browserPaneWidth = browserPaneHost.widthAnchor.constraint(equalToConstant: 0)
+        browserPaneWidth.priority = .defaultHigh
+        self.browserPaneWidthConstraint = browserPaneWidth
+        browserPaneHandle.onResize = { [weak self] x in
+            guard let self, self.browserPaneOpen else { return }
+            let width = self.stage.bounds.width - x
+            if width < Self.browserPaneMinWidth {
+                self.setBrowserPaneOpen(false, animated: true)
+            } else {
+                self.browserPaneWidthConstraint?.constant = min(Self.browserPaneMaxWidth, width)
+            }
+        }
+        browserPaneHandle.onResizeEnd = { [weak self] in
+            guard let self, self.browserPaneOpen,
+                  let w = self.browserPaneWidthConstraint?.constant,
+                  w >= Self.browserPaneMinWidth else { return }
+            self.expandedBrowserPaneWidth = w
+            UserDefaults.standard.set(w, forKey: Self.browserPaneWidthKey)
+        }
         let paneSlotMin = paneSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: 240)
         paneSlotMin.priority = .init(999)   // beats the pane width, yields last
         NSLayoutConstraint.activate([
@@ -486,13 +549,24 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             paneSlotMin,
             filePaneHost.topAnchor.constraint(equalTo: stage.topAnchor),
             filePaneHost.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
-            filePaneHost.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            // Right-split chain: paneSlot | filePane | browserPane | stage edge.
+            // Both right panes collapse to width 0 when closed, so paneSlot
+            // fills whatever they leave.
+            filePaneHost.trailingAnchor.constraint(equalTo: browserPaneHost.leadingAnchor),
             filePaneWidth,
             // 8pt grab strip over the pane's leading edge, full height.
             filePaneHandle.centerXAnchor.constraint(equalTo: filePaneHost.leadingAnchor),
             filePaneHandle.topAnchor.constraint(equalTo: stage.topAnchor),
             filePaneHandle.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
             filePaneHandle.widthAnchor.constraint(equalToConstant: 8),
+            browserPaneHost.topAnchor.constraint(equalTo: stage.topAnchor),
+            browserPaneHost.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+            browserPaneHost.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            browserPaneWidth,
+            browserPaneHandle.centerXAnchor.constraint(equalTo: browserPaneHost.leadingAnchor),
+            browserPaneHandle.topAnchor.constraint(equalTo: stage.topAnchor),
+            browserPaneHandle.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+            browserPaneHandle.widthAnchor.constraint(equalToConstant: 8),
             emptyStateHost.topAnchor.constraint(equalTo: paneSlot.topAnchor),
             emptyStateHost.leadingAnchor.constraint(equalTo: paneSlot.leadingAnchor),
             emptyStateHost.trailingAnchor.constraint(equalTo: paneSlot.trailingAnchor),
@@ -587,7 +661,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onSettings:  { [weak self] id in if let p = self?.pane(id) { self?.acDelegate?.openEditorWindow(editing: p.profile) } },
             onDetach:    { [weak self] id in self?.acDelegate?.popOutVM(id) },
             onToggleFusion: { [weak self] id, on in if let p = self?.pane(id) { self?.acDelegate?.setFusionEngaged(on, for: p.profile) } },
-            onToggleFilePane: { [weak self] in self?.toggleFilePane(nil) })
+            onToggleFilePane: { [weak self] in self?.toggleFilePane(nil) },
+            onToggleBrowser: { [weak self] in self?.toggleBrowserPane(nil) })
         let tbDelegate = UnifiedToolbarDelegate(rootView: toolbarBar)
         self.toolbarDelegate = tbDelegate
         let bar = NSToolbar(identifier: "io.bromure.ac.unified")
@@ -642,6 +717,38 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             }, completionHandler: hideWhenClosed)
         } else {
             filePaneWidthConstraint?.constant = target
+            hideWhenClosed()
+        }
+    }
+
+    // MARK: Browser pane
+
+    /// ⌃⌘B / the toolbar globe. Opening it lazily brings up the workspace's
+    /// ephemeral browser VM (phase 2 wires WorkspaceBrowserController here).
+    @objc func toggleBrowserPane(_ sender: Any?) {
+        setBrowserPaneOpen(!browserPaneOpen, animated: true)
+    }
+
+    func setBrowserPaneOpen(_ open: Bool, animated: Bool) {
+        guard open != browserPaneOpen else { return }
+        browserPaneOpen = open
+        listModel.browserPaneOpen = open
+        browserPaneResizeHandle?.isHidden = !open
+        if open { browserPaneHost.isHidden = false }
+        let target = open ? expandedBrowserPaneWidth : 0
+        let hideWhenClosed: () -> Void = { [weak self] in
+            guard let self, !self.browserPaneOpen else { return }
+            self.browserPaneHost.isHidden = true
+        }
+        if animated {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.18
+                ctx.allowsImplicitAnimation = true
+                browserPaneWidthConstraint?.animator().constant = target
+                contentView?.layoutSubtreeIfNeeded()
+            }, completionHandler: hideWhenClosed)
+        } else {
+            browserPaneWidthConstraint?.constant = target
             hideWhenClosed()
         }
     }
@@ -1213,11 +1320,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     override func sendEvent(_ event: NSEvent) {
         // ⌃⌘S — hide/show the sidebar (classic macOS chord).
         // ⌃⌘E — hide/show the file-explorer pane.
+        // ⌃⌘B — hide/show the agentic browser pane.
         if event.type == .keyDown,
            event.modifierFlags.contains([.command, .control]),
            let chord = event.charactersIgnoringModifiers?.lowercased(),
-           chord == "s" || chord == "e" {
-            if chord == "s" { toggleSidebar(nil) } else { toggleFilePane(nil) }
+           chord == "s" || chord == "e" || chord == "b" {
+            switch chord {
+            case "s": toggleSidebar(nil)
+            case "e": toggleFilePane(nil)
+            default:  toggleBrowserPane(nil)
+            }
             return
         }
         if event.type == .keyDown, handleACShortcut(event) { return }
@@ -2290,6 +2402,7 @@ struct UnifiedToolbarBar: View {
     let onDetach: (Profile.ID) -> Void
     let onToggleFusion: (Profile.ID, Bool) -> Void
     let onToggleFilePane: () -> Void
+    let onToggleBrowser: () -> Void
 
     private var entry: SessionListModel.VMEntry? {
         model.entries.first { $0.id == model.selectedID }
@@ -2308,6 +2421,8 @@ struct UnifiedToolbarBar: View {
                 HeaderIcon(system: "doc.text.magnifyingglass", help: "Inspect trace (⇧⌘I)") { onTrace(entry.id) }
                 HeaderIcon(system: "gearshape", help: "Edit workspace") { onSettings(entry.id) }
                 HeaderIcon(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") { onDetach(entry.id) }
+                HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
+                           active: model.browserPaneOpen) { onToggleBrowser() }
                 HeaderIcon(system: "sidebar.right", help: "Show or hide repo files (⌃⌘E)",
                            active: model.filePaneOpen) { onToggleFilePane() }
             }
