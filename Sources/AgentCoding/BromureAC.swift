@@ -875,6 +875,93 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         launch(profile, freshBootFallback: false)
     }
 
+    /// Duplicate a workspace for a clone-first automation run: settings,
+    /// credentials, and the home (ext4 home.img / legacy home dir) travel as
+    /// an APFS CoW copy — same store.duplicate the sidebar's Duplicate uses.
+    /// The clone is a regular workspace (visible in the sidebar for the
+    /// run's duration) — the engine destroys it when the run finishes.
+    func cloneWorkspaceForAutomation(_ baseID: Profile.ID, runSlug: String) async -> Profile? {
+        guard let base = profiles.first(where: { $0.id == baseID }) else { return nil }
+        // A running source is cloned live — crash-consistent, like a power
+        // cut; the clone's ext4 journal replays at its first mount. Flush
+        // the guest's page cache first so the snapshot carries everything
+        // the workspace has written up to this moment.
+        if runningSessions[baseID] != nil {
+            _ = try? await guestExec(profileID: baseID, command: "sync")
+        }
+        do {
+            var clone = try store.duplicate(base, named: "\(base.name) ⌁ \(runSlug)")
+            // A leftover clone (run never finished, app quit mid-run) must
+            // not boot itself on the next app launch.
+            if clone.bootAtStartup {
+                clone.bootAtStartup = false
+                try? store.save(clone)
+            }
+            // Subscription credentials (Claude, Codex, Grok alike) live in
+            // the engine's stores keyed by profile id, not in profile.json —
+            // mirror the base's effective records onto the clone so
+            // subscription-mode agents keep working in it without a login
+            // (destroyAutomationClone forgets them again).
+            if let engine = mitmEngine {
+                if let rec = engine.claudeSubscriptionStore.record(for: baseID) {
+                    try? engine.claudeSubscriptionStore.setOverride(rec, for: clone.id)
+                }
+                if let rec = engine.codexSubscriptionStore.record(for: baseID) {
+                    try? engine.codexSubscriptionStore.setOverride(rec, for: clone.id)
+                }
+                if let rec = engine.grokSubscriptionStore.record(for: baseID) {
+                    try? engine.grokSubscriptionStore.setOverride(rec, for: clone.id)
+                }
+            }
+            profiles = store.loadAll()
+            refreshSidebar()
+            return clone
+        } catch {
+            BACDebug.log("automation", "workspace clone failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Tear down a clone-first run's disposable workspace: power the VM off
+    /// and delete the profile (and its cloned home) once the session is gone.
+    func destroyAutomationClone(_ id: Profile.ID) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        BACDebug.log("automation", "destroying clone workspace “\(profile.name)”")
+        requestStopSession(id, action: .shutdown)
+        Task { [weak self] in
+            // Wait for the session to wind down (bounded) before deleting
+            // its storage out from under a live VM.
+            for _ in 0..<24 {
+                guard let self else { return }
+                if self.runningSessions[id] == nil { break }
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+            guard let self else { return }
+            guard self.runningSessions[id] == nil else {
+                BACDebug.log("automation",
+                             "clone “\(profile.name)” still running — leaving it for manual cleanup")
+                return
+            }
+            do {
+                try self.store.delete(profile)
+                // Drop the subscription overrides + bogus-key registrations
+                // mirrored onto the clone at creation.
+                if let engine = self.mitmEngine {
+                    try? engine.claudeSubscriptionStore.forget(for: id)
+                    try? engine.codexSubscriptionStore.forget(for: id)
+                    try? engine.grokSubscriptionStore.forget(for: id)
+                    engine.claudeSubscriptionStore.unregisterBogusKeys(for: id)
+                    engine.codexSubscriptionStore.unregisterBogusKeys(for: id)
+                    engine.grokSubscriptionStore.unregisterBogusKeys(for: id)
+                }
+                self.profiles = self.store.loadAll()
+                self.refreshSidebar()
+            } catch {
+                BACDebug.log("automation", "clone delete failed: \(error)")
+            }
+        }
+    }
+
     /// Picker "Stop": power the VM down, honoring `.shutdown` but mapping the
     /// keep-running actions (`.background`/`.ask`) to `.suspend` so Stop always
     /// actually stops.
@@ -2122,8 +2209,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onListCheckpoints = { [weak self] idOrName in
             self?.automationListCheckpoints(idOrName) ?? []
         }
-        server.onRevertCheckpoint = { [weak self] idOrName, cp in
-            await self?.automationRevertCheckpoint(idOrName: idOrName, checkpoint: cp)
+        server.onRevertCheckpoint = { [weak self] idOrName, cp, target in
+            await self?.automationRevertCheckpoint(idOrName: idOrName, checkpoint: cp,
+                                                   target: target)
                 ?? ["error": "unavailable"]
         }
         server.onDescribeProfile = { [weak self] key in self?.automationProfileDescribe(key) }
@@ -2388,6 +2476,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     if let b = t.worktreeBranch { d["worktreeBranch"] = b }
                 } else if t.isGitRepo {
                     d["isGitRepo"] = true
+                    // The cwd's toplevel — lets remote UIs group a repo's
+                    // worktrees under this tab even when cwd is a subfolder.
+                    if let rr = t.repoRoot, !rr.isEmpty { d["repoRoot"] = rr }
                 }
                 // parentBranch/rootRepo ride on worktree tabs AND on attached
                 // terminals (plain tabs opened via "Attach terminal") — the
@@ -2504,24 +2595,35 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `vm ls` (or any unambiguous prefix of it) works, docker-style.
     @MainActor private func automationListCheckpoints(_ idOrName: String) -> [[String: Any]] {
         guard let profile = profileByNameOrID(idOrName) else { return [] }
-        return store.listCheckpoints(for: profile).map {
-            ["id": $0.id,
-             "createdAt": Int($0.createdAt.timeIntervalSince1970),
-             "allocatedBytes": $0.allocatedBytes]
+        func entry(_ cp: ProfileStore.DiskCheckpoint, target: String) -> [String: Any] {
+            ["id": cp.id,
+             "createdAt": Int(cp.createdAt.timeIntervalSince1970),
+             "allocatedBytes": cp.allocatedBytes,
+             "target": target]
         }
+        return store.listCheckpoints(for: profile).map { entry($0, target: "disk") }
+            + store.listHomeCheckpoints(for: profile).map { entry($0, target: "home") }
     }
 
-    @MainActor private func automationRevertCheckpoint(idOrName: String, checkpoint: String) async -> [String: Any] {
+    @MainActor private func automationRevertCheckpoint(
+        idOrName: String, checkpoint: String, target: String) async -> [String: Any] {
         guard let profile = profileByNameOrID(idOrName) else {
             return ["error": "Workspace not found: \(idOrName)"]
         }
-        // The disk image is replaced wholesale, so the VM must not have it open.
+        // The image is replaced wholesale, so the VM must not have it open.
         if runningSessions[profile.id] != nil {
             return ["error": "Stop the workspace first (`vm kill \(profile.name)`), then revert."]
         }
         do {
-            try store.revertDisk(for: profile, to: checkpoint)
-            return ["status": "reverted", "checkpoint": checkpoint, "workspace": profile.name]
+            if target == "home" {
+                // Safety net first — same as the GUI's restore flow.
+                _ = try store.snapshotHomeImage(for: profile, at: Date())
+                try store.revertHomeImage(for: profile, to: checkpoint)
+            } else {
+                try store.revertDisk(for: profile, to: checkpoint)
+            }
+            return ["status": "reverted", "checkpoint": checkpoint,
+                    "target": target, "workspace": profile.name]
         } catch {
             return ["error": error.localizedDescription]
         }
@@ -4334,7 +4436,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 isRunning: false,
                 onResetDisk: {},
                 onResetHome: {},
-                onUpgradeHome: nil
+                onUpgradeHome: nil,
+                onRestoreHome: nil
             )
         }
         let homeImage = store.homeImageURL(for: editing)
@@ -4353,6 +4456,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             onResetHome: { [weak self] in self?.resetHomeProfile(editing) },
             onUpgradeHome: editing.homeModel == .virtiofs
                 ? { [weak self] in self?.armHomeStorageUpgrade(editing) }
+                : nil,
+            onRestoreHome: editing.homeModel == .ext4
+                ? { [weak self] in self?.restoreHomeStorage(editing) }
                 : nil
         )
     }
@@ -4402,6 +4508,72 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.alertStyle = .informational
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
         alert.runModal()
+    }
+
+    /// Editor "Restore home…" for an ext4-home workspace: pick one of the
+    /// per-boot home checkpoints and roll the home image back to it. The
+    /// current home is checkpointed first, so the restore can itself be
+    /// undone from the same menu.
+    @MainActor
+    private func restoreHomeStorage(_ profile: Profile) {
+        let p = profiles.first(where: { $0.id == profile.id }) ?? profile
+        guard p.homeModel == .ext4 else { return }
+        guard runningSessions[p.id] == nil else { return }   // row is disabled while running
+        let checkpoints = store.listHomeCheckpoints(for: p)
+        guard !checkpoints.isEmpty else {
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString("No home checkpoints yet", comment: "")
+            alert.informativeText = NSLocalizedString(
+                "A checkpoint of the home is taken on each successful boot of this workspace. Launch it once, and rollback points will appear here.",
+                comment: "")
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            alert.runModal()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Restore “%@”’s home folder?", comment: ""), p.name)
+        alert.informativeText = NSLocalizedString(
+            "Pick a rollback point below — each one is the home as it was when that session started (the last few boots are kept, then one per day for a week, then one per week for a month). The current home is checkpointed first, so restoring can itself be undone.",
+            comment: "")
+        alert.alertStyle = .warning
+
+        let relative = RelativeDateTimeFormatter()
+        relative.unitsStyle = .abbreviated
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 280, height: 25))
+        for cp in checkpoints {
+            popup.addItem(withTitle: String(
+                format: "%@  (%@)",
+                cp.createdAt.formatted(date: .abbreviated, time: .shortened),
+                relative.localizedString(for: cp.createdAt, relativeTo: Date())))
+        }
+        alert.accessoryView = popup
+
+        alert.addButton(withTitle: NSLocalizedString("Restore", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        guard alert.runModal() == .alertFirstButtonReturn,
+              checkpoints.indices.contains(popup.indexOfSelectedItem) else { return }
+        let choice = checkpoints[popup.indexOfSelectedItem]
+
+        do {
+            // Safety net first: the pre-restore home becomes a checkpoint.
+            _ = try store.snapshotHomeImage(for: p, at: Date())
+            try store.revertHomeImage(for: p, to: choice.id)
+            let done = NSAlert()
+            done.messageText = NSLocalizedString("Home restored", comment: "")
+            done.informativeText = String(
+                format: NSLocalizedString(
+                    "“%1$@” now has its home from %2$@. The next launch boots from it.",
+                    comment: "workspace name, checkpoint date"),
+                p.name, choice.createdAt.formatted(date: .abbreviated, time: .shortened))
+            done.alertStyle = .informational
+            done.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            done.runModal()
+        } catch {
+            showError(error, message: "Couldn't restore the home checkpoint.")
+        }
     }
 
     private func handleEditorSave(profile: Profile, generateSSH: Bool, editing: Profile?) {
@@ -4966,7 +5138,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let files = seedDir.appendingPathComponent("files", isDirectory: true)
                 seedCodexAuthFile(for: profile, homeRoot: files)
                 seedGrokAuthFile(for: profile, homeRoot: files)
-                try store.finalizeHomeSeed(for: profile, seedDir: seedDir)
+                try store.finalizeHomeSeed(
+                            for: profile, seedDir: seedDir,
+                            anthropicEnvKey: plan.fakeForAnthropic()
+                                ?? plan.claudeSubscriptionBogusKey)
                 session.bumpSeedGeneration()
             } catch {
                 NSLog("[bromure-ac] live home-seed refresh failed: \(error)")
@@ -5506,7 +5681,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         let files = seedDir.appendingPathComponent("files", isDirectory: true)
                         seedCodexAuthFile(for: profile, homeRoot: files)
                         seedGrokAuthFile(for: profile, homeRoot: files)
-                        try store.finalizeHomeSeed(for: profile, seedDir: seedDir)
+                        try store.finalizeHomeSeed(
+                            for: profile, seedDir: seedDir,
+                            anthropicEnvKey: plan.fakeForAnthropic()
+                                ?? plan.claudeSubscriptionBogusKey)
                         // Bump even on a fresh boot (harmless — the agent
                         // baselines after its startup apply): on a RESTORE
                         // boot this is what tells the resumed agent that the
@@ -5971,7 +6149,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         scheduledAutomationStore.remove(id)
-        unifiedWindow?.clearAutomationEditor()
+        // The automation is gone — a dirty draft of it isn't worth a warning.
+        unifiedWindow?.clearAutomationEditor(force: true)
     }
 
     // MARK: Worktree dialogs
@@ -6754,17 +6933,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // First non-empty roster = the guest booted to kitty/tmux, so the
                 // disk is proven bootable. Snapshot it (once per session) as a
                 // rollback point — a later bad shutdown can revert here instead of
-                // a full reset. clonefile is instant; run it off the main actor.
+                // a full reset. The ext4 home gets the same treatment: a per-boot
+                // rollback point capturing the home as this session started, so
+                // "the agent trashed my files" can go back in time. clonefile is
+                // instant; run it off the main actor.
                 if !tabs.isEmpty,
                    let session = self.runningSessions[pid], !session.didCheckpoint,
                    let profile = self.profiles.first(where: { $0.id == pid }) {
                     session.didCheckpoint = true
                     let store = self.store
                     Task.detached {
-                        do { _ = try store.snapshotDisk(for: profile, at: Date()) }
+                        let now = Date()
+                        do { _ = try store.snapshotDisk(for: profile, at: now) }
                         catch {
                             FileHandle.standardError.write(Data(
                                 "[checkpoint] snapshot \(profile.name) failed: \(error)\n".utf8))
+                        }
+                        do { _ = try store.snapshotHomeImage(for: profile, at: now) }
+                        catch {
+                            FileHandle.standardError.write(Data(
+                                "[checkpoint] home snapshot \(profile.name) failed: \(error)\n".utf8))
                         }
                     }
                 }
@@ -7306,7 +7494,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         let files = seedDir.appendingPathComponent("files", isDirectory: true)
                         self.seedCodexAuthFile(for: profile, homeRoot: files)
                         self.seedGrokAuthFile(for: profile, homeRoot: files)
-                        try store.finalizeHomeSeed(for: profile, seedDir: seedDir)
+                        try store.finalizeHomeSeed(
+                            for: profile, seedDir: seedDir,
+                            anthropicEnvKey: plan.fakeForAnthropic()
+                                ?? plan.claudeSubscriptionBogusKey)
                     } catch {
                         FileHandle.standardError.write(Data(
                             "[ac] home-seed staging (reboot) failed: \(error)\n".utf8))

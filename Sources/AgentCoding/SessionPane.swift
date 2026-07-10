@@ -529,9 +529,13 @@ final class SessionPane {
             if fire { acDelegate?.openProfileManagerAction(nil) }
             return true
         default:
-            guard let n = Int(key), (1...9).contains(n),
-                  model.tabs.indices.contains(n - 1) else { return false }
-            if fire { switchTo(index: n - 1) }
+            // ⌘1–9 follow the SIDEBAR's row numbers (tree order, container
+            // tabs excluded) so the chord labels next to the rows stay true.
+            guard let n = Int(key), (1...9).contains(n) else { return false }
+            let ordered = worktreeDisplayOrdered(model.tabs)
+                .filter { $0.tab.containerID == nil }
+            guard ordered.indices.contains(n - 1) else { return false }
+            if fire { switchTo(index: ordered[n - 1].idx) }
             return true
         }
     }

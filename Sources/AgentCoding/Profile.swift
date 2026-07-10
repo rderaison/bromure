@@ -2784,28 +2784,86 @@ public final class ProfileStore {
         profileDirectory(for: profile).appendingPathComponent("checkpoints")
     }
 
-    /// CoW-clone the current disk into `checkpoints/<ts>.img` and keep only the
-    /// `keep` newest. clonefile is instant + near-zero space (shares blocks with
-    /// the live disk until they diverge), so this is cheap to do every boot.
-    /// Cloning a live disk yields a crash-consistent image (ext4 journal replays
-    /// on restore) — acceptable for a rollback point, and the source just booted.
+    /// Home (ext4 home.img) rollback points, kept apart from the disk's so
+    /// either can be reverted without touching the other.
+    public func homeCheckpointsDirectory(for profile: Profile) -> URL {
+        checkpointsDirectory(for: profile).appendingPathComponent("home")
+    }
+
+    /// The tiered "go back in time" ladder: which of `dates` to KEEP.
+    /// The newest `boots` stay unconditionally (the last few sessions), then
+    /// the newest checkpoint of each calendar day for `days` days, then the
+    /// newest of each calendar week for `weeks` weeks; everything older is
+    /// pruned. Worst case boots+days+weeks images — in practice the tiers
+    /// overlap and it's fewer, and clonefile copies only cost the blocks
+    /// that have since diverged.
+    public static func checkpointRetention(_ dates: [Date], now: Date,
+                                           boots: Int = 3, days: Int = 7,
+                                           weeks: Int = 4,
+                                           calendar: Calendar = .current) -> Set<Date> {
+        let sorted = dates.sorted(by: >)
+        var keep = Set(sorted.prefix(max(0, boots)))
+        if let dayCut = calendar.date(byAdding: .day, value: -days, to: now) {
+            var seen = Set<DateComponents>()
+            for d in sorted where d >= dayCut {
+                let day = calendar.dateComponents([.year, .month, .day], from: d)
+                if seen.insert(day).inserted { keep.insert(d) }
+            }
+        }
+        if let weekCut = calendar.date(byAdding: .weekOfYear, value: -weeks, to: now) {
+            var seen = Set<DateComponents>()
+            for d in sorted where d >= weekCut {
+                let week = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: d)
+                if seen.insert(week).inserted { keep.insert(d) }
+            }
+        }
+        return keep
+    }
+
+    /// CoW-clone the current disk into `checkpoints/<ts>.img` and prune to
+    /// the tiered ladder. clonefile is instant + near-zero space (shares
+    /// blocks with the live disk until they diverge), so this is cheap to do
+    /// every boot. Cloning a live disk yields a crash-consistent image (ext4
+    /// journal replays on restore) — acceptable for a rollback point, and
+    /// the source just booted.
     @discardableResult
-    public func snapshotDisk(for profile: Profile, at date: Date, keep: Int = 5) throws -> DiskCheckpoint? {
-        let disk = diskURL(for: profile)
-        guard fm.fileExists(atPath: disk.path) else { return nil }
-        let dir = checkpointsDirectory(for: profile)
+    public func snapshotDisk(for profile: Profile, at date: Date) throws -> DiskCheckpoint? {
+        try snapshotImage(diskURL(for: profile),
+                          into: checkpointsDirectory(for: profile), at: date)
+    }
+
+    /// Same rollback ladder for the ext4 home image — the "my agent trashed
+    /// my code an hour ago" recovery path. No-op for legacy virtiofs homes
+    /// (no home.img to clone).
+    @discardableResult
+    public func snapshotHomeImage(for profile: Profile, at date: Date) throws -> DiskCheckpoint? {
+        try snapshotImage(homeImageURL(for: profile),
+                          into: homeCheckpointsDirectory(for: profile), at: date)
+    }
+
+    private func snapshotImage(_ image: URL, into dir: URL,
+                               at date: Date) throws -> DiskCheckpoint? {
+        guard fm.fileExists(atPath: image.path) else { return nil }
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let ts = Int(date.timeIntervalSince1970)
         let dst = dir.appendingPathComponent("\(ts).img")
         guard !fm.fileExists(atPath: dst.path) else { return nil }   // one per second
-        try Self.cloneItem(at: disk, to: dst)
-        pruneCheckpoints(for: profile, keep: keep)
-        return listCheckpoints(for: profile).first { $0.id == String(ts) }
+        try Self.cloneItem(at: image, to: dst)
+        prune(in: dir, now: date)
+        return list(in: dir).first { $0.id == String(ts) }
     }
 
     /// Newest first.
     public func listCheckpoints(for profile: Profile) -> [DiskCheckpoint] {
-        let dir = checkpointsDirectory(for: profile)
+        list(in: checkpointsDirectory(for: profile))
+    }
+
+    /// Newest first.
+    public func listHomeCheckpoints(for profile: Profile) -> [DiskCheckpoint] {
+        list(in: homeCheckpointsDirectory(for: profile))
+    }
+
+    private func list(in dir: URL) -> [DiskCheckpoint] {
         let urls = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.totalFileAllocatedSizeKey])) ?? []
         return urls.compactMap { url -> DiskCheckpoint? in
             guard url.pathExtension == "img",
@@ -2817,9 +2875,11 @@ public final class ProfileStore {
         }.sorted { $0.createdAt > $1.createdAt }
     }
 
-    private func pruneCheckpoints(for profile: Profile, keep: Int) {
-        for old in listCheckpoints(for: profile).dropFirst(max(0, keep)) {
-            try? fm.removeItem(at: old.url)
+    private func prune(in dir: URL, now: Date) {
+        let all = list(in: dir)
+        let keep = Self.checkpointRetention(all.map(\.createdAt), now: now)
+        for cp in all where !keep.contains(cp.createdAt) {
+            try? fm.removeItem(at: cp.url)
         }
     }
 
@@ -2827,17 +2887,33 @@ public final class ProfileStore {
     /// caller enforces this) — replacing an open disk image would corrupt it.
     /// Clears saved RAM state so the kernel's block-device view matches the disk.
     public func revertDisk(for profile: Profile, to checkpointID: String) throws {
-        let src = checkpointsDirectory(for: profile).appendingPathComponent("\(checkpointID).img")
+        try revertImage(fromCheckpoint: checkpointID,
+                        in: checkpointsDirectory(for: profile),
+                        over: diskURL(for: profile), profile: profile)
+    }
+
+    /// Restore a home checkpoint over the live home.img. Same rules: the VM
+    /// must be stopped, and saved RAM state is cleared (a resumed kernel
+    /// would hold stale ext4 state for the replaced device). Only the home
+    /// rolls back — the system disk is untouched.
+    public func revertHomeImage(for profile: Profile, to checkpointID: String) throws {
+        try revertImage(fromCheckpoint: checkpointID,
+                        in: homeCheckpointsDirectory(for: profile),
+                        over: homeImageURL(for: profile), profile: profile)
+    }
+
+    private func revertImage(fromCheckpoint checkpointID: String, in dir: URL,
+                             over image: URL, profile: Profile) throws {
+        let src = dir.appendingPathComponent("\(checkpointID).img")
         guard fm.fileExists(atPath: src.path) else {
             throw NSError(domain: "BromureAC.checkpoint", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Checkpoint \(checkpointID) not found"])
         }
-        let disk = diskURL(for: profile)
-        if fm.fileExists(atPath: disk.path) { try fm.removeItem(at: disk) }
-        try Self.cloneItem(at: src, to: disk)
-        let dir = profileDirectory(for: profile)
-        try? fm.removeItem(at: dir.appendingPathComponent("vm.state"))
-        try? fm.removeItem(at: dir.appendingPathComponent("tabs.json"))
+        if fm.fileExists(atPath: image.path) { try fm.removeItem(at: image) }
+        try Self.cloneItem(at: src, to: image)
+        let profileDir = profileDirectory(for: profile)
+        try? fm.removeItem(at: profileDir.appendingPathComponent("vm.state"))
+        try? fm.removeItem(at: profileDir.appendingPathComponent("tabs.json"))
     }
 
     /// Wipe the per-profile **home** directory. Inverse of resetDisk:
@@ -2858,6 +2934,9 @@ public final class ProfileStore {
         if fm.fileExists(atPath: img.path) {
             try fm.removeItem(at: img)
         }
+        // Erased means erased: the home's rollback checkpoints hold the
+        // same data and must not survive the wipe.
+        try? fm.removeItem(at: homeCheckpointsDirectory(for: profile))
     }
 
     /// Logical size of a per-profile disk image (sparse — what it
@@ -3286,6 +3365,35 @@ public final class ProfileStore {
             try data.write(to: claudeSettingsURL, options: .atomic)
             try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
                                   ofItemAtPath: claudeSettingsURL.path)
+
+            // Pre-approve the session's ANTHROPIC_API_KEY in ~/.claude.json
+            // (customApiKeyResponses stores the key's last-20 suffix) so the
+            // "use this API key from your environment?" prompt never blocks a
+            // first launch or a cloned workspace, whose per-profile bogus key
+            // differs from the approval the base's home carries. Guest-side
+            // twin for the ext4 model: agentd's _approve_claude_api_key.
+            let envKey = tokenPlan?.fakeForAnthropic()
+                ?? tokenPlan?.claudeSubscriptionBogusKey
+            if let envKey, !envKey.isEmpty {
+                let claudeJSONURL = home.appendingPathComponent(".claude.json")
+                var cfg: [String: Any] = [:]
+                if let data = try? Data(contentsOf: claudeJSONURL),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    cfg = json
+                }
+                var responses = cfg["customApiKeyResponses"] as? [String: Any] ?? [:]
+                var approved = responses["approved"] as? [String] ?? []
+                let suffix = String(envKey.suffix(20))
+                if !approved.contains(suffix) {
+                    approved.append(suffix)
+                    responses["approved"] = approved
+                    cfg["customApiKeyResponses"] = responses
+                    if let out = try? JSONSerialization.data(
+                        withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys]) {
+                        try? out.write(to: claudeJSONURL, options: .atomic)
+                    }
+                }
+            }
         }
         if usesClaude {
             // The reporter script the hooks call (idempotent overwrite).
@@ -3466,7 +3574,15 @@ public final class ProfileStore {
     /// picked up; then appends the cleanup entries for the conditional
     /// files that were NOT generated this launch (mirroring the
     /// delete-if-managed logic of the virtiofs path).
-    public func finalizeHomeSeed(for profile: Profile, seedDir: URL) throws {
+    /// `anthropicEnvKey` — the exact ANTHROPIC_API_KEY this session exports
+    /// (token-mode fake or subscription bogus). Its last-20 suffix rides in
+    /// the spec so the guest pre-approves it in ~/.claude.json
+    /// (customApiKeyResponses) — otherwise Claude's "use this API key from
+    /// your environment?" prompt blocks first launches and cloned
+    /// workspaces (whose per-profile bogus key differs from the approval
+    /// the base workspace's home carries).
+    public func finalizeHomeSeed(for profile: Profile, seedDir: URL,
+                                 anthropicEnvKey: String? = nil) throws {
         let files = seedDir.appendingPathComponent("files", isDirectory: true)
         var dirLines: [String] = []
         var fileLines: [String] = []
@@ -3531,6 +3647,10 @@ public final class ProfileStore {
         let usesClaude = profile.tool == .claude
             || profile.additionalTools.contains { $0.tool == .claude }
         var spec: [String: Any] = ["usesClaude": usesClaude]
+        if usesClaude, let key = anthropicEnvKey, !key.isEmpty {
+            // Claude Code stores approvals as the key's last 20 characters.
+            spec["approvedApiKeySuffix"] = String(key.suffix(20))
+        }
         if profile.bedrockEnabled {
             var env: [String: String] = [
                 "CLAUDE_CODE_USE_BEDROCK": "1",
@@ -3838,6 +3958,14 @@ public final class ProfileStore {
     # above has already run for this interactive shell.
     if [ -n "${BROMURE_AC_WT_TOOL:-}" ] && [ -t 1 ]; then
         _wt_tool="$BROMURE_AC_WT_TOOL"; unset BROMURE_AC_WT_TOOL
+        # Pin the agent's start dir to the checkout root the guest agent
+        # chose. tmux already opens the window there (-c), but the agent
+        # must never inherit a drifted $PWD — an agent started in a
+        # subfolder scopes itself to that subfolder.
+        _wt_dir="${BROMURE_AC_WT_DIR:-}"; unset BROMURE_AC_WT_DIR
+        if [ -n "$_wt_dir" ] && [ -d "$_wt_dir" ]; then
+            cd -- "$_wt_dir" 2>/dev/null || true
+        fi
         # Extra CLI flags for THIS launch only, decided host-side by agentd
         # (empty for manual worktrees; the unattended-automation path passes
         # each tool's skip-confirmation flag so the "trust this folder" /
@@ -3861,7 +3989,7 @@ public final class ProfileStore {
                 "$_wt_tool" $_wt_flags
             fi
         fi
-        unset _wt_tool _wt_prompt _wt_flags
+        unset _wt_tool _wt_prompt _wt_flags _wt_dir
     fi
 
     if [ "$BROMURE_AC_REGISTER" = "1" ] \\

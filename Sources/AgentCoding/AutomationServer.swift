@@ -79,11 +79,13 @@ final class ACAutomationServer {
     /// Create (boot) a VM from a profile ref or inline spec + mounts. Returns
     /// the new VM's info dict, or nil on failure.
     var onCreateVM: ((_ spec: [String: Any]) async -> [String: Any]?)?
-    /// Disk rollback points (CLI `vm checkpoints` / `vm revert`). List returns
-    /// newest-first dicts; revert returns a result dict (with an `error` key on
-    /// failure, e.g. the VM is still running).
+    /// Disk + home rollback points (CLI `vm checkpoints` / `vm revert`). List
+    /// returns newest-first dicts tagged `target: disk|home`; revert takes the
+    /// same target and returns a result dict (with an `error` key on failure,
+    /// e.g. the VM is still running).
     var onListCheckpoints: ((_ idOrName: String) -> [[String: Any]])?
-    var onRevertCheckpoint: ((_ idOrName: String, _ checkpoint: String) async -> [String: Any])?
+    var onRevertCheckpoint: ((_ idOrName: String, _ checkpoint: String,
+                              _ target: String) async -> [String: Any])?
 
     // Profile management (CLI `profiles …`).
     var onDescribeProfile: ((_ idOrName: String) -> [String: Any]?)?
@@ -675,11 +677,12 @@ final class ACAutomationServer {
             }
             let id = decode(String(rest.dropLast("/revert".count)))
             let cp = (bodyJSON["checkpoint"] as? String) ?? ""
+            let target = (bodyJSON["target"] as? String) ?? "disk"
             let semaphore = DispatchSemaphore(value: 0)
             var result: [String: Any] = ["error": "not handled"]
             DispatchQueue.main.async {
                 Task { @MainActor in
-                    result = await self.onRevertCheckpoint?(id, cp) ?? ["error": "not handled"]
+                    result = await self.onRevertCheckpoint?(id, cp, target) ?? ["error": "not handled"]
                     semaphore.signal()
                 }
             }

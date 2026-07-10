@@ -24,6 +24,9 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         case githubIssue
         case githubCommit
         case linearIssue
+        /// Chained: fires when another automation's run reports done
+        /// (Claude's Stop hook — the same signal that drives closeWhenDone).
+        case afterAutomation
 
         /// The GitHub triggers all authenticate the same way.
         var isGitHub: Bool {
@@ -193,6 +196,17 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
     /// Stop hook is the one reliable signal). The transcript is saved into
     /// the worktree first. Off = the tab stays up for inspection.
     var closeWhenDone: Bool
+    /// Boot (or resume) the workspace when a fire finds it not running.
+    /// Off = such fires are recorded as skipped instead.
+    var startWorkspaceIfNeeded: Bool
+    /// Run in a disposable duplicate of the workspace instead of the
+    /// workspace itself: cloned (CoW) at fire time, booted, and deleted when
+    /// the run finishes (Claude-only — teardown needs the reliable done
+    /// signal). With closeWhenDone off the clone is kept for inspection.
+    var cloneWorkspaceFirst: Bool
+    /// `.afterAutomation` only: the upstream automation whose finished run
+    /// fires this one.
+    var chainedAutomationID: UUID?
 
     var createdAt: Date
 
@@ -216,6 +230,9 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
          prompt: String = "",
          repoPath: String = "~",
          closeWhenDone: Bool = true,
+         startWorkspaceIfNeeded: Bool = true,
+         cloneWorkspaceFirst: Bool = false,
+         chainedAutomationID: UUID? = nil,
          createdAt: Date = Date()) {
         self.id = id
         self.name = name
@@ -237,6 +254,9 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         self.prompt = prompt
         self.repoPath = repoPath
         self.closeWhenDone = closeWhenDone
+        self.startWorkspaceIfNeeded = startWorkspaceIfNeeded
+        self.cloneWorkspaceFirst = cloneWorkspaceFirst
+        self.chainedAutomationID = chainedAutomationID
         self.createdAt = createdAt
     }
 
@@ -245,6 +265,7 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         case assignmentFilter, linearTeam, ignoreBacklog, filters
         case frequency, weekday, hour, minute, intervalMinutes
         case missedRunPolicy, tool, prompt, repoPath, closeWhenDone, createdAt
+        case startWorkspaceIfNeeded, cloneWorkspaceFirst, chainedAutomationID
     }
 
     init(from decoder: Decoder) throws {
@@ -271,7 +292,25 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         prompt          = try c.decodeIfPresent(String.self, forKey: .prompt) ?? ""
         repoPath        = try c.decodeIfPresent(String.self, forKey: .repoPath) ?? "~"
         closeWhenDone   = try c.decodeIfPresent(Bool.self, forKey: .closeWhenDone) ?? true
+        startWorkspaceIfNeeded = try c.decodeIfPresent(Bool.self,
+                                                       forKey: .startWorkspaceIfNeeded) ?? true
+        cloneWorkspaceFirst = try c.decodeIfPresent(Bool.self,
+                                                    forKey: .cloneWorkspaceFirst) ?? false
+        chainedAutomationID = try c.decodeIfPresent(UUID.self, forKey: .chainedAutomationID)
         createdAt       = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+    }
+
+    /// True when following `chainedAutomationID` links upward from `id`
+    /// revisits `id` — a chain loop. Bounded walk, cycle-safe on stale links.
+    static func chainCycles(from id: UUID, in automations: [ScheduledAutomation]) -> Bool {
+        var cur = automations.first(where: { $0.id == id })?.chainedAutomationID
+        var hops = 0
+        while let c = cur, hops < 64 {
+            if c == id { return true }
+            cur = automations.first(where: { $0.id == c })?.chainedAutomationID
+            hops += 1
+        }
+        return false
     }
 }
 
@@ -301,10 +340,14 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     /// `launched` or `blocked` record here is considered processed and never
     /// fires again — this is the dedup key. nil for schedule runs.
     var itemKey: String?
+    /// The workspace the run actually executed in, when it differs from the
+    /// automation's own — i.e. the disposable clone of a clone-first run.
+    /// Completion matching and teardown key off this.
+    var runProfileID: UUID?
 
     init(id: UUID = UUID(), automationID: UUID, firedAt: Date,
          outcome: Outcome, detail: String, branchSlug: String? = nil,
-         itemKey: String? = nil) {
+         itemKey: String? = nil, runProfileID: UUID? = nil) {
         self.id = id
         self.automationID = automationID
         self.firedAt = firedAt
@@ -312,6 +355,7 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
         self.detail = detail
         self.branchSlug = branchSlug
         self.itemKey = itemKey
+        self.runProfileID = runProfileID
     }
 }
 
@@ -559,7 +603,7 @@ enum GitHubPRPoller {
         case .githubIssue:       return "issue:\(item.number)"
         case .githubCommit:      return "commit:\(item.identifier)"
         case .linearIssue:       return "linear:\(item.identifier)"
-        case .schedule:          return ""
+        case .schedule, .afterAutomation: return ""
         }
     }
 
@@ -602,7 +646,7 @@ enum GitHubPRPoller {
         case .githubIssue:        return "Issue"
         case .githubCommit:       return "Commit"
         case .linearIssue:        return "Linear issue"
-        case .schedule:           return "Item"
+        case .schedule, .afterAutomation: return "Item"
         }
     }
 
@@ -1051,6 +1095,8 @@ final class ScheduledAutomationEngine {
                 scheduleTick(a, now: now)
             case .githubPullRequest, .githubIssue, .githubCommit, .linearIssue:
                 eventTick(a, now: now)
+            case .afterAutomation:
+                break   // fired by agentFinished, nothing to poll
             }
         }
     }
@@ -1149,7 +1195,7 @@ final class ScheduledAutomationEngine {
                 items = try await LinearPoller.fetchIssues(
                     assignment: a.assignmentFilter, team: a.linearTeam,
                     token: profile.linearToken, filters: a.filters)
-            case .schedule:
+            case .schedule, .afterAutomation:
                 return
             }
         } catch {
@@ -1298,6 +1344,15 @@ final class ScheduledAutomationEngine {
         let args = [Self.guestPath(a.repoPath), slug, a.name,
                     a.tool.rawValue, promptOverride ?? a.prompt]
 
+        // Clone-first run: a disposable duplicate of the workspace, never
+        // the workspace itself. Claude-only — the teardown when the run
+        // finishes rides on Claude's reliable done signal.
+        if a.cloneWorkspaceFirst && a.tool == .claude {
+            fireInClone(a, slug: slug, detail: detail, args: args,
+                        now: now, itemKey: itemKey)
+            return
+        }
+
         // Running workspace: queue straight to the session outbox (the same
         // detached path the CLI/SSH surface uses — no window or pane needed).
         if delegate.automationWorktreeCommand(
@@ -1309,9 +1364,22 @@ final class ScheduledAutomationEngine {
             return
         }
 
-        // Workspace off/suspended: start it WITHOUT the interactive path's
-        // fresh-boot-on-restore-failure fallback — an automation must never
-        // trade a suspended session (tmux, running work) for a cold boot.
+        // Workspace off/suspended. Only boot it when the automation says so;
+        // otherwise the fire is recorded as skipped — visible, not silent.
+        guard a.startWorkspaceIfNeeded else {
+            BACDebug.log("automation", "skipping “\(a.name)” — workspace not running, auto-start off")
+            store.record(AutomationRunRecord(
+                automationID: a.id, firedAt: now, outcome: .skipped,
+                detail: NSLocalizedString(
+                    "The workspace isn't running and this automation doesn't start it",
+                    comment: "skipped automation run"),
+                itemKey: itemKey))
+            return
+        }
+
+        // Start it WITHOUT the interactive path's fresh-boot-on-restore-
+        // failure fallback — an automation must never trade a suspended
+        // session (tmux, running work) for a cold boot.
         BACDebug.log("automation", "“\(a.name)”: workspace not running — starting")
         if !pendingBoots.contains(a.profileID) {
             pendingBoots.insert(a.profileID)
@@ -1341,6 +1409,51 @@ final class ScheduledAutomationEngine {
         }
     }
 
+    /// Clone-first fire: duplicate the workspace (CoW — settings,
+    /// credentials, and the ext4 home travel), boot the copy, and queue the
+    /// run there. The clone is torn down when the run finishes (see
+    /// agentFinished) or if it never boots; with closeWhenDone off it's
+    /// deliberately kept for inspection.
+    private func fireInClone(_ a: ScheduledAutomation, slug: String, detail: String,
+                             args: [String], now: Date, itemKey: String?) {
+        Task { [weak self] in
+            guard let self, let delegate = self.delegate else { return }
+            // The delegate syncs a running source's page cache before the
+            // CoW copy, so the clone is as fresh as a live source allows.
+            guard let clone = await delegate.cloneWorkspaceForAutomation(
+                a.profileID, runSlug: slug) else {
+                self.store.record(AutomationRunRecord(
+                    automationID: a.id, firedAt: now, outcome: .failed,
+                    detail: NSLocalizedString("Couldn't clone the workspace",
+                                              comment: "failed automation run"),
+                    itemKey: itemKey))
+                return
+            }
+            BACDebug.log("automation", "“\(a.name)”: cloned workspace → “\(clone.name)” — booting")
+            delegate.startProfileForAutomation(clone.id)
+            let deadline = now.addingTimeInterval(Self.bootTimeout)
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: Self.bootPollInterval)
+                guard let delegate = self.delegate else { return }
+                if delegate.automationWorktreeCommand(
+                    profileNameOrID: clone.id.uuidString, action: "run", args: args) {
+                    BACDebug.log("automation", "launched “\(a.name)” → \(slug) (in clone)")
+                    self.store.record(AutomationRunRecord(
+                        automationID: a.id, firedAt: now, outcome: .launched,
+                        detail: detail, branchSlug: slug, itemKey: itemKey,
+                        runProfileID: clone.id))
+                    return
+                }
+            }
+            self.store.record(AutomationRunRecord(
+                automationID: a.id, firedAt: now, outcome: .failed,
+                detail: NSLocalizedString("The cloned workspace did not boot in time",
+                                          comment: "failed automation run"),
+                itemKey: itemKey))
+            self.delegate?.destroyAutomationClone(clone.id)
+        }
+    }
+
     // MARK: Run completion (transcript + tab close)
 
     /// Delegate callback: a Claude tab flipped to .done. If its branch maps
@@ -1363,12 +1476,23 @@ final class ScheduledAutomationEngine {
                 && Int(slugPart.dropFirst(slug.count + 1)) != nil)
         }),
             let automation = store.automation(run.automationID),
-            automation.profileID == profileID,
-            automation.tool == .claude,
-            automation.closeWhenDone
+            // Clone-first runs live in the clone, not the automation's own
+            // workspace — match whichever profile the run executed in.
+            (run.runProfileID ?? automation.profileID) == profileID,
+            // Only Claude's Stop hook is a trustworthy done — the Codex/Grok
+            // proxy heuristic can flip .done during a long silent stretch.
+            automation.tool == .claude
         else { return }
         finishSent.insert(branch)
+
+        // Chained automations fire on the finish itself, independent of
+        // closeWhenDone (leaving the tab open for inspection shouldn't
+        // stall the pipeline).
+        fireChained(after: automation, branch: branch)
+
+        guard automation.closeWhenDone else { return }
         BACDebug.log("automation", "run done — saving transcript and closing tab for \(branch)")
+        let cloneID = run.runProfileID
         // Small delay so the Stop hook's final transcript lines land on disk
         // before the guest copies the file.
         Task { [weak self] in
@@ -1376,7 +1500,57 @@ final class ScheduledAutomationEngine {
             guard let self, let delegate = self.delegate else { return }
             _ = delegate.automationWorktreeCommand(
                 profileNameOrID: profileID.uuidString, action: "finish", args: [branch])
+            if let cloneID {
+                // Disposable clone: give the finish a moment to write the
+                // transcript, then power off and delete the whole copy.
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                self.delegate?.destroyAutomationClone(cloneID)
+            }
         }
+    }
+
+    /// Fire every enabled "After automation" automation chained to
+    /// `upstream`'s finished run. The editor refuses chain loops at save;
+    /// the cycle re-check here is the runtime backstop against stale edits.
+    private func fireChained(after upstream: ScheduledAutomation, branch: String) {
+        for downstream in store.automations
+        where downstream.enabled
+            && downstream.trigger == .afterAutomation
+            && downstream.chainedAutomationID == upstream.id
+            && downstream.id != upstream.id {
+            if ScheduledAutomation.chainCycles(from: downstream.id, in: store.automations) {
+                BACDebug.log("automation",
+                             "chain: “\(downstream.name)” skipped — chain loop detected")
+                continue
+            }
+            BACDebug.log("automation",
+                         "chain: “\(upstream.name)” finished → firing “\(downstream.name)”")
+            fire(downstream, now: Date(),
+                 promptOverride: Self.substituteChain(
+                    downstream.prompt, upstreamName: upstream.name, branch: branch),
+                 detailOverride: String(
+                    format: NSLocalizedString("after “%1$@” (%2$@)",
+                                              comment: "chained run detail"),
+                    upstream.name, branch))
+        }
+    }
+
+    /// Fill `{{chain.*}}` variables into a chained prompt. Prompts using
+    /// none of them get the upstream context appended instead — same
+    /// convention as the event triggers' `{{pr.*}}` handling.
+    nonisolated static func substituteChain(_ template: String,
+                                            upstreamName: String,
+                                            branch: String) -> String {
+        if template.contains("{{chain.") {
+            return template
+                .replacingOccurrences(of: "{{chain.branch}}", with: branch)
+                .replacingOccurrences(of: "{{chain.automation}}", with: upstreamName)
+        }
+        var out = template
+        out += "\n\n---\nTriggered by automation “\(upstreamName)” finishing its run "
+        out += "on branch \(branch) of this repository. "
+        out += "Its work is on that branch — check it out or diff against it if useful."
+        return out
     }
 
     // MARK: Helpers
@@ -1394,7 +1568,7 @@ final class ScheduledAutomationEngine {
             return "issue\(item.number)"
         case .linearIssue:
             return item.identifier.lowercased()
-        case .schedule:
+        case .schedule, .afterAutomation:
             return ""
         }
     }

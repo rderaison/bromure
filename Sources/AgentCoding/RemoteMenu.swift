@@ -1443,6 +1443,46 @@ final class RemoteMenuApp {
         return min(depth, 6)
     }
 
+    /// Tabs in display order: each worktree (or parentBranch-tagged tab)
+    /// pulled directly under its parent, so the indentation always hangs off
+    /// the right row. Mirrors the GUI sidebar's `worktreeDisplayOrdered`.
+    static func worktreeOrdered(_ tabs: [[String: Any]]) -> [[String: Any]] {
+        var children: [Int: [Int]] = [:]
+        var roots: [Int] = []
+        for (i, t) in tabs.enumerated() {
+            var parent: Int?
+            if let pb = t["parentBranch"] as? String, !pb.isEmpty {
+                parent = tabs.firstIndex(where: { $0["worktreeBranch"] as? String == pb })
+            }
+            if parent == nil, t["isWorktree"] as? Bool == true,
+               let root = t["rootRepo"] as? String, !root.isEmpty {
+                // Depth-1 worktree → the repo tab it was cut from. Older
+                // apps don't send repoRoot; fall back to a cwd prefix match.
+                parent = tabs.firstIndex(where: {
+                    guard $0["isGitRepo"] as? Bool == true else { return false }
+                    if let rr = $0["repoRoot"] as? String, !rr.isEmpty { return rr == root }
+                    guard let c = $0["cwd"] as? String else { return false }
+                    return c == root || c.hasPrefix(root + "/")
+                })
+            }
+            if let p = parent, p != i {
+                children[p, default: []].append(i)
+            } else {
+                roots.append(i)
+            }
+        }
+        var out: [[String: Any]] = []
+        var seen = Set<Int>()
+        func emit(_ i: Int) {
+            guard seen.insert(i).inserted else { return }
+            out.append(tabs[i])
+            for c in children[i] ?? [] { emit(c) }
+        }
+        for r in roots { emit(r) }
+        for i in tabs.indices where !seen.contains(i) { emit(i) }
+        return out
+    }
+
     /// POST a worktree action to the app for `vmID`. Returns true on success.
     @discardableResult
     private func postWorktree(vmID: String, action: String, args: [String]) -> Bool {
@@ -1472,7 +1512,7 @@ final class RemoteMenuApp {
             let tool = fetchVM(vmID)?["tool"] as? String ?? "claude"
             var labels: [String] = []
             var actions: [() -> Void] = []
-            for t in tabs {
+            for t in Self.worktreeOrdered(tabs) {
                 let title = t["title"] as? String ?? "shell"
                 let indent = String(repeating: "  ", count: Self.worktreeDepth(t, in: tabs))
                 if t["isWorktree"] as? Bool == true {
@@ -1683,7 +1723,7 @@ final class RemoteMenuApp {
             // The tab tree — names + worktree nesting — as SWITCHABLE items.
             // Selecting a tab makes it active and closes the overlay, so the
             // guest repaints on that tab. (▸ = current · 📁 repo · 🌿 worktree · ⇗ merge)
-            for t in tabs {
+            for t in Self.worktreeOrdered(tabs) {
                 let title = t["title"] as? String ?? "shell"
                 let indent = String(repeating: "  ", count: Self.worktreeDepth(t, in: tabs))
                 let isActive = (t["active"] as? Bool == true)

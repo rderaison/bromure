@@ -156,6 +156,10 @@ struct ProfileStorageContext {
     /// Non-nil only for saved legacy (virtiofs-home) profiles: re-arms the
     /// home-storage upgrade offer for the next launch.
     var onUpgradeHome: (() -> Void)?
+    /// Non-nil only for saved ext4-home profiles: roll the home back to one
+    /// of its per-boot checkpoints (ACAppDelegate.restoreHomeStorage — owns
+    /// its own picker + confirmation).
+    var onRestoreHome: (() -> Void)?
 
     static func empty(baseImageURL: URL) -> ProfileStorageContext {
         ProfileStorageContext(
@@ -168,7 +172,8 @@ struct ProfileStorageContext {
             isRunning: false,
             onResetDisk: {},
             onResetHome: {},
-            onUpgradeHome: nil
+            onUpgradeHome: nil,
+            onRestoreHome: nil
         )
     }
 }
@@ -3550,15 +3555,28 @@ private struct StorageStackView: View {
                             : NSLocalizedString("Created on first launch.", comment: ""),
                         handler: context.onResetHome
                       ),
-                secondaryAction: (isNewProfile || context.onUpgradeHome == nil)
-                    ? nil
-                    : .init(
-                        label: NSLocalizedString("Upgrade storage…", comment: ""),
-                        role: nil,
-                        enabled: !context.isRunning,
-                        disabledHelp: NSLocalizedString("Close the session window first.", comment: ""),
-                        handler: { context.onUpgradeHome?() }
-                      )
+                // One slot, model-exclusive: legacy homes offer the upgrade,
+                // ext4 homes offer the checkpoint rollback.
+                secondaryAction: {
+                    if isNewProfile { return nil }
+                    if context.onUpgradeHome != nil {
+                        return .init(
+                            label: NSLocalizedString("Upgrade storage…", comment: ""),
+                            role: nil,
+                            enabled: !context.isRunning,
+                            disabledHelp: NSLocalizedString("Close the session window first.", comment: ""),
+                            handler: { context.onUpgradeHome?() })
+                    }
+                    if context.onRestoreHome != nil {
+                        return .init(
+                            label: NSLocalizedString("Restore home…", comment: ""),
+                            role: nil,
+                            enabled: !context.isRunning,
+                            disabledHelp: NSLocalizedString("Close the session window first.", comment: ""),
+                            handler: { context.onRestoreHome?() })
+                    }
+                    return nil
+                }()
             )
 
             Divider()

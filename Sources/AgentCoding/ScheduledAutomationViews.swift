@@ -146,6 +146,8 @@ func scheduleSummary(_ a: ScheduledAutomation) -> String {
                      ? NSLocalizedString("Mine", comment: "linear row summary")
                      : NSLocalizedString("Unassigned", comment: "linear row summary"))
         return parts.joined(separator: " · ")
+    case .afterAutomation:
+        return NSLocalizedString("Chained", comment: "row summary")
     case .schedule:
         break
     }
@@ -203,7 +205,8 @@ struct AutomationPrefill: Sendable {
 // MARK: - Editor
 
 /// The automation editor, shown as a stage overlay. Sections mirror the
-/// agreed design: Trigger, Task, unattended-run warnings, recent runs.
+/// agreed design: Workspace (first — it decides which triggers and agents
+/// are available), Trigger, Task, unattended-run warnings, recent runs.
 /// Guardrail overrides and macOS notifications are follow-ups — the
 /// permissions section links to the workspace's settings instead.
 struct AutomationEditorView: View {
@@ -214,8 +217,13 @@ struct AutomationEditorView: View {
     let onRunNow: (ScheduledAutomation) -> Void
     let onDelete: (UUID) -> Void
     let onEditWorkspace: (UUID) -> Void
+    /// Fires whenever the draft starts/stops differing from what's stored,
+    /// so the AppKit host can warn before tearing down an edited draft.
+    let onDirtyChange: (Bool) -> Void
 
     @State private var draft: ScheduledAutomation
+    /// The draft as presented — the baseline for the dirty check.
+    private let original: ScheduledAutomation
     private let isNew: Bool
 
     /// Repo/team dropdown state: nil = loading, [] with error = fetch failed
@@ -307,15 +315,18 @@ struct AutomationEditorView: View {
          onSave: @escaping (ScheduledAutomation) -> Void,
          onRunNow: @escaping (ScheduledAutomation) -> Void,
          onDelete: @escaping (UUID) -> Void,
-         onEditWorkspace: @escaping (UUID) -> Void) {
+         onEditWorkspace: @escaping (UUID) -> Void,
+         onDirtyChange: @escaping (Bool) -> Void = { _ in }) {
         self.store = store
         self.profiles = profiles
         self.onSave = onSave
         self.onRunNow = onRunNow
         self.onDelete = onDelete
         self.onEditWorkspace = onEditWorkspace
+        self.onDirtyChange = onDirtyChange
         if let id, let existing = store.automation(id) {
             _draft = State(initialValue: existing)
+            original = existing
             _filtersExpanded = State(
                 initialValue: existing.filters != ScheduledAutomation.TriggerFilters())
             isNew = false
@@ -329,6 +340,7 @@ struct AutomationEditorView: View {
                 fresh.tool = owner.tool
             }
             _draft = State(initialValue: fresh)
+            original = fresh
             isNew = true
         }
     }
@@ -405,8 +417,26 @@ struct AutomationEditorView: View {
                 out.append(NSLocalizedString("add a Linear API key to the workspace",
                                              comment: "save blocker"))
             }
+        case .afterAutomation:
+            if let up = draft.chainedAutomationID, store.automation(up) != nil {
+                if chainWouldLoop {
+                    out.append(NSLocalizedString("break the automation loop",
+                                                 comment: "save blocker"))
+                }
+            } else {
+                out.append(NSLocalizedString("pick the automation this one follows",
+                                             comment: "save blocker"))
+            }
         }
         return out
+    }
+
+    /// Would saving the draft's chain link close a loop (A → … → A)?
+    /// Evaluated against the stored automations with the draft substituted in.
+    private var chainWouldLoop: Bool {
+        var all = store.automations.filter { $0.id != draft.id }
+        all.append(draft)
+        return ScheduledAutomation.chainCycles(from: draft.id, in: all)
     }
 
     private var canSave: Bool { saveBlockers.isEmpty }
@@ -519,6 +549,7 @@ struct AutomationEditorView: View {
             VStack(alignment: .leading, spacing: 22) {
                 header
                 Divider()
+                workspaceSection
                 triggerSection
                 taskSection
                 finishSection
@@ -539,6 +570,9 @@ struct AutomationEditorView: View {
         .task(id: draft.profileID) { await loadTriggerSources() }
         // Branches + directories depend on the chosen repo AND branch.
         .task(id: repoBranchKey) { await loadRepoDetails() }
+        // Tell the host when the draft diverges from (or returns to) what's
+        // stored, so navigating away can warn before discarding it.
+        .onChange(of: draft) { onDirtyChange(draft != original) }
     }
 
     /// Standardised secondary helper text under a control.
@@ -638,6 +672,7 @@ struct AutomationEditorView: View {
         case .githubIssue:       trigger = NSLocalizedString("on new issues", comment: "")
         case .githubCommit:      trigger = NSLocalizedString("on new commits", comment: "")
         case .linearIssue:       trigger = NSLocalizedString("on new Linear issues", comment: "")
+        case .afterAutomation:   trigger = NSLocalizedString("after another automation", comment: "")
         }
         return String(format: NSLocalizedString("Runs in %1$@ · %2$@", comment: "workspace · trigger"),
                       ws, trigger)
@@ -653,6 +688,7 @@ struct AutomationEditorView: View {
                 case .githubPullRequest, .githubIssue: githubControls
                 case .githubCommit:                    commitControls
                 case .linearIssue:                     linearControls
+                case .afterAutomation:                 chainControls
                 }
             }
             .padding(.horizontal, 4)
@@ -706,6 +742,10 @@ struct AutomationEditorView: View {
                           : NSLocalizedString(
                               "Add a Linear API key to this workspace to enable Linear triggers",
                               comment: ""))
+                triggerButton(.afterAutomation,
+                              label: NSLocalizedString("After automation", comment: ""))
+                    .help(NSLocalizedString(
+                        "Fire when another automation's run finishes", comment: ""))
                 Spacer()
             }
             if !hasGitHubToken || !hasLinearToken {
@@ -783,8 +823,15 @@ struct AutomationEditorView: View {
                     }
                 }
             }
-            DatePicker(NSLocalizedString("At", comment: "time of day"),
-                       selection: timeBinding, displayedComponents: .hourAndMinute)
+            // Label + control paired by hand: the bare DatePicker sizes its
+            // field to the bone and "9:00 AM" barely fits — give it room.
+            HStack(spacing: 8) {
+                Text(NSLocalizedString("At", comment: "time of day"))
+                DatePicker("", selection: timeBinding,
+                           displayedComponents: .hourAndMinute)
+                    .labelsHidden()
+                    .frame(width: 110)
+            }
         }
         Picker(NSLocalizedString("If the Mac is asleep at fire time", comment: ""),
                selection: $draft.missedRunPolicy) {
@@ -804,6 +851,48 @@ struct AutomationEditorView: View {
             comment: ""))
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
+    }
+
+    /// "After automation" trigger: pick the upstream automation whose
+    /// finished run fires this one. Loops are refused via saveBlockers.
+    @ViewBuilder
+    private var chainControls: some View {
+        let others = store.automations.filter { $0.id != draft.id }
+        if others.isEmpty {
+            hint(NSLocalizedString(
+                "No other automations yet — create the one this should follow first.",
+                comment: ""))
+        } else {
+            Picker(NSLocalizedString("Runs after", comment: "chain trigger"),
+                   selection: $draft.chainedAutomationID) {
+                Text(NSLocalizedString("Choose…", comment: "")).tag(UUID?.none)
+                ForEach(others) { other in
+                    Text(other.name.isEmpty
+                         ? NSLocalizedString("Untitled automation", comment: "")
+                         : other.name).tag(Optional(other.id))
+                }
+            }
+            if let upID = draft.chainedAutomationID, let up = store.automation(upID) {
+                if chainWouldLoop {
+                    Label(NSLocalizedString(
+                        "This choice closes a loop — the chain would fire itself forever.",
+                        comment: ""), systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                } else if up.tool != .claude {
+                    Label(String(format: NSLocalizedString(
+                        "“%@” runs %@ — only Claude runs report finishing, so this chain will never fire.",
+                        comment: "upstream name, tool"),
+                        up.name, up.tool.displayName),
+                        systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                }
+            }
+            hint(NSLocalizedString(
+                "Fires when the chosen automation's run reports done, in this automation's own workspace and repository path. The prompt can use {{chain.automation}} and {{chain.branch}} (the upstream run's worktree branch — its work, if both automations share a repository); without them that context is appended automatically.",
+                comment: ""))
+        }
     }
 
     @ViewBuilder
@@ -988,15 +1077,18 @@ struct AutomationEditorView: View {
         }
     }
 
-    private var taskSection: some View {
-        GroupBox(label: sectionLabel(NSLocalizedString("Task", comment: "automation editor"),
-                                     "terminal.fill")) {
-            VStack(alignment: .leading, spacing: 13) {
-                Picker(NSLocalizedString("Workspace", comment: ""), selection: $draft.profileID) {
+    /// First section by design: the chosen workspace decides which triggers
+    /// are available (its tokens) and which agents can run the task.
+    private var workspaceSection: some View {
+        GroupBox(label: sectionLabel(NSLocalizedString("Workspace", comment: "automation editor"),
+                                     "macwindow")) {
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("", selection: $draft.profileID) {
                     ForEach(profiles) { p in
                         Text(p.name).tag(p.id)
                     }
                 }
+                .labelsHidden()
                 .onChange(of: draft.profileID) {
                     // The new workspace may not have the previously chosen
                     // agent configured — snap to its primary.
@@ -1009,6 +1101,43 @@ struct AutomationEditorView: View {
                         draft.trigger = .schedule
                     }
                 }
+                hint(NSLocalizedString(
+                    "The workspace's credentials decide which triggers are available, and its agents run the task.",
+                    comment: ""))
+                Toggle(NSLocalizedString("Start the workspace if needed", comment: ""),
+                       isOn: $draft.startWorkspaceIfNeeded)
+                hint(draft.startWorkspaceIfNeeded
+                     ? NSLocalizedString(
+                        "A fire while the workspace is off or suspended boots it first.",
+                        comment: "")
+                     : NSLocalizedString(
+                        "A fire while the workspace isn't running is recorded as skipped.",
+                        comment: ""))
+                Toggle(NSLocalizedString("Run in a disposable clone of the workspace",
+                                         comment: ""),
+                       isOn: $draft.cloneWorkspaceFirst)
+                    .disabled(draft.tool != .claude)
+                hint(draft.tool != .claude
+                     ? NSLocalizedString(
+                        "Clone runs are Claude-only — tearing the clone down needs Claude's reliable completion signal.",
+                        comment: "")
+                     : (draft.cloneWorkspaceFirst
+                        ? NSLocalizedString(
+                            "Each run copies this workspace (settings, credentials, home), boots the copy, and deletes it when the run finishes — have the prompt push results to a remote. With “Close the tab…” off, the clone is kept for inspection instead.",
+                            comment: "")
+                        : NSLocalizedString(
+                            "The run executes in this workspace itself, as a worktree tab.",
+                            comment: "")))
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 10)
+        }
+    }
+
+    private var taskSection: some View {
+        GroupBox(label: sectionLabel(NSLocalizedString("Task", comment: "automation editor"),
+                                     "terminal.fill")) {
+            VStack(alignment: .leading, spacing: 13) {
                 Picker(NSLocalizedString("Agent", comment: ""), selection: $draft.tool) {
                     ForEach(toolChoices) { spec in
                         Text("\(spec.tool.displayName) — \(spec.authMode.displayName)")

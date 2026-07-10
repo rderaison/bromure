@@ -359,6 +359,84 @@ struct ScheduledAutomationTests {
         #expect(a.filters.excludeDrafts)
     }
 
+    // MARK: Workspace-at-fire-time + clone flags
+
+    @Test("Automations saved before the run-placement flags decode with defaults")
+    func placementFlagsDecodeDefault() throws {
+        let json = """
+        {"id":"6B29FC40-CA47-1067-B31D-00DD010662DA",
+         "name":"old","profileID":"6B29FC40-CA47-1067-B31D-00DD010662DB"}
+        """
+        let a = try JSONDecoder().decode(ScheduledAutomation.self, from: Data(json.utf8))
+        #expect(a.startWorkspaceIfNeeded)          // boot-if-needed stays the default
+        #expect(!a.cloneWorkspaceFirst)            // cloning is opt-in
+        #expect(a.chainedAutomationID == nil)
+    }
+
+    @Test("Placement flags and the chain link round-trip through Codable")
+    func placementFlagsRoundTrip() throws {
+        var a = ScheduledAutomation(profileID: UUID())
+        a.startWorkspaceIfNeeded = false
+        a.cloneWorkspaceFirst = true
+        a.trigger = .afterAutomation
+        a.chainedAutomationID = UUID()
+        let decoded = try JSONDecoder().decode(
+            ScheduledAutomation.self, from: JSONEncoder().encode(a))
+        #expect(decoded.startWorkspaceIfNeeded == false)
+        #expect(decoded.cloneWorkspaceFirst == true)
+        #expect(decoded.trigger == .afterAutomation)
+        #expect(decoded.chainedAutomationID == a.chainedAutomationID)
+    }
+
+    // MARK: Chaining
+
+    @Test("Chain cycle detection catches self, 2-cycles, and long loops")
+    func chainCycles() {
+        let pid = UUID()
+        var a = ScheduledAutomation(profileID: pid)
+        var b = ScheduledAutomation(profileID: pid)
+        var c = ScheduledAutomation(profileID: pid)
+
+        // Linear chain a ← b ← c: no cycle anywhere.
+        b.chainedAutomationID = a.id
+        c.chainedAutomationID = b.id
+        #expect(!ScheduledAutomation.chainCycles(from: a.id, in: [a, b, c]))
+        #expect(!ScheduledAutomation.chainCycles(from: c.id, in: [a, b, c]))
+
+        // Self-chain.
+        var s = ScheduledAutomation(profileID: pid)
+        s.chainedAutomationID = s.id
+        #expect(ScheduledAutomation.chainCycles(from: s.id, in: [s]))
+
+        // Closing the loop a → c makes every member cyclic.
+        a.chainedAutomationID = c.id
+        #expect(ScheduledAutomation.chainCycles(from: a.id, in: [a, b, c]))
+        #expect(ScheduledAutomation.chainCycles(from: b.id, in: [a, b, c]))
+
+        // A dangling link (upstream deleted) is not a cycle.
+        var d = ScheduledAutomation(profileID: pid)
+        d.chainedAutomationID = UUID()
+        #expect(!ScheduledAutomation.chainCycles(from: d.id, in: [d]))
+    }
+
+    @Test("Chain prompt variables are substituted")
+    func chainSubstitution() {
+        let out = ScheduledAutomationEngine.substituteChain(
+            "Review {{chain.branch}} produced by {{chain.automation}}.",
+            upstreamName: "Nightly refactor", branch: "wt/nightly-0709")
+        #expect(out == "Review wt/nightly-0709 produced by Nightly refactor.")
+    }
+
+    @Test("Chain prompts without variables get the upstream context appended")
+    func chainAutoAppend() {
+        let out = ScheduledAutomationEngine.substituteChain(
+            "Write the changelog.",
+            upstreamName: "Nightly refactor", branch: "wt/nightly-0709")
+        #expect(out.hasPrefix("Write the changelog."))
+        #expect(out.contains("Nightly refactor"))
+        #expect(out.contains("wt/nightly-0709"))
+    }
+
     // MARK: Unattended-run warnings
 
     @MainActor

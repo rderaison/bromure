@@ -146,6 +146,91 @@ struct HomeStorageTests {
             atPath: store.homeBackupDirectory(for: copy).path))
     }
 
+    // MARK: Home checkpoints (go-back-in-time ladder)
+
+    private func date(_ y: Int, _ mo: Int, _ d: Int, _ h: Int = 12) -> Date {
+        var c = DateComponents(); c.year = y; c.month = mo; c.day = d; c.hour = h
+        return Calendar.current.date(from: c)!
+    }
+
+    @Test("Retention keeps last boots, dailies for a week, weeklies for a month")
+    func retentionLadder() {
+        let now = date(2026, 7, 10, 18)
+        // Three boots today, two yesterday, one 3 days ago, one 10 days ago
+        // (inside the 4-week weekly window), one 60 days ago (outside all).
+        let boots = [date(2026, 7, 10, 17), date(2026, 7, 10, 12), date(2026, 7, 10, 9)]
+        let yesterday = [date(2026, 7, 9, 16), date(2026, 7, 9, 8)]
+        let threeDays = [date(2026, 7, 7)]
+        let tenDays = [date(2026, 6, 30)]
+        let ancient = [date(2026, 5, 11)]
+        let all = boots + yesterday + threeDays + tenDays + ancient
+        let keep = ProfileStore.checkpointRetention(all, now: now)
+
+        // Newest 3 unconditionally.
+        for b in boots { #expect(keep.contains(b)) }
+        // Daily tier: the newest of each day inside 7 days.
+        #expect(keep.contains(yesterday[0]))
+        #expect(!keep.contains(yesterday[1]))    // older same-day sibling pruned
+        #expect(keep.contains(threeDays[0]))
+        // Weekly tier: the newest of that week inside 4 weeks.
+        #expect(keep.contains(tenDays[0]))
+        // Outside every tier.
+        #expect(!keep.contains(ancient[0]))
+    }
+
+    @Test("Retention never keeps more than boots+days+weeks entries")
+    func retentionBound() {
+        let now = date(2026, 7, 10, 23)
+        // Four boots a day for 60 days.
+        var all: [Date] = []
+        for back in 0..<60 {
+            let day = Calendar.current.date(byAdding: .day, value: -back, to: now)!
+            for h in [1, 7, 13, 19] {
+                all.append(Calendar.current.date(bySettingHour: h, minute: 0,
+                                                 second: 0, of: day)!)
+            }
+        }
+        let keep = ProfileStore.checkpointRetention(all, now: now)
+        #expect(keep.count <= 3 + 7 + 4 + 1)   // +1: today's daily may overlap-count
+    }
+
+    @Test("Home checkpoints snapshot, list, and revert the ext4 image")
+    func homeCheckpointRoundTrip() throws {
+        let root = try tempDir()
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "ws", tool: .claude, authMode: .token)
+        let img = store.homeImageURL(for: p)
+        try FileManager.default.createDirectory(
+            at: img.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        try Data("state-A".utf8).write(to: img)
+        let cp = try store.snapshotHomeImage(for: p, at: Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(cp != nil)
+        #expect(store.listHomeCheckpoints(for: p).count == 1)
+        // Disk and home ledgers are separate.
+        #expect(store.listCheckpoints(for: p).isEmpty)
+
+        try Data("state-B (bad)".utf8).write(to: img)
+        try store.revertHomeImage(for: p, to: cp!.id)
+        #expect(try String(contentsOf: img, encoding: .utf8) == "state-A")
+    }
+
+    @Test("Erase home also drops its checkpoints")
+    func resetHomePurgesCheckpoints() throws {
+        let root = try tempDir()
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "ws", tool: .claude, authMode: .token)
+        let img = store.homeImageURL(for: p)
+        try FileManager.default.createDirectory(
+            at: img.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("secret".utf8).write(to: img)
+        _ = try store.snapshotHomeImage(for: p, at: Date())
+        #expect(!store.listHomeCheckpoints(for: p).isEmpty)
+
+        try store.resetHome(for: p)
+        #expect(store.listHomeCheckpoints(for: p).isEmpty)
+    }
+
     @Test("Bootstrap home carries the managed .bash_profile")
     func bootstrapHome() throws {
         let root = try tempDir()

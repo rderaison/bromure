@@ -122,6 +122,56 @@ func worktreeDepth(of tab: TabsModel.Tab, in tabs: [TabsModel.Tab]) -> Int {
     return min(depth, 6)
 }
 
+/// A tab paired with its position in `model.tabs` (the select/close APIs
+/// speak model positions). `id` delegates to the tab so SwiftUI rows keep
+/// their identity when only the display order changes.
+struct DisplayOrderedTab: Identifiable {
+    let idx: Int
+    let tab: TabsModel.Tab
+    var id: ObjectIdentifier { tab.id }
+}
+
+/// Tabs in sidebar display order: roster order for top-level tabs, with
+/// every nested tab (a worktree, or a parentBranch-tagged terminal/merge/PR
+/// tab) pulled directly under its parent. tmux appends new windows at the
+/// end of the roster, which used to strand a fresh worktree's indented row
+/// under whatever tab happened to be listed last instead of its parent.
+@MainActor
+func worktreeDisplayOrdered(_ tabs: [TabsModel.Tab]) -> [DisplayOrderedTab] {
+    var children: [Int: [Int]] = [:]
+    var roots: [Int] = []
+    for (i, tab) in tabs.enumerated() {
+        var parent: Int?
+        // Worktree-off-worktree / attached terminal / merge / PR tab: the
+        // parent is the tab checked out at our parentBranch.
+        if let pb = tab.parentBranch, !pb.isEmpty {
+            parent = tabs.firstIndex(where: { $0 !== tab && $0.worktreeBranch == pb })
+        }
+        // Depth-1 worktree (cut from a plain branch): the repo tab it was
+        // created from — the one whose git toplevel is our main checkout.
+        if parent == nil, tab.isWorktree,
+           let root = tab.rootRepo, !root.isEmpty {
+            parent = tabs.firstIndex(where: { $0.repoRoot == root })
+        }
+        if let p = parent, p != i {
+            children[p, default: []].append(i)
+        } else {
+            roots.append(i)
+        }
+    }
+    var out: [DisplayOrderedTab] = []
+    var seen = Set<Int>()
+    func emit(_ i: Int) {
+        guard seen.insert(i).inserted else { return }   // cycle guard
+        out.append(DisplayOrderedTab(idx: i, tab: tabs[i]))
+        for c in children[i] ?? [] { emit(c) }
+    }
+    for r in roots { emit(r) }
+    // Orphan cycles (shouldn't happen) keep roster order at the end.
+    for i in tabs.indices where !seen.contains(i) { emit(i) }
+    return out
+}
+
 /// Coarse per-tab activity derived from the foreground program tmux reports as
 /// the window label — honest signal from data we already have, no guest change.
 enum TabActivity {
@@ -207,6 +257,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private let automationSlot = NSView()
     private var automationHosting: NSHostingView<AutomationEditorView>?
     private var automationEditorVisible = false
+    /// The editor's draft differs from what's stored (reported by the view).
+    /// Consulted by clearAutomationEditor so navigating away warns first.
+    private var automationDraftDirty = false
     private var toolbarDelegate: UnifiedToolbarDelegate?
 
     /// The user-curated terminal grid (phase 2): membership persists here,
@@ -684,9 +737,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     /// Show the terminal grid as the stage surface.
     func showGrid() {
+        guard clearAutomationEditor() else { return }   // dirty draft kept
         clearDockerDashboard()
         clearVMDashboard()
-        clearAutomationEditor()
         listModel.gridSelected = true
         if gridView == nil {
             let dataSource = GridStageView.DataSource(
@@ -810,9 +863,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// and turn on the guest's expensive stats/images polling for the duration.
     func showDockerDashboard(_ id: Profile.ID, container: String? = nil) {
         guard let selPane = pane(id) else { return }
+        guard clearAutomationEditor() else { return }   // dirty draft kept
         hideGrid()
         clearVMDashboard()
-        clearAutomationEditor()
         if let prev = dockerSelectedID, prev != id, let p = pane(prev) {
             acDelegate?.setDockerWatch(false, in: p)   // hand off watch between VMs
         }
@@ -876,8 +929,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// one shows the spec + config (more useful than a black framebuffer).
     func showVMDashboard(_ id: Profile.ID) {
         guard let profile = acDelegate?.profile(for: id) else { return }
+        guard clearAutomationEditor() else { return }   // dirty draft kept
         clearDockerDashboard()
-        clearAutomationEditor()
         let p = pane(id)
         let state = listModel.profileRows.first { $0.id == id }?.state ?? (p != nil ? .running : .off)
         vmDashboardSelectedID = id
@@ -930,10 +983,20 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// ask-before-use flags) is current.
     func showAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil) {
         guard let delegate = acDelegate else { return }
+        if automationEditorVisible {
+            // Re-clicking the automation that's already open must not
+            // silently rebuild over an edited draft — keep the editor as-is.
+            if id != nil, id == listModel.automationSelectedID,
+               automationDraftDirty { return }
+            // Switching to another automation (or "+") discards the current
+            // draft — same warning as any other navigation away.
+            guard clearAutomationEditor() else { return }
+        }
         hideGrid()
         clearDockerDashboard()
         clearVMDashboard()
         automationEditorVisible = true
+        automationDraftDirty = false
         listModel.automationSelectedID = id
         automationHosting?.removeFromSuperview()
         let view = AutomationEditorView(
@@ -943,18 +1006,21 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             prefill: prefill,
             onSave: { [weak self] automation in
                 self?.acDelegate?.saveAutomation(automation)
-                self?.clearAutomationEditor()
+                self?.clearAutomationEditor(force: true)
             },
             onRunNow: { [weak self] automation in
                 self?.acDelegate?.saveAutomation(automation)
                 self?.acDelegate?.runAutomationNow(automation.id)
-                self?.clearAutomationEditor()
+                self?.clearAutomationEditor(force: true)
             },
             onDelete: { [weak self] automationID in
                 self?.acDelegate?.confirmDeleteAutomation(automationID)
             },
             onEditWorkspace: { [weak self] profileID in
                 self?.acDelegate?.sidebarEditProfile(profileID)
+            },
+            onDirtyChange: { [weak self] dirty in
+                self?.automationDraftDirty = dirty
             })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -970,18 +1036,38 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         makeFirstResponder(host)
     }
 
-    func clearAutomationEditor() {
-        guard automationEditorVisible else { return }
+    /// Tear the editor down. An edited draft warns first; false = the user
+    /// chose to keep editing, so the caller must abort its navigation.
+    /// `force` skips the warning — for after a save/delete, when the draft
+    /// is no longer worth anything.
+    @discardableResult
+    func clearAutomationEditor(force: Bool = false) -> Bool {
+        guard automationEditorVisible else { return true }
+        if !force, automationDraftDirty {
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString(
+                "Discard changes to this automation?", comment: "")
+            alert.informativeText = NSLocalizedString(
+                "You edited this automation but didn't save. Leaving now discards those changes.",
+                comment: "")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: NSLocalizedString("Keep Editing", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Discard Changes", comment: ""))
+            if alert.runModal() == .alertFirstButtonReturn { return false }
+        }
         automationEditorVisible = false
+        automationDraftDirty = false
         listModel.automationSelectedID = nil
         automationHosting?.removeFromSuperview()
         automationHosting = nil
         automationSlot.isHidden = true
+        return true
     }
 
     /// Workspace name clicked in the source list → select it and surface its
     /// dashboard, whether the VM is running, suspended, or off.
     func selectWorkspaceName(_ id: Profile.ID) {
+        guard clearAutomationEditor() else { return }   // dirty draft kept
         selectRow(id)
         showVMDashboard(id)
     }
@@ -1010,18 +1096,18 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     // MARK: Tab actions (forward to the pane)
 
     func selectTab(profileID id: Profile.ID, index: Int) {
+        guard clearAutomationEditor() else { return }   // dirty draft kept
         hideGrid()
         clearDockerDashboard()
         clearVMDashboard()
-        clearAutomationEditor()
         if selectedID != id { select(profileID: id) }
         pane(id)?.switchTo(index: index)
     }
     func newTab(profileID id: Profile.ID) {
+        guard clearAutomationEditor() else { return }   // dirty draft kept
         hideGrid()
         clearDockerDashboard()
         clearVMDashboard()
-        clearAutomationEditor()
         if selectedID != id { select(profileID: id) }
         if let p = pane(id) { acDelegate?.spawnNewTab(in: p) }
     }
@@ -1607,34 +1693,40 @@ private struct VMSection: View {
             // tabs are nested under their container instead), then the always-on
             // Docker node.
             if let entry {
+                // Tree order (each worktree under its parent), not roster
+                // order; `item.idx` stays the model position the select/
+                // close/action APIs expect, `pos` is the visible row number
+                // driving the ⌘-digit chord (matched in performACShortcut).
+                let orderedTabs = worktreeDisplayOrdered(entry.model.tabs)
+                    .filter { $0.tab.containerID == nil }
                 VStack(alignment: .leading, spacing: 1) {
-                    ForEach(Array(entry.model.tabs.enumerated()), id: \.element.id) { idx, tab in
-                        if tab.containerID == nil {
-                            TabRow(
-                                label: tab.shownLabel,
-                                // Derive the icon from the shown label: a worktree
-                                // tab's display ("Refactor website (claude)")
-                                // names its tool, so agentKind's contains-match
-                                // picks the agent even when the live foreground
-                                // program is momentarily bash/node. For ordinary
-                                // tabs shownLabel == label, so this is a no-op.
-                                agentKind: BromureIcons.agentKind(forLabel: tab.shownLabel),
-                                agentStatus: tab.agentStatus,
-                                isActive: tab.id == entry.model.activeTab?.id && isSelected,
-                                accentHex: row.accentHex,
-                                chord: (isSelected && idx < 9) ? idx + 1 : nil,
-                                isWorktree: tab.isWorktree,
-                                worktreeDepth: worktreeDepth(of: tab, in: entry.model.tabs),
-                                canCreateWorktree: tab.isGitRepo,
-                                isMergeTab: (tab.display?.hasPrefix("Merge → ") ?? false),
-                                onSelect: { onSelectTab(row.id, idx) },
-                                onClose: { onCloseTab(row.id, idx) },
-                                onAction: { action in onTabAction(row.id, idx, action) })
-                            // Draggable onto the sidebar's Grid node.
-                            .draggable(GridDragPayload.encode(
-                                profileID: row.id, windowIndex: tab.index,
-                                label: tab.shownLabel))
-                        }
+                    ForEach(Array(orderedTabs.enumerated()), id: \.element.id) { pos, item in
+                        let idx = item.idx
+                        let tab = item.tab
+                        TabRow(
+                            label: tab.shownLabel,
+                            // Derive the icon from the shown label: a worktree
+                            // tab's display ("Refactor website (claude)")
+                            // names its tool, so agentKind's contains-match
+                            // picks the agent even when the live foreground
+                            // program is momentarily bash/node. For ordinary
+                            // tabs shownLabel == label, so this is a no-op.
+                            agentKind: BromureIcons.agentKind(forLabel: tab.shownLabel),
+                            agentStatus: tab.agentStatus,
+                            isActive: tab.id == entry.model.activeTab?.id && isSelected,
+                            accentHex: row.accentHex,
+                            chord: (isSelected && pos < 9) ? pos + 1 : nil,
+                            isWorktree: tab.isWorktree,
+                            worktreeDepth: worktreeDepth(of: tab, in: entry.model.tabs),
+                            canCreateWorktree: tab.isGitRepo,
+                            isMergeTab: (tab.display?.hasPrefix("Merge → ") ?? false),
+                            onSelect: { onSelectTab(row.id, idx) },
+                            onClose: { onCloseTab(row.id, idx) },
+                            onAction: { action in onTabAction(row.id, idx, action) })
+                        // Draggable onto the sidebar's Grid node.
+                        .draggable(GridDragPayload.encode(
+                            profileID: row.id, windowIndex: tab.index,
+                            label: tab.shownLabel))
                     }
                     DockerSection(
                         profileID: row.id,

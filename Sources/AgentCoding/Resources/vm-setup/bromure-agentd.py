@@ -1350,6 +1350,13 @@ def _new_window(command=None, cwd=None, env=None, background=False):
     if cwd:
         args += ["-c", cwd]
     if env:
+        env = dict(env)
+        # Tool-launching window (worktree/automation/PR/resolve): also pass
+        # the intended start dir. The managed .bashrc cd's there right
+        # before starting the agent, so it always begins at the checkout
+        # root even if something moved the shell after tmux's -c.
+        if cwd and "BROMURE_AC_WT_TOOL" in env:
+            env.setdefault("BROMURE_AC_WT_DIR", cwd)
         for k, v in env.items():
             args += ["-e", "%s=%s" % (k, v)]
     if command is not None:
@@ -1656,6 +1663,31 @@ _YOLO_FLAGS = {
 }
 
 
+def _preaccept_yolo(tool):
+    """Claude Code shows a one-time interactive "Bypass Permissions mode"
+    acceptance screen the first time it runs with its YOLO flag — which
+    hangs an unattended automation run. Pre-record the acceptance the same
+    way Claude Code itself does (~/.claude.json) before launching."""
+    if tool != "claude":
+        return
+    path = os.path.join(HOME, ".claude.json")
+    try:
+        cfg = {}
+        if os.path.exists(path):
+            with open(path) as f:
+                cfg = json.load(f)
+        if cfg.get("bypassPermissionsModeAccepted") is True:
+            return
+        cfg["bypassPermissionsModeAccepted"] = True
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, path)
+    except Exception as e:
+        # Non-fatal: the run still starts, worst case Claude prompts.
+        log("worktree", "yolo pre-accept failed:", e)
+
+
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
     if prompt_b64 == "-":
         prompt_b64 = ""   # "-" sentinel = no prompt
@@ -1702,6 +1734,7 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
     _env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
     if yolo and _YOLO_FLAGS.get(tool):
         _env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
+        _preaccept_yolo(tool)
     win = _new_window(command="bash -l", cwd=wt_dir, env=_env)
     if not win:
         worktree_err("worktree: could not open a tab (created %s at %s)"
@@ -1726,6 +1759,7 @@ def _automation_tab(cwd, display, tool, prompt_b64):
     env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
     if _YOLO_FLAGS.get(tool):
         env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
+        _preaccept_yolo(tool)
     win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
         worktree_err("automation: could not open a tab at %s" % cwd)
@@ -2833,6 +2867,32 @@ def apply_home_seed():
         log("home", "claude-settings merge failed:\n" + traceback.format_exc())
 
 
+def _approve_claude_api_key(suffix):
+    """Add `suffix` to customApiKeyResponses.approved in ~/.claude.json —
+    Claude Code's own state file, so read-modify-write, everything else
+    preserved. Idempotent."""
+    path = os.path.join(HOME_MOUNT, ".claude.json")
+    cfg = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            obj = json.load(f)
+        if isinstance(obj, dict):
+            cfg = obj
+    resp = cfg.get("customApiKeyResponses")
+    resp = resp if isinstance(resp, dict) else {}
+    approved = resp.get("approved")
+    approved = approved if isinstance(approved, list) else []
+    if suffix in approved:
+        return
+    approved.append(suffix)
+    resp["approved"] = approved
+    cfg["customApiKeyResponses"] = resp
+    tmp = path + ".bromure-seed-tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp, path)
+
+
 def _seed_claude_settings():
     """Guest-side twin of the ~/.claude/settings.json logic in
     ProfileStore.populateManagedHome (virtiofs branch) — the one managed
@@ -2845,6 +2905,19 @@ def _seed_claude_settings():
         spec = json.load(f)
     uses_claude = bool(spec.get("usesClaude"))
     bedrock_env = spec.get("bedrockEnv")
+
+    # Pre-approve the session's ANTHROPIC_API_KEY (its last-20 suffix — the
+    # shape Claude Code stores in customApiKeyResponses.approved) so the
+    # "use this API key from your environment?" prompt never blocks a first
+    # launch or a cloned workspace, whose bogus key differs from the one the
+    # base workspace approved.
+    suffix = spec.get("approvedApiKeySuffix")
+    if suffix:
+        try:
+            _approve_claude_api_key(suffix)
+        except Exception:
+            log("home", "claude.json key pre-approve failed:\n"
+                + traceback.format_exc())
 
     claude_dir = os.path.join(HOME_MOUNT, ".claude")
     path = os.path.join(claude_dir, "settings.json")
