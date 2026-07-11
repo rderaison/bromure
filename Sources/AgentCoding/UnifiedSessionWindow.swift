@@ -822,7 +822,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             // Collapsed: arm the suspend (10s) + shutdown (5min) timers.
             if let id = shownBrowser { browserControllers[id]?.setVisible(false) }
         }
-        let target = open ? expandedBrowserPaneWidth : 0
+        // Fit within the current window. The pane-width constraint's
+        // priority (defaultHigh) beats NSWindow's windowSizeStayPut, so
+        // a target wider than the stage can absorb doesn't squeeze the
+        // terminal — it GROWS THE WINDOW, potentially past the screen
+        // edge. Clamp to what's actually available, leaving the terminal
+        // slot its 240pt minimum (the resize handle still lets the user
+        // drag wider, which resizes within the same limits).
+        let target: CGFloat
+        if open {
+            let fileW = filePaneOpen ? (filePaneWidthConstraint?.constant ?? 0) : 0
+            let available = stage.bounds.width - fileW - 240
+            target = max(Self.browserPaneMinWidth,
+                         min(expandedBrowserPaneWidth, available))
+        } else {
+            target = 0
+        }
         let hideWhenClosed: () -> Void = { [weak self] in
             guard let self, !self.browserPaneOpen else { return }
             self.browserPaneHost.isHidden = true

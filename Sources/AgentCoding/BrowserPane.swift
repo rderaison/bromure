@@ -31,10 +31,17 @@ final class BrowserPaneModel {
     /// the placeholder renders the shared installer's live progress
     /// instead of the plain status line.
     var imageInstall: BrowserImageInstaller?
-    /// Show a Retry button under the placeholder (boot/download failed).
-    var showRetry = false
-    /// Wired by WorkspaceBrowserController to re-attempt after a failure.
-    var onRetry: (() -> Void)?
+    /// True while the placeholder shows the install-consent card ("the
+    /// browser isn't installed — download it?"). The download only
+    /// starts after `onAcceptInstall`.
+    var installPrompt = false
+    /// Consent-card actions, wired by WorkspaceBrowserController.
+    var onAcceptInstall: (() -> Void)?
+    var onDeclineInstall: (() -> Void)?
+    /// Optional action button under the placeholder status (e.g. "Retry"
+    /// after a failure, "Install the Browser…" after a declined prompt).
+    var actionLabel: String?
+    var onAction: (() -> Void)?
 
     /// Stable AppKit view the VM controller mounts the VZVirtualMachineView
     /// into. Kept alive by the model so the SwiftUI side can wrap it without
@@ -190,6 +197,8 @@ struct BrowserPaneView: View {
                 .foregroundStyle(.secondary)
             if let installer = model.imageInstall {
                 imageInstallCard(installer)
+            } else if model.installPrompt {
+                installPromptCard
             } else {
                 if !model.placeholderStatus.isEmpty {
                     Text(model.placeholderStatus)
@@ -198,17 +207,45 @@ struct BrowserPaneView: View {
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 380)
                 }
-                if model.showRetry {
+                if let label = model.actionLabel {
                     Button {
-                        model.onRetry?()
+                        model.onAction?()
                     } label: {
-                        Label("Retry", systemImage: "arrow.clockwise")
+                        Label(label, systemImage: "arrow.clockwise")
                     }
                     .controlSize(.regular)
                 }
             }
         }
         .padding(24)
+    }
+
+    /// Consent card shown before the one-time browser download starts —
+    /// nothing is fetched until the user accepts.
+    private var installPromptCard: some View {
+        VStack(spacing: 10) {
+            Text("Install the browser?")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("Chromium runs in its own disposable VM. One-time download (\(BrowserImageInstaller.shared.downloadSizeDescription)), installed to your Library folder.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 320)
+            HStack(spacing: 10) {
+                Button("Not Now") {
+                    model.onDeclineInstall?()
+                }
+                Button {
+                    model.onAcceptInstall?()
+                } label: {
+                    Label("Download & Install", systemImage: "arrow.down.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+            .controlSize(.regular)
+        }
     }
 
     /// One-time browser-image download: title + live status pill +

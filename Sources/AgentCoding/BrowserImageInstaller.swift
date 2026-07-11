@@ -115,6 +115,18 @@ final class BrowserImageInstaller {
         return nil
     }
 
+    /// Human estimate of the download for consent UIs: the cached
+    /// catalog's actual compressed sizes when we've seen one, else the
+    /// ballpark.
+    var downloadSizeDescription: String {
+        if let image = catalogStore.remote()?.image {
+            let total = image.disk.compressedBytes
+                + (image.boot ?? []).reduce(Int64(0)) { $0 + $1.compressedBytes }
+            return ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+        }
+        return String(localized: "about 500 MB")
+    }
+
     private func run() async -> Bool {
         phase = .running
         progress.reset()

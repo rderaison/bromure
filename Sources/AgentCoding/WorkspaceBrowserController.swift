@@ -144,16 +144,17 @@ final class WorkspaceBrowserController {
             return
         }
         guard let storageDir = resolveStorageDir() else {
-            // Phase 2b: no image anywhere — download it (prebuilt from
-            // dl.bromure.io/browser-images/, postinstall + personalisation
-            // applied), then boot. The pane placeholder renders the shared
-            // installer's live progress meanwhile.
-            installImageThenStart()
+            // Phase 2b: no image anywhere — ask before downloading it
+            // (prebuilt from dl.bromure.io/browser-images/, postinstall +
+            // personalisation applied), then boot. An install already
+            // running (Settings, another workspace) is joined silently.
+            promptOrJoinInstall()
             return
         }
         state = .booting
         model.hasFramebuffer = false
-        model.showRetry = false
+        model.actionLabel = nil
+        model.installPrompt = false
         model.imageInstall = nil
         model.placeholderStatus = NSLocalizedString("Booting browser…", comment: "")
 
@@ -586,7 +587,8 @@ final class WorkspaceBrowserController {
         model.hasFramebuffer = false
         model.placeholderStatus = ""
         model.imageInstall = nil
-        model.showRetry = false
+        model.installPrompt = false
+        model.actionLabel = nil
         model.tabBar.setTabs([])
         model.framebufferContainer.unmountAll()
         tabBridge?.stop()
@@ -605,15 +607,52 @@ final class WorkspaceBrowserController {
         state = .idle
     }
 
+    /// No image anywhere: show the consent card in the pane placeholder
+    /// ("download the browser, ~500 MB?") and only start the install on
+    /// accept. An install that's already running — accepted here earlier,
+    /// started from Settings, or by another workspace — is joined without
+    /// re-asking (the Settings button and a prior accept ARE the consent).
+    private func promptOrJoinInstall() {
+        if BrowserImageInstaller.shared.phase == .running {
+            installImageThenStart()
+            return
+        }
+        guard !model.installPrompt else { return }   // card already up
+        state = .idle
+        model.hasFramebuffer = false
+        model.imageInstall = nil
+        model.actionLabel = nil
+        model.placeholderStatus = ""
+        model.installPrompt = true
+        model.onAcceptInstall = { [weak self] in
+            guard let self else { return }
+            self.model.installPrompt = false
+            self.installImageThenStart()
+        }
+        model.onDeclineInstall = { [weak self] in
+            guard let self else { return }
+            self.model.installPrompt = false
+            self.model.placeholderStatus = NSLocalizedString(
+                "The browser isn't installed.",
+                comment: "Pane placeholder after declining the browser download")
+            self.model.actionLabel = NSLocalizedString(
+                "Install the Browser…",
+                comment: "Pane placeholder button to re-offer the browser download")
+            self.model.onAction = { [weak self] in self?.start() }
+        }
+    }
+
     /// Download the browser image via the shared installer, then boot.
-    /// Every trigger funnels here (pane click, MCP ensureRunning, other
-    /// workspaces) and joins the same in-flight install; the Settings →
-    /// Browser button shows the same progress through the same installer.
+    /// Every trigger funnels here (accepted prompt, MCP ensureRunning,
+    /// other workspaces) and joins the same in-flight install; the
+    /// Settings → Browser button shows the same progress through the
+    /// same installer.
     private func installImageThenStart() {
         state = .booting
         installWait = true
         model.hasFramebuffer = false
-        model.showRetry = false
+        model.actionLabel = nil
+        model.installPrompt = false
         model.placeholderStatus = ""
         model.imageInstall = BrowserImageInstaller.shared
         print("[browser] no image — downloading via BrowserImageInstaller")
@@ -645,8 +684,8 @@ final class WorkspaceBrowserController {
         model.hasFramebuffer = false
         model.imageInstall = nil
         model.placeholderStatus = message
-        model.showRetry = true
-        model.onRetry = { [weak self] in self?.retry() }
+        model.actionLabel = NSLocalizedString("Retry", comment: "Browser pane retry button")
+        model.onAction = { [weak self] in self?.retry() }
     }
 
     // MARK: - Helpers
