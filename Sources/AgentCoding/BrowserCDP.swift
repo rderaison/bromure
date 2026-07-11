@@ -239,14 +239,40 @@ final class BrowserCDP {
 
     // MARK: - Element picker
 
+    /// Monotonic pick session id — bumping it (cancelPick, or arming a new
+    /// pick) makes any in-flight pickElement poll loop stand down.
+    private var pickGeneration = 0
+
+    /// Host-side disarm. The flag alone releases the poll loop (so the
+    /// button un-tints instantly even if CDP is busy); the JS cancel is
+    /// best-effort cleanup of the in-page overlay.
+    func cancelPick() {
+        pickGeneration &+= 1
+        Task { _ = try? await evaluate("if(window.__bromureCancelPick)window.__bromureCancelPick();") }
+    }
+
     /// Arm hover-to-highlight in the active page and resolve with the element
-    /// the user clicks — {selector, tag, text} — or nil on Escape/timeout.
-    /// Polls `window.__bromurePicked`, which the injected overlay sets.
+    /// the user clicks — {selector, tag, text} — or nil on Escape/timeout/
+    /// cancelPick. Polls `window.__bromurePicked`, which the injected overlay
+    /// sets.
     func pickElement(timeoutMs: Int = 60_000) async throws -> [String: Any]? {
+        pickGeneration &+= 1
+        let generation = pickGeneration
         _ = try await evaluate(Self.pickOverlaySource)
+        // Kick one synthetic pointer move at the viewport center so the
+        // highlight + selector label appear the moment the picker arms —
+        // host hover delivery has proven unreliable, and without this the
+        // overlay showed nothing until the mouse produced an event.
+        _ = try? await withPage { conn in
+            _ = try await conn.send("Input.dispatchMouseEvent", params: [
+                "type": "mouseMoved",
+                "x": 400, "y": 300,
+            ])
+        }
         let ticks = max(1, timeoutMs / 200)
         for _ in 0..<ticks {
             try? await Task.sleep(nanoseconds: 200_000_000)
+            if pickGeneration != generation { return nil }   // cancelled host-side
             guard let s = try? await evaluate("JSON.stringify(window.__bromurePicked||null)") as? String,
                   s != "null", let data = s.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -280,6 +306,10 @@ final class BrowserCDP {
       if (window.__bromurePickActive) return;
       window.__bromurePickActive = true;
       window.__bromurePicked = null;
+      var banner = document.createElement('div');
+      banner.textContent = 'Click an element to select it — Esc or the picker button cancels';
+      banner.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;pointer-events:none;background:#4c8bf5;color:#fff;font:12px ui-monospace,monospace;padding:6px 12px;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.35);';
+      document.documentElement.appendChild(banner);
       var box = document.createElement('div');
       box.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;border:2px solid #4c8bf5;background:rgba(76,139,245,0.15);border-radius:2px;';
       var label = document.createElement('div');
@@ -324,7 +354,7 @@ final class BrowserCDP {
         document.removeEventListener('mousemove', move, true);
         document.removeEventListener('click', clickH, true);
         document.removeEventListener('keydown', keyH, true);
-        try { box.remove(); label.remove(); } catch(e){}
+        try { box.remove(); label.remove(); banner.remove(); } catch(e){}
       }
       function clickH(e){
         e.preventDefault(); e.stopPropagation();

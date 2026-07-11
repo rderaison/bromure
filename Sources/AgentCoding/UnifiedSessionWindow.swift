@@ -785,7 +785,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// previously-shown one so its collapse timers arm.
     private func showBrowser(for id: Profile.ID) {
         if let prev = shownBrowser, prev != id {
-            browserControllers[prev]?.setVisible(false)
+            // Hidden by a workspace switch, not a collapse: suspend-only —
+            // it must stay resumable until the sidebar itself closes.
+            browserControllers[prev]?.setVisible(false, teardownWhenHidden: false)
         }
         shownBrowser = id
         browserPaneHost.rootView = BrowserPaneView(model: browserModel(for: id))
@@ -829,9 +831,17 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             if let id = selectedID {
                 showBrowser(for: id)
             }
+            // Background browsers are pane-open-but-switched-away again:
+            // downgrade any collapse-armed teardown to suspend-only.
+            for (wid, c) in browserControllers where wid != shownBrowser {
+                c.setVisible(false, teardownWhenHidden: false)
+            }
         } else {
-            // Collapsed: arm the suspend (10s) + shutdown (5min) timers.
-            if let id = shownBrowser { browserControllers[id]?.setVisible(false) }
+            // Collapsing the sidebar parks EVERY workspace's browser on
+            // the full idle lifecycle (suspend 10s + teardown 5min) —
+            // including ones hidden earlier by workspace switches, which
+            // are suspend-only until the sidebar actually closes.
+            for (_, c) in browserControllers { c.setVisible(false) }
         }
         // Fit within the current window. The pane-width constraint's
         // priority (defaultHigh) beats NSWindow's windowSizeStayPut, so

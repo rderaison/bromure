@@ -80,13 +80,33 @@ final class BrowserPaneModel {
 final class BrowserFramebufferContainer: NSView {
     override var isFlipped: Bool { true }
 
-    /// Hover (mouseMoved) delivery to the guest — the element picker's
-    /// highlight depends on it — requires the window to dispatch
-    /// mouse-moved events. Without this it only starts flowing after a
-    /// window resize forces AppKit to recompute tracking.
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        window?.acceptsMouseMovedEvents = true
+    /// The VZVirtualMachineView inside the mounted cropper — hover events
+    /// captured by the tracking area below are forwarded to it so the
+    /// guest sees pointer movement (the element picker's highlight
+    /// depends on it). NOT window.acceptsMouseMovedEvents: that routes
+    /// window-level mouseMoved to the FIRST RESPONDER (usually the
+    /// terminal), not the view under the cursor.
+    private weak var hoverTarget: NSView?
+
+    /// Track the cursor over the whole framebuffer, focus-independent.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        // Deliver to the VZ view (it translates host mouse events into
+        // guest pointer events); it sits behind the cropper's clip and
+        // never owns a tracking area of its own here.
+        if let target = hoverTarget, target.window === window {
+            target.mouseMoved(with: event)
+        } else {
+            super.mouseMoved(with: event)
+        }
     }
 
     /// Mount (or replace) the framebuffer view, pinned to fill.
@@ -100,10 +120,14 @@ final class BrowserFramebufferContainer: NSView {
             view.trailingAnchor.constraint(equalTo: trailingAnchor),
             view.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
+        // The cropper's subview is the VZVirtualMachineView.
+        hoverTarget = view.subviews.first ?? view
+        updateTrackingAreas()
     }
 
     func unmountAll() {
         subviews.forEach { $0.removeFromSuperview() }
+        hoverTarget = nil
     }
 }
 

@@ -495,10 +495,7 @@ final class WorkspaceBrowserController {
     func userPickElement() {
         guard isReady else { return }
         if model.tabBar.picking {
-            Task { [weak self] in
-                _ = try? await self?.cdp?.evaluate(
-                    "if(window.__bromureCancelPick)window.__bromureCancelPick();")
-            }
+            cdp?.cancelPick()
             return
         }
         Task { [weak self] in
@@ -525,7 +522,13 @@ final class WorkspaceBrowserController {
     /// resume/boot and cancel timers; hidden → arm the suspend + shutdown
     /// timers. An MCP tool call resolves through `ensureRunning`, which also
     /// resumes, so agent activity keeps a collapsed-but-in-use browser alive.
-    func setVisible(_ v: Bool) {
+    /// `teardownWhenHidden` distinguishes WHY the browser became hidden:
+    /// true (default) — the sidebar was collapsed: suspend after 10s AND
+    /// tear down after 5min. false — the pane is still open but another
+    /// workspace is selected: suspend after 10s only; the VM stays
+    /// resumable indefinitely (switching back, a click, or an MCP call
+    /// restores it instantly).
+    func setVisible(_ v: Bool, teardownWhenHidden: Bool = true) {
         isVisible = v
         if v {
             cancelIdleTimers()
@@ -535,25 +538,26 @@ final class WorkspaceBrowserController {
             default: break
             }
         } else {
-            armIdleTimers()
+            armIdleTimers(includeShutdown: teardownWhenHidden)
         }
     }
 
-    private func armIdleTimers() {
+    private func armIdleTimers(includeShutdown: Bool) {
         cancelIdleTimers()
         guard state == .running || state == .suspended else { return }
         let s = DispatchWorkItem { [weak self] in
             guard let self, !self.isVisible else { return }
             self.suspend()
         }
+        suspendWork = s
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.suspendAfter, execute: s)
+        guard includeShutdown else { return }
         let d = DispatchWorkItem { [weak self] in
             guard let self, !self.isVisible else { return }
             print("[browser] collapsed \(Int(Self.shutdownAfter))s — shutting down")
             self.stop()
         }
-        suspendWork = s
         shutdownWork = d
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.suspendAfter, execute: s)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.shutdownAfter, execute: d)
     }
 
