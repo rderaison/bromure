@@ -560,6 +560,13 @@ public final class VMNetSwitch: @unchecked Sendable {
         dhcp += [1, 4] + beBytes(mask)           // subnet mask
         dhcp += [3, 4] + beBytes(serverIP)       // router
         dhcp += [6, 4] + beBytes(serverIP)       // DNS (vmnet gateway forwards)
+        // Interface MTU (option 26): udhcpc clamps eth0 at lease time, before
+        // anything races the guest-side clamp. Without this the guest keeps
+        // the default 1500 and large packets blackhole on the smaller vmnet
+        // egress path (LAN peers still work — same-MTU L2). Host-overridable
+        // via `vm.mtu` UserDefaults; default 1280.
+        let mtu = UInt16(min(9000, max(576, VMConfig.resolvedNICMTU())))
+        dhcp += [26, 2, UInt8(mtu >> 8), UInt8(mtu & 0xFF)]
         dhcp += [255]                            // END
         while dhcp.count < 300 { dhcp += [0] }   // pad to BOOTP minimum
 
