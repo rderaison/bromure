@@ -233,6 +233,16 @@ Alpine chroot on `/dev/vda`) supplies:
   re-rendered from the same `%%VAR%%` templates `setup.sh` bakes for
   local builds (a published build carries `us`/`en_US` defaults).
 
+**Bromure Agentic Coding consumes this catalog too** (its embedded agent
+browser downloads the same image into `BromureAC/browser`), but with a
+different step policy: catalog steps are **Bromure Web-only by default**
+— AC runs none of them (only the built-in fonts copy + personalisation)
+unless a step opts in with `"bromureac": true` in the baseline. The flag
+is covered by the catalog signature (emitted into the payload only when
+present, so pre-field signatures keep verifying). Cloudflare WARP is
+deliberately unmarked: it backs Web's VPN feature and has no business in
+the agent browser.
+
 The distribution build (`bromure init-foss-image --output …`, setup.sh
 `BUILD_MODE=foss`) also **fails the build outright when the out-of-tree
 kernel modules (v4l2loopback, rtc-pl031) can't be found** for the

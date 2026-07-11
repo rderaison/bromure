@@ -157,6 +157,54 @@ struct BrowserImageCatalogTests {
         #expect(ImageCatalogStore.isSignatureValid(cat, magic: magic, publicKeyBase64: pub))
     }
 
+    @Test("bromureac step flag: decode, default, and AC filtering")
+    func bromureacFlag() throws {
+        let json = """
+        {"formatVersion": 1, "image": null, "postinstall": [
+          {"uuid": "a", "seq": 10, "description": "Web only", "command": "echo w"},
+          {"uuid": "b", "seq": 20, "description": "Both", "command": "echo b", "bromureac": true},
+          {"uuid": "c", "seq": 30, "description": "Explicit web", "command": "echo c", "bromureac": false}
+        ]}
+        """
+        let cat = try ImageCatalog.parse(Data(json.utf8))
+        #expect(cat.postinstall[0].bromureac == nil)
+        #expect(!cat.postinstall[0].appliesToAgentCoding)
+        #expect(cat.postinstall[1].appliesToAgentCoding)
+        #expect(!cat.postinstall[2].appliesToAgentCoding)
+        // What Bromure Web runs vs what AC runs.
+        #expect(cat.sortedSteps.map(\.uuid) == ["a", "b", "c"])
+        #expect(cat.sortedSteps.filter(\.appliesToAgentCoding).map(\.uuid) == ["b"])
+    }
+
+    @Test("bromureac is signed only when present — old signatures keep verifying")
+    func bromureacSigning() throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let pub = key.publicKey.rawRepresentation.base64EncodedString()
+        let magic = ImageDistribution.browser.signingMagic
+
+        // A catalog whose step has NO bromureac field: its payload must
+        // carry no line for it (byte-compat with pre-field signatures)…
+        var cat = try ImageCatalog.parse(Data(Self.publishedJSON.utf8))
+        let signedAt = "2026-07-11T10:00:00.000Z"
+        let payload = try #require(cat.signingPayload(signedAt: signedAt, magic: magic))
+        #expect(!String(decoding: payload, as: UTF8.self).contains("bromureac"))
+
+        // …and with the field set, the line appears and is pinned: a
+        // signature over bromureac=true must not verify after a flip.
+        cat.postinstall[0].bromureac = true
+        let payload2 = try #require(cat.signingPayload(signedAt: signedAt, magic: magic))
+        #expect(String(decoding: payload2, as: UTF8.self).contains(".bromureac=true"))
+        let sig = try key.signature(for: payload2)
+        cat.signature = .init(signedAt: signedAt, edSignature: sig.base64EncodedString())
+        #expect(ImageCatalogStore.isSignatureValid(cat, magic: magic, publicKeyBase64: pub))
+        var flipped = cat
+        flipped.postinstall[0].bromureac = false
+        #expect(!ImageCatalogStore.isSignatureValid(flipped, magic: magic, publicKeyBase64: pub))
+        var stripped = cat
+        stripped.postinstall[0].bromureac = nil
+        #expect(!ImageCatalogStore.isSignatureValid(stripped, magic: magic, publicKeyBase64: pub))
+    }
+
     @Test("Cross-channel replay: an AC-signed catalog never verifies as a browser catalog")
     func crossChannelReplay() throws {
         let key = Curve25519.Signing.PrivateKey()

@@ -44,14 +44,26 @@ public struct PostinstallStep: Codable, Sendable, Equatable, Identifiable {
     public var seq: Int
     public var description: String
     public var command: String
+    /// Browser-channel steps are Bromure Web-only by default — Bromure
+    /// Agentic Coding installs the image into its own location and runs
+    /// NO catalog steps there (only the built-in fonts copy +
+    /// personalisation) unless the step opts in with `"bromureac": true`.
+    /// nil/absent = Web only.
+    public var bromureac: Bool?
 
     public var id: String { uuid }
 
-    public init(uuid: String, seq: Int, description: String, command: String) {
+    /// True when Bromure Agentic Coding's browser-image install should
+    /// execute this step.
+    public var appliesToAgentCoding: Bool { bromureac == true }
+
+    public init(uuid: String, seq: Int, description: String, command: String,
+                bromureac: Bool? = nil) {
         self.uuid = uuid
         self.seq = seq
         self.description = description
         self.command = command
+        self.bromureac = bromureac
     }
 }
 
@@ -224,6 +236,13 @@ public struct ImageCatalog: Codable, Sendable, Equatable {
             lines.append("step.\(step.uuid).seq=\(step.seq)")
             lines.append("step.\(step.uuid).description.b64=\(b64(step.description))")
             lines.append("step.\(step.uuid).command.b64=\(b64(step.command))")
+            // Only when present, so catalogs signed before the field
+            // existed keep verifying byte-identically. Signed because it
+            // decides whether AC executes the step — a compromised CDN
+            // must not be able to flip it.
+            if let ac = step.bromureac {
+                lines.append("step.\(step.uuid).bromureac=\(ac)")
+            }
         }
         return Data(lines.joined(separator: "\n").utf8)
     }

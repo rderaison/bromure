@@ -110,9 +110,15 @@ extension LinuxImageManager {
     /// right after the new catalog goes live, so a client that fetched the
     /// catalog just before the switch can see its download 404/truncate —
     /// the refetch lands on the new build.
+    /// `includeStep` filters which catalog postinstall steps run —
+    /// Bromure Web installs them all (default); Bromure Agentic Coding
+    /// passes `{ $0.appliesToAgentCoding }` so only steps explicitly
+    /// marked `"bromureac": true` execute in its copy of the image
+    /// (fonts + personalisation always run regardless).
     public func downloadBaseImage(
         catalogStore: ImageCatalogStore = .browser,
         personalization: Personalization = Personalization(),
+        includeStep: @escaping @Sendable (PostinstallStep) -> Bool = { _ in true },
         progress: @escaping (ProgressEvent) -> Void
     ) async throws {
         let fm = FileManager.default
@@ -168,7 +174,7 @@ extension LinuxImageManager {
             //    also copies the user's macOS fonts, applies their
             //    keyboard/locale, and e2fsck-gates the downloaded image
             //    before promotion.
-            let steps = catalog.sortedSteps
+            let steps = catalog.sortedSteps.filter(includeStep)
             progress(.stepStart("Personalizing image"))
             // The step count lets progress UIs weight the postinstall
             // segment (they watch for "…(N step(s))…" + the guest's

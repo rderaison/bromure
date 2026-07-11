@@ -201,6 +201,12 @@ function signingPayload(cat, signedAt, magic) {
     lines.push(`step.${s.uuid}.seq=${s.seq}`);
     lines.push(`step.${s.uuid}.description.b64=${b64(s.description)}`);
     lines.push(`step.${s.uuid}.command.b64=${b64(s.command)}`);
+    // Only when present — catalogs signed before the field existed keep
+    // verifying. Signed because it decides whether Bromure Agentic
+    // Coding executes the step.
+    if (s.bromureac !== undefined && s.bromureac !== null) {
+      lines.push(`step.${s.uuid}.bromureac=${s.bromureac}`);
+    }
   }
   return Buffer.from(lines.join("\n"), "utf8");
 }

@@ -157,13 +157,18 @@ final class BrowserImageInstaller {
 
         do {
             do {
-                try await manager.downloadBaseImage(catalogStore: catalogStore,
-                                                    progress: handle)
+                // AC runs NO catalog steps in its copy of the image
+                // (fonts + personalisation still happen) unless a step
+                // opts in with "bromureac": true — the image lives in
+                // AC's own location, and Web-facing packages (Cloudflare
+                // WARP) have no business in the agent browser.
+                try await manager.downloadBaseImage(
+                    catalogStore: catalogStore,
+                    includeStep: { $0.appliesToAgentCoding },
+                    progress: handle)
             } catch let error where LinuxImageManager.isDownloadSideFailure(error) {
                 // Same policy as Bromure Web's installer: only
-                // download-side failures fall back to the local bake
-                // (which applies the same catalog steps, so both paths
-                // converge on the same image).
+                // download-side failures fall back to the local bake.
                 handle(.message(String(localized:
                     "Prebuilt image unavailable — building it locally instead (~10 min).")))
                 // The local bake is line-driven; its Alpine/apk output is
@@ -172,7 +177,7 @@ final class BrowserImageInstaller {
                 _ = await catalogStore.refresh()
                 let catalog = catalogStore.effective()
                 try await manager.createBaseImage(
-                    postinstallSteps: catalog.sortedSteps,
+                    postinstallSteps: catalog.sortedSteps.filter(\.appliesToAgentCoding),
                     progress: handle)
             }
             progress.bumpProgress(to: 1.0)
