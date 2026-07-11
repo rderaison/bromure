@@ -206,6 +206,16 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         // plaintext. Only allowed for whitelisted hosts so the proxy
         // can't be used as a generic SOCKS-style escape hatch.
         if req.method == "CONNECT" {
+            // The 30s SO_RCVTIMEO set above is right for header reads but
+            // fatal inside a long-lived tunnel: an HTTPS download is
+            // receive-only after the request, so the client→upstream
+            // pump sits idle, "times out" at 30s, and half-closes the
+            // upstream — which kills any transfer that takes longer than
+            // 30s (e.g. the 73 MB WARP deb over a VPN). Tunnels block
+            // indefinitely; the ends' EOF/RST is what finishes them.
+            var noTimeout = timeval(tv_sec: 0, tv_usec: 0)
+            setsockopt(clientFD, SOL_SOCKET, SO_RCVTIMEO,
+                       &noTimeout, socklen_t(MemoryLayout<timeval>.size))
             handleConnect(clientFD, target: req.path)
             return
         }
