@@ -1472,14 +1472,6 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             }
             return
         }
-        // ⇧⌘S — pick an element in the shown browser (only while the pane is
-        // open, so it doesn't shadow the chord elsewhere).
-        if event.type == .keyDown, browserPaneOpen,
-           event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command, .shift],
-           event.charactersIgnoringModifiers?.lowercased() == "s" {
-            if let id = shownBrowser { browserControllers[id]?.userPickElement() }
-            return
-        }
         if event.type == .keyDown, handleACShortcut(event) { return }
         super.sendEvent(event)
     }

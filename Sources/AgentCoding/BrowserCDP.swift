@@ -307,7 +307,7 @@ final class BrowserCDP {
       window.__bromurePickActive = true;
       window.__bromurePicked = null;
       var banner = document.createElement('div');
-      banner.textContent = 'Click an element to select it — Esc or the picker button cancels';
+      banner.textContent = 'Click the element you want to point out — Esc to cancel';
       banner.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;pointer-events:none;background:#4c8bf5;color:#fff;font:12px ui-monospace,monospace;padding:6px 12px;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.35);';
       document.documentElement.appendChild(banner);
       var box = document.createElement('div');

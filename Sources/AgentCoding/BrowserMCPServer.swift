@@ -317,10 +317,15 @@ final class BrowserMCPServer {
              ["level": prop("string", "Filter: 'error','warn','log','info','debug' or 'all' (default)"),
               "clear": prop("boolean", "Clear the buffer after reading (default false)")]),
         tool("browser_pick_element",
-             "Ask the user to point at an element: highlights elements on hover in "
-             + "the browser and returns the CSS selector of the one they click. Use "
-             + "when the user refers to something on the page you can't unambiguously "
-             + "target — tell them to click it. Waits up to 60s.", [:]),
+             "Arm an interactive element picker and return the CSS selector of the "
+             + "element the user clicks. CALLING THIS TOOL activates the picker "
+             + "itself — the page immediately highlights elements on hover and shows "
+             + "a 'click an element' banner, then blocks up to 60s for the click. Do "
+             + "NOT tell the user to open, enable, or press any picker button, and do "
+             + "NOT ask them to copy or paste a selector back — this one call does all "
+             + "of that. When the user points at something on the page you can't "
+             + "unambiguously target with a selector, just call this and, in the same "
+             + "turn, ask them to click it.", [:]),
     ]
 
     // MARK: - JSON-RPC / result helpers
