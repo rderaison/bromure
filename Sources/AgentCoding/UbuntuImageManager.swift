@@ -557,13 +557,30 @@ public final class UbuntuImageManager {
         // is known when we build the kernel cmdline; if the bind
         // fails (extremely rare with port=0) we fall back to direct
         // HTTP, which still beats HTTPS on these VPNs.
+        // Attach to the process-wide software switch FIRST — that starts
+        // it (if no workspace VM has yet) and fixes the subnet, which is
+        // picked by an ascending scan clear of the host's LAN, so it is
+        // NOT always 192.168.64.0/24 (a busy host lands on .63, .62, …).
+        // The proxy URL below must use THIS bake's actual gateway, or the
+        // guest's apk/modloop fetches point at the wrong host and hang.
+        // Fall back to Apple's NAT if vmnet can't be brought up.
+        let switchPort = VMNetSwitch.shared.attachPort()
+        defer {
+            if let switchPort { VMNetSwitch.shared.detachPort(switchPort) }
+        }
+        // Apple's NAT (the fallback) always puts the host at .1 on
+        // 192.168.64.0/24; the switch reports its real gateway.
+        let guestGatewayHost = switchPort != nil
+            ? (VMNetSwitch.shared.subnet?.startAddressString ?? "192.168.64.1")
+            : "192.168.64.1"
+
         let proxy = AlpinePackageProxy()
         do { try proxy.start() } catch {
             FileHandle.standardError.write(Data(
                 "[bake] Alpine package proxy failed to start (\(error)) — falling back to direct HTTP\n".utf8))
         }
         defer { proxy.stop() }
-        let alpineRepoBase = proxy.mirrorURL?.absoluteString
+        let alpineRepoBase = proxy.guestBase(host: guestGatewayHost)?.absoluteString
             ?? "http://dl-cdn.alpinelinux.org"
 
         // Build (or refresh) the shimmed initrd so the MTU clamp runs
@@ -632,19 +649,12 @@ public final class UbuntuImageManager {
         }
 
         let net = VZVirtioNetworkDeviceConfiguration()
-        // Attach to the process-wide software switch — same path a normal AC
-        // VM takes — so the installer lands on our own DHCP/NAT segment: a
-        // distinct lease that can't collide with a live AC VM, on a subnet
-        // picked clear of the host's LAN. Fall back to Apple's NAT if vmnet
-        // can't be brought up.
-        let switchPort = VMNetSwitch.shared.attachPort()
+        // Use the switch port claimed above (its gateway drove the proxy
+        // URL); Apple's NAT if the switch couldn't come up.
         if let switchPort {
             net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: switchPort)
         } else {
             net.attachment = VZNATNetworkDeviceAttachment()
-        }
-        defer {
-            if let switchPort { VMNetSwitch.shared.detachPort(switchPort) }
         }
         if let mac = claimedInstallerMAC,
            let vzMAC = VZMACAddress(string: mac) {
