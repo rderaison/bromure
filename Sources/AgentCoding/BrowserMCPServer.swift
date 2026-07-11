@@ -236,6 +236,15 @@ final class BrowserMCPServer {
     e.g. http://192.168.x.x:3000 — find it with `hostname -I` (the 192.168.x.x \
     address). NEVER use http://localhost:PORT or http://127.0.0.1:PORT with \
     browser_navigate; it will not reach your server.
+
+    Interacting: browser_click / browser_fill (fast) or browser_type (real \
+    keystrokes) / browser_press_key drive the page by CSS selector; \
+    browser_wait_for blocks until an element appears. Inspecting: \
+    browser_screenshot, browser_get_text, browser_get_html, browser_get_links, \
+    browser_evaluate. Debugging (verify your app the way you'd verify it by \
+    hand): browser_console shows console output + uncaught errors, and \
+    browser_network / browser_network_summary show the request log — call \
+    browser_clear_network for a clean baseline before an action, then re-read.
     """
 
     static let toolDefinitions: [[String: Any]] = [
