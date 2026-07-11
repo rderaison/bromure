@@ -233,7 +233,19 @@ final class AppState: @unchecked Sendable {
         let kernelOpts = defaults.string(forKey: "vm.extraKernelOptions") ?? VMConfig.defaultExtraKernelOptions
 
         initTask = Task {
-            let handle: (ProgressEvent) -> Void = { [weak self] event in
+            // Download path: one continuous phase-weighted bar for the
+            // whole install (download → verify → expand → boot files →
+            // postinstall/personalisation), driven by the shared
+            // SandboxEngine mapper.
+            let mapper = BrowserInstallProgress()
+            let handleDownload: (ProgressEvent) -> Void = { [weak self] event in
+                DispatchQueue.main.async {
+                    self?.handleDownloadProgress(event, mapper: mapper)
+                }
+            }
+            // Local-bake fallback: the legacy per-phase handler (step
+            // checklist + netboot download bar + console).
+            let handleBake: (ProgressEvent) -> Void = { [weak self] event in
                 DispatchQueue.main.async {
                     self?.handleProgress(event)
                 }
@@ -250,11 +262,11 @@ final class AppState: @unchecked Sendable {
                     try await imageManager.downloadBaseImage(
                         personalization: .init(keyboardLayout: keyboard,
                                                naturalScrolling: scrolling),
-                        progress: handle
+                        progress: handleDownload
                     )
                 } catch let error where LinuxImageManager.isDownloadSideFailure(error) {
                     guard !Task.isCancelled else { return }
-                    handle(.message("Prebuilt image unavailable — building locally instead."))
+                    handleBake(.message("Prebuilt image unavailable — building locally instead."))
                     // The local build applies the same catalog postinstall
                     // steps the download path would, so both converge on
                     // the same image.
@@ -268,7 +280,7 @@ final class AppState: @unchecked Sendable {
                         displayScale: scale,
                         extraKernelOptions: kernelOpts,
                         postinstallSteps: catalog.sortedSteps,
-                        progress: handle
+                        progress: handleBake
                     )
                 }
                 guard !Task.isCancelled else { return }
@@ -279,6 +291,30 @@ final class AppState: @unchecked Sendable {
                 self.phase = .error(Self.localizedMessage(for: error))
             }
         }
+    }
+
+    /// Download-path progress: the mapper folds every event into one
+    /// monotonic fraction + narrated status, so the bar never disappears
+    /// between phases; the step checklist and console log keep updating
+    /// alongside it.
+    private func handleDownloadProgress(_ event: ProgressEvent, mapper: BrowserInstallProgress) {
+        mapper.note(event)
+        switch event {
+        case .stepStart(let text):
+            initSteps.append(InitStep(name: text, done: false))
+        case .stepDone(let text):
+            if let idx = initSteps.lastIndex(where: { $0.name == text }) {
+                initSteps[idx].done = true
+            }
+        case .consoleOutput(let text):
+            consoleLog.append(text)
+            if consoleLog.count > 8192 {
+                consoleLog = String(consoleLog.suffix(4096))
+            }
+        default:
+            break
+        }
+        phase = .initializing(status: mapper.status, progress: mapper.fraction)
     }
 
     /// Launch-time catalog maintenance for an up-to-date image: newly
@@ -341,7 +377,17 @@ final class AppState: @unchecked Sendable {
             }
             phase = .initializing(status: text, progress: nil)
         case .message(let text):
-            phase = .initializing(status: text, progress: nil)
+            // The prebuilt-image path reports byte progress as messages
+            // with a trailing percentage ("Downloading … image (1.5 GB)…
+            // 37%", "Expanding image… 45%"). Surface it as the determinate
+            // bar — the view renders its own % caption, so strip it from
+            // the status line.
+            if let pct = Self.trailingPercent(of: text) {
+                phase = .initializing(status: Self.strippingTrailingPercent(from: text),
+                                      progress: pct)
+            } else {
+                phase = .initializing(status: text, progress: nil)
+            }
         case .download(let received, let total):
             if total > 0 {
                 let pct = Double(received) / Double(total)
@@ -358,6 +404,26 @@ final class AppState: @unchecked Sendable {
                 consoleLog = String(consoleLog.suffix(4096))
             }
         }
+    }
+
+    /// "…foo… 37%" → 0.37. nil when the message doesn't end in a percent.
+    private static func trailingPercent(of msg: String) -> Double? {
+        guard msg.hasSuffix("%") else { return nil }
+        let digits = msg.dropLast().reversed().prefix(while: { $0.isNumber })
+        guard !digits.isEmpty, let value = Int(String(digits.reversed())) else { return nil }
+        return min(1.0, Double(value) / 100.0)
+    }
+
+    /// Drop a trailing " NN%" so the status line doesn't show a second
+    /// percentage next to the bar's caption.
+    private static func strippingTrailingPercent(from msg: String) -> String {
+        guard msg.hasSuffix("%") else { return msg }
+        var s = msg.dropLast()
+        let digitsEnd = s.endIndex
+        while let c = s.last, c.isNumber { s = s.dropLast() }
+        guard s.endIndex != digitsEnd else { return msg }  // bare "%" — leave it
+        while s.last == " " { s = s.dropLast() }
+        return String(s)
     }
 
     /// Shut down the current pool and start a fresh one with updated config.
