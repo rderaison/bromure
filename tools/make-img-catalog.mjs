@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 /*
  * make-img-catalog.mjs — assemble the published img-catalog.json for the
- * base-image publish pipeline (scripts/publish-image.sh).
+ * base-image publish pipelines (scripts/publish-image.sh for Bromure
+ * Agentic Coding, scripts/publish-browser-image.sh for Bromure Web).
  *
  * The postinstall step list comes VERBATIM from the bundled baseline
- * (Sources/AgentCoding/Resources/img-catalog.json) — that file is the
- * canonical source, same convention as the MLX catalog, so the shipped
- * app and the published manifest can never drift. Step uuids therefore
- * stay stable across weekly publishes, which is what lets clients tell
- * "already applied" from "new step" (the consent prompt).
+ * (Sources/AgentCoding/Resources/img-catalog.json for AC,
+ * Sources/SandboxEngine/Resources/browser-img-catalog.json for the
+ * browser) — those files are the canonical sources, same convention as
+ * the MLX catalog, so the shipped app and the published manifest can
+ * never drift. Step uuids therefore stay stable across weekly publishes,
+ * which is what lets clients tell "already applied" from "new step"
+ * (the consent prompt).
  *
  * Generate mode:
  *   node tools/make-img-catalog.mjs \
@@ -19,17 +22,28 @@
  *     --sha256 <hex> \
  *     --compressed-bytes N \
  *     --uncompressed-bytes N \
- *     --out <path>
+ *     --out <path> \
+ *     [--payload-magic bromure-browser-img-catalog-v1] \
+ *     [--boot name=vmlinuz,path=browser-images/<uuid>/vmlinuz.gz,sha256=<hex>,compressedBytes=N,uncompressedBytes=N]…
+ *
+ * --boot (repeatable) declares the non-disk boot artifacts the browser
+ * image needs (vmlinuz, initrd — it direct-kernel-boots, unlike the
+ * EFI/GRUB AC image). --payload-magic is the signing-payload domain
+ * separator: both channels sign with the same key, so a distinct first
+ * payload line is what stops a validly signed AC catalog from being
+ * replayed at the browser catalog URL (and vice versa). Default is the
+ * AC magic, "bromure-img-catalog-v1".
  *
  * Signing: unless --allow-unsigned is passed, the catalog is signed with
  * the SPARKLE_PRIVATE_KEY env credential — the same ed25519 key (and the
  * same PKCS8 wrapping as release-upload.mjs) that signs app updates. The
- * signature covers a canonical payload of the image identity/sha256 AND
- * every postinstall command (they run as root in users' base images);
- * clients verify against SUPublicEDKey and refuse unsigned catalogs from
- * the production CDN. The payload format here MUST stay byte-identical
- * to ImageCatalog.signingPayload(signedAt:) in
- * Sources/AgentCoding/ImageCatalog.swift.
+ * signature covers a canonical payload of the image identity/sha256, the
+ * boot artifacts, AND every postinstall command (they run as root in
+ * users' base images); clients verify against SUPublicEDKey and refuse
+ * unsigned catalogs from the production CDN. The payload format here
+ * MUST stay byte-identical to
+ * ImageCatalog.signingPayload(signedAt:magic:) in
+ * Sources/SandboxEngine/ImageCatalog.swift.
  *
  * Inspect mode (used to find the previous build to delete):
  *   node tools/make-img-catalog.mjs --print-image-uuid <prev-catalog.json>
@@ -48,6 +62,13 @@ function req(name) {
   const v = opt(name);
   if (!v) { console.error(`make-img-catalog: missing --${name}`); process.exit(2); }
   return v;
+}
+function optAll(name) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === `--${name}` && args[i + 1] !== undefined) out.push(args[i + 1]);
+  }
+  return out;
 }
 
 // --- Inspect mode -------------------------------------------------------
@@ -78,6 +99,37 @@ if (new Set(uuids).size !== uuids.length || uuids.some((u) => !u)) {
   process.exit(1);
 }
 
+// --boot name=vmlinuz,path=…,sha256=…,compressedBytes=N,uncompressedBytes=N
+// (repeatable) — the extra boot artifacts a direct-kernel-boot image
+// publishes alongside the disk.
+const bootFiles = optAll("boot").map((spec) => {
+  const kv = Object.fromEntries(spec.split(",").map((pair) => {
+    const eq = pair.indexOf("=");
+    return [pair.slice(0, eq), pair.slice(eq + 1)];
+  }));
+  const file = {
+    name: kv.name,
+    path: kv.path,
+    sha256: kv.sha256,
+    compressedBytes: Number(kv.compressedBytes),
+    uncompressedBytes: Number(kv.uncompressedBytes),
+    compression: kv.compression ?? "gzip",
+  };
+  if (!file.name || !file.path || !file.sha256 ||
+      !Number.isFinite(file.compressedBytes) || file.compressedBytes <= 0 ||
+      !Number.isFinite(file.uncompressedBytes) || file.uncompressedBytes <= 0) {
+    console.error(`make-img-catalog: malformed --boot spec: ${spec}`);
+    process.exit(1);
+  }
+  return file;
+});
+if (new Set(bootFiles.map((f) => f.name)).size !== bootFiles.length) {
+  console.error("make-img-catalog: --boot names must be unique");
+  process.exit(1);
+}
+
+const payloadMagic = opt("payload-magic") ?? "bromure-img-catalog-v1";
+
 const catalog = {
   formatVersion: baseline.formatVersion ?? 1,
   image: {
@@ -92,6 +144,7 @@ const catalog = {
       uncompressedBytes: Number(req("uncompressed-bytes")),
       compression: "gzip",
     },
+    ...(bootFiles.length ? { boot: bootFiles } : {}),
   },
   postinstall: baseline.postinstall,
 };
@@ -110,14 +163,15 @@ if (!Number.isFinite(catalog.image.disk.compressedBytes) ||
 
 // --- Sign ----------------------------------------------------------------
 // Canonical payload — keep byte-identical to
-// ImageCatalog.signingPayload(signedAt:) (Swift verifier).
+// ImageCatalog.signingPayload(signedAt:magic:) (Swift verifier,
+// Sources/SandboxEngine/ImageCatalog.swift).
 function b64(s) {
   return Buffer.from(s, "utf8").toString("base64");
 }
-function signingPayload(cat, signedAt) {
+function signingPayload(cat, signedAt, magic) {
   const img = cat.image;
   const lines = [
-    "bromure-img-catalog-v1",
+    magic,
     `signedAt=${signedAt}`,
     `formatVersion=${cat.formatVersion}`,
     `image.uuid=${img.uuid}`,
@@ -130,6 +184,17 @@ function signingPayload(cat, signedAt) {
     `image.disk.uncompressedBytes=${img.disk.uncompressedBytes}`,
     `image.disk.compression=${img.disk.compression}`,
   ];
+  // Boot artifacts (browser channel) — absent for AC catalogs, keeping
+  // their payload byte-identical to the pre-boot-files format.
+  const boot = [...(img.boot ?? [])]
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const f of boot) {
+    lines.push(`boot.${f.name}.path=${f.path}`);
+    lines.push(`boot.${f.name}.sha256=${f.sha256.toLowerCase()}`);
+    lines.push(`boot.${f.name}.compressedBytes=${f.compressedBytes}`);
+    lines.push(`boot.${f.name}.uncompressedBytes=${f.uncompressedBytes}`);
+    lines.push(`boot.${f.name}.compression=${f.compression}`);
+  }
   const steps = [...cat.postinstall]
     .sort((a, b) => (a.uuid < b.uuid ? -1 : a.uuid > b.uuid ? 1 : 0));
   for (const s of steps) {
@@ -163,7 +228,7 @@ if (args.includes("--allow-unsigned")) {
   });
 
   const signedAt = new Date().toISOString();
-  const payload = signingPayload(catalog, signedAt);
+  const payload = signingPayload(catalog, signedAt, payloadMagic);
   const signature = sign(null, payload, key);
   // Self-check: guards against silent key-format bugs producing
   // signatures every client would then reject.

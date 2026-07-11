@@ -1,31 +1,44 @@
-import Crypto
+import CryptoKit
 import Foundation
 
-// MARK: - img-catalog.json model
+// MARK: - img-catalog.json model (shared by every prebuilt-image channel)
 //
-// The manifest that drives prebuilt-base-image distribution. Published to
-// https://dl.bromure.io/images/img-catalog.json by scripts/publish-image.sh
-// (Jenkinsfile.image, weekly); the bundled Resources/img-catalog.json is the
-// canonical source of the postinstall steps and the offline fallback.
+// The manifest format that drives prebuilt-base-image distribution. Two
+// channels publish it today, each under its own CDN prefix:
+//
+//   • Bromure Agentic Coding — https://dl.bromure.io/images/img-catalog.json
+//     (scripts/publish-image.sh, Jenkinsfile.image). Single EFI-bootable
+//     disk artifact (base.img.gz).
+//   • Bromure Web            — https://dl.bromure.io/browser-images/img-catalog.json
+//     (scripts/publish-browser-image.sh, Jenkinsfile.browser-image). Disk
+//     artifact plus `boot` files (vmlinuz.gz, initrd.gz) because the
+//     browser image boots via VZLinuxBootLoader, not EFI/GRUB.
+//
+// The channel-specific bits (CDN prefix, signing-payload magic, bundled
+// baseline, support dir) live in `ImageDistribution`; everything else —
+// parsing, signature verification, fetch/cache — is common. Bromure
+// Agentic Coding reuses the browser distribution as-is when the user opts
+// into installing the web-browser image from AC.
 //
 // Two independent update axes:
-//   • `image.version` — the base-image version (same constant as
-//     `UbuntuImageManager.imageVersion`). A *major* change means "offer the
-//     user a full re-download". Weekly package-refresh rebuilds keep the
-//     version, so only new installations pick them up.
+//   • `image.version` — the base-image version (mirrors the app's
+//     imageVersion constant at publish time). Weekly package-refresh
+//     rebuilds keep the version, so only new installations pick them up.
 //   • `postinstall[].uuid` — each step is identified by a stable uuid. A
 //     step uuid the local image hasn't applied yet is a "new recommended
-//     package": surfaced to the user for consent, then executed in a chroot
-//     against base.img (postinstall.sh). Steps are ordered by `seq`.
+//     package": surfaced to the user for consent, then executed in a
+//     chroot against the base image (postinstall.sh). Steps are ordered
+//     by `seq`.
 //
 // Postinstall steps are how non-free software (Claude Code, Codex, Grok,
-// gcloud) reaches the user's machine: the published image itself contains
-// free software only, so it can be redistributed.
+// gcloud for AC; Cloudflare WARP for the browser) reaches the user's
+// machine: the published images contain free software only, so they can
+// be redistributed.
 
 /// One postinstall command from img-catalog.json. `command` is a shell
-/// fragment executed as root inside a chroot on base.img (bash -e, up to
-/// 3 attempts). `seq` orders execution; `uuid` identifies the step across
-/// catalog updates so we can tell "already applied" from "new".
+/// fragment executed as root inside a chroot on the base image (shell -e,
+/// up to 3 attempts). `seq` orders execution; `uuid` identifies the step
+/// across catalog updates so we can tell "already applied" from "new".
 public struct PostinstallStep: Codable, Sendable, Equatable, Identifiable {
     public var uuid: String
     public var seq: Int
@@ -44,7 +57,7 @@ public struct PostinstallStep: Codable, Sendable, Equatable, Identifiable {
 
 /// The downloadable prebuilt image a published catalog points at.
 public struct RemoteBaseImage: Codable, Sendable, Equatable {
-    /// Compressed disk artifact, keyed under `images/<uuid>/` on the CDN.
+    /// Compressed disk artifact, keyed under `<prefix>/<uuid>/` on the CDN.
     public struct Disk: Codable, Sendable, Equatable {
         /// Object key relative to the CDN base, e.g.
         /// `images/3f…/base.img.gz`.
@@ -53,7 +66,7 @@ public struct RemoteBaseImage: Codable, Sendable, Equatable {
         /// decompression.
         public var sha256: String
         public var compressedBytes: Int64
-        /// Logical size of the decompressed raw disk (24 GB sparse).
+        /// Logical size of the decompressed raw disk.
         public var uncompressedBytes: Int64
         /// Only "gzip" today. Anything else is rejected client-side so a
         /// future format change can't silently produce a corrupt disk.
@@ -69,36 +82,71 @@ public struct RemoteBaseImage: Codable, Sendable, Equatable {
         }
     }
 
+    /// A compressed non-disk boot artifact published alongside the disk.
+    /// The browser image needs `vmlinuz` and `initrd` on the host because
+    /// it boots via VZLinuxBootLoader (direct kernel boot); the AC image
+    /// has none (GRUB lives on its EFI partition).
+    public struct BootFile: Codable, Sendable, Equatable {
+        /// Stable artifact name the client keys on: "vmlinuz" | "initrd".
+        public var name: String
+        /// Object key relative to the CDN base.
+        public var path: String
+        /// SHA-256 (hex) of the compressed file.
+        public var sha256: String
+        public var compressedBytes: Int64
+        public var uncompressedBytes: Int64
+        public var compression: String
+
+        public init(name: String, path: String, sha256: String,
+                    compressedBytes: Int64, uncompressedBytes: Int64,
+                    compression: String = "gzip") {
+            self.name = name
+            self.path = path
+            self.sha256 = sha256
+            self.compressedBytes = compressedBytes
+            self.uncompressedBytes = uncompressedBytes
+            self.compression = compression
+        }
+    }
+
     /// Random uuid minted per published build — the CDN prefix the
     /// artifacts live under. A new weekly build gets a new uuid even when
     /// `version` doesn't change (the previous prefix is deleted after the
     /// new catalog is live).
     public var uuid: String
-    /// Image version — mirrors `UbuntuImageManager.imageVersion` at build
-    /// time ("200", possibly with a dot-revision).
+    /// Image version — mirrors the publishing app's imageVersion constant
+    /// at build time, possibly with a dot-revision.
     public var version: String
-    /// Human description, e.g. "Ubuntu 24.04".
+    /// Human description, e.g. "Ubuntu 24.04" or "Alpine Linux 3.22 + Chromium".
     public var description: String
     /// ISO-8601 build timestamp (informational).
     public var builtAt: String?
     public var disk: Disk
+    /// nil for catalogs that publish a single self-booting disk (AC).
+    public var boot: [BootFile]?
 
     public init(uuid: String, version: String, description: String,
-                builtAt: String? = nil, disk: Disk) {
+                builtAt: String? = nil, disk: Disk, boot: [BootFile]? = nil) {
         self.uuid = uuid
         self.version = version
         self.description = description
         self.builtAt = builtAt
         self.disk = disk
+        self.boot = boot
+    }
+
+    /// The boot artifact named `name`, if the catalog carries one.
+    public func bootFile(named name: String) -> BootFile? {
+        boot?.first { $0.name == name }
     }
 }
 
 /// A parsed img-catalog.json.
 public struct ImageCatalog: Codable, Sendable, Equatable {
-    /// Ed25519 signature over `signingPayload(signedAt:)`, made by the
-    /// publish pipeline with the same Sparkle key that signs app updates
-    /// (SUPublicEDKey verifies both). It covers the image identity +
-    /// sha256 AND every postinstall command — the commands run as root
+    /// Ed25519 signature over `signingPayload(signedAt:magic:)`, made by
+    /// the publish pipeline with the same Sparkle key that signs app
+    /// updates (SUPublicEDKey verifies both). It covers the image identity
+    /// + sha256 AND every postinstall command — the commands run as root
     /// inside users' base images, so a compromised CDN bucket must not
     /// be able to alter them.
     public struct Signature: Codable, Sendable, Equatable {
@@ -137,14 +185,19 @@ public struct ImageCatalog: Codable, Sendable, Equatable {
     /// not raw JSON bytes, so formatting/key-order can never break
     /// verification. tools/make-img-catalog.mjs builds the IDENTICAL
     /// string; any change here is a format break that must be made in
-    /// both places (and bump the version line). Free-text fields are
+    /// both places (and bump the magic line). Free-text fields are
     /// base64'd so embedded newlines can't smuggle extra payload lines.
     /// nil when there's no image (a baseline is never signed).
-    public func signingPayload(signedAt: String) -> Data? {
+    ///
+    /// `magic` is the distribution's domain separator
+    /// (`ImageDistribution.signingMagic`) — it's what stops a validly
+    /// signed AC catalog from being replayed at the browser catalog URL
+    /// (and vice versa), since both channels sign with the same key.
+    public func signingPayload(signedAt: String, magic: String) -> Data? {
         guard let image else { return nil }
         func b64(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
         var lines = [
-            "bromure-img-catalog-v1",
+            magic,
             "signedAt=\(signedAt)",
             "formatVersion=\(formatVersion)",
             "image.uuid=\(image.uuid)",
@@ -157,6 +210,16 @@ public struct ImageCatalog: Codable, Sendable, Equatable {
             "image.disk.uncompressedBytes=\(image.disk.uncompressedBytes)",
             "image.disk.compression=\(image.disk.compression)",
         ]
+        // Boot artifacts (browser channel). Absent entirely for AC
+        // catalogs, which keeps their payload byte-identical to the
+        // pre-boot-files format.
+        for file in (image.boot ?? []).sorted(by: { $0.name < $1.name }) {
+            lines.append("boot.\(file.name).path=\(file.path)")
+            lines.append("boot.\(file.name).sha256=\(file.sha256.lowercased())")
+            lines.append("boot.\(file.name).compressedBytes=\(file.compressedBytes)")
+            lines.append("boot.\(file.name).uncompressedBytes=\(file.uncompressedBytes)")
+            lines.append("boot.\(file.name).compression=\(file.compression)")
+        }
         for step in postinstall.sorted(by: { $0.uuid < $1.uuid }) {
             lines.append("step.\(step.uuid).seq=\(step.seq)")
             lines.append("step.\(step.uuid).description.b64=\(b64(step.description))")
@@ -179,21 +242,12 @@ public struct ImageCatalog: Codable, Sendable, Equatable {
     public static func parse(_ data: Data) throws -> ImageCatalog {
         try JSONDecoder().decode(ImageCatalog.self, from: data)
     }
-}
 
-// MARK: - Baseline (shipped, offline fallback)
-
-extension ImageCatalog {
-    /// The shipped baseline — the bundled `img-catalog.json` resource, the
-    /// same file `scripts/publish-image.sh` reads the postinstall list
-    /// from, so shipped baseline and published manifest can never drift.
-    /// Its `image` is null: with no network there is nothing to download
-    /// (the local build path is the fallback), but the postinstall list
-    /// still applies.
-    public static let baseline: ImageCatalog = loadBundledBaseline()
-
-    static func loadBundledBaseline() -> ImageCatalog {
-        if let url = acResourceBundle.url(forResource: "img-catalog", withExtension: "json"),
+    /// Load a bundled baseline resource; falls back to an empty step list
+    /// if the resource is missing/corrupt, so setup still completes (with
+    /// a free-software image and no extra packages) rather than trapping.
+    public static func loadBaseline(bundle: Bundle, resource: String) -> ImageCatalog {
+        if let url = bundle.url(forResource: resource, withExtension: "json"),
            let data = try? Data(contentsOf: url),
            let cat = try? parse(data) {
             return cat
@@ -201,44 +255,84 @@ extension ImageCatalog {
         return embeddedFallback
     }
 
-    /// Last-resort safety net if the bundled JSON is ever missing/corrupt:
-    /// an empty step list, so setup still completes (with a free-software
-    /// image and no agents) rather than trapping.
+    /// Last-resort safety net if a bundled baseline JSON is ever
+    /// missing/corrupt.
     static let embeddedFallback = ImageCatalog(formatVersion: 1, image: nil, postinstall: [])
+}
+
+// MARK: - Distribution (per-channel configuration)
+
+/// Everything that differs between prebuilt-image channels. The catalog
+/// format, signature scheme, fetch/cache logic, and download plumbing are
+/// shared; a distribution supplies the CDN prefix, the signing-payload
+/// domain separator, the cache file name, and the bundled baseline.
+public struct ImageDistribution: Sendable {
+    /// CDN path prefix the channel publishes under: `<prefix>/img-catalog.json`
+    /// and `<prefix>/<uuid>/<artifact>`.
+    public let catalogPrefix: String
+    /// First line of the signing payload — a domain separator so a
+    /// catalog signed for one channel can't be replayed on another
+    /// (both channels sign with the same Sparkle key).
+    public let signingMagic: String
+    /// File name the fetched catalog is cached under in Application
+    /// Support. Distinct per channel so one app can hold both (AC caches
+    /// the browser catalog next to its own when the user installs the
+    /// web browser).
+    public let cacheFileName: String
+    /// Application Support subdirectory used when no explicit support
+    /// dir is passed to the store.
+    public let defaultSupportDirName: String
+    /// Loads the bundled baseline catalog (canonical postinstall list,
+    /// offline fallback).
+    public let loadBaseline: @Sendable () -> ImageCatalog
+
+    public init(catalogPrefix: String, signingMagic: String, cacheFileName: String,
+                defaultSupportDirName: String,
+                loadBaseline: @escaping @Sendable () -> ImageCatalog) {
+        self.catalogPrefix = catalogPrefix
+        self.signingMagic = signingMagic
+        self.cacheFileName = cacheFileName
+        self.defaultSupportDirName = defaultSupportDirName
+        self.loadBaseline = loadBaseline
+    }
+
+    /// The Bromure Web browser image (Alpine + Chromium, three boot
+    /// artifacts). Lives in SandboxEngine so Bromure Agentic Coding can
+    /// download/postinstall the browser image with the exact same code
+    /// when the user opts into the embedded web browser.
+    public static let browser = ImageDistribution(
+        catalogPrefix: "browser-images",
+        signingMagic: "bromure-browser-img-catalog-v1",
+        cacheFileName: "browser-img-catalog.json",
+        defaultSupportDirName: "Bromure",
+        loadBaseline: {
+            ImageCatalog.loadBaseline(bundle: LinuxImageManager.resourceBundle,
+                                      resource: "browser-img-catalog")
+        }
+    )
 }
 
 // MARK: - Store (fetch + cache)
 
-/// Fetches and caches img-catalog.json — same pattern as the MLX
-/// `CatalogStore`: remote manifest cached in Application Support, bundled
-/// baseline as the offline fallback.
+/// Fetches and caches a channel's img-catalog.json — same pattern as the
+/// MLX `CatalogStore`: remote manifest cached in Application Support,
+/// bundled baseline as the offline fallback.
 public final class ImageCatalogStore: @unchecked Sendable {
-    public static let shared = ImageCatalogStore()
-
-    /// Bromure-hosted manifest, published by `scripts/publish-image.sh`
-    /// (Jenkinsfile.image) with a 1-second CDN cache so a weekly publish
-    /// is visible to clients immediately.
-    public static let defaultRefreshURL =
-        URL(string: "https://dl.bromure.io/images/img-catalog.json")!
+    /// The browser-image channel store (shared instance).
+    public static let browser = ImageCatalogStore(distribution: .browser)
 
     /// Base the catalog's relative artifact paths resolve against.
     public static let defaultPublicBase = URL(string: "https://dl.bromure.io/")!
 
     /// `BROMURE_IMAGE_CATALOG_BASE` env override — points the catalog
     /// fetch AND artifact resolution at another root, e.g. the `file://`
-    /// staging dir scripts/test-image-publish-local.sh assembles, or a
+    /// staging dir the local pipeline-test scripts assemble, or a
     /// localhost server in tests. Layout under the base must mirror the
-    /// CDN (`images/img-catalog.json`, `images/<uuid>/base.img.gz`).
+    /// CDN (`<prefix>/img-catalog.json`, `<prefix>/<uuid>/<artifact>`).
     static var overrideBase: URL? {
         guard let raw = ProcessInfo.processInfo.environment["BROMURE_IMAGE_CATALOG_BASE"],
               !raw.isEmpty else { return nil }
         return URL(string: raw.hasSuffix("/") ? raw : raw + "/")
-    }
-
-    /// The manifest URL actually in effect (override-aware).
-    public static var refreshURL: URL {
-        overrideBase.flatMap { URL(string: "images/img-catalog.json", relativeTo: $0)?.absoluteURL }
-            ?? defaultRefreshURL
     }
 
     /// The artifact base actually in effect (override-aware).
@@ -246,22 +340,35 @@ public final class ImageCatalogStore: @unchecked Sendable {
         overrideBase ?? defaultPublicBase
     }
 
+    public let distribution: ImageDistribution
+    /// The channel's bundled baseline (canonical postinstall list).
+    public let baseline: ImageCatalog
+
     private let cacheURL: URL
     private let lock = NSLock()
     private var cachedRemote: ImageCatalog?
 
-    public init(supportDir: URL? = nil) {
+    /// The manifest URL actually in effect for this channel (override-aware).
+    public var refreshURL: URL {
+        let path = "\(distribution.catalogPrefix)/img-catalog.json"
+        return Self.overrideBase.flatMap { URL(string: path, relativeTo: $0)?.absoluteURL }
+            ?? URL(string: path, relativeTo: Self.defaultPublicBase)!.absoluteURL
+    }
+
+    public init(distribution: ImageDistribution, supportDir: URL? = nil) {
+        self.distribution = distribution
+        self.baseline = distribution.loadBaseline()
         let support = supportDir ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("BromureAC", isDirectory: true)
+            .appendingPathComponent(distribution.defaultSupportDirName, isDirectory: true)
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        self.cacheURL = support.appendingPathComponent("img-catalog.json")
+        self.cacheURL = support.appendingPathComponent(distribution.cacheFileName)
         if let data = try? Data(contentsOf: cacheURL),
            let cached = try? ImageCatalog.parse(data) {
             // The cache is re-verified on load: it sits on disk where
             // anything running as the user could edit it, and trusting
             // it unsigned would bypass the fetch-time check below.
-            if Self.overrideBase != nil || Self.isSignatureValid(cached) {
+            if Self.overrideBase != nil || isSignatureValid(cached) {
                 self.cachedRemote = cached
             }
         }
@@ -271,22 +378,24 @@ public final class ImageCatalogStore: @unchecked Sendable {
 
     /// The ed25519 public key catalog signatures verify against — the
     /// same Sparkle key that signs app updates. Read from Info.plist
-    /// (SUPublicEDKey) when running from the app bundle; the constant
+    /// (SUPublicEDKey) when running from an app bundle; the constant
     /// covers bare-binary contexts (swift build output, unit tests) and
-    /// MUST match Sources/AgentCoding/Info.plist.
-    static var pinnedPublicKeyBase64: String {
+    /// MUST match Sources/Browser/Info.plist and
+    /// Sources/AgentCoding/Info.plist (they carry the same key).
+    public static var pinnedPublicKeyBase64: String {
         (Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String)
             ?? "G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8="
     }
 
     /// True when `catalog` carries a signature that verifies against
-    /// `publicKeyBase64` over the canonical payload.
-    static func isSignatureValid(
+    /// `publicKeyBase64` over the canonical payload built with `magic`.
+    public static func isSignatureValid(
         _ catalog: ImageCatalog,
+        magic: String,
         publicKeyBase64: String = ImageCatalogStore.pinnedPublicKeyBase64
     ) -> Bool {
         guard let sig = catalog.signature,
-              let payload = catalog.signingPayload(signedAt: sig.signedAt),
+              let payload = catalog.signingPayload(signedAt: sig.signedAt, magic: magic),
               let sigData = Data(base64Encoded: sig.edSignature),
               let keyData = Data(base64Encoded: publicKeyBase64),
               let key = try? Curve25519.Signing.PublicKey(rawRepresentation: keyData)
@@ -294,10 +403,17 @@ public final class ImageCatalogStore: @unchecked Sendable {
         return key.isValidSignature(sigData, for: payload)
     }
 
+    /// Channel-scoped convenience over the static verifier.
+    public func isSignatureValid(_ catalog: ImageCatalog) -> Bool {
+        Self.isSignatureValid(catalog, magic: distribution.signingMagic)
+    }
+
+    // MARK: - Access
+
     /// The best catalog we have: last fetched manifest, else the baseline.
     public func effective() -> ImageCatalog {
         lock.lock(); defer { lock.unlock() }
-        return cachedRemote ?? ImageCatalog.baseline
+        return cachedRemote ?? baseline
     }
 
     /// The last *fetched* catalog only — nil when we've never reached the
@@ -321,9 +437,9 @@ public final class ImageCatalogStore: @unchecked Sendable {
     /// but URLSession's local cache would happily serve yesterday's).
     /// Network failures are non-fatal — we keep serving the prior catalog.
     @discardableResult
-    public func refresh(from url: URL = ImageCatalogStore.refreshURL,
+    public func refresh(from url: URL? = nil,
                         session: URLSession = .shared) async -> ImageCatalog? {
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url ?? refreshURL)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         do {
             let (data, resp) = try await session.data(for: request)
@@ -340,7 +456,7 @@ public final class ImageCatalogStore: @unchecked Sendable {
             // (local pipeline tests) skips this; a missing signature is
             // as fatal as a bad one so it can't be stripped.
             if Self.overrideBase == nil {
-                guard Self.isSignatureValid(parsed) else { return nil }
+                guard isSignatureValid(parsed) else { return nil }
                 // Rollback guard: never adopt a catalog signed earlier
                 // than one already adopted — replaying an old, validly
                 // signed catalog could reintroduce a retired image or
@@ -363,5 +479,24 @@ public final class ImageCatalogStore: @unchecked Sendable {
     public static func artifactURL(for path: String,
                                    base: URL = ImageCatalogStore.publicBase) -> URL? {
         URL(string: path, relativeTo: base)?.absoluteURL
+    }
+}
+
+// MARK: - Image state (source + applied postinstall steps)
+
+/// Sidecar to the version stamp: which published image build the on-disk
+/// base image came from (nil = built locally) and which img-catalog
+/// postinstall steps have been applied to it. The diff between the
+/// catalog's steps and `appliedStepUUIDs` drives the "new packages are
+/// recommended" consent prompt. Shared by both channels.
+public struct BaseImageState: Codable, Sendable, Equatable {
+    public var imageUUID: String?
+    public var version: String
+    public var appliedStepUUIDs: [String]
+
+    public init(imageUUID: String?, version: String, appliedStepUUIDs: [String]) {
+        self.imageUUID = imageUUID
+        self.version = version
+        self.appliedStepUUIDs = appliedStepUUIDs
     }
 }

@@ -130,7 +130,7 @@ struct Init: ParsableCommand {
         // With a custom storage dir, scope the catalog cache there too —
         // a pipeline test must not pollute (or read) the real app's
         // cached catalog in Application Support.
-        let catalogStore = storageDirURL.map { ImageCatalogStore(supportDir: $0) }
+        let catalogStore = storageDirURL.map { ImageCatalogStore(distribution: .agentCoding, supportDir: $0) }
             ?? ImageCatalogStore.shared
         // The install path keeps the existing image usable until the
         // new one is ready (writes go to .partial files, then atomic

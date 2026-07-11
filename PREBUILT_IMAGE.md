@@ -1,10 +1,34 @@
-# Prebuilt Base Image (Bromure Agentic Coding)
+# Prebuilt Base Images
 
-Installing Bromure AC used to build the Ubuntu base image locally on every
-machine (~10 min: Alpine netboot → debootstrap → `setup.sh`). New
-installations now **download a prebuilt image** from DigitalOcean Spaces
-instead, and only fall back to the local build when the download isn't
-available (offline, CDN outage).
+Installing Bromure used to build the base images locally on every machine
+(~10 min: Alpine netboot → `setup.sh`). New installations now **download a
+prebuilt image** from DigitalOcean Spaces instead, and only fall back to
+the local build when the download isn't available (offline, CDN outage).
+
+Two channels share the same mechanism (catalog model, ed25519 signing,
+download plumbing, chroot postinstall — all in
+`Sources/SandboxEngine/ImageCatalog.swift` / `ImageFetch.swift`):
+
+| | Bromure Agentic Coding | Bromure Web |
+|---|---|---|
+| CDN prefix | `images/` | `browser-images/` |
+| Image | Ubuntu 24.04, 24 GB sparse, EFI/GRUB | Alpine + Chromium, 4.5 GB, direct kernel boot |
+| Artifacts | `base.img.gz` | `base.img.gz` + `vmlinuz.gz` + `initrd.gz` (catalog `boot` array) |
+| Version constant | `UbuntuImageManager.imageVersion` | `LinuxImageManager.imageVersion` |
+| Baseline (canonical postinstall) | `Sources/AgentCoding/Resources/img-catalog.json` | `Sources/SandboxEngine/Resources/browser-img-catalog.json` |
+| Non-free postinstall | Claude Code, Codex, Grok, gcloud | Cloudflare WARP |
+| Signing payload magic | `bromure-img-catalog-v1` | `bromure-browser-img-catalog-v1` |
+| Pipeline | `Jenkinsfile.image` → `scripts/publish-image.sh` | `Jenkinsfile.browser-image` → `scripts/publish-browser-image.sh` |
+
+The channel-specific configuration lives in `ImageDistribution`
+(`.agentCoding` in `Sources/AgentCoding/ImageCatalogAC.swift`, `.browser`
+in SandboxEngine). The browser machinery deliberately lives in
+**SandboxEngine**, not the browser executable, so Bromure AC can drive
+the exact same download + postinstall when the user opts into the
+embedded web browser (AC already boots the browser image via
+`LinuxImageManager.hasBootFiles`).
+
+# Bromure Agentic Coding (`images/`)
 
 ## The free-software constraint
 
@@ -156,3 +180,105 @@ image (postinstall included). `KEEP_STAGING=1` keeps the artifacts.
 Unit tests: `swift test --filter ImageCatalogTests` (catalog parsing, step
 diffing) and `swift test --filter "Image download plumbing"` (streaming
 sha256, sparse gunzip expansion).
+
+# Bromure Web (`browser-images/`)
+
+The browser image (Alpine + Chromium) follows the same design with three
+differences.
+
+## Three artifacts, not one
+
+The browser image direct-kernel-boots via `VZLinuxBootLoader` (no
+EFI/GRUB), so the host needs the raw ARM64 kernel and the mkinitfs
+initramfs alongside the disk. The catalog's `image.boot` array declares
+them:
+
+```json
+"boot": [
+  { "name": "vmlinuz", "path": "browser-images/<uuid>/vmlinuz.gz",
+    "sha256": "…", "compressedBytes": 1, "uncompressedBytes": 2,
+    "compression": "gzip" },
+  { "name": "initrd", "path": "browser-images/<uuid>/initrd.gz", … }
+]
+```
+
+All three are sha256-verified before install. The signature covers the
+boot artifacts too (a swapped kernel is ring-0 in the user's VM); the
+payload uses the **`bromure-browser-img-catalog-v1`** magic so a validly
+signed AC catalog can never be replayed at the browser URL (both channels
+sign with the same Sparkle key).
+
+## What only exists on the end-user's machine
+
+The published image is strictly FOSS **and impersonal**. Client-side
+postinstall (`Sources/SandboxEngine/Resources/vm-setup/postinstall.sh`,
+Alpine chroot on `/dev/vda`) supplies:
+
+- **Cloudflare WARP** (proprietary .deb from pkg.cloudflareclient.com) —
+  a catalog step in `browser-img-catalog.json`. `setup.sh` bakes only its
+  FOSS runtime deps (gcompat, resolver stub).
+- **macOS fonts** — copied from the user's own Mac via virtiofs (same
+  700 MB cap logic as a local build). Never shipped.
+- **Personalisation** — keyboard layout / natural scrolling / locale are
+  re-rendered from the same `%%VAR%%` templates `setup.sh` bakes for
+  local builds (a published build carries `us`/`en_US` defaults).
+
+The distribution build (`bromure init-foss-image --output …`, setup.sh
+`BUILD_MODE=foss`) also **skips the debug root SSH** block and **fails
+the build outright when the out-of-tree kernel modules (v4l2loopback,
+rtc-pl031) can't be found** for the installed kernel — a local build
+degrades with a warning; a published image must never silently lack
+webcam/RTC support.
+
+## Client behavior
+
+- **New installation** (`AppState.startInit` / `bromure init`) — fetch
+  `browser-images/img-catalog.json`, download + verify + expand all three
+  artifacts into `.partial` files, run postinstall (steps + fonts +
+  personalisation, then an e2fsck gate), promote atomically, stamp
+  `image-version` with the app's `LinuxImageManager.imageVersion` (the
+  catalog's exact version is recorded in `image-state.json` — stamping by
+  the constant means a freshly downloaded image can never look stale).
+  Download-side failures retry 3× with a catalog re-fetch, then fall back
+  to the local build (which applies the same catalog steps, so both paths
+  converge on the same image).
+- **Version change** — the browser keeps its existing behavior: an
+  `imageVersion` bump in the app auto-reinstalls on next launch (now via
+  download-first).
+- **New postinstall steps** — steps whose uuid isn't in
+  `image-state.json` (`~/Library/Application Support/Bromure/`) prompt
+  for consent on launch, then apply to an APFS clone and swap atomically
+  (`LinuxImageManager.applyPostinstallSteps`). Pre-existing installs are
+  migrated on launch: the bundled baseline's steps are marked applied,
+  since the old `setup.sh` baked WARP in.
+
+## Publishing (Jenkins, weekly)
+
+`Jenkinsfile.browser-image` (cron `H 4 * * 1`, an hour after the AC
+image job) runs `./build.sh bromure`, then
+`scripts/publish-browser-image.sh <path-to-bromure>`: init-foss-image →
+boot-check a clone (`bromure verify-image --disk … --kernel … --initrd …`,
+waits for the root serial prompt) → gzip + sha256 ×3 → upload under
+`browser-images/<uuid>/` → catalog (make-img-catalog.mjs with `--boot` +
+`--payload-magic`) at a 1s TTL → origin + CDN smoke-test → delete the
+previous build. `DRY_RUN` / `KEEP_PREVIOUS` as in the AC pipeline. The
+Cloudflare worker needs no change (it routes by extension, not prefix).
+
+## Testing locally (no uploads)
+
+```bash
+./build.sh bromure
+./scripts/test-browser-image-publish-local.sh \
+    '.build/arm64-apple-macosx/release/Bromure.app/Contents/MacOS/bromure'
+# ~15-25 min, ~15 GB disk, network needed
+```
+
+Same shape as the AC rehearsal: builds + boot-checks the FOSS image,
+assembles a `file://` CDN (catalog + three artifacts), runs a real client
+install (`bromure init --download-only --storage-dir …` with
+`BROMURE_IMAGE_CATALOG_BASE`), asserts the stamp / image-state / applied
+steps, and boot-checks the final image. `KEEP_STAGING=1` keeps the
+artifacts.
+
+Unit tests: `swift test --filter BrowserImage` (boot-artifact payload +
+signature domain separation, baseline, image-state migration).

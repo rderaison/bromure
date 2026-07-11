@@ -112,7 +112,11 @@ let package = Package(
                 .product(name: "X509", package: "swift-certificates"),
             ],
             path: "Sources/SandboxEngine",
-            resources: [.copy("Resources/vm-setup")],
+            resources: [.copy("Resources/vm-setup"),
+                        // Browser prebuilt-image baseline: canonical
+                        // postinstall list + offline fallback, uploaded
+                        // verbatim by scripts/publish-browser-image.sh.
+                        .copy("Resources/browser-img-catalog.json")],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("AppKit"),

@@ -119,7 +119,7 @@ struct MainView: View {
             VStack(spacing: 6) {
                 Text("First-Time Setup")
                     .font(.headline)
-                Text("Downloads Alpine Linux (~50 MB) and installs\nChromium. This only needs to happen once.")
+                Text("Downloads the browser image (Alpine Linux + Chromium)\nand personalizes it for your Mac. This only needs to happen once.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

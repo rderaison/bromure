@@ -1,7 +1,18 @@
 #!/bin/sh
 # Bromure VM setup script — installs Alpine Linux with Chromium
-# Usage: setup.sh KEYBOARD_LAYOUT NATURAL_SCROLLING LOCALE DISPLAY_SCALE ALPINE_VERSION
-# No set -e: non-critical sections (WARP, ad blocking) may fail gracefully
+# Usage: setup.sh KEYBOARD_LAYOUT NATURAL_SCROLLING LOCALE DISPLAY_SCALE ALPINE_VERSION [BUILD_MODE]
+# No set -e: non-critical sections (ad blocking) may fail gracefully
+#
+# BUILD_MODE:
+#   user (default) — local build on the end-user's machine: bakes their
+#                    macOS fonts and keeps the debug root SSH.
+#   foss           — redistributable build for the publish pipeline
+#                    (bromure init-foss-image → dl.bromure.io/browser-images/):
+#                    free software only — no Apple fonts, no debug root
+#                    SSH — and a missing out-of-tree kernel module FAILS
+#                    the build instead of degrading. (Cloudflare WARP is
+#                    never installed here in either mode; it's a
+#                    browser-img-catalog.json postinstall step.)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KB_LAYOUT_SPEC="${1:-us}"
@@ -9,6 +20,7 @@ NATURAL_SCROLLING="${2:-true}"
 LOCALE="${3:-en_US}"
 DISPLAY_SCALE="${4:-2}"
 ALPINE_VERSION="${5:-3.22}"
+BUILD_MODE="${6:-user}"
 CURSOR_SIZE=$((DISPLAY_SCALE * 24))
 
 # Parse layout:variant format (e.g. "ch:fr" → layout="ch", variant="fr")
@@ -128,24 +140,17 @@ ls -la /mnt/sbin/init || {
 }
 
 # ---------------------------------------------------------------------------
-# Cloudflare WARP (glibc binary on musl Alpine)
+# Cloudflare WARP runtime dependencies (FOSS). The proprietary WARP
+# binary itself is NOT installed here — it can't ship in the
+# redistributable image, so it's declared as a postinstall step in
+# browser-img-catalog.json and lands on the end-user's machine (both the
+# download path and the local build apply catalog steps after this
+# script). Only the free glibc-compat layer and our own resolver stub
+# are baked.
 # ---------------------------------------------------------------------------
 
 retry chroot /mnt apk add gcompat libstdc++ ca-certificates nftables iproute2 \
     glib nss nspr libgcc
-retry apk add binutils
-
-WARP_DEB=$(wget -qO- 'https://pkg.cloudflareclient.com/dists/bookworm/main/binary-arm64/Packages' \
-    | grep '^Filename:' | tail -1 | cut -d' ' -f2)
-for i in 1 2 3; do
-    wget -q "https://pkg.cloudflareclient.com/$WARP_DEB" -O /tmp/warp.deb && break
-    sleep 2
-done
-cd /tmp && ar x warp.deb 2>/dev/null
-tar xf /tmp/data.tar.* -C /mnt 2>/dev/null || echo "WARP_EXTRACT_FAILED"
-rm -f /tmp/warp.deb /tmp/data.tar.* /tmp/control.tar.* /tmp/debian-binary
-mkdir -p /mnt/var/lib/cloudflare-warp /mnt/var/log/cloudflare-warp
-ls -la /mnt/bin/warp-cli 2>/dev/null && echo "WARP_INSTALLED_OK" || echo "WARP_INSTALL_FAILED"
 
 # Build glibc resolver stub (gcompat lacks __res_init)
 retry apk add gcc musl-dev
@@ -164,19 +169,22 @@ retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools 
 # DEBUG: passwordless root SSH for network debugging of the browser VM.
 # The VM has no serial shell and no exec channel, so this is the only way to
 # get inside it. INSECURE (empty root password, root login, empty-password
-# auth) — this image is for local development only and is regenerated before
-# any real distribution. Remove this block for a production/redistributable
-# image.
+# auth) — local development builds only; foss/distribution builds skip it
+# (the published image must never ship an open root login).
 # ---------------------------------------------------------------------------
-retry chroot /mnt apk add openssh
-chroot /mnt rc-update add sshd default
-# Generate host keys at build so sshd is up on first boot (not on first login).
-chroot /mnt ssh-keygen -A
-sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /mnt/etc/ssh/sshd_config
-sed -i 's/^#\?PermitEmptyPasswords.*/PermitEmptyPasswords yes/' /mnt/etc/ssh/sshd_config
-grep -q '^PermitRootLogin yes' /mnt/etc/ssh/sshd_config || echo 'PermitRootLogin yes' >> /mnt/etc/ssh/sshd_config
-grep -q '^PermitEmptyPasswords yes' /mnt/etc/ssh/sshd_config || echo 'PermitEmptyPasswords yes' >> /mnt/etc/ssh/sshd_config
-chroot /mnt passwd -d root   # empty root password
+if [ "$BUILD_MODE" != "foss" ]; then
+    retry chroot /mnt apk add openssh
+    chroot /mnt rc-update add sshd default
+    # Generate host keys at build so sshd is up on first boot (not on first login).
+    chroot /mnt ssh-keygen -A
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /mnt/etc/ssh/sshd_config
+    sed -i 's/^#\?PermitEmptyPasswords.*/PermitEmptyPasswords yes/' /mnt/etc/ssh/sshd_config
+    grep -q '^PermitRootLogin yes' /mnt/etc/ssh/sshd_config || echo 'PermitRootLogin yes' >> /mnt/etc/ssh/sshd_config
+    grep -q '^PermitEmptyPasswords yes' /mnt/etc/ssh/sshd_config || echo 'PermitEmptyPasswords yes' >> /mnt/etc/ssh/sshd_config
+    chroot /mnt passwd -d root   # empty root password
+else
+    echo "foss build: skipping debug root SSH"
+fi
 
 # ---------------------------------------------------------------------------
 # Configuration files (static)
@@ -315,27 +323,34 @@ install_config configs/chromium-preferences.json /mnt/home/chrome/.config/chromi
 chroot /mnt chown -R chrome:chrome /home/chrome/.config /home/chrome/.cache
 
 # ---------------------------------------------------------------------------
-# macOS fonts (shared from host via VirtioFS for web rendering parity)
+# macOS fonts (shared from host via VirtioFS for web rendering parity).
+# NEVER in a foss/distribution build: Apple fonts are not redistributable
+# — end-user installs copy them from the user's own Mac during
+# postinstall.sh instead (the host attaches no font shares in foss mode).
 # ---------------------------------------------------------------------------
 
 mkdir -p /mnt/usr/share/fonts/macos
-MAX_FONTS_BYTES=734003200  # 700 MB cap to avoid filling the disk
-# Mount all font shares, collect paths with sizes, copy smallest-first up to the cap,
-# then unmount. This avoids filling the disk when the host has many user-installed fonts.
-FONT_LIST=$(mktemp)
-for tag in fonts userfonts; do
-    FMNT="/tmp/$tag"
-    mkdir -p "$FMNT"
-    mount -t virtiofs "$tag" "$FMNT" 2>/dev/null || continue
-    find "$FMNT" -type f \( -name '*.ttf' -o -name '*.otf' -o -name '*.ttc' -o -name '*.TTF' -o -name '*.OTF' -o -name '*.TTC' \) \
-        -exec stat -c '%s %n' {} + >> "$FONT_LIST"
-done
-sort -n "$FONT_LIST" | awk -v max="$MAX_FONTS_BYTES" '{sz+=$1; if(sz>max) exit; print substr($0, index($0," ")+1)}' \
-    | while IFS= read -r path; do cp -- "$path" /mnt/usr/share/fonts/macos/; done
-rm -f "$FONT_LIST"
-for tag in fonts userfonts; do umount "/tmp/$tag" 2>/dev/null; done
-MACOS_FONT_COUNT=$(find /mnt/usr/share/fonts/macos/ -type f 2>/dev/null | wc -l)
-echo "Copied $MACOS_FONT_COUNT macOS font files"
+if [ "$BUILD_MODE" != "foss" ]; then
+    MAX_FONTS_BYTES=734003200  # 700 MB cap to avoid filling the disk
+    # Mount all font shares, collect paths with sizes, copy smallest-first up to the cap,
+    # then unmount. This avoids filling the disk when the host has many user-installed fonts.
+    FONT_LIST=$(mktemp)
+    for tag in fonts userfonts; do
+        FMNT="/tmp/$tag"
+        mkdir -p "$FMNT"
+        mount -t virtiofs "$tag" "$FMNT" 2>/dev/null || continue
+        find "$FMNT" -type f \( -name '*.ttf' -o -name '*.otf' -o -name '*.ttc' -o -name '*.TTF' -o -name '*.OTF' -o -name '*.TTC' \) \
+            -exec stat -c '%s %n' {} + >> "$FONT_LIST"
+    done
+    sort -n "$FONT_LIST" | awk -v max="$MAX_FONTS_BYTES" '{sz+=$1; if(sz>max) exit; print substr($0, index($0," ")+1)}' \
+        | while IFS= read -r path; do cp -- "$path" /mnt/usr/share/fonts/macos/; done
+    rm -f "$FONT_LIST"
+    for tag in fonts userfonts; do umount "/tmp/$tag" 2>/dev/null; done
+    MACOS_FONT_COUNT=$(find /mnt/usr/share/fonts/macos/ -type f 2>/dev/null | wc -l)
+    echo "Copied $MACOS_FONT_COUNT macOS font files"
+else
+    echo "foss build: skipping macOS fonts (copied during end-user postinstall)"
+fi
 
 # Pre-compute font cache so X11/Chromium don't scan fonts on first boot
 chroot /mnt fc-cache -f
@@ -504,12 +519,19 @@ echo "SANDBOX_STEP_DONE:Downloading popular domains list"
 # Pre-built .ko.gz files are bundled in the app for the kernel version they
 # were compiled against (recorded in KVER).  If the installed kernel is
 # newer, fetch matching modules from bromure.io/downloads/<kver>/ instead.
+#
+# A local build degrades gracefully when a module can't be found (webcam
+# sharing / guest clock lose function, everything else works). A foss/
+# distribution build must NEVER degrade: the published image reaches
+# every end-user, so a missing module fails the build altogether.
 # ---------------------------------------------------------------------------
 
 KVER=$(ls /mnt/lib/modules/)
 BUNDLED_KVER=""
 [ -f "$SCRIPT_DIR/v4l2loopback/KVER" ] && BUNDLED_KVER=$(cat "$SCRIPT_DIR/v4l2loopback/KVER" | tr -d '[:space:]')
 mkdir -p "/mnt/lib/modules/$KVER/extra"
+
+MODULES_OK=true
 
 if [ "$KVER" = "$BUNDLED_KVER" ]; then
     echo "Kernel $KVER matches bundled modules"
@@ -521,6 +543,7 @@ if [ "$KVER" = "$BUNDLED_KVER" ]; then
         echo "V4L2LOOPBACK_INSTALLED_OK"
     else
         echo "Warning: v4l2loopback.ko.gz not found in bundle"
+        MODULES_OK=false
     fi
 
     # rtc-pl031
@@ -533,18 +556,18 @@ if [ "$KVER" = "$BUNDLED_KVER" ]; then
         echo "RTC_PL031_INSTALLED_OK"
     else
         echo "Warning: rtc-pl031.ko not found in bundle"
+        MODULES_OK=false
     fi
 else
     echo "Kernel $KVER differs from bundled $BUNDLED_KVER — downloading modules from bromure.io"
     DOWNLOAD_BASE="https://bromure.io/downloads/${KVER}"
-    DL_OK=true
 
     if wget -q -O "/mnt/lib/modules/$KVER/extra/v4l2loopback.ko" "$DOWNLOAD_BASE/v4l2loopback.ko"; then
         echo "V4L2LOOPBACK_INSTALLED_OK (downloaded)"
     else
         echo "Warning: failed to download v4l2loopback.ko for $KVER — webcam sharing will not work"
         rm -f "/mnt/lib/modules/$KVER/extra/v4l2loopback.ko"
-        DL_OK=false
+        MODULES_OK=false
     fi
 
     if wget -q -O "/mnt/lib/modules/$KVER/extra/rtc-pl031.ko" "$DOWNLOAD_BASE/rtc-pl031.ko"; then
@@ -552,12 +575,18 @@ else
     else
         echo "Warning: failed to download rtc-pl031.ko for $KVER — guest clock will need manual sync"
         rm -f "/mnt/lib/modules/$KVER/extra/rtc-pl031.ko"
-        DL_OK=false
+        MODULES_OK=false
     fi
 
-    if [ "$DL_OK" = "false" ]; then
+    if [ "$MODULES_OK" = "false" ]; then
         echo "Warning: some kernel modules unavailable for $KVER — rebuild and upload to $DOWNLOAD_BASE/"
     fi
+fi
+
+# Distribution gate: a published image must carry every module.
+if [ "$BUILD_MODE" = "foss" ] && [ "$MODULES_OK" != "true" ]; then
+    echo "SANDBOX_SETUP_FAILED: kernel modules missing for $KVER (bundled: ${BUNDLED_KVER:-none}) — a distribution build must not degrade; build the modules for this kernel and upload them to https://bromure.io/downloads/$KVER/ (or refresh the bundled v4l2loopback/rtc-pl031 .ko.gz)"
+    exit 1
 fi
 
 chroot /mnt depmod "$KVER"

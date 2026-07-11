@@ -1,4 +1,3 @@
-import CommonCrypto
 import Darwin
 import Foundation
 import SandboxEngine
@@ -23,6 +22,9 @@ extension UbuntuImageManager {
     /// failing identically.
     public static func isDownloadSideFailure(_ error: Error) -> Bool {
         if error is CancellationError { return false }
+        // Every ImageFetchError case is download-side by construction
+        // (that's the enum's contract — see ImageFetch.swift).
+        if error is ImageFetchError { return true }
         if let e = error as? UbuntuImageError {
             switch e {
             case .catalogUnavailable, .downloadFailed, .checksumInvalid,
@@ -68,13 +70,13 @@ extension UbuntuImageManager {
         do {
             // 1. Catalog + image, with the delete-race retry loop.
             var catalog: ImageCatalog?
-            var lastError: Error = UbuntuImageError.catalogUnavailable
+            var lastError: Error = ImageFetchError.catalogUnavailable
             for attempt in 1...3 {
                 if attempt > 1 { progress("Retrying download (attempt \(attempt)/3)…") }
                 progress("Fetching image catalog…")
                 guard let fetched = await catalogStore.refresh(),
                       let image = fetched.image else {
-                    lastError = UbuntuImageError.catalogUnavailable
+                    lastError = ImageFetchError.catalogUnavailable
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     continue
                 }
@@ -198,202 +200,25 @@ extension UbuntuImageManager {
 
     // MARK: - Download + verify + expand
 
+    /// Thin wrapper over the shared ImageFetch plumbing (SandboxEngine):
+    /// download the catalog's disk artifact, verify its sha256, and
+    /// expand it sparse (the 24 GB logical disk is ~6-8 GB physical).
     private func fetchAndExpand(
         image: RemoteBaseImage,
         gz: URL,
         disk: URL,
         progress: @escaping (String) -> Void
     ) async throws {
-        guard image.disk.compression == "gzip" else {
-            throw UbuntuImageError.unsupportedCompression(image.disk.compression)
-        }
-        guard let url = ImageCatalogStore.artifactURL(for: image.disk.path) else {
-            throw UbuntuImageError.imageExpandFailed("bad artifact path \(image.disk.path)")
-        }
-
-        let human = ByteCountFormatter.string(fromByteCount: image.disk.compressedBytes,
-                                              countStyle: .file)
-        progress("Downloading \(image.description) image (\(human))…")
-        let expectedTotal = image.disk.compressedBytes
-        try await LargeFileDownloader(destination: gz) { written, _ in
-            guard expectedTotal > 0 else { return }
-            let pct = written * 100 / expectedTotal
-            progress("Downloading \(image.description) image (\(human))… \(pct)%")
-        }.run(from: url)
-
-        progress("Verifying checksum…")
-        let actual = try await Task.detached(priority: .userInitiated) {
-            try Self.sha256Streaming(of: gz)
-        }.value
-        guard actual == image.disk.sha256.lowercased() else {
-            throw UbuntuImageError.checksumInvalid(
-                "\(image.disk.path): expected \(image.disk.sha256), got \(actual)")
-        }
-
-        progress("Expanding image…")
-        let expectedBytes = image.disk.uncompressedBytes
-        try await Task.detached(priority: .userInitiated) {
-            try Self.expandGzipSparse(from: gz, to: disk,
-                                      expectedBytes: expectedBytes, progress: progress)
-        }.value
-        try? FileManager.default.removeItem(at: gz)
-    }
-
-    /// SHA-256 of a (multi-GB) file without loading it into memory.
-    static func sha256Streaming(of url: URL) throws -> String {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        var ctx = CC_SHA256_CTX()
-        CC_SHA256_Init(&ctx)
-        while true {
-            let chunk = try autoreleasepool {
-                try handle.read(upToCount: 4 * 1024 * 1024)
-            }
-            guard let chunk, !chunk.isEmpty else { break }
-            chunk.withUnsafeBytes {
-                _ = CC_SHA256_Update(&ctx, $0.baseAddress, CC_LONG($0.count))
-            }
-        }
-        var hash = [UInt8](repeating: 0, count: 32)
-        CC_SHA256_Final(&hash, &ctx)
-        return hash.map { String(format: "%02x", $0) }.joined()
-    }
-
-    /// Stream-gunzip a compressed raw disk to `dest`, skipping writes for
-    /// all-zero chunks so the result is APFS-sparse like a locally-built
-    /// image (the 24 GB logical disk is ~6-8 GB physical). Ends with a
-    /// truncate to the expected logical size to materialise trailing holes.
-    static func expandGzipSparse(
-        from gz: URL,
-        to dest: URL,
-        expectedBytes: Int64,
-        progress: @escaping (String) -> Void
-    ) throws {
-        let fm = FileManager.default
-        try? fm.removeItem(at: dest)
-        guard fm.createFile(atPath: dest.path, contents: nil) else {
-            throw UbuntuImageError.imageExpandFailed("cannot create \(dest.path)")
-        }
-        let out = try FileHandle(forWritingTo: dest)
-        defer { try? out.close() }
-
-        let gunzip = Process()
-        gunzip.executableURL = URL(fileURLWithPath: "/usr/bin/gunzip")
-        gunzip.arguments = ["-c", gz.path]
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        gunzip.standardOutput = outPipe
-        gunzip.standardError = errPipe
-        try gunzip.run()
-
-        let reader = outPipe.fileHandleForReading
-        let chunkSize = 4 * 1024 * 1024
-        let zeroChunk = Data(count: chunkSize)
-        var offset: UInt64 = 0
-        var lastReported: UInt64 = 0
-        while true {
-            let chunk = autoreleasepool { reader.readData(ofLength: chunkSize) }
-            if chunk.isEmpty { break }
-            let isZero = chunk.count == chunkSize
-                ? chunk == zeroChunk
-                : chunk.allSatisfy { $0 == 0 }
-            if !isZero {
-                try out.seek(toOffset: offset)
-                try out.write(contentsOf: chunk)
-            }
-            offset += UInt64(chunk.count)
-            if expectedBytes > 0, offset - lastReported >= 1024 * 1024 * 1024 {
-                lastReported = offset
-                progress("Expanding image… \(offset * 100 / UInt64(expectedBytes))%")
-            }
-        }
-        gunzip.waitUntilExit()
-        guard gunzip.terminationStatus == 0 else {
-            let err = String(decoding: errPipe.fileHandleForReading.readDataToEndOfFile(),
-                             as: UTF8.self)
-            throw UbuntuImageError.imageExpandFailed(
-                "gunzip exited \(gunzip.terminationStatus): \(err.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
-        guard Int64(offset) == expectedBytes else {
-            throw UbuntuImageError.imageExpandFailed(
-                "expanded to \(offset) bytes, catalog says \(expectedBytes)")
-        }
-        try out.truncate(atOffset: UInt64(expectedBytes))
-    }
-}
-
-// MARK: - Large-file downloader
-
-/// Delegate-driven URLSession download with byte-level progress — the
-/// async `URLSession.download(from:)` sugar offers none, and the image is
-/// multi-GB. Moves the finished file to `destination` before completing.
-final class LargeFileDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    private let destination: URL
-    private let onProgress: (Int64, Int64) -> Void
-    private var continuation: CheckedContinuation<Void, Error>?
-    private var moveError: Error?
-    private var lastReportedBytes: Int64 = 0
-
-    init(destination: URL, onProgress: @escaping (Int64, Int64) -> Void) {
-        self.destination = destination
-        self.onProgress = onProgress
-    }
-
-    func run(from url: URL) async throws {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 6 * 60 * 60
-        // The CDN caches image objects hard (they're immutable per uuid);
-        // the local layer must not, or a retried download could replay a
-        // truncated body.
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            continuation = cont
-            session.downloadTask(with: url).resume()
-        }
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
-                    totalBytesExpectedToWrite: Int64) {
-        // Throttle: a 3 GB pull at 4 KB callbacks would flood the UI.
-        if totalBytesWritten - lastReportedBytes >= 64 * 1024 * 1024
-            || totalBytesWritten == totalBytesExpectedToWrite {
-            lastReportedBytes = totalBytesWritten
-            onProgress(totalBytesWritten, totalBytesExpectedToWrite)
-        }
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didFinishDownloadingTo location: URL) {
-        if let http = downloadTask.response as? HTTPURLResponse,
-           !(200..<300).contains(http.statusCode) {
-            moveError = UbuntuImageError.downloadFailed(http.statusCode)
-            return
-        }
-        do {
-            try? FileManager.default.removeItem(at: destination)
-            try FileManager.default.moveItem(at: location, to: destination)
-        } catch {
-            moveError = error
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask,
-                    didCompleteWithError error: Error?) {
-        let cont = continuation
-        continuation = nil
-        if let error {
-            cont?.resume(throwing: error)
-        } else if let moveError {
-            cont?.resume(throwing: moveError)
-        } else if let http = task.response as? HTTPURLResponse,
-                  !(200..<300).contains(http.statusCode) {
-            cont?.resume(throwing: UbuntuImageError.downloadFailed(http.statusCode))
-        } else {
-            cont?.resume()
-        }
+        try await ImageFetch.fetchVerifiedArtifact(
+            path: image.disk.path,
+            sha256: image.disk.sha256,
+            compression: image.disk.compression,
+            compressedBytes: image.disk.compressedBytes,
+            uncompressedBytes: image.disk.uncompressedBytes,
+            label: "\(image.description) image",
+            scratchGz: gz,
+            destination: disk,
+            progress: progress
+        )
     }
 }

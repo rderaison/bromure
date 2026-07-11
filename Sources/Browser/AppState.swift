@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import SandboxEngine
@@ -206,8 +207,9 @@ final class AppState: @unchecked Sendable {
         if imageManager.baseImageExists {
             phase = .warmingUp
             startPool()
+            scheduleImageMaintenance()
         } else if imageManager.hasImageFiles {
-            // Image files exist but version mismatch — auto-rebuild
+            // Image files exist but version mismatch — auto-reinstall
             deleteImageFiles()
             startInit()
         } else {
@@ -231,17 +233,43 @@ final class AppState: @unchecked Sendable {
         let kernelOpts = defaults.string(forKey: "vm.extraKernelOptions") ?? VMConfig.defaultExtraKernelOptions
 
         initTask = Task {
+            let handle: (ProgressEvent) -> Void = { [weak self] event in
+                DispatchQueue.main.async {
+                    self?.handleProgress(event)
+                }
+            }
             do {
-                try await imageManager.createBaseImage(
-                    diskSizeMB: 4608,
-                    keyboardLayout: keyboard,
-                    naturalScrolling: scrolling,
-                    displayScale: scale,
-                    extraKernelOptions: kernelOpts
-                ) { [weak self] event in
-                    DispatchQueue.main.async {
-                        self?.handleProgress(event)
-                    }
+                // Prefer the prebuilt image published weekly to
+                // dl.bromure.io/browser-images/ (a few minutes of
+                // download) over the ~10 min local Alpine build. Only
+                // download-side failures (offline, CDN outage, checksum)
+                // fall back to building locally — a postinstall-VM
+                // failure would hit the identical machinery in the local
+                // bake and fail again after ~10 wasted minutes.
+                do {
+                    try await imageManager.downloadBaseImage(
+                        personalization: .init(keyboardLayout: keyboard,
+                                               naturalScrolling: scrolling),
+                        progress: handle
+                    )
+                } catch let error where LinuxImageManager.isDownloadSideFailure(error) {
+                    guard !Task.isCancelled else { return }
+                    handle(.message("Prebuilt image unavailable — building locally instead."))
+                    // The local build applies the same catalog postinstall
+                    // steps the download path would, so both converge on
+                    // the same image.
+                    let store = ImageCatalogStore.browser
+                    _ = await store.refresh()
+                    let catalog = store.effective()
+                    try await imageManager.createBaseImage(
+                        diskSizeMB: 4608,
+                        keyboardLayout: keyboard,
+                        naturalScrolling: scrolling,
+                        displayScale: scale,
+                        extraKernelOptions: kernelOpts,
+                        postinstallSteps: catalog.sortedSteps,
+                        progress: handle
+                    )
                 }
                 guard !Task.isCancelled else { return }
                 self.phase = .warmingUp
@@ -250,6 +278,55 @@ final class AppState: @unchecked Sendable {
                 guard !Task.isCancelled else { return }
                 self.phase = .error(Self.localizedMessage(for: error))
             }
+        }
+    }
+
+    /// Launch-time catalog maintenance for an up-to-date image: newly
+    /// published browser-img-catalog postinstall steps (uuids missing
+    /// from image-state.json) require explicit consent, then are applied
+    /// to an APFS clone of the base image and swapped atomically.
+    private func scheduleImageMaintenance() {
+        Task { [weak self] in
+            guard let self else { return }
+            self.imageManager.migrateLegacyImageStateIfNeeded()
+            let store = ImageCatalogStore.browser
+            guard let catalog = await store.refresh() ?? store.remote() else { return }
+            let applied = self.imageManager.loadImageState()?.appliedStepUUIDs ?? []
+            let pending = catalog.pendingSteps(appliedUUIDs: applied)
+            guard !pending.isEmpty else { return }
+            await self.promptAndApplyPostinstallSteps(pending)
+        }
+    }
+
+    private func promptAndApplyPostinstallSteps(_ steps: [PostinstallStep]) async {
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString(
+            "New packages are recommended to be installed",
+            comment: "Title of the new-postinstall-steps consent prompt")
+        let names = steps.map { "• \($0.description)" }.joined(separator: "\n")
+        alert.informativeText = String(
+            format: NSLocalizedString(
+                "%@\n\nThey will be added to the browser base image (a few minutes). Sessions already open keep running.",
+                comment: "Body of the new-postinstall-steps consent prompt (%@ = bullet list of packages)"),
+            names)
+        alert.addButton(withTitle: NSLocalizedString(
+            "Install", comment: "Consent button of the new-postinstall-steps prompt"))
+        alert.addButton(withTitle: NSLocalizedString(
+            "Not Now", comment: "Decline button of the new-postinstall-steps prompt"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        phase = .initializing(status: "Installing packages...", progress: nil)
+        do {
+            try await imageManager.applyPostinstallSteps(steps) { [weak self] event in
+                DispatchQueue.main.async {
+                    self?.handleProgress(event)
+                }
+            }
+            // The pool's warm VM was cloned from the old base — recycle it.
+            phase = .warmingUp
+            restartPool()
+        } catch {
+            phase = .error(Self.localizedMessage(for: error))
         }
     }
 
@@ -437,6 +514,7 @@ final class AppState: @unchecked Sendable {
         try? fm.removeItem(at: storageDir.appendingPathComponent("vmlinuz"))
         try? fm.removeItem(at: storageDir.appendingPathComponent("initrd"))
         try? fm.removeItem(at: storageDir.appendingPathComponent("image-version"))
+        try? fm.removeItem(at: storageDir.appendingPathComponent("image-state.json"))
     }
 
     /// Current keyboard layout stored in preferences (or auto-detected).

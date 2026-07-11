@@ -362,20 +362,11 @@ public final class UbuntuImageManager {
 
     // MARK: - Image state (source + applied postinstall steps)
 
-    /// Sidecar to the version stamp: which published image build the
-    /// on-disk base.img came from (nil = built locally) and which
-    /// img-catalog postinstall steps have been applied to it.
-    public struct BaseImageState: Codable, Sendable, Equatable {
-        public var imageUUID: String?
-        public var version: String
-        public var appliedStepUUIDs: [String]
-
-        public init(imageUUID: String?, version: String, appliedStepUUIDs: [String]) {
-            self.imageUUID = imageUUID
-            self.version = version
-            self.appliedStepUUIDs = appliedStepUUIDs
-        }
-    }
+    /// Sidecar to the version stamp — the shared SandboxEngine type
+    /// (both prebuilt-image channels record the same shape). Aliased so
+    /// existing `UbuntuImageManager.BaseImageState` references read
+    /// unchanged.
+    public typealias BaseImageState = SandboxEngine.BaseImageState
 
     public func loadImageState() -> BaseImageState? {
         guard let data = try? Data(contentsOf: imageStateURL) else { return nil }

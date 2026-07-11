@@ -11,9 +11,22 @@ import Virtualization
 /// - virtio drivers for GPU, network, and disk
 public final class LinuxImageManager {
     /// Bump this to force a rebuild of the base image on next launch.
-    public static let imageVersion = "364"
+    /// Bumped to 365: Cloudflare WARP is no longer baked by setup.sh —
+    /// it moved to a browser-img-catalog.json postinstall step (the
+    /// published prebuilt image must contain free software only), and
+    /// the debug root-SSH block is now skipped in distribution builds.
+    public static let imageVersion = "365"
 
-    private let storageDir: URL
+    /// Human description of the image — surfaces in
+    /// browser-img-catalog.json (via `bromure init-foss-image`'s
+    /// build-info.json) and the setup UI.
+    public static var imageDescription: String {
+        "Alpine Linux \(alpineVersion) + Chromium"
+    }
+
+    // Internal (not private): LinuxImageManager+Remote.swift — the
+    // prebuilt-image download path — shares it.
+    let storageDir: URL
 
     public init(storageDir: URL? = nil) {
         self.storageDir = storageDir ?? VMConfig.defaultStorageDirectory
@@ -53,6 +66,17 @@ public final class LinuxImageManager {
     }
 
     /// Create a Linux base image: download Alpine netboot, install to disk, add Chromium.
+    ///
+    /// `fossOnly` builds the redistributable variant for the publish
+    /// pipeline (`bromure init-foss-image`): no Cloudflare WARP binary, no
+    /// macOS fonts, no debug root SSH — and a missing out-of-tree kernel
+    /// module fails the build instead of degrading (a published image
+    /// must never silently lack webcam/RTC support).
+    ///
+    /// `postinstallSteps` are the browser-img-catalog.json commands to
+    /// apply after the free-software install completes (Cloudflare WARP —
+    /// see ImageCatalog). The local-build path applies them so it
+    /// converges on the same image the download path produces.
     public func createBaseImage(
         diskSizeMB: UInt64 = 4608,
         keyboardLayout: String? = nil,
@@ -60,6 +84,8 @@ public final class LinuxImageManager {
         locale: String? = nil,
         displayScale: Int? = nil,
         extraKernelOptions: String = VMConfig.defaultExtraKernelOptions,
+        fossOnly: Bool = false,
+        postinstallSteps: [PostinstallStep] = [],
         progress: @escaping (ProgressEvent) -> Void
     ) async throws {
         let fm = FileManager.default
@@ -98,6 +124,7 @@ public final class LinuxImageManager {
             locale: locale,
             displayScale: displayScale,
             extraKernelOptions: extraKernelOptions,
+            fossOnly: fossOnly,
             progress: progress
         )
         progress(.stepDone("Installing Alpine Linux with Chromium"))
@@ -120,13 +147,35 @@ public final class LinuxImageManager {
         try? fm.removeItem(at: efiKernel)
         progress(.stepDone("Preparing boot files"))
 
+        // 5. Apply the catalog postinstall steps (the non-free software a
+        //    published image can't carry — see browser-img-catalog.json).
+        //    Runs while the netboot files are still cached, so the
+        //    provisioner boot doesn't re-download them. Fonts and the
+        //    user config were already baked by setup.sh, so the
+        //    provisioner only executes the steps.
+        if !postinstallSteps.isEmpty {
+            progress(.stepStart("Installing recommended packages"))
+            try await runPostinstall(
+                steps: postinstallSteps,
+                targetDisk: linuxDiskURL,
+                copyFonts: false,
+                personalize: nil,
+                progress: progress
+            )
+            progress(.stepDone("Installing recommended packages"))
+        }
+
         // 6. Clean up
         try? fm.removeItem(at: netbootKernel)
         try? fm.removeItem(at: netbootInitrd)
         try? fm.removeItem(at: netbootInitrdShimmedURL)
 
-        // 7. Write version stamp
+        // 7. Write version stamp + provenance (local build: no image uuid)
         try Self.imageVersion.write(to: imageVersionURL, atomically: true, encoding: .utf8)
+        writeImageState(BaseImageState(
+            imageUUID: nil,
+            version: Self.imageVersion,
+            appliedStepUUIDs: postinstallSteps.map(\.uuid)))
 
         progress(.message("Linux image created at \(linuxDiskURL.path)"))
     }
@@ -151,7 +200,7 @@ public final class LinuxImageManager {
 
     /// Netboot initramfs with the MTU-clamp `rdinit` shim appended. Built from
     /// the downloaded netboot initrd for the install boot, then cleaned up.
-    private var netbootInitrdShimmedURL: URL {
+    var netbootInitrdShimmedURL: URL {
         storageDir.appendingPathComponent("netboot-initramfs-shimmed")
     }
 
@@ -267,13 +316,14 @@ public final class LinuxImageManager {
 
     // MARK: - Private
 
-    private static let alpineVersion = "3.22"
-    private static let alpineRelease = "3.22.3"
-    private static let releasesBase =
+    // Public: surfaces in `bromure init-foss-image`'s build-info.json.
+    public static let alpineVersion = "3.22"
+    public static let alpineRelease = "3.22.3"
+    static let releasesBase =
         "https://dl-cdn.alpinelinux.org/alpine/v\(alpineVersion)/releases/aarch64"
-    private static let netbootBase = "\(releasesBase)/netboot-\(alpineRelease)"
+    static let netbootBase = "\(releasesBase)/netboot-\(alpineRelease)"
 
-    private func downloadNetbootFiles(
+    func downloadNetbootFiles(
         kernelDest: URL,
         initrdDest: URL,
         progress: @escaping (ProgressEvent) -> Void
@@ -445,6 +495,7 @@ public final class LinuxImageManager {
         locale: String? = nil,
         displayScale: Int? = nil,
         extraKernelOptions: String = VMConfig.defaultExtraKernelOptions,
+        fossOnly: Bool = false,
         progress: @escaping (ProgressEvent) -> Void
     ) async throws {
         // Create transfer disk for extracting initramfs
@@ -575,23 +626,30 @@ public final class LinuxImageManager {
             directory: VZSharedDirectory(url: setupDir, readOnly: true)
         )
 
-        // Share macOS system fonts so the guest renders pages identically
-        let systemFontsURL = URL(fileURLWithPath: "/System/Library/Fonts")
-        let fontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "fonts")
-        fontsFS.share = VZSingleDirectoryShare(
-            directory: VZSharedDirectory(url: systemFontsURL, readOnly: true)
-        )
+        var shares: [VZDirectorySharingDeviceConfiguration] = [setupFS]
 
-        var shares: [VZDirectorySharingDeviceConfiguration] = [setupFS, fontsFS]
-
-        // Also share /Library/Fonts (user-installed fonts) if present
-        let userFontsURL = URL(fileURLWithPath: "/Library/Fonts")
-        if FileManager.default.fileExists(atPath: userFontsURL.path) {
-            let userFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "userfonts")
-            userFontsFS.share = VZSingleDirectoryShare(
-                directory: VZSharedDirectory(url: userFontsURL, readOnly: true)
+        // Share macOS fonts so the guest renders pages identically. NEVER
+        // in a FOSS/publish build: Apple fonts are not redistributable —
+        // end-user installs copy them from the user's own Mac instead
+        // (during a local build here, or during postinstall for a
+        // downloaded image).
+        if !fossOnly {
+            let systemFontsURL = URL(fileURLWithPath: "/System/Library/Fonts")
+            let fontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "fonts")
+            fontsFS.share = VZSingleDirectoryShare(
+                directory: VZSharedDirectory(url: systemFontsURL, readOnly: true)
             )
-            shares.append(userFontsFS)
+            shares.append(fontsFS)
+
+            // Also share /Library/Fonts (user-installed fonts) if present
+            let userFontsURL = URL(fileURLWithPath: "/Library/Fonts")
+            if FileManager.default.fileExists(atPath: userFontsURL.path) {
+                let userFontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "userfonts")
+                userFontsFS.share = VZSingleDirectoryShare(
+                    directory: VZSharedDirectory(url: userFontsURL, readOnly: true)
+                )
+                shares.append(userFontsFS)
+            }
         }
 
         vzConfig.directorySharingDevices = shares
@@ -676,13 +734,40 @@ public final class LinuxImageManager {
         let natScroll = (naturalScrolling ?? hostConfig.naturalScrolling) ? "true" : "false"
         let loc = Self.shellEscape(locale ?? hostConfig.locale)
         let scale = displayScale ?? VMConfig.detectDisplayScale()
-        writer.write(Data("sh /tmp/vm-setup/setup.sh \(kbLayout) \(natScroll) \(loc) \(scale) \(Self.alpineVersion)\n".utf8))
+        // "foss" builds the redistributable image: no WARP, no macOS
+        // fonts, no debug SSH, and missing kernel modules FAIL the build.
+        let mode = fossOnly ? "foss" : "user"
+        writer.write(Data("sh /tmp/vm-setup/setup.sh \(kbLayout) \(natScroll) \(loc) \(scale) \(Self.alpineVersion) \(mode)\n".utf8))
 
         do {
-            try await consoleOutput.waitFor(marker: "SANDBOX_SETUP_DONE", timeout: 900, progress: progress)
+            // The explicit failure marker short-circuits immediately (the
+            // publish pipeline's strict kernel-module gate relies on it);
+            // the catch below still inspects the buffer to throw a more
+            // specific diagnosis.
+            try await consoleOutput.waitFor(
+                marker: "SANDBOX_SETUP_DONE", timeout: 900, progress: progress,
+                failMarkers: [
+                    (marker: "SANDBOX_SETUP_FAILED", error: .diskCreationFailed(
+                        "The image could not be created — the in-VM setup script reported a failure."
+                    ))
+                ]
+            )
         } catch {
             let snapshot = consoleOutput.pollAndTrim(marker: "SANDBOX_SETUP_FAILED")
             if snapshot.found {
+                // Surface the script's own failure line when it's in the
+                // recent output (e.g. the strict kernel-module gate of a
+                // foss build) — far more actionable than the generic
+                // network hint.
+                if let line = snapshot.recentOutput
+                    .components(separatedBy: "\n")
+                    .last(where: { $0.contains("SANDBOX_SETUP_FAILED:") })?
+                    .trimmingCharacters(in: .whitespaces),
+                   !line.isEmpty {
+                    throw SandboxError.diskCreationFailed(
+                        "The image could not be created: \(line)"
+                    )
+                }
                 throw SandboxError.diskCreationFailed(
                     "The image could not be created. Package installation failed, likely due to network issues. Please check your internet connection and try again."
                 )
@@ -808,12 +893,12 @@ public final class LinuxImageManager {
     }
 
     /// Escape a string for safe use in a shell command.
-    private static func shellEscape(_ s: String) -> String {
+    static func shellEscape(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// SPM resource bundle, checking Contents/Resources/ for app bundles.
-    private static let resourceBundle: Bundle = {
+    static let resourceBundle: Bundle = {
         let bundleName = "bromure_SandboxEngine"
         // SPM's auto-generated accessor checks Bundle.main.bundleURL (the .app root),
         // but codesign requires resources in Contents/Resources/.
@@ -829,7 +914,7 @@ public final class LinuxImageManager {
 // MARK: - Console Buffer
 
 /// Thread-safe buffer for reading VM console output asynchronously.
-private final class ConsoleBuffer: @unchecked Sendable {
+final class ConsoleBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var buffer = ""
     private var captureStart = 0

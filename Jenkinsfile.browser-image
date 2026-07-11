@@ -1,0 +1,159 @@
+// Jenkinsfile.browser-image — build the free-software browser base image
+// weekly and publish it (plus img-catalog.json) to the DigitalOcean Space
+// that Bromure Web downloads from at install time
+// (https://dl.bromure.io/browser-images/…).
+//
+// The browser sibling of Jenkinsfile.image (the Bromure Agentic Coding
+// pipeline): same bucket, same signing key, same publish/verify/retire
+// choreography — but under the browser-images/ prefix, with THREE
+// artifacts per build (base.img.gz + vmlinuz.gz + initrd.gz, because the
+// browser image direct-kernel-boots instead of using EFI/GRUB), and with
+// the strict kernel-module gate: `bromure init-foss-image` FAILS the
+// build when the out-of-tree modules (v4l2loopback, rtc-pl031) can't be
+// found for the installed kernel — a published image must never silently
+// lack webcam/RTC support.
+//
+// Weekly because the image bakes in current Alpine packages: new
+// installations always start fresh without the catalog version changing
+// (existing users are NOT re-prompted — the version only moves when
+// LinuxImageManager.imageVersion is bumped deliberately, which is what
+// triggers the in-app reinstall).
+//
+// Non-free software (Cloudflare WARP) is NOT in this image — it's
+// declared as postinstall steps in the catalog (canonical source:
+// Sources/SandboxEngine/Resources/browser-img-catalog.json) and
+// installed on the end-user's machine. Apple fonts are likewise copied
+// from the user's own Mac during postinstall, never shipped.
+//
+// The freshly built image is boot-checked on an APFS clone
+// (bromure verify-image) before anything is uploaded, and the newly
+// published catalog + artifacts are smoke-tested from the CDN before the
+// previous build's objects are deleted.
+pipeline {
+    agent { label 'macosx-builder' }
+
+    triggers {
+        // Weekly, Monday early morning (hash-spread within the hour).
+        // One hour after Jenkinsfile.image's window so the two multi-GB
+        // publishes don't contend for the same builder/uplink.
+        cron('H 4 * * 1')
+    }
+
+    options {
+        // A full run is build (~10 min) + boot check + gzip + multi-GB
+        // upload + up to 1h of CDN-propagation polling (the smoke-test
+        // waits for the edge to serve the new catalog before the old
+        // build is deleted); anything past 3h is wedged.
+        timeout(time: 3, unit: 'HOURS')
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Build, boot-check, and compress the image but skip every upload/delete.'
+        )
+        booleanParam(
+            name: 'KEEP_PREVIOUS',
+            defaultValue: false,
+            description: 'Publish the new image but keep the previous browser-images/<uuid>/ objects.'
+        )
+    }
+
+    environment {
+        KEYCHAIN_PASSWORD = credentials('KEYCHAIN_PASSWORD')
+        BUILD_KEYCHAIN    = "${HOME}/build.keychain"
+
+        // Same bucket + public base as the release pipelines; this just
+        // writes under the browser-images/ prefix. Secrets come from
+        // Jenkins creds.
+        DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+        DO_SPACES_REGION      = 'nyc3'
+        DO_SPACES_BUCKET      = 'bromure-dl'
+        DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
+    }
+
+    stages {
+        stage('Unlock Keychain') {
+            steps {
+                sh '''
+                    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$BUILD_KEYCHAIN"
+                    security list-keychains -s "$BUILD_KEYCHAIN" login.keychain-db
+                    security default-keychain -s "$BUILD_KEYCHAIN"
+                '''
+            }
+        }
+
+        stage('Install release-tool deps') {
+            steps {
+                // Same socket.dev-wrapped install as the release pipelines;
+                // tools/spaces-put.mjs needs @aws-sdk/client-s3 + lib-storage.
+                // `npm ci` hard-fails whenever package-lock.json lags a
+                // package.json edit — fall back to `npm install` so a lock
+                // refresh can never brick the weekly publish. (The install
+                // path also updates the lock in the workspace; committing a
+                // regenerated lock restores pure-ci.)
+                sh '''
+                    set -euo pipefail
+                    (cd tools && if [ -f package-lock.json ]; then \
+                                    npx --yes @socketsecurity/cli npm ci --silent \
+                                        || { echo "npm ci failed (lock out of sync?) — falling back to npm install"; \
+                                             npx --yes @socketsecurity/cli npm install; }; \
+                                 else \
+                                    npx --yes @socketsecurity/cli npm install --silent; \
+                                 fi)
+                '''
+            }
+        }
+
+        stage('Build bromure') {
+            steps {
+                // build.sh owns compiling + signing — the publish script
+                // consumes the resulting binary rather than duplicating
+                // the build. Signed with the same Developer ID identity +
+                // provisioning profile as the browser release pipeline
+                // (Jenkinsfile): build.sh reads CODESIGN_IDENTITY and
+                // embeds <repo>/bromure.provisionprofile, which is what
+                // lets the restricted entitlements (application-identifier,
+                // keychain group, vmnet) validate on a real identity.
+                withCredentials([
+                    string(credentialsId: 'DEVELOPER_ID',     variable: 'DEVELOPER_ID'),
+                    file(credentialsId:   'PROVISION_PROFILE', variable: 'PROVISION_PROFILE')
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        rm -f bromure.provisionprofile
+                        cp "$PROVISION_PROFILE" bromure.provisionprofile
+                        export CODESIGN_IDENTITY="$DEVELOPER_ID"
+                        ./build.sh bromure
+                    '''
+                }
+            }
+        }
+
+        stage('Build image + Verify + Publish') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DO_SPACES_KEY',        variable: 'DO_SPACES_KEY'),
+                    string(credentialsId: 'DO_SPACES_SECRET',     variable: 'DO_SPACES_SECRET'),
+                    // img-catalog.json is signed with the same ed25519 key
+                    // that signs Sparkle updates; clients verify against
+                    // SUPublicEDKey and refuse unsigned catalogs. The
+                    // browser channel signs with its own payload magic
+                    // (bromure-browser-img-catalog-v1) so a signed AC
+                    // catalog can't be replayed here.
+                    string(credentialsId: 'SPARKLE_PRIVATE_KEY',  variable: 'SPARKLE_PRIVATE_KEY')
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export DRY_RUN="${DRY_RUN}"
+                        export KEEP_PREVIOUS="${KEEP_PREVIOUS}"
+                        ./scripts/publish-browser-image.sh \
+                            ".build/arm64-apple-macosx/release/Bromure.app/Contents/MacOS/bromure"
+                    '''
+                }
+            }
+        }
+    }
+}

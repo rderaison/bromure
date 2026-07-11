@@ -13,7 +13,8 @@ struct Bromure: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure",
         abstract: "Run a browser in an isolated, ephemeral VM.",
-        subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self, Enroll.self, Unenroll.self, ListEnrollments.self],
+        subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self, Enroll.self, Unenroll.self, ListEnrollments.self,
+                      InitFossImage.self, VerifyImage.self],
         defaultSubcommand: Launch.self
     )
 
@@ -4146,7 +4147,7 @@ private final class SessionDelegateHelper: NSObject, VZVirtualMachineDelegate, N
 
 struct Init: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Create the base image (one-time setup)."
+        abstract: "Create the base image (downloads the prebuilt image; local build as fallback)."
     )
 
     @Option(name: .long, help: "Guest OS: 'linux' or 'macOS'.")
@@ -4157,6 +4158,15 @@ struct Init: ParsableCommand {
 
     @Option(name: .long, help: "Custom storage directory.")
     var storageDir: String?
+
+    @Flag(name: .long,
+          help: "Skip the prebuilt-image download and build locally with setup.sh (~10 min).")
+    var buildLocal = false
+
+    @Flag(name: .long,
+          help: ArgumentHelp("Fail when the download fails instead of falling back to a local build.",
+                             visibility: .hidden))
+    var downloadOnly = false
 
     func run() throws {
         let guestOS = try parseGuestOS(os)
@@ -4173,24 +4183,63 @@ struct Init: ParsableCommand {
 
     private func initLinux(dir: URL, diskSizeMB: UInt64) throws {
         let manager = LinuxImageManager(storageDir: dir)
-        if manager.hasImageFiles {
-            print("Removing existing Linux base image...")
-            let fm = FileManager.default
-            try? fm.removeItem(at: manager.linuxDiskURL)
-            try? fm.removeItem(at: manager.linuxKernelURL)
-            try? fm.removeItem(at: manager.linuxInitrdURL)
-            try? fm.removeItem(at: manager.imageVersionURL)
-        }
+        // With a custom storage dir, scope the catalog cache there too —
+        // a pipeline test must not pollute (or read) the real app's
+        // cached catalog in Application Support.
+        let catalogStore = storageDir != nil
+            ? ImageCatalogStore(distribution: .browser, supportDir: dir)
+            : ImageCatalogStore.browser
 
         print("=== Bromure: Linux Base Image Creation ===")
         let progress = TerminalProgress()
         var taskError: Error?
         var finished = false
+        let buildLocal = self.buildLocal
+        let downloadOnly = self.downloadOnly
 
         Task {
-            do {
-                try await manager.createBaseImage(diskSizeMB: diskSizeMB) { event in
+            // Local build path: the postinstall steps come from the
+            // freshest catalog we can get (remote, else the bundled
+            // baseline) — a new installation applies all of them
+            // without prompting, per the setup consent. The download
+            // path promotes atomically, so only the (in-place) local
+            // build pre-deletes the old artifacts.
+            func buildLocally() async throws {
+                if manager.hasImageFiles {
+                    print("Removing existing Linux base image...")
+                    let fm = FileManager.default
+                    try? fm.removeItem(at: manager.linuxDiskURL)
+                    try? fm.removeItem(at: manager.linuxKernelURL)
+                    try? fm.removeItem(at: manager.linuxInitrdURL)
+                    try? fm.removeItem(at: manager.imageVersionURL)
+                    try? fm.removeItem(at: manager.imageStateURL)
+                }
+                _ = await catalogStore.refresh()
+                let catalog = catalogStore.effective()
+                try await manager.createBaseImage(
+                    diskSizeMB: diskSizeMB,
+                    postinstallSteps: catalog.sortedSteps
+                ) { event in
                     progress.handle(event)
+                }
+            }
+            do {
+                if buildLocal {
+                    try await buildLocally()
+                } else {
+                    do {
+                        try await manager.downloadBaseImage(catalogStore: catalogStore) { event in
+                            progress.handle(event)
+                        }
+                    } catch let error where !downloadOnly
+                        && LinuxImageManager.isDownloadSideFailure(error) {
+                        // Only download-side failures (catalog, transfer,
+                        // checksum, expansion) fall back — a postinstall-VM
+                        // failure would hit the identical machinery in the
+                        // local bake and fail again after ~10 wasted min.
+                        print("Prebuilt-image download unavailable (\(error.localizedDescription)) — building locally instead.")
+                        try await buildLocally()
+                    }
                 }
             } catch { taskError = error }
             finished = true
@@ -4236,6 +4285,141 @@ struct Init: ParsableCommand {
         progress.finish()
         if let taskError { throw taskError }
         print("\nDone. Run 'bromure setup' to complete macOS Setup Assistant.")
+    }
+}
+
+// MARK: - CLI: init-foss-image (publish pipeline)
+
+/// Publisher-side build (Jenkinsfile.browser-image →
+/// scripts/publish-browser-image.sh): produce the redistributable browser
+/// base image containing free software only — no Cloudflare WARP (that's
+/// a browser-img-catalog.json postinstall step applied on the end-user's
+/// machine), no Apple fonts, no debug root SSH — with neutral keyboard/
+/// locale defaults. A missing out-of-tree kernel module FAILS the build.
+/// The artifacts (linux-base.img, vmlinuz, initrd, build-info.json) land
+/// in --output, never in Application Support, so a publish run can't
+/// clobber a developer's own base image.
+struct InitFossImage: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "init-foss-image",
+        abstract: "Build the redistributable free-software browser image (publish pipeline)."
+    )
+
+    @Option(name: .long,
+            help: "Directory the artifacts land in (linux-base.img, vmlinuz, initrd, build-info.json).")
+    var output: String
+
+    func run() throws {
+        let outputDir = URL(fileURLWithPath: output, isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+        let manager = LinuxImageManager(storageDir: outputDir)
+
+        print("=== Bromure: FOSS browser image build (publish pipeline) ===")
+        let progress = TerminalProgress()
+        var result: Result<Void, Error>?
+        Task {
+            do {
+                // Neutral personalisation (us / natural / en_US / 2x):
+                // end-user installs re-render these during postinstall.
+                try await manager.createBaseImage(
+                    keyboardLayout: "us",
+                    naturalScrolling: true,
+                    locale: "en_US",
+                    displayScale: 2,
+                    fossOnly: true,
+                    postinstallSteps: []
+                ) { event in
+                    progress.handle(event)
+                }
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+            CFRunLoopStop(CFRunLoopGetMain())
+        }
+        while result == nil {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
+        }
+        progress.finish()
+        try result!.get()
+
+        // build-info.json: the publish script reads image metadata from
+        // here instead of parsing Swift sources.
+        let info: [String: String] = [
+            "version": LinuxImageManager.imageVersion,
+            "alpineRelease": LinuxImageManager.alpineRelease,
+            "description": LinuxImageManager.imageDescription,
+            "builtAt": ISO8601DateFormatter().string(from: Date()),
+        ]
+        let data = try JSONSerialization.data(
+            withJSONObject: info, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: outputDir.appendingPathComponent("build-info.json"))
+        print("Free-software browser image ready: \(manager.linuxDiskURL.path)")
+    }
+}
+
+// MARK: - CLI: verify-image (publish pipeline)
+
+/// Publish-pipeline gate: boot a browser image headless (direct kernel
+/// boot, like a real session) and require the root serial prompt within
+/// the timeout. Run the DISK against a throwaway APFS clone (`cp -c`) —
+/// booting dirties it, and the artifact being published must stay
+/// byte-identical to what was checksummed. The kernel/initrd are read-only
+/// inputs and can be the real artifacts.
+struct VerifyImage: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "verify-image",
+        abstract: "Boot-check a browser image: wait for the root serial prompt (run on a clone)."
+    )
+
+    @Option(name: .long, help: "Path to the disk image to boot (a disposable clone).")
+    var disk: String
+
+    @Option(name: .long, help: "Path to the raw ARM64 kernel (vmlinuz artifact).")
+    var kernel: String
+
+    @Option(name: .long, help: "Path to the initramfs (initrd artifact).")
+    var initrd: String
+
+    @Option(name: .long, help: "Boot timeout in seconds.")
+    var timeout: Int = 300
+
+    func run() throws {
+        let diskURL = URL(fileURLWithPath: disk)
+        let kernelURL = URL(fileURLWithPath: kernel)
+        let initrdURL = URL(fileURLWithPath: initrd)
+        for url in [diskURL, kernelURL, initrdURL] {
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw ValidationError("no file at \(url.path)")
+            }
+        }
+        let manager = LinuxImageManager(storageDir: diskURL.deletingLastPathComponent())
+        var result: Result<Void, Error>?
+        let timeout = TimeInterval(self.timeout)
+        Task {
+            do {
+                try await manager.verifyImageBoots(
+                    diskURL: diskURL,
+                    kernelURL: kernelURL,
+                    initrdURL: initrdURL,
+                    timeout: timeout,
+                    progress: { event in
+                        if case .message(let msg) = event {
+                            FileHandle.standardError.write(Data("[verify-image] \(msg)\n".utf8))
+                        }
+                    }
+                )
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+            CFRunLoopStop(CFRunLoopGetMain())
+        }
+        while result == nil {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
+        }
+        try result!.get()
+        print("Image boot verification passed: \(diskURL.path)")
     }
 }
 
