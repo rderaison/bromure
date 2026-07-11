@@ -809,6 +809,20 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         shownBrowser = nil
     }
 
+    /// Recreate a workspace's browser so changed settings (the
+    /// stay-signed-in persistence toggle) take effect now: tear down the
+    /// current VM/controller and — when this workspace is front and
+    /// center with the pane open — boot the replacement immediately. The
+    /// new controller re-reads the saved profile at creation.
+    func rebootBrowser(for id: Profile.ID) {
+        guard browserControllers[id] != nil else { return }   // never opened
+        let wasShown = browserPaneOpen && shownBrowser == id
+        teardownBrowser(for: id)
+        if wasShown, selectedID == id {
+            showBrowser(for: id)
+        }
+    }
+
     /// Tear down one workspace's browser (its session ended).
     func teardownBrowser(for id: Profile.ID) {
         browserControllers[id]?.stop()

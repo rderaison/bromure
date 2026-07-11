@@ -4709,6 +4709,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // off `profiles`; resync the running session toolbars now so a flip from
         // public → private (or back) doesn't wait for the next launch.
         refreshStreamingState()
+        // The stay-signed-in persistence setting only applies at browser
+        // boot (WorkspaceBrowserController captures it at creation) —
+        // recreate this workspace's browser now so the flip takes effect
+        // immediately instead of on the next teardown. Runs after the
+        // `profiles` refresh above so the new controller reads the saved
+        // value.
+        if let original = editing, original.browserPersistent != profile.browserPersistent {
+            unifiedWindow?.rebootBrowser(for: profile.id)
+        }
     }
 
     // MARK: - Headless profile create / edit / export (control socket)
