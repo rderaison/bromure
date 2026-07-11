@@ -48,6 +48,9 @@ final class WorkspaceBrowserController {
     /// CDP driver (vsock 5200) for screenshot/eval/page-text — what TabBridge
     /// can't do. Exposed for the browser MCP server + devtools.
     private(set) var cdp: BrowserCDP?
+    /// Network trace (vsock 5900) — the guest trace extension's request log,
+    /// backing browser_network. Nil until the VM attaches.
+    private var trace: TraceBridge?
     /// Default landing page for a fresh ephemeral browser — blank, so an
     /// agent-driven navigate reuses the tab with no homepage flash, and a
     /// manual open starts clean.
@@ -177,7 +180,12 @@ final class WorkspaceBrowserController {
             directConnection: true,   // no proxy — Chromium connects straight out
             enableAutomation: true,
             nativeChrome: true,
-            nativeChromeInset: VMConfig.defaultNativeChromeInset(forDisplayScale: scale)
+            nativeChromeInset: VMConfig.defaultNativeChromeInset(forDisplayScale: scale),
+            // Level 2 (headers) loads the trace extension so the agent can read
+            // the network log (browser_network). It uses only chrome.webRequest,
+            // so — unlike level 3 — it never attaches chrome.debugger and can't
+            // fight our own CDP connection over port 9222.
+            traceLevel: .headers
         )
     }
 
@@ -213,6 +221,10 @@ final class WorkspaceBrowserController {
             wireTabBridge(TabBridge(socketDevice: socketDevice))
             // CDP driver shares the same vsock device (different port, 5200).
             cdp = BrowserCDP(socketDevice: socketDevice)
+            // Network trace: the guest trace-agent (native-messaging → vsock
+            // 5900) streams the request log into an in-memory SQLite store the
+            // browser_network MCP tool queries. Ephemeral, like the VM.
+            trace = TraceBridge(socketDevice: socketDevice, inMemory: true)
         } else {
             print("[browser] no vsock device — tabs/navigation disabled")
         }
@@ -380,6 +392,27 @@ final class WorkspaceBrowserController {
         try await cdp.waitFor(selector: selector, timeoutMs: timeoutMs)
     }
 
+    // MARK: - Network trace (browser_network)
+
+    /// Recorded network requests matching `filter`, oldest first.
+    func networkEvents(filter: TraceFilter) -> [TraceEvent] {
+        trace?.store.queryEvents(filter: filter) ?? []
+    }
+    /// Distinct hostnames seen, for the network summary.
+    func networkHostnames() -> [String] { trace?.distinctHostnames() ?? [] }
+    /// Drop the recorded requests (fresh baseline before an action).
+    func clearNetwork() { trace?.clearTrace() }
+
+    // MARK: - Console (browser_console)
+
+    /// Register the console-capture hook (idempotent). Called before the first
+    /// navigate so page-load errors land in the buffer.
+    func ensureConsoleHook() async { await cdp?.ensureConsoleHook() }
+    func consoleLogs(clear: Bool) async throws -> [[String: Any]] {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        return try await cdp.consoleLogs(clear: clear)
+    }
+
     // MARK: - Collapse lifecycle (suspend / shutdown / resume)
 
     private(set) var isVisible = false
@@ -465,6 +498,8 @@ final class WorkspaceBrowserController {
         tabBridge = nil
         cdp?.stop()
         cdp = nil
+        trace?.stop()
+        trace = nil
         vmView?.virtualMachine = nil
         vmView = nil
         if let warm {

@@ -1,5 +1,6 @@
 import BrowserBridges
 import Foundation
+import SandboxEngine
 
 // The browser MCP server exposed to the in-VM coding agents: navigate, tabs,
 // screenshot, evaluate JS, read page text — so Claude/Codex/Grok can drive and
@@ -68,6 +69,9 @@ final class BrowserMCPServer {
     private func callTool(name: String, args: [String: Any]) async -> [String: Any] {
         do {
             let b = try await readyBrowser()
+            // Register the console-capture hook before anything navigates, so
+            // page-load errors are buffered from the start (idempotent, cheap).
+            await b.ensureConsoleHook()
             switch name {
             case "browser_navigate":
                 let url = try requireArg(args, "url")
@@ -131,12 +135,75 @@ final class BrowserMCPServer {
                 let timeout = (args["timeout"] as? Int) ?? 10000
                 try await b.waitFor(selector: sel, timeoutMs: timeout)
                 return textResult("Found: \(sel)")
+            case "browser_network":
+                return networkResult(b, args)
+            case "browser_network_summary":
+                return networkSummary(b)
+            case "browser_clear_network":
+                b.clearNetwork(); return textResult("Network log cleared")
+            case "browser_console":
+                let clear = (args["clear"] as? Bool) ?? false
+                let level = (args["level"] as? String)?.lowercased()
+                var logs = try await b.consoleLogs(clear: clear)
+                if let level, level != "all" { logs = logs.filter { ($0["level"] as? String) == level } }
+                if logs.isEmpty { return textResult("No console output captured.") }
+                let lines = logs.map { e -> String in
+                    let lvl = (e["level"] as? String ?? "log").uppercased()
+                    return "[\(lvl)] \(e["text"] as? String ?? "")"
+                }
+                return textResult(lines.joined(separator: "\n"))
             default:
                 return errorResult("Unknown tool: \(name)")
             }
         } catch {
             return errorResult(error.localizedDescription)
         }
+    }
+
+    // MARK: - Network trace helpers
+
+    private func networkResult(_ b: WorkspaceBrowserController, _ args: [String: Any]) -> [String: Any] {
+        var f = TraceFilter()
+        if let h = args["hostname"] as? String, !h.isEmpty { f.hostnames = [h] }
+        if let m = args["method"] as? String, !m.isEmpty { f.methods = [m.uppercased()] }
+        if let s = args["status"] as? String, let d = Int(s.prefix(1)), (1...5).contains(d) {
+            f.statusCategories = [d]   // 2 → 2xx, 4 → 4xx, …
+        }
+        if let u = args["urlPattern"] as? String, !u.isEmpty { f.searchText = u }
+        let events = b.networkEvents(filter: f)
+        let limit = (args["limit"] as? Int) ?? 100
+        let limited = Array(events.suffix(limit))
+        if (args["format"] as? String) == "full" {
+            if let data = try? JSONEncoder().encode(limited),
+               let s = String(data: data, encoding: .utf8) { return textResult(s) }
+        }
+        let lines = limited.map { e -> String in
+            let status = e.statusCode.map(String.init) ?? (e.errorText != nil ? "ERR" : "-")
+            let host = e.hostname ?? URLComponents(string: e.url)?.host ?? ""
+            let dur = e.duration.map { String(format: "%.0fms", $0) } ?? "-"
+            return "\(e.method) \(status) \(host) \(dur) \(e.url)"
+        }
+        let header = "\(events.count) requests total, showing last \(limited.count):\n"
+        return textResult(events.isEmpty ? "No network requests recorded yet." : header + lines.joined(separator: "\n"))
+    }
+
+    private func networkSummary(_ b: WorkspaceBrowserController) -> [String: Any] {
+        let events = b.networkEvents(filter: .all)
+        if events.isEmpty { return textResult("No network requests recorded yet.") }
+        var hosts: [String: Int] = [:], methods: [String: Int] = [:], statuses: [String: Int] = [:]
+        for e in events {
+            hosts[e.hostname ?? URLComponents(string: e.url)?.host ?? "(unknown)", default: 0] += 1
+            methods[e.method, default: 0] += 1
+            if let code = e.statusCode, code > 0 { statuses["\(code / 100)xx", default: 0] += 1 }
+            else { statuses["error", default: 0] += 1 }
+        }
+        var out = "=== Network summary ===\n\(events.count) requests, \(hosts.count) hostnames\n\nMethods:\n"
+        for (m, c) in methods.sorted(by: { $0.value > $1.value }) { out += "  \(m): \(c)\n" }
+        out += "\nStatus:\n"
+        for (s, c) in statuses.sorted(by: { $0.key < $1.key }) { out += "  \(s): \(c)\n" }
+        out += "\nTop hosts:\n"
+        for (h, c) in hosts.sorted(by: { $0.value > $1.value }).prefix(15) { out += "  \(c) — \(h)\n" }
+        return textResult(out)
     }
 
     /// The controller, opening the browser and waiting for it to come up if
@@ -212,6 +279,24 @@ final class BrowserMCPServer {
         tool("browser_wait_for", "Wait until a CSS selector appears (or time out).",
              ["selector": prop("string", "CSS selector", required: true),
               "timeout": prop("integer", "Timeout in ms (default 10000)")]),
+        tool("browser_network",
+             "List recorded network requests (method, status, host, duration, url). "
+             + "Great for debugging failed requests. Filterable; newest last.",
+             ["hostname": prop("string", "Only requests to this host"),
+              "method": prop("string", "Only this HTTP method (GET/POST/…)"),
+              "status": prop("string", "Status class: '2xx','4xx','5xx' (matches on the first digit)"),
+              "urlPattern": prop("string", "Substring the URL/host must contain"),
+              "limit": prop("integer", "Max rows (default 100, newest)"),
+              "format": prop("string", "'summary' (default, one line each) or 'full' (JSON with headers/bodies)")]),
+        tool("browser_network_summary",
+             "Aggregate view of recorded requests: counts by host, method, and status class.", [:]),
+        tool("browser_clear_network",
+             "Clear the recorded network log — call before an action to get a clean baseline.", [:]),
+        tool("browser_console",
+             "Read the page's captured console output + uncaught errors/rejections. "
+             + "Essential for debugging why a page misbehaves.",
+             ["level": prop("string", "Filter: 'error','warn','log','info','debug' or 'all' (default)"),
+              "clear": prop("boolean", "Clear the buffer after reading (default false)")]),
     ]
 
     // MARK: - JSON-RPC / result helpers

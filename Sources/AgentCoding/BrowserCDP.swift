@@ -176,6 +176,67 @@ final class BrowserCDP {
         _ = try await evaluate(js)
     }
 
+    // MARK: - Console capture
+
+    /// Once true, `Page.addScriptToEvaluateOnNewDocument` has registered the
+    /// console hook on the active target, so every future document load buffers
+    /// console output into `window.__bromureConsole` from the very start.
+    private var consoleHookInstalled = false
+
+    /// A self-installing, idempotent JS shim that mirrors console.* + uncaught
+    /// errors/rejections into a capped `window.__bromureConsole` ring buffer.
+    static let consoleHookSource = """
+    (function(){
+      if (window.__bromureConsole) return;
+      var buf = window.__bromureConsole = [];
+      function rec(level, args){
+        try {
+          var text = Array.prototype.map.call(args, function(a){
+            try { return (typeof a === 'string') ? a : JSON.stringify(a); }
+            catch(e){ return String(a); }
+          }).join(' ');
+          buf.push({level: level, ts: Date.now(), text: text});
+          if (buf.length > 500) buf.shift();
+        } catch(e){}
+      }
+      ['log','info','warn','error','debug'].forEach(function(m){
+        var orig = console[m];
+        console[m] = function(){ rec(m, arguments); return orig.apply(console, arguments); };
+      });
+      window.addEventListener('error', function(e){
+        rec('error', [e.message + (e.filename ? (' @' + e.filename + ':' + e.lineno) : '')]);
+      });
+      window.addEventListener('unhandledrejection', function(e){
+        rec('error', ['Unhandled promise rejection: ' + ((e.reason && e.reason.message) || e.reason)]);
+      });
+    })();
+    """
+
+    /// Register the console hook so future navigations capture from load. Cheap
+    /// no-op after the first success; called before the agent's first navigate.
+    func ensureConsoleHook() async {
+        guard !consoleHookInstalled else { return }
+        do {
+            try await withPage { conn in
+                _ = try await conn.send("Page.addScriptToEvaluateOnNewDocument",
+                                        params: ["source": Self.consoleHookSource])
+                _ = try? await conn.evaluate(Self.consoleHookSource)  // also the current doc
+            }
+            consoleHookInstalled = true
+        } catch { /* CDP not ready yet — retried on the next tool call */ }
+    }
+
+    /// Buffered console entries for the active page (installs the hook if the
+    /// on-new-document registration hasn't run for this document yet).
+    func consoleLogs(clear: Bool) async throws -> [[String: Any]] {
+        let read = "(function(){var b=window.__bromureConsole||[];"
+            + (clear ? "window.__bromureConsole=[];" : "")
+            + "return JSON.stringify(b);})()"
+        let js = Self.consoleHookSource + "\n" + read
+        let s = (try await evaluate(js)) as? String ?? "[]"
+        return (try? JSONSerialization.jsonObject(with: Data(s.utf8))) as? [[String: Any]] ?? []
+    }
+
     /// JSON-encode a string into a JS/JSON string literal (with quotes) for safe
     /// embedding in an evaluated expression. Web calls this jsQuote.
     static func jsQuote(_ s: String) -> String {
