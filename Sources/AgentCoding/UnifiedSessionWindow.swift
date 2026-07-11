@@ -306,18 +306,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Right-hand agentic browser pane (⌃⌘B). A split like the file explorer
     /// but wider (default ~half the stage — see browser.png), and the
     /// outermost right split (sits right of the file pane when both are open).
-    /// Lives inside the stage so the grid/docker/vm overlays cover it. The
-    /// per-workspace ephemeral browser VM mounts its framebuffer into the
-    /// model's container (WorkspaceBrowserController, phase 2).
-    let browserPaneModel = BrowserPaneModel()
+    /// Lives inside the stage so the grid/docker/vm overlays cover it.
+    ///
+    /// One ephemeral browser VM PER WORKSPACE: models + controllers are keyed
+    /// by Profile.id and created lazily. The single pane host shows the
+    /// selected workspace's browser (swapped on selection); the others keep
+    /// running/suspended off-screen. An empty placeholder model backs the host
+    /// until a workspace's browser is shown.
+    private let browserPlaceholderModel = BrowserPaneModel()
+    private var browserModels: [Profile.ID: BrowserPaneModel] = [:]
+    private var browserControllers: [Profile.ID: WorkspaceBrowserController] = [:]
+    /// Which workspace's browser the pane currently displays.
+    private var shownBrowser: Profile.ID?
     private var browserPaneHost: NonMovableHostingView<BrowserPaneView>!
     private var browserPaneWidthConstraint: NSLayoutConstraint?
     private var browserPaneResizeHandle: SidebarResizeHandle?
     private(set) var browserPaneOpen = false
-    /// The ephemeral browser VM controller — created lazily when the pane
-    /// first opens, torn down when it closes (always ephemeral). One per
-    /// window/workspace.
-    private var browserController: WorkspaceBrowserController?
     private var expandedBrowserPaneWidth: CGFloat = 640
     private static let browserPaneMinWidth: CGFloat = 380
     private static let browserPaneMaxWidth: CGFloat = 1400
@@ -433,7 +437,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // Browser pane (outermost right split) + its drag handle. Same
         // main-window-mode treatment as the file pane: added before the
         // docker/vm/grid overlays so those cover it.
-        let browserPane = BrowserPaneView(model: browserPaneModel)
+        let browserPane = BrowserPaneView(model: browserPlaceholderModel)
         let browserPaneHost = NonMovableHostingView(rootView: browserPane)
         browserPaneHost.translatesAutoresizingMaskIntoConstraints = false
         browserPaneHost.clipsToBounds = true
@@ -735,14 +739,70 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         setBrowserPaneOpen(!browserPaneOpen, animated: true)
     }
 
-    /// The live browser controller, if the pane has been opened (for the
-    /// browser MCP server to drive).
-    var currentBrowserController: WorkspaceBrowserController? { browserController }
+    // MARK: - Per-workspace browsers
 
-    /// Stop and discard the ephemeral browser VM (window close / app quit).
+    private func browserModel(for id: Profile.ID) -> BrowserPaneModel {
+        if let m = browserModels[id] { return m }
+        let m = BrowserPaneModel()
+        browserModels[id] = m
+        return m
+    }
+
+    /// The workspace's browser controller, created lazily. The MCP server and
+    /// the pane both drive through this.
+    func browserController(for id: Profile.ID) -> WorkspaceBrowserController {
+        if let c = browserControllers[id] { return c }
+        let c = WorkspaceBrowserController(model: browserModel(for: id))
+        browserControllers[id] = c
+        return c
+    }
+
+    /// Existing controller for the MCP `browser` resolver (nil if never made).
+    func existingBrowserController(for id: Profile.ID) -> WorkspaceBrowserController? {
+        browserControllers[id]
+    }
+
+    /// Boot/resume a workspace's browser for an MCP tool call WITHOUT changing
+    /// what the pane shows (the agent may drive a background workspace).
+    func ensureBrowserForMCP(_ id: Profile.ID) {
+        browserController(for: id).ensureRunning()
+    }
+
+    /// Point the pane at `id`'s browser and mark it visible; hide the
+    /// previously-shown one so its collapse timers arm.
+    private func showBrowser(for id: Profile.ID) {
+        if let prev = shownBrowser, prev != id {
+            browserControllers[prev]?.setVisible(false)
+        }
+        shownBrowser = id
+        browserPaneHost.rootView = BrowserPaneView(model: browserModel(for: id))
+        browserController(for: id).setVisible(true)
+    }
+
+    /// Called by `select(profileID:)` when the shown workspace changes while
+    /// the browser pane is open — swap the pane to the new workspace's browser.
+    func browserPaneDidChangeWorkspace() {
+        guard browserPaneOpen, let id = selectedID, id != shownBrowser else { return }
+        showBrowser(for: id)
+    }
+
+    /// Stop and discard every workspace browser (window close / app quit).
     func teardownBrowserVM() {
-        browserController?.stop()
-        browserController = nil
+        for (_, c) in browserControllers { c.stop() }
+        browserControllers.removeAll()
+        browserModels.removeAll()
+        shownBrowser = nil
+    }
+
+    /// Tear down one workspace's browser (its session ended).
+    func teardownBrowser(for id: Profile.ID) {
+        browserControllers[id]?.stop()
+        browserControllers[id] = nil
+        browserModels[id] = nil
+        if shownBrowser == id {
+            shownBrowser = nil
+            browserPaneHost.rootView = BrowserPaneView(model: browserPlaceholderModel)
+        }
     }
 
     func setBrowserPaneOpen(_ open: Bool, animated: Bool) {
@@ -752,15 +812,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserPaneResizeHandle?.isHidden = !open
         if open {
             browserPaneHost.isHidden = false
-            // Lazily create the ephemeral browser controller; setVisible(true)
-            // boots it (or resumes a suspended VM).
-            let controller = browserController
-                ?? WorkspaceBrowserController(model: browserPaneModel)
-            browserController = controller
-            controller.setVisible(true)
+            // Show the selected workspace's browser (boots/resumes it).
+            if let id = selectedID {
+                showBrowser(for: id)
+            }
         } else {
             // Collapsed: arm the suspend (10s) + shutdown (5min) timers.
-            browserController?.setVisible(false)
+            if let id = shownBrowser { browserControllers[id]?.setVisible(false) }
         }
         let target = open ? expandedBrowserPaneWidth : 0
         let hideWhenClosed: () -> Void = { [weak self] in
@@ -833,6 +891,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         selectedID = id
         listModel.selectedID = id
         mountSelected(pane)
+        // If the browser pane is open, swap it to this workspace's browser.
+        browserPaneDidChangeWorkspace()
     }
 
     // MARK: Sidebar collapse
@@ -955,6 +1015,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearVMDashboard()
         selectedID = id
         listModel.selectedID = id
+        browserPaneDidChangeWorkspace()   // swap the browser pane to this workspace
         if let pane = pane(id) { mountSelected(pane); return }
         let state = listModel.profileRows.first { $0.id == id }?.state ?? .off
         switch state {

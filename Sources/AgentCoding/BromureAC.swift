@@ -5784,12 +5784,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // Browser MCP listener (vsock 5830): the agents' stdio shim
                 // connects here; we serve the browser tools, driving the
                 // unified window's embedded browser (opening it on demand).
+                let pid = profile.id
                 let mcpServer = BrowserMCPServer(
-                    browser: { [weak self] in self?.unifiedWindow?.currentBrowserController },
-                    ensureBrowser: { [weak self] in
-                        self?.unifiedWindow?.setBrowserPaneOpen(true, animated: true)
-                    })
-                self.browserMCPBridges[profile.id] =
+                    browser: { [weak self] in self?.unifiedWindow?.existingBrowserController(for: pid) },
+                    ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
+                self.browserMCPBridges[pid] =
                     BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
             }
             if sessionDisk.didCloneOnLastEnsure, let current = currentBaseVersion {
@@ -7079,6 +7078,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         shellBridges.removeValue(forKey: profile.id)
         browserMCPBridges[profile.id]?.stop()
         browserMCPBridges.removeValue(forKey: profile.id)
+        unifiedWindow?.teardownBrowser(for: profile.id)
         // Drop this workspace's local models from the engine's union, unloading
         // any no longer wanted by an open workspace (stops the engine if none
         // remain). The engine keeps serving the others.
@@ -7552,12 +7552,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // Browser MCP listener (vsock 5830): the agents' stdio shim
                 // connects here; we serve the browser tools, driving the
                 // unified window's embedded browser (opening it on demand).
+                let pid = profile.id
                 let mcpServer = BrowserMCPServer(
-                    browser: { [weak self] in self?.unifiedWindow?.currentBrowserController },
-                    ensureBrowser: { [weak self] in
-                        self?.unifiedWindow?.setBrowserPaneOpen(true, animated: true)
-                    })
-                self.browserMCPBridges[profile.id] =
+                    browser: { [weak self] in self?.unifiedWindow?.existingBrowserController(for: pid) },
+                    ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
+                self.browserMCPBridges[pid] =
                     BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
             }
             self.wireSandboxCallbacks(sandbox)
