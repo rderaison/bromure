@@ -351,6 +351,34 @@ final class WorkspaceBrowserController {
         guard let cdp else { throw BrowserCDP.CDPError.notReady }
         return try await cdp.pageText()
     }
+    func click(selector: String) async throws -> Bool {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        return try await cdp.click(selector: selector)
+    }
+    func fill(selector: String, value: String) async throws -> Bool {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        return try await cdp.fill(selector: selector, value: value)
+    }
+    func type(selector: String, text: String, clear: Bool, submit: Bool) async throws {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        try await cdp.type(selector: selector, text: text, clear: clear, submit: submit)
+    }
+    func pressKey(_ key: String) async throws {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        try await cdp.pressKey(key)
+    }
+    func html(selector: String) async throws -> String {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        return try await cdp.html(selector: selector)
+    }
+    func links(selector: String) async throws -> String {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        return try await cdp.links(selector: selector)
+    }
+    func waitFor(selector: String, timeoutMs: Int) async throws {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        try await cdp.waitFor(selector: selector, timeoutMs: timeoutMs)
+    }
 
     // MARK: - Collapse lifecycle (suspend / shutdown / resume)
 

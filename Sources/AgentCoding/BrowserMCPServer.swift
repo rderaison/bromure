@@ -98,6 +98,39 @@ final class BrowserMCPServer {
                 return textResult(jsonString(value ?? NSNull()))
             case "browser_get_text":
                 return textResult(try await b.pageText())
+            case "browser_get_html":
+                let sel = (args["selector"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "html"
+                return textResult(try await b.html(selector: sel))
+            case "browser_get_links":
+                let sel = (args["selector"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "body"
+                return textResult(try await b.links(selector: sel))
+            case "browser_click":
+                let sel = try requireArg(args, "selector")
+                let ok = try await b.click(selector: sel)
+                return ok ? textResult("Clicked: \(sel)")
+                          : errorResult("No element matched selector: \(sel)")
+            case "browser_fill":
+                let sel = try requireArg(args, "selector")
+                let value = args["value"] as? String ?? ""
+                let ok = try await b.fill(selector: sel, value: value)
+                return ok ? textResult("Filled: \(sel)")
+                          : errorResult("No element matched selector: \(sel)")
+            case "browser_type":
+                let sel = try requireArg(args, "selector")
+                let text = args["text"] as? String ?? ""
+                let clear = (args["clear"] as? Bool) ?? false
+                let submit = (args["submit"] as? Bool) ?? (args["pressEnter"] as? Bool) ?? false
+                try await b.type(selector: sel, text: text, clear: clear, submit: submit)
+                return textResult("Typed into \(sel)")
+            case "browser_press_key":
+                let key = try requireArg(args, "key")
+                try await b.pressKey(key)
+                return textResult("Pressed \(key)")
+            case "browser_wait_for":
+                let sel = try requireArg(args, "selector")
+                let timeout = (args["timeout"] as? Int) ?? 10000
+                try await b.waitFor(selector: sel, timeoutMs: timeout)
+                return textResult("Found: \(sel)")
             default:
                 return errorResult("Unknown tool: \(name)")
             }
@@ -160,6 +193,25 @@ final class BrowserMCPServer {
         tool("browser_evaluate", "Evaluate a JavaScript expression in the active page and return its value.",
              ["expression": prop("string", "JavaScript expression", required: true)]),
         tool("browser_get_text", "Return the active page's visible text (document.body.innerText).", [:]),
+        tool("browser_get_html", "Return the outerHTML of a CSS selector (default the whole page). Truncated at 100k chars.",
+             ["selector": prop("string", "CSS selector (default 'html')")]),
+        tool("browser_get_links", "Return all links (text + href) under a CSS selector (default 'body') as JSON.",
+             ["selector": prop("string", "CSS selector scope (default 'body')")]),
+        tool("browser_click", "Click the first element matching a CSS selector.",
+             ["selector": prop("string", "CSS selector", required: true)]),
+        tool("browser_fill", "Set an input/textarea/contenteditable's value and fire input+change (fast form fill).",
+             ["selector": prop("string", "CSS selector", required: true),
+              "value": prop("string", "Value to set")]),
+        tool("browser_type", "Type real key events into an element (drives keydown handlers). Optionally clear first / press Enter after.",
+             ["selector": prop("string", "CSS selector", required: true),
+              "text": prop("string", "Text to type"),
+              "clear": prop("boolean", "Clear the field first (default false)"),
+              "submit": prop("boolean", "Press Enter after typing (default false)")]),
+        tool("browser_press_key", "Press a single named key in the active page (Enter, Tab, Escape, ArrowDown, PageDown, …).",
+             ["key": prop("string", "Key name", required: true)]),
+        tool("browser_wait_for", "Wait until a CSS selector appears (or time out).",
+             ["selector": prop("string", "CSS selector", required: true),
+              "timeout": prop("integer", "Timeout in ms (default 10000)")]),
     ]
 
     // MARK: - JSON-RPC / result helpers

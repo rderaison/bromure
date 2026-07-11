@@ -20,6 +20,11 @@ import Security
 //
 // Runtime-untested (no nested virt in the dev sandbox); build-verified only.
 
+/// Build Input.dispatchKeyEvent params for a named key.
+private func keyParams(_ type: String, key: String, code: String, vk: Int) -> [String: Any] {
+    ["type": type, "key": key, "code": code, "windowsVirtualKeyCode": vk]
+}
+
 @MainActor
 final class BrowserCDP {
     private let bridge: CDPBridge
@@ -77,6 +82,128 @@ final class BrowserCDP {
     func pageText() async throws -> String {
         let value = try await evaluate("document.body ? document.body.innerText : ''")
         return value as? String ?? ""
+    }
+
+    /// Click the first element matching `selector`. Returns false if nothing
+    /// matched. Ported from Bromure Web's toolClick (JS `.click()`), plus a
+    /// scrollIntoView so off-screen targets still fire.
+    func click(selector: String) async throws -> Bool {
+        let js = "(function(){var el=document.querySelector(\(Self.jsQuote(selector)));"
+            + "if(!el)return false;el.scrollIntoView({block:'center',inline:'center'});"
+            + "el.click();return true;})()"
+        return (try await evaluate(js)) as? Bool ?? false
+    }
+
+    /// Set an input/textarea/contenteditable's value and fire input+change —
+    /// the fast path for filling forms (no per-keystroke events).
+    func fill(selector: String, value: String) async throws -> Bool {
+        let js = "(function(){var el=document.querySelector(\(Self.jsQuote(selector)));"
+            + "if(!el)return false;el.focus();"
+            + "if('value' in el){el.value=\(Self.jsQuote(value));}else{el.textContent=\(Self.jsQuote(value));}"
+            + "el.dispatchEvent(new Event('input',{bubbles:true}));"
+            + "el.dispatchEvent(new Event('change',{bubbles:true}));return true;})()"
+        return (try await evaluate(js)) as? Bool ?? false
+    }
+
+    /// Type real key events into `selector` (drives keydown/keyup handlers, unlike
+    /// fill). Ported from Web's toolType: focus, optionally clear, per-char key
+    /// events, optional Enter. All on one CDP connection so focus persists.
+    func type(selector: String, text: String, clear: Bool, submit: Bool) async throws {
+        try await withPage { conn in
+            if clear {
+                _ = try await conn.evaluate("(function(){var el=document.querySelector("
+                    + "\(Self.jsQuote(selector)));if(el){el.focus();el.select();}})()")
+                _ = try await conn.send("Input.dispatchKeyEvent", params: keyParams("keyDown", key: "Backspace", code: "Backspace", vk: 8))
+                _ = try await conn.send("Input.dispatchKeyEvent", params: keyParams("keyUp", key: "Backspace", code: "Backspace", vk: 8))
+            }
+            _ = try await conn.evaluate("document.querySelector(\(Self.jsQuote(selector)))?.focus()")
+            for ch in text {
+                let s = String(ch)
+                _ = try await conn.send("Input.dispatchKeyEvent", params: ["type": "keyDown", "text": s, "key": s])
+                _ = try await conn.send("Input.dispatchKeyEvent", params: ["type": "keyUp", "key": s])
+            }
+            if submit {
+                _ = try await conn.send("Input.dispatchKeyEvent", params: keyParams("keyDown", key: "Enter", code: "Enter", vk: 13))
+                _ = try await conn.send("Input.dispatchKeyEvent", params: keyParams("keyUp", key: "Enter", code: "Enter", vk: 13))
+            }
+        }
+    }
+
+    /// Press a single named key (Enter, Tab, Escape, ArrowDown, …) in the active
+    /// page — for keyboard-driven UIs the click/type tools can't reach.
+    func pressKey(_ key: String) async throws {
+        let (code, vk) = Self.keyCodeAndVK(for: key)
+        try await withPage { conn in
+            _ = try await conn.send("Input.dispatchKeyEvent", params: keyParams("keyDown", key: key, code: code, vk: vk))
+            _ = try await conn.send("Input.dispatchKeyEvent", params: keyParams("keyUp", key: key, code: code, vk: vk))
+        }
+    }
+
+    /// outerHTML of the first element matching `selector` (default whole page),
+    /// truncated. Web's toolGetContent(format:html).
+    func html(selector: String) async throws -> String {
+        let js = "document.querySelector(\(Self.jsQuote(selector)))?.outerHTML"
+        var s = (try await evaluate(js)) as? String ?? ""
+        if s.count > 100_000 { s = String(s.prefix(100_000)) + "\n\n[... truncated]" }
+        return s
+    }
+
+    /// All `<a href>` links under `selector` as a JSON array of {text, href}.
+    /// Ported from Web's toolGetLinks.
+    func links(selector: String) async throws -> String {
+        let js = "JSON.stringify(Array.from(document.querySelector(\(Self.jsQuote(selector)))"
+            + "?.querySelectorAll('a[href]') ?? []).map(function(a){"
+            + "return {text:a.innerText.trim().slice(0,200), href:a.href};}))"
+        return (try await evaluate(js)) as? String ?? "[]"
+    }
+
+    /// Resolve once `selector` appears (MutationObserver), or throw on timeout.
+    /// Wrapped in an async IIFE so Runtime.evaluate(awaitPromise:) can await it.
+    func waitFor(selector: String, timeoutMs: Int) async throws {
+        let sel = Self.jsQuote(selector)
+        let js = """
+        (async function(){
+          if (document.querySelector(\(sel))) return true;
+          return await new Promise(function(resolve, reject){
+            var t = setTimeout(function(){ obs.disconnect(); reject(new Error('Timeout waiting for \(selector)')); }, \(timeoutMs));
+            var obs = new MutationObserver(function(){
+              if (document.querySelector(\(sel))) { clearTimeout(t); obs.disconnect(); resolve(true); }
+            });
+            obs.observe(document.documentElement, {childList:true, subtree:true});
+          });
+        })()
+        """
+        _ = try await evaluate(js)
+    }
+
+    /// JSON-encode a string into a JS/JSON string literal (with quotes) for safe
+    /// embedding in an evaluated expression. Web calls this jsQuote.
+    static func jsQuote(_ s: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [s]),
+              let str = String(data: data, encoding: .utf8), str.count >= 2 else { return "\"\"" }
+        return String(str.dropFirst().dropLast())   // strip the surrounding [ ]
+    }
+
+    /// DOM `code` + Windows virtual-key for a handful of named keys the agent is
+    /// likely to press. Unknown keys fall back to the key string as its own code.
+    static func keyCodeAndVK(for key: String) -> (String, Int) {
+        switch key {
+        case "Enter": return ("Enter", 13)
+        case "Tab": return ("Tab", 9)
+        case "Escape", "Esc": return ("Escape", 27)
+        case "Backspace": return ("Backspace", 8)
+        case "Delete": return ("Delete", 46)
+        case "ArrowUp": return ("ArrowUp", 38)
+        case "ArrowDown": return ("ArrowDown", 40)
+        case "ArrowLeft": return ("ArrowLeft", 37)
+        case "ArrowRight": return ("ArrowRight", 39)
+        case "Home": return ("Home", 36)
+        case "End": return ("End", 35)
+        case "PageUp": return ("PageUp", 33)
+        case "PageDown": return ("PageDown", 34)
+        case " ", "Space": return ("Space", 32)
+        default: return (key, 0)
+        }
     }
 
     // MARK: - Target selection + connection
