@@ -477,14 +477,19 @@ public final class LinuxImageManager {
     ///
     /// The returned filter (nil on the Apple-NAT fallback) must be kept
     /// alive for the VM's lifetime and `stop()`ed afterwards.
+    /// `guestProxyHost` is the guest-visible IP where in-process helpers
+    /// (AlpinePackageProxy) are reachable — nil for bridged interfaces,
+    /// where the guest sits on the LAN and host-side proxying is skipped.
     @MainActor
     static func makeProvisionerNetwork()
-        -> (device: VZVirtioNetworkDeviceConfiguration, filter: NetworkFilter?) {
+        -> (device: VZVirtioNetworkDeviceConfiguration, filter: NetworkFilter?,
+            guestProxyHost: String?) {
         var networkFilter: NetworkFilter?
         let net = VZVirtioNetworkDeviceConfiguration()
         guard let netInfo = HostNetworkInfo.detect() else {
             net.attachment = VZNATNetworkDeviceAttachment()
-            return (net, nil)
+            // Apple's shared NAT — the host is always .1 on its subnet.
+            return (net, nil, "192.168.64.1")
         }
         let defaults = UserDefaults.standard
         let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
@@ -514,16 +519,19 @@ public final class LinuxImageManager {
             }
             if let filter = networkFilter {
                 net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
-            } else {
-                net.attachment = VZNATNetworkDeviceAttachment()
+                return (net, filter, filter.guestReachableHostIP)
             }
+            net.attachment = VZNATNetworkDeviceAttachment()
+            return (net, nil, "192.168.64.1")
         } else if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, bridgedInterface: bridgedIface) {
             networkFilter = filter
             net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
+            // Bridged: the guest is on the LAN; no host-side proxying.
+            return (net, filter, nil)
         } else {
             net.attachment = VZNATNetworkDeviceAttachment()
+            return (net, nil, "192.168.64.1")
         }
-        return (net, networkFilter)
     }
 
     private func createRawDisk(at url: URL, sizeMB: UInt64) throws {
@@ -587,13 +595,41 @@ public final class LinuxImageManager {
             to: netbootInitrdShimmedURL
         )
 
+        // Network (needed for apk) — respect the same network mode (NAT/bridged)
+        // and DNS override settings used by regular VMs. Built before the
+        // boot loader: the kernel cmdline's fetch URLs depend on the
+        // guest-visible proxy address below.
+        let (net, buildNetworkFilter, guestProxyHost) = Self.makeProvisionerNetwork()
+        vzConfig.networkDevices = [net]
+
+        // Host-side HTTP→HTTPS package proxy — the same channel the AC
+        // bake uses (AlpinePackageProxy). Guest TLS stacks (apk-tools,
+        // busybox wget) are unreliable over VPN/MITM paths and on the
+        // build server, so every guest fetch (modloop, APKINDEX,
+        // packages, the ad-block lists) rides plain HTTP to this
+        // in-process listener, which re-emits it as HTTPS through
+        // Apple's stack. Falls back to guest-direct HTTPS when the
+        // proxy can't start or the interface is bridged.
+        let proxy = AlpinePackageProxy()
+        var alpineRepoBase: String?
+        if let host = guestProxyHost {
+            do {
+                try proxy.start()
+                alpineRepoBase = proxy.guestBase(host: host)?.absoluteString
+            } catch {
+                print("[bake] Alpine package proxy failed to start (\(error)) — guest fetches go direct")
+            }
+        }
+        defer { proxy.stop() }
+        let repoBase = alpineRepoBase ?? "https://dl-cdn.alpinelinux.org"
+
         let bootLoader = VZLinuxBootLoader(kernelURL: netbootKernel)
         bootLoader.initialRamdiskURL = netbootInitrdShimmedURL
         // No `ip=dhcp`: kernel autoconfig races vmnet's bootpd, fails, and
         // brings the interface down. The rdinit shim does the single DHCP +
         // MTU clamp itself; with no `ip=` on the cmdline, Alpine's /init sees
         // the network already up and skips its own DHCP step.
-        bootLoader.commandLine = "console=hvc0 rdinit=/init.bromure alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main modloop=\(Self.netbootBase)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk \(extraKernelOptions)"
+        bootLoader.commandLine = "console=hvc0 rdinit=/init.bromure alpine_repo=\(repoBase)/alpine/v\(Self.alpineVersion)/main modloop=\(repoBase)/alpine/v\(Self.alpineVersion)/releases/aarch64/netboot-\(Self.alpineRelease)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk \(extraKernelOptions)"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.platform = VZGenericPlatformConfiguration()
@@ -611,11 +647,6 @@ public final class LinuxImageManager {
             VZVirtioBlockDeviceConfiguration(attachment: diskAttachment),
             VZVirtioBlockDeviceConfiguration(attachment: transferAttachment),
         ]
-
-        // Network (needed for apk) — respect the same network mode (NAT/bridged)
-        // and DNS override settings used by regular VMs.
-        let (net, buildNetworkFilter) = Self.makeProvisionerNetwork()
-        vzConfig.networkDevices = [net]
 
         // Serial console via pipe
         let consolePipe = Pipe()
@@ -751,7 +782,11 @@ public final class LinuxImageManager {
         // "foss" builds the redistributable image: no WARP, no macOS
         // fonts, and missing kernel modules FAIL the build.
         let mode = fossOnly ? "foss" : "user"
-        writer.write(Data("sh /tmp/vm-setup/setup.sh \(kbLayout) \(natScroll) \(loc) \(scale) \(Self.alpineVersion) \(mode)\n".utf8))
+        // ALPINE_REPO_BASE routes setup.sh's own fetches (chroot apk,
+        // the ad-block/Tranco lists, kernel modules) through the host
+        // proxy too; unset, the script goes direct.
+        let envPrefix = alpineRepoBase.map { "ALPINE_REPO_BASE='\($0)' " } ?? ""
+        writer.write(Data("\(envPrefix)sh /tmp/vm-setup/setup.sh \(kbLayout) \(natScroll) \(loc) \(scale) \(Self.alpineVersion) \(mode)\n".utf8))
 
         do {
             // The explicit failure marker short-circuits immediately (the

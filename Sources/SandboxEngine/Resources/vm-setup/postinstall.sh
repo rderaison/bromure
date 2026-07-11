@@ -43,6 +43,29 @@ KB_LAYOUT_SPEC="${2:--}"
 NATURAL_SCROLLING="${3:--}"
 LOCALE="${4:--}"
 
+# Host-side package proxy (same channel as setup.sh / the AC bake).
+# ALPINE_REPO_BASE carries the proxy's guest URL when the host runs
+# AlpinePackageProxy; exported as http(s)_proxy so the chroot's
+# downloads (apk, the pinned WARP deb) ride the host's TLS stack.
+# The proxy host itself must be in no_proxy or requests to the proxy
+# would recurse through it forever.
+: "${ALPINE_REPO_BASE:=https://dl-cdn.alpinelinux.org}"
+PROXIED=""
+case "$ALPINE_REPO_BASE" in
+    *dl-cdn.alpinelinux.org*) ;;
+    *)
+        PROXIED=1
+        export http_proxy="$ALPINE_REPO_BASE"
+        export https_proxy="$ALPINE_REPO_BASE"
+        export HTTP_PROXY="$ALPINE_REPO_BASE"
+        export HTTPS_PROXY="$ALPINE_REPO_BASE"
+        _host_port="${ALPINE_REPO_BASE##*://}"
+        _proxy_host="${_host_port%%:*}"
+        export no_proxy="localhost,127.0.0.1,::1,$_proxy_host"
+        export NO_PROXY="$no_proxy"
+        ;;
+esac
+
 log() { printf '[browser-postinstall] %s\n' "$*"; }
 fail() { printf 'SANDBOX_POSTINSTALL_FAILED: %s\n' "$*"; exit 1; }
 
@@ -143,16 +166,29 @@ fi
 cp /mnt/etc/resolv.conf /tmp/resolv.conf.image 2>/dev/null || true
 cp /etc/resolv.conf /mnt/etc/resolv.conf
 
+# Same treatment for apk's repositories: point them at the proxy for the
+# duration of the steps (plain HTTP, host-side TLS), restore the image's
+# canonical HTTPS URLs afterwards.
+if [ -n "$PROXIED" ]; then
+    cp /mnt/etc/apk/repositories /tmp/repositories.image 2>/dev/null || true
+    sed "s|https://dl-cdn.alpinelinux.org|$ALPINE_REPO_BASE|" \
+        /tmp/repositories.image > /mnt/etc/apk/repositories 2>/dev/null || true
+fi
+
 if [ "$STEP_COUNT" -gt 0 ]; then
     # The steps download packages from inside the chroot — verify the VM
     # actually has connectivity first, so a broken network fails in
     # seconds with a clear message instead of as three opaque apk/wget
     # retries per step.
     NETWORK_OK=""
+    # Probe through the proxy when one is up — that's the exact path the
+    # steps' downloads take. Plain HTTP (the netboot busybox wget has no
+    # TLS helper), proxy env cleared per-invocation so the probe can't
+    # recurse through the proxy itself.
+    NET_PROBE="http://dl-cdn.alpinelinux.org/alpine/"
+    [ -n "$PROXIED" ] && NET_PROBE="$ALPINE_REPO_BASE/alpine/"
     for i in $(seq 1 30); do
-        # Plain HTTP like setup.sh's own check — the netboot busybox wget
-        # has no TLS helper; this only probes reachability.
-        if wget -q -O /dev/null --spider http://dl-cdn.alpinelinux.org/alpine/ 2>/dev/null; then
+        if http_proxy= https_proxy= wget -q -O /dev/null --spider "$NET_PROBE" 2>/dev/null; then
             NETWORK_OK=1
             break
         fi
@@ -205,6 +241,9 @@ if [ -f /tmp/resolv.conf.image ]; then
     cp /tmp/resolv.conf.image /mnt/etc/resolv.conf
 else
     printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /mnt/etc/resolv.conf
+fi
+if [ -n "$PROXIED" ] && [ -f /tmp/repositories.image ]; then
+    cp /tmp/repositories.image /mnt/etc/apk/repositories
 fi
 rm -rf /mnt/tmp/bromure-postinstall
 

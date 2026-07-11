@@ -426,9 +426,40 @@ extension LinuxImageManager {
             to: netbootInitrdShimmedURL
         )
 
+        // Same network path as the bake (VMNetSwitch + NetworkFilter,
+        // honoring vm.networkMode / vm.dnsServers) — NOT Apple's NAT.
+        // The postinstall steps download packages from inside the guest,
+        // so this VM needs exactly the network reliability the bake VM
+        // gets; Apple's bootpd/DNS is the documented-flaky last resort.
+        let (net, networkFilter, guestProxyHost) = LinuxImageManager.makeProvisionerNetwork()
+        vzConfig.networkDevices = [net]
+        defer {
+            withExtendedLifetime(networkFilter) { networkFilter?.stop() }
+        }
+
+        // Host-side HTTP→HTTPS package proxy, exactly like the bake: the
+        // netboot's modloop fetch and the chroot's package downloads
+        // (apk, the pinned WARP deb) ride plain HTTP to this in-process
+        // listener, which re-emits them as HTTPS through Apple's stack —
+        // the proven channel on VPN'd hosts and the build server. Falls
+        // back to guest-direct HTTPS when the proxy can't start or the
+        // interface is bridged.
+        let proxy = AlpinePackageProxy()
+        var alpineRepoBase: String?
+        if let host = guestProxyHost {
+            do {
+                try proxy.start()
+                alpineRepoBase = proxy.guestBase(host: host)?.absoluteString
+            } catch {
+                print("[postinstall] Alpine package proxy failed to start (\(error)) — guest fetches go direct")
+            }
+        }
+        defer { proxy.stop() }
+        let repoBase = alpineRepoBase ?? "https://dl-cdn.alpinelinux.org"
+
         let bootLoader = VZLinuxBootLoader(kernelURL: netbootKernel)
         bootLoader.initialRamdiskURL = netbootInitrdShimmedURL
-        bootLoader.commandLine = "console=hvc0 rdinit=/init.bromure alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v\(Self.alpineVersion)/main modloop=\(Self.netbootBase)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk"
+        bootLoader.commandLine = "console=hvc0 rdinit=/init.bromure alpine_repo=\(repoBase)/alpine/v\(LinuxImageManager.alpineVersion)/main modloop=\(repoBase)/alpine/v\(LinuxImageManager.alpineVersion)/releases/aarch64/netboot-\(LinuxImageManager.alpineRelease)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.platform = VZGenericPlatformConfiguration()
@@ -441,17 +472,6 @@ extension LinuxImageManager {
         vzConfig.storageDevices = [
             VZVirtioBlockDeviceConfiguration(attachment: diskAttachment),
         ]
-
-        // Same network path as the bake (VMNetSwitch + NetworkFilter,
-        // honoring vm.networkMode / vm.dnsServers) — NOT Apple's NAT.
-        // The postinstall steps download packages from inside the guest,
-        // so this VM needs exactly the network reliability the bake VM
-        // gets; Apple's bootpd/DNS is the documented-flaky last resort.
-        let (net, networkFilter) = LinuxImageManager.makeProvisionerNetwork()
-        vzConfig.networkDevices = [net]
-        defer {
-            withExtendedLifetime(networkFilter) { networkFilter?.stop() }
-        }
 
         let consolePipe = Pipe()
         let inputPipe = Pipe()
@@ -551,7 +571,11 @@ extension LinuxImageManager {
             try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 60, progress: progress)
 
             progress(.message("Running postinstall…"))
-            writer.write(Data("\(command)\n".utf8))
+            // ALPINE_REPO_BASE routes the chroot's package downloads
+            // (apk, the pinned WARP deb) through the host proxy; unset,
+            // postinstall.sh goes direct.
+            let envPrefix = alpineRepoBase.map { "ALPINE_REPO_BASE='\($0)' " } ?? ""
+            writer.write(Data("\(envPrefix)\(command)\n".utf8))
             try await consoleOutput.waitFor(
                 marker: successMarker,
                 timeout: markerTimeout,

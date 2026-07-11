@@ -15,10 +15,18 @@ import Foundation
 /// host so a compromised guest can't use it as a generic egress relay.
 ///
 /// Lifecycle: bind a TCP listener on 0.0.0.0:<auto-port> before the VM
-/// boots; pass `http://192.168.64.1:<port>` (the vmnet NAT gateway IP
-/// the guest sees) into the kernel cmdline and `setup.sh` environment;
-/// tear down when the bake exits.
-final class AlpinePackageProxy: @unchecked Sendable {
+/// boots; pass `http://<guest-visible host IP>:<port>` into the kernel
+/// cmdline and `setup.sh`/`postinstall.sh` environment; tear down when
+/// the bake exits. `mirrorURL` uses the default 192.168.64.0/24 gateway
+/// (AC's provisioner rides VMNetSwitch's default subnet); flows on other
+/// subnets (the browser bake's ascending switch/per-VM vmnet) build the
+/// guest URL with `guestBase(host:)` and the actual gateway IP.
+///
+/// Shared by the AC Ubuntu bake (UbuntuImageManager) and the browser
+/// image bake/postinstall (LinuxImageManager) — it's what makes guest
+/// package fetches work on hosts where guest-direct TLS doesn't
+/// (VPN/MITM setups, the build server).
+public final class AlpinePackageProxy: @unchecked Sendable {
     /// vmnet's NAT gateway. macOS Virtualization framework's shared mode
     /// hands out 192.168.64.0/24 with .1 as the host-side gateway IP.
     static let guestReachableHost = "192.168.64.1"
@@ -53,7 +61,18 @@ final class AlpinePackageProxy: @unchecked Sendable {
         qos: .utility, attributes: .concurrent)
     private var listenFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
-    private(set) var mirrorURL: URL?
+    public private(set) var mirrorURL: URL?
+    /// The bound port (0 until `start()` succeeds).
+    public private(set) var port: UInt16 = 0
+
+    public init() {}
+
+    /// Guest-visible base URL for a guest whose gateway is `host` —
+    /// e.g. the NetworkFilter/VMNetSwitch gateway IP.
+    public func guestBase(host: String) -> URL? {
+        guard port != 0 else { return nil }
+        return URL(string: "http://\(host):\(port)")
+    }
 
     // Per-request URLSession is created inside `streamRequest` so the
     // streaming delegate's lifetime matches one HTTP hop. No shared
@@ -64,7 +83,7 @@ final class AlpinePackageProxy: @unchecked Sendable {
     /// Bind and start listening. Throws on bind / listen failure (e.g.
     /// `EADDRINUSE` if another process holds the port; we bind to
     /// kernel-assigned `port 0` so this is unlikely).
-    func start() throws {
+    public func start() throws {
         // Globally ignore SIGPIPE. Our `Darwin.write` calls in
         // splice / writeStatus / writeResponse hit a closed client
         // socket the moment a guest gives up mid-download (curl
@@ -111,6 +130,7 @@ final class AlpinePackageProxy: @unchecked Sendable {
             }
         }
         let port = UInt16(bigEndian: actual.sin_port)
+        self.port = port
 
         if Darwin.listen(fd, 16) != 0 {
             let e = errno
@@ -135,7 +155,7 @@ final class AlpinePackageProxy: @unchecked Sendable {
     /// handler closes the listening fd. Also dumps a sorted list of
     /// every upstream host this proxy contacted so we can audit what
     /// the bake actually talks to and tighten / extend the allowlist.
-    func stop() {
+    public func stop() {
         acceptSource?.cancel()
         acceptSource = nil
         listenFD = -1
@@ -542,7 +562,7 @@ final class AlpinePackageProxy: @unchecked Sendable {
         FileHandle.standardError.write(Data("[ac-proxy] \(msg)\n".utf8))
     }
 
-    enum Error: Swift.Error {
+    public enum Error: Swift.Error {
         case socket(Int32)
         case bind(Int32)
         case listen(Int32)

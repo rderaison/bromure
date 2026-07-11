@@ -30,6 +30,35 @@ case "$KB_LAYOUT_SPEC" in
 esac
 
 # ---------------------------------------------------------------------------
+# Host-side package proxy (same channel as the AC bake). When the host
+# runs its HTTP→HTTPS proxy (AlpinePackageProxy) it passes the guest URL
+# in ALPINE_REPO_BASE; the kernel cmdline's alpine_repo/modloop already
+# point at it. Export it as http(s)_proxy so every other fetch — chroot
+# apk, the ad-block/Tranco lists, kernel modules — rides the host's TLS
+# stack too (guest-direct TLS is unreliable on VPN/MITM hosts and the
+# build server). The proxy host itself must be in no_proxy or requests
+# to the proxy would recurse through it forever.
+# ---------------------------------------------------------------------------
+
+: "${ALPINE_REPO_BASE:=https://dl-cdn.alpinelinux.org}"
+PROXIED=""
+case "$ALPINE_REPO_BASE" in
+    *dl-cdn.alpinelinux.org*) ;;
+    *)
+        PROXIED=1
+        export http_proxy="$ALPINE_REPO_BASE"
+        export https_proxy="$ALPINE_REPO_BASE"
+        export HTTP_PROXY="$ALPINE_REPO_BASE"
+        export HTTPS_PROXY="$ALPINE_REPO_BASE"
+        _host_port="${ALPINE_REPO_BASE##*://}"
+        _proxy_host="${_host_port%%:*}"
+        export no_proxy="localhost,127.0.0.1,::1,$_proxy_host"
+        export NO_PROXY="$no_proxy"
+        echo "Using host package proxy at $ALPINE_REPO_BASE"
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -77,11 +106,16 @@ if ! grep -q '1\.1\.1\.1' /etc/resolv.conf 2>/dev/null; then
     echo "nameserver 1.0.0.1" >> /etc/resolv.conf
 fi
 
+# Probe through the proxy when one is up — that's the exact path every
+# later fetch takes. Proxy env cleared for the probe itself (plain HTTP
+# straight to the listener; must not recurse through the proxy).
+NET_PROBE="http://dl-cdn.alpinelinux.org/alpine/"
+[ -n "$PROXIED" ] && NET_PROBE="$ALPINE_REPO_BASE/alpine/"
 for i in $(seq 1 30); do
-    wget -q -O /dev/null --spider http://dl-cdn.alpinelinux.org/alpine/ 2>/dev/null && break
+    http_proxy= https_proxy= wget -q -O /dev/null --spider "$NET_PROBE" 2>/dev/null && break
     sleep 1
 done
-wget -q -O /dev/null --spider http://dl-cdn.alpinelinux.org/alpine/ 2>/dev/null || {
+http_proxy= https_proxy= wget -q -O /dev/null --spider "$NET_PROBE" 2>/dev/null || {
     echo "SANDBOX_SETUP_FAILED: no network connectivity — check your internet connection"
     exit 1
 }
@@ -91,7 +125,10 @@ wget -q -O /dev/null --spider http://dl-cdn.alpinelinux.org/alpine/ 2>/dev/null 
 # ---------------------------------------------------------------------------
 
 modprobe ext4
-retry apk add e2fsprogs
+# GNU wget + CA certs alongside e2fsprogs: the ad-block/Tranco/kernel-
+# module fetches below use https URLs, and busybox wget's proxy/TLS
+# support isn't dependable — GNU wget honors http(s)_proxy/no_proxy.
+retry apk add e2fsprogs wget ca-certificates
 mkfs.ext4 -q -F /dev/vda
 mkdir -p /mnt
 mount -t ext4 /dev/vda /mnt
@@ -104,9 +141,12 @@ retry apk add alpine-base --root /mnt --initdb \
     --keys-dir /etc/apk/keys --repositories-file /etc/apk/repositories
 
 mkdir -p /mnt/etc/apk
+# During the bake the image's apk fetches ride the proxy (plain HTTP,
+# host-side TLS); the canonical HTTPS URLs are restored in the cleanup
+# section so the shipped image points straight at the CDN.
 printf '%s\n' \
-    "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/main" \
-    "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community" \
+    "${ALPINE_REPO_BASE}/alpine/v${ALPINE_VERSION}/main" \
+    "${ALPINE_REPO_BASE}/alpine/v${ALPINE_VERSION}/community" \
     > /mnt/etc/apk/repositories
 
 # Write well-known public DNS as initial resolv.conf for the installed image.
@@ -590,6 +630,12 @@ chroot /mnt rc-update add swap boot
 # ---------------------------------------------------------------------------
 # Cleanup and finish
 # ---------------------------------------------------------------------------
+
+# The shipped image must point at the real CDN, not the bake-time proxy.
+printf '%s\n' \
+    "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/main" \
+    "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community" \
+    > /mnt/etc/apk/repositories
 
 umount /mnt/dev
 umount /mnt/sys

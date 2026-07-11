@@ -68,6 +68,14 @@ public final class NetworkFilter: @unchecked Sendable {
     private var vmnetGateway: UInt32
     private let vmnetSubnet: UInt32
     private let vmnetMask: UInt32
+
+    /// The guest-visible IP the host answers on (this interface's
+    /// gateway) — where in-process helpers like AlpinePackageProxy are
+    /// reachable from the guest. Meaningless for bridged interfaces
+    /// (the guest lives on the LAN, not behind our gateway).
+    public var guestReachableHostIP: String {
+        HostNetworkInfo.formatIPv4(vmnetGateway)
+    }
     /// Custom subnet to request from vmnet in shared mode (nil = default network).
     private let requestedSubnet: VmnetSubnet?
 

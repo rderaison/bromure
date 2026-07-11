@@ -241,6 +241,16 @@ image must never silently lack webcam/RTC support. (The image ships no
 sshd at all; the only host-side access is the serial console's root
 autologin, reachable only from the host process.)
 
+Both the bake and the postinstall VM route every guest fetch (modloop,
+APKINDEX, packages, the WARP deb, the ad-block lists) through the
+host-side **AlpinePackageProxy** (moved to SandboxEngine; the same
+HTTP→HTTPS channel the AC bake uses) — guest-direct TLS is unreliable on
+VPN/MITM hosts and on the build server. The scripts consume it via
+`ALPINE_REPO_BASE` (kernel cmdline + env → `http_proxy`/`https_proxy`
+with the proxy host in `no_proxy`); the shipped image's
+`/etc/apk/repositories` is restored to the canonical CDN URLs. Fetches
+go direct only when the proxy can't start or the VM is bridged.
+
 ## Client behavior
 
 - **New installation** (`AppState.startInit` / `bromure init`) — fetch
