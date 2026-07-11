@@ -752,7 +752,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// the pane both drive through this.
     func browserController(for id: Profile.ID) -> WorkspaceBrowserController {
         if let c = browserControllers[id] { return c }
-        let c = WorkspaceBrowserController(model: browserModel(for: id))
+        let persistent = acDelegate?.profiles.first { $0.id == id }?.browserPersistent ?? false
+        let c = WorkspaceBrowserController(
+            model: browserModel(for: id), workspaceID: id, persistent: persistent)
         browserControllers[id] = c
         return c
     }

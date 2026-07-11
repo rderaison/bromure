@@ -56,8 +56,29 @@ final class WorkspaceBrowserController {
     /// manual open starts clean.
     private let homePage = "about:blank"
 
-    init(model: BrowserPaneModel) {
+    /// The workspace this browser belongs to — keys its persistent profile disk.
+    private let workspaceID: UUID
+    /// When true, Chromium's user-data-dir lives on an encrypted per-workspace
+    /// disk so logins/cookies survive teardown (set from Profile.browserPersistent).
+    let persistent: Bool
+
+    init(model: BrowserPaneModel, workspaceID: UUID, persistent: Bool) {
         self.model = model
+        self.workspaceID = workspaceID
+        self.persistent = persistent
+    }
+
+    /// Per-workspace persistent browser profile dir (shared into the guest as
+    /// Chromium's user-data-dir when `persistent`):
+    /// `~/Library/Application Support/BromureAC/browser-profiles/<id>/image/`.
+    static func browserProfileImageDir(for id: UUID) -> URL {
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport
+            .appendingPathComponent("BromureAC", isDirectory: true)
+            .appendingPathComponent("browser-profiles", isDirectory: true)
+            .appendingPathComponent(id.uuidString, isDirectory: true)
+            .appendingPathComponent("image", isDirectory: true)
     }
 
     // MARK: - Image resolution (shared / AC-owned)
@@ -134,7 +155,30 @@ final class WorkspaceBrowserController {
         let pool = VMPool(config: config, storageDir: storageDir,
                           isolatePeers: false, requireImageVersion: false)
         self.pool = pool
-        print("[browser] booting ephemeral browser VM (storageDir=\(storageDir.path))")
+
+        // Persistent profiles: an encrypted per-workspace disk holds Chromium's
+        // user-data-dir so logins/cookies survive teardown. Failure to set it up
+        // degrades gracefully to ephemeral rather than blocking the browser.
+        var profileImageDir: URL?
+        var profileDiskKey: String?
+        if persistent {
+            let imageDir = Self.browserProfileImageDir(for: workspaceID)
+            let diskURL = imageDir.appendingPathComponent("profile.img")
+            do {
+                try FileManager.default.createDirectory(at: imageDir, withIntermediateDirectories: true)
+                if !ProfileDisk.diskExists(at: diskURL) {
+                    try ProfileDisk.createDisk(profileID: workspaceID, at: diskURL)
+                    print("[browser] created persistent profile disk at \(diskURL.path)")
+                }
+                profileImageDir = imageDir
+                profileDiskKey = try ProfileDisk.keyForProfile(id: workspaceID)
+            } catch {
+                print("[browser] persistent disk setup failed — ephemeral fallback: \(error)")
+            }
+        }
+        let claimProfileID: UUID? = profileImageDir != nil ? workspaceID : nil
+        print("[browser] booting \(profileImageDir != nil ? "persistent" : "ephemeral") "
+            + "browser VM (storageDir=\(storageDir.path))")
 
         Task { [weak self] in
             // Boot explicitly first so the real error surfaces — claim()
@@ -149,9 +193,11 @@ final class WorkspaceBrowserController {
                     "\(error)"))
                 return
             }
-            // Ephemeral: no profileID / profileImageDir → the guest's virtio-fs
-            // share is disconnected and nothing persists past teardown.
-            let warm = await pool.claim(config: config)
+            // Persistent → the per-workspace encrypted disk is shared in as
+            // Chromium's user-data-dir; ephemeral → no share, nothing survives.
+            let warm = await pool.claim(config: config, profileID: claimProfileID,
+                                        profileImageDir: profileImageDir,
+                                        profileDiskKey: profileDiskKey)
             guard let self else {
                 if let warm { await Self.tearDown(warm) }
                 return

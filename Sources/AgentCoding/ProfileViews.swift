@@ -75,6 +75,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case supplyChain      = "Supply Chain"
     case promptInjection  = "Prompt Injection"
     case appearance  = "Appearance"
+    case browser     = "Browser"
     case resources   = "Resources"
     /// App-wide automation toggles. Only shown when the editor is opened
     /// from "Bromure → Preferences" (i.e., `storageContext == nil`); the
@@ -98,6 +99,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .supplyChain:      "shippingbox.fill"
         case .promptInjection:  "exclamationmark.triangle.fill"
         case .appearance:  "paintpalette.fill"
+        case .browser:     "globe"
         case .resources:   "memorychip.fill"
         case .automation:  "antenna.radiowaves.left.and.right"
         }
@@ -118,6 +120,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .supplyChain:      .yellow
         case .promptInjection:  .red
         case .appearance:  .pink
+        case .browser:     .blue
         case .resources:   .gray
         case .automation:  .cyan
         }
@@ -428,6 +431,7 @@ struct ProfileEditorView: View {
         case .supplyChain:      supplyChainSection
         case .promptInjection:  promptInjectionSection
         case .appearance:  appearanceSection
+        case .browser:     browserSection
         case .resources:   resourcesSection
         case .automation:  automationSection
         }
@@ -1954,6 +1958,28 @@ struct ProfileEditorView: View {
         if let s = urlString, let url = URL(string: s) {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    @ViewBuilder
+    private var browserSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("This workspace has an embedded Chromium browser its agents can drive (navigate, click, type, screenshot, read the network log and console) through the built-in `browser` MCP server. The browser runs in its own disposable VM.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle(isOn: $draft.browserPersistent) {
+                    Label("Stay signed in to websites", systemImage: "person.badge.key.fill")
+                        .font(.subheadline.weight(.semibold))
+                }
+                Text("Off (default) → the browser starts from a clean profile every time and forgets everything when the window closes — fully ephemeral. On → cookies, logins, and history are kept on an encrypted per-workspace disk (~/Library/Application Support/BromureAC/browser-profiles/), so the agent stays signed in to sites between sessions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder

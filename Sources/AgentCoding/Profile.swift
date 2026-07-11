@@ -981,6 +981,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// see this"). Mirrors a similar opt-out on Bromure Web.
     public var privateMode: Bool
 
+    /// When true, the workspace's embedded browser keeps its Chromium profile
+    /// (cookies, logins, history) on an encrypted per-workspace disk between
+    /// sessions, so the agent stays signed in to sites. Default false — the
+    /// browser is fully ephemeral (a clean profile discarded on close).
+    public var browserPersistent: Bool
+
     /// **Fusion** configuration. The agents whose answers are fused on a
     /// Claude-Code text turn (any subset of the configured providers, 1–3).
     /// Fusion engages per-session from the title-bar toggle; it's only
@@ -1343,6 +1349,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // preserves prior behaviour for pre-field profiles).
         traceLevel: TraceLevel = .aiDetails,
         privateMode: Bool = false,
+        browserPersistent: Bool = false,
         fusionLegs: Set<Tool> = [],
         fusionJudgeProvider: Tool? = nil,
         fusionJudgeModel: String? = nil,
@@ -1416,6 +1423,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.environmentVariables = environmentVariables
         self.traceLevel = traceLevel
         self.privateMode = privateMode
+        self.browserPersistent = browserPersistent
         self.fusionLegs = fusionLegs
         self.fusionJudgeProvider = fusionJudgeProvider
         self.fusionJudgeModel = fusionJudgeModel
@@ -1493,6 +1501,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case environmentVariables
         case traceLevel
         case privateMode
+        case browserPersistent
         case fusionEnabled   // legacy; decoded for migration, never encoded
         case fusionLegs
         case fusionJudgeProvider
@@ -1587,6 +1596,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                                                      forKey: .environmentVariables) ?? []
         traceLevel = try c.decodeIfPresent(TraceLevel.self, forKey: .traceLevel) ?? .off
         privateMode = try c.decodeIfPresent(Bool.self, forKey: .privateMode) ?? false
+        browserPersistent = try c.decodeIfPresent(Bool.self, forKey: .browserPersistent) ?? false
         // Fusion config. New keys default to empty/nil. Legacy profiles that
         // had `fusionEnabled == true` migrate to fusing whatever providers they
         // had credentials for — resolved lazily by `fusionConfigurable`, so we
@@ -1679,6 +1689,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if traceLevel != .off {
             try c.encode(traceLevel, forKey: .traceLevel)
+        }
+        if browserPersistent {
+            try c.encode(browserPersistent, forKey: .browserPersistent)
         }
         // Only emit privateMode when true — keeps default-config JSON
         // small for the common (managed-mode-streaming) case.
