@@ -141,6 +141,16 @@ final class BrowserMCPServer {
                 return networkSummary(b)
             case "browser_clear_network":
                 b.clearNetwork(); return textResult("Network log cleared")
+            case "browser_pick_element":
+                guard let picked = try await b.pickElement() else {
+                    return textResult("Element pick cancelled or timed out (no element clicked).")
+                }
+                let sel = picked["selector"] as? String ?? ""
+                let tag = picked["tag"] as? String ?? ""
+                let txt = picked["text"] as? String ?? ""
+                return textResult("Picked <\(tag)>"
+                    + (txt.isEmpty ? "" : " \"\(txt)\"")
+                    + "\nselector: \(sel)")
             case "browser_console":
                 let clear = (args["clear"] as? Bool) ?? false
                 let level = (args["level"] as? String)?.lowercased()
@@ -306,6 +316,11 @@ final class BrowserMCPServer {
              + "Essential for debugging why a page misbehaves.",
              ["level": prop("string", "Filter: 'error','warn','log','info','debug' or 'all' (default)"),
               "clear": prop("boolean", "Clear the buffer after reading (default false)")]),
+        tool("browser_pick_element",
+             "Ask the user to point at an element: highlights elements on hover in "
+             + "the browser and returns the CSS selector of the one they click. Use "
+             + "when the user refers to something on the page you can't unambiguously "
+             + "target — tell them to click it. Waits up to 60s.", [:]),
     ]
 
     // MARK: - JSON-RPC / result helpers

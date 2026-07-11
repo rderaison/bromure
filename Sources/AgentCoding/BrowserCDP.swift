@@ -237,6 +237,109 @@ final class BrowserCDP {
         return (try? JSONSerialization.jsonObject(with: Data(s.utf8))) as? [[String: Any]] ?? []
     }
 
+    // MARK: - Element picker
+
+    /// Arm hover-to-highlight in the active page and resolve with the element
+    /// the user clicks — {selector, tag, text} — or nil on Escape/timeout.
+    /// Polls `window.__bromurePicked`, which the injected overlay sets.
+    func pickElement(timeoutMs: Int = 60_000) async throws -> [String: Any]? {
+        _ = try await evaluate(Self.pickOverlaySource)
+        let ticks = max(1, timeoutMs / 200)
+        for _ in 0..<ticks {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard let s = try? await evaluate("JSON.stringify(window.__bromurePicked||null)") as? String,
+                  s != "null", let data = s.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            if obj["cancelled"] != nil { return nil }
+            return obj
+        }
+        _ = try? await evaluate("if(window.__bromureCancelPick)window.__bromureCancelPick();")
+        return nil
+    }
+
+    /// Flash a brief self-removing toast in the active page (visible over the
+    /// framebuffer, unlike the host placeholder line).
+    func showToast(_ message: String) async {
+        let js = "(function(){var t=document.createElement('div');"
+            + "t.textContent=\(Self.jsQuote(message));"
+            + "t.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);"
+            + "z-index:2147483647;background:rgba(20,20,22,0.92);color:#fff;font:13px ui-monospace,monospace;"
+            + "padding:8px 14px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.4);max-width:80vw;"
+            + "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:none;';"
+            + "document.documentElement.appendChild(t);"
+            + "setTimeout(function(){try{t.remove();}catch(e){}},2600);})()"
+        _ = try? await evaluate(js)
+    }
+
+    /// Self-contained overlay: highlights the element under the cursor, shows its
+    /// selector, and on click records {selector, tag, text} to
+    /// `window.__bromurePicked`. Escape cancels. Idempotent.
+    static let pickOverlaySource = """
+    (function(){
+      if (window.__bromurePickActive) return;
+      window.__bromurePickActive = true;
+      window.__bromurePicked = null;
+      var box = document.createElement('div');
+      box.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;border:2px solid #4c8bf5;background:rgba(76,139,245,0.15);border-radius:2px;';
+      var label = document.createElement('div');
+      label.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;background:#4c8bf5;color:#fff;font:12px ui-monospace,monospace;padding:2px 6px;border-radius:3px;max-width:90vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      document.documentElement.appendChild(box);
+      document.documentElement.appendChild(label);
+      var current = null;
+      function cssPath(el){
+        if (!(el instanceof Element)) return '';
+        if (el.id) return '#' + CSS.escape(el.id);
+        var parts = [];
+        while (el && el.nodeType === 1 && parts.length < 5) {
+          if (el.id) { parts.unshift('#' + CSS.escape(el.id)); break; }
+          var sel = el.nodeName.toLowerCase();
+          var cls = (el.className && typeof el.className === 'string')
+            ? el.className.trim().split(/\\s+/).filter(Boolean).slice(0,2) : [];
+          if (cls.length) sel += '.' + cls.map(function(c){ return CSS.escape(c); }).join('.');
+          var parent = el.parentNode;
+          if (parent && parent.children) {
+            var sibs = Array.prototype.filter.call(parent.children, function(c){ return c.nodeName === el.nodeName; });
+            if (sibs.length > 1) sel += ':nth-of-type(' + (Array.prototype.indexOf.call(sibs, el) + 1) + ')';
+          }
+          parts.unshift(sel);
+          el = el.parentElement;
+        }
+        return parts.join(' > ');
+      }
+      function move(e){
+        var el = document.elementFromPoint(e.clientX, e.clientY);
+        if (!el || el === box || el === label) return;
+        current = el;
+        var r = el.getBoundingClientRect();
+        box.style.left = r.left+'px'; box.style.top = r.top+'px';
+        box.style.width = r.width+'px'; box.style.height = r.height+'px';
+        label.textContent = cssPath(el);
+        label.style.left = r.left+'px';
+        label.style.top = Math.max(0, r.top-20)+'px';
+      }
+      function cleanup(){
+        window.__bromurePickActive = false;
+        window.__bromureCancelPick = null;
+        document.removeEventListener('mousemove', move, true);
+        document.removeEventListener('click', clickH, true);
+        document.removeEventListener('keydown', keyH, true);
+        try { box.remove(); label.remove(); } catch(e){}
+      }
+      function clickH(e){
+        e.preventDefault(); e.stopPropagation();
+        var el = current || document.elementFromPoint(e.clientX, e.clientY);
+        window.__bromurePicked = { selector: cssPath(el), tag: el.nodeName.toLowerCase(), text: (el.innerText||'').trim().slice(0,120) };
+        cleanup();
+      }
+      function keyH(e){ if (e.key === 'Escape') { window.__bromurePicked = { cancelled: true }; cleanup(); } }
+      window.__bromureCancelPick = function(){ window.__bromurePicked = { cancelled: true }; cleanup(); };
+      document.addEventListener('mousemove', move, true);
+      document.addEventListener('click', clickH, true);
+      document.addEventListener('keydown', keyH, true);
+    })();
+    """
+
     /// JSON-encode a string into a JS/JSON string literal (with quotes) for safe
     /// embedding in an evaluated expression. Web calls this jsQuote.
     static func jsQuote(_ s: String) -> String {

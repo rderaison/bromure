@@ -119,6 +119,14 @@ final class NativeTabBarModel {
     /// Claude users want the inspector).
     var onDevTools: (() -> Void)?
 
+    /// Called when the user clicks the element-picker button — starts hover-to-
+    /// highlight, and on click copies the element's CSS selector so it can be
+    /// handed to the agent (Bromure AC addition, mirrors Claude Desktop ⌘⇧S).
+    var onPickElement: (() -> Void)?
+
+    /// True while element-pick mode is armed — lets the button show active.
+    var picking: Bool = false
+
     init() {}
 
     var activeTab: TabInfo? { tabs.first(where: { $0.active }) }
@@ -316,6 +324,14 @@ struct NativeCompactBarView: View {
             }
             .buttonStyle(.plain)
             .help("Toggle DevTools (F12)")
+
+            Button(action: { model.onPickElement?() }) {
+                Image(systemName: "dot.viewfinder")
+                    .frame(width: 22, height: 22)
+                    .foregroundStyle(model.picking ? Color.accentColor : Color.primary)
+            }
+            .buttonStyle(.plain)
+            .help("Pick an element — click one in the page to copy its selector (⇧⌘S)")
 
             shareButton
         }

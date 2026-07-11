@@ -314,6 +314,7 @@ final class WorkspaceBrowserController {
         }
         bar.onClose = { [weak self] id in self?.closeTab(id) }
         bar.onDevTools = { [weak self] in self?.toggleDevTools() }
+        bar.onPickElement = { [weak self] in self?.userPickElement() }
         // Site-info popover's on-demand certificate fetch.
         bar.fetchCertificate = { origin in await bridge.fetchCertificate(origin: origin) }
     }
@@ -457,6 +458,39 @@ final class WorkspaceBrowserController {
     func consoleLogs(clear: Bool) async throws -> [[String: Any]] {
         guard let cdp else { throw BrowserCDP.CDPError.notReady }
         return try await cdp.consoleLogs(clear: clear)
+    }
+
+    // MARK: - Element picker
+
+    /// The most recently picked element's CSS selector (button or MCP driven).
+    private(set) var lastPickedSelector: String?
+
+    /// Arm the picker and return the element the user clicks (or nil). Records
+    /// the selector for `lastPickedSelector`. Shared by the button + MCP tool.
+    func pickElement() async throws -> [String: Any]? {
+        guard let cdp else { throw BrowserCDP.CDPError.notReady }
+        model.tabBar.picking = true
+        defer { model.tabBar.picking = false }
+        let picked = try await cdp.pickElement()
+        if let sel = picked?["selector"] as? String, !sel.isEmpty { lastPickedSelector = sel }
+        return picked
+    }
+
+    /// Button/⇧⌘S handler: pick an element, then put its selector on the
+    /// pasteboard (which the clipboard bridge mirrors into the guest, so it's
+    /// paste-ready for the in-VM agent) and flash a confirmation.
+    func userPickElement() {
+        guard isReady else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            guard let picked = try? await self.pickElement(),
+                  let sel = picked["selector"] as? String, !sel.isEmpty else { return }
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(sel, forType: .string)
+            await self.cdp?.showToast(String(
+                format: NSLocalizedString("Copied selector: %@", comment: "element picker toast"), sel))
+        }
     }
 
     // MARK: - Collapse lifecycle (suspend / shutdown / resume)
