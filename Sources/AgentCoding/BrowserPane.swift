@@ -80,6 +80,15 @@ final class BrowserPaneModel {
 final class BrowserFramebufferContainer: NSView {
     override var isFlipped: Bool { true }
 
+    /// Hover (mouseMoved) delivery to the guest — the element picker's
+    /// highlight depends on it — requires the window to dispatch
+    /// mouse-moved events. Without this it only starts flowing after a
+    /// window resize forces AppKit to recompute tracking.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+    }
+
     /// Mount (or replace) the framebuffer view, pinned to fill.
     func mount(_ view: NSView) {
         subviews.forEach { $0.removeFromSuperview() }
@@ -155,10 +164,32 @@ final class NativeChromeCropper: NSView {
 // MARK: - SwiftUI
 
 /// Bridges the stable framebuffer container into SwiftUI.
+///
+/// Wraps the model's container instead of BEING it: a workspace switch
+/// swaps the pane's rootView to a same-typed BrowserPaneView, which
+/// SwiftUI treats as an update of this representable (makeNSView is NOT
+/// called again) — updateNSView re-mounts the new workspace's container,
+/// or the previous workspace's framebuffer would stay on screen.
 private struct FramebufferHost: NSViewRepresentable {
     let container: BrowserFramebufferContainer
-    func makeNSView(context: Context) -> BrowserFramebufferContainer { container }
-    func updateNSView(_ nsView: BrowserFramebufferContainer, context: Context) {}
+
+    func makeNSView(context: Context) -> NSView {
+        let wrapper = NSView()
+        embed(in: wrapper)
+        return wrapper
+    }
+
+    func updateNSView(_ wrapper: NSView, context: Context) {
+        guard container.superview !== wrapper else { return }
+        wrapper.subviews.forEach { $0.removeFromSuperview() }
+        embed(in: wrapper)
+    }
+
+    private func embed(in wrapper: NSView) {
+        container.frame = wrapper.bounds
+        container.autoresizingMask = [.width, .height]
+        wrapper.addSubview(container)
+    }
 }
 
 /// The pane content: browser chrome over the framebuffer / placeholder.

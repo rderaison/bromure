@@ -331,7 +331,7 @@ struct NativeCompactBarView: View {
                     .foregroundStyle(model.picking ? Color.accentColor : Color.primary)
             }
             .buttonStyle(.plain)
-            .help("Pick an element — click one in the page to copy its selector (⇧⌘S)")
+            .help("Pick an element — click one in the page to copy its selector; press again to cancel (⇧⌘S)")
 
             shareButton
         }

@@ -915,42 +915,104 @@ public final class SessionDisk {
     /// launches this; it connects to the host over vsock and pipes the
     /// agent's stdin/stdout to the host BrowserMCPServer. Kept tiny and
     /// dependency-free (stdlib only).
+    ///
+    /// RECONNECTS on any vsock drop instead of exiting: MCP clients
+    /// (Claude Code) permanently withdraw a stdio server's tools when
+    /// its process dies, so this process must survive host-side hiccups
+    /// and browser-VM restarts. The host handler is stateless per
+    /// request line (no session to re-handshake); at worst one in-flight
+    /// request errors per drop and the agent just retries the tool call.
+    /// It also retries the INITIAL connect (the host listener can come
+    /// up moments after the agent), and only exits once its own stdin
+    /// closes (the MCP client shutting the server down on purpose).
     static let browserMCPShimScript = """
     #!/usr/bin/env python3
     # Bromure AC — browser MCP stdio↔vsock shim. Generated; do not edit.
-    # Bridges an MCP client's stdio to the host's BrowserMCPServer over vsock.
-    import os, socket, sys, threading
+    # Bridges an MCP client's stdio to the host's BrowserMCPServer over
+    # vsock, reconnecting on drops so the MCP server never dies with the
+    # transport (see SessionDisk.browserMCPShimScript).
+    import socket, sys, threading, time
     HOST_CID = socket.VMADDR_CID_HOST if hasattr(socket, "VMADDR_CID_HOST") else 2
     PORT = \(browserMCPVsockPort)
-    try:
-        s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-        s.connect((HOST_CID, PORT))
-    except OSError as e:
-        sys.stderr.write("bromure-browser-mcp: cannot reach host: %s\\n" % e)
-        sys.exit(1)
+    state_lock = threading.Lock()
+    conn_lock = threading.Lock()
+    sock = None
+    stdin_open = True
+    reported = False
+    def current():
+        with state_lock:
+            return sock
+    def drop(s):
+        global sock
+        with state_lock:
+            if sock is s:
+                sock = None
+        try:
+            s.close()
+        except OSError:
+            pass
+    def ensure_conn():
+        # Serialize dials; whoever loses the race reuses the winner's
+        # socket. Backoff 0.2s -> 5s, forever while stdin is open.
+        global sock, reported
+        with conn_lock:
+            existing = current()
+            if existing is not None:
+                return existing
+            delay = 0.2
+            while stdin_open:
+                try:
+                    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+                    s.connect((HOST_CID, PORT))
+                    with state_lock:
+                        sock = s
+                    return s
+                except OSError as e:
+                    if not reported:
+                        reported = True
+                        sys.stderr.write("bromure-browser-mcp: host not reachable yet (%s) — retrying\\n" % e)
+                    time.sleep(delay)
+                    delay = min(delay * 2, 5.0)
+            return None
     def stdin_to_sock():
-        try:
-            while True:
-                line = sys.stdin.buffer.readline()
-                if not line:
-                    break
-                s.sendall(line)
-        except OSError:
-            pass
-        try:
-            s.shutdown(socket.SHUT_WR)
-        except OSError:
-            pass
-    threading.Thread(target=stdin_to_sock, daemon=True).start()
-    try:
+        global stdin_open
         while True:
-            chunk = s.recv(65536)
-            if not chunk:
+            line = sys.stdin.buffer.readline()
+            if not line:
                 break
-            sys.stdout.buffer.write(chunk)
-            sys.stdout.buffer.flush()
-    except OSError:
-        pass
+            while True:
+                s = current() or ensure_conn()
+                if s is None:
+                    return
+                try:
+                    s.sendall(line)
+                    break
+                except OSError:
+                    drop(s)
+        stdin_open = False
+        s = current()
+        if s is not None:
+            try:
+                s.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+    threading.Thread(target=stdin_to_sock, daemon=True).start()
+    while True:
+        s = current() or ensure_conn()
+        if s is None:
+            break
+        try:
+            chunk = s.recv(65536)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            drop(s)
+            if not stdin_open:
+                break
+            time.sleep(0.2)
+            continue
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
 
     """
 

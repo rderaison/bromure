@@ -489,9 +489,18 @@ final class WorkspaceBrowserController {
 
     /// Button/⇧⌘S handler: pick an element, then put its selector on the
     /// pasteboard (which the clipboard bridge mirrors into the guest, so it's
-    /// paste-ready for the in-VM agent) and flash a confirmation.
+    /// paste-ready for the in-VM agent) and flash a confirmation. Pressing
+    /// again while armed CANCELS the pick — Escape only reaches the guest
+    /// when the framebuffer has key focus, so the host needs its own out.
     func userPickElement() {
         guard isReady else { return }
+        if model.tabBar.picking {
+            Task { [weak self] in
+                _ = try? await self?.cdp?.evaluate(
+                    "if(window.__bromureCancelPick)window.__bromureCancelPick();")
+            }
+            return
+        }
         Task { [weak self] in
             guard let self else { return }
             guard let picked = try? await self.pickElement(),
@@ -500,7 +509,8 @@ final class WorkspaceBrowserController {
             pb.clearContents()
             pb.setString(sel, forType: .string)
             await self.cdp?.showToast(String(
-                format: NSLocalizedString("Copied selector: %@", comment: "element picker toast"), sel))
+                format: NSLocalizedString("Copied — paste to your agent (⌘V): %@",
+                                          comment: "element picker toast"), sel))
         }
     }
 
