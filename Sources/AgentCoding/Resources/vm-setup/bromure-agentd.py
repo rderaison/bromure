@@ -3065,8 +3065,10 @@ def _seed_claude_settings():
     if env.get("CLAUDE_CODE_DISABLE_MOUSE_CLICKS") == "1":
         env.pop("CLAUDE_CODE_DISABLE_MOUSE_CLICKS", None)
         settings["env"] = env
-    if "copyOnSelect" not in settings:
-        settings["copyOnSelect"] = False
+    # Forced off, not seeded: Claude Code defaults copyOnSelect to true
+    # and persists it, and its copy-on-select double-copies against the
+    # terminal's own selection copy (host Profile.swift does the same).
+    settings["copyOnSelect"] = False
     hook = "/home/ubuntu/.bromure/agent-status.sh"
 
     def _hook_cmd(arg):

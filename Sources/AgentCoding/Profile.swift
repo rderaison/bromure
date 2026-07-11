@@ -3354,11 +3354,12 @@ public final class ProfileStore {
                 settings["env"] = claudeEnv
             }
             // Selection is the terminal/tmux's job (mouse-release already
-            // copies); Claude Code's own copy-on-select would double-copy
-            // and clobber the clipboard. Seed only when unset.
-            if settings["copyOnSelect"] == nil {
-                settings["copyOnSelect"] = false
-            }
+            // copies); Claude Code's own copy-on-select double-copies and
+            // clobbers the clipboard. Forced off at every session start —
+            // Claude Code's own default is true and it persists it into
+            // settings.json, so seed-only-if-unset never wins. Flipping it
+            // back mid-session (/config) works but resets next session.
+            settings["copyOnSelect"] = false
             // Managed status hooks — report working/done/needsInput to the host
             // for the sidebar status dot. Overwrite just these four events
             // (other user hooks + settings are preserved by the read above).
