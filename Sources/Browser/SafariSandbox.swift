@@ -4294,8 +4294,7 @@ struct Init: ParsableCommand {
 /// scripts/publish-browser-image.sh): produce the redistributable browser
 /// base image containing free software only — no Cloudflare WARP (that's
 /// a browser-img-catalog.json postinstall step applied on the end-user's
-/// machine), no Apple fonts, no debug root SSH — with neutral keyboard/
-/// locale defaults. A missing out-of-tree kernel module FAILS the build.
+/// machine), no Apple fonts — with neutral keyboard/locale defaults. A missing out-of-tree kernel module FAILS the build.
 /// The artifacts (linux-base.img, vmlinuz, initrd, build-info.json) land
 /// in --output, never in Application Support, so a publish run can't
 /// clobber a developer's own base image.

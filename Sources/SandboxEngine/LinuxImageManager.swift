@@ -11,11 +11,12 @@ import Virtualization
 /// - virtio drivers for GPU, network, and disk
 public final class LinuxImageManager {
     /// Bump this to force a rebuild of the base image on next launch.
-    /// Bumped to 365: Cloudflare WARP is no longer baked by setup.sh —
-    /// it moved to a browser-img-catalog.json postinstall step (the
-    /// published prebuilt image must contain free software only), and
-    /// the debug root-SSH block is now skipped in distribution builds.
-    public static let imageVersion = "365"
+    /// 364 vs the released 362 (v3.6.3) covers this branch's image
+    /// changes in one hop: Cloudflare WARP moved out of setup.sh into a
+    /// browser-img-catalog.json postinstall step (the published prebuilt
+    /// image must contain free software only), and the debug
+    /// passwordless-root sshd is gone entirely.
+    public static let imageVersion = "364"
 
     /// Human description of the image — surfaces in
     /// browser-img-catalog.json (via `bromure init-foss-image`'s
@@ -69,9 +70,9 @@ public final class LinuxImageManager {
     ///
     /// `fossOnly` builds the redistributable variant for the publish
     /// pipeline (`bromure init-foss-image`): no Cloudflare WARP binary, no
-    /// macOS fonts, no debug root SSH — and a missing out-of-tree kernel
-    /// module fails the build instead of degrading (a published image
-    /// must never silently lack webcam/RTC support).
+    /// macOS fonts — and a missing out-of-tree kernel module fails the
+    /// build instead of degrading (a published image must never silently
+    /// lack webcam/RTC support).
     ///
     /// `postinstallSteps` are the browser-img-catalog.json commands to
     /// apply after the free-software install completes (Cloudflare WARP —
@@ -465,6 +466,66 @@ public final class LinuxImageManager {
         }
     }
 
+    /// Build the network device for a provisioning VM — the install bake
+    /// (`installLinux`) and the postinstall runner
+    /// (LinuxImageManager+Remote) share it, so both honor the same
+    /// network mode (NAT/bridged) and DNS override settings as regular
+    /// session VMs. Routes through the process-wide VMNetSwitch (our own
+    /// DHCP on a collision-free subnet) with per-VM vmnet as the first
+    /// fallback; Apple's NAT + bootpd — the flaky path the switch exists
+    /// to avoid — is the last resort only.
+    ///
+    /// The returned filter (nil on the Apple-NAT fallback) must be kept
+    /// alive for the VM's lifetime and `stop()`ed afterwards.
+    @MainActor
+    static func makeProvisionerNetwork()
+        -> (device: VZVirtioNetworkDeviceConfiguration, filter: NetworkFilter?) {
+        var networkFilter: NetworkFilter?
+        let net = VZVirtioNetworkDeviceConfiguration()
+        guard let netInfo = HostNetworkInfo.detect() else {
+            net.attachment = VZNATNetworkDeviceAttachment()
+            return (net, nil)
+        }
+        let defaults = UserDefaults.standard
+        let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
+        let bridgedIface: String? = (networkMode == "bridged")
+            ? defaults.string(forKey: "vm.bridgedInterface")
+            : nil
+
+        let dnsOverride: [UInt32]
+        if let dnsString = defaults.string(forKey: "vm.dnsServers"),
+           !dnsString.trimmingCharacters(in: .whitespaces).isEmpty {
+            dnsOverride = dnsString.split(separator: ",")
+                .compactMap { HostNetworkInfo.parseIPv4(String($0).trimmingCharacters(in: .whitespaces)) }
+        } else {
+            dnsOverride = []
+        }
+        if bridgedIface == nil {
+            VMNetSwitch.shared.configure(ascendingSubnet: true, bridgePeers: false)
+            if let port = VMNetSwitch.shared.attachPort() {
+                if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, switchPort: port) {
+                    networkFilter = filter
+                } else {
+                    VMNetSwitch.shared.detachPort(port)
+                }
+            }
+            if networkFilter == nil {
+                networkFilter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, subnet: NetworkIdentity.subnet(avoiding: netInfo))
+            }
+            if let filter = networkFilter {
+                net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
+            } else {
+                net.attachment = VZNATNetworkDeviceAttachment()
+            }
+        } else if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, bridgedInterface: bridgedIface) {
+            networkFilter = filter
+            net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
+        } else {
+            net.attachment = VZNATNetworkDeviceAttachment()
+        }
+        return (net, networkFilter)
+    }
+
     private func createRawDisk(at url: URL, sizeMB: UInt64) throws {
         try? FileManager.default.removeItem(at: url)
         let fd = open(url.path, O_RDWR | O_CREAT | O_TRUNC, 0o644)
@@ -553,54 +614,7 @@ public final class LinuxImageManager {
 
         // Network (needed for apk) — respect the same network mode (NAT/bridged)
         // and DNS override settings used by regular VMs.
-        var buildNetworkFilter: NetworkFilter?
-        let net = VZVirtioNetworkDeviceConfiguration()
-        if let netInfo = HostNetworkInfo.detect() {
-            let defaults = UserDefaults.standard
-            let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
-            let bridgedIface: String? = (networkMode == "bridged")
-                ? defaults.string(forKey: "vm.bridgedInterface")
-                : nil
-
-            let dnsOverride: [UInt32]
-            if let dnsString = defaults.string(forKey: "vm.dnsServers"),
-               !dnsString.trimmingCharacters(in: .whitespaces).isEmpty {
-                dnsOverride = dnsString.split(separator: ",")
-                    .compactMap { HostNetworkInfo.parseIPv4(String($0).trimmingCharacters(in: .whitespaces)) }
-            } else {
-                dnsOverride = []
-            }
-            // Route the bake through the same shared switch a normal NAT VM
-            // takes, so the installer gets a collision-free DHCP lease on our
-            // own segment instead of vmnet's bootpd. Bridged bakes keep their
-            // own vmnet interface; fall back to a per-VM interface, then to
-            // Apple's NAT, if the switch can't come up.
-            if bridgedIface == nil {
-                VMNetSwitch.shared.configure(ascendingSubnet: true, bridgePeers: false)
-                if let port = VMNetSwitch.shared.attachPort() {
-                    if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, switchPort: port) {
-                        buildNetworkFilter = filter
-                    } else {
-                        VMNetSwitch.shared.detachPort(port)
-                    }
-                }
-                if buildNetworkFilter == nil {
-                    buildNetworkFilter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, subnet: NetworkIdentity.subnet(avoiding: netInfo))
-                }
-                if let filter = buildNetworkFilter {
-                    net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
-                } else {
-                    net.attachment = VZNATNetworkDeviceAttachment()
-                }
-            } else if let filter = NetworkFilter(networkInfo: netInfo, dnsOverrideServers: dnsOverride, bridgedInterface: bridgedIface) {
-                buildNetworkFilter = filter
-                net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: filter.vmFileHandle)
-            } else {
-                net.attachment = VZNATNetworkDeviceAttachment()
-            }
-        } else {
-            net.attachment = VZNATNetworkDeviceAttachment()
-        }
+        let (net, buildNetworkFilter) = Self.makeProvisionerNetwork()
         vzConfig.networkDevices = [net]
 
         // Serial console via pipe
@@ -735,7 +749,7 @@ public final class LinuxImageManager {
         let loc = Self.shellEscape(locale ?? hostConfig.locale)
         let scale = displayScale ?? VMConfig.detectDisplayScale()
         // "foss" builds the redistributable image: no WARP, no macOS
-        // fonts, no debug SSH, and missing kernel modules FAIL the build.
+        // fonts, and missing kernel modules FAIL the build.
         let mode = fossOnly ? "foss" : "user"
         writer.write(Data("sh /tmp/vm-setup/setup.sh \(kbLayout) \(natScroll) \(loc) \(scale) \(Self.alpineVersion) \(mode)\n".utf8))
 

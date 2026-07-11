@@ -5,8 +5,8 @@
     {
       "uuid": "9c3e313e-b38b-4bc1-a60c-c4664f3be8b1",
       "seq": 10,
-      "description": "Cloudflare WARP client",
-      "command": "apk add --no-cache wget binutils\nWARP_DEB=$(wget -qO- 'https://pkg.cloudflareclient.com/dists/bookworm/main/binary-arm64/Packages' | grep '^Filename:' | tail -1 | cut -d' ' -f2)\n[ -n \"$WARP_DEB\" ]\ncd /tmp\nwget -q \"https://pkg.cloudflareclient.com/$WARP_DEB\" -O warp.deb\nar x warp.deb\ntar xf data.tar.* -C /\nrm -f warp.deb data.tar.* control.tar.* debian-binary\napk del binutils\nmkdir -p /var/lib/cloudflare-warp /var/log/cloudflare-warp\ntest -x /bin/warp-cli"
+      "description": "Cloudflare WARP client 2026.6.836.0",
+      "command": "apk add --no-cache wget binutils\ncd /tmp\nwget -q https://pkg.cloudflareclient.com/pool/bookworm/main/c/cloudflare-warp/cloudflare-warp_2026.6.836.0_arm64.deb -O warp.deb\necho '992e1f399e08831a4a45a9bbc18aae95ec68764598b9603b7d3a2d7bfc720b14  warp.deb' | sha256sum -c -\nar x warp.deb\ntar xzf data.tar.gz -C /\nrm -f warp.deb data.tar.gz control.tar.gz debian-binary\napk del binutils\nmkdir -p /var/lib/cloudflare-warp /var/log/cloudflare-warp\ntest -x /bin/warp-cli"
     }
   ]
 }

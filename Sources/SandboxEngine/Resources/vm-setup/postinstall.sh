@@ -144,6 +144,22 @@ cp /mnt/etc/resolv.conf /tmp/resolv.conf.image 2>/dev/null || true
 cp /etc/resolv.conf /mnt/etc/resolv.conf
 
 if [ "$STEP_COUNT" -gt 0 ]; then
+    # The steps download packages from inside the chroot — verify the VM
+    # actually has connectivity first, so a broken network fails in
+    # seconds with a clear message instead of as three opaque apk/wget
+    # retries per step.
+    NETWORK_OK=""
+    for i in $(seq 1 30); do
+        # Plain HTTP like setup.sh's own check — the netboot busybox wget
+        # has no TLS helper; this only probes reachability.
+        if wget -q -O /dev/null --spider http://dl-cdn.alpinelinux.org/alpine/ 2>/dev/null; then
+            NETWORK_OK=1
+            break
+        fi
+        sleep 1
+    done
+    [ -n "$NETWORK_OK" ] || fail "no network connectivity in the postinstall VM — the packages (Cloudflare WARP) cannot be downloaded; check VPN/DNS settings and retry"
+
     log "entering alpine chroot"
     chroot /mnt /bin/sh -e <<'CHROOT_EOF'
 set -e

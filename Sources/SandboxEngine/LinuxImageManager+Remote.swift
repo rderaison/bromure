@@ -170,6 +170,12 @@ extension LinuxImageManager {
             //    before promotion.
             let steps = catalog.sortedSteps
             progress(.stepStart("Personalizing image"))
+            // The step count lets progress UIs weight the postinstall
+            // segment (they watch for "…(N step(s))…" + the guest's
+            // per-step BEGIN/END markers).
+            text(steps.isEmpty
+                ? "Personalizing image (fonts, keyboard, locale)…"
+                : "Installing recommended packages (\(steps.count) step(s)) and personalizing…")
             try await runPostinstall(
                 steps: steps,
                 targetDisk: scratchDisk,
@@ -237,6 +243,7 @@ extension LinuxImageManager {
 
         do {
             progress(.stepStart("Installing recommended packages"))
+            progress(.message("Installing recommended packages (\(steps.count) step(s))…"))
             try await runPostinstall(
                 steps: steps,
                 targetDisk: scratchDisk,
@@ -407,8 +414,12 @@ extension LinuxImageManager {
 
         // Same MTU-clamping initramfs shim as the install boot — the
         // postinstall steps download packages, so a VPN-shrunk path MTU
-        // would blackhole them identically.
-        let installerMTU = VMConfig.resolvedNICMTU()
+        // would blackhole them identically. Pinned at 1280 (the IPv6
+        // minimum — safe on any path) rather than resolvedNICMTU(): the
+        // postinstall VM must succeed on VPN'd hosts regardless of the
+        // vm.mtu preference, and throughput barely matters for its
+        // ~100 MB of downloads.
+        let installerMTU = 1280
         try InitrdShim.writeShimmedInitrd(
             original: netbootInitrd,
             mtu: installerMTU,
@@ -431,9 +442,16 @@ extension LinuxImageManager {
             VZVirtioBlockDeviceConfiguration(attachment: diskAttachment),
         ]
 
-        let net = VZVirtioNetworkDeviceConfiguration()
-        net.attachment = VZNATNetworkDeviceAttachment()
+        // Same network path as the bake (VMNetSwitch + NetworkFilter,
+        // honoring vm.networkMode / vm.dnsServers) — NOT Apple's NAT.
+        // The postinstall steps download packages from inside the guest,
+        // so this VM needs exactly the network reliability the bake VM
+        // gets; Apple's bootpd/DNS is the documented-flaky last resort.
+        let (net, networkFilter) = LinuxImageManager.makeProvisionerNetwork()
         vzConfig.networkDevices = [net]
+        defer {
+            withExtendedLifetime(networkFilter) { networkFilter?.stop() }
+        }
 
         let consolePipe = Pipe()
         let inputPipe = Pipe()
@@ -519,7 +537,10 @@ extension LinuxImageManager {
             writer.write(Data("root\n".utf8))
             try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
 
-            // Belt-and-suspenders MTU re-clamp, same as installLinux.
+            // Authoritative MTU clamp via `ip link set` AFTER login (and
+            // after the shim's DHCP), so whatever the lease carried, the
+            // interface runs the postinstall at 1280. Same belt-and-
+            // suspenders pattern as installLinux.
             writer.write(Data("NIC=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'); [ -n \"$NIC\" ] && ip link set dev \"$NIC\" mtu \(installerMTU) 2>/dev/null || true\n".utf8))
             try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 10, progress: progress)
 

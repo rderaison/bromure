@@ -5,14 +5,14 @@
 #
 # BUILD_MODE:
 #   user (default) — local build on the end-user's machine: bakes their
-#                    macOS fonts and keeps the debug root SSH.
+#                    macOS fonts.
 #   foss           — redistributable build for the publish pipeline
 #                    (bromure init-foss-image → dl.bromure.io/browser-images/):
-#                    free software only — no Apple fonts, no debug root
-#                    SSH — and a missing out-of-tree kernel module FAILS
-#                    the build instead of degrading. (Cloudflare WARP is
-#                    never installed here in either mode; it's a
-#                    browser-img-catalog.json postinstall step.)
+#                    free software only — no Apple fonts — and a missing
+#                    out-of-tree kernel module FAILS the build instead of
+#                    degrading. (Cloudflare WARP is never installed here
+#                    in either mode; it's a browser-img-catalog.json
+#                    postinstall step.)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KB_LAYOUT_SPEC="${1:-us}"
@@ -164,27 +164,6 @@ rm -f /tmp/resolv_stub.c
 
 retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools jq python3 \
     sqlite-libs v4l-utils nss-tools bash wireguard-tools strongswan openvpn openssl
-
-# ---------------------------------------------------------------------------
-# DEBUG: passwordless root SSH for network debugging of the browser VM.
-# The VM has no serial shell and no exec channel, so this is the only way to
-# get inside it. INSECURE (empty root password, root login, empty-password
-# auth) — local development builds only; foss/distribution builds skip it
-# (the published image must never ship an open root login).
-# ---------------------------------------------------------------------------
-if [ "$BUILD_MODE" != "foss" ]; then
-    retry chroot /mnt apk add openssh
-    chroot /mnt rc-update add sshd default
-    # Generate host keys at build so sshd is up on first boot (not on first login).
-    chroot /mnt ssh-keygen -A
-    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /mnt/etc/ssh/sshd_config
-    sed -i 's/^#\?PermitEmptyPasswords.*/PermitEmptyPasswords yes/' /mnt/etc/ssh/sshd_config
-    grep -q '^PermitRootLogin yes' /mnt/etc/ssh/sshd_config || echo 'PermitRootLogin yes' >> /mnt/etc/ssh/sshd_config
-    grep -q '^PermitEmptyPasswords yes' /mnt/etc/ssh/sshd_config || echo 'PermitEmptyPasswords yes' >> /mnt/etc/ssh/sshd_config
-    chroot /mnt passwd -d root   # empty root password
-else
-    echo "foss build: skipping debug root SSH"
-fi
 
 # ---------------------------------------------------------------------------
 # Configuration files (static)

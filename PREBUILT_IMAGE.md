@@ -215,8 +215,18 @@ postinstall (`Sources/SandboxEngine/Resources/vm-setup/postinstall.sh`,
 Alpine chroot on `/dev/vda`) supplies:
 
 - **Cloudflare WARP** (proprietary .deb from pkg.cloudflareclient.com) —
-  a catalog step in `browser-img-catalog.json`. `setup.sh` bakes only its
-  FOSS runtime deps (gcompat, resolver stub).
+  a catalog step in `browser-img-catalog.json`. The step pins the exact
+  deb **URL and sha256**, so the signed catalog transitively pins the
+  binary that lands in users' images (no trusting Cloudflare's package
+  index at install time). To ship a newer WARP: update the URL + hash
+  (`curl -fsSL https://pkg.cloudflareclient.com/dists/bookworm/main/binary-arm64/Packages | grep -E 'Filename|SHA256'`)
+  **and mint a fresh step uuid** — the old uuid marks the step "already
+  applied", so reusing it would leave existing images on the old
+  version. Like every step, it executes inside a chroot on the image
+  (`postinstall.sh` mounts `/dev/vda` at /mnt and chroots), so its `/`
+  is the image's root — the deb extracts straight to `/bin/warp-cli`.
+  `setup.sh` bakes only WARP's FOSS runtime deps (gcompat, resolver
+  stub).
 - **macOS fonts** — copied from the user's own Mac via virtiofs (same
   700 MB cap logic as a local build). Never shipped.
 - **Personalisation** — keyboard layout / natural scrolling / locale are
@@ -224,11 +234,12 @@ Alpine chroot on `/dev/vda`) supplies:
   local builds (a published build carries `us`/`en_US` defaults).
 
 The distribution build (`bromure init-foss-image --output …`, setup.sh
-`BUILD_MODE=foss`) also **skips the debug root SSH** block and **fails
-the build outright when the out-of-tree kernel modules (v4l2loopback,
-rtc-pl031) can't be found** for the installed kernel — a local build
-degrades with a warning; a published image must never silently lack
-webcam/RTC support.
+`BUILD_MODE=foss`) also **fails the build outright when the out-of-tree
+kernel modules (v4l2loopback, rtc-pl031) can't be found** for the
+installed kernel — a local build degrades with a warning; a published
+image must never silently lack webcam/RTC support. (The image ships no
+sshd at all; the only host-side access is the serial console's root
+autologin, reachable only from the host process.)
 
 ## Client behavior
 

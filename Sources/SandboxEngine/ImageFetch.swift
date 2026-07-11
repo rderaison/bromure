@@ -177,7 +177,9 @@ public enum ImageFetch {
                 try out.write(contentsOf: chunk)
             }
             offset += UInt64(chunk.count)
-            if expectedBytes > 0, offset - lastReported >= 1024 * 1024 * 1024 {
+            // 128 MB ≈ 3% steps on the 4.5 GB browser disk — the
+            // expansion segment of the install bar moves smoothly.
+            if expectedBytes > 0, offset - lastReported >= 128 * 1024 * 1024 {
                 lastReported = offset
                 progress("Expanding image… \(offset * 100 / UInt64(expectedBytes))%")
             }
@@ -234,8 +236,10 @@ final class LargeFileDownloader: NSObject, URLSessionDownloadDelegate, @unchecke
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                     didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
-        // Throttle: a 3 GB pull at 4 KB callbacks would flood the UI.
-        if totalBytesWritten - lastReportedBytes >= 64 * 1024 * 1024
+        // Throttle: a multi-GB pull at 4 KB callbacks would flood the UI.
+        // 16 MB ≈ 1% steps on the ~1.5 GB browser image — smooth without
+        // being chatty.
+        if totalBytesWritten - lastReportedBytes >= 16 * 1024 * 1024
             || totalBytesWritten == totalBytesExpectedToWrite {
             lastReportedBytes = totalBytesWritten
             onProgress(totalBytesWritten, totalBytesExpectedToWrite)
