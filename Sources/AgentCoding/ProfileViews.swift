@@ -208,6 +208,7 @@ struct ProfileEditorView: View {
     /// Sheet state for the SSH-key import flow.
     @State private var importSheet: ImportSheetState?
     @State private var importError: String?
+    @State private var confirmBrowserRedownload = false
     /// Keys of the disclosure groups the user has expanded in the
     /// Credentials pane. All sections start collapsed — the user
     /// opens whichever one they need.
@@ -1978,8 +1979,93 @@ struct ProfileEditorView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            Divider()
+
+            browserImageSection
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Browser base image (app-wide): status + a (Re)download button
+    /// driving the shared BrowserImageInstaller — the same install the
+    /// browser pane triggers on first open, so progress started in one
+    /// place is visible in the other.
+    @ViewBuilder
+    private var browserImageSection: some View {
+        let installer = BrowserImageInstaller.shared
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Label("Browser image", systemImage: "arrow.down.circle")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                switch installer.phase {
+                case .running:
+                    EmptyView()
+                case .idle, .failed:
+                    switch installer.installedSource {
+                    case .sharedWithBromureWeb:
+                        EmptyView()   // Bromure Web owns it — nothing to manage here
+                    case .downloadedByAC:
+                        Button("Re-download") { confirmBrowserRedownload = true }
+                            .confirmationDialog(
+                                "Re-download the browser image?",
+                                isPresented: $confirmBrowserRedownload
+                            ) {
+                                Button("Re-download") {
+                                    Task { await BrowserImageInstaller.shared.install() }
+                                }
+                                Button("Cancel", role: .cancel) {}
+                            } message: {
+                                Text("Downloads a fresh copy (a few GB) and replaces the current image. Open browser sessions keep running and pick up the new image next time they start.")
+                            }
+                    case nil:
+                        Button("Download Now") {
+                            Task { await BrowserImageInstaller.shared.install() }
+                        }
+                    }
+                }
+            }
+
+            if installer.phase == .running {
+                HStack(spacing: 8) {
+                    Text(installer.progress.status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 12)
+                    Text(String(format: "%.0f%%", installer.progress.progress * 100))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                ProgressView(value: installer.progress.progress, total: 1.0)
+                    .progressViewStyle(.linear)
+            } else {
+                Text(browserImageCaption(installer))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if case .failed(let message) = installer.phase {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func browserImageCaption(_ installer: BrowserImageInstaller) -> String {
+        let size = installer.installedDiskSize.map { " (\($0))" } ?? ""
+        switch installer.installedSource {
+        case .sharedWithBromureWeb:
+            return String(localized: "Installed by Bromure Web\(size) — shared with Agentic Coding, managed by the Bromure app.")
+        case .downloadedByAC:
+            return String(localized: "Installed\(size) — downloaded from dl.bromure.io into ~/Library/Application Support/BromureAC/browser.")
+        case nil:
+            return String(localized: "Not installed. Downloaded automatically the first time a workspace opens the browser, or download it now.")
+        }
     }
 
     @ViewBuilder

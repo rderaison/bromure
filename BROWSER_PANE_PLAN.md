@@ -162,58 +162,48 @@ AC-owned). When the shared Web image exists, symlink
 lands at that path instead. Either way AC never mutates the shared image — it's
 only ever a read/clone source.
 
-### Prebuilt distribution (the piece to add on the Web side)
+### Prebuilt distribution — LANDED (see PREBUILT_IMAGE.md)
 
-Today `LinuxImageManager` only builds the browser image locally. The
-distribution pipeline needs to publish a prebuilt one, exactly like the Ubuntu
-`img-catalog.json` flow. Concretely:
+The Web side now publishes a prebuilt browser image weekly
+(`Jenkinsfile.browser-image` → `scripts/publish-browser-image.sh` →
+`https://dl.bromure.io/browser-images/`). It diverged from the sketch above in
+three ways worth knowing:
 
-- **Artifact:** `linux-base.img.gz` (gzip of the raw 24 GB sparse disk) under a
-  per-build CDN prefix, e.g. `https://dl.bromure.io/browser-images/<uuid>/linux-base.img.gz`.
-- **Manifest:** a signed `browser-catalog.json` alongside it (a separate file
-  from `img-catalog.json` — the browser image has **no** postinstall steps, so
-  it's just the image identity + disk descriptor). Reuse the existing
-  `RemoteBaseImage`/`Signature` shapes and the same ed25519 Sparkle signing key:
-  ```json
-  {
-    "formatVersion": 1,
-    "signature": { "signedAt": "<iso8601>", "edSignature": "<base64>" },
-    "image": {
-      "uuid": "<per-build>",
-      "version": "<n[.rev]>",
-      "description": "Alpine + Chromium",
-      "builtAt": "<iso8601>",
-      "disk": {
-        "path": "browser-images/<uuid>/linux-base.img.gz",
-        "sha256": "<hex of the .gz>",
-        "compressedBytes": <int>,
-        "uncompressedBytes": <int>,   // logical raw size
-        "compression": "gzip"
-      }
-    }
-  }
-  ```
-  The signature covers the image identity + sha256 (same rollback + integrity
-  guarantees as the Ubuntu catalog; a compromised bucket can't swap the disk).
+- **Three artifacts, not one** — the browser image direct-kernel-boots, so
+  `vmlinuz.gz` + `initrd.gz` are published alongside `base.img.gz` and declared
+  in the catalog's `image.boot` array.
+- **The manifest is `browser-images/img-catalog.json`** (same `ImageCatalog`
+  model as AC's, signed with the same Sparkle key but a distinct payload magic,
+  `bromure-browser-img-catalog-v1`, so catalogs can't be replayed across
+  channels).
+- **It DOES have postinstall steps** — Cloudflare WARP turned out to be
+  non-free and moved out of the baked image into a catalog step
+  (`Sources/SandboxEngine/Resources/browser-img-catalog.json`); Apple fonts +
+  keyboard/locale personalisation also happen client-side
+  (`vm-setup/postinstall.sh`).
 
-### AC-side refactor to enable reuse
+### AC-side refactor — LANDED
 
-The generic download/verify/expand helpers currently live in
-`AgentCoding/UbuntuImageManager+Remote.swift`: `LargeFileDownloader`,
-`sha256Streaming`, `expandGzipSparse`. Hoist these into **SandboxEngine** (they
-have no Ubuntu specifics) so both the AC browser downloader and Bromure Web's
-own prebuilt path use one implementation. The Ubuntu-specific bits
-(postinstall, EFI vars, version stamps) stay in AC.
+The generic helpers were hoisted into **SandboxEngine**
+(`ImageCatalog.swift`, `ImageFetch.swift`,
+`LinuxImageManager+Remote.swift`), parameterized by `ImageDistribution`.
+AC's on-demand download (phase 2b) is `BrowserImageInstaller` (shared
+`@Observable`, one in-flight install app-wide): the pane's
+`WorkspaceBrowserController.start()` triggers it when `resolveStorageDir()`
+comes up empty and renders its progress in the placeholder; Settings →
+Browser has a (Re)download button driving the same installer. Artifacts
+land in `BromureAC/browser/` (never Bromure Web's dir; no symlink needed —
+`resolveStorageDir` probes both dirs directly).
 
 ## Open questions / risks
 
 - **Two `VZVirtualMachine`s in one process** (Ubuntu workspace + Alpine
   browser). Expected fine (separate configs/sockets) but unverified at runtime —
   first thing to prove in phase 2.
-- **Base image availability.** Resolved: share Bromure Web's
-  `linux-base.img` when present, else download a prebuilt copy into
-  `BromureAC/browser/` (see Provisioning above). Depends on the Web side adding
-  a `browser-catalog.json` + prebuilt `.gz` to the CDN.
+- **Base image availability.** Resolved end-to-end: share Bromure Web's
+  `linux-base.img` when present, else `BrowserImageInstaller` downloads a
+  prebuilt copy into `BromureAC/browser/` from
+  `dl.bromure.io/browser-images/` (published by Jenkinsfile.browser-image).
 - **Name collisions.** `MCPServer`, `AutomationServer` exist in both `Browser`
   and `AgentCoding`. The extracted browser MCP core must be namespaced to avoid
   clashing when AC links it.

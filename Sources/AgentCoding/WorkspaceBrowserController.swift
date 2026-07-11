@@ -37,6 +37,10 @@ final class WorkspaceBrowserController {
     private static let shutdownAfter: TimeInterval = 300
 
     private(set) var state: State = .idle
+    /// True while `installImageThenStart` awaits the shared image
+    /// installer — cleared by `stop()` so a teardown mid-download can't
+    /// boot a VM for a closed pane when the install completes.
+    private var installWait = false
 
     private let model: BrowserPaneModel
     private var pool: VMPool?
@@ -98,7 +102,9 @@ final class WorkspaceBrowserController {
             .appendingPathComponent("browser", isDirectory: true)
     }
 
-    private static func hasAllBootFiles(in dir: URL) -> Bool {
+    // Internal (not private): BrowserImageInstaller reports image
+    // presence with the same check.
+    static func hasAllBootFiles(in dir: URL) -> Bool {
         let fm = FileManager.default
         return bootFiles.allSatisfy {
             fm.fileExists(atPath: dir.appendingPathComponent($0).path)
@@ -138,13 +144,17 @@ final class WorkspaceBrowserController {
             return
         }
         guard let storageDir = resolveStorageDir() else {
-            fail(NSLocalizedString(
-                "No browser image found. Install Bromure Web, or a prebuilt image (coming soon).",
-                comment: "browser image missing"))
+            // Phase 2b: no image anywhere — download it (prebuilt from
+            // dl.bromure.io/browser-images/, postinstall + personalisation
+            // applied), then boot. The pane placeholder renders the shared
+            // installer's live progress meanwhile.
+            installImageThenStart()
             return
         }
         state = .booting
         model.hasFramebuffer = false
+        model.showRetry = false
+        model.imageInstall = nil
         model.placeholderStatus = NSLocalizedString("Booting browser…", comment: "")
 
         let config = browserConfig()
@@ -567,11 +577,16 @@ final class WorkspaceBrowserController {
         }
     }
 
-    /// Tear the browser VM down and clear the pane. Idempotent.
+    /// Tear the browser VM down and clear the pane. Idempotent. (An
+    /// in-flight image download is NOT cancelled — it's shared app-wide
+    /// state; only this pane's wait on it ends.)
     func stop() {
         cancelIdleTimers()
+        installWait = false
         model.hasFramebuffer = false
         model.placeholderStatus = ""
+        model.imageInstall = nil
+        model.showRetry = false
         model.tabBar.setTabs([])
         model.framebufferContainer.unmountAll()
         tabBridge?.stop()
@@ -590,10 +605,48 @@ final class WorkspaceBrowserController {
         state = .idle
     }
 
+    /// Download the browser image via the shared installer, then boot.
+    /// Every trigger funnels here (pane click, MCP ensureRunning, other
+    /// workspaces) and joins the same in-flight install; the Settings →
+    /// Browser button shows the same progress through the same installer.
+    private func installImageThenStart() {
+        state = .booting
+        installWait = true
+        model.hasFramebuffer = false
+        model.showRetry = false
+        model.placeholderStatus = ""
+        model.imageInstall = BrowserImageInstaller.shared
+        print("[browser] no image — downloading via BrowserImageInstaller")
+        Task { [weak self] in
+            let ok = await BrowserImageInstaller.shared.ensureInstalled()
+            guard let self, self.installWait else { return }   // torn down meanwhile
+            self.installWait = false
+            self.model.imageInstall = nil
+            self.state = .idle
+            if ok {
+                self.start()
+            } else {
+                self.fail(BrowserImageInstaller.shared.lastError
+                    ?? NSLocalizedString("The browser image could not be downloaded.",
+                                         comment: "browser image download failed"))
+            }
+        }
+    }
+
+    /// Re-attempt after a failure (the pane placeholder's Retry button).
+    func retry() {
+        guard case .failed = state else { return }
+        state = .idle
+        start()
+    }
+
     private func fail(_ message: String) {
         state = .failed(message)
         model.hasFramebuffer = false
+        model.imageInstall = nil
         model.placeholderStatus = message
+        model.showRetry = true
+        model.onRetry = { [weak self] in self?.retry() }
     }
 
     // MARK: - Helpers

@@ -27,6 +27,14 @@ final class BrowserPaneModel {
     var hasFramebuffer = false
     /// Subtitle under the placeholder globe (e.g. "Booting browser…").
     var placeholderStatus = ""
+    /// Non-nil while the browser image is being downloaded (first open) —
+    /// the placeholder renders the shared installer's live progress
+    /// instead of the plain status line.
+    var imageInstall: BrowserImageInstaller?
+    /// Show a Retry button under the placeholder (boot/download failed).
+    var showRetry = false
+    /// Wired by WorkspaceBrowserController to re-attempt after a failure.
+    var onRetry: (() -> Void)?
 
     /// Stable AppKit view the VM controller mounts the VZVirtualMachineView
     /// into. Kept alive by the model so the SwiftUI side can wrap it without
@@ -177,14 +185,60 @@ struct BrowserPaneView: View {
 
     private var placeholder: some View {
         VStack(spacing: 14) {
-            Image(systemName: "globe")
+            Image(systemName: model.imageInstall != nil ? "arrow.down.circle" : "globe")
                 .font(.system(size: 40, weight: .thin))
                 .foregroundStyle(.secondary)
-            if !model.placeholderStatus.isEmpty {
-                Text(model.placeholderStatus)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+            if let installer = model.imageInstall {
+                imageInstallCard(installer)
+            } else {
+                if !model.placeholderStatus.isEmpty {
+                    Text(model.placeholderStatus)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 380)
+                }
+                if model.showRetry {
+                    Button {
+                        model.onRetry?()
+                    } label: {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                    }
+                    .controlSize(.regular)
+                }
             }
+        }
+        .padding(24)
+    }
+
+    /// One-time browser-image download: title + live status pill +
+    /// determinate bar with a percentage, driven by the shared
+    /// BrowserImageInstaller (Settings → Browser mirrors the same run).
+    private func imageInstallCard(_ installer: BrowserImageInstaller) -> some View {
+        VStack(spacing: 10) {
+            Text("Setting up the browser")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("One-time download — Chromium runs in its own disposable VM.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(installer.progress.status)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 12)
+                    Text(String(format: "%.0f%%", installer.progress.progress * 100))
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                ProgressView(value: installer.progress.progress, total: 1.0)
+                    .progressViewStyle(.linear)
+            }
+            .frame(width: 320)
         }
     }
 }

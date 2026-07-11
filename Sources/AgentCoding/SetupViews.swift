@@ -1,4 +1,5 @@
 import AppKit
+import SandboxEngine
 import SwiftUI
 
 // MARK: - Init progress model
@@ -32,7 +33,9 @@ final class InitProgressModel {
     /// step additions or network retries don't overshoot the
     /// ceiling. With actual = 7056, the bar lands around 94% just
     /// before the final "Base image ready" phase jumps to 1.0.
-    private static let expectedTotalLines = 7500
+    /// Instance-settable: the browser-image install
+    /// (BrowserImageInstaller) is far quieter and overrides this.
+    var expectedTotalLines = 7500
 
     /// Cap line-driven progress here so the host's terminal phase
     /// always has visible distance to cover. "Base image ready"
@@ -55,6 +58,14 @@ final class InitProgressModel {
     private var completedPostinstallSteps = 0
     private var postinstallBase: Double?
 
+    // Browser-image mode (BrowserImageInstaller): phase weights and
+    // guest-log narration are delegated to SandboxEngine's shared
+    // BrowserInstallProgress (Bromure Web's first-run UI uses the same
+    // mapper). Off for the AC Ubuntu flows, whose guest logs use
+    // different markers and weights.
+    var narrateBrowserGuestLog = false
+    private var browserProgress = BrowserInstallProgress()
+
     private let maxLines = 100
     private var lines: [String] = []
     private var trailing: String = ""
@@ -73,6 +84,9 @@ final class InitProgressModel {
         expectedPostinstallSteps = 0
         completedPostinstallSteps = 0
         postinstallBase = nil
+        narrateBrowserGuestLog = false
+        browserProgress = BrowserInstallProgress()
+        expectedTotalLines = 7500
     }
 
     /// No-op holdover so callers that paired `reset()` with `stop()`
@@ -140,6 +154,17 @@ final class InitProgressModel {
         }
     }
 
+    /// Browser-image host-progress intake (AC downloading Bromure Web's
+    /// Alpine/Chromium image — BrowserImageInstaller). Same pill/log
+    /// handling as `noteHostProgress`; the phase weights come from the
+    /// shared SandboxEngine mapper.
+    func noteBrowserHostProgress(_ msg: String) {
+        browserProgress.noteHostMessage(msg)
+        status = browserProgress.status
+        bumpProgress(to: browserProgress.fraction)
+        appendLog("\n▶ " + msg + "\n")
+    }
+
     /// "…foo… 37%" → 0.37. nil when the message doesn't end in a percent.
     private static func trailingPercent(of msg: String) -> Double? {
         guard msg.hasSuffix("%") else { return nil }
@@ -190,10 +215,18 @@ final class InitProgressModel {
             let line = String(buf[..<nl])
             lines.append(line)
             linesSeen += 1
-            // Postinstall step completions (the guest's "END   step …"
-            // marker) advance the final weighted segment armed by
-            // recordHostPhase's "Installing recommended packages (N…".
-            if expectedPostinstallSteps > 0, line.contains(" END   step ") {
+            if narrateBrowserGuestLog {
+                // Browser-image install: the guest log narrates the pill
+                // and drives the tail segment via the shared mapper (its
+                // own step accounting — the generic handler below would
+                // double-count).
+                browserProgress.noteGuestLine(line)
+                if !browserProgress.status.isEmpty { status = browserProgress.status }
+                bumpProgress(to: browserProgress.fraction)
+            } else if expectedPostinstallSteps > 0, line.contains(" END   step ") {
+                // Postinstall step completions (the guest's "END   step …"
+                // marker) advance the final weighted segment armed by
+                // recordHostPhase's "Installing recommended packages (N…".
                 completedPostinstallSteps += 1
                 let base = postinstallBase ?? 0
                 let span = max(0, 0.99 - base)
@@ -206,7 +239,7 @@ final class InitProgressModel {
             // 1.0 is always visible. If real installs exceed the
             // estimate the bar simply pins at the ceiling for the
             // tail.
-            let frac = Double(linesSeen) / Double(Self.expectedTotalLines)
+            let frac = Double(linesSeen) / Double(expectedTotalLines)
             bumpProgress(to: min(frac, Self.progressCeiling))
             buf = String(buf[buf.index(after: nl)...])
         }

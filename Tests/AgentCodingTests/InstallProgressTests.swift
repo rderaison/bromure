@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 import Testing
 @testable import bromure_ac
 
@@ -112,5 +113,122 @@ struct DownloadFallbackTests {
         #expect(!UbuntuImageManager.isDownloadSideFailure(UbuntuImageError.installerTimeout))
         #expect(!UbuntuImageManager.isDownloadSideFailure(UbuntuImageError.noGuestNetwork))
         #expect(!UbuntuImageManager.isDownloadSideFailure(CancellationError()))
+    }
+}
+
+@Suite("InitProgressModel browser-image weighting")
+@MainActor
+struct BrowserInstallProgressTests {
+
+    /// The full first-open flow: catalog → disk (55%) → expansion (→70%)
+    /// → boot artifacts (→76%) → netboot (78%) → guest-narrated
+    /// postinstall tail → ready.
+    @Test("Browser download phases map onto the 55/15/6/2/guest split")
+    func browserPhaseWeighting() {
+        let m = InitProgressModel()
+        m.reset()
+        m.narrateBrowserGuestLog = true
+
+        m.noteBrowserHostProgress("Fetching image catalog…")
+        #expect(m.progress < 0.02)
+
+        m.noteBrowserHostProgress("Downloading Alpine Linux 3.22 + Chromium image (1.5 GB)… 50%")
+        #expect(abs(m.progress - 0.275) < 0.005)
+        // The status pill carries no percentage — the bar is the only one.
+        #expect(m.status == "Downloading Alpine Linux 3.22 + Chromium image (1.5 GB)…")
+
+        // The sparse expander's own internal messages.
+        m.noteBrowserHostProgress("Expanding image… 50%")
+        #expect(abs(m.progress - 0.625) < 0.005)
+
+        m.noteBrowserHostProgress("Downloading vmlinuz (12 MB)…")
+        #expect(abs(m.progress - 0.70) < 0.005)
+        m.noteBrowserHostProgress("Downloading initrd (9 MB)…")
+        #expect(abs(m.progress - 0.73) < 0.005)
+
+        m.noteBrowserHostProgress("Downloading Alpine netboot installer…")
+        #expect(abs(m.progress - 0.78) < 0.005)
+
+        // Anchors the guest-narrated tail at 0.78 (span 0.21).
+        m.noteBrowserHostProgress("Installing recommended packages (1 step(s)) and personalizing…")
+        #expect(abs(m.progress - 0.78) < 0.005)
+
+        m.appendLog("[browser-postinstall] mounting installed system from /dev/vda\n")
+        #expect(abs(m.progress - (0.78 + 0.21 * 0.03)) < 0.005)
+        m.appendLog("[browser-postinstall] personalising: layout=us scrolling=true locale=en_US\n")
+        #expect(m.status == "Personalizing (keyboard, language, fonts)…")
+        m.appendLog("[browser-postinstall] copied 213 macOS font files\n")
+        #expect(abs(m.progress - (0.78 + 0.21 * 0.35)) < 0.005)
+        #expect(m.status.contains("213"))
+        m.appendLog("[browser-postinstall] entering alpine chroot\n")
+        #expect(abs(m.progress - (0.78 + 0.21 * 0.40)) < 0.005)
+
+        m.appendLog("[browser-postinstall-chroot] BEGIN step Cloudflare WARP client\n")
+        #expect(m.status == "Installing Cloudflare WARP client…")
+        #expect(abs(m.progress - (0.78 + 0.21 * 0.65)) < 0.005)
+        m.appendLog("[browser-postinstall-chroot] END   step Cloudflare WARP client\n")
+        #expect(m.status == "Installed Cloudflare WARP client")
+        #expect(abs(m.progress - (0.78 + 0.21 * 0.90)) < 0.005)
+
+        m.appendLog("[browser-postinstall] running final e2fsck on /dev/vda\n")
+        #expect(abs(m.progress - (0.78 + 0.21 * 0.95)) < 0.005)
+        m.appendLog("[browser-postinstall] all done\n")
+        #expect(abs(m.progress - 0.99) < 0.005)
+
+        m.noteBrowserHostProgress("Base image ready at /tmp/linux-base.img (Alpine Linux 3.22 + Chromium)")
+        #expect(m.progress == 1.0)
+    }
+
+    @Test("Personalize-only flow (no catalog steps) still narrates and completes")
+    func personalizeOnly() {
+        let m = InitProgressModel()
+        m.reset()
+        m.narrateBrowserGuestLog = true
+        m.noteBrowserHostProgress("Downloading Alpine netboot installer…")
+        m.noteBrowserHostProgress("Personalizing image (fonts, keyboard, locale)…")
+        m.appendLog("[browser-postinstall] copied 88 macOS font files\n")
+        #expect(m.progress > 0.78)
+        m.appendLog("[browser-postinstall] all done\n")
+        #expect(abs(m.progress - 0.99) < 0.005)
+        m.noteBrowserHostProgress("Base image ready at /x (Alpine Linux 3.22 + Chromium)")
+        #expect(m.progress == 1.0)
+    }
+
+    @Test("Unknown guest lines never move the bar or the pill")
+    func guestNoise() {
+        let m = InitProgressModel()
+        m.reset()
+        m.narrateBrowserGuestLog = true
+        m.noteBrowserHostProgress("Downloading Alpine netboot installer…")
+        let before = m.progress
+        let status = m.status
+        m.appendLog("random apk output line\nfetch https://dl-cdn.alpinelinux.org/x.apk\n")
+        // Only the gentle per-line nudge — no phase jump, no status change.
+        #expect(m.progress - before < 0.01)
+        #expect(m.status == status)
+    }
+
+    @Test("reset() clears browser mode so the AC bake path is unaffected")
+    func resetClearsBrowserMode() {
+        let m = InitProgressModel()
+        m.reset()
+        m.narrateBrowserGuestLog = true
+        m.expectedTotalLines = 900
+        m.reset()
+        #expect(m.narrateBrowserGuestLog == false)
+        #expect(m.expectedTotalLines == 7500)
+        // The generic END-step accounting works again after reset.
+        m.noteHostProgress("Installing recommended packages (2 step(s))…")
+        m.appendLog("[ac-postinstall-chroot] END   step one (took 1s)\n")
+        #expect(abs(m.progress - 0.495) < 0.01)
+    }
+
+    @Test("Browser download-side failures allow the local-build fallback")
+    func browserDownloadSide() {
+        #expect(LinuxImageManager.isDownloadSideFailure(ImageFetchError.catalogUnavailable))
+        #expect(LinuxImageManager.isDownloadSideFailure(ImageFetchError.downloadFailed(404)))
+        #expect(LinuxImageManager.isDownloadSideFailure(ImageFetchError.checksumInvalid("x")))
+        #expect(LinuxImageManager.isDownloadSideFailure(URLError(.notConnectedToInternet)))
+        #expect(!LinuxImageManager.isDownloadSideFailure(CancellationError()))
     }
 }
