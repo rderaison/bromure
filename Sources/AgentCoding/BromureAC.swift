@@ -4618,6 +4618,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         }
 
+        // Flipping stay-signed-in restarts the workspace's browser (the
+        // persistence setting only applies at boot) — warn before saving
+        // when there's actually a live browser to restart, same pattern
+        // as the shared-folders alert above. Cancel aborts the save.
+        if let original = editing,
+           original.browserPersistent != profile.browserPersistent,
+           let controller = unifiedWindow?.existingBrowserController(for: profile.id),
+           controller.state != .idle {
+            let alert = NSAlert()
+            alert.messageText = String(
+                format: NSLocalizedString("Restart the browser for “%@”?", comment: ""),
+                profile.name)
+            alert.informativeText = NSLocalizedString(
+                "Changing “Stay signed in to websites” takes effect by restarting this workspace's browser — its open tabs will close.\n\nSaved sign-ins stay on the encrypted per-workspace disk: they're used while the setting is on and simply ignored while it's off.",
+                comment: "")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: NSLocalizedString("Restart & Save", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
         // Editing keeps the original id (already preserved by ProfileEditorView).
         // The shared save/reconcile core is factored into `persistEditedProfile`
         // so the headless control-socket path (create/edit over the CLI + TUI)
