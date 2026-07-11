@@ -3,10 +3,10 @@
   "image": null,
   "postinstall": [
     {
-      "uuid": "9c3e313e-b38b-4bc1-a60c-c4664f3be8b1",
+      "uuid": "5dcaa90b-9a32-427f-80b1-877649bd8401",
       "seq": 10,
       "description": "Cloudflare WARP client 2026.6.836.0",
-      "command": "apk add --no-cache wget binutils\ncd /tmp\nwget -q https://pkg.cloudflareclient.com/pool/bookworm/main/c/cloudflare-warp/cloudflare-warp_2026.6.836.0_arm64.deb -O warp.deb\necho '992e1f399e08831a4a45a9bbc18aae95ec68764598b9603b7d3a2d7bfc720b14  warp.deb' | sha256sum -c -\nar x warp.deb\ntar xzf data.tar.gz -C /\nrm -f warp.deb data.tar.gz control.tar.gz debian-binary\napk del binutils\nmkdir -p /var/lib/cloudflare-warp /var/log/cloudflare-warp\ntest -x /bin/warp-cli"
+      "command": "apk add --no-cache wget binutils dbus-libs libpcap tpm2-tss-esys tpm2-tss-tctildr tpm2-tss-mu\ncd /tmp\nwget -q https://pkg.cloudflareclient.com/pool/bookworm/main/c/cloudflare-warp/cloudflare-warp_2026.6.836.0_arm64.deb -O warp.deb\necho '992e1f399e08831a4a45a9bbc18aae95ec68764598b9603b7d3a2d7bfc720b14  warp.deb' | sha256sum -c -\nar x warp.deb\ntar xzf data.tar.gz -C /\nrm -f warp.deb data.tar.gz control.tar.gz debian-binary\napk del binutils\nmkdir -p /var/lib/cloudflare-warp /var/log/cloudflare-warp\nfor so in ld-linux-aarch64.so.1; do test -e \"/lib/$so\" || { echo \"missing loader /lib/$so\"; exit 1; }; done\nfor so in libtss2-esys.so.0 libtss2-tctildr.so.0 libtss2-mu.so.0 libdbus-1.so.3 libnss3.so libsmime3.so libnspr4.so libgcc_s.so.1; do test -e \"/usr/lib/$so\" || { echo \"missing library $so\"; exit 1; }; done\ntimeout 10 /bin/warp-cli --version"
     }
   ]
 }
