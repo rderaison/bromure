@@ -3847,9 +3847,16 @@ public final class ProfileStore {
     # a model_provider (wire_api="chat"). Laid down BEFORE the MCP block so
     # its top-level keys (model / model_provider) precede any [mcp_servers.*]
     # tables — TOML requires top-level keys before table headers.
+    # NOTE on the .tmp.$$ + mv dance in the blocks below: this rc runs in
+    # EVERY shell, and at boot tmux starts several panes' shells at once —
+    # a shared tmp path made them race each other (one shell mv'd the tmp
+    # away, the loser printed "mv: cannot stat …tmp"). Per-PID tmps + one
+    # atomic rename make each writer land a complete file; since every
+    # shell renders identical content, last-writer-wins is stable.
     if [ -r /mnt/bromure-meta/codex-local.toml ]; then
         mkdir -p "$HOME/.codex"
-        cat /mnt/bromure-meta/codex-local.toml > "$HOME/.codex/config.toml"
+        cat /mnt/bromure-meta/codex-local.toml > "$HOME/.codex/config.toml.tmp.$$" \
+            && mv -f "$HOME/.codex/config.toml.tmp.$$" "$HOME/.codex/config.toml"
     fi
 
     # Grok local-inference. The grok CLI defaults its model id to "grok-build";
@@ -3863,16 +3870,19 @@ public final class ProfileStore {
         # Strip our prior block AND any stray [model.grok-build] section (older
         # builds — or grok itself — may leave an unmarked one, which collides
         # with ours as a duplicate TOML key and breaks config parsing).
-        awk '
+        if awk '
             /^\\[model\\.grok-build\\]/ { drop=1; next }
             /^\\[/ { drop=0 }
             /^# >>> bromure-local$/ { next }
             /^# <<< bromure-local$/ { next }
             drop { next }
             { print }
-        ' "$HOME/.grok/config.toml" > "$HOME/.grok/config.toml.tmp" \\
-            && mv "$HOME/.grok/config.toml.tmp" "$HOME/.grok/config.toml"
-        cat /mnt/bromure-meta/grok-local.toml >> "$HOME/.grok/config.toml"
+        ' "$HOME/.grok/config.toml" > "$HOME/.grok/config.toml.tmp.$$" 2>/dev/null; then
+            cat /mnt/bromure-meta/grok-local.toml >> "$HOME/.grok/config.toml.tmp.$$"
+            mv -f "$HOME/.grok/config.toml.tmp.$$" "$HOME/.grok/config.toml"
+        else
+            rm -f "$HOME/.grok/config.toml.tmp.$$"
+        fi
     fi
 
     # MCP server configs. Installed for EVERY agent (claude/codex/grok), not
@@ -3884,7 +3894,7 @@ public final class ProfileStore {
         if [ -r /mnt/bromure-meta/mcp/claude.json ]; then
             mkdir -p "$HOME/.claude"
             if [ -f "$HOME/.claude.json" ]; then
-                python3 -c "import json,sys;e=json.load(open(sys.argv[1]));m=json.load(open(sys.argv[2]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};json.dump(e,open(sys.argv[1],'w'),indent=2)" "$HOME/.claude.json" /mnt/bromure-meta/mcp/claude.json 2>/dev/null
+                python3 -c "import json,os,sys;e=json.load(open(sys.argv[1]));m=json.load(open(sys.argv[2]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};t=sys.argv[1]+'.tmp.'+str(os.getpid());json.dump(e,open(t,'w'),indent=2);os.replace(t,sys.argv[1])" "$HOME/.claude.json" /mnt/bromure-meta/mcp/claude.json 2>/dev/null
             else
                 cp /mnt/bromure-meta/mcp/claude.json "$HOME/.claude.json"
             fi
@@ -3893,15 +3903,19 @@ public final class ProfileStore {
         # Best-effort: the exact grok settings path can vary by version.
         if [ -r /mnt/bromure-meta/mcp/claude.json ]; then
             mkdir -p "$HOME/.grok"
-            python3 -c "import json,os,sys;p=os.path.expanduser('~/.grok/user-settings.json');e=(json.load(open(p)) if os.path.exists(p) else {});m=json.load(open(sys.argv[1]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};json.dump(e,open(p,'w'),indent=2)" /mnt/bromure-meta/mcp/claude.json 2>/dev/null || true
+            python3 -c "import json,os,sys;p=os.path.expanduser('~/.grok/user-settings.json');e=(json.load(open(p)) if os.path.exists(p) else {});m=json.load(open(sys.argv[1]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};t=p+'.tmp.'+str(os.getpid());json.dump(e,open(t,'w'),indent=2);os.replace(t,p)" /mnt/bromure-meta/mcp/claude.json 2>/dev/null || true
         fi
         # Codex — marker-guarded install into config.toml (strip a prior
         # bromure block, then append) so [mcp_servers.*] tables don't stack up.
         if [ -r /mnt/bromure-meta/mcp/codex.toml ]; then
             mkdir -p "$HOME/.codex"
             touch "$HOME/.codex/config.toml"
-            sed '/# >>> bromure-mcp/,/# <<< bromure-mcp/d' "$HOME/.codex/config.toml" > "$HOME/.codex/config.toml.tmp" 2>/dev/null && mv "$HOME/.codex/config.toml.tmp" "$HOME/.codex/config.toml"
-            { echo "# >>> bromure-mcp"; cat /mnt/bromure-meta/mcp/codex.toml; echo "# <<< bromure-mcp"; } >> "$HOME/.codex/config.toml"
+            if sed '/# >>> bromure-mcp/,/# <<< bromure-mcp/d' "$HOME/.codex/config.toml" > "$HOME/.codex/config.toml.tmp.$$" 2>/dev/null; then
+                { echo "# >>> bromure-mcp"; cat /mnt/bromure-meta/mcp/codex.toml; echo "# <<< bromure-mcp"; } >> "$HOME/.codex/config.toml.tmp.$$"
+                mv -f "$HOME/.codex/config.toml.tmp.$$" "$HOME/.codex/config.toml"
+            else
+                rm -f "$HOME/.codex/config.toml.tmp.$$"
+            fi
         fi
     fi
 

@@ -764,10 +764,21 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserControllers[id]
     }
 
-    /// Boot/resume a workspace's browser for an MCP tool call WITHOUT changing
-    /// what the pane shows (the agent may drive a background workspace).
+    /// Boot/resume a workspace's browser for an MCP tool call. When the
+    /// agent STARTS a browser for the workspace the user is looking at,
+    /// reveal the pane — they asked the agent to browse, so show them the
+    /// browser (this also surfaces the first-run install consent card).
+    /// Background workspaces boot hidden, and an already-running browser
+    /// whose pane the user closed stays closed — later tool calls don't
+    /// fight the user's choice.
     func ensureBrowserForMCP(_ id: Profile.ID) {
-        browserController(for: id).ensureRunning()
+        let controller = browserController(for: id)
+        if selectedID == id, !browserPaneOpen, controller.state == .idle {
+            // Opens the pane AND boots via showBrowser → setVisible(true).
+            setBrowserPaneOpen(true, animated: true)
+            return
+        }
+        controller.ensureRunning()
     }
 
     /// Point the pane at `id`'s browser and mark it visible; hide the
