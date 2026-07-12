@@ -64,9 +64,6 @@ private struct DiveHUD: View {
         TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { timeline in
             let elapsed = timeline.date.timeIntervalSince(model.startedAt)
             VStack(spacing: 22) {
-                Reticle(accent: accent, elapsed: elapsed)
-                    .frame(width: 128, height: 128)
-
                 Text(model.workspaceName.isEmpty ? "WORKSPACE" : model.workspaceName.uppercased())
                     .font(.system(size: 13, weight: .semibold, design: .monospaced))
                     .tracking(4)
@@ -89,44 +86,6 @@ private struct DiveHUD: View {
                         .transition(.opacity)
                 }
             }
-        }
-    }
-}
-
-/// Rotating dashed dive-reticle: two counter-spinning rings, a crosshair, and
-/// a pulsing core.
-private struct Reticle: View {
-    let accent: Color
-    let elapsed: Double
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .strokeBorder(accent.opacity(0.25), lineWidth: 1)
-            Circle()
-                .trim(from: 0, to: 0.7)
-                .stroke(accent, style: StrokeStyle(lineWidth: 2, lineCap: .round,
-                                                   dash: [3, 6]))
-                .rotationEffect(.degrees(elapsed * 60))
-            Circle()
-                .trim(from: 0, to: 0.35)
-                .stroke(accent.opacity(0.7), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                .padding(14)
-                .rotationEffect(.degrees(-elapsed * 110))
-            // Crosshair.
-            Path { p in
-                p.move(to: CGPoint(x: 64, y: 40)); p.addLine(to: CGPoint(x: 64, y: 54))
-                p.move(to: CGPoint(x: 64, y: 74)); p.addLine(to: CGPoint(x: 64, y: 88))
-                p.move(to: CGPoint(x: 40, y: 64)); p.addLine(to: CGPoint(x: 54, y: 64))
-                p.move(to: CGPoint(x: 74, y: 64)); p.addLine(to: CGPoint(x: 88, y: 64))
-            }
-            .stroke(accent.opacity(0.6), lineWidth: 1)
-            let pulse = 0.5 + 0.5 * sin(elapsed * 3)
-            Circle()
-                .fill(accent)
-                .frame(width: 8, height: 8)
-                .opacity(0.5 + 0.5 * pulse)
-                .shadow(color: accent, radius: 6 * pulse)
         }
     }
 }
