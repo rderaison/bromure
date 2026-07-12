@@ -321,11 +321,26 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private var browserPaneHost: NonMovableHostingView<BrowserPaneView>!
     private var browserPaneWidthConstraint: NSLayoutConstraint?
     private var browserPaneResizeHandle: SidebarResizeHandle?
-    private(set) var browserPaneOpen = false
+    /// Workspaces whose browser pane the user has opened. The pane is one
+    /// global split, but its open/closed state is remembered PER workspace:
+    /// switching workspaces animates the pane to match the newly selected
+    /// one, so a browser opened in A doesn't spawn one in B and isn't lost
+    /// when you return to A. A workspace's browser lives (hidden →
+    /// suspended) as long as its pane stays open; collapsing ITS pane is
+    /// what arms teardown.
+    private var browserPaneOpenWorkspaces: Set<Profile.ID> = []
+    /// Whether the SELECTED workspace's browser pane is open.
+    var browserPaneOpen: Bool {
+        guard let id = selectedID else { return false }
+        return browserPaneOpenWorkspaces.contains(id)
+    }
     private var expandedBrowserPaneWidth: CGFloat = 640
     private static let browserPaneMinWidth: CGFloat = 380
     private static let browserPaneMaxWidth: CGFloat = 1400
     private static let browserPaneDefaultWidth: CGFloat = 640
+    /// Floor the terminal/pane slot keeps when the browser pane is open —
+    /// the clamp that stops the pane from growing the window off-screen.
+    private static let terminalSlotMinWidth: CGFloat = 240
     private static let browserPaneWidthKey = "ac.browserPaneWidth"
 
     init(acDelegate: ACAppDelegate) {
@@ -539,7 +554,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             if width < Self.browserPaneMinWidth {
                 self.setBrowserPaneOpen(false, animated: true)
             } else {
-                self.browserPaneWidthConstraint?.constant = min(Self.browserPaneMaxWidth, width)
+                self.browserPaneWidthConstraint?.constant = self.clampedBrowserPaneWidth(width)
             }
         }
         browserPaneHandle.onResizeEnd = { [weak self] in
@@ -549,7 +564,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             self.expandedBrowserPaneWidth = w
             UserDefaults.standard.set(w, forKey: Self.browserPaneWidthKey)
         }
-        let paneSlotMin = paneSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: 240)
+        let paneSlotMin = paneSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.terminalSlotMinWidth)
         paneSlotMin.priority = .init(999)   // beats the pane width, yields last
         NSLayoutConstraint.activate([
             paneSlot.topAnchor.constraint(equalTo: stage.topAnchor),
@@ -794,11 +809,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserController(for: id).setVisible(true)
     }
 
-    /// Called by `select(profileID:)` when the shown workspace changes while
-    /// the browser pane is open — swap the pane to the new workspace's browser.
+    /// Called by `select(profileID:)` when the shown workspace changes:
+    /// animate the pane to the newly selected workspace's remembered
+    /// open/closed state, swapping (or hiding) the browser accordingly.
     func browserPaneDidChangeWorkspace() {
-        guard browserPaneOpen, let id = selectedID, id != shownBrowser else { return }
-        showBrowser(for: id)
+        applyBrowserPaneState(animated: true)
     }
 
     /// Stop and discard every workspace browser (window close / app quit).
@@ -806,6 +821,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         for (_, c) in browserControllers { c.stop() }
         browserControllers.removeAll()
         browserModels.removeAll()
+        browserPaneOpenWorkspaces.removeAll()
         shownBrowser = nil
     }
 
@@ -816,8 +832,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// new controller re-reads the saved profile at creation.
     func rebootBrowser(for id: Profile.ID) {
         guard browserControllers[id] != nil else { return }   // never opened
+        let wasOpen = browserPaneOpenWorkspaces.contains(id)
         let wasShown = browserPaneOpen && shownBrowser == id
         teardownBrowser(for: id)
+        // teardownBrowser clears the workspace's pane-open state; a reboot
+        // is transient, so restore it (the browser lives as long as its
+        // pane is open).
+        if wasOpen { browserPaneOpenWorkspaces.insert(id) }
         if wasShown, selectedID == id {
             showBrowser(for: id)
         }
@@ -828,6 +849,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserControllers[id]?.stop()
         browserControllers[id] = nil
         browserModels[id] = nil
+        browserPaneOpenWorkspaces.remove(id)
         if shownBrowser == id {
             shownBrowser = nil
             browserPaneHost.rootView = BrowserPaneView(model: browserPlaceholderModel)
@@ -835,44 +857,52 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     func setBrowserPaneOpen(_ open: Bool, animated: Bool) {
-        guard open != browserPaneOpen else { return }
-        browserPaneOpen = open
+        guard let id = selectedID else { return }
+        guard open != browserPaneOpenWorkspaces.contains(id) else { return }
+        if open { browserPaneOpenWorkspaces.insert(id) }
+        else { browserPaneOpenWorkspaces.remove(id) }
+        // collapsedWorkspace = the workspace whose pane the user just
+        // closed — only THAT browser is armed for teardown; every other
+        // workspace's browser keeps living on its own pane state.
+        applyBrowserPaneState(animated: animated, collapsedWorkspace: open ? nil : id)
+    }
+
+    /// The widest the browser pane may be right now: never so wide the
+    /// terminal slot drops below its minimum, nor past the hard max. This
+    /// is what stops opening OR dragging the pane from growing the window
+    /// off-screen — the pane-width constraint outranks NSWindow's
+    /// windowSizeStayPut, so an over-wide value pushes the window edge
+    /// past the screen instead of squeezing the terminal.
+    private func clampedBrowserPaneWidth(_ desired: CGFloat) -> CGFloat {
+        let fileW = filePaneOpen ? (filePaneWidthConstraint?.constant ?? 0) : 0
+        let available = stage.bounds.width - fileW - Self.terminalSlotMinWidth
+        return max(Self.browserPaneMinWidth,
+                   min(desired, min(Self.browserPaneMaxWidth, available)))
+    }
+
+    /// Reconcile the pane UI + browser visibility to the SELECTED
+    /// workspace's remembered open/closed state. Opening/collapsing the
+    /// pane and switching workspaces both funnel here.
+    private func applyBrowserPaneState(animated: Bool, collapsedWorkspace: Profile.ID? = nil) {
+        let open = browserPaneOpen
         listModel.browserPaneOpen = open
         browserPaneResizeHandle?.isHidden = !open
-        if open {
+
+        if open, let id = selectedID {
             browserPaneHost.isHidden = false
-            // Show the selected workspace's browser (boots/resumes it).
-            if let id = selectedID {
-                showBrowser(for: id)
-            }
-            // Background browsers are pane-open-but-switched-away again:
-            // downgrade any collapse-armed teardown to suspend-only.
-            for (wid, c) in browserControllers where wid != shownBrowser {
-                c.setVisible(false, teardownWhenHidden: false)
-            }
-        } else {
-            // Collapsing the sidebar parks EVERY workspace's browser on
-            // the full idle lifecycle (suspend 10s + teardown 5min) —
-            // including ones hidden earlier by workspace switches, which
-            // are suspend-only until the sidebar actually closes.
-            for (_, c) in browserControllers { c.setVisible(false) }
+            // Boots/resumes id and suspends (never tears down) the
+            // previously shown one — it stays alive on its own pane state.
+            showBrowser(for: id)
+        } else if let prev = shownBrowser {
+            // Pane collapsed for the selected workspace: hide the shown
+            // browser. Arm teardown ONLY when the user explicitly closed
+            // that workspace's pane; a plain switch-away is suspend-only.
+            browserControllers[prev]?.setVisible(false,
+                teardownWhenHidden: prev == collapsedWorkspace)
+            shownBrowser = nil
         }
-        // Fit within the current window. The pane-width constraint's
-        // priority (defaultHigh) beats NSWindow's windowSizeStayPut, so
-        // a target wider than the stage can absorb doesn't squeeze the
-        // terminal — it GROWS THE WINDOW, potentially past the screen
-        // edge. Clamp to what's actually available, leaving the terminal
-        // slot its 240pt minimum (the resize handle still lets the user
-        // drag wider, which resizes within the same limits).
-        let target: CGFloat
-        if open {
-            let fileW = filePaneOpen ? (filePaneWidthConstraint?.constant ?? 0) : 0
-            let available = stage.bounds.width - fileW - 240
-            target = max(Self.browserPaneMinWidth,
-                         min(expandedBrowserPaneWidth, available))
-        } else {
-            target = 0
-        }
+
+        let target = open ? clampedBrowserPaneWidth(expandedBrowserPaneWidth) : 0
         let hideWhenClosed: () -> Void = { [weak self] in
             guard let self, !self.browserPaneOpen else { return }
             self.browserPaneHost.isHidden = true
@@ -881,8 +911,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.18
                 ctx.allowsImplicitAnimation = true
-                browserPaneWidthConstraint?.animator().constant = target
-                contentView?.layoutSubtreeIfNeeded()
+                self.browserPaneWidthConstraint?.animator().constant = target
+                self.contentView?.layoutSubtreeIfNeeded()
             }, completionHandler: hideWhenClosed)
         } else {
             browserPaneWidthConstraint?.constant = target
