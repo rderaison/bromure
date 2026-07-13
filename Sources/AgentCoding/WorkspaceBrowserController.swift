@@ -66,10 +66,25 @@ final class WorkspaceBrowserController {
     /// disk so logins/cookies survive teardown (set from Profile.browserPersistent).
     let persistent: Bool
 
-    init(model: BrowserPaneModel, workspaceID: UUID, persistent: Bool) {
+    /// Fat-client remote mode: route the browser VM's traffic to the remote
+    /// workspace subnet through the fat client's SOCKS forwarder. When set, the
+    /// browser switch is pinned to `FatClient.browserSwitchOctet` (so the gateway
+    /// is the known `browserSwitchGateway`) and Chromium boots with a PAC that
+    /// sends `subnetCIDR` → `SOCKS5 browserSwitchGateway:socksPort`, DIRECT else.
+    struct RemoteProxy: Equatable {
+        let subnetCIDR: String
+        let socksPort: Int
+    }
+
+    /// Non-nil in fat-client mode; drives the pinned switch + PAC (see above).
+    private let remoteProxy: RemoteProxy?
+
+    init(model: BrowserPaneModel, workspaceID: UUID, persistent: Bool,
+         remoteProxy: RemoteProxy? = nil) {
         self.model = model
         self.workspaceID = workspaceID
         self.persistent = persistent
+        self.remoteProxy = remoteProxy
     }
 
     /// Per-workspace persistent browser profile dir (shared into the guest as
@@ -163,8 +178,11 @@ final class WorkspaceBrowserController {
         // (VMNetSwitch.shared, peer bridging on) so the agent and the browser
         // can reach each other. requireImageVersion: false → boot Bromure Web's
         // shared image whatever its version stamp (AC doesn't rebuild it).
+        // Fat-client mode pins the switch to a known octet so the gateway (=
+        // the PAC's SOCKS host) is deterministic before boot.
         let pool = VMPool(config: config, storageDir: storageDir,
-                          isolatePeers: false, requireImageVersion: false)
+                          isolatePeers: false, requireImageVersion: false,
+                          pinnedOctet: remoteProxy != nil ? FatClient.browserSwitchOctet : nil)
         self.pool = pool
 
         // Persistent profiles: an encrypted per-workspace disk holds Chromium's
@@ -230,11 +248,21 @@ final class WorkspaceBrowserController {
     /// (needed by native-chrome tab state, and phases 3c-e) are available.
     private func browserConfig() -> VMConfig {
         let scale = VMConfig.resolvedDisplayScale()
+        // Fat-client mode: a PAC routes the remote workspace subnet through the
+        // SOCKS forwarder (at the pinned gateway); DIRECT otherwise. Local mode
+        // connects straight out (directConnection).
+        let pacB64: String? = remoteProxy.flatMap { rp in
+            FatClientPAC.script(routes: [.init(cidr: rp.subnetCIDR,
+                                               proxyHost: FatClient.browserSwitchGateway,
+                                               proxyPort: rp.socksPort)])
+                .flatMap { Data($0.utf8).base64EncodedString() }
+        }
         return VMConfig(
             homePage: homePage,
             enableFileTransfer: true,
             enableClipboardSharing: true,
-            directConnection: true,   // no proxy — Chromium connects straight out
+            directConnection: pacB64 == nil,   // no proxy — Chromium connects straight out
+            proxyPacBase64: pacB64,
             enableAutomation: true,
             nativeChrome: true,
             nativeChromeInset: VMConfig.defaultNativeChromeInset(forDisplayScale: scale),

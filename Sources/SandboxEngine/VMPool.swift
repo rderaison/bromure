@@ -76,6 +76,9 @@ public final class VMPool {
     /// the browser loading the agent's dev server). Default true preserves
     /// Web's behaviour.
     private let isolatePeers: Bool
+    /// When set, pin the shared switch to `192.168.<octet>.0/24` (fat-client
+    /// browser VMs use this so their gateway is a known address for the PAC).
+    private let pinnedOctet: UInt8?
     /// Web owns/rebuilds its image, so it boots only a version-matching one.
     /// AC reuses Web's shared image without controlling its version, so it
     /// sets this false to boot whatever complete boot set is present. Default
@@ -105,13 +108,14 @@ public final class VMPool {
     }
 
     public init(config: VMConfig, storageDir: URL? = nil, isolatePeers: Bool = true,
-                requireImageVersion: Bool = true) {
+                requireImageVersion: Bool = true, pinnedOctet: UInt8? = nil) {
         self.config = config
         let dir = storageDir ?? VMConfig.defaultStorageDirectory
         self.storageDir = dir
         self.imageManager = LinuxImageManager(storageDir: dir)
         self.isolatePeers = isolatePeers
         self.requireImageVersion = requireImageVersion
+        self.pinnedOctet = pinnedOctet
     }
 
     /// Pre-warm a VM by booting it to an idle shell prompt.
@@ -198,7 +202,8 @@ public final class VMPool {
                     // embedded browser joins the workspace VMs' subnet with peer
                     // bridging on so they can reach each other.
                     VMNetSwitch.shared.configure(ascendingSubnet: isolatePeers,
-                                                 bridgePeers: !isolatePeers)
+                                                 bridgePeers: !isolatePeers,
+                                                 pinnedOctet: pinnedOctet)
                     if let port = VMNetSwitch.shared.attachPort() {
                         networkFilter = NetworkFilter(networkInfo: netInfo, switchPort: port)
                         if networkFilter == nil { VMNetSwitch.shared.detachPort(port) }
