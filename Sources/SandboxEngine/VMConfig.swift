@@ -239,6 +239,13 @@ public struct VMConfig {
     /// Password for proxy authentication (optional).
     public var proxyPassword: String?
 
+    /// Base64-encoded PAC script. When set, Chromium starts with
+    /// `--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64,…` and this
+    /// takes precedence over `directConnection`/`proxyHost`. The fat-client
+    /// browser pane uses it to route a remote workspace subnet through its SOCKS
+    /// forwarder while everything else stays DIRECT.
+    public var proxyPacBase64: String?
+
     /// Block all file downloads inside the guest browser.
     /// When true, Chrome policy blocks downloads and an inotify guard deletes any
     /// files created outside dot-directories in /home/chrome.
@@ -351,6 +358,7 @@ public struct VMConfig {
         proxyPort: Int? = nil,
         proxyUsername: String? = nil,
         proxyPassword: String? = nil,
+        proxyPacBase64: String? = nil,
         blockDownloads: Bool = false,
         enableAutomation: Bool = false,
         nativeChrome: Bool = false,
@@ -434,6 +442,7 @@ public struct VMConfig {
         self.proxyPort = proxyPort
         self.proxyUsername = proxyUsername
         self.proxyPassword = proxyPassword
+        self.proxyPacBase64 = proxyPacBase64
         self.blockDownloads = blockDownloads
         self.enableAutomation = enableAutomation
         self.nativeChrome = nativeChrome

@@ -480,6 +480,10 @@ public final class VMPool {
         if config.proxyHost == nil { cfg["useProxy"] = true }
         // Direct-connection mode (AC's embedded browser): no proxy flag at all.
         if config.directConnection { cfg["directConnection"] = true }
+        // Fat-client browser pane: host-supplied PAC (routes the remote subnet
+        // through the SOCKS forwarder). Takes precedence over the above in
+        // config-agent, so the browser reaches the remote guest's dev server.
+        if let pac = config.proxyPacBase64 { cfg["proxyPacB64"] = pac }
         if !config.enableGPU { cfg["disableGPU"] = true }
         if !config.enableWebGL { cfg["disableWebGL"] = true }
         if config.enableGPU { cfg["gpuAccel"] = true }
