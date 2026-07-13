@@ -1900,6 +1900,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         installFatClientForwardResolver()   // before the SSH server captures it
         installFatClientBrowserMCPResolver()
         startRemoteAccessIfNeeded()
+        installBrowserImageIfRequested()
+    }
+
+    /// Debug/test: when `BROMURE_INSTALL_BROWSER_IMAGE=1`, download AC's own copy
+    /// of the browser image (the fat-client browser prefers it). Lets a headless
+    /// run fetch the rebuilt image without the GUI Settings button.
+    @MainActor func installBrowserImageIfRequested() {
+        guard ProcessInfo.processInfo.environment["BROMURE_INSTALL_BROWSER_IMAGE"] != nil else { return }
+        Task { @MainActor in
+            print("[browser-image] install starting…")
+            let ok = await BrowserImageInstaller.shared.install()
+            print("[browser-image] install \(ok ? "DONE" : "FAILED: \(BrowserImageInstaller.shared.lastError ?? "?")")")
+        }
     }
 
     // MARK: - Remote access (optional SSH front door)

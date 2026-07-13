@@ -132,11 +132,18 @@ final class WorkspaceBrowserController {
     /// Web dir never writes into it.
     private func resolveStorageDir() -> URL? {
         let shared = VMConfig.defaultStorageDirectory   // ~/…/Bromure
+        let acDir = Self.browserStorageDir
+        // The fat-client browser prefers AC's OWN image copy: it must carry the
+        // config-agent PAC support the tunnel relies on, and AC can update it
+        // (BrowserImageInstaller) independently of Bromure Web's shared image.
+        if remoteProxy != nil, Self.hasAllBootFiles(in: acDir) {
+            print("[browser] fat-client: using AC-owned browser image dir: \(acDir.path)")
+            return acDir
+        }
         if Self.hasAllBootFiles(in: shared) {
             print("[browser] using shared Bromure image dir: \(shared.path)")
             return shared
         }
-        let acDir = Self.browserStorageDir
         if Self.hasAllBootFiles(in: acDir) {
             print("[browser] using AC-owned browser image dir: \(acDir.path)")
             return acDir
