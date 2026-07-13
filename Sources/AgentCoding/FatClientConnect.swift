@@ -107,7 +107,7 @@ final class RemoteConnectModel {
         phase = .working("Authenticating…")
         let host = self.host
         work.async { [weak self] in
-            let r = RemoteTransport.probe(host: host, password: nil, strictHostKey: true)
+            let r = RemoteTransport.probe(host: host, strictHostKey: true)
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch r {
@@ -123,15 +123,17 @@ final class RemoteConnectModel {
         }
     }
 
-    /// Step 3: try the typed password; on success enroll the key for next time.
+    /// Step 3: try the typed password via our embedded NIOSSH *client* (no
+    /// system `ssh`, no SSH_ASKPASS) — it sends the password through the SSH
+    /// auth API directly and, on success, enrolls this Mac's public key over the
+    /// control bridge so the next connect is passwordless.
     func submitPassword() {
         let pw = password
         guard !pw.isEmpty else { return }
         phase = .working("Signing in…")
         let host = self.host
         work.async { [weak self] in
-            let r = RemoteTransport.probe(host: host, password: pw, strictHostKey: true)
-            if r == .ok { RemoteTransport.enrollKey(host: host, password: pw) }   // passwordless next time
+            let r = FatClientNIOSSH.enrollWithPassword(host: host, password: pw)
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch r {
@@ -142,8 +144,6 @@ final class RemoteConnectModel {
                     self.password = ""
                     self.shakes += 1
                     self.phase = .needPassword(error: "Incorrect password. Try again.")
-                case .hostKeyChanged:
-                    self.phase = .unreachable("Host key changed during sign-in.")
                 case .unreachable(let m):
                     self.phase = .unreachable(m)
                 }

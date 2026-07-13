@@ -1875,6 +1875,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         DispatchQueue.main.async { [weak self] in
             self?.autoOpenRemoteHostsIfRequested()
             self?.debugOpenConnectIfRequested()
+            self?.debugProbeIfRequested()
         }
         }   // if !headless
 
@@ -6435,6 +6436,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc func connectRemoteHostMenuAction(_ sender: Any?) {
         promptConnectRemoteHost()
+    }
+
+    /// Debug: run a password login from inside the GUI app (via the embedded
+    /// NIOSSH client), from `BROMURE_FATCLIENT_PROBE=addr:port:user:password`,
+    /// and log the classified result.
+    @MainActor func debugProbeIfRequested() {
+        guard let spec = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_PROBE"], !spec.isEmpty
+        else { return }
+        let p = spec.split(separator: ":", maxSplits: 3).map(String.init)
+        guard p.count == 4, let port = Int(p[1]) else { return }
+        let host = RemoteHost(name: p[0], address: p[0], port: port, user: p[2])
+        DispatchQueue.global().async {
+            let r = FatClientNIOSSH.enrollWithPassword(host: host, password: p[3])
+            FatClientLog.log("debugProbe (niossh) result: \(r)")
+        }
     }
 
     /// Debug: open the connect window pre-filled from `BROMURE_FATCLIENT_CONNECT`

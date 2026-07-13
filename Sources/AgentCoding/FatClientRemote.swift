@@ -229,58 +229,24 @@ enum RemoteTransport {
         try? body.write(to: knownHostsPath, atomically: true, encoding: .utf8)
     }
 
-    // MARK: Probe (classified connection attempt) + password askpass
+    // MARK: Probe (classified connection attempt)
 
-    /// Path to a tiny askpass helper that echoes the password from a file named
-    /// in `$BROMURE_ASKPASS_FILE`; lets us feed a password to `ssh` from the GUI
-    /// (no controlling TTY) via `SSH_ASKPASS` + `SSH_ASKPASS_REQUIRE=force`.
-    private static var askpassPath: URL { dir.appendingPathComponent("askpass.sh") }
-    private static func ensureAskpass() {
-        ensureDirs()
-        let script = "#!/bin/sh\ncat \"$BROMURE_ASKPASS_FILE\"\n"
-        if (try? String(contentsOf: askpassPath, encoding: .utf8)) != script {
-            try? script.write(to: askpassPath, atomically: true, encoding: .utf8)
-        }
-        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: askpassPath.path)
-    }
-
-    /// Probe a remote with either the client key (`password == nil`) or a
-    /// password, by running one `GET /health` over the tunnel and classifying
-    /// ssh's result. `strictHostKey` = enforce the pinned key (detects MITM).
-    static func probe(host: RemoteHost, password: String?, strictHostKey: Bool) -> RemoteProbe {
+    /// Probe a remote with the client key, by running one `GET /health` over the
+    /// tunnel and classifying ssh's result. `strictHostKey` = enforce the pinned
+    /// key (detects MITM). Password auth lives in `FatClientNIOSSH` — the system
+    /// `ssh` binary is only ever used here with public-key auth (no askpass).
+    static func probe(host: RemoteHost, strictHostKey: Bool) -> RemoteProbe {
         ensureClientKey()
         var args = commonArgs(for: host)
-        args += ["-o", "StrictHostKeyChecking=\(strictHostKey ? "yes" : "accept-new")"]
-        if password != nil {
-            args += ["-o", "BatchMode=no",
-                     "-o", "PubkeyAuthentication=no",
-                     "-o", "PreferredAuthentications=password,keyboard-interactive",
-                     "-o", "NumberOfPasswordPrompts=1"]
-        } else {
-            args += ["-o", "BatchMode=yes"]
-        }
-        args += ["\(host.user)@\(host.address)", FatClient.controlVerb]
+        args += ["-o", "StrictHostKeyChecking=\(strictHostKey ? "yes" : "accept-new")",
+                 "-o", "BatchMode=yes",
+                 "\(host.user)@\(host.address)", FatClient.controlVerb]
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         p.arguments = args
         let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
         p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = errPipe
-
-        var pwFile: URL?
-        if let password {
-            ensureAskpass()
-            let f = dir.appendingPathComponent("pw-\(UUID().uuidString)")
-            try? password.write(to: f, atomically: true, encoding: .utf8)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: f.path)
-            pwFile = f
-            var env = ProcessInfo.processInfo.environment
-            env["SSH_ASKPASS"] = askpassPath.path
-            env["SSH_ASKPASS_REQUIRE"] = "force"
-            env["BROMURE_ASKPASS_FILE"] = f.path
-            env["DISPLAY"] = env["DISPLAY"] ?? ":0"
-            p.environment = env
-        }
 
         do { try p.run() } catch { return .unreachable("couldn't launch ssh") }
         let req = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
@@ -289,7 +255,6 @@ enum RemoteTransport {
         let out = outPipe.fileHandleForReading.readDataToEndOfFile()
         let err = errPipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        if let f = pwFile { try? FileManager.default.removeItem(at: f) }
 
         let outStr = String(decoding: out, as: UTF8.self)
         let errStr = String(decoding: err, as: UTF8.self)
@@ -308,57 +273,12 @@ enum RemoteTransport {
             return .unreachable(firstLine(errStr))
         }
         // No 200 and no clear signal → treat as auth failure (most common:
-        // remote reachable but this credential rejected).
+        // remote reachable but this key not yet authorized).
         return errStr.isEmpty ? .unreachable("no response from remote") : .authFailed
     }
 
     private static func firstLine(_ s: String) -> String {
         s.split(whereSeparator: \.isNewline).map(String.init).first { !$0.isEmpty } ?? s
-    }
-
-    /// After a successful PASSWORD login, enroll the client's public key on the
-    /// remote so subsequent connections are passwordless. Uses a one-shot
-    /// password-authenticated `POST /remote/keys` over the tunnel.
-    @discardableResult
-    static func enrollKey(host: RemoteHost, password: String) -> Bool {
-        guard let pub = ensureClientKey() else { return false }
-        var args = commonArgs(for: host)
-        args += ["-o", "StrictHostKeyChecking=accept-new",
-                 "-o", "BatchMode=no", "-o", "PubkeyAuthentication=no",
-                 "-o", "PreferredAuthentications=password,keyboard-interactive",
-                 "-o", "NumberOfPasswordPrompts=1",
-                 "\(host.user)@\(host.address)", FatClient.controlVerb]
-        ensureAskpass()
-        let f = dir.appendingPathComponent("pw-\(UUID().uuidString)")
-        try? password.write(to: f, atomically: true, encoding: .utf8)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: f.path)
-        defer { try? FileManager.default.removeItem(at: f) }
-
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        p.arguments = args
-        let inPipe = Pipe(), outPipe = Pipe()
-        p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = FileHandle.nullDevice
-        var env = ProcessInfo.processInfo.environment
-        env["SSH_ASKPASS"] = askpassPath.path
-        env["SSH_ASKPASS_REQUIRE"] = "force"
-        env["BROMURE_ASKPASS_FILE"] = f.path
-        env["DISPLAY"] = env["DISPLAY"] ?? ":0"
-        p.environment = env
-        do { try p.run() } catch { return false }
-        let body = "{\"key\":\(jsonString(pub))}"
-        let req = "POST /remote/keys HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
-            + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-        inPipe.fileHandleForWriting.write(Data(req.utf8))
-        try? inPipe.fileHandleForWriting.close()
-        let out = outPipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(decoding: out, as: UTF8.self).contains("HTTP/1.1 200")
-    }
-
-    private static func jsonString(_ s: String) -> String {
-        (try? String(decoding: JSONSerialization.data(withJSONObject: [s]), as: UTF8.self))?
-            .dropFirst().dropLast().description ?? "\"\(s)\""
     }
 
     /// A `ControlClient` whose transport is an SSH tunnel to `host`. Each

@@ -528,9 +528,8 @@ struct FatClientAuthProbe: ParsableCommand {
     @Argument var address: String
     @Argument var port: Int
     @Argument var user: String
-    @Option(name: .long, help: "Try password auth with this password.") var password: String?
+    @Option(name: .long, help: "Try password auth (NIOSSH client) with this password.") var password: String?
     @Option(name: .long, help: "Pinned host-key fingerprint (to test change detection).") var pinned: String?
-    @Flag(name: .long, help: "Enroll the client key using --password (ssh-copy-id style).") var enroll = false
 
     func run() throws {
         var host = RemoteHost(name: address, address: address, port: port, user: user)
@@ -540,14 +539,13 @@ struct FatClientAuthProbe: ParsableCommand {
         } else {
             print("host-key: UNREACHABLE (couldn't scan)")
         }
-        let keyProbe = RemoteTransport.probe(host: host, password: nil, strictHostKey: false)
+        let keyProbe = RemoteTransport.probe(host: host, strictHostKey: false)
         print("pubkey probe: \(keyProbe)")
         if let pw = password {
-            let pwProbe = RemoteTransport.probe(host: host, password: pw, strictHostKey: false)
-            print("password probe: \(pwProbe)")
-            if enroll, pwProbe == .ok {
-                print("enroll key: \(RemoteTransport.enrollKey(host: host, password: pw))")
-            }
+            // Password auth goes through the embedded NIOSSH client (no askpass);
+            // on success it also enrolls this Mac's key for passwordless reconnect.
+            let r = FatClientNIOSSH.enrollWithPassword(host: host, password: pw)
+            print("niossh password result: \(r)")
         }
     }
 }

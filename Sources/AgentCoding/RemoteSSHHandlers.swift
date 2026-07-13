@@ -372,6 +372,17 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
             return
         }
         master = sockFD
+        // Flush anything the client pipelined ahead of the bridge coming up (e.g.
+        // an exec immediately followed by an HTTP request on the same channel),
+        // mirroring the forward bridge. Without this, a request that beats the
+        // control-socket connect is stranded in pendingInbound and never sent.
+        if !pendingInbound.isEmpty {
+            let bytes = pendingInbound; pendingInbound = []
+            _ = bytes.withUnsafeBytes { ptr -> Int in
+                guard let base = ptr.baseAddress else { return 0 }
+                return Self.writeAll(sockFD, base, bytes.count)
+            }
+        }
         childPID = -1
         if wantReply { channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil) }
 
