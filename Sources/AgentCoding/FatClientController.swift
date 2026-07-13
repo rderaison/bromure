@@ -36,6 +36,24 @@ final class RemoteHostController {
     /// `Profile` for appearance and the deleted-workspace check.
     private(set) var profilesByID: [Profile.ID: Profile] = [:]
 
+    /// Spec numbers for the VM dashboard, mirrored per workspace (available
+    /// even for off/suspended VMs, which have no `vms` entry).
+    struct WorkspaceSpec: Equatable {
+        var memoryGB = 4
+        var cpus = 0
+        var diskAllocatedBytes: Int64 = 0
+        var diskCapacityBytes: Int64 = 0
+    }
+    private(set) var specs: [Profile.ID: WorkspaceSpec] = [:]
+    /// Boot time of each running VM, derived from the mirrored uptime (kept
+    /// stable across polls so the dashboard's uptime doesn't jitter).
+    private(set) var bootTimes: [Profile.ID: Date] = [:]
+    /// Decision-prompt ids already surfaced to the user (dedupe across polls).
+    private var promptedIDs: Set<String> = []
+    /// Shared-folder paths per running VM (feeds the remote file browser's
+    /// location list — browsed via the guest, since the host dirs live on A).
+    private(set) var mounts: [Profile.ID: [String]] = [:]
+
     private var pollTimer: Timer?
     private let pollQueue = DispatchQueue(label: "io.bromure.fatclient.poll")
     private var polling = false
@@ -49,10 +67,21 @@ final class RemoteHostController {
     /// Auto-started SOCKS5 forwarder into the remote subnet; its port feeds the
     /// browser pane's PAC and `curl --socks5`. Nil until `start()`.
     private(set) var socks: RemoteSocksForwarder?
-    /// Optional system-wide utun tunnel (any local process → remote subnet at its
-    /// literal address). Off unless `BROMURE_FATCLIENT_UTUN` is set (it needs the
-    /// privileged helper); the browser pane works via SOCKS without it.
+    /// Optional system-wide utun tunnel (any local process → remote subnet at
+    /// its literal address). Off by default — the browser pane works via SOCKS
+    /// without it. Enabled per host with the toolbar's network toggle (or the
+    /// `BROMURE_FATCLIENT_UTUN` env for tests); needs the privileged helper,
+    /// whose install/approval is guided by `startTunnelIfNeeded`.
     private var tunnel: FatClientTunnel?
+    /// UI-facing tunnel state: "off" / "waiting-approval" / "active" / "failed".
+    private(set) var tunnelState = "off"
+    private var approvalPollTimer: Timer?
+    private var tunnelDefaultsKey: String { "fatclient.tunnel.\(host.id.uuidString)" }
+    /// Persisted per-host opt-in for the system-wide tunnel.
+    var tunnelEnabled: Bool {
+        UserDefaults.standard.bool(forKey: tunnelDefaultsKey)
+            || ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_UTUN"] != nil
+    }
 
     init(host: RemoteHost) {
         self.host = host
@@ -86,6 +115,8 @@ final class RemoteHostController {
     func stop() {
         pollTimer?.invalidate()
         pollTimer = nil
+        approvalPollTimer?.invalidate()
+        approvalPollTimer = nil
         socks?.stop()
         socks = nil
         tunnel?.stop()
@@ -144,15 +175,13 @@ final class RemoteHostController {
             FatClientLog.log("apply: remote vmnet subnet = \(cidr)")
             // Optional system-wide tunnel: route the remote subnet literally to a
             // utun (needs the privileged helper; degrades to SOCKS if unavailable).
-            if tunnel == nil, ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_UTUN"] != nil {
-                let t = FatClientTunnel(host: host, localCIDR: cidr)
-                tunnel = t.start() ? t : nil
-            }
+            startTunnelIfNeeded()
         }
 
         applyWorkspaces(workspaces, vms: vms)
         applyGrid(grid)
         applyAutomations(autos)
+        applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         revision &+= 1
         if revision == 1 {
             FatClientLog.log("apply: \(workspaces.count) workspaces, \(vms.count) running, "
@@ -164,6 +193,7 @@ final class RemoteHostController {
         // ProfileRows (all workspaces) + minimal mirrored Profiles.
         var rows: [SessionListModel.ProfileRow] = []
         var newProfiles: [Profile.ID: Profile] = [:]
+        var newSpecs: [Profile.ID: WorkspaceSpec] = [:]
         for w in workspaces {
             guard let idStr = w["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
             let name = w["name"] as? String ?? "?"
@@ -179,14 +209,23 @@ final class RemoteHostController {
                 id: id, name: name, accentHex: accentHex, state: state,
                 compromised: (w["compromised"] as? Bool) ?? false))
 
+            var spec = WorkspaceSpec()
+            spec.memoryGB = w["memoryGB"] as? Int ?? 4
+            spec.cpus = w["cpuCount"] as? Int ?? 0
+            spec.diskAllocatedBytes = Int64((w["diskAllocatedBytes"] as? Int) ?? 0)
+            spec.diskCapacityBytes = Int64((w["diskCapacityBytes"] as? Int) ?? 0)
+            newSpecs[id] = spec
+
             var p = Profile(
                 id: id, name: name,
                 tool: Profile.Tool(rawValue: w["tool"] as? String ?? "") ?? .claude,
                 authMode: Profile.AuthMode(rawValue: w["authMode"] as? String ?? "") ?? .token)
             p.color = ProfileColor(rawValue: w["color"] as? String ?? "") ?? .gray
+            p.memoryGB = spec.memoryGB
             newProfiles[id] = p
         }
         profilesByID = newProfiles
+        specs = newSpecs
         if listModel.profileRows != rows { listModel.profileRows = rows }
 
         // Running entries: one VMEntry per running VM, carrying a live TabsModel.
@@ -207,6 +246,19 @@ final class RemoteHostController {
             model.vmLoad = vm["load"] as? Double ?? 0
             model.vmDiskUsedKB = vm["diskUsedKB"] as? Int ?? 0
             model.vmDiskTotalKB = vm["diskTotalKB"] as? Int ?? 0
+            if let up = vm["uptimeSeconds"] as? Int {
+                let derived = Date(timeIntervalSinceNow: TimeInterval(-up))
+                // Keep the previous value unless it drifted (poll jitter would
+                // otherwise make the dashboard's uptime wobble).
+                if let prev = bootTimes[id], abs(prev.timeIntervalSince(derived)) < 3 {
+                    // stable — keep prev
+                } else {
+                    bootTimes[id] = derived
+                }
+            }
+            mounts[id] = vm["mounts"] as? [String] ?? []
+            applyRemotePorts(model, vm)
+            applyRemoteDocker(model, vm)
             applyRemoteTabs(model, (vm["tabs"] as? [[String: Any]]) ?? [])
             let name = vm["name"] as? String ?? profilesByID[id]?.name ?? "?"
             entries.append(SessionListModel.VMEntry(
@@ -214,6 +266,8 @@ final class RemoteHostController {
                 accentHex: model.accentHex, model: model))
         }
         tabsModels = tabsModels.filter { liveIDs.contains($0.key) }
+        bootTimes = bootTimes.filter { liveIDs.contains($0.key) }
+        mounts = mounts.filter { liveIDs.contains($0.key) }
         // Rebuild entries only when the id set changes (the shared TabsModels
         // update in place, so the sidebar tab rows still refresh live).
         if Set(listModel.entries.map(\.id)) != liveIDs {
@@ -262,6 +316,78 @@ final class RemoteHostController {
         }
         if activePos >= model.tabs.count { activePos = max(0, model.tabs.count - 1) }
         if model.activeIndex != activePos { model.activeIndex = activePos }
+    }
+
+    /// Mirror the guest's listening sockets into the shared `TabsModel` (feeds
+    /// the VM dashboard's ports card, exactly like `applyListeningPorts`).
+    private func applyRemotePorts(_ model: TabsModel, _ vm: [String: Any]) {
+        let ports = ((vm["listeningPorts"] as? [[String: Any]]) ?? []).map {
+            ListeningPort(proto: $0["proto"] as? String ?? "tcp",
+                          addr: $0["addr"] as? String ?? "",
+                          port: $0["port"] as? Int ?? 0,
+                          process: $0["process"] as? String ?? "")
+        }
+        if model.vmListeningPorts != ports { model.vmListeningPorts = ports }
+    }
+
+    /// Mirror the guest's docker state (containers / images / binfmt) into the
+    /// shared `TabsModel` — the remote Docker dashboard renders from these.
+    private func applyRemoteDocker(_ model: TabsModel, _ vm: [String: Any]) {
+        let containers = ((vm["dockerContainers"] as? [[String: Any]]) ?? []).map { d -> DockerContainer in
+            var c = DockerContainer(
+                id: d["id"] as? String ?? "",
+                name: d["name"] as? String ?? "",
+                image: d["image"] as? String ?? "",
+                status: d["status"] as? String ?? "",
+                state: d["state"] as? String ?? "",
+                ports: d["ports"] as? String ?? "",
+                runningFor: d["runningFor"] as? String ?? "",
+                cpuPerc: d["cpuPerc"] as? String ?? "",
+                memUsage: d["memUsage"] as? String ?? "")
+            c.arch = d["arch"] as? String ?? ""
+            return c
+        }
+        if model.dockerContainers != containers { model.dockerContainers = containers }
+        let images = ((vm["dockerImages"] as? [[String: Any]]) ?? []).map {
+            DockerImage(id: $0["id"] as? String ?? "",
+                        repository: $0["repository"] as? String ?? "<none>",
+                        tag: $0["tag"] as? String ?? "<none>",
+                        size: $0["size"] as? String ?? "",
+                        created: $0["created"] as? String ?? "")
+        }
+        if model.dockerImages != images { model.dockerImages = images }
+        if let arches = vm["dockerBinfmt"] as? [String], !arches.isEmpty {
+            if !model.binfmtProbed { model.binfmtProbed = true }
+            if model.binfmtArches != arches { model.binfmtArches = arches }
+        }
+    }
+
+    /// Surface the remote's pending decision prompts (storage upgrade, drift
+    /// reset, compromise wipe, …) as LOCAL alerts — the whole point of the
+    /// prompt broker: the interface that initiated the action answers. The
+    /// chosen button index rides back over the tunnel.
+    private func applyPendingPrompts(_ prompts: [[String: Any]]) {
+        // Prune answered/expired ids so the set can't grow unbounded.
+        let current = Set(prompts.compactMap { $0["id"] as? String })
+        promptedIDs.formIntersection(current)
+        for p in prompts {
+            guard let id = p["id"] as? String, !promptedIDs.contains(id) else { continue }
+            promptedIDs.insert(id)
+            let alert = NSAlert()
+            alert.messageText = p["title"] as? String ?? "Bromure — \(host.name)"
+            alert.informativeText = p["message"] as? String ?? ""
+            let buttons = (p["buttons"] as? [String]) ?? ["OK"]
+            for b in buttons { alert.addButton(withTitle: b) }
+            // Destructive-looking prompts shouldn't confirm on a stray Return.
+            if buttons.first?.lowercased().contains("wipe") == true {
+                alert.buttons.first?.keyEquivalent = ""
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            let resp = alert.runModal()
+            let choice = resp.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            send("POST", "/prompts/\(ControlClient.encodeSegment(id))/answer",
+                 body: ["choice": max(0, min(choice, buttons.count - 1))])
+        }
     }
 
     private func applyGrid(_ grid: [String: Any]) {
@@ -317,6 +443,9 @@ final class RemoteHostController {
     func restartWorkspace(_ id: Profile.ID) {
         send("POST", "/vms/\(seg(id))/reboot", body: ["mode": "soft"])
     }
+    func hardRebootWorkspace(_ id: Profile.ID) {
+        send("POST", "/vms/\(seg(id))/reboot", body: ["mode": "hard"])
+    }
     func selectTab(_ id: Profile.ID, index: Int) {
         // Optimistic local echo; the roster confirms.
         if let m = tabsModels[id], let pos = m.tabs.firstIndex(where: { $0.index == index }) {
@@ -356,6 +485,143 @@ final class RemoteHostController {
         var body: [String: Any] = ["cells": cells]
         if let f = gridStore.focusedCellID { body["focusedCellID"] = f }
         send("POST", "/grid-layout", body: body, then: false)
+    }
+
+    // MARK: System-wide tunnel (one-click, no sudo)
+
+    /// Toggle the per-host tunnel opt-in. Enabling runs the whole guided flow
+    /// (register the SMAppService daemon → walk the user through macOS's one
+    /// approval toggle → start automatically); disabling stops the tunnel and
+    /// unregisters the root daemon once no host wants the feature.
+    func setTunnelEnabled(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: tunnelDefaultsKey)
+        if on {
+            startTunnelIfNeeded(interactive: true)
+        } else {
+            approvalPollTimer?.invalidate(); approvalPollTimer = nil
+            tunnel?.stop(); tunnel = nil
+            tunnelState = "off"
+            let anyEnabled = RemoteHostStore.shared.hosts.contains {
+                UserDefaults.standard.bool(forKey: "fatclient.tunnel.\($0.id.uuidString)")
+            }
+            if !anyEnabled { FatClientTunnelInstaller.unregister() }
+        }
+    }
+
+    /// Start the tunnel when opted in, guiding through daemon install/approval
+    /// as needed. Interactive = user-initiated (may present an alert); the
+    /// non-interactive path (poll/apply) stays silent.
+    func startTunnelIfNeeded(interactive: Bool = false) {
+        guard tunnelEnabled, tunnel == nil else { return }
+        guard let cidr = vmnetSubnet else { return }   // resumes on first /state
+        switch FatClientTunnelInstaller.state {
+        case .enabled:
+            startTunnel(cidr: cidr)
+        case .notRegistered, .requiresApproval:
+            FatClientTunnelInstaller.ensureRegistered()   // register is idempotent
+            guideThroughApproval(interactive: interactive, cidr: cidr)
+        }
+    }
+
+    private func guideThroughApproval(interactive: Bool, cidr: String) {
+        if FatClientTunnelInstaller.state == .enabled {
+            startTunnel(cidr: cidr)
+            return
+        }
+        tunnelState = "waiting-approval"
+        if interactive {
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString("Allow Bromure's network helper", comment: "")
+            alert.informativeText = NSLocalizedString(
+                "Direct network access to the remote's VMs uses a privileged helper.\n\nmacOS asks you to approve it once: System Settings → General → Login Items, then allow “Bromure Agentic Coding”. The tunnel connects automatically as soon as it's approved — nothing else to do.",
+                comment: "")
+            alert.addButton(withTitle: NSLocalizedString("Open Login Items", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+            if alert.runModal() == .alertFirstButtonReturn {
+                FatClientTunnelInstaller.openApprovalSettings()
+            } else {
+                UserDefaults.standard.set(false, forKey: tunnelDefaultsKey)
+                tunnelState = "off"
+                return
+            }
+        }
+        // Watch for the approval and connect the moment it lands.
+        approvalPollTimer?.invalidate()
+        let deadline = Date().addingTimeInterval(300)   // stop watching after 5 min; retried on next connect/toggle
+        let t = Timer(timeInterval: 2, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self else { timer.invalidate(); return }
+                if FatClientTunnelInstaller.state == .enabled {
+                    timer.invalidate(); self.approvalPollTimer = nil
+                    if let cidr = self.vmnetSubnet { self.startTunnel(cidr: cidr) }
+                } else if Date() > deadline {
+                    timer.invalidate(); self.approvalPollTimer = nil
+                    self.tunnelState = "off"
+                }
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        approvalPollTimer = t
+    }
+
+    private func startTunnel(cidr: String) {
+        let t = FatClientTunnel(host: host, localCIDR: cidr)
+        if t.start() {
+            tunnel = t
+            tunnelState = "active"
+            FatClientLog.log("tunnel: active for \(cidr)")
+        } else {
+            tunnelState = "failed"
+            FatClientLog.log("tunnel: start failed (helper unreachable?)")
+        }
+    }
+
+    // Docker dashboard actions — validated + executed on the remote host via
+    // the same outbox verbs the local dashboard sends.
+    func dockerAction(_ id: Profile.ID, _ body: [String: Any]) {
+        send("POST", "/vms/\(seg(id))/docker", body: body)
+    }
+    func setDockerWatch(_ id: Profile.ID, on: Bool) {
+        send("POST", "/vms/\(seg(id))/docker", body: ["action": "watch", "on": on], then: false)
+    }
+
+    /// Run a shell command in the remote workspace's guest, over the tunnel —
+    /// satisfies `GuestExecProvider` for the remote file-explorer pane.
+    func guestExec(_ id: Profile.ID, command: String, timeout: Int) async throws -> String {
+        let host = self.host
+        let path = "/vms/\(seg(id))/exec"
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host)
+                .request("POST", path, body: ["command": command, "timeout": timeout])
+        }.value
+        guard resp.status == 200 else {
+            throw ACAppDelegate.GuestExecError.commandFailed(
+                exitCode: 1, stderr: (resp.json["error"] as? String) ?? "exec failed")
+        }
+        let exitCode = resp.json["exitCode"] as? Int ?? 1
+        guard exitCode == 0 else {
+            throw ACAppDelegate.GuestExecError.commandFailed(
+                exitCode: exitCode, stderr: resp.json["stderr"] as? String ?? "")
+        }
+        return resp.json["stdout"] as? String ?? ""
+    }
+
+    /// Run one native file op in the remote guest — the remote file browser's
+    /// data plane (upload/download/list/delete as base64 JSON over the tunnel).
+    func guestFileOp(_ id: Profile.ID, op: [String: Any], timeout: Int = 30) async throws -> [String: Any] {
+        let host = self.host
+        let path = "/vms/\(seg(id))/file"
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host)
+                .request("POST", path, body: ["op": op, "timeout": timeout])
+        }.value
+        if let err = resp.json["error"] as? String {
+            throw ACAppDelegate.GuestExecError.commandFailed(exitCode: 1, stderr: err)
+        }
+        guard resp.status == 200 else {
+            throw ACAppDelegate.GuestExecError.connectionFailed
+        }
+        return resp.json
     }
 
     // Automation edits.
@@ -422,6 +688,92 @@ struct RemoteConnectionStatusView: View {
     }
 }
 
+// MARK: - Remote window toolbar (per-selected-VM controls + IP)
+
+/// The remote window's trailing toolbar cluster — the fat-client counterpart
+/// of `UnifiedToolbarBar`, restricted to controls that make sense for a
+/// mirrored VM (IP pill, files, docker, reboot, browser + file-pane toggles;
+/// trace/settings/pop-out stay host-side).
+struct RemoteToolbarBar: View {
+    @Bindable var model: SessionListModel
+    let controller: RemoteHostController
+    let onFiles: (Profile.ID) -> Void
+    let onDocker: (Profile.ID) -> Void
+    let onReboot: (Profile.ID) -> Void
+    let onToggleBrowser: () -> Void
+    let onToggleFilePane: () -> Void
+    let onToggleTunnel: () -> Void
+
+    private var entry: SessionListModel.VMEntry? {
+        model.entries.first { $0.id == model.selectedID }
+    }
+
+    private var tunnelHelp: String {
+        switch controller.tunnelState {
+        case "active":           "Direct network access to the remote's VMs is ON — click to turn off"
+        case "waiting-approval": "Waiting for approval in System Settings › Login Items…"
+        case "failed":           "Network tunnel failed — click to retry"
+        default:                 "Enable direct network access to the remote's VMs (192.168.x.x from any local app)"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Spacer(minLength: 0)
+            HeaderIcon(system: controller.tunnelState == "waiting-approval"
+                           ? "network.badge.shield.half.filled" : "network",
+                       help: tunnelHelp,
+                       active: controller.tunnelState == "active") { onToggleTunnel() }
+            if let entry {
+                if let ip = entry.model.ipAddress { ToolbarIP(ip: ip) }
+                HeaderIcon(system: "folder", help: "Browse files") { onFiles(entry.id) }
+                HeaderIcon(system: "shippingbox", help: "Docker dashboard") { onDocker(entry.id) }
+                HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
+                HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
+                           active: model.browserPaneOpen) { onToggleBrowser() }
+                HeaderIcon(system: "sidebar.right", help: "Show or hide repo files (⌃⌘E)",
+                           active: model.filePaneOpen) { onToggleFilePane() }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+    }
+}
+
+@MainActor
+final class RemoteToolbarDelegate: NSObject, NSToolbarDelegate {
+    static let itemID = NSToolbarItem.Identifier("io.bromure.ac.remote.controls")
+    private let rootView: AnyView
+    init(rootView: AnyView) { self.rootView = rootView }
+
+    func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, Self.itemID]
+    }
+    func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, Self.itemID]
+    }
+    func toolbar(_ t: NSToolbar,
+                 itemForItemIdentifier id: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard id == Self.itemID else { return nil }
+        let item = NSToolbarItem(itemIdentifier: id)
+        let host = NSHostingView(rootView: rootView)
+        host.translatesAutoresizingMaskIntoConstraints = false
+        let container = NSView()
+        container.addSubview(host)
+        NSLayoutConstraint.activate([
+            container.heightAnchor.constraint(equalToConstant: 28),
+            container.widthAnchor.constraint(greaterThanOrEqualToConstant: 260),
+            host.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            host.topAnchor.constraint(equalTo: container.topAnchor),
+            host.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        item.view = container
+        item.visibilityPriority = .high
+        return item
+    }
+}
+
 // MARK: - Fat-client mirror window
 
 /// The fat-client window for one remote host. Reuses the EXACT same
@@ -441,6 +793,21 @@ final class RemoteHostWindow: NSWindow {
     private var mountedTermView: TerminalSurfaceView?
     private var shownWorkspace: Profile.ID?
     private var shownWindowIndex: Int?
+
+    // Window chrome (fat-client counterparts of the local window's
+    // decorations): toolbar (IP pill + controls), VM dashboard for
+    // off/suspended workspaces, docker dashboard, file-explorer pane, and
+    // per-VM file-browser (transfer) windows.
+    private var toolbarDelegate: RemoteToolbarDelegate?
+    private var dashboardHost: NSHostingView<VMDashboardView>?
+    private var shownDashboard: (id: Profile.ID, state: SessionListModel.RunState)?
+    private var dockerHost: NSHostingView<DockerDashboardView>?
+    private var dockerShownFor: Profile.ID?
+    private let fileExplorerModel = FileExplorerModel()
+    private var filePaneHost: NSHostingView<FileExplorerPane>!
+    private var filePaneWidthConstraint: NSLayoutConstraint!
+    private var filePaneOpen = false
+    private var fileBrowserWindows: [Profile.ID: NSWindow] = [:]
 
     // Browser pane (fat-client): a local Chromium VM per remote workspace whose
     // page traffic is tunneled to the remote subnet via the SOCKS forwarder.
@@ -470,6 +837,7 @@ final class RemoteHostWindow: NSWindow {
         title = "Remote — \(controller.host.name)"
         isReleasedWhenClosed = false
         buildLayout()
+        buildToolbar()
         showGrid()
         controller.start()
         let t = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
@@ -481,6 +849,9 @@ final class RemoteHostWindow: NSWindow {
 
     override func close() {
         refreshTimer?.invalidate(); refreshTimer = nil
+        clearDockerDashboard()
+        for (_, w) in fileBrowserWindows { w.close() }
+        fileBrowserWindows.removeAll()
         controller.stop()
         gridView?.retireAll()
         for (_, c) in termControllers { c.retireAll() }
@@ -492,13 +863,15 @@ final class RemoteHostWindow: NSWindow {
         super.close()
     }
 
-    /// ⌃⌘B toggles the browser pane for the shown workspace (mirrors the local
-    /// window's shortcut).
+    /// ⌃⌘B toggles the browser pane, ⌃⌘E the file-explorer pane — mirroring
+    /// the local window's shortcuts.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command, .control],
-           event.charactersIgnoringModifiers?.lowercased() == "b" {
-            toggleBrowser(for: nil)
-            return true
+        if event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command, .control] {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "b": toggleBrowser(for: nil); return true
+            case "e": toggleFilePane(); return true
+            default: break
+            }
         }
         return super.performKeyEquivalent(with: event)
     }
@@ -513,7 +886,25 @@ final class RemoteHostWindow: NSWindow {
         stage.layer?.backgroundColor = NSColor.black.cgColor
         content.addSubview(sidebarHost)
         content.addSubview(stage)
-        // Browser pane sits to the right of the stage; width animates 0 ↔ N.
+        // File-explorer pane sits between the stage and the browser pane;
+        // width toggles 0 ↔ N (⌃⌘E / the toolbar's sidebar.right button).
+        fileExplorerModel.execProvider = { [weak self] id, command, timeout in
+            guard let self else { throw ACAppDelegate.GuestExecError.vmNotRunning }
+            return try await self.controller.guestExec(id, command: command, timeout: timeout)
+        }
+        let filePane = FileExplorerPane(
+            model: fileExplorerModel, listModel: controller.listModel,
+            onAutoSetOpen: { [weak self] open in self?.setFilePaneOpen(open) })
+        let fpHost = NSHostingView(rootView: filePane)
+        fpHost.translatesAutoresizingMaskIntoConstraints = false
+        fpHost.clipsToBounds = true   // squish cleanly during open/close
+        // Our width constraint is the ONLY size authority (an NSHostingView
+        // otherwise adds a required min-width that beats the width-0 close).
+        fpHost.sizingOptions = []
+        filePaneHost = fpHost
+        content.addSubview(fpHost)
+        filePaneWidthConstraint = fpHost.widthAnchor.constraint(equalToConstant: 0)
+        // Browser pane sits to the right of the file pane; width animates 0 ↔ N.
         let browser = NSView()
         browser.translatesAutoresizingMaskIntoConstraints = false
         browser.wantsLayer = true
@@ -531,9 +922,13 @@ final class RemoteHostWindow: NSWindow {
             sidebarHost.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             sidebarHost.widthAnchor.constraint(equalToConstant: 240),
             stage.leadingAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
-            stage.trailingAnchor.constraint(equalTo: browser.leadingAnchor),
+            stage.trailingAnchor.constraint(equalTo: fpHost.leadingAnchor),
             stage.topAnchor.constraint(equalTo: content.topAnchor),
             stage.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            fpHost.trailingAnchor.constraint(equalTo: browser.leadingAnchor),
+            fpHost.topAnchor.constraint(equalTo: content.topAnchor),
+            fpHost.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            filePaneWidthConstraint,
             browser.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             browser.topAnchor.constraint(equalTo: content.topAnchor),
             browser.bottomAnchor.constraint(equalTo: content.bottomAnchor),
@@ -543,6 +938,117 @@ final class RemoteHostWindow: NSWindow {
             statusHost.topAnchor.constraint(equalTo: stage.topAnchor),
             statusHost.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
         ])
+    }
+
+    /// The titlebar toolbar: IP pill + per-selected-VM controls, mirroring the
+    /// local window's `UnifiedToolbarBar` (missing decorations issue).
+    private func buildToolbar() {
+        let bar = RemoteToolbarBar(
+            model: controller.listModel,
+            controller: controller,
+            onFiles: { [weak self] id in self?.openFileBrowser(id) },
+            onDocker: { [weak self] id in self?.showDockerDashboard(id) },
+            onReboot: { [weak self] id in self?.confirmReboot(id) },
+            onToggleBrowser: { [weak self] in self?.toggleBrowser(for: nil) },
+            onToggleFilePane: { [weak self] in self?.toggleFilePane() },
+            onToggleTunnel: { [weak self] in
+                guard let c = self?.controller else { return }
+                c.setTunnelEnabled(c.tunnelState == "off" || c.tunnelState == "failed")
+            })
+        let delegate = RemoteToolbarDelegate(rootView: AnyView(bar))
+        toolbarDelegate = delegate
+        let tb = NSToolbar(identifier: "io.bromure.ac.remote")
+        tb.delegate = delegate
+        tb.displayMode = .iconOnly
+        tb.showsBaselineSeparator = false
+        tb.allowsUserCustomization = false
+        toolbarStyle = .unified
+        toolbar = tb
+    }
+
+    // MARK: File-explorer pane + file-browser windows
+
+    func toggleFilePane() { setFilePaneOpen(!filePaneOpen) }
+
+    private func setFilePaneOpen(_ open: Bool) {
+        guard open != filePaneOpen else { return }
+        filePaneOpen = open
+        controller.listModel.filePaneOpen = open
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            ctx.allowsImplicitAnimation = true
+            filePaneWidthConstraint.animator().constant = open ? 340 : 0
+            contentView?.layoutSubtreeIfNeeded()
+        }
+    }
+
+    /// Finder-like browser over the remote VM's filesystem. Every location is
+    /// guest-backed (the workspace's shared folders are host dirs on the
+    /// REMOTE Mac), so browsing and drag-in/drag-out transfer ride the
+    /// `/vms/{id}/file` op channel over the tunnel.
+    private func openFileBrowser(_ id: Profile.ID) {
+        if let win = fileBrowserWindows[id] {
+            win.makeKeyAndOrderFront(nil)
+            return
+        }
+        guard let profile = controller.profile(for: id) else { return }
+        var locations: [FileBrowserLocation] = [
+            FileBrowserLocation(
+                name: NSLocalizedString("Home", comment: ""),
+                backing: .guest,
+                guestPath: "/home/ubuntu",
+                symbol: "house")
+        ]
+        for path in (controller.mounts[id] ?? []).prefix(8) {
+            let base = (path as NSString).lastPathComponent
+            locations.append(FileBrowserLocation(
+                name: base,
+                backing: .guest,
+                guestPath: "/home/ubuntu/\(base)",
+                symbol: "folder"))
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 480),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false)
+        win.title = String(
+            format: NSLocalizedString("Files — %@ (%@)", comment: "remote file browser title"),
+            profile.name, controller.host.name)
+        win.center()
+        win.animationBehavior = .none
+        win.isReleasedWhenClosed = false
+        let c = controller
+        win.contentView = NSHostingView(rootView: FileBrowserView(
+            model: FileBrowserModel(
+                locations: locations,
+                cacheKey: "\(c.host.id.uuidString)-\(id.uuidString)",
+                guestOp: { op in
+                    try await c.guestFileOp(id, op: op)
+                })))
+        win.makeKeyAndOrderFront(nil)
+        fileBrowserWindows[id] = win
+    }
+
+    /// Local soft/hard reboot chooser (the decision belongs to the interacting
+    /// client), then the verb rides the tunnel.
+    private func confirmReboot(_ id: Profile.ID) {
+        let name = controller.profile(for: id)?.name ?? "workspace"
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("Reboot “%@”?", comment: ""), name)
+        alert.informativeText = NSLocalizedString(
+            "Soft reboot asks the guest to shut down cleanly. Hard reboot tears the VM down immediately.",
+            comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Soft Reboot", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Hard Reboot", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            controller.restartWorkspace(id)
+        case .alertSecondButtonReturn:
+            controller.hardRebootWorkspace(id)
+        default:
+            break
+        }
     }
 
     // MARK: Browser pane
@@ -636,8 +1142,8 @@ final class RemoteHostWindow: NSWindow {
             onNewTab: { [weak self] id in self?.controller.newTab(id) },
             onCloseTab: { [weak self] id, idx in self?.controller.closeTab(id, index: idx) },
             onTabAction: { [weak self] id, idx, action in self?.controller.worktree(id, index: idx, action: action) },
-            onSelectDocker: { _ in },
-            onOpenContainer: { _, _ in },
+            onSelectDocker: { [weak self] id in self?.showDockerDashboard(id) },
+            onOpenContainer: { [weak self] id, cid in self?.showDockerDashboard(id, container: cid) },
             onDetachVM: { _ in },
             onCloseVM: { _ in },
             onStart: { [weak self] id in self?.controller.startWorkspace(id) },
@@ -663,6 +1169,8 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.gridSelected = true
         controller.listModel.selectedID = nil
         unmountTerminal()
+        clearVMDashboard()
+        clearDockerDashboard()
         if gridView == nil {
             let ds = GridStageView.DataSource(
                 profile: { [weak self] pid in self?.controller.profile(for: pid) },
@@ -683,8 +1191,20 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.selectedID = id
         // Detach the grid so its surfaces don't fight for the stage.
         gridView?.removeFromSuperview()
-        let idx = window ?? controller.tabsModel(for: id)?.activeTab?.index ?? 0
-        mountTerminal(for: id, window: idx)
+        clearDockerDashboard()
+        // Same gate as the local window's `selectRow`: an off/suspended VM has
+        // no terminal to attach — mounting one anyway left the login greeting
+        // ("Last login: …") on screen while the attach pump polled a VM that
+        // doesn't exist. Show the VM dashboard instead, exactly like local.
+        switch controller.runState(for: id) {
+        case .running, .booting:
+            clearVMDashboard()
+            let idx = window ?? controller.tabsModel(for: id)?.activeTab?.index ?? 0
+            mountTerminal(for: id, window: idx)
+        case .off, .suspended:
+            unmountTerminal()
+            showVMDashboard(id)
+        }
         // The pane shows one workspace's browser at a time: show this one's if
         // it's open, else collapse (keeping the other's VM resumable).
         if browserOpen.contains(id) {
@@ -695,6 +1215,96 @@ final class RemoteHostWindow: NSWindow {
             browserWidthConstraint.constant = 0
         }
         if autoBrowser { setBrowserOpen(id, true) }
+    }
+
+    // MARK: VM dashboard (off/suspended workspaces, mirrors the local stage)
+
+    private func showVMDashboard(_ id: Profile.ID) {
+        guard let profile = controller.profile(for: id) else { return }
+        let state = controller.runState(for: id)
+        if shownDashboard?.id == id, shownDashboard?.state == state,
+           dashboardHost?.superview === stage { return }
+        let spec = controller.specs[id] ?? .init()
+        let c = controller
+        let view = VMDashboardView(
+            model: c.tabsModel(for: id),
+            profile: profile,
+            accentHex: profile.color.hexInUI,
+            state: state,
+            vCPUs: spec.cpus,
+            diskAllocatedBytes: spec.diskAllocatedBytes,
+            diskCapacityBytes: spec.diskCapacityBytes,
+            startedAt: c.bootTimes[id],
+            onNewTerminal: { c.newTab(id) },
+            onSuspend:     { c.suspendWorkspace(id) },
+            onReboot:      { c.restartWorkspace(id) },
+            onShutdown:    { c.shutdownWorkspace(id) },
+            onResume:      { c.startWorkspace(id) })
+        let host = NSHostingView(rootView: view)
+        host.translatesAutoresizingMaskIntoConstraints = false
+        dashboardHost = host
+        shownDashboard = (id, state)
+        mount(host)
+    }
+
+    private func clearVMDashboard() {
+        dashboardHost?.removeFromSuperview()
+        dashboardHost = nil
+        shownDashboard = nil
+    }
+
+    // MARK: Docker dashboard (mirrors the local overlay)
+
+    /// Docker dashboard for a running remote workspace. Data comes from the
+    /// mirrored `TabsModel` (containers/images ride `/state`); actions ride
+    /// `POST /vms/{id}/docker`. Opening turns on the guest's gated stats
+    /// polling for the duration, like the local dashboard.
+    func showDockerDashboard(_ id: Profile.ID, container: String? = nil) {
+        guard let model = controller.tabsModel(for: id) else { return }   // needs a running VM
+        controller.listModel.gridSelected = false
+        controller.listModel.selectedID = id
+        gridView?.removeFromSuperview()
+        unmountTerminal()
+        clearVMDashboard()
+        if let prev = dockerShownFor, prev != id {
+            controller.setDockerWatch(prev, on: false)
+        }
+        controller.listModel.dockerSelectedID = id
+        let c = controller
+        let view = DockerDashboardView(
+            model: model,
+            accentHex: c.profile(for: id)?.color.hexInUI ?? "#3B82F6",
+            onRun: { spec in
+                c.dockerAction(id, [
+                    "action": "run", "image": spec.image, "name": spec.name,
+                    "ports": spec.ports, "env": spec.env, "volumes": spec.volumes,
+                    "inheritEnv": spec.inheritEnv, "inheritProxy": spec.inheritProxy,
+                    "interactive": spec.interactive,
+                ])
+            },
+            onStart:  { cid in c.dockerAction(id, ["action": "start", "container": cid]) },
+            onStop:   { cid in c.dockerAction(id, ["action": "stop", "container": cid]) },
+            onRemove: { cid in c.dockerAction(id, ["action": "remove", "container": cid]) },
+            onAttach: { cid, shell in c.dockerAction(id, ["action": "attach", "container": cid, "shell": shell]) },
+            onLogs:   { cid in c.dockerAction(id, ["action": "logs", "container": cid]) },
+            onInstallBinfmt:   { c.dockerAction(id, ["action": "binfmt"]) },
+            onUninstallBinfmt: { c.dockerAction(id, ["action": "binfmt-off"]) },
+            initialContainerID: container)
+        let host = NSHostingView(rootView: view)
+        host.translatesAutoresizingMaskIntoConstraints = false
+        dockerHost = host
+        dockerShownFor = id
+        mount(host)
+        controller.setDockerWatch(id, on: true)
+    }
+
+    private func clearDockerDashboard() {
+        guard let id = dockerShownFor else { return }
+        controller.setDockerWatch(id, on: false)
+        dockerShownFor = nil
+        controller.listModel.dockerSelectedID = nil
+        dockerHost?.removeFromSuperview()
+        dockerHost = nil
     }
 
     private func mountTerminal(for id: Profile.ID, window idx: Int) {
@@ -757,6 +1367,17 @@ final class RemoteHostWindow: NSWindow {
         if let id = shownWorkspace, shownWindowIndex == nil {
             let idx = controller.tabsModel(for: id)?.activeTab?.index ?? 0
             mountTerminal(for: id, window: idx)
+        }
+        // Follow run-state transitions on the shown stage: an off VM's
+        // dashboard becomes a terminal when it comes up (e.g. after Start),
+        // and a stopped VM's terminal becomes the dashboard.
+        if let d = shownDashboard, controller.runState(for: d.id) != d.state {
+            showWorkspace(d.id)
+        } else if let id = shownWorkspace {
+            switch controller.runState(for: id) {
+            case .off, .suspended: showWorkspace(id)
+            default: break
+            }
         }
         // Debug: dump the rendered window to a PNG (works offscreen, so the
         // two-instance test can verify 1:1 even when the display is asleep).

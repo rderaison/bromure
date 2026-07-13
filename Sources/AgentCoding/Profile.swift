@@ -2026,6 +2026,17 @@ struct ProfileSecrets: Codable {
     var mcpBearerTokens: [String: String]?
     /// MCP OAuth state blobs. Keyed by MCPServer.id.uuidString.
     var mcpOAuthStates: [String: MCPOAuthState]?
+    /// MCP server environment-variable values (commonly API keys).
+    /// Keyed by "<serverID>/<variableID>". Optional for forward-compat.
+    var mcpEnvironmentValues: [String: String]?
+    /// MCP raw-JSON config blobs (free-form — can embed OAuth blocks and
+    /// tokens, so treated as secret wholesale). Keyed by MCPServer.id.
+    var mcpRawJSONs: [String: String]?
+    /// Profile-level environment-variable values. Documented as non-secret,
+    /// but nothing stops a user from putting a key in one — so they're
+    /// write-only over the remote export path like everything else here.
+    /// Keyed by EnvironmentVariable.id.uuidString.
+    var environmentVariableValues: [String: String]?
 
     var isEmpty: Bool {
         (apiKey?.isEmpty ?? true)
@@ -2042,6 +2053,9 @@ struct ProfileSecrets: Codable {
             && defaultCodexTokens == nil
             && (mcpBearerTokens?.isEmpty ?? true)
             && (mcpOAuthStates?.isEmpty ?? true)
+            && (mcpEnvironmentValues?.isEmpty ?? true)
+            && (mcpRawJSONs?.isEmpty ?? true)
+            && (environmentVariableValues?.isEmpty ?? true)
     }
 
     /// Pull every secret string out of the profile, replacing them
@@ -2135,6 +2149,22 @@ struct ProfileSecrets: Codable {
                 s.mcpOAuthStates?[server.id.uuidString] = oauth
                 profile.mcpServers[i].oauthState = nil
             }
+            for (j, env) in server.environment.enumerated() where !env.value.isEmpty {
+                if s.mcpEnvironmentValues == nil { s.mcpEnvironmentValues = [:] }
+                s.mcpEnvironmentValues?["\(server.id.uuidString)/\(env.id.uuidString)"] = env.value
+                profile.mcpServers[i].environment[j].value = ""
+            }
+            if !server.rawJSON.isEmpty {
+                if s.mcpRawJSONs == nil { s.mcpRawJSONs = [:] }
+                s.mcpRawJSONs?[server.id.uuidString] = server.rawJSON
+                profile.mcpServers[i].rawJSON = ""
+            }
+        }
+
+        for (i, env) in profile.environmentVariables.enumerated() where !env.value.isEmpty {
+            if s.environmentVariableValues == nil { s.environmentVariableValues = [:] }
+            s.environmentVariableValues?[env.id.uuidString] = env.value
+            profile.environmentVariables[i].value = ""
         }
 
         return s
@@ -2199,6 +2229,29 @@ struct ProfileSecrets: Codable {
                 }
             }
         }
+        if let map = mcpEnvironmentValues {
+            for (i, server) in profile.mcpServers.enumerated() {
+                for (j, env) in server.environment.enumerated() {
+                    if let v = map["\(server.id.uuidString)/\(env.id.uuidString)"] {
+                        profile.mcpServers[i].environment[j].value = v
+                    }
+                }
+            }
+        }
+        if let map = mcpRawJSONs {
+            for (i, server) in profile.mcpServers.enumerated() {
+                if let raw = map[server.id.uuidString] {
+                    profile.mcpServers[i].rawJSON = raw
+                }
+            }
+        }
+        if let map = environmentVariableValues {
+            for (i, env) in profile.environmentVariables.enumerated() {
+                if let v = map[env.id.uuidString] {
+                    profile.environmentVariables[i].value = v
+                }
+            }
+        }
     }
 
     /// Overlay the non-empty secrets from `newer` on top of `self`.
@@ -2232,6 +2285,15 @@ struct ProfileSecrets: Codable {
         }
         if let m = newer.mcpOAuthStates {
             mcpOAuthStates = (mcpOAuthStates ?? [:]).merging(m) { _, n in n }
+        }
+        if let m = newer.mcpEnvironmentValues {
+            mcpEnvironmentValues = (mcpEnvironmentValues ?? [:]).merging(m) { _, n in n }
+        }
+        if let m = newer.mcpRawJSONs {
+            mcpRawJSONs = (mcpRawJSONs ?? [:]).merging(m) { _, n in n }
+        }
+        if let m = newer.environmentVariableValues {
+            environmentVariableValues = (environmentVariableValues ?? [:]).merging(m) { _, n in n }
         }
     }
 }

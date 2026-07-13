@@ -39,6 +39,8 @@ struct RemoteHost: Codable, Identifiable, Equatable {
     /// TOFU-pinned SSH host-key fingerprint (`SHA256:…`). Set on first trust;
     /// a mismatch on a later connect is flagged as a possible MITM.
     var pinnedHostKey: String? = nil
+    /// Last successful connect — orders the "Recent Servers" list.
+    var lastConnected: Date? = nil
 
     var connectLabel: String { "\(user)@\(address):\(port)" }
 }

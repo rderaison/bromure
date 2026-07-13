@@ -2603,8 +2603,9 @@ struct UnifiedToolbarBar: View {
     }
 }
 
-/// Monospace IP pill in the toolbar; click to copy.
-private struct ToolbarIP: View {
+/// Monospace IP pill in the toolbar; click to copy. (internal — the fat-client
+/// remote window's toolbar reuses it.)
+struct ToolbarIP: View {
     let ip: String
     @State private var copied = false
     var body: some View {
@@ -2627,7 +2628,8 @@ private struct ToolbarIP: View {
     }
 }
 
-private struct HeaderIcon: View {
+/// (internal — the fat-client remote window's toolbar reuses it.)
+struct HeaderIcon: View {
     let system: String
     let help: String
     /// Tinted accent while the surface the button controls is showing.

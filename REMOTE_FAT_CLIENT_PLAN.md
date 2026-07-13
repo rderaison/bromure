@@ -31,6 +31,41 @@ mirroring 1:1 over the tunnel. **Auth UX** (host-key TOFU + password fallback) a
 **Phase 4 network tunnel** are also implemented + verified; the utun/browser-pane
 integration and fleet handling remain.
 
+### Fit-and-finish pass (buglets, July 2026)
+
+- **Off VMs get the dashboard, not a login shell.** `RemoteHostWindow.showWorkspace`
+  now gates on the mirrored run state like the local `selectRow`: off/suspended
+  workspaces mount `VMDashboardView` (spec + Start/Resume), running ones the
+  terminal; the stage follows state transitions live. (Previously an off VM
+  mounted a terminal whose attach pump idled, leaving "Last login: …" on screen.)
+- **Window decorations.** The remote window has a titlebar toolbar (IP pill,
+  Files, Docker, Reboot, browser + file-pane toggles, tunnel toggle), the
+  file-explorer pane (⌃⌘E; git tree/diff over `/vms/{id}/exec`), and a per-VM
+  Files window whose drag-in/out transfer rides the new `POST /vms/{id}/file`
+  op bridge.
+- **Docker dashboard is forwarded.** Container/image/binfmt state is mirrored
+  into `RunningSession` and rides `/state`; the remote window mounts the same
+  `DockerDashboardView`, actions go through `POST /vms/{id}/docker` (host-side
+  validation, same outbox verbs), and the gated stats `watch` toggles with the
+  dashboard's visibility.
+- **Decision prompts follow the initiator.** Remote-initiated launches route
+  storage-upgrade / drift-reset / compromise-wipe questions through
+  `PendingPromptBroker` (`/state.pendingPrompts` + `POST /prompts/{id}/answer`)
+  instead of a server-side NSAlert; safe-default fallback on timeout or when no
+  client is polling.
+- **Connect UX.** The connect window shows a Recent Servers list
+  (`RemoteHostStore` was already persisted, just never surfaced); the host-key
+  fingerprint sheet appears only on FIRST contact with an endpoint — a matching
+  saved pin connects silently, a mismatch still warns loudly.
+- **Secrets are write-only remotely.** `ProfileSecrets` now also strips MCP
+  server `environment` values, MCP `rawJSON`, and profile-level env-var values;
+  the AppleScript `get profile json` bridge is scrubbed outside debug builds and
+  `set profile json` blank-keeps.
+- **Tunnel productized.** The per-host toolbar network toggle runs the whole
+  privileged-helper flow (SMAppService register → guided Login Items approval
+  with status polling → auto-start; unregister when the last host disables it).
+  No sudo, no env var (`BROMURE_FATCLIENT_UTUN` remains as a test hook).
+
 ### Phase 4 — network tunnel (implemented + verified)
 
 The reach-the-remote-subnet tunnel works, byte-exact, over SSH:

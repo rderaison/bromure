@@ -623,6 +623,41 @@ final class RunningSession {
     /// Listening sockets from the guest's ports loop, mirrored here so the
     /// `/vms` record (CLI/TUI) can show them even while detached.
     var listeningPorts: [ListeningPort] = []
+    /// Docker state mirrored from the guest's docker loops (like
+    /// `listeningPorts`) so `/state` can feed a fat client's Docker dashboard
+    /// even when no local pane is attached. Stats/arch merge by short id,
+    /// mirroring `SessionPane.applyDockerStats`/`applyDockerArch`.
+    var dockerContainers: [DockerContainer] = []
+    var dockerImages: [DockerImage] = []
+    var dockerBinfmt: [String] = []
+    private var dockerStatsByShortID: [String: (cpu: String, mem: String)] = [:]
+    private var dockerArchByShortID: [String: String] = [:]
+
+    func mirrorDockerList(_ containers: [DockerContainer]) {
+        dockerContainers = containers.map { c in
+            var c = c
+            if let s = dockerStatsByShortID[c.shortID] { c.cpuPerc = s.cpu; c.memUsage = s.mem }
+            if let a = dockerArchByShortID[c.shortID] { c.arch = a }
+            return c
+        }
+    }
+    func mirrorDockerStats(_ stats: [(id: String, cpu: String, mem: String)]) {
+        dockerStatsByShortID = Dictionary(stats.map { (String($0.id.prefix(12)), (cpu: $0.cpu, mem: $0.mem)) },
+                                          uniquingKeysWith: { a, _ in a })
+        for i in dockerContainers.indices {
+            if let s = dockerStatsByShortID[dockerContainers[i].shortID] {
+                dockerContainers[i].cpuPerc = s.cpu
+                dockerContainers[i].memUsage = s.mem
+            }
+        }
+    }
+    func mirrorDockerArch(_ list: [(id: String, arch: String)]) {
+        dockerArchByShortID = Dictionary(list.map { (String($0.id.prefix(12)), $0.arch) },
+                                         uniquingKeysWith: { a, _ in a })
+        for i in dockerContainers.indices {
+            dockerContainers[i].arch = dockerArchByShortID[dockerContainers[i].shortID] ?? ""
+        }
+    }
     /// True once an explicit stop is in flight, so the VM-stopped callback
     /// doesn't double-run teardown.
     var stopping: Bool = false
@@ -2364,6 +2399,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return true
             }
         }
+        server.onGuestFileOp = { [weak self] idOrName, op, timeout in
+            guard let self else { return ["error": "unavailable"] }
+            return await self.automationGuestFileOp(idOrName: idOrName, op: op, timeout: timeout)
+        }
+        server.onDockerCommand = { [weak self] idOrName, doc in
+            MainActor.assumeIsolated {
+                self?.automationDockerCommand(idOrName: idOrName, doc: doc)
+                    ?? ["ok": false, "error": "unavailable"]
+            }
+        }
+        server.onListPendingPrompts = {
+            MainActor.assumeIsolated { PendingPromptBroker.shared.pendingList() }
+        }
+        server.onAnswerPrompt = { id, choice in
+            MainActor.assumeIsolated { PendingPromptBroker.shared.answer(id: id, choice: choice) }
+        }
     }
 
     /// MITM trace records for `trace …`, optionally filtered to one profile.
@@ -2627,6 +2678,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     ["proto": $0.proto, "addr": $0.addr, "port": $0.port,
                      "process": $0.process] as [String: Any]
                 },
+                // Docker state for the fat-client dashboard (mirrored like ports).
+                "dockerContainers": s.dockerContainers.map {
+                    ["id": $0.id, "name": $0.name, "image": $0.image,
+                     "status": $0.status, "state": $0.state, "ports": $0.ports,
+                     "runningFor": $0.runningFor, "cpuPerc": $0.cpuPerc,
+                     "memUsage": $0.memUsage, "arch": $0.arch] as [String: Any]
+                },
+                "dockerImages": s.dockerImages.map {
+                    ["id": $0.id, "repository": $0.repository, "tag": $0.tag,
+                     "size": $0.size, "created": $0.created] as [String: Any]
+                },
+                "dockerBinfmt": s.dockerBinfmt,
             ]
         }
     }
@@ -2645,6 +2708,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             case .suspended: state = "suspended"
             case .off:       state = "off"
             }
+            // Spec numbers the fat client's VM dashboard needs even for an
+            // off/suspended workspace (no `vms` entry to read them from).
+            let dash = vmDashboardData(for: p.id)
             return [
                 "id": p.id.uuidString,
                 "name": p.name,
@@ -2654,6 +2720,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "authMode": p.authMode.rawValue,
                 "state": state,
                 "compromised": SessionDisk.isCompromised(profile: p, store: store),
+                "memoryGB": p.memoryGB,
+                "cpuCount": UbuntuSandboxVM.runtimeCPUs,
+                "diskAllocatedBytes": dash.diskAllocated,
+                "diskCapacityBytes": dash.diskCapacity,
             ]
         }
     }
@@ -2757,7 +2827,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if runningSessions[id] == nil { break }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        launch(profile, detached: !wasAttached)
+        launch(profile, detached: !wasAttached, remoteInitiated: true)
         var up = false
         for _ in 0..<600 {   // first boots can take a while
             if runningSessions[id] != nil { up = true; break }
@@ -2886,7 +2956,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         //    detaches it instead.
         let detach = spec["detach"] as? Bool == true
         if runningSessions[saved.id] == nil {
-            launch(saved, detached: detach)
+            launch(saved, detached: detach, remoteInitiated: true)
         } else if detach {
             detachSession(saved.id)
         }
@@ -5550,9 +5620,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Boot (or reveal) a profile's session. When `detached` is true the VM
     /// boots window-less — no pane is hosted, the session runs headless from the
     /// start (the `vm run -d` / login-boot / remote-menu path), reattachable
-    /// later.
+    /// later. `remoteInitiated` marks a launch driven over the control socket
+    /// by a fat client: its decision prompts (wipe / drift / storage upgrade)
+    /// are routed to that client via `PendingPromptBroker` instead of a local
+    /// NSAlert — the interface that interacted last gets the question.
     func launch(_ profile: Profile, detached: Bool = false,
-                freshBootFallback: Bool = true) {
+                freshBootFallback: Bool = true, remoteInitiated: Bool = false) {
         // Already shown → just focus + select it (unless we were asked to detach,
         // in which case drop the window and leave the VM running headless).
         if isAttached(profile.id) {
@@ -5571,16 +5644,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // downloading — the agent would come up pointed at an engine that
         // can't load yet, producing a wall of connection errors.
         if let dl = downloadingModel(for: profile) {
-            let alert = NSAlert()
-            alert.messageText = NSLocalizedString("Model still downloading", comment: "")
-            alert.informativeText = String(
-                format: NSLocalizedString(
-                    "“%@” is still downloading. Wait for it to finish, then launch “%@”.",
-                    comment: ""),
-                dl.name, profile.name)
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
-            alert.runModal()
+            // Remote-initiated: the client sees the refusal in its own UI
+            // (the create call reports it); never modal-alert the server.
+            if !remoteInitiated {
+                let alert = NSAlert()
+                alert.messageText = NSLocalizedString("Model still downloading", comment: "")
+                alert.informativeText = String(
+                    format: NSLocalizedString(
+                        "“%@” is still downloading. Wait for it to finish, then launch “%@”.",
+                        comment: ""),
+                    dl.name, profile.name)
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+                alert.runModal()
+            }
             return
         }
 
@@ -5592,7 +5669,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // and may legitimately hold the user's source); the alert
         // surfaces this so the user knows where to look next.
         if SessionDisk.isCompromised(profile: profile, store: store) {
-            if !confirmWipeAndProceed(profile: profile) {
+            if !confirmWipeAndProceed(profile: profile, remoteInitiated: remoteInitiated) {
                 return
             }
             // Fall through — disk + home are gone, flag is cleared,
@@ -5607,17 +5684,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
            let recorded = profile.baseImageVersionAtClone,
            let current = currentBaseVersion,
            recorded != current {
-            let alert = NSAlert()
-            alert.messageText = "Base image updated since this workspace was created."
-            alert.informativeText = "This workspace is on base v\(recorded); the current base is v\(current). Reset the workspace disk to pick up the new base? (Resetting wipes anything you've installed inside the VM. Your project folder is untouched.)"
-            alert.addButton(withTitle: "Reset and launch")
-            alert.addButton(withTitle: "Launch as-is")
-            alert.addButton(withTitle: "Cancel")
-            switch alert.runModal() {
-            case .alertFirstButtonReturn:
+            let title = "Base image updated since this workspace was created."
+            let message = "This workspace is on base v\(recorded); the current base is v\(current). Reset the workspace disk to pick up the new base? (Resetting wipes anything you've installed inside the VM. Your project folder is untouched.)"
+            let choice: Int
+            if remoteInitiated {
+                choice = PendingPromptBroker.shared.ask(
+                    profileID: profile.id, title: title, message: message,
+                    buttons: ["Reset and launch", "Launch as-is", "Cancel"],
+                    fallback: 2)
+            } else {
+                let alert = NSAlert()
+                alert.messageText = title
+                alert.informativeText = message
+                alert.addButton(withTitle: "Reset and launch")
+                alert.addButton(withTitle: "Launch as-is")
+                alert.addButton(withTitle: "Cancel")
+                switch alert.runModal() {
+                case .alertFirstButtonReturn: choice = 0
+                case .alertThirdButtonReturn: choice = 2
+                default: choice = 1
+                }
+            }
+            switch choice {
+            case 0:
                 try? store.resetDisk(for: profile)
                 emitDiskResetEvent(profile: profile, reason: "base_image_drift")
-            case .alertThirdButtonReturn:
+            case 2:
                 return
             default:
                 break
@@ -5638,7 +5730,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Headless (CLI/remote) launches never modal-prompt; the workspace
         // keeps its current storage and the offer waits for a GUI launch.
         if profile.homeModel == .virtiofs && !headless {
-            if promptHomeStorageUpgrade(profile: profile) {
+            if promptHomeStorageUpgrade(profile: profile, remoteInitiated: remoteInitiated) {
                 migrateHomeThisBoot = true
                 // The dual-attach migrate config can't restore a snapshot
                 // saved against the old config — boot fresh (the dialog
@@ -6041,11 +6133,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Home-storage upgrade offer for a legacy (virtiofs-home) workspace,
     /// shown on every GUI launch until the user accepts. Returns true when
-    /// the user picked "Upgrade Now".
+    /// the user picked "Upgrade Now". Remote-initiated launches route the
+    /// question to the fat client that asked (never a server-side modal).
     @MainActor
-    private func promptHomeStorageUpgrade(profile: Profile) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = String(
+    private func promptHomeStorageUpgrade(profile: Profile, remoteInitiated: Bool = false) -> Bool {
+        let title = String(
             format: NSLocalizedString("Upgrade “%@”’s home storage?", comment: ""),
             profile.name)
         var info = NSLocalizedString(
@@ -6061,6 +6153,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         info += "\n\n" + NSLocalizedString(
             "If you choose Not Now, Bromure will ask again the next time this workspace starts.",
             comment: "")
+        if remoteInitiated {
+            return PendingPromptBroker.shared.ask(
+                profileID: profile.id, title: title, message: info,
+                buttons: [NSLocalizedString("Upgrade Now", comment: ""),
+                          NSLocalizedString("Not Now", comment: "")],
+                fallback: 1) == 0
+        }
+        let alert = NSAlert()
+        alert.messageText = title
         alert.informativeText = info
         alert.alertStyle = .informational
         alert.addButton(withTitle: NSLocalizedString("Upgrade Now", comment: ""))
@@ -6808,8 +6909,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// via `bash -c` — so values can't break out of their argument. Newlines are
     /// stripped (the command travels as one line in the cmd file).
     func requestDockerRun(spec: DockerRunSpec, in pane: SessionPane) {
+        guard let verb = Self.dockerRunVerb(spec: spec) else { return }
+        sendCommand(verb, in: pane)
+    }
+
+    /// Assemble the `docker-run …` outbox verb for a run spec (shared by the
+    /// local dashboard and the fat-client `/vms/{id}/docker` route). nil when
+    /// the image is missing.
+    static func dockerRunVerb(spec: DockerRunSpec) -> String? {
         let image = spec.image.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !image.isEmpty else { return }
+        guard !image.isEmpty else { return nil }
         func q(_ s: String) -> String {
             "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
         }
@@ -6846,7 +6955,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // container name interactive tabs nest under ("-" otherwise); <image> is
         // the bare ref the guest pre-pulls (with progress) for detached runs.
         let tag = (spec.interactive && !name.isEmpty) ? name : "-"
-        sendCommand("docker-run \(mode) \(spec.interactive ? "1" : "0") \(tag) \(image) \(cmd)", in: pane)
+        return "docker-run \(mode) \(spec.interactive ? "1" : "0") \(tag) \(image) \(cmd)"
     }
 
     /// Toggle the guest's expensive dashboard polling (CPU/mem + images) by
@@ -6875,22 +6984,97 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         try? (command + "\n").write(to: file, atomically: true, encoding: .utf8)
     }
 
+    /// Window-independent outbox verb for a profile's running session — the
+    /// counterpart of `sendCommand(_:in:)` for remote (fat-client) actions,
+    /// where no local pane exists.
+    private func sendGuestCommand(_ command: String, profileID: Profile.ID) {
+        guard let outbox = runningSessions[profileID]?.sandbox.sessionDisk?.outboxDirectory else { return }
+        let file = outbox.appendingPathComponent("cmd-\(UUID().uuidString).txt")
+        try? (command + "\n").write(to: file, atomically: true, encoding: .utf8)
+    }
+
+    /// `setDockerWatch(_:in:)` for a window-less (remote-driven) session.
+    /// Same atomic-write rationale as the pane variant above.
+    func setDockerWatch(_ on: Bool, profileID: Profile.ID) {
+        guard let outbox = runningSessions[profileID]?.sandbox.sessionDisk?.outboxDirectory else { return }
+        let marker = outbox.appendingPathComponent(".docker-watch")
+        if on {
+            try? Data().write(to: marker, options: .atomic)
+        } else {
+            try? FileManager.default.removeItem(at: marker)
+        }
+    }
+
+    /// Handle a fat-client `POST /vms/{id}/docker` action: validate host-side
+    /// exactly like the local dashboard's request* methods, then send the same
+    /// outbox verb the GUI would.
+    @MainActor func automationDockerCommand(idOrName: String, doc: [String: Any]) -> [String: Any] {
+        guard let id = resolveRunningSessionID(idOrName), runningSessions[id] != nil else {
+            return ["ok": false, "error": "VM not running: \(idOrName)"]
+        }
+        let action = (doc["action"] as? String) ?? ""
+        switch action {
+        case "start", "stop", "remove", "logs":
+            guard let cid = sanitizedDockerID(doc["container"] as? String ?? "") else {
+                return ["ok": false, "error": "bad container id"]
+            }
+            sendGuestCommand("docker-\(action) \(cid)", profileID: id)
+        case "attach":
+            guard let cid = sanitizedDockerID(doc["container"] as? String ?? "") else {
+                return ["ok": false, "error": "bad container id"]
+            }
+            let allowed = CharacterSet(charactersIn:
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.")
+            let shell = (doc["shell"] as? String ?? "sh").trimmingCharacters(in: .whitespaces)
+            let safe = !shell.isEmpty && shell.unicodeScalars.allSatisfy(allowed.contains) ? shell : "sh"
+            sendGuestCommand("docker-attach \(cid) \(safe)", profileID: id)
+        case "binfmt":
+            sendGuestCommand("docker-binfmt", profileID: id)
+        case "binfmt-off":
+            sendGuestCommand("docker-binfmt-off", profileID: id)
+        case "run":
+            var spec = DockerRunSpec(image: doc["image"] as? String ?? "")
+            spec.name = doc["name"] as? String ?? ""
+            spec.ports = doc["ports"] as? [String] ?? []
+            spec.env = doc["env"] as? [String] ?? []
+            spec.volumes = doc["volumes"] as? [String] ?? []
+            spec.inheritEnv = doc["inheritEnv"] as? Bool ?? false
+            spec.inheritProxy = doc["inheritProxy"] as? Bool ?? false
+            spec.interactive = doc["interactive"] as? Bool ?? false
+            guard let verb = Self.dockerRunVerb(spec: spec) else {
+                return ["ok": false, "error": "missing image"]
+            }
+            sendGuestCommand(verb, profileID: id)
+        case "watch":
+            setDockerWatch((doc["on"] as? Bool) ?? false, profileID: id)
+        default:
+            return ["ok": false, "error": "unknown docker action: \(action)"]
+        }
+        return ["ok": true]
+    }
+
+    /// Handle a fat-client `POST /vms/{id}/file` op — the remote file browser's
+    /// data plane, bridged to the same vsock `{"file": …}` channel the local
+    /// one uses.
+    @MainActor func automationGuestFileOp(idOrName: String, op: [String: Any],
+                                          timeout: Int) async -> [String: Any] {
+        guard let id = resolveRunningSessionID(idOrName) else {
+            return ["error": "VM not running: \(idOrName)"]
+        }
+        do {
+            return try await guestFileOp(profileID: id, op: op, timeout: timeout)
+        } catch {
+            return ["error": String(describing: error)]
+        }
+    }
+
     /// Confirm + execute the wipe of a compromised profile. Returns
     /// true if the user accepted and the wipe ran, false on cancel.
     /// On true, the caller proceeds with the regular launch path —
     /// the disk + home no longer exist, so it'll mint fresh ones.
     @MainActor
-    private func confirmWipeAndProceed(profile: Profile) -> Bool {
-        let alert = NSAlert()
-        alert.alertStyle = .critical
-        if let symbol = NSImage(
-            systemSymbolName: "exclamationmark.octagon.fill",
-            accessibilityDescription: "Compromised VM warning") {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 64, weight: .bold)
-                .applying(.init(paletteColors: [.systemRed]))
-            alert.icon = symbol.withSymbolConfiguration(cfg)
-        }
-        alert.messageText = String(
+    private func confirmWipeAndProceed(profile: Profile, remoteInitiated: Bool = false) -> Bool {
+        let title = String(
             format: NSLocalizedString("⛔ “%@” is marked as compromised", comment: ""),
             profile.name)
         var info = NSLocalizedString(
@@ -6916,15 +7100,34 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "Inspect those folders before launching anything that re-uses them.",
                 comment: "")
         }
-        alert.informativeText = info
-        alert.addButton(withTitle: NSLocalizedString("Wipe and Launch", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        // Esc → Cancel. Don't let an enter-press auto-confirm a
-        // destructive wipe; remove the default keyEquivalent on the
-        // first button so the user has to click it explicitly.
-        alert.buttons.first?.keyEquivalent = ""
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        if remoteInitiated {
+            // Fallback (timeout / client gone) is Cancel — never auto-wipe.
+            guard PendingPromptBroker.shared.ask(
+                profileID: profile.id, title: title, message: info,
+                buttons: [NSLocalizedString("Wipe and Launch", comment: ""),
+                          NSLocalizedString("Cancel", comment: "")],
+                fallback: 1) == 0 else { return false }
+        } else {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            if let symbol = NSImage(
+                systemSymbolName: "exclamationmark.octagon.fill",
+                accessibilityDescription: "Compromised VM warning") {
+                let cfg = NSImage.SymbolConfiguration(pointSize: 64, weight: .bold)
+                    .applying(.init(paletteColors: [.systemRed]))
+                alert.icon = symbol.withSymbolConfiguration(cfg)
+            }
+            alert.messageText = title
+            alert.informativeText = info
+            alert.addButton(withTitle: NSLocalizedString("Wipe and Launch", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+            // Esc → Cancel. Don't let an enter-press auto-confirm a
+            // destructive wipe; remove the default keyEquivalent on the
+            // first button so the user has to click it explicitly.
+            alert.buttons.first?.keyEquivalent = ""
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        }
 
         let session = SessionDisk(
             profile: profile, store: store,
@@ -7397,11 +7600,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         sandbox.onDockerList = { [weak self] containers in
             Task { @MainActor in
+                self?.runningSessions[pid]?.mirrorDockerList(containers)
                 self?.pane(for: pid)?.applyDockerList(containers)
             }
         }
         sandbox.onDockerStats = { [weak self] stats in
             Task { @MainActor in
+                self?.runningSessions[pid]?.mirrorDockerStats(stats)
                 self?.pane(for: pid)?.applyDockerStats(stats)
             }
         }
@@ -7427,6 +7632,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         sandbox.onDockerImages = { [weak self] images in
             Task { @MainActor in
+                self?.runningSessions[pid]?.dockerImages = images
                 self?.pane(for: pid)?.applyDockerImages(images)
             }
         }
@@ -7462,11 +7668,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         sandbox.onDockerBinfmt = { [weak self] arches in
             Task { @MainActor in
+                self?.runningSessions[pid]?.dockerBinfmt = arches
                 self?.pane(for: pid)?.applyDockerBinfmt(arches)
             }
         }
         sandbox.onDockerArch = { [weak self] list in
             Task { @MainActor in
+                self?.runningSessions[pid]?.mirrorDockerArch(list)
                 self?.pane(for: pid)?.applyDockerArch(list)
             }
         }

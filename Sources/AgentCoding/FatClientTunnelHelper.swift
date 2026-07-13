@@ -10,6 +10,20 @@ import ServiceManagement
 enum FatClientTunnelInstaller {
     static let plistName = "io.bromure.fatclient-tunnel.plist"
 
+    enum State {
+        case enabled
+        case requiresApproval
+        case notRegistered
+    }
+
+    static var state: State {
+        switch SMAppService.daemon(plistName: plistName).status {
+        case .enabled:          return .enabled
+        case .requiresApproval: return .requiresApproval
+        default:                return .notRegistered
+        }
+    }
+
     /// True once the daemon is registered AND enabled (running). Attempts a
     /// registration if it's never been done; otherwise reports the current state.
     @discardableResult
@@ -29,6 +43,25 @@ enum FatClientTunnelInstaller {
                 FatClientLog.log("tunnel: SMAppService register failed: \(error)")
             }
             return svc.status == .enabled
+        }
+    }
+
+    /// Take the user to the approval toggle (System Settings › General ›
+    /// Login Items) — the one step the app cannot do for them.
+    static func openApprovalSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
+    /// Remove the daemon registration (feature turned off everywhere).
+    static func unregister() {
+        let svc = SMAppService.daemon(plistName: plistName)
+        guard svc.status != .notRegistered else { return }
+        svc.unregister { error in
+            if let error {
+                FatClientLog.log("tunnel: unregister failed: \(error)")
+            } else {
+                FatClientLog.log("tunnel: daemon unregistered")
+            }
         }
     }
 }

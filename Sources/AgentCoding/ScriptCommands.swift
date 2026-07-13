@@ -188,8 +188,11 @@ final class BromureACGetMainWindowIDCommand: NSScriptCommand {
 // Codable used to persist profile.json on disk, which sidesteps the
 // need to bridge 50+ individual fields — the test side composes JSON,
 // the host applies it atomically. Secrets travel verbatim through
-// this bridge (it's a debug surface), so callers should treat the
-// blob as sensitive.
+// this bridge ONLY on debug builds (BROMURE_DEBUG_CLAUDE, which the
+// e2e suite sets to assert round-trips); otherwise the blob is
+// scrubbed via ProfileSecrets.extract — same write-only contract as
+// the control-socket export, so no code path emits cleartext secrets
+// regardless of transport.
 
 @objc(BromureACGetProfileJSONCommand)
 final class BromureACGetProfileJSONCommand: NSScriptCommand {
@@ -198,7 +201,10 @@ final class BromureACGetProfileJSONCommand: NSScriptCommand {
             guard let key = directParameter as? String, !key.isEmpty else {
                 return "error: profile name or UUID required" as Any
             }
-            guard let profile = findProfile(key) else { return "error: profile not found" as Any }
+            guard var profile = findProfile(key) else { return "error: profile not found" as Any }
+            if ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] == nil {
+                _ = ProfileSecrets.extract(stripping: &profile)
+            }
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
@@ -232,6 +238,15 @@ final class BromureACSetProfileJSONCommand: NSScriptCommand {
                 // rebind the profile to a different identity (which would
                 // orphan the on-disk session disk + meta share).
                 incoming.id = existing.id
+                // Blank-keep: a blob round-tripped through the (scrubbed)
+                // get bridge carries empty secret fields — merge the stored
+                // secrets underneath so get→edit→set can't wipe them.
+                // Values the caller actually supplied still win.
+                var existingCopy = existing
+                var merged = ProfileSecrets.extract(stripping: &existingCopy)
+                var incomingCopy = incoming
+                merged.overlay(with: ProfileSecrets.extract(stripping: &incomingCopy))
+                merged.apply(to: &incoming)
                 try d.store.save(incoming)
                 d.profiles = d.store.loadAll()
                 return "ok" as Any

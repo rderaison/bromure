@@ -209,11 +209,28 @@ Remote Host…** (⇧⌘K) — enter address/port/user, copy your client key to 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/state` | One-shot snapshot: version, workspaces, running VMs, grid layout, automations |
-| `GET` | `/workspaces` | All workspaces (running or not) as sidebar rows |
+| `GET` | `/state` | One-shot snapshot: version, workspaces, running VMs (incl. ports + docker), grid layout, automations, pending prompts |
+| `GET` | `/workspaces` | All workspaces (running or not) as sidebar rows (incl. memory/cpu/disk spec for the dashboard) |
 | `GET`/`POST` | `/grid-layout` | Read / replace the grid (StageLayout), last-writer-wins |
 | `GET`/`POST` | `/automations` | List / upsert scheduled automations |
 | `DELETE`/`POST` | `/automations/{id}[/run\|/toggle]` | Delete, run-now, toggle |
+| `POST` | `/vms/{id}/file` | One native `{"file": …}` op in the guest — the remote file browser's transfer plane |
+| `POST` | `/vms/{id}/docker` | A docker dashboard action (`start`/`stop`/`remove`/`logs`/`attach`/`run`/`binfmt`/`binfmt-off`/`watch`), validated host-side, sent as the same outbox verb the local GUI uses |
+| `POST` | `/prompts/{id}/answer` | Answer a pending decision prompt (`{"choice": n}`) surfaced in `/state`'s `pendingPrompts` |
 
 Interactive terminals reuse the existing `POST /vms/{id}/exec` hijacked-stream path;
 the client spawns `__attach-window --remote <hostID> <vm> <window>`.
+
+**Decision prompts follow the initiator.** A workspace launch driven over the
+control socket (`remoteInitiated`) routes its decision prompts — home-storage
+upgrade, base-image drift reset, compromised-VM wipe — through
+`PendingPromptBroker` instead of a server-side `NSAlert`: the fat client sees
+them in `/state`, renders them as local alerts, and answers via
+`POST /prompts/{id}/answer`. Timeouts resolve to the safe (non-destructive)
+choice; if no client is polling `/state`, the safe default applies immediately.
+
+**Secrets are write-only over every remote surface.** `GET /profiles/{id}?full=1`
+runs `ProfileSecrets.extract` (now also covering MCP server `environment`
+values, MCP `rawJSON` blobs, and profile-level environment-variable values);
+writes blank-keep. The AppleScript `get profile json` bridge is scrubbed the
+same way unless `BROMURE_DEBUG_CLAUDE` is set (the e2e suite's round-trip).

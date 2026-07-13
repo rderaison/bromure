@@ -34,6 +34,9 @@ final class RemoteConnectModel {
 
     /// Existing host being (re)connected, if any — carries the pinned key.
     private var host: RemoteHost
+    /// "address:port" the current `host.pinnedHostKey` was pinned for — editing
+    /// the endpoint invalidates a carried pin (it belongs to another server).
+    private var pinnedEndpoint: String?
     private let onConnected: (RemoteHost) -> Void
     private let work = DispatchQueue(label: "io.bromure.connect")
 
@@ -43,9 +46,25 @@ final class RemoteConnectModel {
             host = existing
             name = existing.name; address = existing.address
             port = String(existing.port); user = existing.user
+            pinnedEndpoint = existing.pinnedHostKey != nil ? "\(existing.address):\(existing.port)" : nil
         } else {
             host = RemoteHost(name: "", address: "", user: NSUserName())
         }
+    }
+
+    /// Fill the form from a saved host (recents list) without connecting.
+    func prefill(_ saved: RemoteHost) {
+        host = saved
+        pinnedEndpoint = saved.pinnedHostKey != nil ? "\(saved.address):\(saved.port)" : nil
+        name = saved.name; address = saved.address
+        port = String(saved.port); user = saved.user
+    }
+
+    /// One-click reconnect to a saved host. TOFU already happened, so this
+    /// normally goes straight to key auth with no fingerprint sheet.
+    func connect(to saved: RemoteHost) {
+        prefill(saved)
+        begin()
     }
 
     var clientPublicKey: String { RemoteTransport.ensureClientKey() ?? "" }
@@ -61,10 +80,33 @@ final class RemoteConnectModel {
 
     // MARK: Flow
 
+    /// Adopt the saved record matching the typed endpoint, so reconnecting to a
+    /// known server reuses its identity + TOFU pin (no fingerprint sheet), and
+    /// drop a carried pin when the endpoint was edited to a different server.
+    private func adoptSavedIdentity() {
+        let store = RemoteHostStore.shared
+        if let same = store.hosts.first(where: {
+            $0.address == host.address && $0.port == host.port && $0.user == host.user
+        }) {
+            host.id = same.id
+            host.lastConnected = same.lastConnected
+            if name.trimmingCharacters(in: .whitespaces).isEmpty { host.name = same.name }
+        }
+        // The host key is a property of the endpoint, not of the login user.
+        if let pin = store.hosts.first(where: {
+            $0.address == host.address && $0.port == host.port && $0.pinnedHostKey != nil
+        })?.pinnedHostKey {
+            host.pinnedHostKey = pin
+        } else if pinnedEndpoint != "\(host.address):\(host.port)" {
+            host.pinnedHostKey = nil
+        }
+    }
+
     /// Step 1: reach the host and verify its host key.
     func begin() {
         syncHostFromFields()
         guard !host.address.isEmpty else { return }
+        adoptSavedIdentity()
         phase = .working("Contacting \(host.connectLabel)…")
         let host = self.host
         work.async { [weak self] in
@@ -152,6 +194,7 @@ final class RemoteConnectModel {
     }
 
     private func succeed() {
+        host.lastConnected = Date()
         RemoteHostStore.shared.upsert(host)
         onConnected(host)
     }
@@ -198,6 +241,7 @@ struct RemoteConnectView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Mirror another Mac running Bromure — its grid, workspaces, tabs and automations — over SSH.")
                 .foregroundStyle(.secondary).font(.callout)
+            recents
             field("Name", text: $model.name, placeholder: "e.g. rack mini")
             field("Address", text: $model.address, placeholder: "host or IP")
             HStack {
@@ -213,6 +257,50 @@ struct RemoteConnectView: View {
                     .disabled(model.address.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
+    }
+
+    /// Previously connected servers, most recent first — click to reconnect
+    /// without retyping anything (the saved TOFU pin skips the fingerprint sheet).
+    @ViewBuilder private var recents: some View {
+        let hosts = RemoteHostStore.shared.hosts.sorted {
+            ($0.lastConnected ?? .distantPast) > ($1.lastConnected ?? .distantPast)
+        }
+        if !hosts.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Recent Servers").font(.caption).foregroundStyle(.secondary)
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(hosts) { h in recentRow(h) }
+                    }
+                }
+                .frame(maxHeight: 136)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+        }
+    }
+
+    private func recentRow(_ h: RemoteHost) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "macmini")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(h.name.isEmpty ? h.address : h.name).font(.callout)
+                Text(h.connectLabel).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "arrow.forward.circle").foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .contentShape(Rectangle())
+        .onTapGesture { model.connect(to: h) }
+        .contextMenu {
+            Button("Fill In Details") { model.prefill(h) }
+            Button("Remove from Recents", role: .destructive) {
+                RemoteHostStore.shared.remove(h.id)
+            }
+        }
+        .help("Connect to \(h.connectLabel)")
     }
 
     private func working(_ msg: String) -> some View {

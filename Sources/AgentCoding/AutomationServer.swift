@@ -132,6 +132,16 @@ final class ACAutomationServer {
     var onDeleteAutomation: ((_ id: String) -> Bool)?
     var onRunAutomation: ((_ id: String) -> Bool)?
     var onToggleAutomation: ((_ id: String) -> Bool)?
+    /// One native file op ({"file": {...}}) in the VM's guest — the remote
+    /// file browser's data plane (upload/download/list/delete as base64 JSON).
+    var onGuestFileOp: ((_ idOrName: String, _ op: [String: Any], _ timeout: Int) async -> [String: Any])?
+    /// A docker dashboard action (start/stop/remove/logs/attach/run/binfmt/
+    /// watch) for the VM — validated host-side, then sent over the same
+    /// outbox verb protocol the local GUI uses.
+    var onDockerCommand: ((_ idOrName: String, _ doc: [String: Any]) -> [String: Any])?
+    /// Decision prompts pending for a remote client (fat client), + answer.
+    var onListPendingPrompts: (() -> [[String: Any]])?
+    var onAnswerPrompt: ((_ id: String, _ choice: Int) -> Bool)?
 
     init(port: UInt16 = 9223, bindAddress: String = "127.0.0.1") {
         // 9223 (one off from the browser's 9222) so both apps can run side
@@ -401,6 +411,10 @@ final class ACAutomationServer {
                     "vms": self.onListVMs?() ?? [],
                     "gridLayout": self.onGetGridLayout?() ?? ["cells": []],
                     "automations": self.onListAutomations?() ?? ["automations": [], "runs": []],
+                    // Decision prompts awaiting a remote answer (storage
+                    // upgrade, drift reset, …) — the fat client renders these
+                    // as local alerts and answers via POST /prompts/{id}/answer.
+                    "pendingPrompts": self.onListPendingPrompts?() ?? [],
                 ]
             }
             // The workspace VM subnet, so a fat client can route/tunnel to it
@@ -435,6 +449,16 @@ final class ACAutomationServer {
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let ok = DispatchQueue.main.sync { self.onUpsertAutomation?(bodyJSON) ?? false }
             sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
+
+        // Answer a pending decision prompt (fat client). The id names the
+        // prompt (from /state's pendingPrompts); the body carries the chosen
+        // button index.
+        case ("POST", let p) where p.hasPrefix("/prompts/") && p.hasSuffix("/answer"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let id = String(p.dropFirst("/prompts/".count).dropLast("/answer".count))
+            let choice = (bodyJSON["choice"] as? Int) ?? -1
+            let ok = DispatchQueue.main.sync { self.onAnswerPrompt?(id, choice) ?? false }
+            sendResponse(fd: fd, status: ok ? 200 : 404, body: ["ok": ok])
 
         case (_, let p) where p == "/debug/ui-shot" || p.hasPrefix("/debug/ui-shot?"):
             guard debugEnabled || isTrustedLocal else {
@@ -726,6 +750,36 @@ final class ACAutomationServer {
                 sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
             }
             handleExec(fd: fd, profileID: decode(String(rest.dropLast("/exec".count))), bodyJSON: bodyJSON)
+            return
+        }
+        if rest.hasSuffix("/file") {
+            guard method == "POST" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let id = decode(String(rest.dropLast("/file".count)))
+            let op = (bodyJSON["op"] as? [String: Any]) ?? [:]
+            let timeout = (bodyJSON["timeout"] as? Int) ?? 30
+            let semaphore = DispatchSemaphore(value: 0)
+            var result: [String: Any] = ["error": "not handled"]
+            DispatchQueue.main.async {
+                Task { @MainActor in
+                    result = await self.onGuestFileOp?(id, op, timeout) ?? ["error": "not handled"]
+                    semaphore.signal()
+                }
+            }
+            semaphore.wait()
+            sendResponse(fd: fd, status: result["error"] == nil ? 200 : 409, body: result)
+            return
+        }
+        if rest.hasSuffix("/docker") {
+            guard method == "POST" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let id = decode(String(rest.dropLast("/docker".count)))
+            let result = DispatchQueue.main.sync { self.onDockerCommand?(id, bodyJSON) }
+                ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 409, body: result)
             return
         }
         if rest.hasSuffix("/attach") {

@@ -243,6 +243,9 @@ struct BrowserPaneView: View {
                 FramebufferHost(container: model.framebufferContainer)
             }
         }
+        // The pane background is always Color.black; pin the scheme so
+        // .secondary/.tertiary text stays legible when the OS is in light mode.
+        .environment(\.colorScheme, .dark)
     }
 
     private var placeholder: some View {
