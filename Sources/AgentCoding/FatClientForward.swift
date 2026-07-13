@@ -321,6 +321,36 @@ struct FatClientDial: ParsableCommand {
     }
 }
 
+/// `bromure-ac __fatclient-browsermcp <addr> <port> <user> <vm>` — dials the
+/// browser-mcp relay channel and sends one `initialize`, to verify the server
+/// dispatches the verb + invokes the resolver (plumbing/testing).
+struct FatClientBrowserMCPProbe: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "__fatclient-browsermcp", abstract: "Fat-client browser-mcp dial (plumbing).",
+        shouldDisplay: false)
+    @Argument var address: String
+    @Argument var port: Int
+    @Argument var user: String
+    @Argument var vm: String
+    func run() throws {
+        let host = RemoteHost(name: address, address: address, port: port, user: user)
+        guard let fd = RemoteTransport.browserMCPDial(host: host, vm: vm), fd >= 0 else {
+            print("browser-mcp: dial failed"); return
+        }
+        defer { Darwin.close(fd) }
+        let req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n"
+        _ = req.withCString { Darwin.write(fd, $0, strlen($0)) }
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let n = Darwin.read(fd, &buf, buf.count)
+        if n > 0 {
+            print("browser-mcp response: \(String(decoding: buf[0..<n], as: UTF8.self).prefix(300))")
+        } else {
+            print("browser-mcp: EOF (no response) — channel closed (expected when the "
+                + "workspace has no running browser bridge)")
+        }
+    }
+}
+
 /// `bromure-ac __forward-socks <hostID> <localPort>` — a SOCKS5 proxy that
 /// tunnels to any remote guest (used by the local browser VM's PAC). Plumbing.
 struct FatClientSocks: ParsableCommand {

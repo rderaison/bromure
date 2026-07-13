@@ -56,9 +56,10 @@ struct BromureAC: ParsableCommand {
         // bromure-cli exposes none of them and has no GUI default.
         let topLevel: [ParsableCommand.Type] =
             asCLI ? [FatClientPost.self, FatClientAuthProbe.self, FatClientForward.self,
-                     FatClientSocks.self, FatClientDial.self]
+                     FatClientSocks.self, FatClientDial.self, FatClientBrowserMCPProbe.self]
                   : [Run.self, RemoteMenu.self, VMAttachWindow.self, FatClientPost.self,
-                     FatClientAuthProbe.self, FatClientForward.self, FatClientSocks.self, FatClientDial.self]
+                     FatClientAuthProbe.self, FatClientForward.self, FatClientSocks.self,
+                     FatClientDial.self, FatClientBrowserMCPProbe.self]
         let defaultCmd: ParsableCommand.Type? = asCLI ? nil : Run.self
         return CommandConfiguration(
             commandName: name,
