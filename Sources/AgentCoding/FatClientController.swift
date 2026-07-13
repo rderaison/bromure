@@ -429,6 +429,17 @@ final class RemoteHostWindow: NSWindow {
     private var mountedTermView: TerminalSurfaceView?
     private var shownWorkspace: Profile.ID?
     private var shownWindowIndex: Int?
+
+    // Browser pane (fat-client): a local Chromium VM per remote workspace whose
+    // page traffic is tunneled to the remote subnet via the SOCKS forwarder.
+    private var browserPaneHost: NSView!
+    private var browserWidthConstraint: NSLayoutConstraint!
+    private var browserControllers: [Profile.ID: WorkspaceBrowserController] = [:]
+    private var browserModels: [Profile.ID: BrowserPaneModel] = [:]
+    private var browserOpen: Set<Profile.ID> = []
+    private var shownBrowser: Profile.ID?
+    /// Test hook: auto-open the browser pane once a workspace is selected.
+    private let autoBrowser = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_BROWSER"] != nil
     private var lastRevision = -1
     private var refreshTimer: Timer?
     /// Test hook: name of a workspace to auto-select once it's running (mounts
@@ -460,7 +471,20 @@ final class RemoteHostWindow: NSWindow {
         gridView?.retireAll()
         for (_, c) in termControllers { c.retireAll() }
         termControllers.removeAll()
+        for (_, c) in browserControllers { c.stop() }
+        browserControllers.removeAll()
         super.close()
+    }
+
+    /// ⌃⌘B toggles the browser pane for the shown workspace (mirrors the local
+    /// window's shortcut).
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command, .control],
+           event.charactersIgnoringModifiers?.lowercased() == "b" {
+            toggleBrowser(for: nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     private func buildLayout() {
@@ -473,6 +497,14 @@ final class RemoteHostWindow: NSWindow {
         stage.layer?.backgroundColor = NSColor.black.cgColor
         content.addSubview(sidebarHost)
         content.addSubview(stage)
+        // Browser pane sits to the right of the stage; width animates 0 ↔ N.
+        let browser = NSView()
+        browser.translatesAutoresizingMaskIntoConstraints = false
+        browser.wantsLayer = true
+        browser.layer?.backgroundColor = NSColor.black.cgColor
+        content.addSubview(browser)
+        browserPaneHost = browser
+        browserWidthConstraint = browser.widthAnchor.constraint(equalToConstant: 0)
         // Connection-status overlay covers the stage until we're connected.
         statusHost = NSHostingView(rootView: RemoteConnectionStatusView(controller: controller))
         statusHost.translatesAutoresizingMaskIntoConstraints = false
@@ -483,14 +515,75 @@ final class RemoteHostWindow: NSWindow {
             sidebarHost.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             sidebarHost.widthAnchor.constraint(equalToConstant: 240),
             stage.leadingAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
-            stage.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stage.trailingAnchor.constraint(equalTo: browser.leadingAnchor),
             stage.topAnchor.constraint(equalTo: content.topAnchor),
             stage.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            browser.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            browser.topAnchor.constraint(equalTo: content.topAnchor),
+            browser.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            browserWidthConstraint,
             statusHost.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
             statusHost.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
             statusHost.topAnchor.constraint(equalTo: stage.topAnchor),
             statusHost.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
         ])
+    }
+
+    // MARK: Browser pane
+
+    private func browserModel(for id: Profile.ID) -> BrowserPaneModel {
+        if let m = browserModels[id] { return m }
+        let m = BrowserPaneModel(); browserModels[id] = m; return m
+    }
+
+    /// Lazily create the workspace's browser controller in remote-proxy mode.
+    /// Nil until the remote subnet + SOCKS port are both known (first `/state`).
+    private func browserController(for id: Profile.ID) -> WorkspaceBrowserController? {
+        if let c = browserControllers[id] { return c }
+        guard let subnet = controller.vmnetSubnet, let port = controller.socks?.port else { return nil }
+        let persistent = controller.profile(for: id)?.browserPersistent ?? false
+        let c = WorkspaceBrowserController(
+            model: browserModel(for: id), workspaceID: id, persistent: persistent,
+            remoteProxy: .init(subnetCIDR: subnet, socksPort: port))
+        browserControllers[id] = c
+        return c
+    }
+
+    /// Toggle the browser pane for the shown workspace (⌃⌘B), or open it for a
+    /// specific workspace. Needs the tunnel up (subnet + SOCKS), so it no-ops
+    /// until the first `/state` arrives.
+    func toggleBrowser(for id: Profile.ID?) {
+        guard let id = id ?? shownWorkspace else { return }
+        if browserOpen.contains(id) { setBrowserOpen(id, false) }
+        else { setBrowserOpen(id, true) }
+    }
+
+    private func setBrowserOpen(_ id: Profile.ID, _ open: Bool) {
+        if open {
+            if shownBrowser == id, browserWidthConstraint.constant > 0 { return }   // already shown
+            guard let ctl = browserController(for: id) else {
+                FatClientLog.log("browser: tunnel not ready (no subnet/socks yet)"); return
+            }
+            browserOpen.insert(id)
+            shownBrowser = id
+            let host = NSHostingView(rootView: BrowserPaneView(model: browserModel(for: id)))
+            host.translatesAutoresizingMaskIntoConstraints = false
+            for sub in browserPaneHost.subviews { sub.removeFromSuperview() }
+            browserPaneHost.addSubview(host)
+            NSLayoutConstraint.activate([
+                host.leadingAnchor.constraint(equalTo: browserPaneHost.leadingAnchor),
+                host.trailingAnchor.constraint(equalTo: browserPaneHost.trailingAnchor),
+                host.topAnchor.constraint(equalTo: browserPaneHost.topAnchor),
+                host.bottomAnchor.constraint(equalTo: browserPaneHost.bottomAnchor),
+            ])
+            browserWidthConstraint.constant = max(480, frame.width * 0.42)
+            ctl.setVisible(true)
+        } else {
+            browserOpen.remove(id)
+            if shownBrowser == id { shownBrowser = nil }
+            browserWidthConstraint.constant = 0
+            browserControllers[id]?.setVisible(false, teardownWhenHidden: false)
+        }
     }
 
     private func makeSidebar() -> SessionSidebar {
@@ -568,6 +661,16 @@ final class RemoteHostWindow: NSWindow {
         gridView?.removeFromSuperview()
         let idx = window ?? controller.tabsModel(for: id)?.activeTab?.index ?? 0
         mountTerminal(for: id, window: idx)
+        // The pane shows one workspace's browser at a time: show this one's if
+        // it's open, else collapse (keeping the other's VM resumable).
+        if browserOpen.contains(id) {
+            setBrowserOpen(id, true)
+        } else if let prev = shownBrowser, prev != id {
+            browserControllers[prev]?.setVisible(false, teardownWhenHidden: false)
+            shownBrowser = nil
+            browserWidthConstraint.constant = 0
+        }
+        if autoBrowser { setBrowserOpen(id, true) }
     }
 
     private func mountTerminal(for id: Profile.ID, window idx: Int) {
