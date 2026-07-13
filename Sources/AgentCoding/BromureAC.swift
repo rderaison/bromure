@@ -503,6 +503,16 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     discardWtItem.target = delegate
     wsMenu.addItem(discardWtItem)
 
+    wsMenu.addItem(NSMenuItem.separator())
+
+    // Inspect a workspace's disk image (or any ext4 .img) without booting a VM,
+    // via the userland ext4 reader/writer.
+    let openExt4Item = NSMenuItem(title: L("Open ext4 file…"),
+                                  action: #selector(ACAppDelegate.openExt4FileAction(_:)),
+                                  keyEquivalent: "")
+    openExt4Item.target = delegate
+    wsMenu.addItem(openExt4Item)
+
     // Edit menu — without these items, the responder chain has no
     // Cut/Copy/Paste/Select-All hooks and ⌘V silently fails inside
     // text fields (SecureField especially). Standard idioms; targets
@@ -4097,6 +4107,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         enrollmentWindow = win
+    }
+
+    /// Workspaces ▸ Open ext4 file… — browse (and optionally edit) a raw or
+    /// partitioned ext4 `.img` via the userland ext4 reader/writer, no VM boot.
+    @objc func openExt4FileAction(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.title = NSLocalizedString("Open ext4 Disk Image", comment: "")
+        panel.message = NSLocalizedString("Choose an ext4 .img disk image (raw or partitioned).", comment: "")
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = []          // raw disk images have no canonical UTI
+        if let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("BromureAC", isDirectory: true),
+           FileManager.default.fileExists(atPath: dir.path) {
+            panel.directoryURL = dir
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Ext4BrowserWindowController.show(imagePath: url.path)
     }
 
     private func makeEnrollmentContentView(in window: NSWindow) -> NSView {
