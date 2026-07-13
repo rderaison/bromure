@@ -57,8 +57,11 @@ final class FatClientTunnel {
             FatClientLog.log("tunnel: couldn't bind local listener"); return false
         }
         lfd = fd; port = p
+        // Ensure the privileged daemon is installed (first use prompts approval
+        // in System Settings); until enabled, setup fails and we stay on SOCKS.
+        FatClientTunnelInstaller.ensureRegistered()
         guard let dev = FatClientTunnelHelper.shared.setup(cidr: localCIDR, redirectPort: p) else {
-            FatClientLog.log("tunnel: privileged setup failed (helper installed? run scripts/utun-spike.py)")
+            FatClientLog.log("tunnel: privileged setup failed (daemon approved? see System Settings › Login Items)")
             Darwin.close(fd); lfd = -1; return false
         }
         utun = dev
@@ -96,7 +99,12 @@ final class FatClientTunnel {
             let cfd = Darwin.accept(lfd, nil, nil)
             if cfd < 0 { if errno == EINTR { continue }; break }
             Thread.detachNewThread {
-                guard let (ip, port) = OriginalDestination.lookup(fd: cfd) else {
+                // Recover addresses app-side (no root), then ask the daemon to
+                // DIOCNATLOOK the pre-rdr destination.
+                guard let (localIP, localPort) = Self.sockAddr(cfd, peer: false),
+                      let (peerIP, peerPort) = Self.sockAddr(cfd, peer: true),
+                      let (ip, port) = FatClientTunnelHelper.shared.lookup(
+                        srcIP: peerIP, srcPort: peerPort, dstIP: localIP, dstPort: localPort) else {
                     Darwin.close(cfd); return
                 }
                 // Aliased route: `ip` is a 100.64.<n>.x alias the local process
@@ -113,67 +121,20 @@ final class FatClientTunnel {
     }
 }
 
-// MARK: - Original destination recovery (pf DIOCNATLOOK)
-
-/// Recovers the pre-redirect destination of a `pf`-rdr'd TCP connection via
-/// `DIOCNATLOOK` on `/dev/pf` (macOS has no `SO_ORIGINAL_DST`). Requires root, so
-/// this runs inside the privileged helper alongside the forwarder.
-enum OriginalDestination {
-    // struct pfioc_natlook — 4× pf_addr(16B) + 4× u16 + af/proto/variant/dir.
-    private struct pfioc_natlook {
-        var saddr = (UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-                     UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0))
-        var daddr = (UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-                     UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0))
-        var rsaddr = (UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-                      UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0))
-        var rdaddr = (UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-                      UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0))
-        var sport: UInt16 = 0
-        var dport: UInt16 = 0
-        var rsport: UInt16 = 0
-        var rdport: UInt16 = 0
-        var af: UInt8 = 0
-        var proto: UInt8 = 0
-        var proto_variant: UInt8 = 0
-        var direction: UInt8 = 0
-    }
-
-    /// `(ip, port)` the connection was originally headed to, or nil.
-    static func lookup(fd: Int32) -> (ip: String, port: Int)? {
-        // Local (redirected) and peer addresses of the accepted socket.
-        var local = sockaddr_in(), peer = sockaddr_in()
-        var ll = socklen_t(MemoryLayout<sockaddr_in>.size)
-        var pl = socklen_t(MemoryLayout<sockaddr_in>.size)
-        guard withUnsafeMutablePointer(to: &local, { p in p.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &ll) } }) == 0,
-              withUnsafeMutablePointer(to: &peer, { p in p.withMemoryRebound(to: sockaddr.self, capacity: 1) { getpeername(fd, $0, &pl) } }) == 0
-        else { return nil }
-
-        let pf = open("/dev/pf", O_RDWR)
-        guard pf >= 0 else { return nil }
-        defer { close(pf) }
-
-        var nl = pfioc_natlook()
-        nl.af = UInt8(AF_INET)
-        nl.proto = UInt8(IPPROTO_TCP)
-        nl.direction = 2   // PF_OUT
-        // saddr/sport = the connection's source (our peer); daddr/dport = the
-        // redirected local socket; pf maps them back to the original dst.
-        withUnsafeBytes(of: peer.sin_addr) { src in
-            withUnsafeMutableBytes(of: &nl.saddr) { $0.copyBytes(from: src.prefix(4)) }
+extension FatClientTunnel {
+    /// The IPv4 address+port of an accepted socket's local (redirected) or peer
+    /// end — needed to ask the daemon for the pre-rdr destination. No root.
+    static func sockAddr(_ fd: Int32, peer: Bool) -> (ip: String, port: UInt16)? {
+        var sa = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let rc = withUnsafeMutablePointer(to: &sa) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                peer ? getpeername(fd, $0, &len) : getsockname(fd, $0, &len)
+            }
         }
-        withUnsafeBytes(of: local.sin_addr) { dst in
-            withUnsafeMutableBytes(of: &nl.daddr) { $0.copyBytes(from: dst.prefix(4)) }
-        }
-        nl.sport = peer.sin_port
-        nl.dport = local.sin_port
-
-        let sz = MemoryLayout<pfioc_natlook>.size
-        // DIOCNATLOOK = _IOWR('D', 23, struct pfioc_natlook)
-        let req = UInt(0xC000_0000) | (UInt(sz & 0x1FFF) << 16) | (UInt(UInt8(ascii: "D")) << 8) | 23
-        let rc = withUnsafeMutablePointer(to: &nl) { ioctl(pf, req, $0) }
         guard rc == 0 else { return nil }
-        let ip = withUnsafeBytes(of: nl.rdaddr) { "\($0[0]).\($0[1]).\($0[2]).\($0[3])" }
-        return (ip, Int(UInt16(bigEndian: nl.rdport)))
+        let a = sa.sin_addr.s_addr
+        let ip = "\(a & 0xff).\((a >> 8) & 0xff).\((a >> 16) & 0xff).\((a >> 24) & 0xff)"
+        return (ip, UInt16(bigEndian: sa.sin_port))
     }
 }

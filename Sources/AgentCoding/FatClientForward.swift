@@ -321,6 +321,16 @@ struct FatClientDial: ParsableCommand {
     }
 }
 
+/// `bromure-ac __tunnel-helper` — the privileged utun tunnel daemon, run as root
+/// by launchd (registered via SMAppService). Serves setup/lookup/teardown over
+/// an owner-only Unix socket for `FatClientTunnel`. Never runs unless root.
+struct TunnelHelper: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "__tunnel-helper", abstract: "Privileged utun tunnel daemon.",
+        shouldDisplay: false)
+    func run() throws { FatClientTunnelDaemon.run() }
+}
+
 /// `bromure-ac __fatclient-browsermcp <addr> <port> <user> <vm>` — dials the
 /// browser-mcp relay channel and sends one `initialize`, to verify the server
 /// dispatches the verb + invokes the resolver (plumbing/testing).

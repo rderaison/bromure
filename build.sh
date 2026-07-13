@@ -90,6 +90,35 @@ fi
 RESOURCES_DIR="$CONTENTS/Resources"
 mkdir -p "$RESOURCES_DIR"
 
+# Fat-client privileged tunnel daemon (SMAppService, macOS 13+). The plist lives
+# in Contents/Library/LaunchDaemons/ and runs `bromure-ac __tunnel-helper` as
+# root once the user approves it in System Settings › Login Items. Only meaningful
+# for the bromure-ac target; harmless elsewhere.
+LAUNCHD_DIR="$CONTENTS/Library/LaunchDaemons"
+mkdir -p "$LAUNCHD_DIR"
+BUNDLE_BIN_NAME="$(basename "$BINARY")"
+cat > "$LAUNCHD_DIR/io.bromure.fatclient-tunnel.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.bromure.fatclient-tunnel</string>
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/$BUNDLE_BIN_NAME</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$BUNDLE_BIN_NAME</string>
+        <string>__tunnel-helper</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
 # Copy the per-target icon as AppIcon.icns (matching CFBundleIconFile in
 # both Info.plists). Fall back to the shared icon if the target-specific
 # one is missing.
