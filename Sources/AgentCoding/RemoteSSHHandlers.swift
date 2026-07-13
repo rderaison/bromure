@@ -241,6 +241,12 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
     private var terminated = false
     private var readSource: DispatchSourceRead?
     private let ioQueue = DispatchQueue(label: "io.bromure.remote.pty")
+    /// SSH→master bytes awaiting a writable `master` (a slow guest/control reader
+    /// fills the send buffer). Drained by `writeSource` when the fd is writable,
+    /// so a stalled reader never busy-spins or blocks the SSH event loop. Only
+    /// touched on `ioQueue`.
+    private var outBuffer: [UInt8] = []
+    private var writeSource: DispatchSourceWrite?
 
     init(menuExe: String, user: String, controlSocketPath: String,
          forwardResolver: RemoteAccessServer.ForwardResolver? = nil,
@@ -302,13 +308,54 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
         let channelData = unwrapInboundIn(data)
         guard case .byteBuffer(var buf) = channelData.data, case .channel = channelData.type else { return }
         guard let bytes = buf.readBytes(length: buf.readableBytes) else { return }
-        // The forward fd is opened asynchronously (vsock connect); buffer any
-        // client bytes that beat it and flush once it's up.
+        // Hand off to the io queue so the write path (buffer + writable-drain)
+        // never runs on — or blocks — the SSH event loop.
+        ioQueue.async { [weak self] in self?.deliverInbound(bytes) }
+    }
+
+    // MARK: SSH → master write path (non-blocking, backpressure-aware; ioQueue only)
+
+    private func deliverInbound(_ bytes: [UInt8]) {
+        // The forward/control fd opens asynchronously; buffer bytes that beat it.
         if master < 0 { pendingInbound.append(contentsOf: bytes); return }
-        _ = bytes.withUnsafeBytes { ptr -> Int in
-            guard let base = ptr.baseAddress else { return 0 }
-            return Self.writeAll(master, base, bytes.count)
+        outBuffer.append(contentsOf: bytes)
+        drainOut()
+    }
+
+    /// Move any pre-fd bytes into the write buffer once `master` is up. Called on
+    /// `ioQueue` after a bridge sets `master`.
+    private func flushPending() {
+        guard master >= 0, !pendingInbound.isEmpty else { return }
+        outBuffer.insert(contentsOf: pendingInbound, at: 0)   // pre-fd bytes come first
+        pendingInbound = []
+        drainOut()
+    }
+
+    /// Write as much of `outBuffer` as `master` accepts; on EAGAIN, stop and arm
+    /// a write source to finish when the fd is writable. Never spins/blocks.
+    private func drainOut() {
+        guard master >= 0 else { return }
+        while !outBuffer.isEmpty {
+            let n = outBuffer.withUnsafeBytes { Darwin.write(master, $0.baseAddress, outBuffer.count) }
+            if n > 0 {
+                outBuffer.removeFirst(n)
+            } else if n < 0 && errno == EINTR {
+                continue
+            } else if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                armWriteSource(); return
+            } else {
+                return   // fd error; the read pump / channel close drives teardown
+            }
         }
+        writeSource?.cancel(); writeSource = nil   // fully drained
+    }
+
+    private func armWriteSource() {
+        guard writeSource == nil, master >= 0 else { return }
+        let src = DispatchSource.makeWriteSource(fileDescriptor: master, queue: ioQueue)
+        src.setEventHandler { [weak self] in self?.drainOut() }
+        writeSource = src
+        src.resume()
     }
 
     // MARK: PTY child
@@ -377,24 +424,19 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
             return
         }
         master = sockFD
-        // Flush anything the client pipelined ahead of the bridge coming up (e.g.
-        // an exec immediately followed by an HTTP request on the same channel),
-        // mirroring the forward bridge. Without this, a request that beats the
+        // Non-blocking BEFORE the flush so the write path can't block on a full
+        // send buffer. Then flush anything the client pipelined ahead of the
+        // bridge coming up (e.g. an exec immediately followed by an HTTP request
+        // on the same channel) — without this a request that beats the
         // control-socket connect is stranded in pendingInbound and never sent.
-        if !pendingInbound.isEmpty {
-            let bytes = pendingInbound; pendingInbound = []
-            _ = bytes.withUnsafeBytes { ptr -> Int in
-                guard let base = ptr.baseAddress else { return 0 }
-                return Self.writeAll(sockFD, base, bytes.count)
-            }
-        }
+        let flags = fcntl(sockFD, F_GETFL)
+        _ = fcntl(sockFD, F_SETFL, flags | O_NONBLOCK)
+        ioQueue.async { [weak self] in self?.flushPending() }
         childPID = -1
         if wantReply { channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil) }
 
-        // Non-blocking socket + a read pump that forwards its output to the
-        // client, identical in shape to the PTY pump.
-        let flags = fcntl(sockFD, F_GETFL)
-        _ = fcntl(sockFD, F_SETFL, flags | O_NONBLOCK)
+        // Read pump that forwards the fd's output to the client, identical in
+        // shape to the PTY pump.
         let src = DispatchSource.makeReadSource(fileDescriptor: sockFD, queue: ioQueue)
         src.setEventHandler { [weak self] in
             guard let self else { return }
@@ -479,14 +521,11 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
         }
         self.master = fd
         self.childPID = -1
-        if wantReply { channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil) }
-        // Flush anything the client sent before the fd was ready.
-        if !self.pendingInbound.isEmpty {
-            let bytes = self.pendingInbound; self.pendingInbound = []
-            _ = bytes.withUnsafeBytes { Self.writeAll(fd, $0.baseAddress!, bytes.count) }
-        }
+        // Non-blocking before flushing pre-fd bytes, so the write path can't block.
         let flags = fcntl(fd, F_GETFL)
         _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        if wantReply { channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil) }
+        ioQueue.async { [weak self] in self?.flushPending() }
         let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: self.ioQueue)
         src.setEventHandler { [weak self] in
             guard let self else { return }
@@ -556,25 +595,14 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
         terminated = true
         readSource?.cancel()
         readSource = nil
+        writeSource?.cancel()
+        writeSource = nil
         if master >= 0 { Darwin.close(master) }
         if pid > 0 {
             kill(pid, SIGHUP)
             var st: Int32 = 0
             waitpid(pid, &st, WNOHANG)
         }
-    }
-
-    private static func writeAll(_ fd: Int32, _ buf: UnsafeRawPointer, _ count: Int) -> Int {
-        var written = 0
-        while written < count {
-            let n = Darwin.write(fd, buf + written, count - written)
-            if n <= 0 {
-                if n < 0 && (errno == EINTR || errno == EAGAIN) { continue }
-                break
-            }
-            written += n
-        }
-        return written
     }
 }
 
