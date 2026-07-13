@@ -77,6 +77,57 @@ enum UtunPacket {
         return p
     }
 
+    // MARK: UDP
+
+    struct UDPDatagram {
+        var srcIP: UInt32, dstIP: UInt32
+        var srcPort: UInt16, dstPort: UInt16
+        var payload: ArraySlice<UInt8>
+    }
+
+    /// Parse an IPv4/UDP packet (no AF header), or nil.
+    static func parseUDP(_ p: [UInt8]) -> UDPDatagram? {
+        guard p.count >= 20, (p[0] >> 4) == 4 else { return nil }
+        let ihl = Int(p[0] & 0x0F) * 4
+        guard ihl >= 20, p[9] == 17, p.count >= ihl + 8 else { return nil }
+        let total = Int(u16(p, 2))
+        guard total >= ihl + 8, total <= p.count else { return nil }
+        let ulen = Int(u16(p, ihl + 4))
+        guard ulen >= 8, ihl + ulen <= total else { return nil }
+        return UDPDatagram(srcIP: u32(p, 12), dstIP: u32(p, 16),
+                           srcPort: u16(p, ihl), dstPort: u16(p, ihl + 2),
+                           payload: p[(ihl + 8)..<(ihl + ulen)])
+    }
+
+    /// Build an IPv4/UDP packet (no AF header) with both checksums.
+    static func buildUDP(_ d: UDPDatagram) -> [UInt8] {
+        let ihl = 20, udpLen = 8 + d.payload.count
+        var p = [UInt8](repeating: 0, count: ihl + udpLen)
+        p[0] = 0x45; putU16(&p, 2, UInt16(ihl + udpLen)); putU16(&p, 6, 0x4000)
+        p[8] = 64; p[9] = 17
+        putU32(&p, 12, d.srcIP); putU32(&p, 16, d.dstIP)
+        putU16(&p, 10, ipChecksum(p, 0, ihl))
+        let u = ihl
+        putU16(&p, u, d.srcPort); putU16(&p, u + 2, d.dstPort); putU16(&p, u + 4, UInt16(udpLen))
+        for (i, b) in d.payload.enumerated() { p[u + 8 + i] = b }
+        // UDP checksum uses the same pseudo-header as TCP (proto 17).
+        putU16(&p, u + 6, udpChecksum(p, ihl: ihl, udpLen: udpLen, srcIP: d.srcIP, dstIP: d.dstIP))
+        return p
+    }
+
+    static func udpChecksum(_ p: [UInt8], ihl: Int, udpLen: Int, srcIP: UInt32, dstIP: UInt32) -> UInt16 {
+        var sum: UInt32 = 0
+        sum += (srcIP >> 16) & 0xffff; sum += srcIP & 0xffff
+        sum += (dstIP >> 16) & 0xffff; sum += dstIP & 0xffff
+        sum += UInt32(17); sum += UInt32(udpLen)
+        var i = ihl; let end = ihl + udpLen
+        while i + 1 < end { sum += UInt32(u16(p, i)); i += 2 }
+        if i < end { sum += UInt32(p[i]) << 8 }
+        while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16) }
+        let c = UInt16(~sum & 0xffff)
+        return c == 0 ? 0xffff : c   // 0 means "no checksum"; use all-ones instead
+    }
+
     // MARK: Checksums
 
     /// One's-complement 16-bit checksum over `p[start..<start+len]`.

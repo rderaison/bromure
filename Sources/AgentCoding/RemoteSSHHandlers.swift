@@ -226,6 +226,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
     private let controlSocketPath: String
     /// Resolves a `forward <ip> <port>` to a guest-loopback-relay fd (vsock).
     private let forwardResolver: RemoteAccessServer.ForwardResolver?
+    private let udpForwardResolver: RemoteAccessServer.UDPForwardResolver?
     private let browserMCPResolver: RemoteAccessServer.BrowserMCPResolver?
     /// Inbound SSH bytes that arrived before the forward fd was ready (the vsock
     /// connect is async), flushed once it is.
@@ -250,11 +251,13 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
 
     init(menuExe: String, user: String, controlSocketPath: String,
          forwardResolver: RemoteAccessServer.ForwardResolver? = nil,
+         udpForwardResolver: RemoteAccessServer.UDPForwardResolver? = nil,
          browserMCPResolver: RemoteAccessServer.BrowserMCPResolver? = nil) {
         self.menuExe = menuExe
         self.user = user
         self.controlSocketPath = controlSocketPath
         self.forwardResolver = forwardResolver
+        self.udpForwardResolver = udpForwardResolver
         self.browserMCPResolver = browserMCPResolver
     }
 
@@ -290,6 +293,8 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
             } else if let fwd = FatClient.parseForward(e.command) {
                 startForwardBridge(context: context, wantReply: e.wantReply,
                                    ip: fwd.ip, port: fwd.port)
+            } else if let ip = FatClient.parseForwardUDP(e.command) {
+                startUDPForwardBridge(context: context, wantReply: e.wantReply, ip: ip)
             } else if let vm = FatClient.parseBrowserMCP(e.command) {
                 startBrowserMCPBridge(context: context, wantReply: e.wantReply, vm: vm)
             } else {
@@ -482,6 +487,30 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
             el.execute {
                 guard let self else { if fd >= 0 { Darwin.close(fd) }; return }
                 FatClientLog.log("forward: resolver \(ip):\(port) -> fd=\(fd)")
+                self.wireResolvedFD(channel: channel, wantReply: wantReply, fd: fd)
+            }
+        }
+    }
+
+    /// Multiplexed UDP tunnel to a guest: the resolver dials the guest's loopback
+    /// relay in UDP mode; this channel carries length-prefixed datagrams. Same
+    /// subnet restriction + byte pump as the TCP forward bridge.
+    private func startUDPForwardBridge(context: ChannelHandlerContext, wantReply: Bool, ip: String) {
+        guard !started else { return }
+        started = true
+        let channel = context.channel
+        let subnet = SandboxEngine.VMNetSwitch.shared.subnet
+        guard let subnet, subnet.containsGuest(ip), let resolver = udpForwardResolver else {
+            SupplyChainLog.shared.record("[remote] refused forward-udp to \(ip) — not a guest on the vmnet subnet.")
+            if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
+            channel.close(promise: nil)
+            return
+        }
+        let el = channel.eventLoop
+        resolver(ip) { [weak self] fd in
+            el.execute {
+                guard let self else { if fd >= 0 { Darwin.close(fd) }; return }
+                FatClientLog.log("forward-udp: resolver \(ip) -> fd=\(fd)")
                 self.wireResolvedFD(channel: channel, wantReply: wantReply, fd: fd)
             }
         }

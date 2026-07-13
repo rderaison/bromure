@@ -38,6 +38,19 @@ enum FatClient {
         return (String(parts[0]), port)
     }
 
+    /// SSH `exec` verb for a multiplexed UDP tunnel to a guest: the full command
+    /// is `bromure-fatclient/1 forward-udp <ip>`. All UDP to that guest rides one
+    /// channel; each datagram is length-prefixed with its return info (see
+    /// UtunUDP.swift). The server dials the guest's loopback-relay in UDP mode.
+    static let forwardUDPVerbPrefix = "bromure-fatclient/1 forward-udp "
+
+    /// Parse `<prefix><ip>` → ip.
+    static func parseForwardUDP(_ command: String) -> String? {
+        guard command.hasPrefix(forwardUDPVerbPrefix) else { return nil }
+        let ip = command.dropFirst(forwardUDPVerbPrefix.count).trimmingCharacters(in: .whitespaces)
+        return ip.isEmpty ? nil : ip
+    }
+
     /// SSH `exec` verb for the browser-MCP relay: `bromure-fatclient/1 browser-mcp
     /// <workspaceID>`. The server splices the workspace agent's vsock-5830 MCP
     /// stream (line-delimited JSON-RPC) to this channel, so the fat client's own

@@ -95,6 +95,80 @@ def _pipe(src, dst, label=None):
             pass
 
 
+def handle_udp(vs, rest):
+    """UDP tunnel mode (fat-client system-wide utun): all UDP to this guest is
+    multiplexed over one vsock connection, each datagram framed
+        [u16 bodyLen][u32 srcIP][u16 srcPort][u16 dstPort][payload]
+    One UDP socket per (srcIP, srcPort, dstPort) → 127.0.0.1:<dstPort>; replies
+    framed back the same way."""
+    import struct
+    socks = {}
+    vs_lock = threading.Lock()
+
+    def reader(key, us):
+        srcip, srcport, dstport = key
+        while True:
+            try:
+                data = us.recv(65535)
+            except OSError:
+                break
+            if not data:
+                break
+            body = struct.pack("!IHH", srcip, srcport, dstport) + data
+            with vs_lock:
+                try:
+                    vs.sendall(struct.pack("!H", len(body)) + body)
+                except OSError:
+                    break
+
+    buf = rest
+    try:
+        while True:
+            while len(buf) < 2:
+                chunk = vs.recv(65536)
+                if not chunk:
+                    return
+                buf += chunk
+            (bodylen,) = struct.unpack("!H", buf[:2])
+            while len(buf) < 2 + bodylen:
+                chunk = vs.recv(65536)
+                if not chunk:
+                    return
+                buf += chunk
+            body, buf = buf[2:2 + bodylen], buf[2 + bodylen:]
+            if len(body) < 8:
+                continue
+            srcip, srcport, dstport = struct.unpack("!IHH", body[:8])
+            payload = body[8:]
+            key = (srcip, srcport, dstport)
+            us = socks.get(key)
+            if us is None:
+                us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                us.settimeout(120)
+                try:
+                    us.connect(("127.0.0.1", dstport))
+                except OSError as exc:
+                    log("udp connect 127.0.0.1:%d failed: %s" % (dstport, exc))
+                    us.close()
+                    continue
+                socks[key] = us
+                threading.Thread(target=reader, args=(key, us), daemon=True).start()
+            try:
+                us.send(payload)
+            except OSError:
+                pass
+    finally:
+        for us in socks.values():
+            try:
+                us.close()
+            except OSError:
+                pass
+        try:
+            vs.close()
+        except OSError:
+            pass
+
+
 def handle(vs):
     # Read the newline-terminated target port that prefixes the stream.
     buf = b""
@@ -118,6 +192,9 @@ def handle(vs):
         return
 
     line, _, rest = buf.partition(b"\n")
+    if line.strip() == b"UDP":
+        handle_udp(vs, rest)
+        return
     try:
         port = int(line.strip())
     except ValueError:

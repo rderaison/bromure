@@ -315,6 +315,17 @@ enum RemoteTransport {
         return SSHTunnel.shared.dial(args)
     }
 
+    /// Open a `forward-udp <ip>` channel: a multiplexed byte stream carrying
+    /// length-prefixed UDP datagrams to a remote guest. Fresh ssh process, like
+    /// `forwardDial`.
+    static func forwardDialUDP(host: RemoteHost, ip: String) -> Int32? {
+        ensureClientKey()
+        var args = commonArgs(for: host)
+        args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+                 "\(host.user)@\(host.address)", "\(FatClient.forwardUDPVerbPrefix)\(ip)"]
+        return SSHTunnel.shared.dial(args)
+    }
+
     /// Open a `browser-mcp <vm>` channel: a raw byte stream carrying the remote
     /// workspace agent's line-delimited JSON-RPC, which the fat client answers
     /// with its own `BrowserMCPServer`. Fresh ssh process per relay (long-lived

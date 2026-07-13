@@ -83,7 +83,119 @@ struct UtunForwarderTests {
         #expect(dataSeg.seq == srvISN + 1)   // first data byte from the server
     }
 
+    @Test("UDP datagram forwarded and reply reconstructed")
+    func udp() throws {
+        var sp: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, SOCK_DGRAM, 0, &sp) == 0)
+        let testEnd = sp[0], utunEnd = sp[1]
+        setRecvTimeout(testEnd, seconds: 3)
+
+        // Mock guest relay: reads a framed datagram, upper-cases the payload,
+        // frames it back — same protocol as the real loopback-relay UDP mode.
+        let udpDial: (RemoteHost, String) -> Int32? = { _, _ in
+            var rp: [Int32] = [0, 0]
+            guard socketpair(AF_UNIX, SOCK_STREAM, 0, &rp) == 0 else { return -1 }
+            self.startMockUDPRelay(rp[1])
+            return rp[0]
+        }
+        let fwd = UtunForwarder(
+            utunFD: utunEnd, host: RemoteHost(name: "t", address: "x", port: 1, user: "u"),
+            localCIDR: "192.168.64.0/24", remoteCIDR: nil,
+            dial: { _, _, _ in -1 }, udpDial: udpDial)
+        Thread.detachNewThread { fwd.run() }
+        defer { fwd.stop() }
+
+        // 192.168.127.2:5000 → 192.168.64.5:53, payload "hi".
+        let pkt = UtunPacket.buildUDP(.init(srcIP: 0xC0A8_7F02, dstIP: 0xC0A8_4005,
+            srcPort: 5000, dstPort: 53, payload: Array("hi".utf8)[...]))
+        writeRaw(testEnd, pkt)
+        let raw = try #require(readRawMatching(testEnd) { $0.count >= 28 && $0[9] == 17 })
+        let d = try #require(UtunPacket.parseUDP(raw))
+        #expect(d.srcIP == 0xC0A8_4005 && d.dstIP == 0xC0A8_7F02)   // reply from guest:53 → us:5000
+        #expect(d.srcPort == 53 && d.dstPort == 5000)
+        #expect(String(decoding: Array(d.payload), as: UTF8.self) == "HI")
+    }
+
+    @Test("ICMP echo request is answered locally")
+    func icmp() throws {
+        var sp: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, SOCK_DGRAM, 0, &sp) == 0)
+        let testEnd = sp[0], utunEnd = sp[1]
+        setRecvTimeout(testEnd, seconds: 3)
+        let fwd = UtunForwarder(
+            utunFD: utunEnd, host: RemoteHost(name: "t", address: "x", port: 1, user: "u"),
+            localCIDR: "192.168.64.0/24", remoteCIDR: nil,
+            dial: { _, _, _ in -1 }, udpDial: { _, _ in -1 })
+        Thread.detachNewThread { fwd.run() }
+        defer { fwd.stop() }
+
+        writeRaw(testEnd, icmpEcho(src: 0xC0A8_7F02, dst: 0xC0A8_4005, id: 0x1234, seq: 1, payload: [0xAA, 0xBB]))
+        let r = try #require(readRawMatching(testEnd) { $0.count >= 28 && $0[9] == 1 })
+        let ihl = Int(r[0] & 0x0F) * 4
+        #expect(r[ihl] == 0)                          // type 0 = echo reply
+        #expect(UtunPacket.u32(r, 12) == 0xC0A8_4005) // src = original dst
+        #expect(UtunPacket.u32(r, 16) == 0xC0A8_7F02) // dst = original src
+        #expect(Array(r[(ihl + 8)...]) == [0xAA, 0xBB]) // payload echoed
+    }
+
     // MARK: helpers
+
+    private func writeRaw(_ fd: Int32, _ pkt: [UInt8]) {
+        var out: [UInt8] = [0, 0, 0, 2]
+        out.append(contentsOf: pkt)
+        _ = out.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, out.count) }
+    }
+
+    private func readRawMatching(_ fd: Int32, _ pred: ([UInt8]) -> Bool) -> [UInt8]? {
+        var buf = [UInt8](repeating: 0, count: 2048)
+        for _ in 0..<20 {
+            let n = Darwin.read(fd, &buf, buf.count)
+            guard n > 4 else { return nil }
+            let pkt = Array(buf[4..<n])
+            if pred(pkt) { return pkt }
+        }
+        return nil
+    }
+
+    private func icmpEcho(src: UInt32, dst: UInt32, id: UInt16, seq: UInt16, payload: [UInt8]) -> [UInt8] {
+        var icmp = [UInt8](repeating: 0, count: 8 + payload.count)
+        icmp[0] = 8   // echo request
+        icmp[4] = UInt8(id >> 8); icmp[5] = UInt8(id & 0xff)
+        icmp[6] = UInt8(seq >> 8); icmp[7] = UInt8(seq & 0xff)
+        for (i, b) in payload.enumerated() { icmp[8 + i] = b }
+        let ck = UtunPacket.ipChecksum(icmp, 0, icmp.count)
+        icmp[2] = UInt8(ck >> 8); icmp[3] = UInt8(ck & 0xff)
+        var p = [UInt8](repeating: 0, count: 20 + icmp.count)
+        p[0] = 0x45; UtunPacket.putU16(&p, 2, UInt16(20 + icmp.count))
+        UtunPacket.putU16(&p, 6, 0x4000); p[8] = 64; p[9] = 1
+        UtunPacket.putU32(&p, 12, src); UtunPacket.putU32(&p, 16, dst)
+        UtunPacket.putU16(&p, 10, UtunPacket.ipChecksum(p, 0, 20))
+        for (i, b) in icmp.enumerated() { p[20 + i] = b }
+        return p
+    }
+
+    /// Reads framed datagrams, upper-cases the payload, frames it back.
+    private func startMockUDPRelay(_ fd: Int32) {
+        Thread.detachNewThread {
+            var acc = [UInt8](); var buf = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let n = Darwin.read(fd, &buf, buf.count)
+                if n <= 0 { break }
+                acc.append(contentsOf: buf[0..<n])
+                while acc.count >= 2 {
+                    let len = (Int(acc[0]) << 8) | Int(acc[1])
+                    guard acc.count >= 2 + len else { break }
+                    let body = Array(acc[2..<(2 + len)]); acc.removeFirst(2 + len)
+                    guard body.count >= 8 else { continue }
+                    var resp = Array(body[0..<8])
+                    resp.append(contentsOf: body[8...].map { (97...122).contains($0) ? $0 - 32 : $0 })
+                    var frame: [UInt8] = [UInt8(resp.count >> 8), UInt8(resp.count & 0xff)]
+                    frame.append(contentsOf: resp)
+                    _ = frame.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, frame.count) }
+                }
+            }
+        }
+    }
 
     private func seg(src: UInt32 = 0xC0A8_7F02, dst: UInt32 = 0xC0A8_4005,
                      seq: UInt32 = 0, ack: UInt32 = 0, flags: UInt8, payload: [UInt8] = []) -> UtunPacket.TCPSegment {
