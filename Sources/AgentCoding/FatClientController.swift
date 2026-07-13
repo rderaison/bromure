@@ -42,6 +42,14 @@ final class RemoteHostController {
     /// Bumped every apply; the window observes it to refresh the stage.
     private(set) var revision = 0
 
+    /// The remote's workspace subnet (CIDR, e.g. "192.168.64.0/24"), read from
+    /// `/state`. Needed by the browser pane's PAC and the fleet router to decide
+    /// which destinations to tunnel.
+    private(set) var vmnetSubnet: String?
+    /// Auto-started SOCKS5 forwarder into the remote subnet; its port feeds the
+    /// browser pane's PAC and `curl --socks5`. Nil until `start()`.
+    private(set) var socks: RemoteSocksForwarder?
+
     init(host: RemoteHost) {
         self.host = host
         let base = RemoteTransport.dir
@@ -61,11 +69,21 @@ final class RemoteHostController {
         }
         RunLoop.main.add(t, forMode: .common)
         pollTimer = t
+        // Stand up the subnet tunnel entry point (SOCKS) so the browser pane and
+        // `curl --socks5` can reach the remote guests as soon as the host is up.
+        if socks == nil {
+            socks = RemoteSocksForwarder(host: host)
+            if let p = socks?.port {
+                FatClientLog.log("socks: 127.0.0.1:\(p) → \(host.connectLabel) (remote subnet)")
+            }
+        }
     }
 
     func stop() {
         pollTimer?.invalidate()
         pollTimer = nil
+        socks?.stop()
+        socks = nil
     }
 
     private func pollOnce() {
@@ -114,6 +132,11 @@ final class RemoteHostController {
         let vms = (snapshot["vms"] as? [[String: Any]]) ?? []
         let grid = (snapshot["gridLayout"] as? [String: Any]) ?? ["cells": []]
         let autos = (snapshot["automations"] as? [String: Any]) ?? [:]
+
+        if let cidr = snapshot["vmnetSubnet"] as? String, cidr != vmnetSubnet {
+            vmnetSubnet = cidr
+            FatClientLog.log("apply: remote vmnet subnet = \(cidr)")
+        }
 
         applyWorkspaces(workspaces, vms: vms)
         applyGrid(grid)

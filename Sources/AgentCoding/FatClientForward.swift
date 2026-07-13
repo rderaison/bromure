@@ -91,6 +91,32 @@ enum FatForward {
         return fd
     }
 
+    /// Bind a loopback listener on an OS-chosen ephemeral port; returns the fd
+    /// and the actual port, or (-1, 0) on failure. Used by the auto-started
+    /// per-host SOCKS forwarder, which needs a free port it can advertise.
+    static func listenEphemeral() -> (fd: Int32, port: Int) {
+        let fd = listen(port: 0, bindAll: false)
+        guard fd >= 0 else { return (-1, 0) }
+        var addr = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let rc = withUnsafeMutablePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
+        }
+        guard rc == 0 else { Darwin.close(fd); return (-1, 0) }
+        return (fd, Int(UInt16(bigEndian: addr.sin_port)))
+    }
+
+    /// SOCKS5 accept loop over an ALREADY-bound listener `lfd`. Returns when
+    /// `lfd` is closed (that's the stop signal — `accept` then fails). Unlike
+    /// `serveSocks` this never binds, so the owner controls the fd's lifetime.
+    static func acceptSocks(lfd: Int32, host: RemoteHost) {
+        while true {
+            let cfd = Darwin.accept(lfd, nil, nil)
+            if cfd < 0 { if errno == EINTR { continue }; break }   // lfd closed → stop
+            Thread.detachNewThread { handleSocks(cfd, host: host) }
+        }
+    }
+
     /// Fixed local port → remote `ip:port`. Blocks, accepting forever.
     static func serveForward(host: RemoteHost, localPort: Int, ip: String, port: Int, bindAll: Bool) {
         let lfd = listen(port: localPort, bindAll: bindAll)
@@ -171,6 +197,37 @@ enum FatForward {
         }
         writeAll([5, 0, 0, 1, 0, 0, 0, 0, 0, 0])   // success (BND.ADDR/PORT ignored)
         splice(cfd, rfd)
+    }
+}
+
+// MARK: - Per-host SOCKS forwarder (auto-started with a remote connection)
+
+/// A SOCKS5 forwarder bound to a loopback ephemeral port, tunneling each CONNECT
+/// to a guest on the connected remote's subnet (over `bromure forward`). One is
+/// started per connected `RemoteHostController`; the browser pane's PAC points
+/// at `port` for the remote subnet, and `curl --socks5 127.0.0.1:<port>` reaches
+/// the same guests. Idle cost is one fd + one thread parked in `accept`.
+final class RemoteSocksForwarder {
+    let port: Int
+    private let lfd: Int32
+    private var stopped = false
+
+    /// Binds an ephemeral loopback port and starts accepting. Returns nil if the
+    /// listener couldn't be bound.
+    init?(host: RemoteHost) {
+        let (fd, port) = FatForward.listenEphemeral()
+        guard fd >= 0 else { return nil }
+        self.lfd = fd
+        self.port = port
+        Thread.detachNewThread { FatForward.acceptSocks(lfd: fd, host: host) }
+    }
+
+    /// Close the listener; the parked `accept` fails and its thread exits.
+    /// In-flight tunnels finish on their own (each owns its own fds).
+    func stop() {
+        guard !stopped else { return }
+        stopped = true
+        Darwin.close(lfd)
     }
 }
 
