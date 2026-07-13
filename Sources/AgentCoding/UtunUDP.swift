@@ -22,7 +22,8 @@ final class UDPChannel {
     private let emit: ([UInt8]) -> Void
     private let onClosed: (UInt32) -> Void
 
-    private let lock = NSLock()
+    private let lock = NSLock()        // guards the state below
+    private let writeLock = NSLock()   // serializes ALL writes to rfd (framed stream)
     private var rfd: Int32 = -1
     private var connecting = false
     private var closed = false
@@ -39,19 +40,31 @@ final class UDPChannel {
         let frame = Self.frame(srcIP: srcIP, srcPort: srcPort, dstPort: dstPort, payload: payload)
         lock.lock()
         if closed { lock.unlock(); return }
-        if rfd >= 0 { _ = writeAll(rfd, frame); lock.unlock(); return }
+        if rfd >= 0 {
+            let fd = rfd; lock.unlock()
+            writeFrame(fd, frame)   // under writeLock, NOT the state lock
+            return
+        }
         pending.append(frame)
-        if connecting { lock.unlock(); return }
+        let startDial = !connecting
         connecting = true
         lock.unlock()
-        dialAsync()
+        if startDial { dialAsync() }
+    }
+
+    /// The one serialized write path for the channel fd — both `send()` and the
+    /// dial drain go through here so frames never interleave on the stream.
+    private func writeFrame(_ fd: Int32, _ frame: [UInt8]) {
+        writeLock.lock(); _ = writeAll(fd, frame); writeLock.unlock()
     }
 
     func close() {
-        lock.lock(); defer { lock.unlock() }
-        guard !closed else { return }
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
         closed = true
-        if rfd >= 0 { Darwin.close(rfd); rfd = -1 }
+        let fd = rfd; rfd = -1
+        lock.unlock()
+        if fd >= 0 { writeLock.lock(); Darwin.close(fd); writeLock.unlock() }
     }
 
     private func dialAsync() {
@@ -68,7 +81,7 @@ final class UDPChannel {
             self.rfd = fd
             let queued = self.pending; self.pending = []
             self.lock.unlock()
-            for f in queued { _ = self.writeAll(fd, f) }
+            for f in queued { self.writeFrame(fd, f) }   // serialized like send()
             self.readLoop(fd)
         }
     }
@@ -97,8 +110,16 @@ final class UDPChannel {
                 emit(pkt)
             }
         }
-        lock.lock(); let alive = !closed; lock.unlock()
-        if alive { onClosed(guestIP) }
+        // The relay dropped the channel: close the fd (mirroring the TCP path)
+        // and drop the channel so a later datagram re-dials cleanly.
+        lock.lock()
+        let alive = !closed
+        if alive { closed = true; rfd = -1 }
+        lock.unlock()
+        if alive {
+            writeLock.lock(); Darwin.close(fd); writeLock.unlock()
+            onClosed(guestIP)
+        }
     }
 
     private static func frame(srcIP: UInt32, srcPort: UInt16, dstPort: UInt16, payload: ArraySlice<UInt8>) -> [UInt8] {

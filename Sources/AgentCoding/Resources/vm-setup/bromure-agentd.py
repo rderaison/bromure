@@ -1200,24 +1200,31 @@ def _loopback_handle_udp(vs, rest):
     """
     import struct
     socks = {}          # (srcIP, srcPort, dstPort) -> connected UDP socket
+    socks_lock = threading.Lock()
     vs_lock = threading.Lock()
 
     def reader(key, us):
         srcip, srcport, dstport = key
-        while True:
-            try:
-                data = us.recv(65535)
-            except OSError:
-                break
-            if not data:
-                break
-            body = struct.pack("!IHH", srcip, srcport, dstport) + data
-            frame = struct.pack("!H", len(body)) + body
-            with vs_lock:
+        try:
+            while True:
                 try:
-                    vs.sendall(frame)
+                    data = us.recv(65535)   # b'' is a zero-length datagram, NOT EOF
                 except OSError:
-                    break
+                    break                    # idle timeout or socket error → reap
+                body = struct.pack("!IHH", srcip, srcport, dstport) + data
+                with vs_lock:
+                    try:
+                        vs.sendall(struct.pack("!H", len(body)) + body)
+                    except OSError:
+                        break
+        finally:
+            with socks_lock:
+                if socks.get(key) is us:
+                    del socks[key]       # so a recurring flow re-dials cleanly
+            try:
+                us.close()
+            except OSError:
+                pass
 
     buf = rest
     try:
@@ -1239,24 +1246,35 @@ def _loopback_handle_udp(vs, rest):
             srcip, srcport, dstport = struct.unpack("!IHH", body[:8])
             payload = body[8:]
             key = (srcip, srcport, dstport)
-            us = socks.get(key)
+            with socks_lock:
+                us = socks.get(key)
             if us is None:
-                us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                us.settimeout(120)
+                ns = None
                 try:
-                    us.connect(("127.0.0.1", dstport))
+                    ns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    ns.settimeout(120)
+                    ns.connect(("127.0.0.1", dstport))
                 except OSError as exc:
-                    _loopback_log("udp connect 127.0.0.1:%d failed: %s" % (dstport, exc))
-                    us.close()
-                    continue
-                socks[key] = us
+                    _loopback_log("udp socket 127.0.0.1:%d failed: %s" % (dstport, exc))
+                    if ns is not None:
+                        try:
+                            ns.close()
+                        except OSError:
+                            pass
+                    continue     # never tears down the whole tunnel
+                us = ns
+                with socks_lock:
+                    socks[key] = us
                 threading.Thread(target=reader, args=(key, us), daemon=True).start()
             try:
                 us.send(payload)
             except OSError:
                 pass
     finally:
-        for us in socks.values():
+        with socks_lock:
+            remaining = list(socks.values())
+            socks.clear()
+        for us in remaining:
             try:
                 us.close()
             except OSError:
