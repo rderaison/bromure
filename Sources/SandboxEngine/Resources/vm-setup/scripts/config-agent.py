@@ -305,7 +305,16 @@ def write_chrome_env(cfg):
 
     if cfg.get("darkMode"):
         extra_flags.append("--force-dark-mode")
-    if cfg.get("directConnection"):
+    if cfg.get("proxyPacB64"):
+        # Fat-client browser pane: the host supplies a PAC (base64) that routes
+        # the REMOTE workspace subnet through the fat client's SOCKS forwarder
+        # (reachable at the vmnet gateway) and everything else DIRECT. Chromium
+        # resolves the SOCKS destination remotely, so the browser reaches the
+        # remote guest's dev server without any host route or disjoint subnet.
+        pac = str(cfg["proxyPacB64"])
+        extra_flags.append(
+            "--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64," + pac)
+    elif cfg.get("directConnection"):
         # Direct-connection mode (Bromure AC's embedded browser): no proxy
         # flag at all — Chromium connects straight out via the VM's NAT.
         pass
