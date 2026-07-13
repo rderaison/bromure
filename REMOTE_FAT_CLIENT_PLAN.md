@@ -54,11 +54,46 @@ The reach-the-remote-subnet tunnel works, byte-exact, over SSH:
   (`ACAppDelegate.resolveFatClientForward`). Verified: curl over the SOCKS proxy →
   remote `192.168.64.x` dev server, byte-exact.
 
-Still to do in Phase 4: the **system-wide `utun`** (so *any* local process — not just a
-SOCKS-configured browser/curl — reaches the remote subnet at its literal address; needs the
-privileged helper); wiring the **browser pane** into the remote window + the **browser-mcp
-relay** + a PAC that points the local browser VM at the SOCKS proxy; and fleet
-**alias-on-collision**.
+**Landed since (networking primitives, unit-tested):**
+
+- **Auth is now askpass-free.** The password bootstrap runs through an embedded swift-nio-ssh
+  **client** (`FatClientNIOSSH.enrollWithPassword`): password auth + client-key enrollment in
+  one connection, no system `ssh`/`SSH_ASKPASS`. (Also fixed a real server bug — the control
+  bridge didn't flush `pendingInbound`, so a pipelined request that beat the control-socket
+  connect was silently dropped; `startControlBridge` now flushes like the forward bridge.)
+- **Auto-SOCKS.** `RemoteHostController` starts a per-host `RemoteSocksForwarder` (ephemeral
+  loopback port, stoppable) on connect and reads `/state`'s `vmnetSubnet` (previously dropped).
+- **PAC generator** (`FatClientPAC`) — SOCKS for each remote subnet, DIRECT otherwise; CIDR/host
+  inputs validated against JS injection; fleet-aware (one clause per host, alias subnets included).
+- **Fleet router** (`FleetRouter`) — route literally when the subnet is free, else assign a
+  `100.64.<n>.0/24` alias; `remap()` does the host-octet-preserving address rewrite for the relay.
+
+**Still to do in Phase 4:**
+
+- **Browser pane on `RemoteHostWindow`** (the main refactor). `RemoteHostWindow.stage` is
+  single-occupant (grid *or* one terminal) — port the `paneSlot | browserPaneHost` right-split
+  from `UnifiedSessionWindow` and give `RemoteHostController` the per-`Profile.ID`
+  `browserControllers`/`browserModels`. Instantiate `WorkspaceBrowserController` per remote
+  workspace on B.
+- **Browser data plane wiring** (the primitives above compose here):
+  - Add an **explicit-octet knob** to `VMNetSwitch.configure()` (today: only ascending/descending,
+    and a no-op after start) and thread it → `startVmnetLocked` → `chooseSubnetOctet`. Pin B's
+    browser switch to an octet **disjoint** from the remote's (e.g. 127) so navigating to the
+    remote `192.168.64.x` is off-subnet and egresses to the host, where the PAC catches it.
+  - Make `WorkspaceBrowserController.browserConfig()` proxy-aware: instead of `directConnection`,
+    inject `--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64,<FatClientPAC>` via
+    `extraChromeFlags`. The PAC's proxy host is the **browser switch gateway** (e.g. 192.168.127.1);
+    bind `RemoteSocksForwarder` there (not 127.0.0.1) so the browser VM can reach it.
+  - **Empirical check first** (plan spike #1, still unrun): confirm the browser VM's off-subnet
+    traffic actually reaches a host-side listener on the gateway before committing this shape.
+- **`browser-mcp` relay channel.** New `bromure-fatclient/1 browser-mcp <vm>` verb; server tees
+  `BrowserMCPVsockBridge`'s agent JSON-RPC onto the channel (mind the multi-connection id-space
+  caveat); client runs a line loop → B's own `BrowserMCPServer.handle(line:)` (transport-agnostic).
+  For an aliased host, rewrite the advertised address via `FleetRouter.remap`.
+- **System-wide `utun`** (privileged): app-side userspace forwarder over `serveForward` per flow +
+  a launchd SMJobBless helper (open utun, hand back fd) + host routes per connected subnet. Needs
+  admin consent and the plan's spike #1 (does vmnet-NAT'd off-subnet guest traffic hit a host utun
+  route?) run first. SOCKS/PAC is the no-privilege fallback and works without this.
 
 ### Phases 1–3
 
