@@ -91,11 +91,13 @@ enum FatForward {
         return fd
     }
 
-    /// Bind a loopback listener on an OS-chosen ephemeral port; returns the fd
-    /// and the actual port, or (-1, 0) on failure. Used by the auto-started
-    /// per-host SOCKS forwarder, which needs a free port it can advertise.
-    static func listenEphemeral() -> (fd: Int32, port: Int) {
-        let fd = listen(port: 0, bindAll: false)
+    /// Bind an ephemeral-port listener (`bindAll` → 0.0.0.0, else loopback);
+    /// returns the fd and the actual port, or (-1, 0) on failure. The browser
+    /// pane binds 0.0.0.0 so the guest can reach it at the vmnet gateway (the
+    /// gateway IP isn't on the host until the switch starts, so we can't bind it
+    /// directly); `acceptSocks`'s peer filter keeps it from being an open relay.
+    static func listenEphemeral(bindAll: Bool = false) -> (fd: Int32, port: Int) {
+        let fd = listen(port: 0, bindAll: bindAll)
         guard fd >= 0 else { return (-1, 0) }
         var addr = sockaddr_in()
         var len = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -106,13 +108,25 @@ enum FatForward {
         return (fd, Int(UInt16(bigEndian: addr.sin_port)))
     }
 
-    /// SOCKS5 accept loop over an ALREADY-bound listener `lfd`. Returns when
-    /// `lfd` is closed (that's the stop signal — `accept` then fails). Unlike
-    /// `serveSocks` this never binds, so the owner controls the fd's lifetime.
-    static func acceptSocks(lfd: Int32, host: RemoteHost) {
+    /// Dotted-quad of an accepted peer's IPv4 address (network byte order).
+    static func peerIPv4(_ addr: sockaddr_in) -> String {
+        let a = addr.sin_addr.s_addr
+        return "\(a & 0xff).\((a >> 8) & 0xff).\((a >> 16) & 0xff).\((a >> 24) & 0xff)"
+    }
+
+    /// SOCKS5 accept loop over an ALREADY-bound listener `lfd`. `allow` gates
+    /// each connection by source IP (nil = accept all). Returns when `lfd` is
+    /// closed (that's the stop signal — `accept` then fails). Unlike `serveSocks`
+    /// this never binds, so the owner controls the fd's lifetime.
+    static func acceptSocks(lfd: Int32, host: RemoteHost, allow: ((String) -> Bool)? = nil) {
         while true {
-            let cfd = Darwin.accept(lfd, nil, nil)
+            var peer = sockaddr_in()
+            var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let cfd = withUnsafeMutablePointer(to: &peer) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.accept(lfd, $0, &len) }
+            }
             if cfd < 0 { if errno == EINTR { continue }; break }   // lfd closed → stop
+            if let allow, !allow(peerIPv4(peer)) { Darwin.close(cfd); continue }
             Thread.detachNewThread { handleSocks(cfd, host: host) }
         }
     }
@@ -212,14 +226,22 @@ final class RemoteSocksForwarder {
     private let lfd: Int32
     private var stopped = false
 
-    /// Binds an ephemeral loopback port and starts accepting. Returns nil if the
-    /// listener couldn't be bound.
+    /// Binds an ephemeral port and starts accepting. Bound to 0.0.0.0 so the
+    /// local browser VM can reach it at the vmnet gateway, but connections are
+    /// accepted ONLY from loopback (curl on the host) and the pinned browser
+    /// subnet (192.168.<browserSwitchOctet>.x) — never an open relay onto the
+    /// LAN. Returns nil if the listener couldn't be bound.
     init?(host: RemoteHost) {
-        let (fd, port) = FatForward.listenEphemeral()
+        let (fd, port) = FatForward.listenEphemeral(bindAll: true)
         guard fd >= 0 else { return nil }
         self.lfd = fd
         self.port = port
-        Thread.detachNewThread { FatForward.acceptSocks(lfd: fd, host: host) }
+        let browserPrefix = "192.168.\(FatClient.browserSwitchOctet)."
+        Thread.detachNewThread {
+            FatForward.acceptSocks(lfd: fd, host: host) { ip in
+                ip.hasPrefix("127.") || ip.hasPrefix(browserPrefix)
+            }
+        }
     }
 
     /// Close the listener; the parked `accept` fails and its thread exits.
