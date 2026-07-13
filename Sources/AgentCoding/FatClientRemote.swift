@@ -314,6 +314,18 @@ enum RemoteTransport {
                  "\(host.user)@\(host.address)", "\(FatClient.forwardVerbPrefix)\(ip) \(port)"]
         return SSHTunnel.shared.dial(args)
     }
+
+    /// Open a `browser-mcp <vm>` channel: a raw byte stream carrying the remote
+    /// workspace agent's line-delimited JSON-RPC, which the fat client answers
+    /// with its own `BrowserMCPServer`. Fresh ssh process per relay (long-lived
+    /// stream, no ControlMaster), like `forwardDial`.
+    static func browserMCPDial(host: RemoteHost, vm: String) -> Int32? {
+        ensureClientKey()
+        var args = commonArgs(for: host)
+        args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+                 "\(host.user)@\(host.address)", "\(FatClient.browserMCPVerbPrefix)\(vm)"]
+        return SSHTunnel.shared.dial(args)
+    }
 }
 
 /// UI-facing, observable store of configured remote hosts. Delegates all path /

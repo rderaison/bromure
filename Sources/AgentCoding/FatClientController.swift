@@ -436,6 +436,8 @@ final class RemoteHostWindow: NSWindow {
     private var browserWidthConstraint: NSLayoutConstraint!
     private var browserControllers: [Profile.ID: WorkspaceBrowserController] = [:]
     private var browserModels: [Profile.ID: BrowserPaneModel] = [:]
+    /// Relays the remote agent's browser MCP to the local pane's browser.
+    private var browserRelays: [Profile.ID: BrowserMCPRelayClient] = [:]
     private var browserOpen: Set<Profile.ID> = []
     private var shownBrowser: Profile.ID?
     /// Test hook: auto-open the browser pane once a workspace is selected.
@@ -471,6 +473,8 @@ final class RemoteHostWindow: NSWindow {
         gridView?.retireAll()
         for (_, c) in termControllers { c.retireAll() }
         termControllers.removeAll()
+        for (_, r) in browserRelays { r.stop() }
+        browserRelays.removeAll()
         for (_, c) in browserControllers { c.stop() }
         browserControllers.removeAll()
         super.close()
@@ -578,6 +582,14 @@ final class RemoteHostWindow: NSWindow {
             ])
             browserWidthConstraint.constant = max(480, frame.width * 0.42)
             ctl.setVisible(true)
+            // Relay the remote agent's browser MCP to this local browser.
+            if browserRelays[id] == nil {
+                let relay = BrowserMCPRelayClient(
+                    host: controller.host, vm: id.uuidString,
+                    browser: { [weak self] in self?.browserControllers[id] })
+                browserRelays[id] = relay
+                relay.start()
+            }
         } else {
             browserOpen.remove(id)
             if shownBrowser == id { shownBrowser = nil }

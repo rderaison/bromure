@@ -67,6 +67,13 @@ final class RemoteAccessServer {
         @Sendable (_ ip: String, _ port: Int, _ completion: @escaping @Sendable (Int32) -> Void) -> Void
     var forwardResolver: ForwardResolver?
 
+    /// Resolves a `browser-mcp <vm>` channel: splices the workspace agent's
+    /// vsock-5830 MCP stream to an fd and returns it (`completion(-1)` if the
+    /// workspace has no browser bridge). Set by the app delegate.
+    typealias BrowserMCPResolver =
+        @Sendable (_ vm: String, _ completion: @escaping @Sendable (Int32) -> Void) -> Void
+    var browserMCPResolver: BrowserMCPResolver?
+
     private static let sshKeygenBinary = "/usr/bin/ssh-keygen"
 
     init(paths: Paths = .default) { self.paths = paths }
@@ -103,6 +110,7 @@ final class RemoteAccessServer {
         // Fat clients bridge to this owner-only control socket over SSH.
         let controlSocketPath = ProfileStore().controlSocketURL.path
         let forwardResolver = self.forwardResolver
+        let browserMCPResolver = self.browserMCPResolver
 
         let g = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         // Shared across all connections: the per-source-IP password rate
@@ -145,7 +153,8 @@ final class RemoteAccessServer {
                                     try childChannel.pipeline.syncOperations.addHandler(
                                         SSHPTYSessionHandler(menuExe: exe, user: user,
                                                              controlSocketPath: controlSocketPath,
-                                                             forwardResolver: forwardResolver))
+                                                             forwardResolver: forwardResolver,
+                                                             browserMCPResolver: browserMCPResolver))
                                 }
                             }),
                         RemoteErrorHandler(),

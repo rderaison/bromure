@@ -1897,6 +1897,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         startAutomationServerIfNeeded()
         installFatClientForwardResolver()   // before the SSH server captures it
+        installFatClientBrowserMCPResolver()
         startRemoteAccessIfNeeded()
     }
 
@@ -6390,6 +6391,34 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 completion(-1)
             }
         }
+    }
+
+    @MainActor func installFatClientBrowserMCPResolver() {
+        RemoteAccessServer.shared.browserMCPResolver = { vm, completion in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let delegate = NSApp.delegate as? ACAppDelegate else { completion(-1); return }
+                    delegate.resolveBrowserMCP(vm: vm, completion: completion)
+                }
+            }
+        }
+    }
+
+    /// A fat client opened `browser-mcp <workspaceID>`: hand the SSH bridge a
+    /// socketpair end and tell that workspace's browser bridge to splice the
+    /// agent's vsock-5830 MCP stream to the other end. The fat client then runs
+    /// its OWN BrowserMCPServer over the channel to drive its local browser.
+    @MainActor private func resolveBrowserMCP(vm: String,
+                                              completion: @escaping @Sendable (Int32) -> Void) {
+        guard let id = UUID(uuidString: vm), let bridge = browserMCPBridges[id] else {
+            FatClientLog.log("browser-mcp-resolver: no browser bridge for \(vm)")
+            completion(-1); return
+        }
+        var sp: [Int32] = [0, 0]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0 else { completion(-1); return }
+        bridge.attachRemote(fd: sp[0])
+        FatClientLog.log("browser-mcp-resolver: \(vm) attached")
+        completion(sp[1])
     }
 
     /// Open (or focus) the mirror window for a configured remote host.

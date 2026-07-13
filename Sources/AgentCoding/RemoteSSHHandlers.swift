@@ -226,6 +226,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
     private let controlSocketPath: String
     /// Resolves a `forward <ip> <port>` to a guest-loopback-relay fd (vsock).
     private let forwardResolver: RemoteAccessServer.ForwardResolver?
+    private let browserMCPResolver: RemoteAccessServer.BrowserMCPResolver?
     /// Inbound SSH bytes that arrived before the forward fd was ready (the vsock
     /// connect is async), flushed once it is.
     private var pendingInbound: [UInt8] = []
@@ -242,11 +243,13 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
     private let ioQueue = DispatchQueue(label: "io.bromure.remote.pty")
 
     init(menuExe: String, user: String, controlSocketPath: String,
-         forwardResolver: RemoteAccessServer.ForwardResolver? = nil) {
+         forwardResolver: RemoteAccessServer.ForwardResolver? = nil,
+         browserMCPResolver: RemoteAccessServer.BrowserMCPResolver? = nil) {
         self.menuExe = menuExe
         self.user = user
         self.controlSocketPath = controlSocketPath
         self.forwardResolver = forwardResolver
+        self.browserMCPResolver = browserMCPResolver
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -281,6 +284,8 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
             } else if let fwd = FatClient.parseForward(e.command) {
                 startForwardBridge(context: context, wantReply: e.wantReply,
                                    ip: fwd.ip, port: fwd.port)
+            } else if let vm = FatClient.parseBrowserMCP(e.command) {
+                startBrowserMCPBridge(context: context, wantReply: e.wantReply, vm: vm)
             } else {
                 startMenu(context: context, wantReply: e.wantReply)
             }
@@ -435,38 +440,68 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
             el.execute {
                 guard let self else { if fd >= 0 { Darwin.close(fd) }; return }
                 FatClientLog.log("forward: resolver \(ip):\(port) -> fd=\(fd)")
-                guard fd >= 0 else {
-                    if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
-                    channel.close(promise: nil)
-                    return
-                }
-                self.master = fd
-                self.childPID = -1
-                if wantReply { channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil) }
-                // Flush anything the client sent before the fd was ready.
-                if !self.pendingInbound.isEmpty {
-                    let bytes = self.pendingInbound; self.pendingInbound = []
-                    _ = bytes.withUnsafeBytes { Self.writeAll(fd, $0.baseAddress!, bytes.count) }
-                }
-                let flags = fcntl(fd, F_GETFL)
-                _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
-                let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: self.ioQueue)
-                src.setEventHandler { [weak self] in
-                    guard let self else { return }
-                    var buf = [UInt8](repeating: 0, count: 1 << 15)
-                    let n = Darwin.read(fd, &buf, buf.count)
-                    if n > 0 {
-                        var bb = channel.allocator.buffer(capacity: n)
-                        bb.writeBytes(buf[0..<n])
-                        channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(bb)), promise: nil)
-                    } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR && errno != EWOULDBLOCK) {
-                        self.finish(channel: channel, pid: -1, master: fd)
-                    }
-                }
-                self.readSource = src
-                src.resume()
+                self.wireResolvedFD(channel: channel, wantReply: wantReply, fd: fd)
             }
         }
+    }
+
+    /// Bridge the SSH channel to the workspace agent's browser-MCP stream: the
+    /// resolver splices the guest's vsock-5830 JSON-RPC to an fd, which this
+    /// channel byte-pumps to the fat client's own BrowserMCPServer. Same
+    /// machinery as the forward bridge (async-resolved fd).
+    private func startBrowserMCPBridge(context: ChannelHandlerContext, wantReply: Bool, vm: String) {
+        guard !started else { return }
+        started = true
+        let channel = context.channel
+        guard let resolver = browserMCPResolver else {
+            SupplyChainLog.shared.record("[remote] refused browser-mcp \(vm) — no resolver.")
+            if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
+            channel.close(promise: nil)
+            return
+        }
+        let el = channel.eventLoop
+        resolver(vm) { [weak self] fd in
+            el.execute {
+                guard let self else { if fd >= 0 { Darwin.close(fd) }; return }
+                FatClientLog.log("browser-mcp: resolver \(vm) -> fd=\(fd)")
+                self.wireResolvedFD(channel: channel, wantReply: wantReply, fd: fd)
+            }
+        }
+    }
+
+    /// Wire an async-resolved fd as this channel's byte-pump peer (shared by the
+    /// forward and browser-mcp bridges). Runs on the channel event loop.
+    private func wireResolvedFD(channel: Channel, wantReply: Bool, fd: Int32) {
+        guard fd >= 0 else {
+            if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
+            channel.close(promise: nil)
+            return
+        }
+        self.master = fd
+        self.childPID = -1
+        if wantReply { channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil) }
+        // Flush anything the client sent before the fd was ready.
+        if !self.pendingInbound.isEmpty {
+            let bytes = self.pendingInbound; self.pendingInbound = []
+            _ = bytes.withUnsafeBytes { Self.writeAll(fd, $0.baseAddress!, bytes.count) }
+        }
+        let flags = fcntl(fd, F_GETFL)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: self.ioQueue)
+        src.setEventHandler { [weak self] in
+            guard let self else { return }
+            var buf = [UInt8](repeating: 0, count: 1 << 15)
+            let n = Darwin.read(fd, &buf, buf.count)
+            if n > 0 {
+                var bb = channel.allocator.buffer(capacity: n)
+                bb.writeBytes(buf[0..<n])
+                channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(bb)), promise: nil)
+            } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR && errno != EWOULDBLOCK) {
+                self.finish(channel: channel, pid: -1, master: fd)
+            }
+        }
+        self.readSource = src
+        src.resume()
     }
 
     /// Connect a blocking AF_UNIX stream socket to `path`. Returns -1 on failure.

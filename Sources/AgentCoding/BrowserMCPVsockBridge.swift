@@ -16,6 +16,12 @@ final class BrowserMCPVsockBridge: NSObject {
     private var listenerDelegate: MCPListenerDelegate?
     private let server: BrowserMCPServer
     private var connections: [ObjectIdentifier: Connection] = [:]
+    /// When a fat client has a `browser-mcp` channel open for this workspace,
+    /// the agent's MCP stream is spliced raw to this fd (the SSH channel) instead
+    /// of A's local `server` — so the fat client's own BrowserMCPServer drives
+    /// its local browser. One relay at a time (raw byte splice can't multiplex).
+    private var remoteFd: Int32?
+    private var splicedConns: [ObjectIdentifier: VZVirtioSocketConnection] = [:]
 
     init(socketDevice: VZVirtioSocketDevice, server: BrowserMCPServer) {
         self.socketDevice = socketDevice
@@ -34,7 +40,52 @@ final class BrowserMCPVsockBridge: NSObject {
         connections.removeAll()
     }
 
+    /// Route agent MCP connections to a fat client's `browser-mcp` channel (`fd`)
+    /// instead of A's local browser. Existing local connections are dropped so
+    /// the guest shim reconnects and gets spliced.
+    func attachRemote(fd: Int32) {
+        if let old = remoteFd { Darwin.close(old) }
+        remoteFd = fd
+        for (_, c) in connections { c.cancel() }
+        connections.removeAll()
+    }
+
+    /// Stop relaying to the fat client; new agent connections go local again.
+    func detachRemote() {
+        if let fd = remoteFd { Darwin.close(fd) }
+        remoteFd = nil
+    }
+
     private func adopt(_ conn: VZVirtioSocketConnection) {
+        if let rfd = remoteFd {
+            // Self-heal: if the fat client's channel hung up (socketpair peer
+            // closed) we won't have been told — drop the stale relay and fall
+            // through to serving this agent locally again.
+            var pfd = pollfd(fd: rfd, events: 0, revents: 0)
+            if poll(&pfd, 1, 0) >= 0, pfd.revents & Int16(POLLHUP) != 0 {
+                detachRemote()
+            } else if !splicedConns.isEmpty {
+                // One relay at a time — raw byte splice can't interleave two
+                // agents' JSON-RPC id spaces on a single channel.
+                conn.close(); return
+            } else {
+                // Splice this agent's MCP stream raw to the fat client's channel.
+                // Dup both fds so splice's close touches neither the VZ-owned fd
+                // nor the shared remoteFd; retain conn for the splice's lifetime.
+                let agentFd = dup(conn.fileDescriptor)
+                let remoteDup = dup(rfd)
+                let key = ObjectIdentifier(conn)
+                splicedConns[key] = conn
+                Thread.detachNewThread {
+                    FatForward.splice(agentFd, remoteDup)   // closes both dups at EOF
+                    DispatchQueue.main.async {
+                        self.splicedConns.removeValue(forKey: key)
+                        conn.close()
+                    }
+                }
+                return
+            }
+        }
         let c = Connection(conn: conn, server: server) { [weak self] c in
             self?.connections.removeValue(forKey: ObjectIdentifier(c))
         }
