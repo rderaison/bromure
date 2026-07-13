@@ -25,21 +25,27 @@ final class UtunForwarder {
     /// Opens a byte stream to `(ip, port)` on the remote; default is the SSH
     /// forward channel. Injectable so the forwarder is testable without a remote.
     private let dial: (RemoteHost, String, Int) -> Int32?
+    /// Opens a multiplexed UDP forward channel to a guest (`ip`).
+    private let udpDial: (RemoteHost, String) -> Int32?
     private var running = true
     private let writeLock = NSLock()
     private let flowsLock = NSLock()
     private var flows: [FlowKey: TCPFlow] = [:]
+    private let udpLock = NSLock()
+    private var udpChannels: [UInt32: UDPChannel] = [:]
 
     /// utun frames are prefixed with the 4-byte address family (big-endian AF_INET).
     private static let afHeader: [UInt8] = [0, 0, 0, 2]
 
     init(utunFD: Int32, host: RemoteHost, localCIDR: String, remoteCIDR: String?,
-         dial: @escaping (RemoteHost, String, Int) -> Int32? = { RemoteTransport.forwardDial(host: $0, ip: $1, port: $2) }) {
+         dial: @escaping (RemoteHost, String, Int) -> Int32? = { RemoteTransport.forwardDial(host: $0, ip: $1, port: $2) },
+         udpDial: @escaping (RemoteHost, String) -> Int32? = { RemoteTransport.forwardDialUDP(host: $0, ip: $1) }) {
         self.utunFD = utunFD
         self.host = host
         self.remoteCIDR = remoteCIDR
         self.subnet = UtunForwarder.parseCIDR(localCIDR)
         self.dial = dial
+        self.udpDial = udpDial
     }
 
     /// Blocking read loop. Returns when the fd closes or `stop()` is called.
@@ -51,17 +57,77 @@ final class UtunForwarder {
                 if n < 0 && errno == EINTR { continue }
                 break
             }
-            guard let seg = UtunPacket.parse(Array(buf[4..<n])) else { continue }
-            // Only handle flows into the routed subnet.
-            if let s = subnet, (seg.dstIP & s.mask) != (s.net & s.mask) { continue }
-            handle(seg)
+            let pkt = Array(buf[4..<n])
+            guard pkt.count >= 20, (pkt[0] >> 4) == 4 else { continue }
+            let dstIP = UtunPacket.u32(pkt, 16)
+            // Only handle traffic into the routed subnet.
+            if let s = subnet, (dstIP & s.mask) != (s.net & s.mask) { continue }
+            switch pkt[9] {                                   // IP protocol
+            case 6:  if let seg = UtunPacket.parse(pkt) { handle(seg) }   // TCP
+            case 17: handleUDP(pkt)                                        // UDP
+            case 1:  handleICMP(pkt)                                       // ICMP
+            default: break
+            }
         }
+    }
+
+    // MARK: ICMP (echo answered locally)
+
+    /// Reply to an ICMP echo request from the tunnel itself. A true proxy would
+    /// need raw sockets on the remote; like most tun2socks stacks we answer echo
+    /// locally, so `ping <guest>` confirms the subnet is routed and the tunnel is
+    /// up (it does not round-trip to the guest).
+    private func handleICMP(_ pkt: [UInt8]) {
+        let ihl = Int(pkt[0] & 0x0F) * 4
+        guard pkt.count >= ihl + 8, pkt[ihl] == 8 else { return }   // type 8 = echo request
+        var r = pkt
+        for i in 0..<4 { r.swapAt(12 + i, 16 + i) }                 // swap IP src/dst
+        r[ihl] = 0                                                   // type 0 = echo reply
+        r[ihl + 2] = 0; r[ihl + 3] = 0                              // zero, then recompute ICMP cksum
+        let ic = UtunPacket.ipChecksum(r, ihl, pkt.count - ihl)
+        r[ihl + 2] = UInt8(ic >> 8); r[ihl + 3] = UInt8(ic & 0xff)
+        r[10] = 0; r[11] = 0                                         // zero, then recompute IP cksum
+        let ip = UtunPacket.ipChecksum(r, 0, ihl)
+        r[10] = UInt8(ip >> 8); r[11] = UInt8(ip & 0xff)
+        writeRaw(r)
+    }
+
+    /// Write a raw IPv4 packet (no AF header) to the utun.
+    private func writeRaw(_ pkt: [UInt8]) {
+        var out = UtunForwarder.afHeader
+        out.append(contentsOf: pkt)
+        writeLock.lock()
+        _ = out.withUnsafeBytes { Darwin.write(utunFD, $0.baseAddress, out.count) }
+        writeLock.unlock()
     }
 
     func stop() {
         running = false
         flowsLock.lock(); let all = Array(flows.values); flows.removeAll(); flowsLock.unlock()
         for f in all { f.close() }
+        udpLock.lock(); let chans = Array(udpChannels.values); udpChannels.removeAll(); udpLock.unlock()
+        for c in chans { c.close() }
+    }
+
+    // MARK: UDP
+
+    private func handleUDP(_ pkt: [UInt8]) {
+        guard let d = UtunPacket.parseUDP(pkt) else { return }
+        udpChannel(for: d.dstIP).send(srcIP: d.srcIP, srcPort: d.srcPort,
+                                      dstPort: d.dstPort, payload: d.payload)
+    }
+
+    private func udpChannel(for guestIP: UInt32) -> UDPChannel {
+        udpLock.lock(); defer { udpLock.unlock() }
+        if let c = udpChannels[guestIP] { return c }
+        let target = UtunForwarder.aliasToRemote(UtunPacket.ipString(guestIP), remoteCIDR: remoteCIDR)
+        let c = UDPChannel(host: host, guestIP: guestIP, targetIP: target, udpDial: udpDial,
+                           emit: { [weak self] pkt in self?.writeRaw(pkt) },
+                           onClosed: { [weak self] gip in
+                               self?.udpLock.lock(); self?.udpChannels.removeValue(forKey: gip); self?.udpLock.unlock()
+                           })
+        udpChannels[guestIP] = c
+        return c
     }
 
     // MARK: Packet handling

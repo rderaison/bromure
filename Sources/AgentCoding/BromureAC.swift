@@ -1934,6 +1934,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         startAutomationServerIfNeeded()
         installFatClientForwardResolver()   // before the SSH server captures it
+        installFatClientUDPForwardResolver()
         installFatClientBrowserMCPResolver()
         startRemoteAccessIfNeeded()
         installBrowserImageIfRequested()
@@ -6505,6 +6506,44 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             case .failure(let err):
                 FatClientLog.log("forward-resolver: vsock 5010 connect failed: \(err)")
                 completion(-1)
+            }
+        }
+    }
+
+    @MainActor func installFatClientUDPForwardResolver() {
+        RemoteAccessServer.shared.udpForwardResolver = { ip, completion in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let delegate = NSApp.delegate as? ACAppDelegate else { completion(-1); return }
+                    delegate.resolveFatClientForwardUDP(ip: ip, completion: completion)
+                }
+            }
+        }
+    }
+
+    /// Like `resolveFatClientForward` but signals the guest relay's UDP mode
+    /// ("UDP\n" header). One vsock relay carries all UDP to the guest, framed.
+    @MainActor private func resolveFatClientForwardUDP(ip: String,
+                                                       completion: @escaping @Sendable (Int32) -> Void) {
+        guard let session = runningSessions.values.first(where: { $0.lastIP == ip }),
+              let dev = session.sandbox.socketDevice else {
+            FatClientLog.log("udp-forward-resolver: no running VM at \(ip)"); completion(-1); return
+        }
+        dev.connect(toPort: 5010) { result in
+            switch result {
+            case .success(let conn):
+                let vfd = conn.fileDescriptor
+                let sent = "UDP\n".withCString { Darwin.write(vfd, $0, strlen($0)) }
+                guard sent > 0 else { FatClientLog.log("udp-forward-resolver: header write failed"); completion(-1); return }
+                var sp: [Int32] = [0, 0]
+                guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0 else { completion(-1); return }
+                let dupFD = dup(vfd)
+                let peer = sp[1]
+                Thread.detachNewThread { FatForward.splice(dupFD, peer); _ = conn }
+                FatClientLog.log("udp-forward-resolver: \(ip) -> vsock UDP relay ok")
+                completion(sp[0])
+            case .failure(let err):
+                FatClientLog.log("udp-forward-resolver: vsock 5010 connect failed: \(err)"); completion(-1)
             }
         }
     }

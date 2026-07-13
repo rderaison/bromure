@@ -1191,6 +1191,100 @@ def _loopback_pipe(src, dst, label=None):
             pass
 
 
+def _loopback_handle_udp(vs, rest):
+    """UDP tunnel mode (fat-client system-wide utun). The host multiplexes all
+    UDP to this guest over one vsock connection; each datagram is framed
+        [u16 bodyLen][u32 srcIP][u16 srcPort][u16 dstPort][payload]
+    We keep one UDP socket per (srcIP, srcPort, dstPort) connected to
+    127.0.0.1:<dstPort>, send the payload, and frame replies back the same way.
+    """
+    import struct
+    socks = {}          # (srcIP, srcPort, dstPort) -> connected UDP socket
+    socks_lock = threading.Lock()
+    vs_lock = threading.Lock()
+
+    def reader(key, us):
+        srcip, srcport, dstport = key
+        try:
+            while True:
+                try:
+                    data = us.recv(65535)   # b'' is a zero-length datagram, NOT EOF
+                except OSError:
+                    break                    # idle timeout or socket error → reap
+                body = struct.pack("!IHH", srcip, srcport, dstport) + data
+                with vs_lock:
+                    try:
+                        vs.sendall(struct.pack("!H", len(body)) + body)
+                    except OSError:
+                        break
+        finally:
+            with socks_lock:
+                if socks.get(key) is us:
+                    del socks[key]       # so a recurring flow re-dials cleanly
+            try:
+                us.close()
+            except OSError:
+                pass
+
+    buf = rest
+    try:
+        while True:
+            while len(buf) < 2:
+                chunk = vs.recv(65536)
+                if not chunk:
+                    return
+                buf += chunk
+            (bodylen,) = struct.unpack("!H", buf[:2])
+            while len(buf) < 2 + bodylen:
+                chunk = vs.recv(65536)
+                if not chunk:
+                    return
+                buf += chunk
+            body, buf = buf[2:2 + bodylen], buf[2 + bodylen:]
+            if len(body) < 8:
+                continue
+            srcip, srcport, dstport = struct.unpack("!IHH", body[:8])
+            payload = body[8:]
+            key = (srcip, srcport, dstport)
+            with socks_lock:
+                us = socks.get(key)
+            if us is None:
+                ns = None
+                try:
+                    ns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    ns.settimeout(120)
+                    ns.connect(("127.0.0.1", dstport))
+                except OSError as exc:
+                    _loopback_log("udp socket 127.0.0.1:%d failed: %s" % (dstport, exc))
+                    if ns is not None:
+                        try:
+                            ns.close()
+                        except OSError:
+                            pass
+                    continue     # never tears down the whole tunnel
+                us = ns
+                with socks_lock:
+                    socks[key] = us
+                threading.Thread(target=reader, args=(key, us), daemon=True).start()
+            try:
+                us.send(payload)
+            except OSError:
+                pass
+    finally:
+        with socks_lock:
+            remaining = list(socks.values())
+            socks.clear()
+        for us in remaining:
+            try:
+                us.close()
+            except OSError:
+                pass
+        try:
+            vs.close()
+        except OSError:
+            pass
+
+
 def _loopback_handle(vs):
     # Read the newline-terminated target port that prefixes the stream.
     buf = b""
@@ -1213,6 +1307,9 @@ def _loopback_handle(vs):
         return
 
     line, _, rest = buf.partition(b"\n")
+    if line.strip() == b"UDP":
+        _loopback_handle_udp(vs, rest)
+        return
     try:
         port = int(line.strip())
     except ValueError:

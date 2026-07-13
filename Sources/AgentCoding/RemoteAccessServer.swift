@@ -67,6 +67,13 @@ final class RemoteAccessServer {
         @Sendable (_ ip: String, _ port: Int, _ completion: @escaping @Sendable (Int32) -> Void) -> Void
     var forwardResolver: ForwardResolver?
 
+    /// Resolves a `forward-udp <ip>` channel: dials the guest's loopback relay in
+    /// UDP mode and returns the fd (`completion(-1)` on failure). Set by the app
+    /// delegate; sibling of `forwardResolver`.
+    typealias UDPForwardResolver =
+        @Sendable (_ ip: String, _ completion: @escaping @Sendable (Int32) -> Void) -> Void
+    var udpForwardResolver: UDPForwardResolver?
+
     /// Resolves a `browser-mcp <vm>` channel: splices the workspace agent's
     /// vsock-5830 MCP stream to an fd and returns it (`completion(-1)` if the
     /// workspace has no browser bridge). Set by the app delegate.
@@ -110,6 +117,7 @@ final class RemoteAccessServer {
         // Fat clients bridge to this owner-only control socket over SSH.
         let controlSocketPath = ProfileStore().controlSocketURL.path
         let forwardResolver = self.forwardResolver
+        let udpForwardResolver = self.udpForwardResolver
         let browserMCPResolver = self.browserMCPResolver
 
         let g = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -154,6 +162,7 @@ final class RemoteAccessServer {
                                         SSHPTYSessionHandler(menuExe: exe, user: user,
                                                              controlSocketPath: controlSocketPath,
                                                              forwardResolver: forwardResolver,
+                                                             udpForwardResolver: udpForwardResolver,
                                                              browserMCPResolver: browserMCPResolver))
                                 }
                             }),
