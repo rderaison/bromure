@@ -77,6 +77,11 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// reach each other; Bromure Web keeps every ephemeral session mutually
     /// unreachable, so it disables peer forwarding (internet egress still flows).
     private var bridgePeers = true
+    /// When set, pin `192.168.<octet>.0/24` (if that octet is free of the host's
+    /// own LANs). The fat client pins its browser switch to a fixed octet so the
+    /// gateway address is deterministic before the VM boots — the browser-pane
+    /// PAC and the SOCKS forwarder both reference it.
+    private var pinnedOctet: UInt8?
 
     // MARK: - DHCP (we serve it ourselves)
 
@@ -113,12 +118,13 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// Opt into a non-default policy. Must be called before the first
     /// `attachPort()` (no-op once the interface has started). Bromure Web calls
     /// this to walk the subnet up and isolate its VMs; AC relies on the defaults.
-    public func configure(ascendingSubnet: Bool, bridgePeers: Bool) {
+    public func configure(ascendingSubnet: Bool, bridgePeers: Bool, pinnedOctet: UInt8? = nil) {
         lock.lock()
         defer { lock.unlock() }
         guard !started else { return }
         self.ascendingSubnet = ascendingSubnet
         self.bridgePeers = bridgePeers
+        self.pinnedOctet = pinnedOctet
     }
 
     /// Persist DHCP leases to a sqlite db at `url` so a MAC keeps its IP across
@@ -424,14 +430,18 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// 65…126, so the two never meet. Falls back to 64 if the whole 2…64 band
     /// is somehow taken (vanishingly unlikely).
     private func chooseSubnetOctet() -> UInt8 {
-        let used = HostNetworkInfo.localPrivateClassCOctets()
-        if ascendingSubnet {
-            // Bromure Web: walk up 65 → 126, clear of AC's downward 64 → 2 band.
-            var octet = 65
-            while octet <= 126 {
-                if !used.contains(UInt8(octet)) { return UInt8(octet) }
-                octet += 1
-            }
+        Self.selectOctet(ascending: ascendingSubnet, pinned: pinnedOctet,
+                         used: HostNetworkInfo.localPrivateClassCOctets())
+    }
+
+    /// Pure octet selection: honor `pinned` when it's a valid, host-LAN-free
+    /// octet; otherwise walk (up 65→126 when ascending, else down 64→2) skipping
+    /// the host's own class-C octets. Extracted so it can be unit-tested without
+    /// the entitled vmnet interface.
+    static func selectOctet(ascending: Bool, pinned: UInt8?, used: Set<UInt8>) -> UInt8 {
+        if let pinned, (2...254).contains(pinned), !used.contains(pinned) { return pinned }
+        if ascending {
+            for octet in 65...126 where !used.contains(UInt8(octet)) { return UInt8(octet) }
             return 65
         }
         var octet = 64

@@ -40,4 +40,14 @@ enum FatClient {
 
     /// Protocol version advertised in `state` snapshots.
     static let protocolVersion = 1
+
+    /// The fat client pins its local browser VMs' switch to this octet so the
+    /// gateway (`192.168.<octet>.1`) is a fixed, known address the browser-pane
+    /// PAC and the SOCKS forwarder both target *before* the VM boots. 127 sits
+    /// above AC's downward (64→2) and Bromure Web's upward (65→126) bands, so it
+    /// won't collide with a workspace switch.
+    static let browserSwitchOctet: UInt8 = 127
+    /// Gateway of the pinned browser switch — where the guest reaches the host
+    /// (and thus the SOCKS forwarder).
+    static let browserSwitchGateway = "192.168.127.1"
 }
