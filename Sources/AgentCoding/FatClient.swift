@@ -38,6 +38,20 @@ enum FatClient {
         return (String(parts[0]), port)
     }
 
+    /// SSH `exec` verb for the browser-MCP relay: `bromure-fatclient/1 browser-mcp
+    /// <workspaceID>`. The server splices the workspace agent's vsock-5830 MCP
+    /// stream (line-delimited JSON-RPC) to this channel, so the fat client's own
+    /// `BrowserMCPServer` — driving the LOCAL browser pane — answers the remote
+    /// agent. See REMOTE_FAT_CLIENT_PLAN.md "Browser pane".
+    static let browserMCPVerbPrefix = "bromure-fatclient/1 browser-mcp "
+
+    /// Parse `<prefix><workspaceID>` → the workspace id string.
+    static func parseBrowserMCP(_ command: String) -> String? {
+        guard command.hasPrefix(browserMCPVerbPrefix) else { return nil }
+        let rest = command.dropFirst(browserMCPVerbPrefix.count).trimmingCharacters(in: .whitespaces)
+        return rest.isEmpty ? nil : rest
+    }
+
     /// Protocol version advertised in `state` snapshots.
     static let protocolVersion = 1
 
