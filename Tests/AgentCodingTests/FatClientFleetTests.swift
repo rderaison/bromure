@@ -57,6 +57,14 @@ struct FatClientFleetTests {
         #expect(routes[2].localCIDR == "100.64.3.0/24")
     }
 
+    @Test("tunnel aliasToRemote maps the alias back to the remote net")
+    func aliasToRemote() {
+        // Aliased route: a local process hit 100.64.2.7 → dial the remote's real 192.168.64.7.
+        #expect(FatClientTunnel.aliasToRemote("100.64.2.7", remoteCIDR: "192.168.64.0/24") == "192.168.64.7")
+        // Literal route (remoteCIDR nil) → unchanged.
+        #expect(FatClientTunnel.aliasToRemote("192.168.64.7", remoteCIDR: nil) == "192.168.64.7")
+    }
+
     @Test("remap is identity for literal, host-preserving swap for aliased")
     func remap() {
         let literal = FleetRouter.Route(hostID: hostA, remoteCIDR: "192.168.64.0/24",

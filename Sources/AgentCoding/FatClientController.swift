@@ -49,6 +49,10 @@ final class RemoteHostController {
     /// Auto-started SOCKS5 forwarder into the remote subnet; its port feeds the
     /// browser pane's PAC and `curl --socks5`. Nil until `start()`.
     private(set) var socks: RemoteSocksForwarder?
+    /// Optional system-wide utun tunnel (any local process → remote subnet at its
+    /// literal address). Off unless `BROMURE_FATCLIENT_UTUN` is set (it needs the
+    /// privileged helper); the browser pane works via SOCKS without it.
+    private var tunnel: FatClientTunnel?
 
     init(host: RemoteHost) {
         self.host = host
@@ -84,6 +88,8 @@ final class RemoteHostController {
         pollTimer = nil
         socks?.stop()
         socks = nil
+        tunnel?.stop()
+        tunnel = nil
     }
 
     private func pollOnce() {
@@ -136,6 +142,12 @@ final class RemoteHostController {
         if let cidr = snapshot["vmnetSubnet"] as? String, cidr != vmnetSubnet {
             vmnetSubnet = cidr
             FatClientLog.log("apply: remote vmnet subnet = \(cidr)")
+            // Optional system-wide tunnel: route the remote subnet literally to a
+            // utun (needs the privileged helper; degrades to SOCKS if unavailable).
+            if tunnel == nil, ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_UTUN"] != nil {
+                let t = FatClientTunnel(host: host, localCIDR: cidr)
+                tunnel = t.start() ? t : nil
+            }
         }
 
         applyWorkspaces(workspaces, vms: vms)

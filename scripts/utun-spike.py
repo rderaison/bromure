@@ -40,9 +40,9 @@ def open_utun():
     import fcntl
     fcntl.ioctl(s, CTLIOCGINFO, buf)
     ctl_id = struct.unpack("I96s", buf.raw)[0]
-    # struct sockaddr_ctl — connect selects a free utun (unit 0 => any)
-    sc = struct.pack("BBHII5I", 32, socket.AF_SYSTEM, AF_SYS_CONTROL, ctl_id, 0, 0, 0, 0, 0, 0)
-    s.connect(sc)
+    # Python's PF_SYSTEM socket takes a (ctl_id, unit) pair; unit 0 = pick a free
+    # utun. (It does the sockaddr_ctl packing internally.)
+    s.connect((ctl_id, 0))
     ifname = s.getsockopt(SYSPROTO_CONTROL_LEVEL, UTUN_OPT_IFNAME, 256).split(b"\x00")[0].decode()
     return s, ifname
 
