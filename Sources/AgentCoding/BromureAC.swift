@@ -55,7 +55,10 @@ struct BromureAC: ParsableCommand {
         // `__attach-window` (native terminal view pump) are app-internal;
         // bromure-cli exposes none of them and has no GUI default.
         let topLevel: [ParsableCommand.Type] =
-            asCLI ? [] : [Run.self, RemoteMenu.self, VMAttachWindow.self]
+            asCLI ? [FatClientPost.self, FatClientAuthProbe.self, FatClientForward.self,
+                     FatClientSocks.self, FatClientDial.self]
+                  : [Run.self, RemoteMenu.self, VMAttachWindow.self, FatClientPost.self,
+                     FatClientAuthProbe.self, FatClientForward.self, FatClientSocks.self, FatClientDial.self]
         let defaultCmd: ParsableCommand.Type? = asCLI ? nil : Run.self
         return CommandConfiguration(
             commandName: name,
@@ -441,6 +444,17 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     newWsItem.target = delegate
     wsMenu.addItem(newWsItem)
 
+    // Fat client: mirror a remote bromure-ac (its grid, workspaces, tabs,
+    // automations) 1:1 over SSH. A peer of "New Workspace…" — both bring a
+    // source of workspaces into the app.
+    let connectRemoteItem = NSMenuItem(title: L("Connect to Remote Bromure…"),
+                                       action: #selector(ACAppDelegate.connectRemoteHostMenuAction(_:)),
+                                       keyEquivalent: "k")
+    connectRemoteItem.keyEquivalentModifierMask = [.command, .shift]
+    connectRemoteItem.target = delegate
+    wsMenu.addItem(connectRemoteItem)
+    wsMenu.addItem(NSMenuItem.separator())
+
     let newTabItem = NSMenuItem(title: L("New tab"),
                                 action: #selector(ACAppDelegate.newTabAction(_:)),
                                 keyEquivalent: "t")   // ⌘T (matches the existing chord)
@@ -629,6 +643,17 @@ final class RunningSession {
     /// coerced to a clean shutdown instead.
     var homeJustMigrated: Bool = false
 
+    /// Latest guest vitals, mirrored from the `onVMStats` callback so the
+    /// `/vms` record reports real CPU/mem/load/disk even for a detached or
+    /// headless (window-less) session — the fat client needs these to render
+    /// the dashboard 1:1. (The attached pane keeps its own copy for the GUI.)
+    var vmCPU: Double = 0
+    var vmMemUsedKB: Int = 0
+    var vmMemTotalKB: Int = 0
+    var vmLoad: Double = 0
+    var vmDiskUsedKB: Int = 0
+    var vmDiskTotalKB: Int = 0
+
     init(profileID: Profile.ID, profile: Profile, sandbox: UbuntuSandboxVM) {
         self.profileID = profileID
         self.profile = profile
@@ -680,6 +705,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// the first non-detached launch. Popped-out VMs leave it for their own
     /// `TabbedSessionWindow`.
     var unifiedWindow: UnifiedSessionWindow?
+
+    /// Fat-client: open remote-host mirror windows, keyed by host id.
+    private var remoteHostWindows: [UUID: RemoteHostWindow] = [:]
+    /// The "Connect to Remote Bromure" window (auth flow), if open.
+    var remoteConnectWindow: NSWindow?
 
     /// Every `SessionPane` currently displayed somewhere — in `unifiedWindow`
     /// or a popped-out `profileWindows` entry. This is the dispatch target for
@@ -1833,10 +1863,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.promptNewPostinstallSteps(pending)
                 }
             }
+        } else if ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"] != nil {
+            // Pure fat client (no local base image needed): skip the setup
+            // window — this instance only mirrors remote hosts.
         } else {
             ensureInstallWindow()
             renderSetup()
             NSApp.activate(ignoringOtherApps: true)
+        }
+        // Fat client: open any remote-host mirror windows requested via env.
+        DispatchQueue.main.async { [weak self] in
+            self?.autoOpenRemoteHostsIfRequested()
+            self?.debugOpenConnectIfRequested()
         }
         }   // if !headless
 
@@ -1857,6 +1895,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         startAutomationServerIfNeeded()
+        installFatClientForwardResolver()   // before the SSH server captures it
         startRemoteAccessIfNeeded()
     }
 
@@ -2270,6 +2309,44 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onRemoteRemoveKey = { [weak self] sel in
             MainActor.assumeIsolated { self?.remoteAccessRemoveKey(sel) ?? ["error": "unavailable"] }
         }
+
+        // Fat-client mirror (a remote bromure-ac reflecting this one 1:1).
+        server.onListWorkspaces = { [weak self] in
+            MainActor.assumeIsolated { self?.automationWorkspaceList() ?? [] }
+        }
+        server.onGetGridLayout = { [weak self] in
+            MainActor.assumeIsolated { self?.automationGridLayout() ?? ["cells": []] }
+        }
+        server.onSetGridLayout = { [weak self] doc in
+            MainActor.assumeIsolated { self?.automationApplyGridLayout(doc) ?? false }
+        }
+        server.onListAutomations = { [weak self] in
+            MainActor.assumeIsolated { self?.automationScheduledList() ?? ["automations": [], "runs": []] }
+        }
+        server.onUpsertAutomation = { [weak self] doc in
+            MainActor.assumeIsolated { self?.automationUpsertScheduled(doc) ?? false }
+        }
+        server.onDeleteAutomation = { [weak self] id in
+            MainActor.assumeIsolated {
+                guard let self, let uuid = UUID(uuidString: id) else { return false }
+                self.scheduledAutomationStore.remove(uuid)
+                return true
+            }
+        }
+        server.onRunAutomation = { [weak self] id in
+            MainActor.assumeIsolated {
+                guard let self, let uuid = UUID(uuidString: id) else { return false }
+                self.runAutomationNow(uuid)
+                return true
+            }
+        }
+        server.onToggleAutomation = { [weak self] id in
+            MainActor.assumeIsolated {
+                guard let self, let uuid = UUID(uuidString: id) else { return false }
+                self.toggleAutomation(uuid)
+                return true
+            }
+        }
     }
 
     /// MITM trace records for `trace …`, optionally filtered to one profile.
@@ -2489,6 +2566,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if let r = t.rootRepo, !r.isEmpty { d["rootRepo"] = r }
                 // A "Merge → …" tab is resolvable; expose it so SSH can offer it.
                 if t.display?.hasPrefix("Merge → ") == true { d["isMergeTab"] = true }
+                // Agent status dot (working/done/needsInput) for the fat-client
+                // mirror — sourced from the attached pane's tab model when present.
+                if let status = pane(for: s.profileID)?.model.tabs
+                    .first(where: { $0.index == t.index })?.agentStatus {
+                    d["agentStatus"] = status.rawValue
+                }
                 return d
             }
             let diskURL = store.diskURL(for: s.profile)
@@ -2507,13 +2590,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "tabs": tabs,
                 "cpuCount": UbuntuSandboxVM.runtimeCPUs,
                 "memoryGB": s.profile.memoryGB,
-                "cpu": pane(for: s.profileID)?.model.vmCPU ?? 0,
-                "memUsedKB": pane(for: s.profileID)?.model.vmMemUsedKB ?? 0,
-                "memTotalKB": pane(for: s.profileID)?.model.vmMemTotalKB ?? 0,
-                "load": pane(for: s.profileID)?.model.vmLoad ?? 0,
-                "diskUsedKB": pane(for: s.profileID)?.model.vmDiskUsedKB ?? 0,
-                "diskTotalKB": pane(for: s.profileID)?.model.vmDiskTotalKB ?? 0,
-                "hasStats": (pane(for: s.profileID)?.model.vmMemTotalKB ?? 0) > 0,
+                "cpu": pane(for: s.profileID)?.model.vmCPU ?? s.vmCPU,
+                "memUsedKB": pane(for: s.profileID)?.model.vmMemUsedKB ?? s.vmMemUsedKB,
+                "memTotalKB": pane(for: s.profileID)?.model.vmMemTotalKB ?? s.vmMemTotalKB,
+                "load": pane(for: s.profileID)?.model.vmLoad ?? s.vmLoad,
+                "diskUsedKB": pane(for: s.profileID)?.model.vmDiskUsedKB ?? s.vmDiskUsedKB,
+                "diskTotalKB": pane(for: s.profileID)?.model.vmDiskTotalKB ?? s.vmDiskTotalKB,
+                "hasStats": (pane(for: s.profileID)?.model.vmMemTotalKB ?? s.vmMemTotalKB) > 0,
                 "networkMode": s.profile.networkMode.rawValue,
                 "macAddress": MACBindings.shared.macAddress(for: s.profileID),
                 "diskPath": diskURL.path,
@@ -2529,6 +2612,88 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 },
             ]
         }
+    }
+
+    // MARK: - Fat-client state serialization
+
+    /// All workspaces (running or not) as sidebar rows — the exact shape
+    /// `refreshSidebar()` builds `ProfileRow` from, so a fat client renders the
+    /// source list 1:1.
+    @MainActor func automationWorkspaceList() -> [[String: Any]] {
+        profiles.map { p in
+            let state: String
+            switch runState(for: p) {
+            case .running:   state = "running"
+            case .booting:   state = "booting"
+            case .suspended: state = "suspended"
+            case .off:       state = "off"
+            }
+            return [
+                "id": p.id.uuidString,
+                "name": p.name,
+                "accentHex": p.color.hexInUI,
+                "color": p.color.rawValue,
+                "tool": p.tool.rawValue,
+                "authMode": p.authMode.rawValue,
+                "state": state,
+                "compromised": SessionDisk.isCompromised(profile: p, store: store),
+            ]
+        }
+    }
+
+    /// The persisted grid (StageLayout) — cells + focus/zoom — so the fat
+    /// client mirrors the grid 1:1.
+    @MainActor func automationGridLayout() -> [String: Any] {
+        let gridStore = unifiedWindow?.gridStore ?? GridLayoutStore()
+        let cells: [[String: Any]] = gridStore.cells.map {
+            ["profileID": $0.profileID.uuidString, "windowIndex": $0.windowIndex, "label": $0.label]
+        }
+        var out: [String: Any] = ["cells": cells]
+        if let f = gridStore.focusedCellID { out["focusedCellID"] = f }
+        if let z = gridStore.zoomedCellID { out["zoomedCellID"] = z }
+        return out
+    }
+
+    /// Scheduled automations + run history, JSON-encoded from the Codable
+    /// models so the fat client mirrors (and can round-trip) them verbatim.
+    @MainActor func automationScheduledList() -> [String: Any] {
+        [
+            "automations": scheduledAutomationStore.automations.compactMap(Self.codableToDict),
+            "runs": scheduledAutomationStore.runs.compactMap(Self.codableToDict),
+        ]
+    }
+
+    /// Encode a Codable value to a JSON object dict (ISO8601 dates) for the
+    /// `[String: Any]` HTTP responses.
+    static func codableToDict<T: Encodable>(_ value: T) -> [String: Any]? {
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .iso8601
+        guard let data = try? enc.encode(value),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return obj
+    }
+
+    /// Apply a whole grid layout received from a fat client (last-writer-wins).
+    @MainActor func automationApplyGridLayout(_ doc: [String: Any]) -> Bool {
+        guard let gridStore = unifiedWindow?.gridStore else { return false }
+        let cells = (doc["cells"] as? [[String: Any]]) ?? []
+        gridStore.replaceAll(cells.compactMap { c -> GridCell? in
+            guard let pidStr = c["profileID"] as? String, let pid = UUID(uuidString: pidStr),
+                  let idx = c["windowIndex"] as? Int else { return nil }
+            return GridCell(profileID: pid, windowIndex: idx, label: c["label"] as? String ?? "")
+        })
+        gridStore.focusedCellID = doc["focusedCellID"] as? String
+        gridStore.zoomedCellID = doc["zoomedCellID"] as? String
+        return true
+    }
+
+    /// Upsert a scheduled automation received from a fat client.
+    @MainActor func automationUpsertScheduled(_ doc: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: doc) else { return false }
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        guard let automation = try? dec.decode(ScheduledAutomation.self, from: data) else { return false }
+        saveAutomation(automation)
+        return true
     }
 
     @MainActor private func automationStopVM(idOrName: String, action: String) async -> Bool {
@@ -3165,6 +3330,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// is remembered. Skipped for the headless agent and dev (`swift run`) builds.
     @MainActor private func offerCLISymlinkIfNeeded() {
         guard !headless else { return }
+        // A pure fat client (auto-opening remote mirror windows) must not be
+        // interrupted by a launch-time modal — it blocks the run loop before
+        // the remote windows open.
+        guard ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"] == nil else { return }
         let linkPath = "/usr/local/bin/bromure-cli"
         guard !FileManager.default.fileExists(atPath: linkPath) else { return }
         guard !UserDefaults.standard.bool(forKey: "cliSymlinkDeclined") else { return }
@@ -3255,6 +3424,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NSWindow else { return }
+        // Fat-client mirror window: drop the retained window + stop its poller.
+        if let rw = win as? RemoteHostWindow {
+            remoteHostWindows[rw.controller.host.id] = nil
+            return
+        }
+        if win === remoteConnectWindow { remoteConnectWindow = nil; return }
         // Registration throwaway window: route to its own teardown (destroys
         // the scratch VM + dir) instead of the normal per-profile session
         // cleanup, which would suspend/save state and could terminate the app.
@@ -6162,6 +6337,162 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Persist an automation from the editor and replant its next fire
     /// immediately, so the sidebar row shows "next …" without waiting for
     /// the engine's 30-second tick.
+    // MARK: - Fat client (connect to a remote bromure-ac and mirror it 1:1)
+
+    /// Wire the SSH server's fat-client `forward` resolver. A `forward
+    /// <ip> <port>` from a client resolves to an fd bridged to that VM's
+    /// loopback-relay (vsock 5010) — the RELIABLE host→guest path. (A plain TCP
+    /// connect to the guest from this app process — or any child of it — gets
+    /// EHOSTUNREACH; only unrelated processes can dial guests. Routing over
+    /// vsock to the guest's own loopback, which then reaches its 0.0.0.0-bound
+    /// dev server at 127.0.0.1:<port>, sidesteps that entirely.)
+    @MainActor func installFatClientForwardResolver() {
+        RemoteAccessServer.shared.forwardResolver = { ip, port, completion in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let delegate = NSApp.delegate as? ACAppDelegate else { completion(-1); return }
+                    delegate.resolveFatClientForward(ip: ip, port: port, completion: completion)
+                }
+            }
+        }
+    }
+
+    @MainActor private func resolveFatClientForward(ip: String, port: Int,
+                                                    completion: @escaping @Sendable (Int32) -> Void) {
+        guard let session = runningSessions.values.first(where: { $0.lastIP == ip }),
+              let dev = session.sandbox.socketDevice else {
+            FatClientLog.log("forward-resolver: no running VM at \(ip)")
+            completion(-1); return
+        }
+        dev.connect(toPort: 5010) { result in
+            switch result {
+            case .success(let conn):
+                let vfd = conn.fileDescriptor
+                let header = "\(port)\n"
+                let sent = header.withCString { Darwin.write(vfd, $0, strlen($0)) }
+                guard sent > 0 else { FatClientLog.log("forward-resolver: header write failed"); completion(-1); return }
+                var sp: [Int32] = [0, 0]
+                guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0 else { completion(-1); return }
+                // Splice the vsock fd (dup'd so it outlives the pump close)
+                // to one end of a socketpair on a background thread, retaining
+                // `conn` for the connection's lifetime; hand the other end back.
+                let dupFD = dup(vfd)
+                let peer = sp[1]
+                Thread.detachNewThread {
+                    FatForward.splice(dupFD, peer)
+                    _ = conn   // hold the vsock connection open until the splice ends
+                }
+                FatClientLog.log("forward-resolver: \(ip):\(port) -> vsock relay ok")
+                completion(sp[0])
+            case .failure(let err):
+                FatClientLog.log("forward-resolver: vsock 5010 connect failed: \(err)")
+                completion(-1)
+            }
+        }
+    }
+
+    /// Open (or focus) the mirror window for a configured remote host.
+    @MainActor func openRemoteHost(_ host: RemoteHost) {
+        FatClientLog.log("openRemoteHost: \(host.connectLabel)")
+        if let existing = remoteHostWindows[host.id] {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+        let controller = RemoteHostController(host: host)
+        let window = RemoteHostWindow(controller: controller)
+        window.center()
+        remoteHostWindows[host.id] = window
+        window.delegate = self
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Open the "Connect to Remote Bromure" window: host details → host-key TOFU
+    /// (fingerprint shown, change warned) → public-key auth → password fallback
+    /// (inline retry + shake) → mirror window. Editing an existing host carries
+    /// its pinned key so a changed key is flagged.
+    @MainActor func promptConnectRemoteHost(existing: RemoteHost? = nil) {
+        if let w = remoteConnectWindow { w.makeKeyAndOrderFront(nil); return }
+        let model = RemoteConnectModel(existing: existing) { [weak self] host in
+            self?.remoteConnectWindow?.close()
+            self?.remoteConnectWindow = nil
+            self?.openRemoteHost(host)
+        }
+        let hc = NSHostingController(rootView: RemoteConnectView(model: model, onClose: { [weak self] in
+            self?.remoteConnectWindow?.close()
+            self?.remoteConnectWindow = nil
+        }))
+        let win = NSWindow(contentViewController: hc)
+        win.title = "Connect to Remote Bromure"
+        win.styleMask = [.titled, .closable]
+        win.isReleasedWhenClosed = false
+        win.delegate = self
+        win.center()
+        remoteConnectWindow = win
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc func connectRemoteHostMenuAction(_ sender: Any?) {
+        promptConnectRemoteHost()
+    }
+
+    /// Debug: open the connect window pre-filled from `BROMURE_FATCLIENT_CONNECT`
+    /// (`addr:port:user`) and, if it names a reachable host, drive `begin()` so a
+    /// snapshot captures the host-key-confirm phase.
+    @MainActor func debugOpenConnectIfRequested() {
+        guard let spec = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_CONNECT"], !spec.isEmpty
+        else { return }
+        let model = RemoteConnectModel { [weak self] host in
+            self?.remoteConnectWindow?.close(); self?.remoteConnectWindow = nil
+            self?.openRemoteHost(host)
+        }
+        let parts = spec.split(separator: ":").map(String.init)
+        if parts.count >= 1, parts[0] != "1" { model.address = parts[0] }
+        if parts.count >= 2 { model.port = parts[1] }
+        if parts.count >= 3 { model.user = parts[2] }
+        if parts.contains("auto") { model.autoTrust = true }
+        let hc = NSHostingController(rootView: RemoteConnectView(model: model, onClose: {}))
+        let win = NSWindow(contentViewController: hc)
+        win.title = "Connect to Remote Bromure"
+        win.styleMask = [.titled, .closable]
+        win.isReleasedWhenClosed = false
+        win.center(); remoteConnectWindow = win
+        win.makeKeyAndOrderFront(nil)
+        if !model.address.isEmpty { model.begin() }
+        // Snapshot after the async host-key scan resolves.
+        if let path = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_SHOT"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak win] in
+                guard let content = win?.contentView else { return }
+                content.layoutSubtreeIfNeeded()
+                let b = content.bounds
+                if b.width > 1, let rep = content.bitmapImageRepForCachingDisplay(in: b) {
+                    content.cacheDisplay(in: b, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                }
+            }
+        }
+    }
+
+    /// Auto-open remote windows named in `BROMURE_FATCLIENT_OPEN` (a host id, a
+    /// host name, or "all") — used by the two-instance end-to-end test.
+    @MainActor func autoOpenRemoteHostsIfRequested() {
+        guard let spec = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"], !spec.isEmpty
+        else { return }
+        FatClientLog.log("autoOpen: spec=\(spec)")
+        let hosts = RemoteHostStore.shared.hosts
+        FatClientLog.log("autoOpen: \(hosts.count) configured host(s): \(hosts.map(\.name))")
+        let targets: [RemoteHost]
+        if spec == "all" {
+            targets = hosts
+        } else if let id = UUID(uuidString: spec) {
+            targets = hosts.filter { $0.id == id }
+        } else {
+            targets = hosts.filter { $0.name == spec || $0.address == spec }
+        }
+        for h in targets { openRemoteHost(h) }
+    }
+
     func saveAutomation(_ automation: ScheduledAutomation) {
         scheduledAutomationStore.upsert(automation)
         scheduledAutomationEngine.tick()
@@ -7016,8 +7347,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         sandbox.onVMStats = { [weak self] cpu, used, total, load, diskUsed, diskTotal in
             Task { @MainActor in
-                self?.pane(for: pid)?.applyVMStats(cpu: cpu, memUsedKB: used, memTotalKB: total,
-                                                   load: load, diskUsedKB: diskUsed, diskTotalKB: diskTotal)
+                guard let self else { return }
+                // Mirror into the session so /vms reports vitals even detached
+                // (a fat client reads these; there may be no local pane).
+                if let s = self.runningSessions[pid] {
+                    s.vmCPU = cpu; s.vmMemUsedKB = used; s.vmMemTotalKB = total
+                    s.vmLoad = load; s.vmDiskUsedKB = diskUsed; s.vmDiskTotalKB = diskTotal
+                }
+                self.pane(for: pid)?.applyVMStats(cpu: cpu, memUsedKB: used, memTotalKB: total,
+                                                  load: load, diskUsedKB: diskUsed, diskTotalKB: diskTotal)
             }
         }
         sandbox.onPortsList = { [weak self] ports in

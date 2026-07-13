@@ -3,6 +3,7 @@ import NIOCore
 import NIOPosix
 import NIOSSH
 import OpenDirectory
+import SandboxEngine
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -218,9 +219,21 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
 
     private let menuExe: String
     private let user: String
+    /// Path to the app's owner-only control socket. When a fat client sends the
+    /// `FatClient.controlVerb` exec command, we bridge the SSH channel straight
+    /// to this socket (no PTY, no menu) so the client can speak the control-plane
+    /// HTTP API — including the hijacked interactive-exec pump for terminals.
+    private let controlSocketPath: String
+    /// Resolves a `forward <ip> <port>` to a guest-loopback-relay fd (vsock).
+    private let forwardResolver: RemoteAccessServer.ForwardResolver?
+    /// Inbound SSH bytes that arrived before the forward fd was ready (the vsock
+    /// connect is async), flushed once it is.
+    private var pendingInbound: [UInt8] = []
     private var term = "xterm-256color"
     private var cols: UInt16 = 80
     private var rows: UInt16 = 24
+    /// The fd we pump bytes to/from: a PTY master (menu path) or the control
+    /// socket (fat-client path). Reused by the single read pump + `channelRead`.
     private var master: Int32 = -1
     private var childPID: pid_t = -1
     private var started = false
@@ -228,9 +241,12 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
     private var readSource: DispatchSourceRead?
     private let ioQueue = DispatchQueue(label: "io.bromure.remote.pty")
 
-    init(menuExe: String, user: String) {
+    init(menuExe: String, user: String, controlSocketPath: String,
+         forwardResolver: RemoteAccessServer.ForwardResolver? = nil) {
         self.menuExe = menuExe
         self.user = user
+        self.controlSocketPath = controlSocketPath
+        self.forwardResolver = forwardResolver
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -257,8 +273,17 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
         case let e as SSHChannelRequestEvent.ShellRequest:
             startMenu(context: context, wantReply: e.wantReply)
         case let e as SSHChannelRequestEvent.ExecRequest:
-            // ForceCommand semantics: ignore the requested command, run the menu.
-            startMenu(context: context, wantReply: e.wantReply)
+            // A fat client asks for the control-socket bridge or a guest TCP
+            // forward by name. Anything else keeps ForceCommand semantics:
+            // ignore the command, run the menu.
+            if e.command == FatClient.controlVerb {
+                startControlBridge(context: context, wantReply: e.wantReply)
+            } else if let fwd = FatClient.parseForward(e.command) {
+                startForwardBridge(context: context, wantReply: e.wantReply,
+                                   ip: fwd.ip, port: fwd.port)
+            } else {
+                startMenu(context: context, wantReply: e.wantReply)
+            }
         case let e as SSHChannelRequestEvent.WindowChangeRequest:
             cols = UInt16(clamping: e.terminalCharacterWidth)
             rows = UInt16(clamping: e.terminalRowHeight)
@@ -271,7 +296,10 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let channelData = unwrapInboundIn(data)
         guard case .byteBuffer(var buf) = channelData.data, case .channel = channelData.type else { return }
-        guard master >= 0, let bytes = buf.readBytes(length: buf.readableBytes) else { return }
+        guard let bytes = buf.readBytes(length: buf.readableBytes) else { return }
+        // The forward fd is opened asynchronously (vsock connect); buffer any
+        // client bytes that beat it and flush once it's up.
+        if master < 0 { pendingInbound.append(contentsOf: bytes); return }
         _ = bytes.withUnsafeBytes { ptr -> Int in
             guard let base = ptr.baseAddress else { return 0 }
             return Self.writeAll(master, base, bytes.count)
@@ -321,6 +349,137 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
         }
         readSource = src
         src.resume()
+    }
+
+    // MARK: Fat-client control bridge
+
+    /// Bridge the SSH channel to the app's owner-only control socket: no PTY, no
+    /// menu — the channel becomes a raw byte pipe to `control.sock`, so the
+    /// fat client speaks the existing control-plane HTTP API (state polling,
+    /// commands, and the hijacked interactive-exec pump for terminals) over SSH.
+    /// The SSH `authorized_keys` gate stands in for the socket's owner-only
+    /// (0600) file mode. Reuses the same read-pump machinery as the menu path,
+    /// with `childPID = -1` so teardown/finish skip the process reap.
+    private func startControlBridge(context: ChannelHandlerContext, wantReply: Bool) {
+        guard !started else { return }
+        started = true
+        let channel = context.channel
+
+        let sockFD = Self.connectUnix(path: controlSocketPath)
+        guard sockFD >= 0 else {
+            if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
+            channel.close(promise: nil)
+            return
+        }
+        master = sockFD
+        childPID = -1
+        if wantReply { channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil) }
+
+        // Non-blocking socket + a read pump that forwards its output to the
+        // client, identical in shape to the PTY pump.
+        let flags = fcntl(sockFD, F_GETFL)
+        _ = fcntl(sockFD, F_SETFL, flags | O_NONBLOCK)
+        let src = DispatchSource.makeReadSource(fileDescriptor: sockFD, queue: ioQueue)
+        src.setEventHandler { [weak self] in
+            guard let self else { return }
+            var buf = [UInt8](repeating: 0, count: 1 << 15)
+            let n = Darwin.read(sockFD, &buf, buf.count)
+            if n > 0 {
+                var bb = channel.allocator.buffer(capacity: n)
+                bb.writeBytes(buf[0..<n])
+                channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(bb)), promise: nil)
+            } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR && errno != EWOULDBLOCK) {
+                self.finish(channel: channel, pid: -1, master: sockFD)
+            }
+        }
+        readSource = src
+        src.resume()
+    }
+
+    /// Bridge the SSH channel to a TCP connection to a guest VM (`ip:port`) on
+    /// this host's vmnet subnet — the raw pipe a fat client uses to reach the
+    /// remote workspace subnet. Restricted to the vmnet subnet (guest VMs only,
+    /// never the gateway/host or arbitrary internet hosts). Reuses the same
+    /// byte-pump machinery as the control bridge.
+    private func startForwardBridge(context: ChannelHandlerContext, wantReply: Bool,
+                                    ip: String, port: Int) {
+        guard !started else { return }
+        started = true
+        let channel = context.channel
+
+        // Only allow forwarding to a guest on the vmnet subnet.
+        let subnet = SandboxEngine.VMNetSwitch.shared.subnet
+        FatClientLog.log("forward: request \(ip):\(port) subnet=\(subnet?.cidrString ?? "nil") guest=\(subnet?.containsGuest(ip) ?? false)")
+        guard let subnet, subnet.containsGuest(ip), let resolver = forwardResolver else {
+            SupplyChainLog.shared.record("[remote] refused forward to \(ip):\(port) — not a guest on the vmnet subnet.")
+            if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
+            channel.close(promise: nil)
+            return
+        }
+
+        // Resolve the guest fd asynchronously (vsock connect to the guest's
+        // loopback-relay). Hop back to the channel's event loop to wire it up.
+        let el = channel.eventLoop
+        resolver(ip, port) { [weak self] fd in
+            el.execute {
+                guard let self else { if fd >= 0 { Darwin.close(fd) }; return }
+                FatClientLog.log("forward: resolver \(ip):\(port) -> fd=\(fd)")
+                guard fd >= 0 else {
+                    if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
+                    channel.close(promise: nil)
+                    return
+                }
+                self.master = fd
+                self.childPID = -1
+                if wantReply { channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil) }
+                // Flush anything the client sent before the fd was ready.
+                if !self.pendingInbound.isEmpty {
+                    let bytes = self.pendingInbound; self.pendingInbound = []
+                    _ = bytes.withUnsafeBytes { Self.writeAll(fd, $0.baseAddress!, bytes.count) }
+                }
+                let flags = fcntl(fd, F_GETFL)
+                _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+                let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: self.ioQueue)
+                src.setEventHandler { [weak self] in
+                    guard let self else { return }
+                    var buf = [UInt8](repeating: 0, count: 1 << 15)
+                    let n = Darwin.read(fd, &buf, buf.count)
+                    if n > 0 {
+                        var bb = channel.allocator.buffer(capacity: n)
+                        bb.writeBytes(buf[0..<n])
+                        channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(bb)), promise: nil)
+                    } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR && errno != EWOULDBLOCK) {
+                        self.finish(channel: channel, pid: -1, master: fd)
+                    }
+                }
+                self.readSource = src
+                src.resume()
+            }
+        }
+    }
+
+    /// Connect a blocking AF_UNIX stream socket to `path`. Returns -1 on failure.
+    private static func connectUnix(path: String) -> Int32 {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return -1 }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        let cap = MemoryLayout.size(ofValue: addr.sun_path)
+        guard bytes.count < cap else { Darwin.close(fd); return -1 }
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: UInt8.self, capacity: cap) { dst in
+                for (i, b) in bytes.enumerated() { dst[i] = b }
+                dst[bytes.count] = 0
+            }
+        }
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if rc != 0 { Darwin.close(fd); return -1 }
+        return fd
     }
 
     private func applyWinsize() {

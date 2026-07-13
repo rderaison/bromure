@@ -184,3 +184,36 @@ See `BromureAC.sdef` for the complete dictionary.
 - Debug endpoints (`/exec`, `/app/state`, all `bromure_ac_vm_*` MCP tools) require `BROMURE_DEBUG_CLAUDE=1` in the app's environment.
 - Per-session `ShellBridge` instances are gated on the same env var, so the guest's `shell-agent.py` is only shipped + autostarted on debug builds. Production sessions have no shell-exec surface.
 - Profile bearer tokens never traverse the HTTP API in plaintext — `bromure_ac_get_profile` returns the JSON-encoded Profile which can include secrets, so the API is intentionally loopback-only.
+
+---
+
+## Fat client (remote mirror over SSH)
+
+A local bromure-ac can connect to a **remote** bromure-ac and mirror its full UI 1:1 —
+the grid, workspaces with their tabs/worktrees, and automations — with bidirectional
+edits and interactive terminals. See `REMOTE_FAT_CLIENT_PLAN.md` for the architecture;
+Phases 1–3 are implemented.
+
+**Transport.** The embedded SSH server (`remote enable`) gains one machine-client verb:
+an `exec` request of exactly `bromure-fatclient/1 control` bridges the SSH channel to the
+remote's owner-only `control.sock` (no PTY, no menu). The client speaks the **existing**
+control-plane HTTP API over that tunnel, so nothing new is on the wire. Human `ssh` is
+unchanged (still forced into `__remote-menu`). Auth is the bridge's ed25519 host key +
+`authorized_keys`; the client's own key is under `…/BromureAC/remote-client/`.
+
+**Setup.** On the remote: `bromure-ac remote enable` then
+`bromure-ac remote key add '<fat-client-pubkey>'`. On the client: **Window → Connect to
+Remote Host…** (⇧⌘K) — enter address/port/user, copy your client key to the remote, connect.
+
+**New trusted control-socket routes** (used by the mirror; local socket only):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/state` | One-shot snapshot: version, workspaces, running VMs, grid layout, automations |
+| `GET` | `/workspaces` | All workspaces (running or not) as sidebar rows |
+| `GET`/`POST` | `/grid-layout` | Read / replace the grid (StageLayout), last-writer-wins |
+| `GET`/`POST` | `/automations` | List / upsert scheduled automations |
+| `DELETE`/`POST` | `/automations/{id}[/run\|/toggle]` | Delete, run-now, toggle |
+
+Interactive terminals reuse the existing `POST /vms/{id}/exec` hijacked-stream path;
+the client spawns `__attach-window --remote <hostID> <vm> <window>`.

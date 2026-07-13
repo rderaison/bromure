@@ -24,6 +24,9 @@ final class GridStageView: NSView {
         var onStart: (UUID) -> Void
         /// Jump to the workspace's own stage (select workspace + tab).
         var onJump: (UUID, Int) -> Void
+        /// Fat-client: when set, cells attach to the workspace on this remote
+        /// bromure-ac over SSH instead of the local control socket.
+        var remoteHost: UUID? = nil
     }
     private let dataSource: DataSource
 
@@ -131,7 +134,8 @@ final class GridStageView: NSView {
             if state == .running, let profile {
                 let controller = controllers[cell.profileID]
                     ?? {
-                        let c = TerminalSessionController(profile: profile)
+                        let c = TerminalSessionController(profile: profile,
+                                                          remoteHost: dataSource.remoteHost)
                         controllers[cell.profileID] = c
                         return c
                     }()

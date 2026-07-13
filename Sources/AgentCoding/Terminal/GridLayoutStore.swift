@@ -62,6 +62,13 @@ final class GridLayoutStore {
         save()
     }
 
+    /// Replace the whole cell list wholesale (fat-client "layout set":
+    /// last-writer-wins, no partial-merge state). Clamped to `maxCells`.
+    func replaceAll(_ newCells: [GridCell]) {
+        cells = Array(newCells.prefix(Self.maxCells))
+        save()
+    }
+
     func move(id: String, toIndex: Int) {
         guard let from = cells.firstIndex(where: { $0.id == id }),
               (0..<cells.count).contains(toIndex) else { return }

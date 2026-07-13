@@ -39,6 +39,22 @@ public struct VmnetSubnet: Sendable, Equatable {
     public var endAddressString: String { HostNetworkInfo.formatIPv4(poolEnd) }
     /// `vmnet_subnet_mask_key`.
     public var subnetMaskString: String { HostNetworkInfo.formatIPv4(mask) }
+    /// Network address, e.g. "192.168.64.0".
+    public var networkString: String { HostNetworkInfo.formatIPv4(network) }
+    /// CIDR prefix length derived from the mask (e.g. 24).
+    public var prefixLength: Int { mask.nonzeroBitCount }
+    /// "192.168.64.0/24" — for advertising the subnet to a fat client.
+    public var cidrString: String { "\(networkString)/\(prefixLength)" }
+
+    /// Whether a dotted-decimal IPv4 falls inside this subnet AND is a plausible
+    /// guest (not the gateway, not the broadcast address). Used to restrict what
+    /// a fat client may `forward` to — guest VMs only, never arbitrary hosts.
+    public func containsGuest(_ ipString: String) -> Bool {
+        guard let ip = HostNetworkInfo.parseIPv4(ipString) else { return false }
+        guard (ip & mask) == network else { return false }
+        let broadcast = network | ~mask
+        return ip != gateway && ip != network && ip != broadcast
+    }
 
     /// A `192.168.<octet>.0/24` network: gateway `.1`, DHCP pool `.2`–`.254`.
     public static func classC(thirdOctet octet: UInt8) -> VmnetSubnet {

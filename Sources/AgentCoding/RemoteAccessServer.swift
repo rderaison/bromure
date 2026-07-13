@@ -59,6 +59,14 @@ final class RemoteAccessServer {
     private var current: Config?
     private var running = false
 
+    /// Resolves a fat-client `forward <ip> <port>` to a connected fd bridged to
+    /// the guest's loopback-relay (vsock 5010) over VZ — the reliable host→guest
+    /// path (a plain TCP connect from the app process gets EHOSTUNREACH). Set by
+    /// the app delegate. `completion(-1)` on failure. See RemoteSSHHandlers.
+    typealias ForwardResolver =
+        @Sendable (_ ip: String, _ port: Int, _ completion: @escaping @Sendable (Int32) -> Void) -> Void
+    var forwardResolver: ForwardResolver?
+
     private static let sshKeygenBinary = "/usr/bin/ssh-keygen"
 
     init(paths: Paths = .default) { self.paths = paths }
@@ -92,6 +100,9 @@ final class RemoteAccessServer {
         let authorized = config.pubkeyAuth ? loadAuthorizedNIOKeys() : []
         let exe = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
         let user = NSUserName()
+        // Fat clients bridge to this owner-only control socket over SSH.
+        let controlSocketPath = ProfileStore().controlSocketURL.path
+        let forwardResolver = self.forwardResolver
 
         let g = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         // Shared across all connections: the per-source-IP password rate
@@ -132,7 +143,9 @@ final class RemoteAccessServer {
                                 }
                                 return childChannel.eventLoop.makeCompletedFuture {
                                     try childChannel.pipeline.syncOperations.addHandler(
-                                        SSHPTYSessionHandler(menuExe: exe, user: user))
+                                        SSHPTYSessionHandler(menuExe: exe, user: user,
+                                                             controlSocketPath: controlSocketPath,
+                                                             forwardResolver: forwardResolver))
                                 }
                             }),
                         RemoteErrorHandler(),

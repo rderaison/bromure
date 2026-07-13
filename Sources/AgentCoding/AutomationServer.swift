@@ -118,6 +118,21 @@ final class ACAutomationServer {
     var onRemoteAddKey: ((_ publicKey: String) -> [String: Any])?
     var onRemoteRemoveKey: ((_ selector: String) -> [String: Any])?
 
+    // Fat-client mirror (a remote bromure-ac reflecting this one 1:1).
+    /// All workspaces (running or not) as sidebar rows.
+    var onListWorkspaces: (() -> [[String: Any]])?
+    /// The persisted grid (StageLayout): cells + focus/zoom.
+    var onGetGridLayout: (() -> [String: Any])?
+    /// Apply a whole grid layout (last-writer-wins).
+    var onSetGridLayout: ((_ doc: [String: Any]) -> Bool)?
+    /// Scheduled automations + run history.
+    var onListAutomations: (() -> [String: Any])?
+    /// Upsert / delete / run-now / toggle a scheduled automation.
+    var onUpsertAutomation: ((_ doc: [String: Any]) -> Bool)?
+    var onDeleteAutomation: ((_ id: String) -> Bool)?
+    var onRunAutomation: ((_ id: String) -> Bool)?
+    var onToggleAutomation: ((_ id: String) -> Bool)?
+
     init(port: UInt16 = 9223, bindAddress: String = "127.0.0.1") {
         // 9223 (one off from the browser's 9222) so both apps can run side
         // by side during development without conflicting.
@@ -373,6 +388,54 @@ final class ACAutomationServer {
             state["debugEnabled"] = true
             sendResponse(fd: fd, status: 200, body: state)
 
+        // Fat-client mirror endpoints. Trusted (control socket) only — they
+        // carry no secrets but they are the fat client's whole state feed.
+        // One-shot combined snapshot (the poll workhorse): workspaces + running
+        // VMs + grid layout + automations in a single round trip.
+        case ("GET", "/state"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            var snapshot: [String: Any] = DispatchQueue.main.sync {
+                [
+                    "version": FatClient.protocolVersion,
+                    "workspaces": self.onListWorkspaces?() ?? [],
+                    "vms": self.onListVMs?() ?? [],
+                    "gridLayout": self.onGetGridLayout?() ?? ["cells": []],
+                    "automations": self.onListAutomations?() ?? ["automations": [], "runs": []],
+                ]
+            }
+            // The workspace VM subnet, so a fat client can route/tunnel to it
+            // (Phase 4). nil until the first VM boots the vmnet interface.
+            if let subnet = SandboxEngine.VMNetSwitch.shared.subnet {
+                snapshot["vmnetSubnet"] = subnet.cidrString
+                snapshot["vmnetGateway"] = subnet.startAddressString
+            }
+            sendResponse(fd: fd, status: 200, body: snapshot)
+
+        case ("GET", "/workspaces"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let ws = DispatchQueue.main.sync { self.onListWorkspaces?() ?? [] }
+            sendResponse(fd: fd, status: 200, body: ["workspaces": ws])
+
+        case ("GET", "/grid-layout"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let layout = DispatchQueue.main.sync { self.onGetGridLayout?() ?? ["cells": []] }
+            sendResponse(fd: fd, status: 200, body: layout)
+
+        case ("POST", "/grid-layout"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let ok = DispatchQueue.main.sync { self.onSetGridLayout?(bodyJSON) ?? false }
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
+
+        case ("GET", "/automations"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let list = DispatchQueue.main.sync { self.onListAutomations?() ?? ["automations": [], "runs": []] }
+            sendResponse(fd: fd, status: 200, body: list)
+
+        case ("POST", "/automations"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let ok = DispatchQueue.main.sync { self.onUpsertAutomation?(bodyJSON) ?? false }
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
+
         case (_, let p) where p == "/debug/ui-shot" || p.hasPrefix("/debug/ui-shot?"):
             guard debugEnabled || isTrustedLocal else {
                 sendResponse(fd: fd, status: 403, body: ["error": "Local only"])
@@ -480,6 +543,24 @@ final class ACAutomationServer {
                 ?? String(p.dropFirst("/remote/keys/".count))
             let r = DispatchQueue.main.sync { self.onRemoteRemoveKey?(sel) ?? ["error": "unavailable"] }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        // Fat-client automation edits: DELETE /automations/{id},
+        // POST /automations/{id}/run, POST /automations/{id}/toggle.
+        case (let m, let p) where p.hasPrefix("/automations/"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let rest = String(p.dropFirst("/automations/".count))
+            let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
+            let id = parts.first.flatMap { $0.removingPercentEncoding } ?? ""
+            let action = parts.count > 1 ? parts[1] : ""
+            let ok: Bool
+            switch (m, action) {
+            case ("DELETE", ""):     ok = DispatchQueue.main.sync { self.onDeleteAutomation?(id) ?? false }
+            case ("POST", "run"):    ok = DispatchQueue.main.sync { self.onRunAutomation?(id) ?? false }
+            case ("POST", "toggle"): ok = DispatchQueue.main.sync { self.onToggleAutomation?(id) ?? false }
+            default:
+                sendResponse(fd: fd, status: 404, body: ["error": "Not found", "path": path]); return
+            }
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
 
         case (let m, let p) where p.hasPrefix("/vms/"):
             handleVMRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)

@@ -9,9 +9,24 @@ import SandboxEngine
 /// /var/run/docker.sock: plain HTTP/1.1 over an AF_UNIX stream.
 struct ControlClient {
     let socketPath: String
+    /// How to obtain a fresh bidirectional byte stream to the control plane.
+    /// Default dials the local AF_UNIX control socket; the fat client swaps in
+    /// a dial that spawns an `ssh … bromure-fatclient control` subprocess wired
+    /// to a socketpair, so the exact same request/openStream logic runs over the
+    /// SSH tunnel to a remote bromure-ac. Returns an fd the caller owns, or nil.
+    let dial: () -> Int32?
 
     init(socketPath: String? = nil) {
-        self.socketPath = socketPath ?? ProfileStore().controlSocketURL.path
+        let path = socketPath ?? ProfileStore().controlSocketURL.path
+        self.socketPath = path
+        self.dial = { ControlClient.connect(to: path) }
+    }
+
+    /// Build a client whose transport is a caller-supplied dial (e.g. the SSH
+    /// tunnel). `socketPath` is retained only for diagnostics/labels.
+    init(socketPath: String, dial: @escaping () -> Int32?) {
+        self.socketPath = socketPath
+        self.dial = dial
     }
 
     struct Response { let status: Int; let json: [String: Any] }
@@ -31,7 +46,7 @@ struct ControlClient {
 
     @discardableResult
     func request(_ method: String, _ path: String, body: [String: Any]? = nil) throws -> Response {
-        guard let fd = Self.connect(to: socketPath) else { throw ClientError.agentNotRunning }
+        guard let fd = dial() else { throw ClientError.agentNotRunning }
         defer { Darwin.close(fd) }
 
         let bodyData = try body.map { try JSONSerialization.data(withJSONObject: $0) } ?? Data()
@@ -70,7 +85,7 @@ struct ControlClient {
     /// header, and hand back the raw fd for bidirectional streaming. The caller
     /// owns the fd and must close it. Throws on non-200.
     func openStream(_ method: String, _ path: String, body: [String: Any]) throws -> Int32 {
-        guard let fd = Self.connect(to: socketPath) else { throw ClientError.agentNotRunning }
+        guard let fd = dial() else { throw ClientError.agentNotRunning }
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         var head = "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\n"
         head += "Content-Type: application/json\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n"
@@ -401,9 +416,32 @@ struct VMAttachWindow: ParsableCommand {
     @Argument(help: "tmux window index to show.")
     var windowIndex: Int
 
+    @Option(name: .long,
+            help: "Fat-client remote host id: attach to a workspace on a remote bromure-ac over SSH.")
+    var remote: String?
+
     func run() throws {
+        // Fat-client mode: attach to a workspace on a REMOTE bromure-ac over the
+        // SSH tunnel. The client speaks the identical control-plane API, so the
+        // pump below is unchanged — only the transport differs. We must NOT
+        // autostart a local agent in this case.
+        if let remoteID = remote, let hostID = UUID(uuidString: remoteID) {
+            // Interactive stream → dedicated direct SSH connection (no
+            // ControlMaster; it buffers a multiplexed channel's server→client
+            // output). The GET /vms resolution below reuses the same client.
+            guard let client = RemoteTransport.client(hostID: hostID, interactive: true) else {
+                throw ValidationError("Unknown remote host: \(remoteID)")
+            }
+            try attachLoop(client: client)
+            return
+        }
+
         let client = ControlClient()
         try client.ensureAgentRunning()
+        try attachLoop(client: client)
+    }
+
+    private func attachLoop(client: ControlClient) throws {
 
         // Stay patient through VM boot instead of exiting: a fresh workspace
         // isn't in /vms and its tmux session isn't up for a few seconds after
@@ -441,6 +479,75 @@ struct VMAttachWindow: ParsableCommand {
                 throw ValidationError("VM not found: \(vm)")
             }
             Thread.sleep(forTimeInterval: 0.5)
+        }
+    }
+}
+
+/// Hidden helper that issues a control-plane request over the fat-client SSH
+/// tunnel to a configured remote host — exercises the exact client→server
+/// command path the mirror UI uses, so the two-instance test can drive edits
+/// from the client side without the GUI.
+struct FatClientPost: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "__fatclient", abstract: "Fat-client tunnel request (plumbing).",
+        shouldDisplay: false)
+
+    @Argument(help: "Remote host id (from remote-client/hosts.json).")
+    var hostID: String
+    @Argument(help: "HTTP method.")
+    var method: String
+    @Argument(help: "Control-plane path, e.g. /state or /automations/<id>/toggle.")
+    var path: String
+    @Option(name: .long, help: "Inline JSON request body.")
+    var json: String?
+
+    func run() throws {
+        guard let id = UUID(uuidString: hostID), let client = RemoteTransport.client(hostID: id) else {
+            throw ValidationError("unknown remote host: \(hostID)")
+        }
+        var body: [String: Any]?
+        if let json, let data = json.data(using: .utf8) {
+            body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+        let resp = try client.request(method, path, body: body)
+        FileHandle.standardError.write(Data("HTTP \(resp.status)\n".utf8))
+        if let d = try? JSONSerialization.data(withJSONObject: resp.json,
+                                               options: [.prettyPrinted, .sortedKeys]) {
+            print(String(data: d, encoding: .utf8) ?? "")
+        }
+        if resp.status < 200 || resp.status >= 300 { throw ExitCode(1) }
+    }
+}
+
+/// Hidden helper to exercise the fat-client auth transport headlessly (host-key
+/// scan + pubkey/password probe classification), for the two-instance test.
+struct FatClientAuthProbe: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "__fatclient-auth", abstract: "Fat-client auth probe (plumbing).",
+        shouldDisplay: false)
+    @Argument var address: String
+    @Argument var port: Int
+    @Argument var user: String
+    @Option(name: .long, help: "Try password auth with this password.") var password: String?
+    @Option(name: .long, help: "Pinned host-key fingerprint (to test change detection).") var pinned: String?
+    @Flag(name: .long, help: "Enroll the client key using --password (ssh-copy-id style).") var enroll = false
+
+    func run() throws {
+        var host = RemoteHost(name: address, address: address, port: port, user: user)
+        host.pinnedHostKey = pinned
+        if let info = RemoteTransport.scanHostKey(address: address, port: port) {
+            print("host-key fingerprint: \(info.fingerprint)")
+        } else {
+            print("host-key: UNREACHABLE (couldn't scan)")
+        }
+        let keyProbe = RemoteTransport.probe(host: host, password: nil, strictHostKey: false)
+        print("pubkey probe: \(keyProbe)")
+        if let pw = password {
+            let pwProbe = RemoteTransport.probe(host: host, password: pw, strictHostKey: false)
+            print("password probe: \(pwProbe)")
+            if enroll, pwProbe == .ok {
+                print("enroll key: \(RemoteTransport.enrollKey(host: host, password: pw))")
+            }
         }
     }
 }

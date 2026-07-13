@@ -482,6 +482,15 @@ final class ScheduledAutomationStore {
         save()
     }
 
+    /// Fat-client mirror: replace the whole automations + runs list from a
+    /// remote snapshot, in memory only (no save — this store is a read model of
+    /// another machine's state). No-op if nothing changed, so the `@Observable`
+    /// view doesn't churn on every poll.
+    func mirror(automations newAutomations: [ScheduledAutomation], runs newRuns: [AutomationRunRecord]) {
+        if automations != newAutomations { automations = newAutomations }
+        if runs != newRuns { runs = newRuns }
+    }
+
     func runs(for id: UUID) -> [AutomationRunRecord] {
         runs.filter { $0.automationID == id }
     }

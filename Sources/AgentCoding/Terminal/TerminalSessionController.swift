@@ -15,6 +15,10 @@ final class TerminalSessionController {
     let vmID: String
     /// Appearance source for the surfaces; refreshed on profile save.
     private var profile: Profile
+    /// Fat-client: when set, surfaces attach to a workspace on a REMOTE
+    /// bromure-ac over SSH (`__attach-window --remote <hostID> …`) instead of
+    /// the local control socket. Everything else is identical.
+    private let remoteHost: UUID?
 
     private var views: [Int: TerminalSurfaceView] = [:]
     private var reattachDelays: [Int: TimeInterval] = [:]
@@ -24,9 +28,10 @@ final class TerminalSessionController {
     /// pane/grid chrome subscribes.
     var onTitleChange: ((Int, String) -> Void)?
 
-    init(profile: Profile) {
+    init(profile: Profile, remoteHost: UUID? = nil) {
         self.vmID = profile.id.uuidString
         self.profile = profile
+        self.remoteHost = remoteHost
         let center = NotificationCenter.default
         observers.append(center.addObserver(
             forName: GhosttyRuntime.childExitedNotification, object: nil,
@@ -62,7 +67,8 @@ final class TerminalSessionController {
     func view(forWindow index: Int) -> TerminalSurfaceView? {
         if let existing = views[index] { return existing }
         guard GhosttyRuntime.shared.start() else { return nil }
-        guard let view = TerminalSurfaceView(command: Self.attachCommand(vmID: vmID, window: index),
+        guard let view = TerminalSurfaceView(command: Self.attachCommand(vmID: vmID, window: index,
+                                                                         remoteHost: remoteHost),
                                              windowIndex: index,
                                              profileID: profile.id) else { return nil }
         if let surface = view.surface {
@@ -149,8 +155,11 @@ final class TerminalSessionController {
 
     /// The surface child command. Quoted for ghostty's shell-words parsing —
     /// the app path contains spaces ("Bromure Agentic Coding.app").
-    static func attachCommand(vmID: String, window: Int) -> String {
+    static func attachCommand(vmID: String, window: Int, remoteHost: UUID? = nil) -> String {
         let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        if let remoteHost {
+            return "'\(exe)' __attach-window --remote '\(remoteHost.uuidString)' '\(vmID)' \(window)"
+        }
         return "'\(exe)' __attach-window '\(vmID)' \(window)"
     }
 }

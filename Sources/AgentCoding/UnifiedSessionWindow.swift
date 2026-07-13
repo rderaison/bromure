@@ -1514,7 +1514,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
 // MARK: - Sidebar SwiftUI
 
-private struct SessionSidebar: View {
+// Internal (not private) so the fat-client `RemoteHostWindow` can reuse the
+// exact same sidebar to render a mirrored remote host 1:1.
+struct SessionSidebar: View {
     @Bindable var model: SessionListModel
     /// Grid membership — drives the pinned Grid node and its children.
     let gridStore: GridLayoutStore
