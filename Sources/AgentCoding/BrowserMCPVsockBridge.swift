@@ -46,8 +46,17 @@ final class BrowserMCPVsockBridge: NSObject {
     func attachRemote(fd: Int32) {
         if let old = remoteFd { Darwin.close(old) }
         remoteFd = fd
-        for (_, c) in connections { c.cancel() }
-        connections.removeAll()
+        // Redirect existing agent connections to the fat client by dropping them
+        // so the guest shim reconnects and gets spliced (see `adopt`). But NEVER
+        // tear one down mid-handshake — the shim won't re-send initialize/
+        // tools_list, so the agent's browser tools would hang "connecting". A
+        // handshake-complete connection is dropped now (harmless — tools are
+        // already surfaced); one still handshaking self-cancels the instant it
+        // finishes. Cancelled connections remove themselves via onClose.
+        for c in Array(connections.values) {
+            if c.handshakeDone { c.cancel() }
+            else { c.redirectWhenReady = true }
+        }
     }
 
     /// Stop relaying to the fat client; new agent connections go local again.
@@ -103,6 +112,15 @@ final class BrowserMCPVsockBridge: NSObject {
         private let onClose: (Connection) -> Void
         private var readSource: DispatchSourceRead?
         private var pending = Data()
+        /// True once this connection has answered `tools/list` — i.e. the agent's
+        /// MCP client has finished its `initialize`/`tools/list` handshake and the
+        /// browser tools have surfaced. Only then is it safe to tear the
+        /// connection down to redirect it to a fat client (the dumb stdio shim
+        /// never re-handshakes, so a mid-handshake redirect wedges the tools).
+        private(set) var handshakeDone = false
+        /// Set by `attachRemote` when a fat client wants this (still-handshaking)
+        /// connection redirected — it self-cancels the moment the handshake ends.
+        var redirectWhenReady = false
 
         init(conn: VZVirtioSocketConnection, server: BrowserMCPServer,
              onClose: @escaping (Connection) -> Void) {
@@ -142,6 +160,14 @@ final class BrowserMCPVsockBridge: NSObject {
                         guard let self else { return }
                         if let resp = await self.server.handle(line: line) {
                             self.writeLine(resp)
+                        }
+                        // Handshake completes once tools/list is answered; a
+                        // deferred fat-client redirect fires now (the agent
+                        // already holds its tools, so the reconnect+splice to
+                        // the fat client only carries subsequent tool calls).
+                        if !self.handshakeDone, line.contains("\"tools/list\"") {
+                            self.handshakeDone = true
+                            if self.redirectWhenReady { self.cancel() }
                         }
                     }
                 }

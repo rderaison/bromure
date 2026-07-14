@@ -1322,21 +1322,62 @@ def _loopback_handle(vs):
     try:
         tcp, host = _loopback_connect(port)
     except OSError as exc:
-        # Single-shot listeners (grok) shut down after receiving the code; the
-        # browser often opens parallel/retry connections, so late ones find
-        # nothing listening. Return a clean 200 so the tab lands on a tidy
-        # "you can close this" page instead of a dropped-connection error.
-        _loopback_log("callback for port %d: listener gone (%s); "
-                      "returning synthetic 200" % (port, exc))
-        body = ("<!doctype html><html><body style=\"font-family:-apple-system,"
-                "sans-serif;text-align:center;margin-top:4em\"><h2>Login "
-                "complete</h2><p>You can close this tab and return to the "
-                "terminal.</p></body></html>").encode("utf-8")
-        resp = (b"HTTP/1.1 200 OK\r\n"
-                b"Content-Type: text/html; charset=utf-8\r\n"
-                b"Connection: close\r\n"
-                b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n"
-                + body)
+        # Nothing is listening on 127.0.0.1:<port>. Two very different cases:
+        #
+        #  * An OAuth callback whose single-shot listener (grok/claude login) has
+        #    already received the code and shut down; the browser opens parallel /
+        #    retry connections and the late ones land here. Return a tidy "Login
+        #    complete" 200 so registration finishes cleanly (NEVER regress this).
+        #  * An ordinary forward to a port whose server simply isn't running (a
+        #    dev server that's down, or bound only to the VM's LAN IP not
+        #    loopback). Returning a fake 200 here is actively misleading — the
+        #    caller must see a real error.
+        #
+        # Distinguish by peeking the request: OAuth callbacks carry code=/state=
+        # or hit /callback|/oauth. Be generous (favor the tidy page) so a real
+        # login is never broken; a dev server rarely sends those on its first line.
+        peek = rest
+        if not peek:
+            try:
+                vs.settimeout(0.5)
+                peek = vs.recv(2048)
+            except OSError:
+                peek = b""
+            finally:
+                try:
+                    vs.settimeout(None)
+                except OSError:
+                    pass
+        head = peek[:512].lower()
+        is_oauth = (b"code=" in head or b"state=" in head
+                    or b"/callback" in head or b"/oauth" in head or b"/auth" in head)
+        if is_oauth:
+            _loopback_log("callback for port %d: listener gone (%s); synthetic 200"
+                          % (port, exc))
+            body = ("<!doctype html><html><body style=\"font-family:-apple-system,"
+                    "sans-serif;text-align:center;margin-top:4em\"><h2>Login "
+                    "complete</h2><p>You can close this tab and return to the "
+                    "terminal.</p></body></html>").encode("utf-8")
+            resp = (b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: text/html; charset=utf-8\r\n"
+                    b"Connection: close\r\n"
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+                    + body)
+        else:
+            _loopback_log("forward to port %d failed (%s); nothing listening — 502"
+                          % (port, exc))
+            body = ("<!doctype html><html><body style=\"font-family:-apple-system,"
+                    "sans-serif;text-align:center;margin-top:4em\"><h2>No service on "
+                    "port %d</h2><p>Nothing is listening on 127.0.0.1:%d in this "
+                    "workspace. If this is your dev server, make sure it is running "
+                    "and bound to 0.0.0.0 (or 127.0.0.1) — binding only to the VM's "
+                    "LAN IP leaves it unreachable here.</p></body></html>"
+                    % (port, port)).encode("utf-8")
+            resp = (b"HTTP/1.1 502 Bad Gateway\r\n"
+                    b"Content-Type: text/html; charset=utf-8\r\n"
+                    b"Connection: close\r\n"
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+                    + body)
         try:
             vs.sendall(resp)
         except OSError:
