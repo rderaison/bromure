@@ -337,6 +337,12 @@ struct ProfileEditorView: View {
     /// nil and the Storage section is hidden.
     private let storageContext: ProfileStorageContext?
 
+    /// When non-nil (a remote/redacted profile), the Credentials and Guardrails
+    /// panes list these server-computed credential refs instead of deriving them
+    /// from `draft` — whose secrets are blanked on the wire, which would otherwise
+    /// hide every secret-bearing credential. nil = local editor: derive from the draft.
+    private let remoteCredentialRefs: [CredentialRef]?
+
     /// "Generate SSH key" toggle is decoupled from the model — only used
     /// to decide whether to call ssh-keygen on save.
     @State private var generateSSH: Bool
@@ -421,6 +427,7 @@ struct ProfileEditorView: View {
         isNew: Bool? = nil,
         terminalDefaults: TerminalAppDefaults,
         storageContext: ProfileStorageContext?,
+        remoteCredentialRefs: [CredentialRef]? = nil,
         onSave: @escaping (Profile, _ generateSSH: Bool) -> Void,
         onCancel: @escaping () -> Void,
         onImportSSHKey: ((URL, _ passphrase: String?, _ label: String) throws -> ImportedSSHKey)? = nil,
@@ -466,6 +473,7 @@ struct ProfileEditorView: View {
         self.isNew = resolvedIsNew
         self.terminalDefaults = terminalDefaults
         self.storageContext = storageContext
+        self.remoteCredentialRefs = remoteCredentialRefs
         self.onSave = onSave
         self.onCancel = onCancel
     }
@@ -1104,7 +1112,9 @@ struct ProfileEditorView: View {
 
             // Only what's configured — grouped by category. Real values stay on
             // the host; the "ask before use" control lives in the Guardrails pane.
-            let groups = draft.configuredCredentialsByCategory()
+            // A remote/redacted profile has its secrets blanked, so use the
+            // server-computed ref list to enumerate (else every cred would hide).
+            let groups = draft.credentialsByCategory(remoteCredentialRefs ?? draft.configuredCredentials())
             if groups.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "key.slash").font(.title2).foregroundStyle(.secondary)
@@ -2808,7 +2818,7 @@ struct ProfileEditorView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                let refs = draft.configuredCredentials()
+                let refs = remoteCredentialRefs ?? draft.configuredCredentials()
                 if refs.isEmpty {
                     VStack(spacing: 6) {
                         Image(systemName: "shield.slash").font(.title2).foregroundStyle(.secondary)

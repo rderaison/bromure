@@ -5237,6 +5237,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             merged.overlay(with: incomingSecrets)
             merged.apply(to: &incoming)
 
+            // Kube contexts are part of this full-document replace: honor the
+            // caller's exact set so removing one in the (redacted) editor sticks.
+            // overlay/apply above already restored each redacted entry's stored
+            // secret and kept existing entries by id; here we drop any context the
+            // caller's document omitted. An absent `kubeconfigs` key means "don't
+            // touch" (partial callers stay safe) — only an explicitly-sent array
+            // is authoritative.
+            if let sentKube = rawDoc["kubeconfigs"] as? [[String: Any]] {
+                let keep = Set(sentKube.compactMap { ($0["id"] as? String).flatMap { UUID(uuidString: $0) } })
+                incoming.kubeconfigs.removeAll { !keep.contains($0.id) }
+            }
+
             profile = incoming
             editing = existing
         } else {
@@ -5307,6 +5319,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let p = profileByNameOrID(key) else { return nil }
         var stripped = p
         _ = ProfileSecrets.extract(stripping: &stripped)   // blank all secrets
+        // `extract` drops kubeconfig entries wholesale (unlike git/docker/db, whose
+        // identity survives with just the secret blanked). Re-add each context's
+        // identity with its auth + CA redacted so the remote guardrails pane can
+        // list it; the save round-trip keeps the stored secret (see overlay).
+        stripped.kubeconfigs = p.kubeconfigs.map { $0.redactedIdentity() }
         guard let data = try? JSONEncoder.iso8601().encode(stripped),
               var dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return nil
@@ -5314,6 +5331,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Flag so callers/humans know the secret fields were redacted (blank =
         // keep the stored value on save; type a value to change it).
         dict["_secretsRedacted"] = true
+        // The guardrails pane derives its rows from `configuredCredentials()`, which
+        // keys off the (now-blanked) secret being present. Ship the list computed from
+        // the REAL profile so a remote pane can render every configured credential.
+        dict["configuredCredentialRefs"] = p.configuredCredentials().map(\.id)
         return dict
     }
 

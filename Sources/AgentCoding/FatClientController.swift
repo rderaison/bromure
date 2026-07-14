@@ -1414,12 +1414,18 @@ final class RemoteHostWindow: NSWindow {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let profile: Profile
+            var credentialRefs: [CredentialRef]? = nil
             do {
                 let doc = try await c.fetchProfileDoc(id)
                 let data = try JSONSerialization.data(withJSONObject: doc)
                 let dec = JSONDecoder()
                 dec.dateDecodingStrategy = .iso8601
                 profile = try dec.decode(Profile.self, from: data)
+                // The remote profile's secrets are blanked, so `configuredCredentials()`
+                // would hide every secret-bearing credential — use the server-computed
+                // list to populate the Guardrails pane instead.
+                credentialRefs = (doc["configuredCredentialRefs"] as? [String])?
+                    .compactMap { CredentialRef(wireID: $0) }
             } catch {
                 Self.presentRemoteError(
                     NSLocalizedString("Couldn't load the workspace settings", comment: ""), error)
@@ -1441,6 +1447,7 @@ final class RemoteHostWindow: NSWindow {
                 isNew: false,
                 terminalDefaults: TerminalAppDefaults.load(),
                 storageContext: nil,
+                remoteCredentialRefs: credentialRefs,
                 onSave: { [weak self] edited, generateSSH in
                     self?.saveWorkspaceSettings(id, edited, generateSSH: generateSSH)
                 },
@@ -1452,6 +1459,10 @@ final class RemoteHostWindow: NSWindow {
 
     private func saveWorkspaceSettings(_ id: Profile.ID, _ edited: Profile, generateSSH: Bool) {
         guard var doc = ACAppDelegate.codableToDict(edited) else { return }
+        // The Profile encoder omits an empty kubeconfigs array; send it explicitly
+        // so removing the last kube context is honored server-side (an absent key
+        // means "leave kube untouched" — see automationUpsertProfile).
+        if edited.kubeconfigs.isEmpty { doc["kubeconfigs"] = [[String: Any]]() }
         if generateSSH { doc["generateSSH"] = true }
         let original = settingsOriginals[id]
         let c = controller

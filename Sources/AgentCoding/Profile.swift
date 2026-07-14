@@ -41,6 +41,25 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
     /// A kubeconfig is configured once it names a server to talk to.
     public var isUsable: Bool { !serverURL.trimmingCharacters(in: .whitespaces).isEmpty }
 
+    /// A copy with the secret material (auth token/cert/command + CA PEM) blanked
+    /// but the identity (name, server, namespace, guardrail flags) intact — what
+    /// the remote profile export ships so the guardrails pane can list the context
+    /// without the secret crossing the wire. `ProfileSecrets.overlay` treats the
+    /// blank auth as "keep the stored secret" on the save round-trip.
+    public func redactedIdentity() -> KubeconfigEntry {
+        var e = self
+        e.caCertPEM = ""
+        // Blank the secret material but keep the auth *kind*, so the editor shows a
+        // clientCert / exec context as such (not an empty bearer row) and
+        // `Auth.isBlank` still reads it as untouched on the save round-trip.
+        switch auth {
+        case .bearerToken:                e.auth = .bearerToken("")
+        case .clientCert:                 e.auth = .clientCert(certPEM: "", keyPEM: "")
+        case .execPlugin(_, _, let secs): e.auth = .execPlugin(command: "", args: [], refreshSeconds: secs)
+        }
+        return e
+    }
+
     public enum Auth: Codable, Equatable, Sendable {
         /// Static bearer token (rotated rarely).
         case bearerToken(String)
@@ -90,6 +109,16 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
                 try c.encode(cmd, forKey: .command)
                 try c.encode(args, forKey: .args)
                 try c.encode(secs, forKey: .refreshSeconds)
+            }
+        }
+
+        /// True when this auth carries no secret material — the shape a redacted
+        /// export round-trips (so a save can tell "unchanged" from a real edit).
+        public var isBlank: Bool {
+            switch self {
+            case .bearerToken(let t):        return t.isEmpty
+            case .clientCert(let c, let k):  return c.isEmpty && k.isEmpty
+            case .execPlugin(let cmd, _, _): return cmd.isEmpty
             }
         }
     }
@@ -2331,7 +2360,28 @@ struct ProfileSecrets: Codable {
         additionalToolApiKeys.merge(newer.additionalToolApiKeys) { _, n in n }
         gitHTTPSTokens.merge(newer.gitHTTPSTokens) { _, n in n }
         manualTokenValues.merge(newer.manualTokenValues) { _, n in n }
-        if let v = newer.kubeconfigs, !v.isEmpty { kubeconfigs = v }
+        // Kube round-trips through the redacted export with blank auth. Merge per
+        // id so an identity/guardrail edit (name, requireApproval, …) applies while
+        // a blank auth keeps the stored cert/token; a real incoming auth still wins.
+        // (Only the redacted round-trip paths call overlay; local saves persist the
+        // full profile directly, so this never suppresses a local deletion.)
+        if let incoming = newer.kubeconfigs, !incoming.isEmpty {
+            var merged = kubeconfigs ?? []
+            for e in incoming {
+                if let i = merged.firstIndex(where: { $0.id == e.id }) {
+                    let stored = merged[i]
+                    merged[i] = e                    // identity + guardrail edits from the caller
+                    // Auth and CA are both redacted on the wire (redactedIdentity):
+                    // keep whatever the caller didn't re-enter, so an unrelated edit
+                    // (or a token change) can't silently drop the stored cert/token.
+                    if e.auth.isBlank      { merged[i].auth = stored.auth }
+                    if e.caCertPEM.isEmpty { merged[i].caCertPEM = stored.caCertPEM }
+                } else {
+                    merged.append(e)
+                }
+            }
+            kubeconfigs = merged
+        }
         if let v = newer.digitalOceanToken { digitalOceanToken = v }
         if let v = newer.linearToken { linearToken = v }
         if let v = newer.awsSecretAccessKey { awsSecretAccessKey = v }
@@ -4341,6 +4391,34 @@ public enum CredentialRef: Hashable, Sendable, Identifiable {
         }
     }
 
+    /// Parse the stable `id` wire form back into a ref — lets the server ship the
+    /// configured-credential list (computed from the real profile, before secrets
+    /// are blanked) to a remote guardrails pane.
+    public init?(wireID: String) {
+        switch wireID {
+        case "primaryToolKey": self = .primaryToolKey
+        case "aws":            self = .aws
+        case "do":             self = .digitalOcean
+        case "linear":         self = .linear
+        case "ssh-managed":    self = .managedSSHKey
+        default:
+            let parts = wireID.split(separator: ":", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { return nil }
+            switch parts[0] {
+            case "tool":
+                guard let t = Profile.Tool(rawValue: parts[1]) else { return nil }
+                self = .additionalTool(t)
+            case "git":    guard let u = UUID(uuidString: parts[1]) else { return nil }; self = .git(u)
+            case "manual": guard let u = UUID(uuidString: parts[1]) else { return nil }; self = .manual(u)
+            case "docker": guard let u = UUID(uuidString: parts[1]) else { return nil }; self = .docker(u)
+            case "db":     guard let u = UUID(uuidString: parts[1]) else { return nil }; self = .database(u)
+            case "kube":   guard let u = UUID(uuidString: parts[1]) else { return nil }; self = .kube(u)
+            case "ssh":    guard let u = UUID(uuidString: parts[1]) else { return nil }; self = .importedSSHKey(u)
+            default: return nil
+            }
+        }
+    }
+
     public var category: CredentialCategory {
         switch self {
         case .primaryToolKey, .additionalTool:              return .agents
@@ -4465,8 +4543,14 @@ public extension Profile {
     /// Configured credentials grouped by category (only non-empty categories),
     /// in display order.
     func configuredCredentialsByCategory() -> [(CredentialCategory, [CredentialRef])] {
-        let all = configuredCredentials()
-        return CredentialCategory.allCases.compactMap { cat in
+        credentialsByCategory(configuredCredentials())
+    }
+
+    /// Group an explicit ref list by category (only non-empty categories), in
+    /// display order. Used with a server-supplied list when a remote profile's
+    /// blanked secrets would otherwise hide creds from `configuredCredentials()`.
+    func credentialsByCategory(_ all: [CredentialRef]) -> [(CredentialCategory, [CredentialRef])] {
+        CredentialCategory.allCases.compactMap { cat in
             let items = all.filter { $0.category == cat }
             return items.isEmpty ? nil : (cat, items)
         }
