@@ -2597,6 +2597,13 @@ struct ProfileEditorView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            // Workspace subnet is app-wide, not per-workspace — show it only in
+            // Preferences (storageContext == nil), like the Automation pane.
+            if storageContext == nil {
+                Divider()
+                SubnetSettingsView()
+            }
         }
     }
 
@@ -5030,6 +5037,49 @@ struct SSHKeyView: View {
 }
 
 // MARK: - Automation defaults bridge
+
+/// App-wide workspace-subnet control (Preferences → Resources). Toggles this
+/// install onto a private random /24 in 172.16.0.0/12 and lets the user
+/// re-randomize it, so multiple bromures don't all collide on 192.168.64.0/24
+/// when a rich client mirrors several remotes. Changes apply on the next launch
+/// (or immediately if no workspace VM has booted yet this session).
+@MainActor
+private struct SubnetSettingsView: View {
+    @AppStorage("vmnet.useRandom172") private var useRandom = false
+    @State private var subnet = VMNetSwitch.savedRandom172BaseString()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Workspace subnet")
+                .font(.headline)
+            Toggle(isOn: Binding(
+                get: { useRandom },
+                set: { on in
+                    useRandom = on
+                    if on {
+                        VMNetSwitch.ensureRandom172Base()
+                        subnet = VMNetSwitch.savedRandom172BaseString()
+                        VMNetSwitch.shared.setSubnetStrategy(.randomClassB172)
+                    }
+                })) {
+                Text("Use a private subnet (avoids clashes across remotes)")
+            }
+            if useRandom {
+                HStack(spacing: 8) {
+                    Text("\(subnet ?? "—")/24")
+                        .font(.system(.body, design: .monospaced))
+                    Button("Randomize") {
+                        VMNetSwitch.rerollRandom172Base()
+                        subnet = VMNetSwitch.savedRandom172BaseString()
+                    }
+                }
+            }
+            Text("Each install normally uses 192.168.64.0/24, which collides when the rich client mirrors more than one remote. A private 172.16.x.x subnet keeps them distinct. Changes apply the next time your workspaces start.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
 
 /// Read/write the app-wide automation settings stored in UserDefaults,
 /// and live-toggle the HTTP server on the AC delegate when the user flips

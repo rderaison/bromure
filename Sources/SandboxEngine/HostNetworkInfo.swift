@@ -77,6 +77,29 @@ public struct HostNetworkInfo {
         return octets
     }
 
+    /// The `/24` network addresses (low byte 0) of every local IPv4 interface
+    /// inside `172.16.0.0/12`. Lets AC's random-172 subnet picker steer clear of
+    /// any `172.x.y.0/24` the host is genuinely on — most importantly Docker's
+    /// `172.17.0.0/16` bridge and any compose networks — so a randomly chosen
+    /// workspace subnet never shadows one.
+    public static func localPrivate172Slash24s() -> Set<UInt32> {
+        var nets: Set<UInt32> = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nets }
+        defer { freeifaddrs(ifaddr) }
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            guard let addr = ptr.pointee.ifa_addr,
+                  addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let ip = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
+            }
+            if (ip & 0xFFF0_0000) == 0xAC10_0000 {   // 172.16.0.0/12
+                nets.insert(ip & 0xFFFF_FF00)         // the /24 network address
+            }
+        }
+        return nets
+    }
+
     /// Parse a dotted-decimal IPv4 string into a host-byte-order UInt32.
     static func parseIPv4(_ string: String) -> UInt32? {
         let parts = string.split(separator: ".").compactMap { UInt32($0) }

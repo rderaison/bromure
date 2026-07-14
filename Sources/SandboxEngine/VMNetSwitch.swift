@@ -83,6 +83,14 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// PAC and the SOCKS forwarder both reference it.
     private var pinnedOctet: UInt8?
 
+    /// How the (unpinned) NAT subnet is chosen. `.classC192` is the historical
+    /// `192.168.<octet>` walk (Bromure Web, and AC's own default). `.randomClassB172`
+    /// makes AC pick a persisted random `/24` within `172.16.0.0/12` so multiple
+    /// bromure installs don't all collide on `192.168.64.0/24` when one rich
+    /// client VPNs to several at once. Only AC opts in (see `setSubnetStrategy`).
+    public enum SubnetStrategy: Sendable { case classC192, randomClassB172 }
+    private var subnetStrategy: SubnetStrategy = .classC192
+
     // MARK: - DHCP (we serve it ourselves)
 
     /// vmnet's built-in `bootpd` only tracks a *single* lease per interface, so
@@ -125,6 +133,21 @@ public final class VMNetSwitch: @unchecked Sendable {
         self.ascendingSubnet = ascendingSubnet
         self.bridgePeers = bridgePeers
         self.pinnedOctet = pinnedOctet
+    }
+
+    /// AC-only opt-in: put the shared NAT interface on a persisted random `/24`
+    /// within `172.16.0.0/12` (skipping Docker's `172.17–172.20` and any `/24`
+    /// the host is already on) instead of `192.168.64.0/24`. Because
+    /// `VMNetSwitch.shared` is a per-process singleton and only AC calls this,
+    /// Bromure Web keeps its `192.168.x` walk untouched. A pinned browser switch
+    /// (the fat client) stays in `192.168` — its subnet is local to the rich
+    /// client and can't collide with a remote's workspace subnet. No-op once the
+    /// interface has started; call once at process startup before any VM boots.
+    public func setSubnetStrategy(_ strategy: SubnetStrategy) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !started else { return }
+        subnetStrategy = strategy
     }
 
     /// Persist DHCP leases to a sqlite db at `url` so a MAC keeps its IP across
@@ -248,9 +271,9 @@ public final class VMNetSwitch: @unchecked Sendable {
         let desc = xpc_dictionary_create(nil, nil, 0)
         xpc_dictionary_set_uint64(desc, vmnet_operation_mode_key, UInt64(kVmnetSharedMode))
 
-        // Pick a free 192.168.<octet>.0/24, avoiding any the host is really on.
-        let octet = chooseSubnetOctet()
-        let base: UInt32 = 0xC0A8_0000 | (UInt32(octet) << 8)  // 192.168.octet.0
+        // Pick a free /24 (192.168.<octet> by default, or a random 172.16/12
+        // one under .randomClassB172), avoiding any the host is really on.
+        let base = chooseSubnetBase()
         gatewayIP = base | 1
         dhcpPoolStart = base | 2
         dhcpPoolEnd = base | 254
@@ -261,7 +284,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         xpc_dictionary_set_string(desc, vmnet_start_address_key, Self.ipString(gatewayIP))
         xpc_dictionary_set_string(desc, vmnet_end_address_key, Self.ipString(dhcpPoolEnd))
         xpc_dictionary_set_string(desc, vmnet_subnet_mask_key, Self.ipString(subnetMask))
-        if switchDebug { print("[VMNetSwitch] using subnet 192.168.\(octet).0/24, gateway \(Self.ipString(gatewayIP))") }
+        if switchDebug { print("[VMNetSwitch] using subnet \(Self.ipString(base))/24, gateway \(Self.ipString(gatewayIP))") }
 
         let sem = DispatchSemaphore(value: 0)
         var success = false
@@ -423,6 +446,17 @@ public final class VMNetSwitch: @unchecked Sendable {
 
     // MARK: - Subnet selection
 
+    /// The `/24` network address (low byte 0) the interface leases from. A pinned
+    /// browser switch and every `.classC192` caller stay in `192.168.<octet>`;
+    /// only an unpinned `.randomClassB172` caller (AC opting in) lands in
+    /// `172.16.0.0/12`.
+    private func chooseSubnetBase() -> UInt32 {
+        if subnetStrategy == .randomClassB172, pinnedOctet == nil {
+            return Self.persistedRandom172Base(hostUsed: HostNetworkInfo.localPrivate172Slash24s())
+        }
+        return 0xC0A8_0000 | (UInt32(chooseSubnetOctet()) << 8)   // 192.168.<octet>.0
+    }
+
     /// Choose the third octet for our `192.168.<octet>.0/24` NAT subnet.
     /// Starts at 64 (the historical AC default) and walks *down* — 63, 62, … —
     /// past any `192.168.x` the host is already on, so we never shadow a real
@@ -432,6 +466,76 @@ public final class VMNetSwitch: @unchecked Sendable {
     private func chooseSubnetOctet() -> UInt8 {
         Self.selectOctet(ascending: ascendingSubnet, pinned: pinnedOctet,
                          used: HostNetworkInfo.localPrivateClassCOctets())
+    }
+
+    /// UserDefaults key holding AC's chosen `/24` network address (a `UInt32`
+    /// stored as `Int`). Under `CFFIXED_USER_HOME` this relocates with the rest
+    /// of the app's defaults, so two isolated instances get independent subnets.
+    public static let subnetBase172DefaultsKey = "vmnet.switch.subnetBase172"
+
+    /// 172.16/12 second octets we'll pick from — 16, then 21…31, skipping
+    /// Docker's default bridge range (172.17–172.20).
+    private static let allowed172SecondOctets: [UInt32] = [16] + Array(21...31)
+
+    /// The persisted random `/24` in `172.16.0.0/12`, chosen once and reused. It
+    /// is re-rolled only if the host has since joined that `/24` (e.g. a VPN or a
+    /// Docker bridge moved onto it) — which is exactly the collision this feature
+    /// exists to avoid. Persists the choice on first pick.
+    public static func persistedRandom172Base(hostUsed: Set<UInt32>) -> UInt32 {
+        let d = UserDefaults.standard
+        if d.object(forKey: subnetBase172DefaultsKey) != nil {
+            let saved = UInt32(bitPattern: Int32(truncatingIfNeeded: d.integer(forKey: subnetBase172DefaultsKey)))
+            if isEligible172(saved, hostUsed: hostUsed) { return saved }
+        }
+        let chosen = randomEligible172(hostUsed: hostUsed)
+        d.set(Int(chosen), forKey: subnetBase172DefaultsKey)
+        return chosen
+    }
+
+    /// Pick (and persist, on first call) AC's random 172.16/12 `/24`, doing the
+    /// host-collision scan internally. Convenience for the migration flow and the
+    /// Settings display; reuses the saved choice thereafter.
+    @discardableResult
+    public static func ensureRandom172Base() -> UInt32 {
+        persistedRandom172Base(hostUsed: HostNetworkInfo.localPrivate172Slash24s())
+    }
+
+    /// Roll a fresh eligible `/24` (172.16/12, not Docker's range, host-free).
+    /// Persists it as the new choice; used by the "Randomize" Settings action.
+    @discardableResult
+    public static func rerollRandom172Base() -> UInt32 {
+        let base = randomEligible172(hostUsed: HostNetworkInfo.localPrivate172Slash24s())
+        UserDefaults.standard.set(Int(base), forKey: subnetBase172DefaultsKey)
+        return base
+    }
+
+    /// The persisted `/24` network base formatted as dotted-decimal (e.g.
+    /// "172.23.181.0"), or nil if none has been chosen yet. For the Settings UI.
+    public static func savedRandom172BaseString() -> String? {
+        let d = UserDefaults.standard
+        guard d.object(forKey: subnetBase172DefaultsKey) != nil else { return nil }
+        let base = UInt32(bitPattern: Int32(truncatingIfNeeded: d.integer(forKey: subnetBase172DefaultsKey)))
+        return ipString(base)
+    }
+
+    static func randomEligible172(hostUsed: Set<UInt32>) -> UInt32 {
+        for _ in 0..<4096 {
+            let b2 = allowed172SecondOctets.randomElement()!
+            let b3 = UInt32.random(in: 0...255)
+            let base = 0xAC10_0000 | ((b2 & 0x0F) << 16) | (b3 << 8)   // 172.<b2>.<b3>.0
+            if isEligible172(base, hostUsed: hostUsed) { return base }
+        }
+        return 0xAC10_0000   // 172.16.0.0/24 last resort
+    }
+
+    /// A `/24` (low byte 0) inside 172.16/12, outside Docker's 172.17–172.20, and
+    /// not one the host currently occupies.
+    static func isEligible172(_ base: UInt32, hostUsed: Set<UInt32>) -> Bool {
+        let b2 = (base >> 16) & 0xFF
+        return (base & 0x0000_00FF) == 0
+            && (base & 0xFFF0_0000) == 0xAC10_0000
+            && allowed172SecondOctets.contains(b2)
+            && !hostUsed.contains(base)
     }
 
     /// Pure octet selection: honor `pinned` when it's a valid, host-LAN-free

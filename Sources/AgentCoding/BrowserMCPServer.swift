@@ -242,10 +242,10 @@ final class BrowserMCPServer {
     CRITICAL — reaching a server you run in THIS workspace: the browser runs in \
     a DIFFERENT VM, so 127.0.0.1 / localhost inside the browser point at the \
     browser's own VM, NOT this workspace. To open a dev server (e.g. one you \
-    started on port 3000) in the browser, navigate to this workspace's LAN IP, \
-    e.g. http://192.168.x.x:3000 — find it with `hostname -I` (the 192.168.x.x \
-    address). NEVER use http://localhost:PORT or http://127.0.0.1:PORT with \
-    browser_navigate; it will not reach your server.
+    started on port 3000) in the browser, navigate to this workspace's LAN IP — \
+    find it with `hostname -I` (the private address it prints, e.g. 172.x.x.x or \
+    192.168.x.x) — e.g. http://<that-ip>:3000. NEVER use http://localhost:PORT or \
+    http://127.0.0.1:PORT with browser_navigate; it will not reach your server.
 
     Interacting: browser_click / browser_fill (fast) or browser_type (real \
     keystrokes) / browser_press_key drive the page by CSS selector; \
@@ -261,8 +261,8 @@ final class BrowserMCPServer {
         tool("browser_navigate",
              "Navigate the active tab to a URL (or search terms). To open a "
              + "server running in THIS workspace, use the workspace's LAN IP "
-             + "(192.168.x.x from `hostname -I`), NOT localhost/127.0.0.1 — the "
-             + "browser is a separate VM.",
+             + "(the private address from `hostname -I`, e.g. 172.x.x.x), NOT "
+             + "localhost/127.0.0.1 — the browser is a separate VM.",
              ["url": prop("string", "URL or search query", required: true)]),
         tool("browser_new_tab", "Open a new tab, optionally at a URL.",
              ["url": prop("string", "URL to open (optional)")]),

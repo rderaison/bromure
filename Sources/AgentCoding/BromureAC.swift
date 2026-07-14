@@ -1726,9 +1726,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         VMNetSwitch.shared.enablePersistentLeases(
             at: acSupport.appendingPathComponent("dhcp-leases.sqlite"))
 
+        // Opt this install onto a persisted random 172.16/12 subnet (instead of
+        // the shared 192.168.64.0/24) once the user has accepted the migration —
+        // so a rich client VPNing to several remotes doesn't get confused by
+        // overlapping subnets. Synchronous + before any VM boots, so the switch
+        // starts on the right network. AC-only; Bromure Web never calls this.
+        if UserDefaults.standard.bool(forKey: "vmnet.useRandom172") {
+            VMNetSwitch.shared.setSubnetStrategy(.randomClassB172)
+        }
+
         // Offer to install the `bromure-cli` command-line tool (admin prompt).
         // Deferred so the main window appears first; no-op for the headless agent.
         DispatchQueue.main.async { [weak self] in self?.offerCLISymlinkIfNeeded() }
+        // Offer the one-time VM-subnet migration (once the window is up).
+        DispatchQueue.main.async { [weak self] in self?.offerSubnetMigrationIfNeeded() }
 
         // Refresh the MLX model catalog from the hosted manifest in the
         // background (vLLM.md §5.1). Non-fatal — falls back to the bundled
@@ -3466,6 +3477,41 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             UserDefaults.standard.set(true, forKey: "cliSymlinkDeclined")
         default:
             break   // Not Now — offer again next launch
+        }
+    }
+
+    /// One-time offer to move this Mac's workspace VMs off the shared
+    /// `192.168.64.0/24` NAT subnet onto a private random `172.16/12` one, so a
+    /// rich client mirroring several remotes isn't confused by overlapping
+    /// subnets. "Migrate Now" applies immediately when no VM has booted yet this
+    /// session, otherwise on the next launch; "Don't Ask Again" is remembered.
+    /// The subnet can be changed or re-randomized later in Settings › Resources.
+    @MainActor private func offerSubnetMigrationIfNeeded() {
+        guard !headless else { return }
+        guard ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"] == nil else { return }
+        guard !UserDefaults.standard.bool(forKey: "vmnet.useRandom172") else { return }   // already migrated
+        guard !UserDefaults.standard.bool(forKey: "vmnet.migrateSubnet.declined") else { return }
+        guard Bundle.main.bundleURL.pathExtension == "app" else { return }   // not dev `swift run`
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = NSLocalizedString(
+            "Give this Mac its own private VM subnet?", comment: "")
+        alert.informativeText = NSLocalizedString(
+            "Every Bromure install uses the same 192.168.64.0/24 network for its workspace VMs. If you connect to more than one remote from the rich client, those identical subnets collide and the VPN can't tell them apart.\n\nBromure can move this Mac's VMs onto a private, randomly chosen 172.16.x.x network instead. You can change or re-randomize it later in Settings › Resources.",
+            comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Migrate Now", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Don’t Ask Again", comment: ""))
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            UserDefaults.standard.set(true, forKey: "vmnet.useRandom172")
+            VMNetSwitch.ensureRandom172Base()               // pick + persist now
+            VMNetSwitch.shared.setSubnetStrategy(.randomClassB172)   // applies now if no VM booted yet, else next launch
+        case .alertThirdButtonReturn:
+            UserDefaults.standard.set(true, forKey: "vmnet.migrateSubnet.declined")
+        default:
+            break   // Later — offer again next launch
         }
     }
 
