@@ -3480,6 +3480,40 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    /// Surface a first-resolution failure of a 1Password `op://` reference:
+    /// install instructions when the CLI is missing, otherwise the op error.
+    /// GUI-only — a headless/remote host just logs (the modal would block).
+    @MainActor func presentOnePasswordError(_ error: OnePasswordCLI.OpError, profileName: String) {
+        guard !headless else {
+            FileHandle.standardError.write(Data(
+                "[1password] \(error.errorDescription ?? "\(error)") — workspace \(profileName)\n".utf8))
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        switch error {
+        case .notInstalled:
+            alert.messageText = NSLocalizedString("1Password CLI not found", comment: "")
+            alert.informativeText = String(format: NSLocalizedString(
+                "“%@” uses a 1Password secret reference (op://…), but the 1Password CLI (op) isn't installed or isn't on the path. Install it, sign in, then restart the workspace.",
+                comment: ""), profileName)
+            alert.addButton(withTitle: NSLocalizedString("Get 1Password CLI", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            if alert.runModal() == .alertFirstButtonReturn,
+               let url = URL(string: OnePasswordCLI.installURL) {
+                NSWorkspace.shared.open(url)
+            }
+        case .readFailed:
+            alert.messageText = String(format: NSLocalizedString(
+                "Couldn't load a 1Password secret for “%@”", comment: ""), profileName)
+            alert.informativeText = (error.errorDescription ?? "") + "\n\n" + NSLocalizedString(
+                "Make sure you're signed in to 1Password (run `op signin`) and the referenced item exists, then restart the workspace.",
+                comment: "")
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            alert.runModal()
+        }
+    }
+
     /// One-time offer to move this Mac's workspace VMs off the shared
     /// `192.168.64.0/24` NAT subnet onto a private random `172.16/12` one, so a
     /// rich client mirroring several remotes isn't confused by overlapping
@@ -5897,6 +5931,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                         profileID: profile.id,
                                         swapper: engine.swapper)
             }
+
+            // 1Password: manual tokens whose value is an `op://` reference are
+            // resolved host-side. The plan already minted a stable fake from the
+            // reference string; the refresher resolves the real secret now (and
+            // every 120s), so the guest only ever holds the fake and only the
+            // op:// path is on disk. First-resolution failures surface here.
+            let opRefs: [OnePasswordRefresher.Ref] = profile.manualTokens.compactMap { tok in
+                guard tok.isUsable, let opRef = OnePasswordCLI.reference(in: tok.realValue)
+                else { return nil }
+                let fake = SessionTokenPlan.deriveFake(
+                    prefix: "brm_",
+                    real: tok.realValue.trimmingCharacters(in: .whitespacesAndNewlines),
+                    salt: salt)
+                let hosts: [String?] = tok.effectiveHostScopes.map { $0.isEmpty ? nil : $0 }
+                return .init(
+                    opRef: opRef, fake: fake, hosts: hosts,
+                    consentID: tok.requireApproval ? ConsentCredentialID.manualToken(tok.id) : nil,
+                    consentName: tok.name.isEmpty ? "manual token" : "“\(tok.name)” token")
+            }
+            engine.opRefresher.start(
+                profileID: profile.id, refs: opRefs, swapper: engine.swapper,
+                onFirstError: { [weak self] err in
+                    self?.presentOnePasswordError(err, profileName: profile.name)
+                })
         }
         // Drop the synthetic kubeconfig + every other managed dotfile
         // where the guest picks them up. virtiofs (and migrate) boots

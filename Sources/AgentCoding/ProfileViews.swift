@@ -1399,6 +1399,16 @@ struct ProfileEditorView: View {
         let state = envImport
         var awsAccess = "", awsSecret = "", awsSession = "", awsAny = false
         for row in state.recognized where row.include {
+            // A 1Password reference can't ride the typed-credential path (those
+            // are never resolved host-side) — route it to a manual token, which
+            // exports a fake and swaps in the op-resolved secret. Keep the tool
+            // on token auth so it actually uses the exported key.
+            if let opRef = OnePasswordCLI.reference(in: row.value) {
+                draft.manualTokens.append(.init(
+                    name: row.name, realValue: opRef, envVarName: row.name, hostFilters: []))
+                if case .toolKey(let t) = row.slot, draft.tool == t { draft.authMode = .token }
+                continue
+            }
             switch row.slot {
             case .toolKey(let t):
                 if draft.tool == t {
@@ -1435,8 +1445,11 @@ struct ProfileEditorView: View {
                 .split(whereSeparator: { $0 == "," || $0 == " " })
                 .map { String($0).trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
+            // Store the normalized bare `op://…` reference (never the secret)
+            // when the value is a 1Password reference; otherwise the literal.
+            let stored = OnePasswordCLI.reference(in: row.value) ?? row.value
             draft.manualTokens.append(.init(
-                name: row.name, realValue: row.value, envVarName: row.name, hostFilters: hosts))
+                name: row.name, realValue: stored, envVarName: row.name, hostFilters: hosts))
         }
         showEnvImport = false
     }
@@ -3631,13 +3644,16 @@ private struct ManualTokenRow: View {
                 credFieldHint("A name for you to recognise this entry. Shown here only — never sent anywhere.")
             }
 
-            // Real secret — the actual key, masked by default.
+            // Real secret — the actual key (masked), OR a 1Password `op://`
+            // reference (shown in the clear, since only the path is stored).
+            let isOpRef = OnePasswordCLI.reference(in: token.realValue) != nil
             VStack(alignment: .leading, spacing: 3) {
-                credFieldLabel("Real secret")
+                credFieldLabel(isOpRef ? "1Password reference" : "Real secret")
                 HStack(spacing: 6) {
                     ZStack {
-                        if revealReal {
-                            TextField("", text: $token.realValue, prompt: Text("sk_live_…"))
+                        if isOpRef || revealReal {
+                            TextField("", text: $token.realValue,
+                                      prompt: Text(isOpRef ? "op://vault/item/field" : "sk_live_…"))
                                 .textFieldStyle(.roundedBorder)
                         } else {
                             SecureField("", text: $token.realValue, prompt: Text("sk_live_…"))
@@ -3645,17 +3661,35 @@ private struct ManualTokenRow: View {
                         }
                     }
                     .labelsHidden()
-                    Button {
-                        revealReal.toggle()
-                    } label: {
-                        Image(systemName: revealReal ? "eye.slash" : "eye")
+                    if !isOpRef {
+                        Button {
+                            revealReal.toggle()
+                        } label: {
+                            Image(systemName: revealReal ? "eye.slash" : "eye")
+                        }
+                        .buttonStyle(.borderless)
+                        .help(revealReal
+                              ? NSLocalizedString("Hide value", comment: "")
+                              : NSLocalizedString("Show value", comment: ""))
                     }
-                    .buttonStyle(.borderless)
-                    .help(revealReal
-                          ? NSLocalizedString("Hide value", comment: "")
-                          : NSLocalizedString("Show value", comment: ""))
                 }
-                credFieldHint("Your real API key. Stays on macOS — the VM only ever sees a fake stand-in.")
+                if isOpRef {
+                    credFieldHint("A 1Password secret reference (op://…). Only this path is stored — Bromure resolves the secret with the op CLI at launch and refreshes it every 2 minutes; the VM only ever sees a fake.")
+                    if !OnePasswordCLI.isInstalled {
+                        Button {
+                            if let url = URL(string: OnePasswordCLI.installURL) {
+                                NSWorkspace.shared.open(url)
+                            }
+                        } label: {
+                            Label(NSLocalizedString("Get 1Password CLI", comment: ""),
+                                  systemImage: "arrow.up.right.square")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                } else {
+                    credFieldHint("Your real API key. Stays on macOS — the VM only ever sees a fake stand-in. You can also paste a 1Password reference (op://vault/item/field).")
+                }
             }
 
             // Env var — the variable the fake is exported under inside the VM.

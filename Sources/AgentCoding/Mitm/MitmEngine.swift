@@ -60,6 +60,10 @@ public final class MitmEngine {
     /// Owner of the exec-credential poller tasks. One Task per
     /// kubeconfig entry; cancelled in `unregister(profileID:)`.
     public let execPoller = ExecCredentialPoller()
+    /// Owner of the 1Password `op://` refresh loops (one per profile), which
+    /// re-resolve op-sourced credentials every 120 s and update the swap map
+    /// in place. Cancelled in `unregister(profileID:)`.
+    public let opRefresher = OnePasswordRefresher()
 
     /// Per-profile trace level + session id, set by ACAppDelegate at
     /// session launch. The HTTPProxy connection looks these up to
@@ -434,6 +438,7 @@ public final class MitmEngine {
         clientIdentities.clearAll(for: profileID)
         clusterCAs.clearAll(for: profileID)
         execPoller.stopAll()
+        opRefresher.stop(profileID: profileID)
         // Drop any consent grants the user issued during this session
         // — "Allow for the rest of the session" must not survive a
         // window close. Detached so we don't block the @MainActor
