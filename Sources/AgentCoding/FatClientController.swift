@@ -1083,6 +1083,7 @@ final class RemoteHostWindow: NSWindow {
         browser.translatesAutoresizingMaskIntoConstraints = false
         browser.wantsLayer = true
         browser.layer?.backgroundColor = NSColor.black.cgColor
+        browser.clipsToBounds = true   // squish cleanly during open/close
         content.addSubview(browser)
         browserPaneHost = browser
         browserWidthConstraint = browser.widthAnchor.constraint(equalToConstant: 0)
@@ -1684,6 +1685,11 @@ final class RemoteHostWindow: NSWindow {
             shownBrowser = id
             let host = NSHostingView(rootView: BrowserPaneView(model: browserModel(for: id)))
             host.translatesAutoresizingMaskIntoConstraints = false
+            // The width constraint is the ONLY size authority — otherwise the
+            // SwiftUI content adds a required min-width that beats the width-0
+            // "closed" constant, so the globe's second click only shrinks the
+            // pane to that minimum instead of collapsing it.
+            host.sizingOptions = []
             for sub in browserPaneHost.subviews { sub.removeFromSuperview() }
             browserPaneHost.addSubview(host)
             NSLayoutConstraint.activate([
