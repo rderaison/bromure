@@ -15,6 +15,10 @@ final class TerminalSurfaceView: NSView {
     /// Profile (VM) this surface serves — image pastes upload into this
     /// guest. nil disables image paste (surface without VM context).
     let profileID: Profile.ID?
+    /// Remote host id when this surface mirrors a workspace on another Mac
+    /// (fat client). nil = a local VM. Image pastes route their guest file
+    /// ops through this host's tunnel controller instead of the local bridge.
+    let remoteHost: UUID?
     /// Guest title (from OSC / tmux), updated via the runtime's action fan-out.
     private(set) var title: String = ""
 
@@ -37,10 +41,11 @@ final class TerminalSurfaceView: NSView {
     private var preeditText: String?
 
     init?(command: String, workingDirectory: String? = nil, windowIndex: Int,
-          profileID: Profile.ID? = nil) {
+          profileID: Profile.ID? = nil, remoteHost: UUID? = nil) {
         guard let app = GhosttyRuntime.shared.app else { return nil }
         self.windowIndex = windowIndex
         self.profileID = profileID
+        self.remoteHost = remoteHost
         super.init(frame: .zero)
 
         var cfg = ghostty_surface_config_new()

@@ -421,6 +421,15 @@ struct VMAttachWindow: ParsableCommand {
     var remote: String?
 
     func run() throws {
+        // Wipe the host login banner ("Last login: … on ttysNNN") that ghostty's
+        // login shell prints before it execs us. While the VM is still booting
+        // this banner is the only thing on screen, which reads as "the VM has
+        // already booted." Clear the screen + scrollback up front; the guest
+        // tmux repaints the real terminal once we attach. Only when stdout is a
+        // tty (the surface's pty), never when piped.
+        if isatty(STDOUT_FILENO) != 0 {
+            FileHandle.standardOutput.write(Data("\u{1b}[H\u{1b}[2J\u{1b}[3J".utf8))
+        }
         // Fat-client mode: attach to a workspace on a REMOTE bromure-ac over the
         // SSH tunnel. The client speaks the identical control-plane API, so the
         // pump below is unchanged — only the transport differs. We must NOT

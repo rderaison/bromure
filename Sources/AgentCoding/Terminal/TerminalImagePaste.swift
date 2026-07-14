@@ -189,13 +189,32 @@ enum TerminalImagePaste {
                 NSSound.beep()
                 return
             }
+            // Route the guest file ops to the guest that actually backs this
+            // surface: a local VM via the app delegate's vsock bridge, or a
+            // remote workspace via its tunnel controller (fat client). Without
+            // this, a ⌘V in a mirrored terminal tried the local bridge, which
+            // has no such VM — so remote image paste silently failed.
+            let fileOp: GuestFileOp
+            let cleanup: @MainActor (String) async -> Void
+            if let remoteHost = view.remoteHost,
+               let controller = delegate.remoteController(forHost: remoteHost) {
+                fileOp = { try await controller.guestFileOp(profileID, op: $0) }
+                cleanup = { cmd in
+                    _ = try? await controller.guestExec(profileID, command: cmd, timeout: 10)
+                }
+            } else {
+                fileOp = { try await delegate.guestFileOp(profileID: profileID, op: $0) }
+                cleanup = { cmd in
+                    _ = try? await delegate.guestExec(profileID: profileID, command: cmd, timeout: 10)
+                }
+            }
             // Host-side thumbnail chip at the caret — the human sees what
             // was pasted; the pty still only ever gets the path text.
             let overlay = PasteThumbnailOverlay.present(over: view, sources: sources)
             do {
                 let paths = try await upload(
                     sources,
-                    via: { try await delegate.guestFileOp(profileID: profileID, op: $0) },
+                    via: fileOp,
                     progress: { overlay?.setProgress($0) })
                 overlay?.markDone()
                 // The transfer can outlive the surface (retire/reattach,
@@ -208,12 +227,7 @@ enum TerminalImagePaste {
                 }
                 // Fire-and-forget hygiene: pastes older than a week go
                 // away so the home image doesn't grow without bound.
-                Task {
-                    _ = try? await delegate.guestExec(
-                        profileID: profileID,
-                        command: "find \(pastesDir) -type f -mtime +7 -delete 2>/dev/null; true",
-                        timeout: 10)
-                }
+                Task { await cleanup("find \(pastesDir) -type f -mtime +7 -delete 2>/dev/null; true") }
             } catch {
                 overlay?.markFailed()
                 NSLog("[ghostty] image paste failed: %@", String(describing: error))

@@ -80,7 +80,7 @@ Each workspace is a self-contained directory at `profiles/<uuid>/` under the sup
 | `traces/YYYY-MM-DD/<sessionID>.jsonl` | Per-session trace metadata, one JSON record per line. |
 | `traces/YYYY-MM-DD/<sessionID>/<recordID>.req.enc`, `.res.enc` | Captured request/response bodies, AES-GCM-encrypted (`0600`). |
 
-### Enrollment, remote access, and the fat client
+### Enrollment, remote access, and the rich client
 
 | Path (under the support root) | Holds |
 |---|---|
@@ -92,7 +92,7 @@ Each workspace is a self-contained directory at `profiles/<uuid>/` under the sup
 | `remote/hostkey_ed25519`, `remote/hostkey_ed25519.pub` | Embedded SSH server host key (dir mode `0700`, key `0600`). |
 | `remote/authorized_keys` | Public keys allowed through the SSH front door (`0600`). |
 | `remote/overlay-key` | Optional overlay-keychord override for the SSH remote menu. |
-| `remote-client/id_ed25519`, `.pub` | The fat client's SSH client keypair (comment `bromure-ac-fatclient`). |
+| `remote-client/id_ed25519`, `.pub` | The rich client's SSH client keypair (comment `bromure-ac-fatclient`). |
 | `remote-client/known_hosts` | Trust-on-first-use pins of remote host keys. |
 | `remote-client/hosts.json` | Saved remote servers ("Recent Servers"). |
 | `remote-client/hosts/<host-UUID>/grid-layout.json`, `automations.json` | Per-host mirror persistence so a remote grid never clobbers the local one. |
@@ -140,7 +140,7 @@ Bromure Agentic Coding opens no fixed inbound ports by default. The two optional
 | `28500`–`28599` | MCP OAuth callback listener (`http://127.0.0.1:<port>/callback`). | `127.0.0.1`. |
 | dynamic | Local inference engine, allocated at first spawn to avoid colliding with Ollama/LM Studio on 11434. | `127.0.0.1` (never `0.0.0.0`). |
 | dynamic | Local-inference tool-call repair proxy. | `127.0.0.1`. |
-| ephemeral | Per-remote-host SOCKS5 forwarder used by the fat client's browser pane. | Bound `0.0.0.0` but peer-filtered to loopback plus `192.168.127.x`. |
+| ephemeral | Per-remote-host SOCKS5 forwarder used by the rich client's browser pane. | Bound `0.0.0.0` but peer-filtered to loopback plus `192.168.127.x`. |
 
 Two loopback endpoints exist *inside* the guest, not on the Mac: `127.0.0.1:8080` (the in-VM HTTP(S) proxy every shell exports as `HTTPS_PROXY`) and `127.0.0.1:11434` (where the on-host local inference engine appears, via a vsock bridge).
 
@@ -152,7 +152,7 @@ Installation itself opens no TCP ports; the base-image build's package proxy bin
 |---|---|
 | `192.168.64.0/24` | Default NAT subnet for workspace VMs (gateway `.1`, DHCP pool `.2`–`.254`, 24 h leases). Auto-relocated if the Mac's LAN already uses it. |
 | `192.168.65.0/24`–`192.168.126.0/24` | Range Bromure Web instances relocate into, keeping AC and Web from colliding. |
-| `192.168.127.0/24` | The fat client's pinned local browser-VM subnet (gateway `.127.1`), so the gateway is predictable. |
+| `192.168.127.0/24` | The rich client's pinned local browser-VM subnet (gateway `.127.1`), so the gateway is predictable. |
 | `100.64.<n>.0/24` | CGNAT alias subnets for fleet subnet collisions — implemented and tested but not yet wired into the runtime path (single remote host is the supported configuration). |
 | `10.98.<unit>.0/30` | Point-to-point link networks used by the privileged utun tunnel daemon. |
 
@@ -189,15 +189,15 @@ These influence the app at launch. Most are for debugging, testing, or building 
 | `BROMURE_CLI_DEBUG` | Verbose control-socket connection diagnostics on stderr for CLI commands. | Debugging (CLI) |
 | `BROMURE_REPAIR_DEBUG` | Local-inference repair-proxy request/response diagnostics, appended to `/tmp/bromure-repair.log`. | Debugging (local models) |
 | `BROMURE_INFER_DEBUG` | Per-request engine stats (slot, prefilled tokens, TTFT, tok/s) to stderr. | Debugging (local models) |
-| `BROMURE_FATCLIENT_LOG` | Unbuffered fat-client stderr logging. | Debugging (remote) |
-| `BROMURE_ATTACH_DEBUG=<path>` | Also append the fat-client log to a file. | Debugging (remote) |
+| `BROMURE_FATCLIENT_LOG` | Unbuffered rich-client stderr logging. | Debugging (remote) |
+| `BROMURE_ATTACH_DEBUG=<path>` | Also append the rich-client log to a file. | Debugging (remote) |
 | `BROMURE_INJECTION_COREML=1` | Run the injection classifiers on the CoreML/Neural Engine provider (defaults to CPU; CoreML roughly 5× the resident memory at identical accuracy). | Power user |
 | `BROMURE_NO_COREML` | Force-disable CoreML for the classifiers even if `BROMURE_INJECTION_COREML` is set. | Power user |
 | `BROMURE_GPU_CACHE_GB` | MLX GPU buffer-cache cap in GB (default 4). | Power user (local models) |
 | `BROMURE_KVBITS`, `BROMURE_KVBITS_START`, `BROMURE_CACHE_SLOTS`, `BROMURE_THINKING` | Local-inference tuning: KV-cache quantization bits and threshold, KV-cache session slots (1–8, default 4), and disabling silent thinking. See [Local Models](13-local-models.mdx). | Power user (local models) |
 | `VISUAL` / `EDITOR` | Editor used by `bromure-cli workspaces edit` (falls back to `vi`). | End user (CLI) |
 | `BROMURE_MANAGED_URL` | Override the bromure.io API base used for enrollment, heartbeat, and cert issuance. | Enterprise admin |
-| `BROMURE_FATCLIENT_OPEN` | Pure fat-client launch: skips the first-run setup window (no local base image needed) and suppresses the `bromure-cli` symlink prompt. | Advanced / testing |
+| `BROMURE_FATCLIENT_OPEN` | Pure rich-client launch: skips the first-run setup window (no local base image needed) and suppresses the `bromure-cli` symlink prompt. | Advanced / testing |
 | `BROMURE_IMAGE_CATALOG_BASE` | Point image downloads at a local/staging catalog; **also disables catalog signature verification**. Test and pipeline use only. | Test / CI |
 | `BROMURE_INSTALL_BROWSER_IMAGE=1` | Auto-download AC's copy of the embedded browser image at launch (the normal trigger is the browser pane or **Settings** → **Browser**). | Test / debug |
 | `CODESIGN_IDENTITY` | `build.sh` signing identity; unset falls back to ad-hoc `-` (no Gatekeeper, iCloud, or vmnet). | Developer (build) |

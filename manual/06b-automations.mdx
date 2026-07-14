@@ -153,11 +153,11 @@ It sits next to the workspace store, uses atomic writes and ISO-8601 dates, and 
 Two things can stop an unattended run from completing on its own:
 
 - **Ask-before-use credentials.** If any credential the run would use is set to *Ask before use*, the run pauses in a consent dialog on this Mac until you approve it. The editor surfaces this up front as a **Won't run fully unattended** banner listing the exact credentials, with an **Open Workspace Settings…** shortcut — it is a warning, never a save blocker. See [Credentials](08-credentials.mdx).
-- **Lifecycle decisions.** A run may raise a decision prompt — a storage upgrade, a base-image drift reset, a compromise wipe. On the host these appear as ordinary alerts. When the automation is being driven from a remote [fat client](18-glossary.mdx), the prompt is queued instead and answered over the control API. See [Answering pending prompts](16-automation-cli.mdx#answering-pending-prompts).
+- **Lifecycle decisions.** A run may raise a decision prompt — a storage upgrade, a base-image drift reset, a compromise wipe. On the host these appear as ordinary alerts. When the automation is being driven from a remote [rich client](18-glossary.mdx), the prompt is queued instead and answered over the control API. See [Answering pending prompts](16-automation-cli.mdx#answering-pending-prompts).
 
 ## Driving automations from the CLI and API
 
-The whole automation feature is mirrored on the app's control socket, so a [fat client](14-remote-access.mdx) or any script can read and drive automations without the GUI:
+The whole automation feature is mirrored on the app's control socket, so a [rich client](14-remote-access.mdx) or any script can read and drive automations without the GUI:
 
 | Endpoint | Purpose |
 | --- | --- |

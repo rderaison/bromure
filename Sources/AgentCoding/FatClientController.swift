@@ -438,6 +438,9 @@ final class RemoteHostController {
     var hasSnapshot: Bool { revision > 0 }
 
     func profile(for id: Profile.ID) -> Profile? { profilesByID[id] }
+    /// Mirrored profiles in source-list order (the automation editor's
+    /// workspace picker + default owner rely on a stable order).
+    var profiles: [Profile] { listModel.profileRows.compactMap { profilesByID[$0.id] } }
     func tabsModel(for id: Profile.ID) -> TabsModel? { tabsModels[id] }
     func runState(for id: Profile.ID) -> SessionListModel.RunState {
         listModel.profileRows.first { $0.id == id }?.state ?? .off
@@ -644,6 +647,23 @@ final class RemoteHostController {
         guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
             throw ACAppDelegate.GuestExecError.commandFailed(
                 exitCode: 1, stderr: (resp.json["error"] as? String) ?? "save failed (HTTP \(resp.status))")
+        }
+        DispatchQueue.main.async { [weak self] in self?.pollOnce() }
+        return resp.json
+    }
+
+    /// Create a brand-new workspace on the remote from an editor document
+    /// (`POST /profiles` → 201). Returns the response body (`id`, `shortId`,
+    /// and `sshPublicKey` when the doc asked for a generated key).
+    @discardableResult
+    func createProfileDoc(_ doc: [String: Any]) async throws -> [String: Any] {
+        let host = self.host
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", "/profiles", body: doc)
+        }.value
+        guard resp.status == 201, (resp.json["ok"] as? Bool) == true else {
+            throw ACAppDelegate.GuestExecError.commandFailed(
+                exitCode: 1, stderr: (resp.json["error"] as? String) ?? "create failed (HTTP \(resp.status))")
         }
         DispatchQueue.main.async { [weak self] in self?.pollOnce() }
         return resp.json
@@ -887,11 +907,36 @@ final class RemoteHostWindow: NSWindow {
     private let fileExplorerModel = FileExplorerModel()
     private var filePaneHost: NSHostingView<FileExplorerPane>!
     private var filePaneWidthConstraint: NSLayoutConstraint!
+    private var filePaneResizeHandle: SidebarResizeHandle?
     private var filePaneOpen = false
+    /// Preferred (expanded) file-pane width — restored on open, persisted at
+    /// drag-end. Mirrors the local window's resizable file pane.
+    private var expandedFilePaneWidth: CGFloat = 340
+    private static let filePaneMinWidth: CGFloat = 200
+    private static let filePaneMaxWidth: CGFloat = 1000
+    private static let filePaneWidthKey = "ac.remote.filePaneWidth"
     private var fileBrowserWindows: [Profile.ID: NSWindow] = [:]
+
+    // Resizable sidebar (fat-client counterpart of the local window's
+    // drag-to-resize divider). Width is user-adjustable and persisted.
+    private var sidebarWidthConstraint: NSLayoutConstraint!
+    private var sidebarResizeHandle: SidebarResizeHandle?
+    private static let sidebarMinWidth: CGFloat = 160
+    private static let sidebarMaxWidth: CGFloat = 520
+    private static let sidebarDefaultWidth: CGFloat = 240
+    private static let sidebarWidthKey = "ac.remote.sidebarWidth"
     /// Per-workspace settings editors (the pill's gearshape) — same
     /// `ProfileEditorView` as local, saving over the tunnel.
     private var settingsWindows: [Profile.ID: NSWindow] = [:]
+    /// The full profile the settings editor opened with, so a save can diff it
+    /// and prompt to restart when a VM-baked field (network, memory, mounts, …)
+    /// changed — the remote applies those only on a fresh launch.
+    private var settingsOriginals: [Profile.ID: Profile] = [:]
+    /// The "+" new-workspace editor — creates on the remote (`POST /profiles`).
+    private var newWorkspaceWindow: NSWindow?
+    /// The automation editor window — creates/edits on the remote
+    /// (`POST /automations`).
+    private var automationWindow: NSWindow?
     /// Popped-out workspace windows (the pill's pop-out) — an extra live view
     /// of the mirrored terminal; each owns its own attach controller.
     private var popOutWindows: [Profile.ID: NSWindow] = [:]
@@ -1004,6 +1049,33 @@ final class RemoteHostWindow: NSWindow {
         filePaneHost = fpHost
         content.addSubview(fpHost)
         filePaneWidthConstraint = fpHost.widthAnchor.constraint(equalToConstant: 0)
+        // Restore the persisted expanded width (used when the pane opens).
+        let fpStored = UserDefaults.standard.double(forKey: Self.filePaneWidthKey)
+        if fpStored >= Self.filePaneMinWidth { expandedFilePaneWidth = fpStored }
+        // 8pt drag strip over the file pane's leading edge (browser↔file, or
+        // terminal↔file when the browser is closed). Hidden while the pane is
+        // closed. Mirrors the local window's filePaneResizeHandle.
+        let fileHandle = SidebarResizeHandle()
+        fileHandle.translatesAutoresizingMaskIntoConstraints = false
+        fileHandle.isHidden = true
+        content.addSubview(fileHandle)
+        filePaneResizeHandle = fileHandle
+        fileHandle.onResize = { [weak self] x in
+            guard let self, self.filePaneOpen, let content = self.contentView else { return }
+            let width = content.bounds.width - x
+            if width < Self.filePaneMinWidth {
+                self.setFilePaneOpen(false)
+            } else {
+                self.filePaneWidthConstraint.constant = min(Self.filePaneMaxWidth, width)
+            }
+        }
+        fileHandle.onResizeEnd = { [weak self] in
+            guard let self, self.filePaneOpen else { return }
+            let w = self.filePaneWidthConstraint.constant
+            guard w >= Self.filePaneMinWidth else { return }
+            self.expandedFilePaneWidth = w
+            UserDefaults.standard.set(w, forKey: Self.filePaneWidthKey)
+        }
         // Pane order (left→right, matching the local window): terminal | web
         // browser | file explorer. The browser is the middle split; both right
         // panes animate width 0 ↔ N and the terminal stage fills the rest.
@@ -1040,15 +1112,49 @@ final class RemoteHostWindow: NSWindow {
             else { return }
             self.expandedBrowserWidth = self.browserWidthConstraint.constant
         }
+        // 8pt drag strip over the sidebar's trailing edge (sidebar↔terminal
+        // boundary), like the local window's sidebar resizeHandle. No collapse-
+        // to-rail here — just a clamped resize.
+        let sidebarHandle = SidebarResizeHandle()
+        sidebarHandle.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(sidebarHandle)
+        sidebarResizeHandle = sidebarHandle
+        sidebarHandle.onResize = { [weak self] x in
+            guard let self else { return }
+            self.sidebarWidthConstraint.constant =
+                max(Self.sidebarMinWidth, min(Self.sidebarMaxWidth, x))
+        }
+        sidebarHandle.onResizeEnd = { [weak self] in
+            guard let self else { return }
+            UserDefaults.standard.set(
+                self.sidebarWidthConstraint.constant, forKey: Self.sidebarWidthKey)
+        }
         // Connection-status overlay covers the stage until we're connected.
         statusHost = NSHostingView(rootView: RemoteConnectionStatusView(controller: controller))
         statusHost.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(statusHost)
+        // Keep the drag strips topmost so an open pane host never intercepts the
+        // half of a handle that overlaps it (re-adding moves them to the front).
+        for h in [sidebarHandle, fileHandle, browserHandle] { content.addSubview(h) }
+        let storedSidebar = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
+        let sidebarInitial = storedSidebar >= Self.sidebarMinWidth
+            ? min(storedSidebar, Self.sidebarMaxWidth) : Self.sidebarDefaultWidth
+        sidebarWidthConstraint = sidebarHost.widthAnchor.constraint(equalToConstant: sidebarInitial)
         NSLayoutConstraint.activate([
             sidebarHost.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             sidebarHost.topAnchor.constraint(equalTo: content.topAnchor),
             sidebarHost.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            sidebarHost.widthAnchor.constraint(equalToConstant: 240),
+            sidebarWidthConstraint,
+            // Grab strip centered on the sidebar/terminal boundary, full height.
+            sidebarHandle.centerXAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
+            sidebarHandle.topAnchor.constraint(equalTo: content.topAnchor),
+            sidebarHandle.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            sidebarHandle.widthAnchor.constraint(equalToConstant: 8),
+            // Grab strip centered on the file pane's leading edge, full height.
+            fileHandle.centerXAnchor.constraint(equalTo: fpHost.leadingAnchor),
+            fileHandle.topAnchor.constraint(equalTo: content.topAnchor),
+            fileHandle.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            fileHandle.widthAnchor.constraint(equalToConstant: 8),
             stage.leadingAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
             stage.trailingAnchor.constraint(equalTo: browser.leadingAnchor),
             stage.topAnchor.constraint(equalTo: content.topAnchor),
@@ -1130,10 +1236,11 @@ final class RemoteHostWindow: NSWindow {
         guard open != filePaneOpen else { return }
         filePaneOpen = open
         controller.listModel.filePaneOpen = open
+        filePaneResizeHandle?.isHidden = !open
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.18
             ctx.allowsImplicitAnimation = true
-            filePaneWidthConstraint.animator().constant = open ? 340 : 0
+            filePaneWidthConstraint.animator().constant = open ? expandedFilePaneWidth : 0
             contentView?.layoutSubtreeIfNeeded()
         }
     }
@@ -1232,6 +1339,7 @@ final class RemoteHostWindow: NSWindow {
                 return
             }
             if let win = self.settingsWindows[id] { win.makeKeyAndOrderFront(nil); return }
+            self.settingsOriginals[id] = profile   // baseline for the restart diff
             let win = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
                 styleMask: [.titled, .closable],
@@ -1258,6 +1366,7 @@ final class RemoteHostWindow: NSWindow {
     private func saveWorkspaceSettings(_ id: Profile.ID, _ edited: Profile, generateSSH: Bool) {
         guard var doc = ACAppDelegate.codableToDict(edited) else { return }
         if generateSSH { doc["generateSSH"] = true }
+        let original = settingsOriginals[id]
         let c = controller
         Task { @MainActor [weak self] in
             do {
@@ -1270,6 +1379,16 @@ final class RemoteHostWindow: NSWindow {
                         "Add this public key to your Git host:\n\n%@", comment: ""), pub)
                     a.runModal()
                 }
+                // Some settings are baked into the VM at boot — a running
+                // workspace won't reflect them until it restarts. Offer that
+                // now, mirroring the local editor's restart prompt. Only when
+                // the workspace is actually up (off/suspended pick it up on
+                // next cold boot).
+                if let self, let original,
+                   Self.restartRequiringChanges(from: original, to: edited),
+                   c.runState(for: id) == .running || c.runState(for: id) == .booting {
+                    self.promptRestartToApply(id)
+                }
             } catch {
                 Self.presentRemoteError(
                     NSLocalizedString("Couldn't save the workspace", comment: ""), error)
@@ -1277,9 +1396,179 @@ final class RemoteHostWindow: NSWindow {
         }
     }
 
+    /// True when a save changed a field that's baked into the VM at boot (so
+    /// only a fresh launch applies it). Mirrors the local window's
+    /// `restartRequiringChanges` — the live-refreshable fields (env, guardrails,
+    /// credentials, trace level, terminal appearance) are intentionally omitted.
+    private static func restartRequiringChanges(from old: Profile, to new: Profile) -> Bool {
+        old.memoryGB != new.memoryGB
+            || old.networkMode != new.networkMode
+            || old.bridgedInterfaceID != new.bridgedInterfaceID
+            || old.folderPaths != new.folderPaths
+            || old.tool != new.tool
+            || old.authMode != new.authMode
+            || old.additionalTools != new.additionalTools
+            || old.sshPublicKey != new.sshPublicKey
+            || old.importedSSHKeys != new.importedSSHKeys
+            || old.kubeconfigs != new.kubeconfigs
+            || old.awsCredentials != new.awsCredentials
+    }
+
+    private func promptRestartToApply(_ id: Profile.ID) {
+        let name = controller.profile(for: id)?.name ?? "this workspace"
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Restart “%@” to apply these changes?", comment: ""), name)
+        alert.informativeText = NSLocalizedString(
+            "Some settings you changed (like networking, memory, or shared folders) are baked into the VM at boot, so the running workspace won't pick them up until it restarts.",
+            comment: "")
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: NSLocalizedString("Restart Now", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
+        if alert.runModal() == .alertFirstButtonReturn {
+            controller.restartWorkspace(id)   // graceful shutdown + fresh launch
+        }
+    }
+
     private func closeSettingsWindow(_ id: Profile.ID) {
         settingsWindows[id]?.close()
         settingsWindows[id] = nil
+        settingsOriginals[id] = nil
+    }
+
+    // MARK: New workspace (the "+" button) — created on the remote
+
+    /// Open the same `ProfileEditorView` the local window uses for a new
+    /// profile, backed by a blank draft. On save the document is POSTed to the
+    /// remote (`POST /profiles`), so the workspace is actually created on the
+    /// server. Host-side-only affordances stay hidden (their callbacks are nil),
+    /// exactly like `openWorkspaceSettings`.
+    private func createWorkspace() {
+        if let win = newWorkspaceWindow { win.makeKeyAndOrderFront(nil); return }
+        // A numbered placeholder name so the user can save immediately.
+        let taken = Set(controller.profiles.map { $0.name })
+        var n = controller.profiles.count + 1
+        var name = "Workspace \(n)"
+        while taken.contains(name) { n += 1; name = "Workspace \(n)" }
+        let draft = Profile(name: name, tool: .claude, authMode: .subscription)
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false)
+        win.title = String(
+            format: NSLocalizedString("New workspace — %@", comment: "remote new workspace title"),
+            controller.host.name)
+        win.center()
+        win.isReleasedWhenClosed = false
+        win.contentView = NSHostingView(rootView: ProfileEditorView(
+            profile: draft,
+            isNew: true,
+            terminalDefaults: TerminalAppDefaults.load(),
+            storageContext: nil,
+            onSave: { [weak self] edited, generateSSH in
+                self?.createWorkspaceFromEditor(edited, generateSSH: generateSSH)
+            },
+            onCancel: { [weak self] in self?.closeNewWorkspaceWindow() }))
+        win.makeKeyAndOrderFront(nil)
+        newWorkspaceWindow = win
+    }
+
+    private func createWorkspaceFromEditor(_ edited: Profile, generateSSH: Bool) {
+        guard var doc = ACAppDelegate.codableToDict(edited) else { return }
+        if generateSSH { doc["generateSSH"] = true }
+        let c = controller
+        Task { @MainActor [weak self] in
+            do {
+                let resp = try await c.createProfileDoc(doc)
+                self?.closeNewWorkspaceWindow()
+                if generateSSH, let pub = resp["sshPublicKey"] as? String, !pub.isEmpty {
+                    let a = NSAlert()
+                    a.messageText = NSLocalizedString("New SSH key generated", comment: "")
+                    a.informativeText = String(format: NSLocalizedString(
+                        "Add this public key to your Git host:\n\n%@", comment: ""), pub)
+                    a.runModal()
+                }
+            } catch {
+                Self.presentRemoteError(
+                    NSLocalizedString("Couldn't create the workspace", comment: ""), error)
+            }
+        }
+    }
+
+    private func closeNewWorkspaceWindow() {
+        newWorkspaceWindow?.close()
+        newWorkspaceWindow = nil
+    }
+
+    // MARK: Automation editor — created/edited on the remote
+
+    /// The same `AutomationEditorView` the local window shows, in a window (the
+    /// fat client keeps editors in windows, like workspace settings). Saves ride
+    /// the tunnel: `onSave`/`onRunNow` upsert via `POST /automations`, delete via
+    /// `DELETE /automations/{id}`. `nil` id opens a fresh draft (the "+" button).
+    private func showAutomationEditor(_ id: UUID?) {
+        controller.listModel.automationSelectedID = id
+        if let win = automationWindow {
+            // Rebuild for the newly-requested automation.
+            win.contentView = NSHostingView(rootView: makeAutomationEditor(id))
+            win.makeKeyAndOrderFront(nil)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 680),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered, defer: false)
+        win.title = id == nil
+            ? NSLocalizedString("New automation", comment: "remote automation title")
+            : NSLocalizedString("Edit automation", comment: "remote automation title")
+        win.center()
+        win.isReleasedWhenClosed = false
+        win.contentView = NSHostingView(rootView: makeAutomationEditor(id))
+        win.makeKeyAndOrderFront(nil)
+        automationWindow = win
+    }
+
+    private func makeAutomationEditor(_ id: UUID?) -> AutomationEditorView {
+        AutomationEditorView(
+            store: controller.automationStore,
+            profiles: controller.profiles,
+            editing: id,
+            onSave: { [weak self] auto in
+                self?.controller.upsertAutomation(auto)
+                self?.closeAutomationWindow()
+            },
+            onRunNow: { [weak self] auto in
+                self?.controller.upsertAutomation(auto)
+                self?.controller.runAutomation(auto.id)
+                self?.closeAutomationWindow()
+            },
+            onDelete: { [weak self] aid in
+                self?.confirmDeleteAutomation(aid)
+            },
+            onEditWorkspace: { [weak self] pid in
+                self?.openWorkspaceSettings(pid)
+            })
+    }
+
+    private func confirmDeleteAutomation(_ id: UUID) {
+        let name = controller.automationStore.automation(id)?.name ?? "this automation"
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Delete “%@”?", comment: "delete automation"), name)
+        alert.informativeText = NSLocalizedString(
+            "This removes the automation on the remote. It can't be undone.", comment: "")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        controller.deleteAutomation(id)
+        closeAutomationWindow()
+    }
+
+    private func closeAutomationWindow() {
+        automationWindow?.close()
+        automationWindow = nil
+        controller.listModel.automationSelectedID = nil
     }
 
     private static func presentRemoteError(_ title: String, _ error: Error) {
@@ -1376,7 +1665,11 @@ final class RemoteHostWindow: NSWindow {
     /// specific workspace. Needs the tunnel up (subnet + SOCKS), so it no-ops
     /// until the first `/state` arrives.
     func toggleBrowser(for id: Profile.ID?) {
-        guard let id = id ?? shownWorkspace else { return }
+        // Fall back to the selected workspace, not just the mounted terminal:
+        // a name-row click shows the dashboard (no terminal mounted, so
+        // `shownWorkspace` is nil), but the globe must still target that
+        // workspace's browser.
+        guard let id = id ?? shownWorkspace ?? controller.listModel.selectedID else { return }
         if browserOpen.contains(id) { setBrowserOpen(id, false) }
         else { setBrowserOpen(id, true) }
     }
@@ -1404,13 +1697,7 @@ final class RemoteHostWindow: NSWindow {
             setBrowserWidth(clampBrowserWidth(initial))
             ctl.setVisible(true)
             // Relay the remote agent's browser MCP to this local browser.
-            if browserRelays[id] == nil {
-                let relay = BrowserMCPRelayClient(
-                    host: controller.host, vm: id.uuidString,
-                    browser: { [weak self] in self?.browserControllers[id] })
-                browserRelays[id] = relay
-                relay.start()
-            }
+            ensureBrowserRelay(id)
             // First browser opened this session: offer the VPN to the remote
             // host so its VMs are reachable system-wide, not just from the pane.
             offerBrowserVPNIfNeeded()
@@ -1419,6 +1706,43 @@ final class RemoteHostWindow: NSWindow {
             if shownBrowser == id { shownBrowser = nil }
             setBrowserWidth(0)
             browserControllers[id]?.setVisible(false, teardownWhenHidden: false)
+        }
+    }
+
+    /// Start the browser-MCP relay for a workspace so the remote agent's
+    /// `browser_*` tools (Claude opening a page) are redirected to THIS rich
+    /// client's pane instead of opening on the remote's own app. Dialing the
+    /// `browser-mcp <vm>` channel is what takes the guest's browser stream over
+    /// from the remote, so it must be up BEFORE the agent uses the browser —
+    /// not only after the user clicks the globe. Idempotent; guarded on a live
+    /// VM so we don't spin re-dialing an off workspace.
+    private func ensureBrowserRelay(_ id: Profile.ID) {
+        guard browserRelays[id] == nil else { return }
+        let state = controller.runState(for: id)
+        guard state == .running || state == .booting else { return }
+        let relay = BrowserMCPRelayClient(
+            host: controller.host, vm: id.uuidString,
+            browser: { [weak self] in
+                // A browser request arrived from the remote agent — surface the
+                // local pane so the user sees what Claude opened, then hand back
+                // the controller that drives it.
+                self?.showBrowserForAgent(id)
+                return self?.browserControllers[id]
+            })
+        browserRelays[id] = relay
+        relay.start()
+    }
+
+    /// An agent-initiated browser request came in over the relay. Open this
+    /// workspace's browser in the pane when the user is looking at it; otherwise
+    /// create + remember it so switching to that workspace reveals it, without
+    /// hijacking the current view.
+    private func showBrowserForAgent(_ id: Profile.ID) {
+        if controller.listModel.selectedID == id {
+            setBrowserOpen(id, true)   // idempotent — no-ops if already shown
+        } else {
+            browserOpen.insert(id)
+            _ = browserController(for: id)
         }
     }
 
@@ -1479,7 +1803,7 @@ final class RemoteHostWindow: NSWindow {
                 return true
             },
             onAddAllToGrid: { _ in },
-            onSelect: { [weak self] id in self?.showWorkspace(id) },
+            onSelect: { [weak self] id in self?.selectWorkspaceName(id) },
             onSelectTab: { [weak self] id, idx in
                 self?.controller.selectTab(id, index: idx); self?.showWorkspace(id, window: idx)
             },
@@ -1494,14 +1818,14 @@ final class RemoteHostWindow: NSWindow {
             onShutdown: { [weak self] id in self?.controller.shutdownWorkspace(id) },
             onSuspend: { [weak self] id in self?.controller.suspendWorkspace(id) },
             onRestart: { [weak self] id in self?.controller.restartWorkspace(id) },
-            onEdit: { _ in },
+            onEdit: { [weak self] id in self?.openWorkspaceSettings(id) },
             onDuplicate: { _ in },
             onReset: { _ in },
             onDelete: { _ in },
-            onNewProfile: { },
+            onNewProfile: { [weak self] in self?.createWorkspace() },
             automationStore: c.automationStore,
-            onSelectAutomation: { _ in },
-            onNewAutomation: { },
+            onSelectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
+            onNewAutomation: { [weak self] in self?.showAutomationEditor(nil) },
             onRunAutomation: { [weak self] id in self?.controller.runAutomation(id) },
             onToggleAutomation: { [weak self] id in self?.controller.toggleAutomation(id) },
             onDeleteAutomation: { [weak self] id in self?.controller.deleteAutomation(id) })
@@ -1533,6 +1857,19 @@ final class RemoteHostWindow: NSWindow {
         mount(gridView!)
     }
 
+    /// Name-row click: show the workspace's dashboard (mirrors the local
+    /// window's `selectWorkspaceName`), even when the VM is running. Individual
+    /// tabs still open their terminal via `onSelectTab` → `showWorkspace(_:window:)`.
+    private func selectWorkspaceName(_ id: Profile.ID) {
+        controller.listModel.gridSelected = false
+        controller.listModel.selectedID = id
+        gridView?.removeFromSuperview()
+        clearDockerDashboard()
+        unmountTerminal()
+        showVMDashboard(id)
+        followBrowserPane(for: id)
+    }
+
     private func showWorkspace(_ id: Profile.ID, window: Int? = nil) {
         controller.listModel.gridSelected = false
         controller.listModel.selectedID = id
@@ -1552,8 +1889,17 @@ final class RemoteHostWindow: NSWindow {
             unmountTerminal()
             showVMDashboard(id)
         }
-        // The pane shows one workspace's browser at a time: show this one's if
-        // it's open, else collapse (keeping the other's VM resumable).
+        followBrowserPane(for: id)
+    }
+
+    /// The browser pane shows one workspace's browser at a time: show the
+    /// selected one's if it's open, else collapse (keeping the other's VM
+    /// resumable). Shared by name-row and tab/terminal selection.
+    private func followBrowserPane(for id: Profile.ID) {
+        // Start the browser-MCP relay for the selected workspace so a browser
+        // Claude opens lands in this pane, even if the user never clicked the
+        // globe first (otherwise the remote services it on its own app).
+        ensureBrowserRelay(id)
         if browserOpen.contains(id) {
             setBrowserOpen(id, true)
         } else if let prev = shownBrowser, prev != id {

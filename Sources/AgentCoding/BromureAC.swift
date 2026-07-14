@@ -755,6 +755,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Fat-client: open remote-host mirror windows, keyed by host id.
     private var remoteHostWindows: [UUID: RemoteHostWindow] = [:]
+    /// The tunnel controller for an open remote-host mirror, if any. Lets
+    /// host-side surfaces (e.g. terminal image paste) route guest file ops
+    /// to the right remote workspace over its tunnel.
+    @MainActor func remoteController(forHost id: UUID) -> RemoteHostController? {
+        remoteHostWindows[id]?.controller
+    }
     /// The "Connect to Remote Bromure" window (auth flow), if open.
     var remoteConnectWindow: NSWindow?
 
@@ -5136,11 +5142,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         // Push host-side cosmetic + live-swap updates into a running session,
         // matching the GUI (minus the restart prompt, which needs a window).
-        if editing != nil, let win = pane(for: toSave.id) {
-            let runningProfile = win.profile
-            win.applyLiveProfileUpdates(toSave)
-            applyLiveSessionRefresh(from: runningProfile, to: toSave,
-                                    terminalDefaults: terminalDefaults, window: win)
+        if editing != nil {
+            // Keep the running session's captured profile current too. A reboot
+            // relaunches from `runningSessions[id].profile` (see
+            // automationRebootVM), and VM-baked fields (network mode, memory,
+            // mounts) are only picked up on a fresh launch. Without this a
+            // settings change made just before a reboot silently reverted on
+            // relaunch — the pane's copy below only drives live/cosmetic refresh.
+            runningSessions[toSave.id]?.profile = toSave
+            if let win = pane(for: toSave.id) {
+                let runningProfile = win.profile
+                win.applyLiveProfileUpdates(toSave)
+                applyLiveSessionRefresh(from: runningProfile, to: toSave,
+                                        terminalDefaults: terminalDefaults, window: win)
+            }
         }
 
         var result = automationProfileDescribe(toSave.id.uuidString) ?? ["id": toSave.id.uuidString]
@@ -5763,10 +5778,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // image before the session starts, with progress on the boot
         // overlay.
         var migrateHomeThisBoot = false
-        // Headless (CLI/remote) launches never modal-prompt; the workspace
-        // keeps its current storage and the offer waits for a GUI launch.
-        if profile.homeModel == .virtiofs && !headless {
-            if promptHomeStorageUpgrade(profile: profile, remoteInitiated: remoteInitiated) {
+        // Headless (CLI) AND remote-initiated (fat client) launches never prompt
+        // for this OPTIONAL storage upgrade: the workspace keeps its current
+        // storage and the offer waits for a local GUI launch. A fat-client
+        // reboot in particular must not block here — the migrate offer would
+        // stall the reboot's control response waiting for an answer that has to
+        // arrive over the same control channel, which the user sees as the whole
+        // connection hanging on every reboot of a legacy-home workspace. (The
+        // safety-critical drift-reset / compromise-wipe prompts above still route
+        // to the fat client, since they gate whether the VM should boot at all.)
+        if profile.homeModel == .virtiofs && !headless && !remoteInitiated {
+            if promptHomeStorageUpgrade(profile: profile) {
                 migrateHomeThisBoot = true
                 // The dual-attach migrate config can't restore a snapshot
                 // saved against the old config — boot fresh (the dialog

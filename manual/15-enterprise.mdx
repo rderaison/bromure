@@ -15,9 +15,9 @@ This chapter covers enrolling a Mac, the mTLS identity that authenticates its up
 The word "fleet" spans two features that are worth keeping distinct, because they share no trust root:
 
 - **bromure.io enrollment** (this chapter) registers a Mac with your workspace and streams session metadata to the cloud, authenticated by a mutual-TLS certificate issued by your organization's CA.
-- **The fat client** ([Remote Access](14-remote-access.mdx)) lets one Mac mirror *other* Macs' running instances over SSH, authenticated by SSH host keys and enrolled public keys.
+- **The rich client** ([Remote Access](14-remote-access.mdx)) lets one Mac mirror *other* Macs' running instances over SSH, authenticated by SSH host keys and enrolled public keys.
 
-Neither depends on the other. You can enroll without ever using the fat client, mirror hosts without enrolling any of them, or do both. Enrollment's mTLS stack is fleet telemetry only; fat-client mirroring trusts SSH — the two are deliberately not merged in this version.
+Neither depends on the other. You can enroll without ever using the rich client, mirror hosts without enrolling any of them, or do both. Enrollment's mTLS stack is fleet telemetry only; rich-client mirroring trusts SSH — the two are deliberately not merged in this version.
 
 ## Enrolling with Bromure Enterprise Manager
 
@@ -146,7 +146,7 @@ Two of the streamed event types are what make enterprise-tier reporting useful a
 
 On the bromure.io side, each enrolled Mac appears as a row on the workspace's `/agentic-coding/installs` page, identified by its install ID and showing the device name you set, the user, and a last-seen timestamp kept fresh by the 10-minute heartbeat. From there an administrator reviews the streamed session metadata, the supply-chain inventory, token-usage rollups, and prompt-injection detections for the whole fleet.
 
-This is distinct from the fat client's notion of a "fleet" — mirroring several *remote hosts* at once over SSH — which is covered in [Remote Access](14-remote-access.mdx#multiple-remotes-fleet-subnet-routing). The two never share a trust root.
+This is distinct from the rich client's notion of a "fleet" — mirroring several *remote hosts* at once over SSH — which is covered in [Remote Access](14-remote-access.mdx#multiple-remotes-fleet-subnet-routing). The two never share a trust root.
 
 ## Remote consent handling
 

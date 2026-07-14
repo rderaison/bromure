@@ -282,9 +282,9 @@ Storage lives under `~/Library/Application Support/BromureAC/` (see the [Appendi
 - **Delete a whole workspace** you no longer need with `bromure-cli workspaces rm <workspace>` (removes disk and home after confirmation).
 - **Reclaim the base image** with `bromure-cli reset` if you want to start fresh (workspaces are untouched, so re-`init` afterward).
 
-## Remote access and the fat client
+## Remote access and the rich client
 
-The optional SSH remote-access front door and the fat-client mirror are covered in [Remote Access](14-remote-access.mdx). The symptoms below are the ones that block a connection.
+The optional SSH remote-access front door and the rich-client mirror are covered in [Remote Access](14-remote-access.mdx). The symptoms below are the ones that block a connection.
 
 ### Cannot connect over SSH (port 2222)
 
@@ -298,19 +298,19 @@ The optional SSH remote-access front door and the fat-client mirror are covered 
 
 ### Host-key or fingerprint (TOFU) mismatch
 
-**Cause.** The fat client pins each remote's host key on first connect (trust-on-first-use), stored in `~/Library/Application Support/BromureAC/remote-client/known_hosts`. Pinning is per endpoint (`address:port`), so editing a saved host's address or port invalidates the carried pin and correctly re-triggers the trust prompt. A mismatch on an unchanged endpoint means the remote's key changed — or something is intercepting the connection.
+**Cause.** The rich client pins each remote's host key on first connect (trust-on-first-use), stored in `~/Library/Application Support/BromureAC/remote-client/known_hosts`. Pinning is per endpoint (`address:port`), so editing a saved host's address or port invalidates the carried pin and correctly re-triggers the trust prompt. A mismatch on an unchanged endpoint means the remote's key changed — or something is intercepting the connection.
 
 **Fix.** If you legitimately rebuilt the remote, remove its pin and reconnect to re-trust. If you did not expect the key to change, stop and investigate before accepting it.
 
 ### The remote grid or browser pane won't mirror
 
-**Cause.** A *headless* remote — the app is running but has no unified window open — cannot accept or serve grid-layout edits, though everything else mirrors. Some prompt-driven worktree operations (new worktree, merge, resolve) are also not available from the fat client in v1, and multi-host subnet aliasing is a documented design limitation, not a shipped behavior: a single remote host is the supported configuration.
+**Cause.** A *headless* remote — the app is running but has no unified window open — cannot accept or serve grid-layout edits, though everything else mirrors. Some prompt-driven worktree operations (new worktree, merge, resolve) are also not available from the rich client in v1, and multi-host subnet aliasing is a documented design limitation, not a shipped behavior: a single remote host is the supported configuration.
 
-**Fix.** Open a session window on the remote so it has a unified window to mirror. For worktree create/merge/resolve on a remote, use the SSH/TUI remote menu instead of the fat-client toolbar.
+**Fix.** Open a session window on the remote so it has a unified window to mirror. For worktree create/merge/resolve on a remote, use the SSH/TUI remote menu instead of the rich-client toolbar.
 
 ### The system-wide tunnel needs approval
 
-**Cause.** The fat client's optional system-wide tunnel uses a privileged launchd daemon registered through SMAppService. Its first registration surfaces a background-item approval toggle.
+**Cause.** The rich client's optional system-wide tunnel uses a privileged launchd daemon registered through SMAppService. Its first registration surfaces a background-item approval toggle.
 
 **Fix.** Approve **Bromure Agentic Coding** under **System Settings** → **General** → **Login Items & Extensions** (the app can open that pane for you). Over the tunnel, an ICMP ping to a remote guest is answered locally and confirms routing, not guest liveness.
 

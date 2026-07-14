@@ -56,7 +56,7 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Checkpoint** — A per-boot copy-on-write snapshot of a workspace's system disk or ext4 home, kept on a tiered retention ladder (roughly 3 boots / 7 days / 4 weeks) and restorable while the VM is stopped. See [Workspaces](05-workspaces.mdx).
 
-**Client key** — The fat client's own ed25519 keypair (comment `bromure-ac-fatclient`); its public half must be enrolled on the remote, done automatically by one-time password pairing or manually with `bromure-cli remote key add`. See [Remote Access](14-remote-access.mdx).
+**Client key** — The rich client's own ed25519 keypair (comment `bromure-ac-fatclient`); its public half must be enrolled on the remote, done automatically by one-time password pairing or manually with `bromure-cli remote key add`. See [Remote Access](14-remote-access.mdx).
 
 **Close action** — The per-workspace choice of what closing the session window does: **Run in the background**, **Suspend**, **Shut down**, or **Ask** each time. See [Sessions](06-sessions.mdx).
 
@@ -70,7 +70,7 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Consent broker** — The host component that displays approval dialogs for gated credentials, guardrail prompts, and supply-chain holds, and tracks the time-bounded grants they produce. Grants are in memory only and are wiped at session teardown. See [Credentials](08-credentials.mdx).
 
-**Control socket** — The owner-only HTTP-over-Unix-socket control plane (`~/Library/Application Support/BromureAC/control.sock`) that the CLI and GUI use to talk to the running app; the fat client tunnels this exact API over SSH. See [Remote Access](14-remote-access.mdx).
+**Control socket** — The owner-only HTTP-over-Unix-socket control plane (`~/Library/Application Support/BromureAC/control.sock`) that the CLI and GUI use to talk to the running app; the rich client tunnels this exact API over SSH. See [Remote Access](14-remote-access.mdx).
 
 **Controller overlay** — The host-drawn menu opened by the overlay keychord (default `Ctrl-]`) while attached to a workspace's tmux: tab switching, worktrees, Fusion, routing, settings, reboot, suspend, and disconnect. The trigger key never reaches the guest. See [Remote Access](14-remote-access.mdx).
 
@@ -91,8 +91,6 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 ## F
 
 **Fake token** — A structure-preserving stand-in (for example `brm_…`, `sk-ant-api03-brm-…`, `xai-brm-…`) written into the VM in place of a real credential. It is deterministically derived from the real value and a per-install salt, so it does not rotate between sessions, and it is useless anywhere except through the proxy. Also called a placeholder or decoy credential. See [Credentials](08-credentials.mdx).
-
-**Fat client** — A local `bromure-cli` acting as a live one-to-one mirror of a remote `bromure-cli` over SSH — grid, workspaces, tabs, worktrees, automations, and terminals, with bidirectional edits. The remote is always authoritative. See [Remote Access](14-remote-access.mdx).
 
 **File-explorer pane** — The read-only repository tree with diff and preview, fed by git commands run inside the guest. See [Sessions](06-sessions.mdx).
 
@@ -224,13 +222,15 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Remote consent** — MITM consent prompts (credential use, supply chain, guardrails, prompt injection) rendered as numbered menus on the attached user's terminal during a remote session; they are host-side and guest-unforgeable, and any timeout or dismissal means deny. See [Remote Access](14-remote-access.mdx).
 
-**Remote host** — A configured remote `bromure-cli` instance (name, address, SSH port, user, pinned host key) in the fat client's Recent Servers list; each opens its own mirror window. See [Remote Access](14-remote-access.mdx).
+**Remote host** — A configured remote `bromure-cli` instance (name, address, SSH port, user, pinned host key) in the rich client's Recent Servers list; each opens its own mirror window. See [Remote Access](14-remote-access.mdx).
 
 **Remote menu** — The curses-style TUI (`bromure-cli __remote-menu`) every human SSH login is forced into. It mirrors the CLI and GUI operations — workspace lifecycle, all settings panes, worktrees, models, traces, and tmux attach — and a raw shell is never reachable. See [Remote Access](14-remote-access.mdx).
 
 **Require approval to use** — A per-credential checkbox (off by default) that makes the host pop a consent dialog before the credential is first used in a session, offering time-bounded grants (5 minutes, 1 hour, or the rest of the session). See [Credentials](08-credentials.mdx).
 
 **Reset disk** — Reverting a workspace's system disk to a fresh clone of the base image; the persistent home survives. See [Workspaces](05-workspaces.mdx).
+
+**Rich client** — A local `bromure-cli` acting as a live one-to-one mirror of a remote `bromure-cli` over SSH — grid, workspaces, tabs, worktrees, automations, and terminals, with bidirectional edits. The remote is always authoritative. See [Remote Access](14-remote-access.mdx).
 
 **Roster** — The guest-published list of tmux windows (`tabs.txt`), refreshed roughly every 0.7 seconds, that drives the tab bar, active-tab tracking, worktree metadata, and boot detection. See [Sessions](06-sessions.mdx).
 
@@ -256,7 +256,7 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Sparkle** — The auto-update framework embedded in the app; it checks bromure.io daily and powers **Check for Updates…**. The same signing key also signs the image catalogs. See [Installation](02-installation.mdx).
 
-**SSH front door** — The app's optional embedded SSH server (not macOS's `sshd`). It is off by default; when on, it is the single transport for human remote logins, the fat client, and network forwarding. See [Remote Access](14-remote-access.mdx).
+**SSH front door** — The app's optional embedded SSH server (not macOS's `sshd`). It is off by default; when on, it is the single transport for human remote logins, the rich client, and network forwarding. See [Remote Access](14-remote-access.mdx).
 
 **ssh-agent bridge** — The in-process ssh-agent served to the VM over vsock. The guest can request identities and signatures but can never read the private key bytes. See [Credentials](08-credentials.mdx).
 
@@ -280,7 +280,7 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Token swap** — The proxy operation that replaces a fake token in an outbound request's header (and, for opted-in entries, body) with the real value, scoped to the credential's destination host. See [Credentials](08-credentials.mdx).
 
-**TOFU (trust on first use)** — The fat client's host-key trust model: the remote's SSH host-key fingerprint is shown once for manual confirmation, then pinned per endpoint. A later mismatch triggers a prominent "host key has CHANGED" warning. See [Remote Access](14-remote-access.mdx).
+**TOFU (trust on first use)** — The rich client's host-key trust model: the remote's SSH host-key fingerprint is shown once for manual confirmation, then pinned per endpoint. A later mismatch triggers a prominent "host key has CHANGED" warning. See [Remote Access](14-remote-access.mdx).
 
 **Tool-calling verified** — A model-catalog badge meaning the exact quantized build was smoke-tested for agent-grade tool calling; values are verified, untested, or broken. See [Local Models](13-local-models.mdx).
 

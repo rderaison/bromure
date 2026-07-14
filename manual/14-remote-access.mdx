@@ -1,14 +1,14 @@
 ---
-title: "Remote Access & the Fat Client"
+title: "Remote Access & the Rich Client"
 description: "Reach a running Bromure Agentic Coding over SSH — from a terminal menu, the CLI, or another Mac that mirrors it 1:1 — and expose VM services safely."
 order: 14
 ---
 
-# Remote Access & the Fat Client
+# Remote Access & the Rich Client
 
 A workspace VM lives on one Mac, but the person who wants to drive it is not always sitting at that Mac. Bromure Agentic Coding can be reached remotely, and every remote path rides a single, optional, disabled-by-default SSH front door. Turn it on and you get three ways in: a person can `ssh` in from any terminal and land in a menu; you can manage the front door itself from the command line; and another Mac running the app can connect over the same server and mirror the whole instance — its grid, workspaces, terminals, and dashboards — in a live window.
 
-This chapter covers enabling remote access on the host, each of the three entry points, how the fat client mirrors a remote 1:1, reaching services inside remote VMs, exposing a dev server to the internet, and the security model that keeps all of it safe. Fleet-scale enrollment and cloud telemetry are a different system entirely — see [Enterprise](15-enterprise.mdx). The complete command reference lives in [Automation & the CLI](16-automation-cli.mdx).
+This chapter covers enabling remote access on the host, each of the three entry points, how the rich client mirrors a remote 1:1, reaching services inside remote VMs, exposing a dev server to the internet, and the security model that keeps all of it safe. Fleet-scale enrollment and cloud telemetry are a different system entirely — see [Enterprise](15-enterprise.mdx). The complete command reference lives in [Automation & the CLI](16-automation-cli.mdx).
 
 ## The three ways in
 
@@ -18,9 +18,9 @@ Everything below depends on the SSH front door being enabled (it is off by defau
 |---|---|---|
 | **Plain SSH** | A person at any terminal (`ssh -p 2222 you@mac`) | The [remote menu](#signing-in-over-plain-ssh) — a curses-style TUI. A raw shell is never reachable. |
 | **The `bromure-cli remote` CLI** | You, on the host itself | Manage the front door: enable/disable, keys, status. See [Enabling remote access on the host](#enabling-remote-access-on-the-host). |
-| **The fat client** | Another Mac running the app | A live 1:1 [mirror window](#mirroring-a-remote-with-the-fat-client) of the remote instance, with bidirectional edits. |
+| **The rich client** | Another Mac running the app | A live 1:1 [mirror window](#mirroring-a-remote-with-the-rich-client) of the remote instance, with bidirectional edits. |
 
-The server is *embedded* — it is Apple's swift-nio-ssh library built into the app, not macOS's own `sshd`. That distinction matters: because the app runs its own server, it can verify your macOS account password through OpenDirectory without you ever enabling **Remote Login** in System Settings and without administrator rights. It listens only for the exact macOS user who launched `bromure-cli`, and it forces every interactive login into the remote menu. The only machine-facing exceptions are four whitelisted commands the fat client uses (`bromure-fatclient/1 control`, `forward <ip> <port>`, `forward-udp <ip>`, and `browser-mcp <vm>`); anything else a human types behaves like a login and drops into the menu.
+The server is *embedded* — it is Apple's swift-nio-ssh library built into the app, not macOS's own `sshd`. That distinction matters: because the app runs its own server, it can verify your macOS account password through OpenDirectory without you ever enabling **Remote Login** in System Settings and without administrator rights. It listens only for the exact macOS user who launched `bromure-cli`, and it forces every interactive login into the remote menu. The only machine-facing exceptions are four whitelisted commands the rich client uses (`bromure-fatclient/1 control`, `forward <ip> <port>`, `forward-udp <ip>`, and `browser-mcp <vm>`); anything else a human types behaves like a login and drops into the menu.
 
 > **Note:** The Remote Access window describes the server as "an app-owned instance of the system SSH server." It is more precisely an embedded swift-nio-ssh server, deliberately *not* macOS's `sshd` — that is exactly what lets it work without Remote Login or admin rights.
 
@@ -65,7 +65,7 @@ The CLI talks to the running app over its owner-only control socket, so the app 
 
 ### Host keys, fingerprints, and trust
 
-On the first enable, the server generates an ed25519 host key. Its fingerprint — shown in the **Server host key** row and by `bromure-cli remote status`, in the form `256 SHA256:… bromure-ac-remote (ED25519)` — is what a connecting client verifies to be sure it reached the right Mac. Give this fingerprint to whoever connects (or check it yourself in the fat client's first-contact sheet) so a man-in-the-middle cannot impersonate the host. See [trust on first use](18-glossary.mdx) for how the fat client pins it.
+On the first enable, the server generates an ed25519 host key. Its fingerprint — shown in the **Server host key** row and by `bromure-cli remote status`, in the form `256 SHA256:… bromure-ac-remote (ED25519)` — is what a connecting client verifies to be sure it reached the right Mac. Give this fingerprint to whoever connects (or check it yourself in the rich client's first-contact sheet) so a man-in-the-middle cannot impersonate the host. See [trust on first use](18-glossary.mdx) for how the rich client pins it.
 
 ### Rate limiting
 
@@ -90,12 +90,12 @@ Navigate with the arrow keys, Enter to select, and `q` or Esc to go back; **Exit
 
 The overlay chord is configurable on the *host* Mac (the machine being connected to) via the file `~/Library/Application Support/BromureAC/remote/overlay-key` — accepted forms are `C-]`, `^]`, `0x1d`, or `29` — or the `BROMURE_OVERLAY_KEY` environment variable.
 
-## Mirroring a remote with the fat client
+## Mirroring a remote with the rich client
 
-The fat client turns this Mac's copy of Bromure Agentic Coding into a live mirror of a remote one. You get a full window that renders the remote using the exact same sidebar, grid, and terminal views you already know — the same layout shown below for a local instance — but titled **Remote — `<name>`**, and every edit you make runs on the remote and echoes back.
+The rich client turns this Mac's copy of Bromure Agentic Coding into a live mirror of a remote one. You get a full window that renders the remote using the exact same sidebar, grid, and terminal views you already know — the same layout shown below for a local instance — but titled **Remote — `<name>`**, and every edit you make runs on the remote and echoes back.
 
 <p align="center">
-  <img src="images/workspaces.en.jpg" width="700" alt="The Bromure Agentic Coding workspace browser: a WORKSPACES sidebar with Grid and AUTOMATIONS sections, and a detail pane showing CPU, Memory, vCPUs, Disk, and Uptime cards above a CONFIGURATION summary. A fat-client mirror window renders a remote instance using this same layout." />
+  <img src="images/workspaces.en.jpg" width="700" alt="The Bromure Agentic Coding workspace browser: a WORKSPACES sidebar with Grid and AUTOMATIONS sections, and a detail pane showing CPU, Memory, vCPUs, Disk, and Uptime cards above a CONFIGURATION summary. A rich-client mirror window renders a remote instance using this same layout." />
 </p>
 
 ### Connecting
@@ -108,7 +108,7 @@ The fat client turns this Mac's copy of Bromure Agentic Coding into a live mirro
 
 To pre-authorize a Mac without ever typing a password, click **Show this Mac's key** in the connect window, then run `bromure-cli remote key add '<this Mac's key>'` on the remote. After the first successful connect, double-click a saved server for one-click reconnects; each row's context menu offers **Connect**, **Edit…**, and **Remove**.
 
-> **Note:** The fat client generates its own dedicated ed25519 keypair (comment `bromure-ac-fatclient`) the first time you use it, stored under the remote-client directory. The host-key pin belongs to the endpoint (`address:port`), not the user — editing a saved server's address or port drops the pin and re-triggers the first-contact fingerprint sheet. Because adding a key restarts the remote's SSH listener, the password-pairing step reports success as soon as the enrollment request is flushed, not after an HTTP response.
+> **Note:** The rich client generates its own dedicated ed25519 keypair (comment `bromure-ac-fatclient`) the first time you use it, stored under the remote-client directory. The host-key pin belongs to the endpoint (`address:port`), not the user — editing a saved server's address or port drops the pin and re-triggers the first-contact fingerprint sheet. Because adding a key restarts the remote's SSH listener, the password-pairing step reports success as soon as the enrollment request is flushed, not after an HTTP response.
 
 ### The mirror window
 
@@ -129,7 +129,7 @@ Under the hood, the mirror polls the remote's `/state` snapshot every 0.75 secon
 
 The mirror is comprehensive. It renders every workspace with its live run state, all tabs and worktrees (fully nested), the grid layout, automations, VM dashboards for off and suspended workspaces, the Docker dashboard, vitals (CPU, memory, load, disk, uptime, IP, ports), and live interactive terminals. Edits are bidirectional and converge on every connected client at the next poll: start/stop/suspend/reboot, tab operations, grid edits (whole-layout, last-writer-wins), automation edits, the Fusion toggle, Docker actions, settings saves, and file transfers.
 
-A few operations are **not** available from the fat client in this version:
+A few operations are **not** available from the rich client in this version:
 
 - **Prompt-driven worktree operations** — creating a new worktree, merging, resolving a conflict, or seeding an automation — are not remoted in v1. Do those on the host's own GUI or through the [remote menu](#signing-in-over-plain-ssh) (which *does* support create, merge, and resolve). The mirror still displays every worktree, and **remove** and **attach terminal** work remotely.
 - **Grid-layout edits** need a GUI window open on the remote. A fully headless remote (app running, no unified window) mirrors everything else but cannot accept a layout change.
@@ -141,7 +141,7 @@ Some actions you initiate remotely raise a decision on the remote — a home-sto
 
 ### Secrets stay on the host
 
-Secrets never cross the link. When the fat client reads a remote profile to populate the editor, every secret field arrives **blanked**. On save, a blank field means "keep the stored value" and a typed one replaces it. API keys, tokens, and MCP environment secrets stay on the remote Mac. The fat client authenticates by SSH key alone once paired — there are no password prompts during mirroring.
+Secrets never cross the link. When the rich client reads a remote profile to populate the editor, every secret field arrives **blanked**. On save, a blank field means "keep the stored value" and a typed one replaces it. API keys, tokens, and MCP environment secrets stay on the remote Mac. The rich client authenticates by SSH key alone once paired — there are no password prompts during mirroring.
 
 ## Reaching services on the remote's VMs
 
@@ -207,12 +207,12 @@ The forwarder tears itself down after 300 seconds so the loopback port is never 
 
 Remote access is powerful, so it is worth being precise about its boundaries.
 
-- **Off by default, one door.** No remote path exists until you enable the SSH server. Every path — human menu, CLI, fat client, port forwards, browser MCP — rides that one server and no other.
-- **Encryption and transport.** All traffic is SSH. The fat client's control polling, terminal attaches, file transfers, port forwards, and browser-MCP relay all travel inside the SSH connection. Because swift-nio-ssh has no post-quantum key exchange, a modern OpenSSH client will print a "not using a post-quantum key exchange" warning; this is expected and does not indicate a downgrade attack.
+- **Off by default, one door.** No remote path exists until you enable the SSH server. Every path — human menu, CLI, rich client, port forwards, browser MCP — rides that one server and no other.
+- **Encryption and transport.** All traffic is SSH. The rich client's control polling, terminal attaches, file transfers, port forwards, and browser-MCP relay all travel inside the SSH connection. Because swift-nio-ssh has no post-quantum key exchange, a modern OpenSSH client will print a "not using a post-quantum key exchange" warning; this is expected and does not indicate a downgrade attack.
 - **Who can log in.** Only the exact macOS user who launched the app. Password auth is verified against OpenDirectory (no Remote Login, no PAM changes, no admin rights), and public-key auth accepts only keys you have enrolled. Password attempts are rate-limited per source IP; keys are not.
-- **What a session can do.** A human login can only reach the remote menu — never a shell — so it can create, configure, and drive workspaces, but it cannot run arbitrary host commands. The fat client's four machine verbs are similarly narrow: a control-socket bridge, a forward to a guest on the vmnet subnet, and a browser-MCP relay. Forwards to the host itself, the gateway, or the internet are refused.
+- **What a session can do.** A human login can only reach the remote menu — never a shell — so it can create, configure, and drive workspaces, but it cannot run arbitrary host commands. The rich client's four machine verbs are similarly narrow: a control-socket bridge, a forward to a guest on the vmnet subnet, and a browser-MCP relay. Forwards to the host itself, the gateway, or the internet are refused.
 - **Secrets never leave the host.** Remote profile reads are secrets-blanked and saves are secret-preserving; API keys, tokens, and MCP environment secrets stay on the remote Mac.
-- **Trust on first use.** The fat client pins the remote's host key per endpoint on first contact and warns loudly on any later change.
+- **Trust on first use.** The rich client pins the remote's host key per endpoint on first contact and warns loudly on any later change.
 - **Guest-unforgeable consent.** MITM consent prompts raised by a running agent are rendered on the *host* side of the terminal pump, where a compromised guest can neither see nor forge them; any timeout or detach resolves to deny. See [Remote consent handling](15-enterprise.mdx#remote-consent-handling).
 
 ## Troubleshooting
@@ -222,7 +222,7 @@ Remote access is powerful, so it is worth being precise about its boundaries.
 | Enabling returns an error | Base image is missing or still installing | The server cannot start until the base image is present. Finish the install, then enable again. |
 | `ssh` connects but says to reconnect with `ssh -t` | No TTY was requested | The remote menu needs a terminal; add `-t` (or use `ssh -t -p 2222 <user>@<mac>`). |
 | OpenSSH prints "not using a post-quantum key exchange" | swift-nio-ssh has no PQ key exchange | Expected and harmless — the connection is still encrypted. |
-| The fat client keeps asking for a password | This Mac's key is not enrolled on the remote | Let one password login enroll it automatically, or run `bromure-cli remote key add '<this Mac's key>'` on the remote (**Show this Mac's key** copies it). |
+| The rich client keeps asking for a password | This Mac's key is not enrolled on the remote | Let one password login enroll it automatically, or run `bromure-cli remote key add '<this Mac's key>'` on the remote (**Show this Mac's key** copies it). |
 | Red **Trust New Key & Continue** sheet | The remote's host key changed since it was pinned | Verify out of band; only continue if you know why the key changed (reinstall, new Mac) — otherwise it may be a man-in-the-middle. |
 | Live connections drop after editing keys | Adding or removing an authorized key restarts the listener | Expected; reconnect. |
 | Browser pane stays blank | The SOCKS forwarder or subnet is not ready yet | Wait for the first `/state` poll; ensure the workspace is running and this Mac has the browser image installed. |
@@ -232,15 +232,15 @@ Remote access is powerful, so it is worth being precise about its boundaries.
 
 ## Files, ports, and environment variables
 
-Server-side state lives under `~/Library/Application Support/BromureAC/remote/`: `hostkey_ed25519` (0600) and its `.pub`, `authorized_keys` (0600), and the optional `overlay-key` override. The fat client's identity and state live under `~/Library/Application Support/BromureAC/remote-client/`: `id_ed25519(.pub)` (comment `bromure-ac-fatclient`), `known_hosts` (TOFU pins), `hosts.json` (saved servers), and per-host mirror persistence under `hosts/<host-UUID>/`. The whole support directory relocates under `CFFIXED_USER_HOME`.
+Server-side state lives under `~/Library/Application Support/BromureAC/remote/`: `hostkey_ed25519` (0600) and its `.pub`, `authorized_keys` (0600), and the optional `overlay-key` override. The rich client's identity and state live under `~/Library/Application Support/BromureAC/remote-client/`: `id_ed25519(.pub)` (comment `bromure-ac-fatclient`), `known_hosts` (TOFU pins), `hosts.json` (saved servers), and per-host mirror persistence under `hosts/<host-UUID>/`. The whole support directory relocates under `CFFIXED_USER_HOME`.
 
 | Port / interface | Role |
 |---|---|
 | TCP 2222 (configurable, `≥ 1024`) | The embedded SSH server, bind `0.0.0.0` by default. |
 | Guest vsock 5010 | Always-on loopback relay in every VM — the path for port forwards and OAuth callback delivery. |
-| Guest vsock 5830 | The workspace agent's browser-MCP stream, relayed to the fat client's browser pane. |
+| Guest vsock 5830 | The workspace agent's browser-MCP stream, relayed to the rich client's browser pane. |
 | Ephemeral port, bound `0.0.0.0` | Per-host SOCKS5 forwarder (peer-filtered to loopback and the `192.168.127.x` browser subnet). |
-| `192.168.127.0/24` | The fat client's pinned local browser-VM subnet. |
+| `192.168.127.0/24` | The rich client's pinned local browser-VM subnet. |
 | `100.64.<n>.0/24` | CGNAT alias subnets assigned on a fleet subnet collision. |
 
-The relevant UserDefaults keys (domain `io.bromure.agentic-coding`) are `remoteAccess.enabled`, `remoteAccess.port`, `remoteAccess.bindAddress`, `remoteAccess.passwordAuth`, `remoteAccess.pubkeyAuth`, `fatclient.tunnel.<host-UUID>`, and `cloudflareTunnel.consented`. Diagnostic environment variables include `BROMURE_OVERLAY_KEY` (remote-menu chord), `BROMURE_FATCLIENT_LOG` (verbose fat-client logging), and `BROMURE_FATCLIENT_UTUN` (force-enable the system-wide tunnel opt-in — the toolbar toggle is the product path). The full CLI reference, including the hidden `__forward`, `__forward-socks`, `__dial`, and `__attach-window` plumbing, is in [Automation & the CLI](16-automation-cli.mdx).
+The relevant UserDefaults keys (domain `io.bromure.agentic-coding`) are `remoteAccess.enabled`, `remoteAccess.port`, `remoteAccess.bindAddress`, `remoteAccess.passwordAuth`, `remoteAccess.pubkeyAuth`, `fatclient.tunnel.<host-UUID>`, and `cloudflareTunnel.consented`. Diagnostic environment variables include `BROMURE_OVERLAY_KEY` (remote-menu chord), `BROMURE_FATCLIENT_LOG` (verbose rich-client logging), and `BROMURE_FATCLIENT_UTUN` (force-enable the system-wide tunnel opt-in — the toolbar toggle is the product path). The full CLI reference, including the hidden `__forward`, `__forward-socks`, `__dial`, and `__attach-window` plumbing, is in [Automation & the CLI](16-automation-cli.mdx).

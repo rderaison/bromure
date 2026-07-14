@@ -8,7 +8,7 @@ order: 6.5
 
 Every workspace comes with its own web browser: a full Chromium that opens as a pane beside the terminal. It exists so an agent can *see the web* — open the app it just built, read a docs page, reproduce a bug, click through a flow — and so you can watch (and drive) the same browser it does. The browser runs in its own disposable sidecar VM, separate from the workspace VM, so a hostile page can never touch the agent's files or your Mac.
 
-This chapter is the complete guide to using it: opening it, driving it by hand, letting the agent drive it through the built-in [browser MCP server](18-glossary.mdx), keeping sign-ins, and the privacy model. It is the same pane introduced in [Sessions](06-sessions.mdx#the-agentic-browser-pane); everything here also applies when a remote agent drives it over a [fat-client](14-remote-access.mdx) connection.
+This chapter is the complete guide to using it: opening it, driving it by hand, letting the agent drive it through the built-in [browser MCP server](18-glossary.mdx), keeping sign-ins, and the privacy model. It is the same pane introduced in [Sessions](06-sessions.mdx#the-agentic-browser-pane); everything here also applies when a remote agent drives it over a [rich-client](14-remote-access.mdx) connection.
 
 ## Opening the browser
 
@@ -104,7 +104,7 @@ You never press an "enable picker" button or open any menu — arming the picker
 
 Under the hood the tools reach the browser over a generated Python stdio shim, `bromure-browser-mcp.py`, staged read-only into the agent's VM at `/mnt/bromure-meta/`. It dials the host over [vsock](18-glossary.mdx) port 5830 and reconnects forever, so the tools never disappear from the agent's tool list even across browser teardowns. The full tool reference lives in [CLI, Automation & MCP](16-automation-cli.mdx#the-in-workspace-browser-mcp-server).
 
-> **Note:** On a [fat client](14-remote-access.mdx), a remote agent's browser-MCP stream can be spliced over the SSH connection so the remote agent drives the browser pane you are watching locally. One such relay is active at a time.
+> **Note:** On a [rich client](14-remote-access.mdx), a remote agent's browser-MCP stream can be spliced over the SSH connection so the remote agent drives the browser pane you are watching locally. One such relay is active at a time.
 
 ## Staying signed in vs. staying disposable
 
