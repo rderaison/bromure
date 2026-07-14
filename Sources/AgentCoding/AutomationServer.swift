@@ -282,47 +282,60 @@ final class ACAutomationServer {
     }
 
     private func handleRequest(fd: Int32) {
-        var buf = [UInt8](repeating: 0, count: 65536)
-        let n = Darwin.read(fd, &buf, buf.count)
-        guard n > 0 else { Darwin.close(fd); return }
-        var totalRead = n
+        // Read the whole request off the socket. Bytes arrive in multiple reads
+        // — especially over the ssh tunnel, where the first read may hold only
+        // part of the header block — so accumulate until the header terminator
+        // (\r\n\r\n), then read exactly Content-Length body bytes. The previous
+        // code assumed the first 64 KB read held the whole header block AND kept
+        // its body loop bounded by that first buffer; when the tunnel split the
+        // stream the body arrived truncated, its JSON failed to parse, and a
+        // POST /vms/{id}/file upload reached the guest as an empty op → the
+        // guest agent's "path must be absolute".
+        var data = [UInt8]()
+        var chunk = [UInt8](repeating: 0, count: 65536)
 
-        // Read the body if Content-Length says there's more
-        if let raw = String(bytes: buf[0..<totalRead], encoding: .utf8),
-           let headerEnd = raw.range(of: "\r\n\r\n") {
-            let headers = String(raw[..<headerEnd.lowerBound]).lowercased()
-            if let clRange = headers.range(of: "content-length: "),
-               let clValue = Int(headers[clRange.upperBound...].prefix(while: { $0.isNumber })) {
-                let bodyStart = raw.distance(from: raw.startIndex, to: headerEnd.upperBound)
-                // Grow the buffer to fit the full declared body — a `POST
-                // /profiles` carrying large inline secrets (PEMs, kubeconfigs)
-                // can exceed the initial 64 KB, and a file/image upload posts a
-                // 6 MB raw chunk that base64-encodes to 8 MB (plus JSON) via
-                // POST /vms/{id}/file. Cap at a sane ceiling so a bogus
-                // Content-Length can't exhaust memory, but leave headroom above
-                // an 8 MB chunk or those uploads truncate and fail to parse.
-                let needed = min(bodyStart + max(0, clValue), 16 * 1024 * 1024)
-                if needed > buf.count {
-                    buf.append(contentsOf: [UInt8](repeating: 0, count: needed - buf.count))
+        // Index just past the first "\r\n\r\n", or nil if not yet seen.
+        func headerEndIndex() -> Int? {
+            guard data.count >= 4 else { return nil }
+            var i = 0
+            while i <= data.count - 4 {
+                if data[i] == 13, data[i + 1] == 10, data[i + 2] == 13, data[i + 3] == 10 {
+                    return i + 4
                 }
-                var remaining = clValue - (totalRead - bodyStart)
-                while remaining > 0 && totalRead < buf.count {
-                    var tmp = [UInt8](repeating: 0, count: min(remaining, buf.count - totalRead))
-                    let extra = Darwin.read(fd, &tmp, tmp.count)
-                    if extra <= 0 { break }
-                    buf.replaceSubrange(totalRead..<totalRead + extra, with: tmp[0..<extra])
-                    totalRead += extra
-                    remaining -= extra
-                }
+                i += 1
             }
+            return nil
         }
 
-        let raw = String(bytes: buf[0..<totalRead], encoding: .utf8) ?? ""
-        let lines = raw.components(separatedBy: "\r\n")
-        guard let requestLine = lines.first else {
-            sendResponse(fd: fd, status: 400, body: ["error": "Bad request"])
-            return
+        var bodyStart: Int? = nil
+        while bodyStart == nil {
+            let n = Darwin.read(fd, &chunk, chunk.count)
+            if n <= 0 { Darwin.close(fd); return }
+            data.append(contentsOf: chunk[0..<n])
+            bodyStart = headerEndIndex()
+            // A header block this large is bogus — bail rather than grow forever.
+            if bodyStart == nil, data.count > (1 << 20) { Darwin.close(fd); return }
         }
+        let start = bodyStart!
+
+        let headerBlock = String(decoding: data[0..<start], as: UTF8.self)
+        var contentLength = 0
+        if let clRange = headerBlock.lowercased().range(of: "content-length:") {
+            contentLength = Int(headerBlock.lowercased()[clRange.upperBound...]
+                .drop(while: { $0 == " " }).prefix(while: { $0.isNumber })) ?? 0
+        }
+        // Memory guard against a bogus Content-Length; 16 MB clears a 6 MB raw
+        // upload chunk (8 MB base64 + JSON) from POST /vms/{id}/file.
+        contentLength = min(max(0, contentLength), 16 * 1024 * 1024)
+
+        while data.count - start < contentLength {
+            let want = min(chunk.count, contentLength - (data.count - start))
+            let n = Darwin.read(fd, &chunk, want)
+            if n <= 0 { break }   // peer closed / error mid-body
+            data.append(contentsOf: chunk[0..<n])
+        }
+
+        let requestLine = headerBlock.components(separatedBy: "\r\n").first ?? ""
         let parts = requestLine.split(separator: " ", maxSplits: 2)
         guard parts.count >= 2 else {
             sendResponse(fd: fd, status: 400, body: ["error": "Bad request"])
@@ -332,12 +345,21 @@ final class ACAutomationServer {
         let path = String(parts[1])
 
         var bodyJSON: [String: Any] = [:]
-        if let bodyStart = raw.range(of: "\r\n\r\n") {
-            let bodyStr = String(raw[bodyStart.upperBound...])
-            if !bodyStr.isEmpty,
-               let data = bodyStr.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                bodyJSON = json
+        let bodyBytes = data.count > start ? Array(data[start...]) : []
+        if !bodyBytes.isEmpty,
+           let json = try? JSONSerialization.jsonObject(with: Data(bodyBytes)) as? [String: Any] {
+            bodyJSON = json
+        }
+        // Truncation/parse-failure breadcrumb: a body shorter than declared, or
+        // a non-empty body that didn't parse, is the "path must be absolute"
+        // upload failure. Debug-gated so it can't spam a normal run.
+        if debugEnabled, contentLength > 0 {
+            if bodyBytes.count < contentLength {
+                NSLog("[ac-http] %@ %@ TRUNCATED body: read %d of Content-Length %d",
+                      method, path, bodyBytes.count, contentLength)
+            } else if bodyJSON.isEmpty {
+                NSLog("[ac-http] %@ %@ body parse FAILED (%d bytes, CL %d)",
+                      method, path, bodyBytes.count, contentLength)
             }
         }
 
@@ -774,6 +796,15 @@ final class ACAutomationServer {
             let id = decode(String(rest.dropLast("/file".count)))
             let op = (bodyJSON["op"] as? [String: Any]) ?? [:]
             let timeout = (bodyJSON["timeout"] as? Int) ?? 30
+            if debugEnabled {
+                // What actually reached the guest-op layer: an empty op / blank
+                // path here (with the body log above quiet) means the op itself
+                // was dropped, not the body truncated.
+                let dataLen = (op["data"] as? String)?.count ?? 0
+                NSLog("[ac-http] /file op=%@ path=%@ dataB64=%d",
+                      (op["op"] as? String) ?? "<none>",
+                      (op["path"] as? String) ?? "<none>", dataLen)
+            }
             let semaphore = DispatchSemaphore(value: 0)
             var result: [String: Any] = ["error": "not handled"]
             DispatchQueue.main.async {
