@@ -829,9 +829,9 @@ struct ProfileEditorView: View {
     /// Backend-flavoured label for a cloud leg.
     private func fusionBackendLabel(_ t: Profile.Tool) -> String {
         switch t {
-        case .claude: return "Claude Code (Anthropic) — your session"
-        case .codex:  return "Codex (OpenAI)"
-        case .grok:   return "Grok (xAI)"
+        case .claude: return NSLocalizedString("Claude Code (Anthropic) — your session", comment: "Fusion cloud leg label for the primary Claude session")
+        case .codex:  return NSLocalizedString("Codex (OpenAI)", comment: "Fusion cloud leg label")
+        case .grok:   return NSLocalizedString("Grok (xAI)", comment: "Fusion cloud leg label")
         }
     }
 
@@ -3415,9 +3415,11 @@ struct LocalModelsSettingsView: View {
                     Section {
                         Label {
                             VStack(alignment: .leading, spacing: 2) {
+                                // Ternary Text(cond ? a : b) with interpolation resolves to
+                                // the non-localizing Text(String) overload, so format explicitly.
                                 Text(combinedMemGB > hostGB
-                                     ? "Selected local models need ~\(combinedMemGB) GB together — more than this Mac's \(hostGB) GB."
-                                     : "Selected local models need ~\(combinedMemGB) GB together, close to this Mac's \(hostGB) GB.")
+                                     ? String(format: NSLocalizedString("Selected local models need ~%d GB together — more than this Mac's %d GB.", comment: "combined-memory warning, over budget"), combinedMemGB, hostGB)
+                                     : String(format: NSLocalizedString("Selected local models need ~%d GB together, close to this Mac's %d GB.", comment: "combined-memory warning, near budget"), combinedMemGB, hostGB))
                                 Text("They run in parallel (one engine, several models), so their memory adds up. Drop one, or pick smaller models.")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
@@ -4043,7 +4045,7 @@ private struct StorageStackView: View {
                 accent: .blue,
                 symbol: "internaldrive.fill",
                 title: NSLocalizedString("Workspace system disk", comment: ""),
-                subtitle: "A read-write copy of the base OS, just for this workspace. Holds anything you `sudo apt install`, edits to /etc and /var, system-level config.",
+                subtitle: NSLocalizedString("A read-write copy of the base OS, just for this workspace. Holds anything you `sudo apt install`, edits to /etc and /var, system-level config.", comment: "Storage layer subtitle — per-workspace system disk"),
                 metadata: diskMetadata,
                 size: diskBytes,
                 action: isNewProfile
@@ -4068,12 +4070,12 @@ private struct StorageStackView: View {
                 accent: .gray,
                 symbol: "cube.fill",
                 title: NSLocalizedString("Base OS image", comment: ""),
-                subtitle: "Ubuntu Noble + Node, Claude Code, Codex, gh, glab, fonts. Shared by every workspace, immutable at runtime.",
+                subtitle: NSLocalizedString("Ubuntu Noble + Node, Claude Code, Codex, gh, glab, fonts. Shared by every workspace, immutable at runtime.", comment: "Storage layer subtitle — shared base OS image"),
                 metadata: baseMetadata,
                 size: baseBytes,
                 action: nil,
-                bottomNote: "Rebuild via the app menu (∼5–10 min).",
-                noteHelp: "Affects every workspace, so it's parked outside this editor."
+                bottomNote: NSLocalizedString("Rebuild via the app menu (∼5–10 min).", comment: "Base OS image rebuild note"),
+                noteHelp: NSLocalizedString("Affects every workspace, so it's parked outside this editor.", comment: "Base OS image rebuild help")
             )
         }
         .background(Color(nsColor: .windowBackgroundColor),
@@ -4090,30 +4092,30 @@ private struct StorageStackView: View {
     private var homeMetadata: String {
         if isNewProfile { return NSLocalizedString("Created on first launch.", comment: "") }
         guard context.profileHomeURL != nil || context.profileHomeImageURL != nil else {
-            return "Not yet created."
+            return NSLocalizedString("Not yet created.", comment: "Storage layer status — home not created yet")
         }
         if let mtime = homeMTime {
-            return "Active \(relativeAge(of: mtime))."
+            return String(format: NSLocalizedString("Active %@.", comment: "Storage layer status — recently active, arg is a relative age"), relativeAge(of: mtime))
         }
-        return "Quiet — no recent activity."
+        return NSLocalizedString("Quiet — no recent activity.", comment: "Storage layer status — home idle")
     }
 
     private var diskMetadata: String {
         if isNewProfile { return NSLocalizedString("Created on first launch.", comment: "") }
-        guard context.profileDiskURL != nil else { return "Not yet cloned." }
+        guard context.profileDiskURL != nil else { return NSLocalizedString("Not yet cloned.", comment: "Storage layer status — disk not cloned yet") }
         if let v = context.baseImageVersion {
-            return "Cloned from base v\(v)."
+            return String(format: NSLocalizedString("Cloned from base v%@.", comment: "Storage layer status — disk cloned from base version, arg is version stamp"), v)
         }
-        return "Cloned from base."
+        return NSLocalizedString("Cloned from base.", comment: "Storage layer status — disk cloned from base")
     }
 
     private var baseMetadata: String {
         var parts: [String] = []
         if let v = context.baseImageVersion { parts.append("v\(v)") }
         if let d = context.baseImageBuildDate {
-            parts.append("built \(Self.dateFormatter.string(from: d))")
+            parts.append(String(format: NSLocalizedString("built %@", comment: "Storage layer status — base image build date, arg is a date"), Self.dateFormatter.string(from: d)))
         }
-        return parts.isEmpty ? "Built once per app version." : parts.joined(separator: " · ")
+        return parts.isEmpty ? NSLocalizedString("Built once per app version.", comment: "Storage layer status — base image build cadence") : parts.joined(separator: " · ")
     }
 
     @MainActor

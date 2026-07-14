@@ -285,7 +285,10 @@ struct BrowserPaneView: View {
             Text("Install the browser?")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text("Chromium runs in its own disposable VM. One-time download (\(BrowserImageInstaller.shared.downloadSizeDescription)), installed to your Library folder.")
+            Text(String(format: NSLocalizedString(
+                "Chromium runs in its own disposable VM. One-time download (%@), installed to your Library folder.",
+                comment: "browser install-consent card body; %@ is the download size"),
+                BrowserImageInstaller.shared.downloadSizeDescription))
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)

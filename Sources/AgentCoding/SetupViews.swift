@@ -11,7 +11,7 @@ import SwiftUI
 @MainActor
 @Observable
 final class InitProgressModel {
-    var status: String = "Preparing…"
+    var status: String = NSLocalizedString("Preparing…", comment: "Initial setup status pill, shown before the first installer progress message arrives")
     /// Rolling buffer of the installer's serial output. Only the last
     /// `maxLines` complete lines (plus any in-progress trailing partial
     /// line) are kept so SwiftUI's Text reflow stays cheap during a
@@ -73,7 +73,7 @@ final class InitProgressModel {
     /// Reset for a new bake run. Called by the start path before
     /// kicking off `createBaseImage`.
     func reset() {
-        status = "Preparing…"
+        status = NSLocalizedString("Preparing…", comment: "Initial setup status pill, shown before the first installer progress message arrives")
         consoleLog = ""
         error = nil
         isRunning = true
@@ -303,8 +303,8 @@ struct SetupView: View {
 /// collapsible console log of every progress message.
 struct InitializingView: View {
     let model: InitProgressModel
-    var title: String = "Building base image"
-    var subtitle: String = "This is the one-time install. Don't close the window."
+    var title: String = NSLocalizedString("Building base image", comment: "Setup progress window title")
+    var subtitle: String = NSLocalizedString("This is the one-time install. Don't close the window.", comment: "Setup progress window subtitle")
     let onCancel: () -> Void
 
     /// Console pane is collapsed by default — the determinate progress
@@ -360,7 +360,7 @@ struct InitializingView: View {
             DisclosureGroup(isExpanded: $consoleExpanded) {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        Text(model.consoleLog.isEmpty ? "(waiting for installer output…)" : model.consoleLog)
+                        Text(model.consoleLog.isEmpty ? NSLocalizedString("(waiting for installer output…)", comment: "Placeholder in the setup console pane before any installer output arrives") : model.consoleLog)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(.primary)
                             .frame(maxWidth: .infinity, alignment: .leading)

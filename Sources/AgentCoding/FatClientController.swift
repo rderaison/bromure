@@ -786,10 +786,10 @@ struct RemoteToolbarBar: View {
 
     private var tunnelHelp: String {
         switch controller.tunnelState {
-        case "active":           "Direct network access to the remote's VMs is ON — click to turn off"
-        case "waiting-approval": "Waiting for approval in System Settings › Login Items…"
-        case "failed":           "Network tunnel failed — click to retry"
-        default:                 "Enable direct network access to the remote's VMs (192.168.x.x from any local app)"
+        case "active":           NSLocalizedString("Direct network access to the remote's VMs is ON — click to turn off", comment: "network-tunnel toolbar toggle tooltip when active")
+        case "waiting-approval": NSLocalizedString("Waiting for approval in System Settings › Login Items…", comment: "network-tunnel toolbar toggle tooltip while awaiting approval")
+        case "failed":           NSLocalizedString("Network tunnel failed — click to retry", comment: "network-tunnel toolbar toggle tooltip after failure")
+        default:                 NSLocalizedString("Enable direct network access to the remote's VMs (192.168.x.x from any local app)", comment: "network-tunnel toolbar toggle tooltip when off")
         }
     }
 

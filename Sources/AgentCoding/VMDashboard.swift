@@ -117,7 +117,7 @@ struct VMDashboardView: View {
                          caption: "of \(profile.memoryGB) GB",
                          systemImage: "memorychip.fill", tint: .purple)
             } else {
-                StatCard(title: "CPU", value: "—", caption: "\(stateLabel.lowercased())",
+                StatCard(title: "CPU", value: "—", caption: stateCaption,
                          systemImage: "cpu.fill", tint: accent)
                 StatCard(title: "Memory", value: "\(profile.memoryGB) GB", caption: "allocated",
                          systemImage: "memorychip.fill", tint: .purple)
@@ -139,7 +139,7 @@ struct VMDashboardView: View {
                          systemImage: "internaldrive.fill", tint: .teal)
             }
             StatCard(title: "Uptime", value: isRunning ? uptimeText : "—",
-                     caption: isRunning ? "since boot" : "\(stateLabel.lowercased())",
+                     caption: isRunning ? "since boot" : stateCaption,
                      systemImage: "clock.fill", tint: .orange)
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -325,20 +325,15 @@ struct VMDashboardView: View {
         let d = UserDefaults.standard
         if d.bool(forKey: "cloudflareTunnel.consented") { return true }
         let a = NSAlert()
-        a.messageText = "Expose services to the internet via Cloudflare Tunnel?"
-        a.informativeText = """
-        Bromure will download cloudflared \(CloudflaredPin.version) (~18 MB) from GitHub, verify it \
-        against a pinned checksum and Cloudflare's Developer ID signature, and run one tunnel process \
-        per exposed service (recorded in the Supply Chain Log).
-
-        Traffic transits Cloudflare's network under their Terms of Service (cloudflare.com/terms).
-
-        Each service gets a random public https://….trycloudflare.com URL — anyone who has it can \
-        reach the service, so make sure the service itself expects that. The URL changes if the \
-        tunnel restarts.
-        """
-        a.addButton(withTitle: "Agree & Expose")
-        a.addButton(withTitle: "Cancel")
+        a.messageText = NSLocalizedString("Expose services to the internet via Cloudflare Tunnel?",
+                                          comment: "Cloudflare tunnel consent alert title")
+        a.informativeText = String(
+            format: NSLocalizedString(
+                "Bromure will download cloudflared %@ (~18 MB) from GitHub, verify it against a pinned checksum and Cloudflare's Developer ID signature, and run one tunnel process per exposed service (recorded in the Supply Chain Log).\n\nTraffic transits Cloudflare's network under their Terms of Service (cloudflare.com/terms).\n\nEach service gets a random public https://….trycloudflare.com URL — anyone who has it can reach the service, so make sure the service itself expects that. The URL changes if the tunnel restarts.",
+                comment: "Cloudflare tunnel consent alert body; %@ = cloudflared version"),
+            CloudflaredPin.version)
+        a.addButton(withTitle: NSLocalizedString("Agree & Expose", comment: "Cloudflare tunnel consent confirm button"))
+        a.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel button"))
         guard a.runModal() == .alertFirstButtonReturn else { return false }
         d.set(true, forKey: "cloudflareTunnel.consented")
         return true
@@ -382,10 +377,16 @@ struct VMDashboardView: View {
                       label: spec.tool.displayName,
                       value: toolModeText(spec))
         }
-        rows.append(.init(icon: "shield.lefthalf.filled", label: "Guardrails", value: guardrailsText))
-        rows.append(.init(icon: "lock.shield", label: "Prompt-injection scan",
-                          value: promptInjectionOn ? "On" : "Off"))
-        rows.append(.init(icon: "folder.fill", label: "Shared folders", value: foldersText))
+        rows.append(.init(icon: "shield.lefthalf.filled",
+                          label: NSLocalizedString("Guardrails", comment: "Config row label"),
+                          value: guardrailsText))
+        rows.append(.init(icon: "lock.shield",
+                          label: NSLocalizedString("Prompt-injection scan", comment: "Config row label"),
+                          value: promptInjectionOn ? NSLocalizedString("On", comment: "Feature enabled")
+                                                   : NSLocalizedString("Off", comment: "Feature disabled")))
+        rows.append(.init(icon: "folder.fill",
+                          label: NSLocalizedString("Shared folders", comment: "Config row label"),
+                          value: foldersText))
         return rows
     }
 
@@ -393,10 +394,20 @@ struct VMDashboardView: View {
 
     private var stateLabel: String {
         switch state {
-        case .running:   return "Running"
-        case .booting:   return "Booting"
-        case .suspended: return "Suspended"
-        case .off:       return "Off"
+        case .running:   return NSLocalizedString("Running", comment: "VM run-state pill")
+        case .booting:   return NSLocalizedString("Booting", comment: "VM run-state pill")
+        case .suspended: return NSLocalizedString("Suspended", comment: "VM run-state pill")
+        case .off:       return NSLocalizedString("Off", comment: "VM run-state pill")
+        }
+    }
+    /// Lowercase run-state word shown as a stat-card caption while the VM isn't
+    /// running (only `suspended` / `off` actually appear).
+    private var stateCaption: LocalizedStringKey {
+        switch state {
+        case .running:   return "running"
+        case .booting:   return "booting"
+        case .suspended: return "suspended"
+        case .off:       return "off"
         }
     }
     private var stateColor: Color {
@@ -412,23 +423,26 @@ struct VMDashboardView: View {
     private func toolModeText(_ spec: Profile.ToolSpec) -> String {
         if spec.authMode == .local {
             let model = spec.localModelID.flatMap { CatalogStore.shared.resolve($0)?.name ?? $0 }
-            return "On-device · \(model ?? "local model")"
+            return String(format: NSLocalizedString("On-device · %@", comment: "Config value: tool runs locally; %@ = model name"),
+                          model ?? NSLocalizedString("local model", comment: "Fallback when the local model name is unknown"))
         }
-        return "Cloud · \(spec.authMode.displayName)"
+        return String(format: NSLocalizedString("Cloud · %@", comment: "Config value: tool runs in the cloud; %@ = auth mode"),
+                      spec.authMode.displayName)
     }
     private var guardrailsText: String {
         let g = profile.guardrails
         let modes = [g.kubernetes, g.aws, g.digitalOcean, g.docker, g.github, g.gitlab, g.bitbucket]
         let active = modes.filter { $0 != .off }
-        if active.isEmpty { return "Off" }
+        if active.isEmpty { return NSLocalizedString("Off", comment: "Guardrails disabled") }
         let names = Set(active.map(\.displayName))
-        return names.count == 1 ? names.first! : "Custom (\(active.count) domains)"
+        return names.count == 1 ? names.first!
+            : String(format: NSLocalizedString("Custom (%d domains)", comment: "Guardrails active on N domains"), active.count)
     }
     private var promptInjectionOn: Bool {
         profile.promptInjection.detectSourceInjection || profile.promptInjection.detectRulesInjection
     }
     private var foldersText: String {
-        profile.folderPaths.isEmpty ? "None"
+        profile.folderPaths.isEmpty ? NSLocalizedString("None", comment: "No shared folders")
             : profile.folderPaths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
     }
 
