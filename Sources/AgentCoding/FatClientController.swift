@@ -2008,8 +2008,12 @@ final class RemoteHostWindow: NSWindow {
         guard let profile = controller.profile(for: id) else {
             unmountTerminal(); return
         }
-        // Same workspace + window already mounted → nothing to do.
-        if shownWorkspace == id, shownWindowIndex == idx, mountedTermView?.window != nil { return }
+        // Same workspace + window already mounted → just re-grab keyboard focus
+        // (a re-click on the tab should let you type without clicking the pane).
+        if shownWorkspace == id, shownWindowIndex == idx, let live = mountedTermView, live.window != nil {
+            makeFirstResponder(live)
+            return
+        }
         unmountTerminal()
         let ctl = termControllers[id] ?? {
             let c = TerminalSessionController(profile: profile, remoteHost: controller.host.id)
@@ -2022,6 +2026,9 @@ final class RemoteHostWindow: NSWindow {
         mountedTermView = view
         shownWorkspace = id
         shownWindowIndex = idx
+        // Selecting a terminal tab should focus it immediately — otherwise you
+        // have to click into the pane before you can type.
+        makeFirstResponder(view)
     }
 
     private func unmountTerminal() {
