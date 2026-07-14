@@ -217,6 +217,27 @@ private struct Shake: GeometryEffect {
 struct RemoteConnectView: View {
     @Bindable var model: RemoteConnectModel
     var onClose: () -> Void
+    /// Open directly on the details form (editing an existing host) instead
+    /// of the server picker.
+    var startInForm = false
+
+    /// Server picker selection (the Screen Sharing-style list).
+    @State private var selectedID: UUID?
+    /// True while the add/edit details form is showing instead of the picker.
+    @State private var showingForm: Bool
+
+    init(model: RemoteConnectModel, onClose: @escaping () -> Void, startInForm: Bool = false) {
+        self.model = model
+        self.onClose = onClose
+        self.startInForm = startInForm
+        _showingForm = State(initialValue: startInForm)
+    }
+
+    private var savedHosts: [RemoteHost] {
+        RemoteHostStore.shared.hosts.sorted {
+            ($0.lastConnected ?? .distantPast) > ($1.lastConnected ?? .distantPast)
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -236,12 +257,112 @@ struct RemoteConnectView: View {
         .frame(width: 460)
     }
 
-    // Host details
-    private var editing: some View {
+    /// Picker first (like Screen Sharing) when there are saved servers; the
+    /// details form only for adding or editing one.
+    @ViewBuilder private var editing: some View {
+        if showingForm || savedHosts.isEmpty {
+            form
+        } else {
+            picker
+        }
+    }
+
+    // MARK: Server picker
+
+    private var picker: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Mirror another Mac running Bromure — its grid, workspaces, tabs and automations — over SSH.")
                 .foregroundStyle(.secondary).font(.callout)
-            recents
+            List(selection: $selectedID) {
+                ForEach(savedHosts) { h in
+                    serverRow(h).tag(h.id)
+                }
+            }
+            .listStyle(.inset(alternatesRowBackgrounds: true))
+            .frame(height: 190)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color.primary.opacity(0.12)))
+            .onAppear { if selectedID == nil { selectedID = savedHosts.first?.id } }
+            HStack(spacing: 10) {
+                ControlGroup {
+                    Button {
+                        model.prefill(RemoteHost(name: "", address: "", user: NSUserName()))
+                        showingForm = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .help("Add a server")
+                    Button {
+                        if let id = selectedID {
+                            RemoteHostStore.shared.remove(id)
+                            selectedID = savedHosts.first?.id
+                        }
+                    } label: {
+                        Image(systemName: "minus")
+                    }
+                    .disabled(selectedID == nil)
+                    .help("Remove the selected server")
+                }
+                .frame(width: 70)
+                Button("Show this Mac's key") { showClientKey() }
+                Spacer()
+                Button("Cancel", action: onClose).keyboardShortcut(.cancelAction)
+                Button("Connect") {
+                    if let h = savedHosts.first(where: { $0.id == selectedID }) {
+                        model.connect(to: h)
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(selectedID == nil)
+            }
+        }
+    }
+
+    private func serverRow(_ h: RemoteHost) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "macmini.fill")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 16))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(h.name.isEmpty ? h.address : h.name).font(.callout)
+                Text(h.connectLabel).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if let last = h.lastConnected {
+                Text(last, format: .relative(presentation: .named))
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            model.connect(to: h)
+        })
+        .simultaneousGesture(TapGesture().onEnded {
+            selectedID = h.id
+        })
+        .contextMenu {
+            Button("Connect") { model.connect(to: h) }
+            Button("Edit…") {
+                model.prefill(h)
+                showingForm = true
+            }
+            Divider()
+            Button("Remove", role: .destructive) {
+                RemoteHostStore.shared.remove(h.id)
+                if selectedID == h.id { selectedID = nil }
+            }
+        }
+        .help("Connect to \(h.connectLabel)")
+    }
+
+    // MARK: Add/edit details form
+
+    private var form: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Mirror another Mac running Bromure — its grid, workspaces, tabs and automations — over SSH.")
+                .foregroundStyle(.secondary).font(.callout)
             field("Name", text: $model.name, placeholder: "e.g. rack mini")
             field("Address", text: $model.address, placeholder: "host or IP")
             HStack {
@@ -249,6 +370,9 @@ struct RemoteConnectView: View {
                 field("Remote user", text: $model.user, placeholder: NSUserName())
             }
             HStack {
+                if !savedHosts.isEmpty {
+                    Button("Back") { showingForm = false }
+                }
                 Button("Show this Mac's key") { showClientKey() }
                 Spacer()
                 Button("Cancel", action: onClose).keyboardShortcut(.cancelAction)
@@ -257,50 +381,6 @@ struct RemoteConnectView: View {
                     .disabled(model.address.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
-    }
-
-    /// Previously connected servers, most recent first — click to reconnect
-    /// without retyping anything (the saved TOFU pin skips the fingerprint sheet).
-    @ViewBuilder private var recents: some View {
-        let hosts = RemoteHostStore.shared.hosts.sorted {
-            ($0.lastConnected ?? .distantPast) > ($1.lastConnected ?? .distantPast)
-        }
-        if !hosts.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Recent Servers").font(.caption).foregroundStyle(.secondary)
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(hosts) { h in recentRow(h) }
-                    }
-                }
-                .frame(maxHeight: 136)
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-        }
-    }
-
-    private func recentRow(_ h: RemoteHost) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "macmini")
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(h.name.isEmpty ? h.address : h.name).font(.callout)
-                Text(h.connectLabel).font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            Image(systemName: "arrow.forward.circle").foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 8).padding(.vertical, 5)
-        .contentShape(Rectangle())
-        .onTapGesture { model.connect(to: h) }
-        .contextMenu {
-            Button("Fill In Details") { model.prefill(h) }
-            Button("Remove from Recents", role: .destructive) {
-                RemoteHostStore.shared.remove(h.id)
-            }
-        }
-        .help("Connect to \(h.connectLabel)")
     }
 
     private func working(_ msg: String) -> some View {

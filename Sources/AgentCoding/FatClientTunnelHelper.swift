@@ -24,25 +24,35 @@ enum FatClientTunnelInstaller {
         }
     }
 
-    /// True once the daemon is registered AND enabled (running). Attempts a
-    /// registration if it's never been done; otherwise reports the current state.
+    enum RegisterOutcome: Equatable {
+        case enabled
+        case requiresApproval
+        /// `register()` threw — nothing was added to Login Items, so waiting
+        /// for an approval would wait forever. Carries the OS error text.
+        case failed(String)
+    }
+
+    /// Registers the daemon if it's never been done; otherwise reports the
+    /// current state. A thrown `register()` is surfaced (not swallowed) —
+    /// callers must not send the user to Login Items in that case.
     @discardableResult
-    static func ensureRegistered() -> Bool {
+    static func ensureRegistered() -> RegisterOutcome {
         let svc = SMAppService.daemon(plistName: plistName)
         switch svc.status {
         case .enabled:
-            return true
+            return .enabled
         case .requiresApproval:
             FatClientLog.log("tunnel: daemon needs approval — System Settings › General › Login Items")
-            return false
+            return .requiresApproval
         default:
             do {
                 try svc.register()
                 FatClientLog.log("tunnel: daemon register requested (status=\(svc.status.rawValue))")
             } catch {
                 FatClientLog.log("tunnel: SMAppService register failed: \(error)")
+                return .failed(error.localizedDescription)
             }
-            return svc.status == .enabled
+            return svc.status == .enabled ? .enabled : .requiresApproval
         }
     }
 

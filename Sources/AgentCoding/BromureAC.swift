@@ -3525,6 +3525,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Fat-client mirror window: drop the retained window + stop its poller.
         if let rw = win as? RemoteHostWindow {
             remoteHostWindows[rw.controller.host.id] = nil
+            updateActivationPolicy()
             return
         }
         if win === remoteConnectWindow { remoteConnectWindow = nil; return }
@@ -6617,6 +6618,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         window.center()
         remoteHostWindows[host.id] = window
         window.delegate = self
+        updateActivationPolicy()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -6635,7 +6637,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let hc = NSHostingController(rootView: RemoteConnectView(model: model, onClose: { [weak self] in
             self?.remoteConnectWindow?.close()
             self?.remoteConnectWindow = nil
-        }))
+        }, startInForm: existing != nil))
         let win = NSWindow(contentViewController: hc)
         win.title = "Connect to Remote Bromure"
         win.styleMask = [.titled, .closable]
@@ -7986,7 +7988,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// at the window-show sites (`attachWindow`, the picker opener).
     @MainActor
     func updateActivationPolicy() {
+        // Fat-client mirror windows count as session UI: a pure fat client
+        // must keep its Dock icon / ⌘Tab presence like any local session.
         let hasSessionUI = (unifiedWindow?.isVisible == true) || !profileWindows.isEmpty
+            || !remoteHostWindows.isEmpty
         if !hasSessionUI && mainWindow == nil {
             NSApp.setActivationPolicy(.accessory)
         } else {

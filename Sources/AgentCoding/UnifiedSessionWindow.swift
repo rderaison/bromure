@@ -2652,7 +2652,8 @@ struct HeaderIcon: View {
     }
 }
 
-private struct FusionToggle: View {
+/// (internal — the fat-client remote window's toolbar reuses it.)
+struct FusionToggle: View {
     @Bindable var model: TabsModel
     let onToggle: (Bool) -> Void
     var body: some View {

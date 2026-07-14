@@ -38,11 +38,16 @@ integration and fleet handling remain.
   workspaces mount `VMDashboardView` (spec + Start/Resume), running ones the
   terminal; the stage follows state transitions live. (Previously an off VM
   mounted a terminal whose attach pump idled, leaving "Last login: …" on screen.)
-- **Window decorations.** The remote window has a titlebar toolbar (IP pill,
-  Files, Docker, Reboot, browser + file-pane toggles, tunnel toggle), the
-  file-explorer pane (⌃⌘E; git tree/diff over `/vms/{id}/exec`), and a per-VM
-  Files window whose drag-in/out transfer rides the new `POST /vms/{id}/file`
-  op bridge.
+- **Window decorations.** The remote window's titlebar toolbar matches the
+  local pill button-for-button (IP pill, Fusion ⚡, Files, Reboot, Settings,
+  pop-out, browser + file-pane toggles) plus the remote-only tunnel toggle;
+  the Docker dashboard opens from the sidebar, like local. Fusion rides
+  `POST /vms/{id}/fusion` (state mirrored via `/state`), Settings round-trips
+  the profile document (`GET /profiles/{id}?full=1` → secret-preserving `PUT`),
+  and pop-out opens an extra attach window onto the mirrored terminal. Also:
+  the file-explorer pane (⌃⌘E; git tree/diff over `/vms/{id}/exec`), and a
+  per-VM Files window whose drag-in/out transfer rides the `POST
+  /vms/{id}/file` op bridge.
 - **Docker dashboard is forwarded.** Container/image/binfmt state is mirrored
   into `RunningSession` and rides `/state`; the remote window mounts the same
   `DockerDashboardView`, actions go through `POST /vms/{id}/docker` (host-side

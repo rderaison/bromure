@@ -129,6 +129,34 @@ if [ ! -f "$PROVISION_PROFILE" ]; then
 fi
 cp "$PROVISION_PROFILE" "$CONTENTS/embedded.provisionprofile"
 
+# Fat-client privileged tunnel daemon (SMAppService, macOS 13+). Same plist
+# build.sh embeds: without it, SMAppService.daemon(plistName:).register()
+# throws and the network helper never appears in Login Items. Only meaningful
+# for the bromure-ac target; harmless elsewhere.
+LAUNCHD_DIR="$CONTENTS/Library/LaunchDaemons"
+mkdir -p "$LAUNCHD_DIR"
+cat > "$LAUNCHD_DIR/io.bromure.fatclient-tunnel.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.bromure.fatclient-tunnel</string>
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/$PRODUCT_NAME</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$PRODUCT_NAME</string>
+        <string>__tunnel-helper</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
 if [ -f "$ICON_FILE" ]; then
     cp "$ICON_FILE" "$RESOURCES_DIR/AppIcon.icns"
 fi

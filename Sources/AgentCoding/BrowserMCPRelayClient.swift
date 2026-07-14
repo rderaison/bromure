@@ -1,4 +1,5 @@
 import Foundation
+import os
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -16,7 +17,13 @@ final class BrowserMCPRelayClient {
     private let host: RemoteHost
     private let vm: String
     private let server: BrowserMCPServer
-    private var running = false
+    /// Set on the main actor, read from the pump thread — lock-protected
+    /// (MainActor.assumeIsolated off the main thread is a runtime trap).
+    private let runningState = OSAllocatedUnfairLock(initialState: false)
+    private var running: Bool {
+        get { runningState.withLock { $0 } }
+        set { runningState.withLock { $0 = newValue } }
+    }
     private var fd: Int32 = -1
 
     init(host: RemoteHost, vm: String,
@@ -51,9 +58,7 @@ final class BrowserMCPRelayClient {
     }
 
     private nonisolated func runningSnapshot() -> Bool {
-        // `running` is only mutated on the main actor; a stale read just costs
-        // one extra loop iteration, which the fd-close in stop() interrupts.
-        MainActor.assumeIsolated { running }
+        runningState.withLock { $0 }
     }
 
     /// Read JSON-RPC request lines from the channel, answer each via the local

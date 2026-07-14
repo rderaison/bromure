@@ -53,6 +53,9 @@ final class RemoteHostController {
     /// Shared-folder paths per running VM (feeds the remote file browser's
     /// location list — browsed via the guest, since the host dirs live on A).
     private(set) var mounts: [Profile.ID: [String]] = [:]
+    /// Last local Fusion toggle per workspace — suppresses the mirrored
+    /// `fusionEngaged` for a beat so a stale poll can't flap the ⚡ button.
+    private var fusionTouched: [Profile.ID: Date] = [:]
 
     private var pollTimer: Timer?
     private let pollQueue = DispatchQueue(label: "io.bromure.fatclient.poll")
@@ -257,6 +260,17 @@ final class RemoteHostController {
                 }
             }
             mounts[id] = vm["mounts"] as? [String] ?? []
+            // Fusion state for the toolbar's ⚡ toggle. Skip the engaged bit
+            // briefly after a local toggle so an in-flight (stale) poll can't
+            // flap the button before the POST lands on the remote.
+            let fusionConfigurable = vm["fusionConfigurable"] as? Bool ?? false
+            if model.fusionConfigurable != fusionConfigurable {
+                model.fusionConfigurable = fusionConfigurable
+            }
+            if Date().timeIntervalSince(fusionTouched[id] ?? .distantPast) > 3 {
+                let engaged = vm["fusionEngaged"] as? Bool ?? false
+                if model.fusionEngaged != engaged { model.fusionEngaged = engaged }
+            }
             applyRemotePorts(model, vm)
             applyRemoteDocker(model, vm)
             applyRemoteTabs(model, (vm["tabs"] as? [[String: Any]]) ?? [])
@@ -518,9 +532,28 @@ final class RemoteHostController {
         case .enabled:
             startTunnel(cidr: cidr)
         case .notRegistered, .requiresApproval:
-            FatClientTunnelInstaller.ensureRegistered()   // register is idempotent
-            guideThroughApproval(interactive: interactive, cidr: cidr)
+            switch FatClientTunnelInstaller.ensureRegistered() {   // register is idempotent
+            case .enabled:
+                startTunnel(cidr: cidr)
+            case .requiresApproval:
+                guideThroughApproval(interactive: interactive, cidr: cidr)
+            case .failed(let why):
+                // register() threw — no Login Items entry exists, so don't
+                // send the user there to approve nothing. Click retries.
+                tunnelState = "failed"
+                if interactive { presentRegistrationFailure(why) }
+            }
         }
+    }
+
+    private func presentRegistrationFailure(_ why: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("Couldn't install the network helper", comment: "")
+        alert.informativeText = String(format: NSLocalizedString(
+            "macOS refused to register Bromure's privileged network helper:\n\n%@\n\nA privileged helper can only be installed and approved from an administrator account. Bromure keeps working over its built-in per-app tunnel — this helper is only needed to reach the remote's VMs from other apps.",
+            comment: ""), why)
+        alert.runModal()
     }
 
     private func guideThroughApproval(interactive: Bool, cidr: String) {
@@ -533,7 +566,7 @@ final class RemoteHostController {
             let alert = NSAlert()
             alert.messageText = NSLocalizedString("Allow Bromure's network helper", comment: "")
             alert.informativeText = NSLocalizedString(
-                "Direct network access to the remote's VMs uses a privileged helper.\n\nmacOS asks you to approve it once: System Settings → General → Login Items, then allow “Bromure Agentic Coding”. The tunnel connects automatically as soon as it's approved — nothing else to do.",
+                "Direct network access to the remote's VMs uses a privileged helper.\n\nmacOS asks you to approve it once: System Settings → General → Login Items, then allow “Bromure Agentic Coding” (macOS asks for an administrator's credentials). The tunnel connects automatically as soon as it's approved — nothing else to do.",
                 comment: "")
             alert.addButton(withTitle: NSLocalizedString("Open Login Items", comment: ""))
             alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
@@ -574,6 +607,46 @@ final class RemoteHostController {
             tunnelState = "failed"
             FatClientLog.log("tunnel: start failed (helper unreachable?)")
         }
+    }
+
+    /// Fusion toggle for the toolbar's ⚡ — rides the same control verb the
+    /// CLI's `vm fusion` uses. The mirrored `fusionEngaged` confirms on poll.
+    func setFusion(_ id: Profile.ID, engaged: Bool) {
+        fusionTouched[id] = Date()
+        send("POST", "/vms/\(seg(id))/fusion", body: ["engaged": engaged])
+    }
+
+    /// Full profile document for the settings editor (secrets blanked
+    /// server-side; blank fields keep their stored value on save).
+    func fetchProfileDoc(_ id: Profile.ID) async throws -> [String: Any] {
+        let host = self.host
+        let path = "/profiles/\(seg(id))?full=1"
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("GET", path)
+        }.value
+        guard resp.status == 200 else {
+            throw ACAppDelegate.GuestExecError.commandFailed(
+                exitCode: 1, stderr: (resp.json["error"] as? String) ?? "profile fetch failed")
+        }
+        return resp.json
+    }
+
+    /// Secret-preserving whole-document save (the counterpart of
+    /// `fetchProfileDoc`). Returns the response body (e.g. `sshPublicKey`
+    /// when the doc asked for a generated key).
+    @discardableResult
+    func saveProfileDoc(_ id: Profile.ID, _ doc: [String: Any]) async throws -> [String: Any] {
+        let host = self.host
+        let path = "/profiles/\(seg(id))"
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("PUT", path, body: doc)
+        }.value
+        guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
+            throw ACAppDelegate.GuestExecError.commandFailed(
+                exitCode: 1, stderr: (resp.json["error"] as? String) ?? "save failed (HTTP \(resp.status))")
+        }
+        DispatchQueue.main.async { [weak self] in self?.pollOnce() }
+        return resp.json
     }
 
     // Docker dashboard actions — validated + executed on the remote host via
@@ -691,15 +764,18 @@ struct RemoteConnectionStatusView: View {
 // MARK: - Remote window toolbar (per-selected-VM controls + IP)
 
 /// The remote window's trailing toolbar cluster — the fat-client counterpart
-/// of `UnifiedToolbarBar`, restricted to controls that make sense for a
-/// mirrored VM (IP pill, files, docker, reboot, browser + file-pane toggles;
-/// trace/settings/pop-out stay host-side).
+/// of `UnifiedToolbarBar`, same buttons in the same order (Fusion, files,
+/// reboot, settings, pop-out, browser + file-pane toggles) so a mirrored VM
+/// looks and drives exactly like a local one, plus the remote-only network
+/// tunnel toggle. The Docker dashboard opens from the sidebar, like local.
 struct RemoteToolbarBar: View {
     @Bindable var model: SessionListModel
     let controller: RemoteHostController
     let onFiles: (Profile.ID) -> Void
-    let onDocker: (Profile.ID) -> Void
     let onReboot: (Profile.ID) -> Void
+    let onSettings: (Profile.ID) -> Void
+    let onDetach: (Profile.ID) -> Void
+    let onToggleFusion: (Profile.ID, Bool) -> Void
     let onToggleBrowser: () -> Void
     let onToggleFilePane: () -> Void
     let onToggleTunnel: () -> Void
@@ -721,14 +797,19 @@ struct RemoteToolbarBar: View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
             HeaderIcon(system: controller.tunnelState == "waiting-approval"
-                           ? "network.badge.shield.half.filled" : "network",
+                           ? "network.badge.shield.half.filled"
+                           : (controller.tunnelState == "active"
+                              ? "point.3.filled.connected.trianglepath.dotted"
+                              : "point.3.connected.trianglepath.dotted"),
                        help: tunnelHelp,
                        active: controller.tunnelState == "active") { onToggleTunnel() }
             if let entry {
                 if let ip = entry.model.ipAddress { ToolbarIP(ip: ip) }
+                FusionToggle(model: entry.model) { on in onToggleFusion(entry.id, on) }
                 HeaderIcon(system: "folder", help: "Browse files") { onFiles(entry.id) }
-                HeaderIcon(system: "shippingbox", help: "Docker dashboard") { onDocker(entry.id) }
                 HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
+                HeaderIcon(system: "gearshape", help: "Edit workspace") { onSettings(entry.id) }
+                HeaderIcon(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") { onDetach(entry.id) }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserPaneOpen) { onToggleBrowser() }
                 HeaderIcon(system: "sidebar.right", help: "Show or hide repo files (⌃⌘E)",
@@ -808,6 +889,13 @@ final class RemoteHostWindow: NSWindow {
     private var filePaneWidthConstraint: NSLayoutConstraint!
     private var filePaneOpen = false
     private var fileBrowserWindows: [Profile.ID: NSWindow] = [:]
+    /// Per-workspace settings editors (the pill's gearshape) — same
+    /// `ProfileEditorView` as local, saving over the tunnel.
+    private var settingsWindows: [Profile.ID: NSWindow] = [:]
+    /// Popped-out workspace windows (the pill's pop-out) — an extra live view
+    /// of the mirrored terminal; each owns its own attach controller.
+    private var popOutWindows: [Profile.ID: NSWindow] = [:]
+    private var popOutControllers: [Profile.ID: TerminalSessionController] = [:]
 
     // Browser pane (fat-client): a local Chromium VM per remote workspace whose
     // page traffic is tunneled to the remote subnet via the SOCKS forwarder.
@@ -827,6 +915,10 @@ final class RemoteHostWindow: NSWindow {
     /// its remote terminal in the stage without needing a curated grid).
     private let autoSelectName = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_SELECT"]
     private var didAutoSelect = false
+    /// Test hook: comma-separated pill actions ("settings", "popout", "files")
+    /// fired 2s after the auto-selected workspace mounts — drives the toolbar
+    /// headlessly for E2E.
+    private let autoActions = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_ACTION"]
 
     init(controller: RemoteHostController) {
         self.controller = controller
@@ -852,6 +944,11 @@ final class RemoteHostWindow: NSWindow {
         clearDockerDashboard()
         for (_, w) in fileBrowserWindows { w.close() }
         fileBrowserWindows.removeAll()
+        for (_, w) in settingsWindows { w.close() }
+        settingsWindows.removeAll()
+        for id in Array(popOutWindows.keys) {
+            popOutWindows[id]?.close()   // willClose → reapPopOut retires the controller
+        }
         controller.stop()
         gridView?.retireAll()
         for (_, c) in termControllers { c.retireAll() }
@@ -947,8 +1044,10 @@ final class RemoteHostWindow: NSWindow {
             model: controller.listModel,
             controller: controller,
             onFiles: { [weak self] id in self?.openFileBrowser(id) },
-            onDocker: { [weak self] id in self?.showDockerDashboard(id) },
             onReboot: { [weak self] id in self?.confirmReboot(id) },
+            onSettings: { [weak self] id in self?.openWorkspaceSettings(id) },
+            onDetach: { [weak self] id in self?.popOutWorkspace(id) },
+            onToggleFusion: { [weak self] id, on in self?.controller.setFusion(id, engaged: on) },
             onToggleBrowser: { [weak self] in self?.toggleBrowser(for: nil) },
             onToggleFilePane: { [weak self] in self?.toggleFilePane() },
             onToggleTunnel: { [weak self] in
@@ -1049,6 +1148,145 @@ final class RemoteHostWindow: NSWindow {
         default:
             break
         }
+    }
+
+    // MARK: Workspace settings (the pill's gearshape, mirroring local)
+
+    /// The same `ProfileEditorView` the local window opens, backed by the
+    /// remote document round-trip: GET `/profiles/{id}?full=1` (secrets
+    /// blanked) → edit → secret-preserving PUT. Host-side-only affordances
+    /// (SSH-key import, subscription registration) stay hidden — their
+    /// callbacks are nil, exactly like a freshly-created local profile.
+    private func openWorkspaceSettings(_ id: Profile.ID) {
+        if let win = settingsWindows[id] { win.makeKeyAndOrderFront(nil); return }
+        let c = controller
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let profile: Profile
+            do {
+                let doc = try await c.fetchProfileDoc(id)
+                let data = try JSONSerialization.data(withJSONObject: doc)
+                let dec = JSONDecoder()
+                dec.dateDecodingStrategy = .iso8601
+                profile = try dec.decode(Profile.self, from: data)
+            } catch {
+                Self.presentRemoteError(
+                    NSLocalizedString("Couldn't load the workspace settings", comment: ""), error)
+                return
+            }
+            if let win = self.settingsWindows[id] { win.makeKeyAndOrderFront(nil); return }
+            let win = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
+                styleMask: [.titled, .closable],
+                backing: .buffered, defer: false)
+            win.title = String(
+                format: NSLocalizedString("Edit workspace — %@", comment: "remote settings title"),
+                c.host.name)
+            win.center()
+            win.isReleasedWhenClosed = false
+            win.contentView = NSHostingView(rootView: ProfileEditorView(
+                profile: profile,
+                isNew: false,
+                terminalDefaults: TerminalAppDefaults.load(),
+                storageContext: nil,
+                onSave: { [weak self] edited, generateSSH in
+                    self?.saveWorkspaceSettings(id, edited, generateSSH: generateSSH)
+                },
+                onCancel: { [weak self] in self?.closeSettingsWindow(id) }))
+            win.makeKeyAndOrderFront(nil)
+            self.settingsWindows[id] = win
+        }
+    }
+
+    private func saveWorkspaceSettings(_ id: Profile.ID, _ edited: Profile, generateSSH: Bool) {
+        guard var doc = ACAppDelegate.codableToDict(edited) else { return }
+        if generateSSH { doc["generateSSH"] = true }
+        let c = controller
+        Task { @MainActor [weak self] in
+            do {
+                let resp = try await c.saveProfileDoc(id, doc)
+                self?.closeSettingsWindow(id)
+                if generateSSH, let pub = resp["sshPublicKey"] as? String, !pub.isEmpty {
+                    let a = NSAlert()
+                    a.messageText = NSLocalizedString("New SSH key generated", comment: "")
+                    a.informativeText = String(format: NSLocalizedString(
+                        "Add this public key to your Git host:\n\n%@", comment: ""), pub)
+                    a.runModal()
+                }
+            } catch {
+                Self.presentRemoteError(
+                    NSLocalizedString("Couldn't save the workspace", comment: ""), error)
+            }
+        }
+    }
+
+    private func closeSettingsWindow(_ id: Profile.ID) {
+        settingsWindows[id]?.close()
+        settingsWindows[id] = nil
+    }
+
+    private static func presentRemoteError(_ title: String, _ error: Error) {
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = title
+        if case ACAppDelegate.GuestExecError.commandFailed(_, let stderr) = error {
+            a.informativeText = stderr
+        } else {
+            a.informativeText = error.localizedDescription
+        }
+        a.runModal()
+    }
+
+    // MARK: Pop-out workspace window (the pill's pop-out, mirroring local)
+
+    /// An extra window onto the mirrored workspace's terminal — the remote
+    /// analog of the local pill's pop-out. The mirror window keeps its 1:1
+    /// sidebar; the pop-out is just another live attach, torn down when its
+    /// window closes or the workspace stops running.
+    private func popOutWorkspace(_ id: Profile.ID) {
+        if let win = popOutWindows[id] { win.makeKeyAndOrderFront(nil); return }
+        guard let profile = controller.profile(for: id) else { return }
+        switch controller.runState(for: id) {
+        case .running, .booting: break
+        case .off, .suspended: return   // pill only shows for running VMs
+        }
+        let ctl = TerminalSessionController(profile: profile, remoteHost: controller.host.id)
+        let idx = controller.tabsModel(for: id)?.activeTab?.index ?? 0
+        guard let view = ctl.view(forWindow: idx) else { return }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 940, height: 640),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false)
+        win.title = "\(profile.name) — \(controller.host.name)"
+        win.center()
+        win.isReleasedWhenClosed = false
+        let content = NSView()
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor.black.cgColor
+        view.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            view.topAnchor.constraint(equalTo: content.topAnchor),
+            view.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
+        win.contentView = content
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: win, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.reapPopOut(id) }
+        }
+        win.makeKeyAndOrderFront(nil)
+        popOutWindows[id] = win
+        popOutControllers[id] = ctl
+    }
+
+    /// Tear down a pop-out's attach controller once its window is gone.
+    private func reapPopOut(_ id: Profile.ID) {
+        popOutWindows[id] = nil
+        popOutControllers[id]?.retireAll()
+        popOutControllers[id] = nil
     }
 
     // MARK: Browser pane
@@ -1363,6 +1601,21 @@ final class RemoteHostWindow: NSWindow {
             didAutoSelect = true
             FatClientLog.log("auto-selecting running workspace \(name)")
             showWorkspace(row.id)
+            if let actions = autoActions {
+                let id = row.id
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                    guard let self else { return }
+                    for action in actions.split(separator: ",") {
+                        FatClientLog.log("auto-action: \(action)")
+                        switch action {
+                        case "settings": self.openWorkspaceSettings(id)
+                        case "popout":   self.popOutWorkspace(id)
+                        case "files":    self.openFileBrowser(id)
+                        default: break
+                        }
+                    }
+                }
+            }
         }
         if let id = shownWorkspace, shownWindowIndex == nil {
             let idx = controller.tabsModel(for: id)?.activeTab?.index ?? 0
@@ -1376,6 +1629,14 @@ final class RemoteHostWindow: NSWindow {
         } else if let id = shownWorkspace {
             switch controller.runState(for: id) {
             case .off, .suspended: showWorkspace(id)
+            default: break
+            }
+        }
+        // Pop-outs have no dashboard fallback — close them when their
+        // workspace stops (their attach pump would idle on a dead VM).
+        for id in Array(popOutWindows.keys) {
+            switch controller.runState(for: id) {
+            case .off, .suspended: popOutWindows[id]?.close()
             default: break
             }
         }

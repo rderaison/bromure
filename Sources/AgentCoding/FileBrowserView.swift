@@ -437,9 +437,14 @@ final class FileBrowserModel {
             return NSItemProvider(contentsOf: url) ?? NSItemProvider()
         }
         let provider = NSItemProvider()
-        provider.suggestedName = entry.name
         let ext = (entry.name as NSString).pathExtension
         let type = UTType(filenameExtension: ext) ?? .data
+        // The receiver names the dropped file suggestedName + the registered
+        // type's preferred extension, so hand it an extension-less base —
+        // "index.html" would otherwise land as "index.html.html".
+        provider.suggestedName = type.preferredFilenameExtension != nil
+            ? (entry.name as NSString).deletingPathExtension
+            : entry.name
         provider.registerFileRepresentation(
             forTypeIdentifier: type.identifier,
             fileOptions: [], visibility: .all
