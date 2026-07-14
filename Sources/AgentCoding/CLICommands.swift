@@ -56,10 +56,7 @@ struct ControlClient {
         head += "Content-Length: \(bodyData.count)\r\n"
         head += "Connection: close\r\n\r\n"
         var out = Data(head.utf8); out.append(bodyData)
-        _ = out.withUnsafeBytes { ptr -> Int in
-            guard let base = ptr.baseAddress else { return 0 }
-            return Darwin.write(fd, base, out.count)
-        }
+        Self.writeAll(fd, out)
 
         var resp = Data()
         var buf = [UInt8](repeating: 0, count: 65536)
@@ -81,6 +78,30 @@ struct ControlClient {
         return Response(status: status, json: json)
     }
 
+    /// Write the whole buffer, looping over short writes. A single
+    /// `Darwin.write` returns as few as one byte when the socket's send buffer
+    /// fills — which it does for a multi-megabyte body (a base64 image/file
+    /// upload) over the ssh-tunnel socketpair. Ignoring the count silently
+    /// truncated the request body, so large uploads never reached the remote
+    /// guest while small control calls and all downloads (tiny requests) worked.
+    private static func writeAll(_ fd: Int32, _ data: Data) {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard var base = raw.baseAddress else { return }
+            var remaining = raw.count
+            while remaining > 0 {
+                let n = Darwin.write(fd, base, remaining)
+                if n > 0 {
+                    base = base.advanced(by: n)
+                    remaining -= n
+                } else if n < 0 && errno == EINTR {
+                    continue          // interrupted before any byte moved — retry
+                } else {
+                    break             // hard error or peer gone; response read reports it
+                }
+            }
+        }
+    }
+
     /// Open a streaming connection: send the request, consume the response
     /// header, and hand back the raw fd for bidirectional streaming. The caller
     /// owns the fd and must close it. Throws on non-200.
@@ -90,7 +111,7 @@ struct ControlClient {
         var head = "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\n"
         head += "Content-Type: application/json\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n"
         var out = Data(head.utf8); out.append(bodyData)
-        _ = out.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, out.count) }
+        Self.writeAll(fd, out)
 
         // Read exactly up to the end of the response header (\r\n\r\n) one byte
         // at a time, so we don't swallow any stream bytes that follow it.

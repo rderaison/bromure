@@ -296,9 +296,12 @@ final class ACAutomationServer {
                 let bodyStart = raw.distance(from: raw.startIndex, to: headerEnd.upperBound)
                 // Grow the buffer to fit the full declared body — a `POST
                 // /profiles` carrying large inline secrets (PEMs, kubeconfigs)
-                // can exceed the initial 64 KB. Cap at a sane ceiling so a
-                // bogus Content-Length can't exhaust memory.
-                let needed = min(bodyStart + max(0, clValue), 8 * 1024 * 1024)
+                // can exceed the initial 64 KB, and a file/image upload posts a
+                // 6 MB raw chunk that base64-encodes to 8 MB (plus JSON) via
+                // POST /vms/{id}/file. Cap at a sane ceiling so a bogus
+                // Content-Length can't exhaust memory, but leave headroom above
+                // an 8 MB chunk or those uploads truncate and fail to parse.
+                let needed = min(bodyStart + max(0, clValue), 16 * 1024 * 1024)
                 if needed > buf.count {
                     buf.append(contentsOf: [UInt8](repeating: 0, count: needed - buf.count))
                 }
