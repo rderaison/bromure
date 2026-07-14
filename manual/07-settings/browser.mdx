@@ -9,7 +9,7 @@ order: 7.14
 Every workspace ships with an embedded Chromium browser that its agents can drive — navigate, click, type, take screenshots, read the console and network log — through the built-in `browser` MCP server. The browser runs in **its own disposable VM**, separate from the workspace's Ubuntu VM, so a page an agent opens can never touch the agent's own environment. The **Browser** pane controls two things: whether that browser remembers your sign-ins between sessions, and how the shared browser image is downloaded to your Mac.
 
 <p align="center">
-  <img src="../images/editor-browser.en.jpg" width="600" alt="The Browser pane of the Edit workspace window, showing the Stay signed in to websites toggle (off) and a Browser image section marked Not installed with a Download Now button" />
+  <img src="../images/editor-browser.en.jpg" width="600" alt="The Browser pane of the Edit workspace window, showing the Stay signed in to websites toggle (off); a Permissions section with Allow file uploads and Allow file downloads on and Allow camera and Allow microphone off; and a Browser image section marked Installed with a Re-download button" />
 </p>
 
 The pane opens with the same summary the app shows above the controls: this workspace has an embedded Chromium browser its agents can drive through the built-in `browser` MCP server, and it runs in its own disposable VM. The pane sets policy only — you drive the browser itself from the agentic browser pane in the session window (⌃⌘B), and the agent drives it through the MCP tools. Both are covered in [Sessions](../06-sessions.mdx), and the full list of `browser_*` tools is in [Automation & the CLI](../16-automation-cli.mdx).
