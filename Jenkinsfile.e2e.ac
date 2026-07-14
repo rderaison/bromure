@@ -361,6 +361,23 @@ pipeline {
                 }
             }
         }
+
+        stage('25. Rich client (self-mirror)') {
+            // Turns on the app's embedded swift-nio-ssh front door on
+            // 127.0.0.1:2222 and mirrors this instance to ITSELF over the
+            // tunnel, then drives the whole rich-client control plane via
+            // POST /debug/fatclient (connect + snapshot parity, dashboard,
+            // terminal mount, create/edit workspace on the server, automation
+            // create+delete, browser collapse). No system sshd / OS keypair /
+            // authorized_keys needed — the app is its own SSH server. Needs the
+            // base image from the Init stage; self-skips (SKIP) without one, and
+            // disables remote access again in its own teardown.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^25\\."'
+                }
+            }
+        }
     }
 
     post {

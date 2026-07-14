@@ -1662,6 +1662,12 @@ final class RemoteHostWindow: NSWindow {
             }
             controller.upsertAutomation(auto)
             return ["ok": true, "id": auto.id.uuidString]
+        case "delete-automation":
+            guard let key = p["id"] as? String, let aid = UUID(uuidString: key) else {
+                return ["error": "automation id required"]
+            }
+            controller.deleteAutomation(aid)
+            return ["ok": true]
         case "toggle-browser":
             guard let id = resolveID() else { return ["error": "workspace not found"] }
             let open = p["open"] as? Bool ?? !browserOpen.contains(id)

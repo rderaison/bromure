@@ -22,7 +22,8 @@
  */
 
 import { execSync, execFileSync, spawn } from "child_process";
-import { readFileSync, existsSync, openSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync } from "fs";
+import os from "os";
 
 const APP_NAME = "Bromure Agentic Coding";
 const API = process.env.BROMURE_AC_API_URL || "http://127.0.0.1:9223";
@@ -2304,6 +2305,220 @@ async function main() {
     }
   } else {
     console.log("\n--- 24. Worktrees (VM-side) --- (skipped via --no-sessions)");
+  }
+
+  // ======================================================================
+  // 25. Rich client (fat client) — self-mirror over the embedded SSH server
+  //
+  // The app runs its OWN swift-nio-ssh front door (RemoteAccessServer), so one
+  // instance can mirror ITSELF: enable the SSH server on 127.0.0.1:2222, point
+  // a RemoteHost record back at localhost, and drive the resulting mirror
+  // window through POST /debug/fatclient → RemoteHostController.debugPerform.
+  // That exercises the whole rich-client control plane — connect + snapshot
+  // parity, dashboard-on-name, terminal mount, create/edit a workspace ON THE
+  // SERVER, automation create+delete, and the browser-pane collapse — with
+  // client and server on the same host. `remote enable` is refused without a
+  // base image (same invariant as launch), so the section self-skips then,
+  // like 8/24. Teardown always disables remote access and drops the host
+  // record so a persistent CI agent — and section 19's "disabled by default"
+  // — start clean on the next run.
+  // ======================================================================
+  {
+    console.log("\n--- 25. Rich client (self-mirror) ---");
+
+    const SUP = `${os.homedir()}/Library/Application Support/BromureAC`;
+    const KDIR = `${SUP}/remote-client`;
+    const HOST_ADDR = "127.0.0.1";
+    const HOST_PORT = 2222;
+    const HOST_USER = os.userInfo().username;
+
+    await test("25.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", async () => {
+      const h = await api("GET", "/health");
+      assertEq(h.status, "ok");
+      assert(h.debugEnabled === true,
+             "app is running without BROMURE_DEBUG_CLAUDE=1 — quit it and rerun; the harness relaunches it with the flag");
+    });
+
+    // Bring-up: turn on the embedded SSH server (pubkey-only, loopback). It's
+    // refused while there's no base image — skip the whole section then.
+    const enableOut = cli(
+      ["remote", "enable", "--bind", HOST_ADDR, "--port", String(HOST_PORT), "--pubkey", "--no-password"],
+      { allowFail: true });
+    const noImage = /base image|no image/i.test(enableOut);
+
+    if (noImage) {
+      console.log("  \x1b[33mSKIP\x1b[0m  Rich-client tests (no base image — run `bromure-ac init` first)");
+    } else {
+      let broughtUp = true;
+      try {
+        // Client keypair at the exact path RemoteTransport.ensureClientKey reads.
+        if (!existsSync(`${KDIR}/id_ed25519`)) {
+          mkdirSync(KDIR, { recursive: true, mode: 0o700 });
+          execFileSync("ssh-keygen", ["-t", "ed25519", "-N", "", "-q", "-f", `${KDIR}/id_ed25519`]);
+        }
+        // Enroll it on THIS instance's SSH server (remote/authorized_keys).
+        cli(["remote", "key", "add", `${KDIR}/id_ed25519.pub`], { allowFail: true });
+        // A self-mirror host record pointing back at localhost.
+        writeFileSync(`${KDIR}/hosts.json`, JSON.stringify([{
+          id: "11111111-1111-1111-1111-111111111111",
+          name: "ACE2E_Self", address: HOST_ADDR, port: HOST_PORT, user: HOST_USER,
+        }]));
+      } catch (e) {
+        broughtUp = false;
+        console.log(`  \x1b[33mSKIP\x1b[0m  Rich-client tests (bring-up failed: ${e.message})`);
+      }
+
+      if (broughtUp) {
+        // POST /debug/fatclient {host, action, …} → the mirror's debugPerform.
+        const fc = (action, extra = {}) =>
+          api("POST", "/debug/fatclient", { host: HOST_ADDR, action, ...extra });
+
+        // One connected mirror is shared below; always tear the server down.
+        try {
+          let connState = null;
+
+          await test("25.1 self-mirror connects; its snapshot mirrors the server", async () => {
+            for (let i = 0; i < 45; i++) {
+              connState = await fc("get-mirror-state");
+              if (connState && connState.connected === true) break;
+              await sleep(1000);
+            }
+            assert(connState && connState.connected === true,
+                   `self-mirror never connected: ${JSON.stringify(connState).slice(0, 200)}`);
+            assert(Array.isArray(connState.workspaces), "mirror snapshot missing workspaces[]");
+            // The mirror polls the server on a timer, so allow a few ticks for
+            // its workspace set to converge on the server's own profile list.
+            const local = acJSON("list profiles").map((p) => p.id.toUpperCase()).sort();
+            let mirrored = [];
+            for (let i = 0; i < 10; i++) {
+              const s = await fc("get-mirror-state");
+              mirrored = (s.workspaces || []).map((w) => String(w.id).toUpperCase()).sort();
+              if (JSON.stringify(mirrored) === JSON.stringify(local)) break;
+              await sleep(500);
+            }
+            assertEq(JSON.stringify(mirrored), JSON.stringify(local),
+                     "mirror workspace list never converged on the server's own profile list");
+          });
+
+          // The remaining tests need the connection; without it they'd all
+          // cascade-fail with the same root cause 25.1 already reports.
+          if (!(connState && connState.connected === true)) {
+            console.log("  \x1b[33mSKIP\x1b[0m  25.2–25.8 (mirror never connected — see 25.1)");
+          } else {
+            const wsID = createProfile("ACE2E_RC_WS");
+            try {
+              await test("25.2 a server-side workspace surfaces in the mirror feed", async () => {
+                let seen = false;
+                for (let i = 0; i < 20; i++) {
+                  const s = await fc("get-mirror-state");
+                  if ((s.workspaces || []).some((w) => String(w.id).toUpperCase() === wsID.toUpperCase())) { seen = true; break; }
+                  await sleep(500);
+                }
+                assert(seen, "a workspace created on the server never appeared in the mirror snapshot");
+              });
+
+              await test("25.3 selecting a workspace name shows its dashboard (not a terminal)", async () => {
+                const r = await fc("select", { workspace: wsID });
+                assert(r.ok === true, `select failed: ${JSON.stringify(r)}`);
+                assertEq(String(r.selectedID || "").toUpperCase(), wsID.toUpperCase(), "select didn't update selectedID");
+                assert(r.dashboardShown === true, "dashboard not shown on workspace-name select");
+              });
+
+              await test("25.4 mount-terminal shows the workspace's terminal", async () => {
+                const r = await fc("mount-terminal", { workspace: wsID, window: 0 });
+                assert(r.ok === true, `mount-terminal failed: ${JSON.stringify(r)}`);
+                assertEq(String(r.shownWorkspace || "").toUpperCase(), wsID.toUpperCase(),
+                         "mount-terminal didn't set shownWorkspace");
+              });
+
+              await test("25.5 create-workspace goes through to the server", async () => {
+                const NAME = "ACE2E_RC_Created";
+                deleteProfile(NAME);   // clear any stale copy from a prior run
+                const r = await fc("create-workspace", { doc: { name: NAME, color: "#33aa77" } });
+                assert(r.ok === true, `create-workspace not acked: ${JSON.stringify(r)}`);
+                let created = null;
+                for (let i = 0; i < 20; i++) {
+                  created = acJSON("list profiles").find((p) => p.name === NAME);
+                  if (created) break;
+                  await sleep(500);
+                }
+                assert(created, "create-workspace never created the profile on the server");
+                deleteProfile(created.id);
+              });
+
+              await test("25.6 edit-workspace persists the rename to the server", async () => {
+                const NEW = "ACE2E_RC_WS_Renamed";
+                const r = await fc("edit-workspace", { workspace: wsID, doc: { ...getProfileJSON(wsID), name: NEW } });
+                assert(r.ok === true, `edit-workspace not acked: ${JSON.stringify(r)}`);
+                let renamed = false;
+                for (let i = 0; i < 20; i++) {
+                  if (getProfileJSON(wsID).name === NEW) { renamed = true; break; }
+                  await sleep(500);
+                }
+                assert(renamed, "edit-workspace never persisted the rename to the server");
+              });
+
+              await test("25.7 automation create + delete round-trips through the mirror", async () => {
+                const AID = "22222222-2222-2222-2222-222222222222";
+                // Full ScheduledAutomation (synthesized decoder → every
+                // non-optional field required; `filters:{}` is lenient).
+                const auto = {
+                  id: AID, name: "ACE2E_RC_Auto", profileID: wsID, enabled: false,
+                  trigger: "schedule", githubRepo: "", assignmentFilter: "unassigned",
+                  linearTeam: "", ignoreBacklog: true, filters: {},
+                  frequency: "weekdays", weekday: 2, hour: 9, minute: 0,
+                  intervalMinutes: 60, missedRunPolicy: "skip", tool: "claude",
+                  prompt: "echo hi", repoPath: "~", closeWhenDone: true,
+                  startWorkspaceIfNeeded: true, cloneWorkspaceFirst: false,
+                  createdAt: "2026-01-01T00:00:00Z",
+                };
+                const r = await fc("new-automation", { automation: auto });
+                assert(r.ok === true, `new-automation rejected (schema drift?): ${JSON.stringify(r)}`);
+                let present = false;
+                for (let i = 0; i < 20; i++) {
+                  const s = await fc("get-mirror-state");
+                  if ((s.automations || []).some((a) => String(a.id).toUpperCase() === AID.toUpperCase())) { present = true; break; }
+                  await sleep(500);
+                }
+                assert(present, "new automation never surfaced in the mirror snapshot");
+
+                // Delete it through the mirror; it must vanish server-side.
+                await fc("delete-automation", { id: AID });
+                let gone = false;
+                for (let i = 0; i < 20; i++) {
+                  const s = await fc("get-mirror-state");
+                  if (!(s.automations || []).some((a) => String(a.id).toUpperCase() === AID.toUpperCase())) { gone = true; break; }
+                  await sleep(500);
+                }
+                assert(gone, "automation still present after delete-through-mirror");
+              });
+
+              await test("25.8 browser pane fully collapses on a second toggle", async () => {
+                // Opening the browser needs the workspace's SOCKS tunnel (a
+                // running VM + vmnet subnet). If it isn't ready the open is a
+                // no-op (width stays 0) — soft-skip the collapse assertion so
+                // the suite still runs on a box with no booted workspace.
+                const open = await fc("toggle-browser", { workspace: wsID, open: true });
+                assert(open.ok === true, `toggle-browser open failed: ${JSON.stringify(open)}`);
+                if (!(open.browserWidth > 0)) {
+                  console.log("  \x1b[33mSKIP\x1b[0m  25.8 collapse assertion (browser tunnel not ready — no running workspace)");
+                  await fc("toggle-browser", { workspace: wsID, open: false });
+                  return;
+                }
+                const closed = await fc("toggle-browser", { workspace: wsID, open: false });
+                assert(closed.ok === true, `toggle-browser close failed: ${JSON.stringify(closed)}`);
+                assertEq(closed.browserWidth, 0, "browser pane did not collapse to width 0 on re-toggle");
+              });
+            } finally {
+              deleteProfile(wsID);
+            }
+          }
+        } finally {
+          cli(["remote", "disable"], { allowFail: true });
+          try { writeFileSync(`${KDIR}/hosts.json`, "[]"); } catch {}
+        }
+      }
+    }
   }
 
   // ======================================================================
