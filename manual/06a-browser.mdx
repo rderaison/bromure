@@ -62,6 +62,17 @@ account, and tell me if the confirmation page renders. Screenshot it.
 
 The agent's tool calls can boot and reveal the browser automatically for the selected workspace; if the pane was closed, a tool call opens it and waits for the cold boot. (The pane never *re-opens itself* after you have closed it manually within a session, so you always stay in control of whether it is visible.)
 
+### Prompts that trigger the browser
+
+There is no "use the browser" command — the agent reaches for the `browser_*` tools whenever your request can only be answered by loading, seeing, or acting on a real page. In practice, anything that names a URL, asks the agent to *look at* or *click* something rendered, or asks for a screenshot, a console log, or network activity will pull the browser in. A few shapes that reliably do:
+
+- **See something you built** — "Open my dev server at `http://<workspace-ip>:3000` and tell me whether the dashboard renders." / "Take a full-width screenshot of the landing page." / "I changed the header to blue — reload the page and confirm it looks right."
+- **Reproduce or test a flow** — "Go to the sign-up page, fill it with a test account, submit, and tell me if the confirmation screen appears." / "Click through checkout and stop at the first step that errors."
+- **Read or extract from a page** — "Open `<docs URL>` and summarize the authentication section." / "List every outbound link on this page." / "Grab the pricing table as Markdown."
+- **Debug a client-side problem** — "The Buy button does nothing — open the page, click it, and check the console and network log for the failing request." (The agent uses `browser_console` and `browser_network` to read exactly what you would see in DevTools, without you copying anything out.)
+
+The more concretely you point at a page or an on-screen action, the more directly the agent goes to the browser. If you only *describe* a result ("does signup work?"), the agent will usually still open the browser to check — but naming the URL or the button removes a round trip. Remember to give it the workspace's LAN IP, not `localhost`, for dev servers (see [Loading a dev server](#loading-a-dev-server-the-agent-started)).
+
 ### The browser tools
 
 The server exposes 23 tools, grouped by what they do:
@@ -74,7 +85,22 @@ The server exposes 23 tools, grouped by what they do:
 | **Interacting** | `browser_click`, `browser_fill`, `browser_type`, `browser_press_key`, `browser_pick_element` |
 | **Diagnostics** | `browser_console`, `browser_network`, `browser_network_summary`, `browser_clear_network` |
 
-`browser_pick_element` is the one that involves you: it starts an interactive 60-second element picker, so when the agent is unsure which element you mean, you can click it in the pane and hand the agent a precise selector. `browser_evaluate` runs arbitrary JavaScript in the page and returns the result, and `browser_network` / `browser_console` give the agent the same request log and console output you would read in DevTools — which is how an agent debugs a failing fetch or a client-side error without you copying anything out by hand.
+`browser_evaluate` runs arbitrary JavaScript in the page and returns the result, and `browser_network` / `browser_console` give the agent the same request log and console output you would read in DevTools — which is how an agent debugs a failing fetch or a client-side error without you copying anything out by hand. `browser_pick_element` is the one that involves you directly, and it gets its own section below.
+
+### Pointing at an element
+
+Words are a clumsy way to identify one element on a busy page — "the second card", "that broken button", "the misaligned label". When the agent can't tell which element you mean, ask it to let you *point*, and it will hand control to you instead of guessing:
+
+```
+One card in this grid is misaligned — let me point at it. Then read that
+element's classes and tell me why it's off.
+```
+
+Behind that, the agent calls `browser_pick_element`, which **arms an interactive picker directly in the browser pane**: elements highlight as you move the mouse over them, and a "click an element" banner appears at the top. Click the element you mean, and the agent immediately receives its exact CSS selector — nothing to describe, copy, or paste. You have about 60 seconds to click before the picker times out and the agent gets nothing back.
+
+You never press an "enable picker" button or open any menu — arming the picker *is* the agent's tool call, so it happens the instant you ask. Phrasings that reliably trigger it: **"let me point at it"**, **"I'll click the one I mean"**, **"which element? I'll show you"**, or just **"point-and-pick"**. Once the agent has the selector it can do anything with that element — click it, read its text or classes, watch it, or use it as an anchor to explain a layout bug — so a good follow-through is to say what you want done with the element in the same breath as offering to point at it.
+
+> **Tip:** The picker is the fastest way to bridge "I can see the problem, you can't." Instead of describing a visual glitch, point at the offending element and let the agent inspect the real DOM node.
 
 Under the hood the tools reach the browser over a generated Python stdio shim, `bromure-browser-mcp.py`, staged read-only into the agent's VM at `/mnt/bromure-meta/`. It dials the host over [vsock](18-glossary.mdx) port 5830 and reconnects forever, so the tools never disappear from the agent's tool list even across browser teardowns. The full tool reference lives in [CLI, Automation & MCP](16-automation-cli.mdx#the-in-workspace-browser-mcp-server).
 
