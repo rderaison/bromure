@@ -73,6 +73,10 @@ final class TerminalSurfaceView: NSView {
         // resolve actions targeting it — and stop resolving once it's gone.
         self.userdataPtr = userdataPtr
         GhosttyRuntime.registerSurfaceUserdata(userdataPtr, view: self)
+        // Accept image files dragged onto the terminal — uploaded into the
+        // guest (over the tunnel in the rich client) exactly like an image
+        // paste, with the guest path typed in their place.
+        registerForDraggedTypes([.fileURL])
     }
 
     required init?(coder: NSCoder) { fatalError("not supported") }
@@ -192,6 +196,28 @@ final class TerminalSurfaceView: NSView {
         let ok = super.resignFirstResponder()
         if ok, let surface { ghostty_surface_set_focus(surface, false) }
         return ok
+    }
+
+    // MARK: Image drag-and-drop
+
+    /// Accept a drag only when it's image file(s) and this surface has a VM
+    /// (same gate as an image paste); anything else falls through to selection.
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard profileID != nil,
+              TerminalImagePaste.sources(from: sender.draggingPasteboard) != nil else { return [] }
+        return .copy
+    }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard profileID != nil,
+              TerminalImagePaste.sources(from: sender.draggingPasteboard) != nil else { return [] }
+        return .copy
+    }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let ptr = userdataPtr else { return false }
+        // Same pipeline as ⌘V of an image: upload into the guest (local vsock, or
+        // the remote tunnel per this surface's `remoteHost`) and type the guest
+        // path in place — so a dropped image lands as a path Claude can read.
+        return TerminalImagePaste.beginImagePaste(surfaceUserdata: ptr, pasteboard: sender.draggingPasteboard)
     }
 
     override func updateTrackingAreas() {

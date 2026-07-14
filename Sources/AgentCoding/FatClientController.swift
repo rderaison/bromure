@@ -1710,8 +1710,19 @@ final class RemoteHostWindow: NSWindow {
         } else {
             browserOpen.remove(id)
             if shownBrowser == id { shownBrowser = nil }
-            setBrowserWidth(0)
             browserControllers[id]?.setVisible(false, teardownWhenHidden: false)
+            // Detach the browser content so nothing inside it can resist the
+            // width-0 close (a residual SwiftUI/framebuffer minimum was leaving
+            // the pane "smaller but not gone"), then animate the collapse with a
+            // forced layout pass — same shape as the file pane, which collapses
+            // cleanly. Re-opening rebuilds the host.
+            for sub in browserPaneHost.subviews { sub.removeFromSuperview() }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.allowsImplicitAnimation = true
+                setBrowserWidth(0)
+                contentView?.layoutSubtreeIfNeeded()
+            }
         }
     }
 
@@ -2011,7 +2022,7 @@ final class RemoteHostWindow: NSWindow {
         // Same workspace + window already mounted → just re-grab keyboard focus
         // (a re-click on the tab should let you type without clicking the pane).
         if shownWorkspace == id, shownWindowIndex == idx, let live = mountedTermView, live.window != nil {
-            makeFirstResponder(live)
+            focusTerminalSoon(live)
             return
         }
         unmountTerminal()
@@ -2028,7 +2039,18 @@ final class RemoteHostWindow: NSWindow {
         shownWindowIndex = idx
         // Selecting a terminal tab should focus it immediately — otherwise you
         // have to click into the pane before you can type.
-        makeFirstResponder(view)
+        focusTerminalSoon(view)
+    }
+
+    /// Make the terminal surface first responder AFTER the current event (the
+    /// SwiftUI sidebar click) finishes — a synchronous `makeFirstResponder`
+    /// here loses to the sidebar's hosting view re-grabbing focus as the click
+    /// completes, which is why a same-tick focus didn't stick in the rich client.
+    private func focusTerminalSoon(_ view: TerminalSurfaceView) {
+        DispatchQueue.main.async { [weak self, weak view] in
+            guard let self, let view, view.window === self else { return }
+            self.makeFirstResponder(view)
+        }
     }
 
     private func unmountTerminal() {
