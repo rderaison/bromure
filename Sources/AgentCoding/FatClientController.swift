@@ -1010,6 +1010,51 @@ final class RemoteHostWindow: NSWindow {
 
     /// ⌃⌘B toggles the browser pane, ⌃⌘E the file-explorer pane — mirroring
     /// the local window's shortcuts.
+    /// Plain-⌘ workspace chords — the rich-client twin of the local window's
+    /// `handleACShortcut` (UnifiedSessionWindow). ⌘T opens a new shell, ⌘W
+    /// closes the shown window, ⌘1–9 switch the shown workspace's windows in
+    /// sidebar order. Without this the chords fell through to the terminal and
+    /// did nothing (the guest ignores them). Requires EXACTLY ⌘ so ⇧⌘T / ⌃⌘B
+    /// stay with the handlers below.
+    private func handleACShortcut(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command]
+        else { return false }
+        let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        // The workspace the user is looking at — a mounted terminal, else the
+        // dashboard, else the sidebar selection.
+        guard let id = shownWorkspace ?? shownDashboard?.id ?? controller.listModel.selectedID
+        else { return false }
+        let fire = !event.isARepeat   // don't spawn/close on autorepeat
+        switch chars {
+        case "t":
+            if fire { controller.newTab(id) }
+            return true
+        case "w":
+            if fire, let idx = shownWindowIndex { controller.closeTab(id, index: idx) }
+            return true
+        default:
+            guard let n = Int(chars), (1...9).contains(n),
+                  let m = controller.tabsModel(for: id) else { return false }
+            // ⌘1–9 follow the sidebar's row numbers (tree order, container tabs
+            // excluded) — same ordering the local window uses.
+            let ordered = worktreeDisplayOrdered(m.tabs).filter { $0.tab.containerID == nil }
+            guard ordered.indices.contains(n - 1) else { return false }
+            if fire {
+                let tab = ordered[n - 1].tab
+                controller.selectTab(id, index: tab.index)
+                showWorkspace(id, window: tab.index)
+            }
+            return true
+        }
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        // Intercept the plain-⌘ chords before the keystroke reaches the guest
+        // terminal (the earliest hook, like the local window's sendEvent).
+        if event.type == .keyDown, handleACShortcut(event) { return }
+        super.sendEvent(event)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
         // ⇧⌘T opens a new browser tab (⌘T is the shell shortcut). Caught here,
@@ -1026,6 +1071,9 @@ final class RemoteHostWindow: NSWindow {
             default: break
             }
         }
+        // Plain-⌘ workspace chords (also handled in sendEvent; kept here for the
+        // menu-key-equivalent dispatch path, mirroring the local window).
+        if handleACShortcut(event) { return true }
         return super.performKeyEquivalent(with: event)
     }
 
