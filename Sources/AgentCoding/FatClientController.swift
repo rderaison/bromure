@@ -901,6 +901,9 @@ final class RemoteHostWindow: NSWindow {
     // page traffic is tunneled to the remote subnet via the SOCKS forwarder.
     private var browserPaneHost: NSView!
     private var browserWidthConstraint: NSLayoutConstraint!
+    private var browserResizeHandle: SidebarResizeHandle?
+    /// Last user-chosen browser-pane width, restored the next time it opens.
+    private var expandedBrowserWidth: CGFloat = 0
     private var browserControllers: [Profile.ID: WorkspaceBrowserController] = [:]
     private var browserModels: [Profile.ID: BrowserPaneModel] = [:]
     /// Relays the remote agent's browser MCP to the local pane's browser.
@@ -1001,7 +1004,9 @@ final class RemoteHostWindow: NSWindow {
         filePaneHost = fpHost
         content.addSubview(fpHost)
         filePaneWidthConstraint = fpHost.widthAnchor.constraint(equalToConstant: 0)
-        // Browser pane sits to the right of the file pane; width animates 0 ↔ N.
+        // Pane order (left→right, matching the local window): terminal | web
+        // browser | file explorer. The browser is the middle split; both right
+        // panes animate width 0 ↔ N and the terminal stage fills the rest.
         let browser = NSView()
         browser.translatesAutoresizingMaskIntoConstraints = false
         browser.wantsLayer = true
@@ -1009,6 +1014,32 @@ final class RemoteHostWindow: NSWindow {
         content.addSubview(browser)
         browserPaneHost = browser
         browserWidthConstraint = browser.widthAnchor.constraint(equalToConstant: 0)
+        // 8pt drag strip over the browser pane's leading edge (terminal↔browser
+        // boundary), like the local window's browserPaneResizeHandle.
+        let browserHandle = SidebarResizeHandle()
+        browserHandle.translatesAutoresizingMaskIntoConstraints = false
+        browserHandle.isHidden = true
+        content.addSubview(browserHandle)
+        browserResizeHandle = browserHandle
+        browserHandle.onResize = { [weak self] x in
+            guard let self, self.browserWidthConstraint.constant > 0,
+                  let content = self.contentView else { return }
+            // Browser's right edge is the file pane's left edge, so subtract the
+            // file pane width (0 when closed) from the content right edge, then
+            // the handle's x, to get the proposed browser width.
+            let fileW = self.filePaneOpen ? self.filePaneWidthConstraint.constant : 0
+            let width = content.bounds.width - fileW - x
+            if width < Self.browserPaneMinWidth {
+                if let id = self.shownBrowser { self.setBrowserOpen(id, false) }
+            } else {
+                self.setBrowserWidth(self.clampBrowserWidth(width))
+            }
+        }
+        browserHandle.onResizeEnd = { [weak self] in
+            guard let self, self.browserWidthConstraint.constant >= Self.browserPaneMinWidth
+            else { return }
+            self.expandedBrowserWidth = self.browserWidthConstraint.constant
+        }
         // Connection-status overlay covers the stage until we're connected.
         statusHost = NSHostingView(rootView: RemoteConnectionStatusView(controller: controller))
         statusHost.translatesAutoresizingMaskIntoConstraints = false
@@ -1019,22 +1050,48 @@ final class RemoteHostWindow: NSWindow {
             sidebarHost.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             sidebarHost.widthAnchor.constraint(equalToConstant: 240),
             stage.leadingAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
-            stage.trailingAnchor.constraint(equalTo: fpHost.leadingAnchor),
+            stage.trailingAnchor.constraint(equalTo: browser.leadingAnchor),
             stage.topAnchor.constraint(equalTo: content.topAnchor),
             stage.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            fpHost.trailingAnchor.constraint(equalTo: browser.leadingAnchor),
-            fpHost.topAnchor.constraint(equalTo: content.topAnchor),
-            fpHost.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            filePaneWidthConstraint,
-            browser.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            browser.trailingAnchor.constraint(equalTo: fpHost.leadingAnchor),
             browser.topAnchor.constraint(equalTo: content.topAnchor),
             browser.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             browserWidthConstraint,
+            browserHandle.centerXAnchor.constraint(equalTo: browser.leadingAnchor),
+            browserHandle.topAnchor.constraint(equalTo: content.topAnchor),
+            browserHandle.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            browserHandle.widthAnchor.constraint(equalToConstant: 8),
+            fpHost.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            fpHost.topAnchor.constraint(equalTo: content.topAnchor),
+            fpHost.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            filePaneWidthConstraint,
             statusHost.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
             statusHost.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
             statusHost.topAnchor.constraint(equalTo: stage.topAnchor),
             statusHost.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
         ])
+    }
+
+    // Browser-pane width bounds (mirror the local window).
+    private static let browserPaneMinWidth: CGFloat = 380
+    private static let terminalSlotMinWidth: CGFloat = 400
+
+    /// Clamp a proposed browser width so the terminal keeps its minimum and the
+    /// pane never exceeds the space left of the (possibly open) file pane.
+    private func clampBrowserWidth(_ desired: CGFloat) -> CGFloat {
+        guard let content = contentView else { return desired }
+        let fileW = filePaneOpen ? filePaneWidthConstraint.constant : 0
+        // 240 sidebar + terminal minimum + file pane = the space the browser
+        // may not eat into.
+        let available = content.bounds.width - 240 - Self.terminalSlotMinWidth - fileW
+        return max(Self.browserPaneMinWidth, min(desired, max(Self.browserPaneMinWidth, available)))
+    }
+
+    /// Set the browser-pane width and keep the drag handle shown only while the
+    /// pane is open (width > 0).
+    private func setBrowserWidth(_ w: CGFloat) {
+        browserWidthConstraint.constant = w
+        browserResizeHandle?.isHidden = w <= 0
     }
 
     /// The titlebar toolbar: IP pill + per-selected-VM controls, mirroring the
@@ -1301,9 +1358,15 @@ final class RemoteHostWindow: NSWindow {
     private func browserController(for id: Profile.ID) -> WorkspaceBrowserController? {
         if let c = browserControllers[id] { return c }
         guard let subnet = controller.vmnetSubnet, let port = controller.socks?.port else { return nil }
-        let persistent = controller.profile(for: id)?.browserPersistent ?? false
+        let profile = controller.profile(for: id)
         let c = WorkspaceBrowserController(
-            model: browserModel(for: id), workspaceID: id, persistent: persistent,
+            model: browserModel(for: id), workspaceID: id,
+            persistent: profile?.browserPersistent ?? false,
+            permissions: .init(
+                allowUploads: profile?.browserAllowUploads ?? true,
+                allowDownloads: profile?.browserAllowDownloads ?? true,
+                webcam: profile?.browserWebcam ?? false,
+                microphone: profile?.browserMicrophone ?? false),
             remoteProxy: .init(subnetCIDR: subnet, socksPort: port))
         browserControllers[id] = c
         return c
@@ -1336,7 +1399,9 @@ final class RemoteHostWindow: NSWindow {
                 host.topAnchor.constraint(equalTo: browserPaneHost.topAnchor),
                 host.bottomAnchor.constraint(equalTo: browserPaneHost.bottomAnchor),
             ])
-            browserWidthConstraint.constant = max(480, frame.width * 0.42)
+            let initial = expandedBrowserWidth >= Self.browserPaneMinWidth
+                ? expandedBrowserWidth : max(480, frame.width * 0.42)
+            setBrowserWidth(clampBrowserWidth(initial))
             ctl.setVisible(true)
             // Relay the remote agent's browser MCP to this local browser.
             if browserRelays[id] == nil {
@@ -1346,12 +1411,53 @@ final class RemoteHostWindow: NSWindow {
                 browserRelays[id] = relay
                 relay.start()
             }
+            // First browser opened this session: offer the VPN to the remote
+            // host so its VMs are reachable system-wide, not just from the pane.
+            offerBrowserVPNIfNeeded()
         } else {
             browserOpen.remove(id)
             if shownBrowser == id { shownBrowser = nil }
-            browserWidthConstraint.constant = 0
+            setBrowserWidth(0)
             browserControllers[id]?.setVisible(false, teardownWhenHidden: false)
         }
+    }
+
+    /// Whether we've already offered the VPN this session (asked once, then the
+    /// toolbar tunnel toggle is the way to change it).
+    private var didOfferBrowserVPN = false
+
+    /// The first time a browser is enabled in this remote window, offer to turn
+    /// on the VPN — the system-wide utun tunnel to the remote host. Without it
+    /// the browser still reaches the remote's workspaces over Bromure's built-in
+    /// per-app tunnel; with it, this Mac routes to the remote's VMs system-wide
+    /// so other apps can reach them by address too. No-op if the tunnel is
+    /// already on, if we've asked before, or in headless auto-open (E2E) mode.
+    private func offerBrowserVPNIfNeeded() {
+        guard !didOfferBrowserVPN, !controller.tunnelEnabled, !autoBrowser else { return }
+        didOfferBrowserVPN = true
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = String(
+            format: NSLocalizedString("Turn on the VPN to “%@”?", comment: ""),
+            controller.host.name)
+        alert.informativeText = NSLocalizedString(
+            "The browser can already reach this remote's workspaces over Bromure's built-in per-app tunnel. Turning on the VPN routes this Mac to the remote's VMs system-wide, so your other apps and terminals can reach them by address too. macOS asks you to approve a network helper once.",
+            comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Turn On VPN", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Not Now", comment: ""))
+        if alert.runModal() == .alertFirstButtonReturn {
+            controller.setTunnelEnabled(true)
+        }
+    }
+
+    /// Hide the browser pane without forgetting the workspace's open state
+    /// (used when switching to the Grid or another workspace) — the browser VM
+    /// stays resumable so returning re-shows it instantly.
+    private func hideShownBrowser() {
+        guard let prev = shownBrowser else { return }
+        browserControllers[prev]?.setVisible(false, teardownWhenHidden: false)
+        shownBrowser = nil
+        setBrowserWidth(0)
     }
 
     private func makeSidebar() -> SessionSidebar {
@@ -1409,6 +1515,9 @@ final class RemoteHostWindow: NSWindow {
         unmountTerminal()
         clearVMDashboard()
         clearDockerDashboard()
+        // The Grid has no browser pane — collapse any shown browser (it stays
+        // resumable, so returning to the workspace re-shows it).
+        hideShownBrowser()
         if gridView == nil {
             let ds = GridStageView.DataSource(
                 profile: { [weak self] pid in self?.controller.profile(for: pid) },
@@ -1448,9 +1557,7 @@ final class RemoteHostWindow: NSWindow {
         if browserOpen.contains(id) {
             setBrowserOpen(id, true)
         } else if let prev = shownBrowser, prev != id {
-            browserControllers[prev]?.setVisible(false, teardownWhenHidden: false)
-            shownBrowser = nil
-            browserWidthConstraint.constant = 0
+            hideShownBrowser()
         }
         if autoBrowser { setBrowserOpen(id, true) }
     }

@@ -1,0 +1,78 @@
+---
+title: "Local Models"
+description: "Run a coding model on your Mac instead of the cloud: enable on-device inference, pick Local or Hybrid routing, and download MLX models."
+order: 7.3
+---
+
+# Local Models
+
+The **Local Models** pane runs a coding model on your Mac itself, so a workspace's agents can answer entirely on-device instead of calling a cloud provider — or fall back to a local model only when the cloud is unreachable. The weights are Apple [MLX](../18-glossary.mdx) builds; the inference engine is bundled with the app, so there is nothing to install beyond downloading a model.
+
+Everything on this page has a companion deep-dive: the on-device engine, the tool-call repair layer, the hybrid fallback policy, and the `bromure-cli model` and `bromure-cli vm routing` commands are all in [Local Models](../13-local-models.mdx). This page documents the settings pane.
+
+<p align="center">
+  <img src="../images/editor-local-models.en.jpg" width="600" alt="The Local Models pane of the Edit workspace window, showing the Enable local models switch turned off with the caption Run a coding model on this Mac instead of the cloud" />
+</p>
+
+By default the pane shows a single switch — **Enable local models** — with everything else hidden. Turning it on reveals the routing mode and the model catalog described below.
+
+## Enable local models
+
+The master switch, captioned *Run a coding model on this Mac instead of the cloud.*, is the workspace's on/off for on-device inference:
+
+- **Off (default)** — the workspace routes agent traffic to the cloud, exactly as if this pane did not exist.
+- **On** — routing switches to on-device inference and the mode picker and model list appear. Turning it on defaults the mode to **Local**.
+
+Because the workspace's agents run their LLM traffic through the local engine while this is on, enabling it pins every enabled agent's auth mode to **Local model**, and turning it back off restores each agent's previous mode. You do not have to touch the [Agents](agents.mdx) pane by hand.
+
+## Routing mode
+
+With local models enabled, a radio picks how the workspace uses them. The two rows carry the pane's own footer descriptions:
+
+| Mode | Behavior |
+|---|---|
+| **Local — always on-device** | Every request stays on this Mac — nothing leaves the machine. Replies are private but slower, and bounded by the model you can fit in memory. |
+| **Hybrid — cloud, fall back to local** | Requests go to the cloud as usual, falling back to the on-device model only when the cloud is unreachable — cloud speed and quality with a local safety net. |
+
+Hybrid's finer knobs — a rolling cloud token budget, a time-to-first-token deadline, and a proactive local/cloud split — are tuned from the command line (`bromure-cli vm hybrid …`) rather than this pane. They are documented in [Local Models](../13-local-models.mdx).
+
+## The model catalog
+
+Below the mode picker, the list is headed **Models · N GB unified memory**, where N is your Mac's unified memory. Each row describes one curated MLX model:
+
+- **Active-model radio** — the filled dot marks the single model this workspace serves. Selecting it here is also what flips enabled agents to **Local model** auth.
+- **Tier badge** — a small `S` / `M` / `L` / `XL` size class.
+- **Fit badge** — how the model sits against your Mac's memory: **Fits** (green — comfortable headroom), **Tight** (orange — loads with little to spare), or **Won't fit** (greyed out; the row is disabled and cannot be selected). The pane's footer restates it: *Greyed-out models need more memory than this Mac has.*
+- **Download size** — the on-disk weight size in GB.
+- **tools** seal — a checkmark badge on models whose tool-calling has been verified for agent use.
+
+The control at the end of each row reflects its download state:
+
+| State | Control |
+|---|---|
+| Not downloaded | **Download** button (disabled when the model won't fit). |
+| Downloading | A progress bar with a byte label and a stop (✕) button. |
+| Interrupted (the app was killed mid-pull) | **Interrupted**, with a **Resume** button and a discard (trash) button. |
+| Failed | A **Retry** button (hover for the error message). |
+| Installed | **Installed**, with a menu offering **Remove**. |
+
+> **Note:** Downloads are immediate and global — a model you pull here lands in shared storage and becomes available to every workspace, not just this one. The routing mode and the active-model choice, by contrast, are per-workspace and take effect only when you click **Save**.
+
+## Combined-memory warning
+
+The local models this workspace has selected — the active model, plus any agent set to **Local model** auth and any [Fusion](fusion.mdx) local leg or judge — load in parallel in one engine, so their memory requirements add up. When they approach your Mac's RAM, a warning appears above the list: **orange** when they are close to the host's memory, **red** when they exceed it. It states how much they need together and suggests you drop one or pick smaller models.
+
+## Settings reference
+
+| Setting | Description |
+|---|---|
+| **Enable local models** | Master switch for on-device inference. On sets routing to **Local**; off restores **Cloud**. Default: off (Cloud). |
+| **Mode** | Radio: **Local — always on-device** / **Hybrid — cloud, fall back to local**. Default: **Local** when enabled. |
+| **Active model** | Radio dot per row; the one model the workspace serves. Default: none — the first model you download is selected automatically. |
+| **Download / Installed / Remove** | Per-model action. Immediate and global (shared across workspaces); not part of the **Save** transaction. |
+
+## Related chapters
+
+- [Local Models](../13-local-models.mdx) — the on-device engine, the model catalog and CLI, and the hybrid fallback policy in full.
+- [Agents](agents.mdx) — the per-agent **Local model** auth mode this pane keeps in step.
+- [Fusion](fusion.mdx) — using a local model as a fuse leg or as the judge.

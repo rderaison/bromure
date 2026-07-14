@@ -1,0 +1,246 @@
+---
+title: "Remote Access & the Fat Client"
+description: "Reach a running Bromure Agentic Coding over SSH — from a terminal menu, the CLI, or another Mac that mirrors it 1:1 — and expose VM services safely."
+order: 14
+---
+
+# Remote Access & the Fat Client
+
+A workspace VM lives on one Mac, but the person who wants to drive it is not always sitting at that Mac. Bromure Agentic Coding can be reached remotely, and every remote path rides a single, optional, disabled-by-default SSH front door. Turn it on and you get three ways in: a person can `ssh` in from any terminal and land in a menu; you can manage the front door itself from the command line; and another Mac running the app can connect over the same server and mirror the whole instance — its grid, workspaces, terminals, and dashboards — in a live window.
+
+This chapter covers enabling remote access on the host, each of the three entry points, how the fat client mirrors a remote 1:1, reaching services inside remote VMs, exposing a dev server to the internet, and the security model that keeps all of it safe. Fleet-scale enrollment and cloud telemetry are a different system entirely — see [Enterprise](15-enterprise.mdx). The complete command reference lives in [Automation & the CLI](16-automation-cli.mdx).
+
+## The three ways in
+
+Everything below depends on the SSH front door being enabled (it is off by default). Once it is running, the same server serves all three audiences:
+
+| Way in | Who uses it | What you get |
+|---|---|---|
+| **Plain SSH** | A person at any terminal (`ssh -p 2222 you@mac`) | The [remote menu](#signing-in-over-plain-ssh) — a curses-style TUI. A raw shell is never reachable. |
+| **The `bromure-cli remote` CLI** | You, on the host itself | Manage the front door: enable/disable, keys, status. See [Enabling remote access on the host](#enabling-remote-access-on-the-host). |
+| **The fat client** | Another Mac running the app | A live 1:1 [mirror window](#mirroring-a-remote-with-the-fat-client) of the remote instance, with bidirectional edits. |
+
+The server is *embedded* — it is Apple's swift-nio-ssh library built into the app, not macOS's own `sshd`. That distinction matters: because the app runs its own server, it can verify your macOS account password through OpenDirectory without you ever enabling **Remote Login** in System Settings and without administrator rights. It listens only for the exact macOS user who launched `bromure-cli`, and it forces every interactive login into the remote menu. The only machine-facing exceptions are four whitelisted commands the fat client uses (`bromure-fatclient/1 control`, `forward <ip> <port>`, `forward-udp <ip>`, and `browser-mcp <vm>`); anything else a human types behaves like a login and drops into the menu.
+
+> **Note:** The Remote Access window describes the server as "an app-owned instance of the system SSH server." It is more precisely an embedded swift-nio-ssh server, deliberately *not* macOS's `sshd` — that is exactly what lets it work without Remote Login or admin rights.
+
+## Enabling remote access on the host
+
+Remote access is off until you turn it on, and it can be managed two equivalent ways: the **Remote Access** window or the `bromure-cli remote` CLI. Both write to the same place, so a change made in one is reflected in the other and applies live.
+
+### The Remote Access window
+
+Open **Bromure Agentic Coding** (the app-name menu) → **Remote Access…**. The window title is **Remote Access**. A green or gray dot reads **sshd running** or **sshd stopped**; when the server is up, a copyable connect string of the form `ssh -p <port> <user>@<host>` appears under the header.
+
+| Section | Field | Purpose | Default |
+|---|---|---|---|
+| Header | **Enable remote access over SSH** | Starts and stops the server. | Off |
+| **Listener** | **Bind IP** | Which interface to listen on. `0.0.0.0` = every interface; `127.0.0.1` = this Mac only. | `0.0.0.0` |
+| **Listener** | **Port** | Listener TCP port; must be `≥ 1024` (a non-root process cannot bind privileged ports). | `2222` |
+| **Authentication** | **macOS account password** | Accept the macOS login password of the user running the app (verified via OpenDirectory). | On |
+| **Authentication** | **Public key** | Accept keys from the authorized-keys list below. | On |
+| **Server host key** | fingerprint | The server's own ed25519 host-key fingerprint, for out-of-band verification. Reads **(generated on first enable)** until first use. | — |
+| **Authorized public keys** | list | Enrolled `ssh-ed25519` / `ecdsa` public keys. Add by pasting a key line; remove with the trash icon. Reads **No keys enrolled.** when empty. | empty |
+
+Edit **Bind IP** or **Port** and press Return to apply the change live. The **Authentication** section notes **Verified against `<user>` — the user running bromure-cli.** so it is clear whose password unlocks the door.
+
+> **Warning:** At least one authentication method must stay enabled — you cannot switch off both password and public-key auth. Pasting an invalid key is rejected with **Not a valid public key**. Adding or removing an authorized key restarts the listener, which drops any live connections.
+
+### The `bromure-cli remote` CLI
+
+The CLI talks to the running app over its owner-only control socket, so the app remains the single source of truth. It is the fastest way to enable access on a headless Mac you reached over an existing shell.
+
+| Command | What it does |
+|---|---|
+| `bromure-cli remote` (or `remote status`) | Prints enabled/running state, bind and port, auth methods, host-key fingerprint, login user, a ready-made connect string, and the numbered authorized-key list. |
+| `bromure-cli remote enable [--port N] [--bind IP] [--password\|--no-password] [--pubkey\|--no-pubkey]` | Starts the server (auto-launching the app agent if needed). Defaults: port 2222, bind `0.0.0.0`, both auth methods on. |
+| `bromure-cli remote disable` | Stops the server and persists the off state. |
+| `bromure-cli remote key add <path-or-key-text>` | Enrolls a public key from a file path or a pasted key line; prints its fingerprint. |
+| `bromure-cli remote key ls` | Lists authorized keys with a 1-based index, fingerprint, and comment. |
+| `bromure-cli remote key rm <index\|fingerprint>` | Removes a key by index or by a fingerprint substring. |
+
+`remote enable` refuses if you pass both `--no-password` and `--no-pubkey`, and it errors while a base image is missing or installing. When the app is not running, `status`, `disable`, and `key ls` print **No bromure-cli agent running.**
+
+> **Note:** The server will not start while the base image is absent or still installing — enabling then returns an actionable error rather than a silent no-op. This is true both at launch and when you flip the toggle. Install or finish installing the base image first.
+
+### Host keys, fingerprints, and trust
+
+On the first enable, the server generates an ed25519 host key. Its fingerprint — shown in the **Server host key** row and by `bromure-cli remote status`, in the form `256 SHA256:… bromure-ac-remote (ED25519)` — is what a connecting client verifies to be sure it reached the right Mac. Give this fingerprint to whoever connects (or check it yourself in the fat client's first-contact sheet) so a man-in-the-middle cannot impersonate the host. See [trust on first use](18-glossary.mdx) for how the fat client pins it.
+
+### Rate limiting
+
+Password attempts are throttled per source IP by a token bucket: five attempts at full speed, then a refill of about one attempt every two seconds, with the imposed delay capped at eight seconds. Attempts are *delayed*, never refused, and nobody is ever locked out; one noisy IP cannot slow another. Public-key authentication is never throttled.
+
+## Signing in over plain SSH
+
+Any terminal can reach the host with `ssh -p 2222 <user>@<mac>`. Instead of a shell, the connection lands in the **remote menu** — a curses-style TUI (internally `bromure-cli __remote-menu`) forced onto every human login. A raw shell is never reachable through it.
+
+The menu mirrors the app: a unified **Workspaces** list with live state glyphs (● running, ◌ booting, ⏸ suspended, ○ off), plus **Models** and **Trace** sections. From it you can:
+
+- **Create a workspace** with a single-screen form, with a **Full settings…** door into all fourteen configuration panes (General, Agents, Local Models, Fusion, Folders, Credentials, Environment, MCP, Tracing, Guardrails, Supply Chain, Prompt Injection, Appearance, Resources).
+- **Start, suspend, kill, reboot, or delete** any workspace.
+- **Edit every setting.** Secrets show as `•••• (set)`; leaving a secret blank keeps the stored value.
+- **Manage worktrees** — create, merge, attach a terminal, or discard — with the same nesting as the GUI.
+- **Generate SSH keys**, toggle Fusion and model routing, and browse trace summaries.
+- **Attach** to any tmux tab or a running Docker container.
+
+Navigate with the arrow keys, Enter to select, and `q` or Esc to go back; **Exit (disconnect)** ends the session. Selecting **Attach** hands the terminal to the guest's tmux; `Ctrl-b d` detaches back to the menu. While you are attached, an overlay keychord (default `Ctrl-]`) pops a host-side controller — switch tabs, open a new tab, manage worktrees, toggle Fusion or routing, edit settings, reboot, suspend, or disconnect — without the keystroke ever reaching the guest. Attaching to a container prompts for the shell (Enter = `sh`).
+
+> **Note:** The menu needs a real terminal. Connecting without a TTY prints a hint to reconnect with `ssh -t`. Starting a cold workspace waits up to about 20 seconds for the guest's tmux session before attaching. If a workspace uses **Subscription** auth, the menu reminds you to run the tool's login (for example `claude login`) inside the VM after it boots.
+
+The overlay chord is configurable on the *host* Mac (the machine being connected to) via the file `~/Library/Application Support/BromureAC/remote/overlay-key` — accepted forms are `C-]`, `^]`, `0x1d`, or `29` — or the `BROMURE_OVERLAY_KEY` environment variable.
+
+## Mirroring a remote with the fat client
+
+The fat client turns this Mac's copy of Bromure Agentic Coding into a live mirror of a remote one. You get a full window that renders the remote using the exact same sidebar, grid, and terminal views you already know — the same layout shown below for a local instance — but titled **Remote — `<name>`**, and every edit you make runs on the remote and echoes back.
+
+<p align="center">
+  <img src="images/workspaces.en.jpg" width="700" alt="The Bromure Agentic Coding workspace browser: a WORKSPACES sidebar with Grid and AUTOMATIONS sections, and a detail pane showing CPU, Memory, vCPUs, Disk, and Uptime cards above a CONFIGURATION summary. A fat-client mirror window renders a remote instance using this same layout." />
+</p>
+
+### Connecting
+
+1. **On the remote Mac**, enable remote access (the **Remote Access** window or `bromure-cli remote enable`).
+2. **On this Mac**, choose **Workspaces** → **Connect to Remote Bromure…** (⇧⌘K). The **Connect to Remote Bromure** window opens: a saved-servers picker plus an add/edit form. Rows show a name, `user@address:port`, and the last-connected time.
+3. Click **+**, enter a **Name** (for example, `rack mini`), **Address**, **Port** (default `2222`), and **Remote user**, then click **Connect**.
+4. On **first contact**, a sheet shows the remote's SSH host-key fingerprint. Verify it against the remote's **Remote Access** window, then click **Trust & Continue**. The pin is remembered for this endpoint; later connections are silent unless the key changes, in which case the button turns red and reads **Trust New Key & Continue** — a possible man-in-the-middle.
+5. The client then tries public-key auth with this Mac's dedicated key. If this Mac is not authorized yet, it falls back to asking for the remote user's macOS **login password** (button: **Sign In**). A successful password login automatically enrolls this Mac's key on the remote over the tunnel, so every later connection is passwordless.
+
+To pre-authorize a Mac without ever typing a password, click **Show this Mac's key** in the connect window, then run `bromure-cli remote key add '<this Mac's key>'` on the remote. After the first successful connect, double-click a saved server for one-click reconnects; each row's context menu offers **Connect**, **Edit…**, and **Remove**.
+
+> **Note:** The fat client generates its own dedicated ed25519 keypair (comment `bromure-ac-fatclient`) the first time you use it, stored under the remote-client directory. The host-key pin belongs to the endpoint (`address:port`), not the user — editing a saved server's address or port drops the pin and re-triggers the first-contact fingerprint sheet. Because adding a key restarts the remote's SSH listener, the password-pairing step reports success as soon as the enrollment request is flushed, not after an HTTP response.
+
+### The mirror window
+
+The mirror window opens automatically after a successful connect. Click a workspace row to mount its live terminal (if running) or its VM dashboard with **Start** / **Resume** (if off or suspended); the stage follows state transitions live. Tab clicks switch optimistically and are confirmed by the next state poll.
+
+Its titlebar toolbar mirrors the local per-VM pill, left to right: the network-tunnel toggle (remote windows only), the IP pill, the Fusion bolt, **Browse files** (folder), **Reboot the VM**, **Edit workspace** (gearshape), **Pop out to its own window**, **Show or hide the agentic browser (⌃⌘B)** (globe), and **Show or hide repo files (⌃⌘E)**. The Docker dashboard opens from the sidebar, exactly as it does locally.
+
+A few affordances behave specially over the mirror:
+
+- **Edit workspace** opens the same profile editor as local, but backed by a secrets-blanked read and a secret-preserving save (see [Secrets stay on the host](#secrets-stay-on-the-host)). **Generate new SSH key** works and shows you the new public key.
+- **Browse files** opens a Finder-like per-VM window titled **Files — `<workspace>` (`<host>`)** over the guest filesystem — Home plus up to eight shared folders — with drag-in and drag-out transfer over the tunnel.
+- **Reboot the VM** asks **Soft** vs **Hard** locally, then sends the verb.
+- **Pop out** opens an extra live terminal window that auto-closes if the workspace stops.
+
+Under the hood, the mirror polls the remote's `/state` snapshot every 0.75 seconds over an SSH-tunnelled control-socket bridge, and renders it through the same views as a local window. Short control calls multiplex over one SSH ControlMaster connection per host; interactive terminal attaches deliberately use their own dedicated SSH connections, because a multiplexed channel buffers the spontaneous output (tmux repaints) that a terminal needs immediately.
+
+### What mirrors, and what works remotely
+
+The mirror is comprehensive. It renders every workspace with its live run state, all tabs and worktrees (fully nested), the grid layout, automations, VM dashboards for off and suspended workspaces, the Docker dashboard, vitals (CPU, memory, load, disk, uptime, IP, ports), and live interactive terminals. Edits are bidirectional and converge on every connected client at the next poll: start/stop/suspend/reboot, tab operations, grid edits (whole-layout, last-writer-wins), automation edits, the Fusion toggle, Docker actions, settings saves, and file transfers.
+
+A few operations are **not** available from the fat client in this version:
+
+- **Prompt-driven worktree operations** — creating a new worktree, merging, resolving a conflict, or seeding an automation — are not remoted in v1. Do those on the host's own GUI or through the [remote menu](#signing-in-over-plain-ssh) (which *does* support create, merge, and resolve). The mirror still displays every worktree, and **remove** and **attach terminal** work remotely.
+- **Grid-layout edits** need a GUI window open on the remote. A fully headless remote (app running, no unified window) mirrors everything else but cannot accept a layout change.
+- **Host-side-only affordances** — importing an SSH key from a file, and subscription registration — are hidden in the remote settings editor.
+
+### Pending decision prompts
+
+Some actions you initiate remotely raise a decision on the remote — a home-storage upgrade, a base-image drift reset, or a compromised-VM wipe. These surface in the `/state` snapshot as pending prompts and appear as local alerts in *your* mirror window; your answer rides back over the tunnel. If a prompt goes unanswered, it times out to the safe, non-destructive choice. The MITM consent prompts that a running agent can trigger (credential use, supply-chain pass-through, guardrail writes, prompt injection) are handled by a separate, guest-unforgeable path documented under [Remote consent handling](15-enterprise.mdx#remote-consent-handling).
+
+### Secrets stay on the host
+
+Secrets never cross the link. When the fat client reads a remote profile to populate the editor, every secret field arrives **blanked**. On save, a blank field means "keep the stored value" and a typed one replaces it. API keys, tokens, and MCP environment secrets stay on the remote Mac. The fat client authenticates by SSH key alone once paired — there are no password prompts during mirroring.
+
+## Reaching services on the remote's VMs
+
+A remote workspace's dev server lives at a private address like `http://192.168.64.5:3000` on the *remote's* network. Bromure gives you two tiers of access to it — one automatic and browser-scoped, one opt-in and system-wide.
+
+### The browser pane (automatic, PAC-scoped)
+
+The mirror window's collapsible right-side browser pane (the globe toolbar button, or ⌃⌘B) is a **local** Chromium VM whose page traffic to the remote workspace subnet is tunnelled over SSH. A generated [PAC](18-glossary.mdx) (proxy auto-config) script routes only the remote subnet through a per-host SOCKS forwarder and everything else DIRECT, and destinations are resolved on the remote side — so navigating to a remote dev server's literal `http://192.168.64.x:port` just works. The remote agent's own browser-control MCP stream is relayed to this pane, so the remote coding agent drives the browser you are looking at.
+
+Select a running remote workspace and press ⌃⌘B. The pane does nothing until the first `/state` snapshot has delivered the remote's subnet and the SOCKS forwarder is up (a log line notes "tunnel not ready" until then). Its local browser VM is pinned to subnet `192.168.127.0/24` (gateway `192.168.127.1`) so it can never collide with a workspace subnet. Persistent browser profiles live on this Mac, keyed by the remote workspace ID.
+
+> **Note:** The browser pane requires this Mac to be Apple Silicon with the browser base image installed locally. The SOCKS forwarder binds `0.0.0.0` (so the browser VM can reach it at the vmnet gateway) but accepts connections only from loopback and the pinned `192.168.127.x` browser subnet — it is never an open relay.
+
+### SOCKS forwarding and fixed port forwards
+
+Every connected remote host automatically gets a local SOCKS5 forwarder on an ephemeral port bound to `0.0.0.0` (peer-filtered to loopback and the `192.168.127.x` browser subnet). Each CONNECT opens a `forward <ip> <port>` SSH channel that the remote bridges — via the guest's always-on loopback relay on vsock 5010 — to that guest's own `127.0.0.1:<port>`. So from this Mac, `curl --socks5 127.0.0.1:<port> http://192.168.64.5:3000` reaches the remote guest byte-for-byte.
+
+For fixed forwards there is hidden CLI plumbing: `bromure-cli __forward <hostID> <localPort> <remoteIP> <remotePort>` for an `ssh -L`-style forward, and `bromure-cli __forward-socks <hostID> <localPort>` for a standalone SOCKS proxy. Both bind loopback by default and accept `--bind-all`.
+
+> **Warning:** The remote refuses any forward whose target is not a guest on its own vmnet subnet. You cannot use a forward to reach the remote Mac itself, its gateway, or the internet — only the workspace VMs.
+
+### The system-wide network tunnel
+
+When you want *any* local app — not just the browser pane — to reach remote VMs at their literal addresses, enable the per-host tunnel with the mirror toolbar's network toggle (the triangle-path icon, first in the toolbar). Its tooltip reads **Enable direct network access to the remote's VMs (192.168.x.x from any local app)**.
+
+A one-time privileged helper — a launchd daemon installed via SMAppService, no `sudo` — creates a `utun` interface and routes the remote subnet to it, then hands the interface's file descriptor back to the app. A userspace TCP/UDP stack in the app terminates each flow and splices it over the same SSH forward channels, using your SSH identity. There are no `pf` rules and no kernel forwarding.
+
+The first time you enable it, an alert titled **Allow Bromure's network helper** explains the one-time macOS approval:
+
+1. Click the toolbar toggle.
+2. In the alert, open **System Settings → General → Login Items** and allow **Bromure Agentic Coding** (macOS asks for administrator credentials once).
+3. The app polls for the approval (every 2 seconds, up to 5 minutes) and connects automatically the moment it lands. While it waits, the toggle tooltip reads **Waiting for approval in System Settings › Login Items…**.
+
+When the tunnel is up the tooltip reads **Direct network access to the remote's VMs is ON — click to turn off**; if it fails, **Network tunnel failed — click to retry**. Toggling off stops the tunnel, and when the last host disables it the daemon is unregistered. The setting is remembered per host.
+
+> **Note:** The tunnel needs an administrator account for the one-time approval. Without one, Bromure keeps working over the built-in SOCKS path — the helper is only needed to reach remote VMs from *other* apps. If macOS refuses the registration outright, an alert titled **Couldn't install the network helper** explains, and the toggle retries on the next click. A `ping` to a remote guest is answered locally by the tunnel: it confirms that routing is up, not that the guest is alive.
+
+### Multiple remotes (fleet subnet routing)
+
+You can mirror several remotes at once; each opens its own window, SOCKS forwarder, and (optionally) tunnel. When two remotes advertise the same subnet — the near-certain `192.168.64.0/24` collision — the first is routed literally and the second is given a `100.64.<n>.0/24` CGNAT-space alias, with a 1:1 host-octet-preserving remap so both can be reached at once.
+
+> **Warning:** Multi-host alias routing is implemented and unit-tested, but the runtime wiring that stitches an alias-aware PAC and browser-MCP remap across hosts is still pending. **A single remote host is the fully supported configuration today.** A known limitation of aliasing, once wired, is that a dev page emitting an absolute literal `http://192.168.64.x` link inside an *aliased* remote can misroute; literal (non-aliased) remotes are unaffected.
+
+## Exposing a dev server to the internet
+
+Separately from all of the above, an individual HTTP service running inside a workspace can be exposed to the public internet with a per-port [Cloudflare quick tunnel](18-glossary.mdx). Open a running workspace's dashboard, find the service under the ports card, and click the globe (tooltip: **Expose to the internet (Cloudflare quick tunnel)**). Bromure runs one `cloudflared` process for that origin and gives you a random `https://<name>.trycloudflare.com` URL — no Cloudflare account needed. One tunnel and one URL per service; exposing or unexposing one never disturbs the others.
+
+The globe's color tracks state: gray = off, orange = installing or starting, green = running, red = failed. A status line under the port shows progress (**Downloading & verifying cloudflared (~18 MB, one-time)…**, then **Starting tunnel…**) or the clickable public hostname with a copy button.
+
+The first time you expose anything, a one-time consent dialog titled **Expose services to the internet via Cloudflare Tunnel?** covers the download, verification, Cloudflare's Terms of Service, and the fact that anyone with the random URL can reach the service. Click the globe again to stop.
+
+The `cloudflared` binary is a pinned release, verified twice before it ever runs: the SHA-256 of the downloaded archive is checked against a hash baked into the app, and a Developer ID code-signature check confirms Cloudflare's team ID. Every step is recorded in the Supply Chain Log (see [Supply-Chain Protection](09-supply-chain.mdx)). It runs with `--no-autoupdate`.
+
+> **Warning:** Quick-tunnel URLs are public to anyone who has them, and the hostname **rotates** whenever the tunnel restarts (a reboot, an unexpose/re-expose, or a crash). Only HTTP(S) origins get a globe — SSH and well-known raw-TCP or database ports (22, 1433, 3306, 3389, 5432, 5672, 5900, 6379, 9092, 11211, 27017) and UDP never do, because a browser could not reach them through Cloudflare's edge. All of a workspace's tunnels are torn down when its VM suspends or shuts down. A hash mismatch on download refuses installation until the pin is updated in an app release.
+
+## OAuth callback forwarding
+
+A CLI running *inside* a workspace VM — `gh`, `gcloud`, a subscription sign-in — often completes an OAuth flow by opening a browser on your host Mac and waiting for a redirect to `http://127.0.0.1:<port>/callback`. Bromure bridges that automatically: the host binds the loopback port on both IPv4 and IPv6, and on the first real request splices it over vsock 5010 to the guest's own `127.0.0.1:<port>`. The `redirect_uri` is never rewritten, so PKCE and redirect validation still pass. There is nothing to configure — start the login inside the workspace and the redirect is delivered into the guest.
+
+The forwarder tears itself down after 300 seconds so the loopback port is never held indefinitely. If the host port is already in use, the flow proceeds natively without the bridge, and speculative browser preconnects (sockets that open but never send) are ignored so they cannot wedge a single-shot callback server.
+
+## Security model
+
+Remote access is powerful, so it is worth being precise about its boundaries.
+
+- **Off by default, one door.** No remote path exists until you enable the SSH server. Every path — human menu, CLI, fat client, port forwards, browser MCP — rides that one server and no other.
+- **Encryption and transport.** All traffic is SSH. The fat client's control polling, terminal attaches, file transfers, port forwards, and browser-MCP relay all travel inside the SSH connection. Because swift-nio-ssh has no post-quantum key exchange, a modern OpenSSH client will print a "not using a post-quantum key exchange" warning; this is expected and does not indicate a downgrade attack.
+- **Who can log in.** Only the exact macOS user who launched the app. Password auth is verified against OpenDirectory (no Remote Login, no PAM changes, no admin rights), and public-key auth accepts only keys you have enrolled. Password attempts are rate-limited per source IP; keys are not.
+- **What a session can do.** A human login can only reach the remote menu — never a shell — so it can create, configure, and drive workspaces, but it cannot run arbitrary host commands. The fat client's four machine verbs are similarly narrow: a control-socket bridge, a forward to a guest on the vmnet subnet, and a browser-MCP relay. Forwards to the host itself, the gateway, or the internet are refused.
+- **Secrets never leave the host.** Remote profile reads are secrets-blanked and saves are secret-preserving; API keys, tokens, and MCP environment secrets stay on the remote Mac.
+- **Trust on first use.** The fat client pins the remote's host key per endpoint on first contact and warns loudly on any later change.
+- **Guest-unforgeable consent.** MITM consent prompts raised by a running agent are rendered on the *host* side of the terminal pump, where a compromised guest can neither see nor forge them; any timeout or detach resolves to deny. See [Remote consent handling](15-enterprise.mdx#remote-consent-handling).
+
+## Troubleshooting
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| Enabling returns an error | Base image is missing or still installing | The server cannot start until the base image is present. Finish the install, then enable again. |
+| `ssh` connects but says to reconnect with `ssh -t` | No TTY was requested | The remote menu needs a terminal; add `-t` (or use `ssh -t -p 2222 <user>@<mac>`). |
+| OpenSSH prints "not using a post-quantum key exchange" | swift-nio-ssh has no PQ key exchange | Expected and harmless — the connection is still encrypted. |
+| The fat client keeps asking for a password | This Mac's key is not enrolled on the remote | Let one password login enroll it automatically, or run `bromure-cli remote key add '<this Mac's key>'` on the remote (**Show this Mac's key** copies it). |
+| Red **Trust New Key & Continue** sheet | The remote's host key changed since it was pinned | Verify out of band; only continue if you know why the key changed (reinstall, new Mac) — otherwise it may be a man-in-the-middle. |
+| Live connections drop after editing keys | Adding or removing an authorized key restarts the listener | Expected; reconnect. |
+| Browser pane stays blank | The SOCKS forwarder or subnet is not ready yet | Wait for the first `/state` poll; ensure the workspace is running and this Mac has the browser image installed. |
+| A forward is refused | The target is not a guest on the remote's vmnet subnet | Forwards can only reach workspace VMs, never the host, gateway, or internet. |
+| Tunnel toggle stuck at **Waiting for approval…** | The privileged helper is not approved yet | Approve **Bromure Agentic Coding** in System Settings → General → Login Items (needs admin). Without it, SOCKS still works. |
+| Grid-layout edits don't take on the remote | The remote is headless | Grid edits need a GUI window open on the remote; everything else still mirrors. |
+
+## Files, ports, and environment variables
+
+Server-side state lives under `~/Library/Application Support/BromureAC/remote/`: `hostkey_ed25519` (0600) and its `.pub`, `authorized_keys` (0600), and the optional `overlay-key` override. The fat client's identity and state live under `~/Library/Application Support/BromureAC/remote-client/`: `id_ed25519(.pub)` (comment `bromure-ac-fatclient`), `known_hosts` (TOFU pins), `hosts.json` (saved servers), and per-host mirror persistence under `hosts/<host-UUID>/`. The whole support directory relocates under `CFFIXED_USER_HOME`.
+
+| Port / interface | Role |
+|---|---|
+| TCP 2222 (configurable, `≥ 1024`) | The embedded SSH server, bind `0.0.0.0` by default. |
+| Guest vsock 5010 | Always-on loopback relay in every VM — the path for port forwards and OAuth callback delivery. |
+| Guest vsock 5830 | The workspace agent's browser-MCP stream, relayed to the fat client's browser pane. |
+| Ephemeral port, bound `0.0.0.0` | Per-host SOCKS5 forwarder (peer-filtered to loopback and the `192.168.127.x` browser subnet). |
+| `192.168.127.0/24` | The fat client's pinned local browser-VM subnet. |
+| `100.64.<n>.0/24` | CGNAT alias subnets assigned on a fleet subnet collision. |
+
+The relevant UserDefaults keys (domain `io.bromure.agentic-coding`) are `remoteAccess.enabled`, `remoteAccess.port`, `remoteAccess.bindAddress`, `remoteAccess.passwordAuth`, `remoteAccess.pubkeyAuth`, `fatclient.tunnel.<host-UUID>`, and `cloudflareTunnel.consented`. Diagnostic environment variables include `BROMURE_OVERLAY_KEY` (remote-menu chord), `BROMURE_FATCLIENT_LOG` (verbose fat-client logging), and `BROMURE_FATCLIENT_UTUN` (force-enable the system-wide tunnel opt-in — the toolbar toggle is the product path). The full CLI reference, including the hidden `__forward`, `__forward-socks`, `__dial`, and `__attach-window` plumbing, is in [Automation & the CLI](16-automation-cli.mdx).

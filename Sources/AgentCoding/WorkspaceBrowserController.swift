@@ -66,6 +66,16 @@ final class WorkspaceBrowserController {
     /// disk so logins/cookies survive teardown (set from Profile.browserPersistent).
     let persistent: Bool
 
+    /// Per-workspace browser capability toggles (Settings → Browser). Applied
+    /// at boot; changing any requires a browser restart to take effect.
+    struct Permissions: Equatable {
+        var allowUploads = true
+        var allowDownloads = true
+        var webcam = false
+        var microphone = false
+    }
+    let permissions: Permissions
+
     /// Fat-client remote mode: route the browser VM's traffic to the remote
     /// workspace subnet through the fat client's SOCKS forwarder. When set, the
     /// browser switch is pinned to `FatClient.browserSwitchOctet` (so the gateway
@@ -80,10 +90,12 @@ final class WorkspaceBrowserController {
     private let remoteProxy: RemoteProxy?
 
     init(model: BrowserPaneModel, workspaceID: UUID, persistent: Bool,
+         permissions: Permissions = .init(),
          remoteProxy: RemoteProxy? = nil) {
         self.model = model
         self.workspaceID = workspaceID
         self.persistent = persistent
+        self.permissions = permissions
         self.remoteProxy = remoteProxy
     }
 
@@ -266,10 +278,23 @@ final class WorkspaceBrowserController {
         }
         return VMConfig(
             homePage: homePage,
-            enableFileTransfer: true,
+            // WebGL/WebGPU on (software GL via llvmpipe): the agent frequently
+            // needs to view a WebGL/canvas app it just built. Without this the
+            // guest config-agent passes --disable-webgl --disable-3d-apis.
+            enableWebGL: true,
+            // Per-workspace permission toggles (Settings → Browser). Uploads use
+            // the host file-transfer bridge (also gates fileUploadEnabled).
+            enableFileTransfer: permissions.allowUploads,
             enableClipboardSharing: true,
+            // Camera/microphone are off by default. Turning either on keeps
+            // WebRTC enabled (the webrtc-block extension loads only when BOTH
+            // are off) and exposes that host device to the browser.
+            enableWebcam: permissions.webcam,
+            enableMicrophone: permissions.microphone,
             directConnection: pacB64 == nil,   // no proxy — Chromium connects straight out
             proxyPacBase64: pacB64,
+            // "Allow file downloads" off ⇒ block all downloads in the guest.
+            blockDownloads: !permissions.allowDownloads,
             enableAutomation: true,
             nativeChrome: true,
             nativeChromeInset: VMConfig.defaultNativeChromeInset(forDisplayScale: scale),

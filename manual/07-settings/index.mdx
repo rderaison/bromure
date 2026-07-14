@@ -1,0 +1,67 @@
+---
+title: "Settings Reference"
+description: "How to open the workspace settings editor, how saving works, and where every setting lives — pane by pane."
+order: 7.0
+---
+
+# Settings Reference
+
+Every setting in Bromure Agentic Coding belongs to a single [workspace](../05-workspaces.mdx): each workspace carries its own agents, credentials, security policies, appearance, and VM resources, edited in one place — the settings editor. The only exceptions are the **Automation** pane (app-wide, stored in application preferences), the downloaded browser image, and downloaded local models (both shared across workspaces).
+
+This chapter is the reference for the editor itself and for all sixteen panes. Each pane has its own page with a screenshot, a settings table with defaults, and pointers to the deep-dive chapter that explains the underlying feature.
+
+## Opening the settings editor
+
+There are four ways into the editor:
+
+1. **Toolbar gear** — with a workspace selected in the main window, click the gear icon in the toolbar (tooltip **Edit workspace**).
+2. **Sidebar context menu** — click the **⋯** menu on a workspace row in the sidebar and choose **Edit…**.
+3. **New workspace** — click the **+** button at the bottom of the sidebar (tooltip **New workspace**). This opens the same editor as a **New workspace** window, pre-filled from your preferences template; the confirm button reads **Create** instead of **Save**.
+4. **Preferences** — choose **Preferences…** from the app menu (⌘,). This opens the editor bound to the preferences template (see below) and adds the app-wide **Automation** pane.
+
+When editing an existing workspace, the window is titled **Edit workspace**. Only one editor window exists at a time — opening settings for a different workspace replaces the current editor window.
+
+## The editor window
+
+The editor is a two-pane window: a sidebar of categories on the left, each with a colored gradient icon, and a scrolling detail pane on the right. **Cancel** (or Esc) discards your changes; **Save** (or **Create**) applies them.
+
+<p align="center">
+  <img src="../images/editor-general.en.jpg" width="600" alt="The settings editor showing the General pane, with the category sidebar on the left" />
+</p>
+
+Saves are transactional per window — nothing is applied until you click **Save** or **Create**. A few actions have immediate side effects regardless, because they operate on shared or external state: local-model downloads and removals (global, shared across workspaces), prompt-injection model downloads, MCP OAuth authorization, subscription **Register…** / **Forget**, SSH-key import, and everything in the **Automation** pane (which writes app preferences live).
+
+Secrets you type anywhere in the editor are never written to the plain-text `profile.json`. On save they are split into `secrets.enc`, AES-GCM-encrypted with a master key held in the macOS Keychain, with file permissions `600`. See [Credentials & the wire boundary](../08-credentials.mdx) for the full model.
+
+## The preferences template ("Defaults")
+
+Opening the editor from **Preferences…** does not edit any workspace — it edits a template workspace forcibly named **Defaults** (the **Name** field is hidden). Every new workspace is forked from this template, so anything you set there — agents, credentials, guardrails, appearance — becomes your personal default for future workspaces.
+
+The factory template ships with Claude Code enabled as the primary agent in **Subscription (interactive login)** mode, every guardrail set to **Prompt before write**, and the session trace level at **AI request details**. The defaults quoted throughout this chapter are these factory values; if you have edited Preferences, new workspaces inherit your values instead.
+
+> **Note:** The **Automation** pane is app-wide, not per-workspace. It only appears when the editor is opened via **Preferences…**, and its changes take effect immediately rather than on save.
+
+## The panes
+
+| Pane | What it configures |
+|---|---|
+| [General](general.mdx) | Workspace name, accent color, window-close behavior, start at login, and notes. |
+| [Agents](agents.mdx) | Which coding agents (Claude Code, Codex, Grok Build) are available, which one is primary, and how each authenticates. |
+| [Local Models](local-models.mdx) | On-device inference: the master switch, Local/Hybrid routing, and the MLX model catalog with downloads. |
+| [Fusion](fusion.mdx) | Multi-model answer synthesis (BETA): which models to fuse and which model judges. |
+| [Folders](folders.mdx) | Host folders shared into the VM at `/home/ubuntu/<basename>` (up to 8). |
+| [Credentials](credentials.mdx) | Git identity, SSH keys, forge tokens, cloud and database credentials — all held on the host and swapped fake→real on the wire. |
+| [Environment](environment.mdx) | Plain `KEY=VALUE` variables exported into every VM shell. |
+| [MCP](mcp.mdx) | Model Context Protocol servers, translated into each enabled agent's native config and injected at boot. |
+| [Tracing](tracing.mdx) | How much the proxy records, private mode on enrolled Macs, and subscription token-swap status. |
+| [Guardrails](guardrails.mdx) | Host-side write policies per resource: Off, Prompt before write, Block destructive, or Read-only. |
+| [Supply Chain](supply-chain.mdx) | Package-fetch defenses: age gate, OSV lookups, socket.dev or Delpi filtering, install-script stripping, and lockfile prompts. |
+| [Prompt Injection](prompt-injection.mdx) | On-device detection of injected or rogue instructions in the agent's AI traffic. |
+| [Appearance](appearance.mdx) | Terminal font, cursor, colors, and window opacity. |
+| [Browser](browser.mdx) | The embedded agent-drivable Chromium: profile persistence and browser-image management. |
+| [Resources](resources.mdx) | The three storage layers, VM RAM, and NAT or bridged networking. |
+| [Automation](automation.mdx) | App-wide (Preferences only): the loopback HTTP automation API and the `bromure-cli mcp` server. |
+
+## Where settings are stored
+
+Per-workspace settings live in `~/Library/Application Support/BromureAC/profiles/<uuid>/profile.json`, with secrets in the adjacent encrypted `secrets.enc`. The preferences template is stored as `profile-template.json` plus `profile-template.enc` next to the profiles directory — deliberately outside it, so it never appears in the workspace sidebar. The Automation pane writes app-wide preferences (UserDefaults) rather than any profile file.

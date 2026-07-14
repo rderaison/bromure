@@ -434,7 +434,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // pane and its resize handle are main-window-mode surfaces only.
         let explorerPane = FileExplorerPane(
             model: fileExplorerModel, listModel: listModel,
-            onAutoSetOpen: { [weak self] open in self?.setFilePaneOpen(open, animated: true) })
+            onAutoSetOpen: { [weak self] open in self?.setFilePaneOpen(open, animated: true) },
+            onWorktreeAction: { [weak self] action in
+                // Act on the selected workspace's active tab (by its array index
+                // in the pane's tab roster — what handleTabAction expects).
+                guard let self, let id = self.selectedID, let p = self.pane(id),
+                      let active = p.model.activeTab,
+                      let idx = p.model.tabs.firstIndex(where: { $0 === active })
+                else { return }
+                self.handleTabAction(profileID: id, index: idx, action: action)
+            })
         let filePaneHost = NonMovableHostingView(rootView: explorerPane)
         filePaneHost.translatesAutoresizingMaskIntoConstraints = false
         filePaneHost.clipsToBounds = true   // squish cleanly during open/close
@@ -767,9 +776,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// the pane both drive through this.
     func browserController(for id: Profile.ID) -> WorkspaceBrowserController {
         if let c = browserControllers[id] { return c }
-        let persistent = acDelegate?.profiles.first { $0.id == id }?.browserPersistent ?? false
+        let profile = acDelegate?.profiles.first { $0.id == id }
         let c = WorkspaceBrowserController(
-            model: browserModel(for: id), workspaceID: id, persistent: persistent)
+            model: browserModel(for: id), workspaceID: id,
+            persistent: profile?.browserPersistent ?? false,
+            permissions: .init(
+                allowUploads: profile?.browserAllowUploads ?? true,
+                allowDownloads: profile?.browserAllowDownloads ?? true,
+                webcam: profile?.browserWebcam ?? false,
+                microphone: profile?.browserMicrophone ?? false))
         browserControllers[id] = c
         return c
     }

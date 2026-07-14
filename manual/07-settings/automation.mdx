@@ -1,0 +1,73 @@
+---
+title: "Automation"
+description: "The app-wide pane that enables Bromure Agentic Coding's loopback HTTP automation API and the bromure-cli mcp server."
+order: 7.16
+---
+
+# Automation
+
+The **Automation** pane is the one setting in the editor that is *not* per-workspace. It configures Bromure Agentic Coding's HTTP automation API — a loopback control plane that external tools, scripts, and AI agents use to manage workspaces and sessions — and it applies to the whole app. Because it belongs to no single workspace, it appears only when you open the editor as the app's Preferences.
+
+There is no screenshot for this pane in this chapter: it is reached through **Bromure → Preferences…** (⌘,), where the editor is bound to the [preferences template](index.mdx) and the **Automation** category is added to the bottom of the category sidebar. It does not appear when you edit an ordinary workspace.
+
+> **Note:** Unlike every per-workspace pane, this one is not transactional. Its controls write app preferences the moment you change them — there is no **Save** step, and the toggle takes effect immediately.
+
+## What the automation server is
+
+The pane's summary explains it plainly: Bromure Agentic Coding exposes an HTTP API on the loopback interface that lets external tools manage workspaces and sessions, and the bundled `bromure-cli mcp` subcommand wraps the same surface for AI agents such as Claude Code and Claude Desktop.
+
+Two access paths share this one HTTP surface, and it is worth keeping them apart:
+
+- **The control socket** — an always-on, owner-only Unix socket at `~/Library/Application Support/BromureAC/control.sock` (mode `0600`). The `bromure-cli` command-line tool talks to the app over this socket. It is independent of this pane: the CLI works whether or not the automation server is enabled, because the file permissions on the socket are its access gate.
+- **The automation API** — the same routes exposed over TCP, off by default, enabled here. This is what external HTTP clients and the `bromure-cli mcp` server use. Turning this off does not affect the CLI.
+
+The complete route list, the CLI, and the MCP servers are documented in [Automation & the CLI](../16-automation-cli.mdx).
+
+## Enable automation server
+
+The **Enable automation server** switch turns the TCP listener on and off. Its caption reflects the current state:
+
+- When on: **Listening on `127.0.0.1:9223`. Toggling this off stops the server immediately; the MCP subcommand will no longer reach the app.**
+- When off: **Off — the HTTP API and the MCP subcommand are unavailable.**
+
+The server is **off by default**. While it is off, the `bromure-cli mcp` stdio server has nothing to connect to, so any MCP client configured against it will report no tools until you enable the server here.
+
+> **Warning:** The automation API has no authentication. On the loopback interface, profile and session listing and session create/close are open to any local process; the mutating and introspection routes (workspace control, `exec`, app state, debug) additionally require the app to have been launched with `BROMURE_DEBUG_CLAUDE`. Because there is no auth, exposing the listener beyond loopback is a real risk — see **Bind address** below.
+
+## Port and bind address
+
+Two fields tune where the server listens:
+
+- **Port** — the TCP port, with a placeholder of **(default: 9223)** and a valid range of 1–65535. The default of 9223 is deliberately one off from the Bromure web browser's automation port (9222), so both apps can run side by side.
+- **Bind address** — the interface to bind, defaulting to `127.0.0.1`. Any value other than loopback raises an orange warning: **Non-loopback bind exposes the API to the network. The MCP server has no auth.** Keep this at `127.0.0.1` unless you fully understand the exposure.
+
+The pane notes the timing: **Port and bind address take effect the next time the server starts. Toggling the switch off and on applies them now.** In other words, change the port or address, then flip **Enable automation server** off and on to rebind immediately.
+
+## MCP client configuration
+
+The bottom of the pane holds a ready-to-paste **MCP client configuration** snippet for wiring the `bromure-cli mcp` server into an MCP client. It reads: add this to `~/.config/claude-code/.mcp.json` (or your MCP client's equivalent):
+
+```json
+{
+  "mcpServers": {
+    "bromure-cli": {
+      "command": "/Applications/Bromure Agentic Coding.app/Contents/MacOS/bromure-cli",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The `command` points straight at the app binary inside the bundle. Enable the automation server first, since the MCP server's session and profile tools call the HTTP API you just turned on.
+
+## Where the settings live
+
+Everything in this pane is stored in the app's preferences under the `io.bromure.agentic-coding` domain, not in any `profile.json`. The same three keys can be set from the command line or via AppleScript, which is useful for scripted provisioning:
+
+| Setting | Preferences key | Type | Default |
+|---|---|---|---|
+| **Enable automation server** | `automation.enabled` | Boolean | `false` |
+| **Port** | `automation.port` | Integer (1–65535) | `9223` |
+| **Bind address** | `automation.bindAddress` | String (IP) | `127.0.0.1` |
+
+For example, `defaults write io.bromure.agentic-coding automation.enabled -bool true` enables the server, and AppleScript's `set ac app setting "automation.enabled" to value "true"` toggles it live. The mechanics of both, along with everything the API and MCP servers can do, are in [Automation & the CLI](../16-automation-cli.mdx).

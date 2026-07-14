@@ -1,0 +1,44 @@
+---
+title: "General"
+description: "Workspace identity and window behavior: name, accent color, close action, start at login, and notes."
+order: 7.1
+---
+
+# General
+
+The **General** pane holds the workspace's identity and its window behavior. It is the first pane the editor shows, with the workspace name as the page heading. Everything here is cosmetic or behavioral — nothing in this pane affects the VM's contents, credentials, or security posture.
+
+<p align="center">
+  <img src="../images/editor-general.en.jpg" width="600" alt="The General settings pane: Name, Color, When closing the window, Start this VM at login, and Notes" />
+</p>
+
+## Settings
+
+| Setting | Description |
+|---|---|
+| **Name** | The display name shown in the main window's sidebar. This is the only field required to save a workspace. New workspaces are pre-named `Default workspace` (auto-numbered `Default workspace 2`, `3`, … if the name is taken). Hidden in the Preferences flavor of the editor, where the template is always named `Defaults`. |
+| **Color** | The workspace's accent color. Menu of eight presets: **Blue** (default), **Red**, **Green**, **Orange**, **Purple**, **Pink**, **Teal**, **Gray**. Tints the workspace's server-rack tile in the sidebar, the selection highlight, and tab accents. |
+| **When closing the window** | What happens to the VM when you close its session window: **Run in the background**, **Suspend**, **Shut down**, or **Ask**. Default: **Ask**. |
+| **Start this VM at login** | Boots this workspace automatically when you log in to your Mac. Default: off. |
+| **Notes (optional)** | A free-form multi-line note attached to the workspace. Default: empty. |
+
+## Window-close behavior
+
+The **When closing the window** menu decides the fate of a running VM when its session window closes:
+
+- **Run in the background** — the window closes but the VM keeps running, detached. It stays available in the sidebar (state **Running**) and you can reopen it at any time; long-running agent jobs continue uninterrupted.
+- **Suspend** — the VM's RAM is saved to disk and the VM stops consuming CPU. Resuming is nearly instant and restores the session exactly where it left off. The sidebar shows **Suspended**.
+- **Shut down** — a clean ACPI poweroff. The next start is a normal boot. The sidebar shows **Off**.
+- **Ask** (default) — a prompt appears each time the window closes, offering the three choices above.
+
+See [Sessions](../06-sessions.mdx) for how these states appear in the sidebar and how to resume or restart a workspace.
+
+## Starting a workspace at login
+
+Turning on **Start this VM at login** installs a per-user macOS LaunchAgent (`io.bromure.agentic-coding.boot`) — no administrator password required. At your next macOS login it starts `bromure-cli` headless and boots this workspace, so the agent environment is ready before you open the app. The LaunchAgent is removed automatically as soon as no workspace has the option enabled.
+
+## Related chapters
+
+- [Workspaces](../05-workspaces.mdx) — creating, duplicating, resetting, and deleting workspaces.
+- [Sessions](../06-sessions.mdx) — the session window, VM states, and lifecycle actions.
+- [Settings Reference](index.mdx) — all panes at a glance.

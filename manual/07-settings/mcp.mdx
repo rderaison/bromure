@@ -1,0 +1,80 @@
+---
+title: "MCP"
+description: "Configure Model Context Protocol servers for the workspace — HTTP or stdio — translated into each agent's native config and injected at boot."
+order: 7.8
+---
+
+# MCP
+
+The **MCP** pane configures the [Model Context Protocol](../18-glossary.mdx) servers available to this workspace's agents. MCP servers give an agent access to external tools and context — a documentation index, an issue tracker, a design tool, a database explorer. You define each server once here, and Bromure Agentic Coding translates it into the right configuration format for every enabled agent and injects it into the VM at boot.
+
+<p align="center">
+  <img src="../images/editor-mcp.en.jpg" width="600" alt="The MCP pane of the Edit workspace window, showing the empty-state message No MCP servers configured and an Add server button" />
+</p>
+
+The pane's caption summarizes the flow: **MCP servers give your agent access to external tools and context. Configs are translated into the right format for the active agent (Claude Code or Codex) and injected into the VM at boot.** With none configured it reads **No MCP servers configured.**
+
+## How servers are delivered to agents
+
+You describe each server once in a neutral form. At session boot, bromure writes it out in each enabled agent's native format:
+
+- **Claude Code** — merged into `~/.claude.json`.
+- **Codex** — written as a TOML block in `~/.codex/config.toml`.
+- **Grok Build** — merged into Grok's user-settings file.
+
+Because this happens at boot, adding, editing, or removing a server takes effect the next time the workspace's session starts, not live in a running session. A server's per-server enable switch lets you keep a definition on file while turning it off for a run.
+
+## Adding a server
+
+Click **Add server** to append a row. New servers default to **HTTP** transport and are enabled. Each row has the following controls across its header:
+
+- **Name** — the server's identifier (placeholder `my-server`).
+- **Transport** — a segmented control, **HTTP** or **STDIO**. It is hidden while the row is in JSON mode (see below).
+- **Enable switch** — turns this one server on or off independently.
+- **Edit as JSON** — a curly-braces button that swaps the form for a raw JSON editor. The JSON you enter is passed straight through to the agent config and validated inline; the button then reads **Switch to form** to go back.
+- **Remove** — the minus button deletes the row.
+
+The fields below the header depend on the transport.
+
+### STDIO servers
+
+A **STDIO** server is a command launched inside the VM that speaks MCP over standard input and output. Two fields:
+
+- **Command** — the executable (placeholder `npx`).
+- **Arguments** — space-separated arguments (placeholder `-y @upstash/context7-mcp`).
+
+### HTTP servers
+
+An **HTTP** server is a remote MCP endpoint. Its **URL** field takes the server address (placeholder `https://mcp.example.com/mcp`), and an **Authentication** disclosure holds the credential. There are two ways to authenticate, and both keep the real token on the host — the VM only ever holds a fake, swapped onto the wire by the proxy scoped to the server's host:
+
+- **Authorize with OAuth…** — runs a host-side OAuth broker. Once authorized, the row shows **Authorized** with an expiry ("expires …") and **Re-authorize** / **Revoke** buttons, and the token's environment variable is auto-named `MCP_OAUTH_<NAME>`.
+- **Static token** — under "Or enter a static token:", set an **Env var name** (for example `FIGMA_OAUTH_TOKEN`) and paste the **Token** into the secure field. The token field is captioned **Never sent to VM — swapped by proxy**.
+
+For HTTP servers that carry a bearer token, the proxy also answers the server host's OAuth discovery paths so the in-VM agent treats the server as pre-authenticated and does not attempt its own (VM-impossible) OAuth flow. The bearer-token swap is documented alongside the other credential families in [Credentials & the wire boundary](../08-credentials.mdx).
+
+## MCP servers vs. the app's own automation server
+
+Two different things share the letters "MCP," and it is worth keeping them apart:
+
+- **This pane** configures MCP servers that the *agent inside the VM* consumes as tools.
+- The app's **Automation** feature exposes an MCP server that lets an *external* agent drive Bromure Agentic Coding itself (open workspaces, manage sessions). That is the `bromure-cli mcp` subcommand, configured in the [Automation](automation.mdx) pane and documented in [Automation & the CLI](../16-automation-cli.mdx).
+
+## Settings reference
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| **Server list** | List of server rows | Empty | Each server has a name, transport, enable switch, and a JSON-editor toggle. |
+| **Transport** | Segmented: **HTTP** / **STDIO** | HTTP | HTTP = remote URL; STDIO = a command launched in the VM. Hidden in JSON mode. |
+| **Enabled** | Switch (per server) | On | Turns one server on or off without deleting it. |
+| **Edit as JSON** | Toggle button | Form mode | Swaps the form for a raw, inline-validated JSON config passed straight through. |
+| **Command / Arguments** | Text (STDIO) | Empty | The executable and its space-separated arguments. |
+| **URL** | Text (HTTP) | Empty | The remote MCP endpoint address. |
+| **Authentication** | OAuth broker or static bearer token (HTTP) | None | OAuth auto-names `MCP_OAUTH_<NAME>`; a static token uses an env var you name. The real token stays on the host and is swapped on the wire. |
+| **Add server** | Button | — | Appends a new HTTP, enabled server row. |
+
+## Related chapters
+
+- [Automation & the CLI](../16-automation-cli.mdx) — the app's own MCP server (`bromure-cli mcp`) for driving Bromure Agentic Coding from an external agent.
+- [Credentials & the wire boundary](../08-credentials.mdx) — how HTTP MCP bearer tokens are held on the host and swapped on the wire.
+- [Agents](agents.mdx) — which agents are enabled and which is primary; each receives the translated MCP config at boot.
+- [Settings Reference](index.mdx) — all panes at a glance.

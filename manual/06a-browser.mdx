@@ -1,0 +1,130 @@
+---
+title: "The Embedded Browser"
+description: "Using the workspace's built-in Chromium — driving it yourself, letting the agent drive it through the browser MCP tools, staying signed in, and privacy."
+order: 6.5
+---
+
+# The Embedded Browser
+
+Every workspace comes with its own web browser: a full Chromium that opens as a pane beside the terminal. It exists so an agent can *see the web* — open the app it just built, read a docs page, reproduce a bug, click through a flow — and so you can watch (and drive) the same browser it does. The browser runs in its own disposable sidecar VM, separate from the workspace VM, so a hostile page can never touch the agent's files or your Mac.
+
+This chapter is the complete guide to using it: opening it, driving it by hand, letting the agent drive it through the built-in [browser MCP server](18-glossary.mdx), keeping sign-ins, and the privacy model. It is the same pane introduced in [Sessions](06-sessions.mdx#the-agentic-browser-pane); everything here also applies when a remote agent drives it over a [fat-client](14-remote-access.mdx) connection.
+
+## Opening the browser
+
+Toggle the browser pane with **⌃⌘B**, or click the **globe** button in the session-window toolbar. It opens as a split on the right edge of the stage, sharing the window with the terminal.
+
+The very first time you open it — per Mac, not per workspace — a consent card asks **Install the browser?** with **Download & Install** and **Not Now**. The browser image is a one-time download of roughly 500 MB, shared by every workspace. Until it is installed the pane shows the install prompt instead of a page; you can also pre-fetch it from the workspace's [Browser settings](07-settings/browser.mdx) with **Download Now**.
+
+Once installed, the browser VM boots lazily the first time any workspace opens the pane (or the first time an agent calls a browser tool), which takes a second or two. You do not manage this VM directly — it is created, suspended, and torn down for you (see [Lifecycle and resource use](#lifecycle-and-resource-use)).
+
+> **Note:** The browser runs in a *different* VM from the one your agent's shell runs in. The two share a private network (see [Loading a dev server](#loading-a-dev-server-the-agent-started)), but they are not the same machine — a file the agent writes in its home directory is not on the browser's disk, and `localhost` in the browser is not the agent's `localhost`.
+
+## Driving it yourself
+
+The pane is a chrome-less browser view under a compact, Safari-style tab bar:
+
+| Control | What it does |
+|---|---|
+| **Back / forward** | The arrow buttons, or **⌘[** and **⌘]**. |
+| **Tab pills** | One pill per open tab. The *active* pill doubles as the address field ("Search or enter URL"): type a bare hostname and `https://` is prepended; type anything that is not a URL and it becomes a Google search. |
+| **+** | New tab (**⌘T** while the pane has focus). |
+| **DevTools** | Toggle Chromium's Developer Tools (**F12**) — the full element inspector, console, and network panel. |
+| **Site info** | Click the favicon for a site-information popover, including the certificate chain on HTTPS pages. |
+| **Share** | The standard macOS share menu for the current page. |
+
+Drag the pane's left edge to resize it (default 640 points, adjustable between 380 and 1400; the terminal always keeps at least 240 points). Drag it below the minimum width to close the pane.
+
+> **Note:** While the browser view has keyboard focus, **⌘Q** and **⌘Tab** are captured by the guest so that in-page shortcuts work — they will not quit the app or switch macOS apps. Click the terminal or the sidebar to hand those shortcuts back to macOS.
+
+## Loading a dev server the agent started
+
+The most common reason to open the browser is to look at something the agent is building. Because the browser VM shares the same NAT subnet as the workspace VM, it can reach a dev server the agent started directly — but **not** at `localhost`, because the browser is a separate machine.
+
+Reach the dev server by the *workspace VM's* IP address:
+
+1. Start the server in the agent's terminal as usual (for example a dev server on port 3000).
+2. Copy the workspace's IP from the **IP pill** in the toolbar (or run `hostname -I` in the agent's terminal).
+3. In the browser, navigate to `http://<workspace-ip>:3000`.
+
+The agent, when it drives the browser itself, is instructed to do exactly this — reach dev servers by the LAN IP, never `localhost` — so its screenshots and checks hit the right server.
+
+## Letting the agent drive it
+
+The browser is *agentic*: every workspace agent is handed a built-in `browser` MCP server automatically, with no configuration. Its tools let the agent open pages, click, type, read the DOM, take screenshots, and inspect the console and network — driving the very pane you see. You and the agent share one browser: a page the agent opens appears in your pane, and a tab you open is visible to the agent's `browser_list_tabs`.
+
+You do not turn this on. Just ask the agent to do something that needs a browser — for example:
+
+```
+Open http://<workspace-ip>:3000, click "Sign up", fill the form with a test
+account, and tell me if the confirmation page renders. Screenshot it.
+```
+
+The agent's tool calls can boot and reveal the browser automatically for the selected workspace; if the pane was closed, a tool call opens it and waits for the cold boot. (The pane never *re-opens itself* after you have closed it manually within a session, so you always stay in control of whether it is visible.)
+
+### The browser tools
+
+The server exposes 23 tools, grouped by what they do:
+
+| Group | Tools |
+|---|---|
+| **Navigation** | `browser_navigate`, `browser_back`, `browser_forward`, `browser_reload`, `browser_wait_for` |
+| **Tabs** | `browser_new_tab`, `browser_list_tabs`, `browser_activate_tab`, `browser_close_tab` |
+| **Reading the page** | `browser_get_text`, `browser_get_html`, `browser_get_links`, `browser_screenshot` (with a full-page option), `browser_evaluate` (run JavaScript) |
+| **Interacting** | `browser_click`, `browser_fill`, `browser_type`, `browser_press_key`, `browser_pick_element` |
+| **Diagnostics** | `browser_console`, `browser_network`, `browser_network_summary`, `browser_clear_network` |
+
+`browser_pick_element` is the one that involves you: it starts an interactive 60-second element picker, so when the agent is unsure which element you mean, you can click it in the pane and hand the agent a precise selector. `browser_evaluate` runs arbitrary JavaScript in the page and returns the result, and `browser_network` / `browser_console` give the agent the same request log and console output you would read in DevTools — which is how an agent debugs a failing fetch or a client-side error without you copying anything out by hand.
+
+Under the hood the tools reach the browser over a generated Python stdio shim, `bromure-browser-mcp.py`, staged read-only into the agent's VM at `/mnt/bromure-meta/`. It dials the host over [vsock](18-glossary.mdx) port 5830 and reconnects forever, so the tools never disappear from the agent's tool list even across browser teardowns. The full tool reference lives in [CLI, Automation & MCP](16-automation-cli.mdx#the-in-workspace-browser-mcp-server).
+
+> **Note:** On a [fat client](14-remote-access.mdx), a remote agent's browser-MCP stream can be spliced over the SSH connection so the remote agent drives the browser pane you are watching locally. One such relay is active at a time.
+
+## Staying signed in vs. staying disposable
+
+By default the browser is **disposable**: its disk is an ephemeral clone that is deleted when the browser is torn down, so cookies, logins, and history vanish with it. Every fresh open starts clean. This is the safe default — nothing an agent does in the browser persists or leaks into later work.
+
+When you need sign-ins to survive — logging into a staging site the agent will revisit, keeping a session across restarts — enable **Stay signed in to websites** in the workspace's [Browser settings](07-settings/browser.mdx). Chromium's profile then lives on an encrypted, per-workspace disk under `~/Library/Application Support/BromureAC/browser-profiles/` and survives teardowns. Toggling the setting restarts the workspace's browser, so you are warned before the change is saved.
+
+> **Warning:** Turning on **Stay signed in** trades disposability for convenience. Saved cookies and logins are exactly the kind of thing a prompt-injected agent would try to exfiltrate. Prefer the disposable default for any workspace pointed at untrusted code, and reserve persistence for browsers that only ever visit sites you trust.
+
+## Lifecycle and resource use
+
+The browser VM is managed for you and kept cheap when idle:
+
+- It is created lazily on first open (or first agent tool call) and boots from the shared 500 MB image as a copy-on-write clone.
+- A hidden browser **suspends after about 10 seconds** and is **torn down entirely after 5 minutes** collapsed, freeing its memory and disk.
+- The pane's open/closed state is remembered per workspace while the app runs, but deliberately not across app restarts — a disposable browser would not survive a restart anyway.
+
+Unlike workspace VMs, the sidecar browser VM *is* served from a pre-warmed pool, which is why opening the pane usually feels instant after the first time.
+
+## Keyboard shortcuts
+
+These apply while the browser pane has keyboard focus:
+
+| Shortcut | Action |
+|---|---|
+| ⌃⌘B | Toggle the browser pane |
+| ⌘T / ⌘W | New / close browser tab |
+| ⌘[ / ⌘] | Back / forward |
+| ⌘R | Reload |
+| ⌘L | Focus the address field (the active tab pill) |
+| F12 | Toggle DevTools |
+
+## Troubleshooting
+
+**The pane shows an install prompt instead of a page.** The browser image is not downloaded yet. Click **Download & Install**, or pre-fetch it from [Browser settings](07-settings/browser.mdx) → **Download Now** (about 500 MB).
+
+**The agent's page won't load / shows connection refused.** The agent is almost certainly using `localhost`. The browser is a separate VM — it must reach the dev server by the workspace VM's LAN IP (`hostname -I` in the agent's terminal, or the toolbar IP pill), as in [Loading a dev server](#loading-a-dev-server-the-agent-started).
+
+**⌘Q or ⌘Tab do nothing.** The browser view has focus and is capturing them for in-page use. Click the terminal or the sidebar to return those shortcuts to macOS.
+
+**Logins disappear between sessions.** That is the disposable default. Enable **Stay signed in to websites** in [Browser settings](07-settings/browser.mdx) to keep a persistent profile.
+
+**The browser pane won't re-open on its own after the agent used it.** By design: once you close the pane manually, it stays closed until you re-open it, even if the agent keeps issuing browser tool calls (which still run — you just don't see the pane). Press ⌃⌘B to bring it back.
+
+## Related settings and tools
+
+- [Browser settings](07-settings/browser.mdx) — the **Stay signed in to websites** toggle and browser-image management.
+- [Sessions](06-sessions.mdx) — the browser pane in the context of the whole session window.
+- [CLI, Automation & MCP](16-automation-cli.mdx#the-in-workspace-browser-mcp-server) — the full `browser_*` tool reference and the vsock transport.

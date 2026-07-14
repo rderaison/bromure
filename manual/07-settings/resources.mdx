@@ -1,0 +1,77 @@
+---
+title: "Resources"
+description: "The workspace VM's storage layers, RAM allocation, and NAT or bridged networking."
+order: 7.15
+---
+
+# Resources
+
+The **Resources** pane configures the virtual machine behind a workspace: how its disks are laid out, how much memory it gets, and how it reaches the network. It is divided into three groups — **Storage**, **Memory**, and **Network** — matching the three things every workspace VM needs.
+
+<p align="center">
+  <img src="../images/editor-resources.en.jpg" width="600" alt="The Resources pane of the Edit workspace window: a Storage stack showing Your home folder, Workspace system disk, and Base OS image, above a Memory group with a VM RAM stepper" />
+</p>
+
+The storage controls act on a real workspace's disks, so they only appear once a workspace exists. In the preferences template (**Bromure → Preferences…**), where there is no VM to act on, the pane explains that storage controls apply to real workspaces and shows the memory and network settings only — those still seed every new workspace.
+
+## Storage
+
+A workspace's filesystem is built from three stacked layers. As the pane puts it: the layers stack to make this workspace's environment; the bottom is shared and immutable, and the top two are yours and can be erased independently. Each layer is a row in the stack, with its size and status on the right and, where an action is possible, a button.
+
+### Your home folder
+
+The top layer is the persistent `/home/ubuntu` — project clones, dotfiles, `.ssh` keys, `npm-global`, `.cargo`, shell history, and anything else the agent writes to its home. On a modern workspace this lives on a private ext4 disk image that shrinks on your Mac as files are deleted inside the VM; the row's status line shows **Active** with a relative time and the current size, or **Not yet created** before the first launch.
+
+Two actions can appear on this row:
+
+- **Erase home…** (destructive) wipes the home layer. Projects, shell history, `npm-global`, `.cargo`, and the auto-generated SSH keypair are all removed; the app's managed dotfiles are rebuilt on the next launch, and the home's rollback checkpoints are deleted too. The rest of the workspace — its system disk, settings, and imported credentials — is untouched.
+- A second, model-dependent slot holds either **Restore home…** or **Upgrade storage…**:
+  - **Restore home…** rolls the ext4 home image back to one of its per-boot checkpoints (each checkpoint is the home exactly as it was when that session started). The current home is checkpointed first, so a restore can itself be undone. This is the same rollback described in [Sessions](../06-sessions.mdx).
+  - **Upgrade storage…** appears only on a legacy workspace whose home is still a shared host folder. It re-arms the one-time migration to the ext4 image, which then runs on the next boot with progress shown on the boot screen; the old home is kept on your Mac as a backup.
+
+### Workspace system disk
+
+The middle layer is a read-write copy of the base OS, cloned just for this workspace. It holds anything you `sudo apt install`, edits to `/etc` and `/var`, and other system-level configuration. The status line shows which base version it was cloned from (for example, **Cloned from base v200.2**).
+
+**Reset to base…** (destructive) discards every system-level change and re-clones the disk from the current [base image](../18-glossary.mdx). Your home folder is left intact — only the OS layer is replaced. Because a fresh disk cannot resume against an old memory snapshot, resetting also clears any saved RAM state and tab layout, so the next start is a clean boot. This is the same action as **Reset disk** in the sidebar; see [Workspaces](../05-workspaces.mdx).
+
+### Base OS image
+
+The bottom layer is the shared, immutable base image — Ubuntu Noble plus Node, Claude Code, Codex, `gh`, `glab`, and fonts — cloned by every workspace and read-only at runtime. The row shows its version, build date, and on-disk size. There is no per-workspace action here: rebuilding the base affects every workspace, so it lives in the app menu instead, noted on the row as **Rebuild via the app menu (~5–10 min)**.
+
+> **Note:** The two destructive buttons are disabled while the workspace's session window is open — the tooltip reads **Close the session window first.** — and for a workspace that has never launched, where the disks do not exist yet (**Created on first launch.**). Close the session before resetting or erasing.
+
+## Memory
+
+The **VM RAM** stepper sets the memory allocated to this workspace's VM, from **2 to 32 GB in steps of 2**. As the caption suggests, raise it if Claude or Codex feels sluggish or a Rust build runs out of memory.
+
+The default is scaled to your Mac's own memory: **4 GB** on hosts with less than 18 GB of RAM, **6 GB** up to 36 GB, and **8 GB** on larger machines. The VM's CPU allocation is fixed at 4 vCPUs and is not configurable here.
+
+> **Tip:** For a niche need you can also change the ext4 home image's apparent size before a workspace's first boot with `defaults write io.bromure.agentic-coding vm.homeImageGB -int <N>` (8–1024 GB, default 64). The image is sparse, so a larger apparent size costs nothing until the guest actually writes that much.
+
+## Network
+
+The **Network** group is a radio choice between two modes:
+
+- **NAT** (default) — the VM sits behind NAT. Egress works, and nothing on your LAN can reach it. All NAT-mode workspace VMs share one private network segment, so a workspace and its browser VM, or two workspaces, can reach each other's dev servers by IP — see [Concepts](../04-concepts.mdx). The caption reads: **VM sits behind NAT. Egress works; nothing on your LAN can reach it.**
+- **Bridged** — the VM joins your physical LAN and gets its own LAN-routable IP address via DHCP.
+
+### Bridged mode and the interface picker
+
+Choosing **Bridged** reveals an **Interface** picker listing the Mac's physical network interfaces; the VM bridges onto the one you select, defaulting to the first available. The caption confirms: **The VM gets a LAN-routable IP via DHCP on the chosen interface.**
+
+If the Mac has no interface available for bridging, an orange warning appears — **No bridged interfaces available. Bromure AC will fall back to NAT at launch.** — and the workspace launches in NAT mode instead. Bridged networking depends on the virtualization networking entitlement, so it is available only in a properly signed build.
+
+## Settings reference
+
+| Setting | Type | Default |
+|---|---|---|
+| **Your home folder** — **Erase home…** | Destructive button (disabled while running / before first launch) | — |
+| **Your home folder** — **Restore home…** / **Upgrade storage…** | Button (model-dependent; disabled while running) | — |
+| **Workspace system disk** — **Reset to base…** | Destructive button (disabled while running / before first launch) | — |
+| **Base OS image** | Read-only row (version, build date, size) | — |
+| **VM RAM** | Stepper, 2–32 GB in steps of 2 | Host-scaled: 4 GB (host under 18 GB), 6 GB (under 36 GB), 8 GB (36 GB or more) |
+| **Network mode** | Radio: **NAT** / **Bridged** | NAT |
+| **Interface** (bridged only) | Picker of physical interfaces | First available (falls back to NAT if none) |
+
+The disk, home, and checkpoint files described here live under `~/Library/Application Support/BromureAC/profiles/<uuid>/`; the [Concepts](../04-concepts.mdx) chapter explains the copy-on-write clone model, and [Sessions](../06-sessions.mdx) covers suspend, resume, and home checkpoints in depth.

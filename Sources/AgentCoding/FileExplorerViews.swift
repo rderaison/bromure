@@ -15,6 +15,12 @@ struct FileExplorerPane: View {
     /// while the pane is closed (IDE-style auto-show), false when it LEAVES a
     /// repo for a non-repo directory (auto-collapse).
     let onAutoSetOpen: (Bool) -> Void
+    /// Worktree actions for the selected workspace's active tab. When non-nil, a
+    /// worktree action bar appears while the active tab is inside a git repo:
+    /// New worktree… always, plus Merge / Delete when the active tab IS a
+    /// worktree. Left nil in remote (fat-client) mode, where worktrees are
+    /// managed from the sidebar.
+    var onWorktreeAction: ((TabAction) -> Void)? = nil
 
     /// Expanded directories (repo-relative paths). Reset per repo.
     @State private var expanded: Set<String> = []
@@ -53,6 +59,7 @@ struct FileExplorerPane: View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.5)
+            worktreeBar
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -135,6 +142,40 @@ struct FileExplorerPane: View {
         }
         nodes.forEach(walk)
         return result
+    }
+
+    // MARK: Worktree action bar
+
+    /// Shown while the active tab is inside a git repo (and worktree actions are
+    /// available). New worktree… always; Merge / Delete only when the active tab
+    /// itself is a worktree.
+    @ViewBuilder
+    private var worktreeBar: some View {
+        if currentRepoRoot != nil, let act = onWorktreeAction {
+            HStack(spacing: 6) {
+                Button { act(.newWorktree) } label: {
+                    Label("New worktree…", systemImage: "arrow.branch")
+                }
+                .help("Create a git worktree branched from this tab's HEAD and open an agent in it")
+                if activeTab?.isWorktree == true {
+                    Button { act(.merge) } label: {
+                        Label("Merge", systemImage: "arrow.triangle.merge")
+                    }
+                    .help("Merge this worktree's branch back into an ancestor")
+                    Button { act(.removeWorktree) } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .help("Discard this worktree and delete its branch")
+                }
+                Spacer()
+            }
+            .labelStyle(.titleAndIcon)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            Divider().opacity(0.5)
+        }
     }
 
     // MARK: Header

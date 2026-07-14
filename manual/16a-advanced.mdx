@@ -1,0 +1,93 @@
+---
+title: "Advanced"
+description: "Power-user surfaces: browse, extract from, and repair a workspace's ext4 disk images on your Mac without booting a VM, plus low-level configuration defaults."
+order: 16.5
+---
+
+# Advanced
+
+This chapter collects the app's power-user surfaces — the ones you reach for occasionally, not every session. Its centerpiece is the built-in **ext4 file browser**, which opens a workspace's disk images directly on your Mac without booting the VM: for recovering a file from a workspace you would rather not start, or repairing one that won't boot. A short section at the end documents two low-level configuration defaults.
+
+Everything here assumes you are comfortable with the storage model from [Workspaces](05-workspaces.mdx) and [Sessions](06-sessions.mdx).
+
+## The ext4 file browser
+
+Each [workspace](18-glossary.mdx) keeps its data in Linux `ext4` disk images — the system disk `disk.img` and the home image `home.img`. macOS has no native ext4 support, so ordinarily the only way to see inside those images is to boot the VM. Bromure Agentic Coding avoids that with its own dependency-free, userland ext4 reader and writer: it parses the on-disk format directly and shows you the tree.
+
+**Workspaces ▸ Open ext4 file…** opens any ext4 (also `ext2` or `ext3`) `.img` — a raw filesystem or an MBR/GPT-partitioned disk — in a Finder-like window. Nothing is mounted, no VM boots, and no elevated privileges are needed.
+
+> **Note:** The image opens **read-only** by default — safe even if a workspace VM still has the disk attached. Editing is a separate, explicitly gated step (see [Editing an image](#editing-an-image)).
+
+### What you can open: the disks inside a workspace
+
+A workspace lives under `~/Library/Application Support/BromureAC/profiles/<uuid>/`. Two images there are worth browsing, plus their rollback snapshots:
+
+| Image | What the browser shows | Toolbar info line reads |
+| --- | --- | --- |
+| `disk.img` | The Ubuntu system root — `/etc`, `/var`, `/usr`, `/opt`, and so on. The disk is a GPT layout (a 512 MiB EFI partition plus the ext4 root); the browser locates the ext4 root automatically. | `partition @…MiB` |
+| `home.img` | The guest's `/home/ubuntu` directly at the filesystem root — dotfiles, project checkouts, `.ssh`, shell history, and the paste cache under `.bromure/`. | `raw` |
+| `checkpoints/<ts>.img` | A boot-proven rollback snapshot of `disk.img`. | `partition @…MiB` |
+| `checkpoints/home/<ts>.img` | A rollback snapshot of `home.img`. | `raw` |
+
+The home image behaves this way because the guest formats it with `mkfs.ext4` and mounts it *over* `/home/ubuntu` on boot — so the image's own root directory **is** that home folder. On a workspace still using the legacy shared-folder home there is no `home.img` to open; see [Sessions](06-sessions.mdx) for the storage models and the one-time upgrade.
+
+### Opening an image
+
+1. Choose **Workspaces ▸ Open ext4 file…**.
+2. An open panel titled **Open ext4 Disk Image** appears — "Choose an ext4 .img disk image (raw or partitioned)." — starting in `~/Library/Application Support/BromureAC`. Navigate into a workspace's `profiles/<uuid>/` folder and pick `disk.img`, `home.img`, or a file under `checkpoints/`.
+3. The browser opens in a window titled **ext4 — «filename»**, showing the filesystem root.
+
+The toolbar's info line (bottom-left) summarizes the volume: its label, total size, whether the filesystem was found raw or at a partition offset, and its state — `clean`, `not cleanly unmounted`, or `journal needs recovery`. There is one window per image; reopening an image that is already open just focuses its window.
+
+### Browsing, previewing, and extracting
+
+The main view is a three-column table — **Name**, **Size**, and **Type** — with directories listed first. Type distinguishes folders, files, and symlinks, as well as the special Unix node types (Char, Block, FIFO, Socket).
+
+- **Navigate** — double-click a folder to enter it; click the toolbar **Up** arrow to go back. The breadcrumb shows the current path.
+- **Preview** — double-click a file, or right-click it and choose **Preview**. Text files render as text; binary files render as a hex dump. Either way the preview is capped at the first 1 MiB, and the footer reports how many of the file's total bytes are shown. A symlink previews as its target path.
+- **Extract** — right-click a file and choose **Extract…** to write its full contents to your Mac through a save panel. This is the read-only path you will use most often.
+
+### Editing an image
+
+Editing is deliberately behind a gate. Click **Enable Editing…** in the toolbar; a warning appears:
+
+> Only edit an image whose workspace VM is stopped. Writing to a disk that a running VM has open will corrupt it.
+
+Confirm and the image reopens read-write, with an orange **Editing** pencil badge in the toolbar. A file's context menu then gains **Replace…**: pick a host file whose contents overwrite the selected file *in place*. The editor recomputes the inode's `metadata_csum` checksum, so the result stays consistent and needs no repair.
+
+> **Warning:** Replacement is **in-place only**. The new contents must fit the file's already-allocated blocks — a larger file is refused with **That file would need to grow** (growing, creating, and deleting files is not yet enabled). Inline-data files cannot be edited. Writes are refused while the journal needs recovery — run `fsck` first (below). And never edit an image that a running VM has attached.
+
+### Running fsck
+
+The toolbar's **Run fsck…** button runs `fsck.ext4` (`e2fsck`) against the open image to replay the journal and repair the filesystem. It confirms first — "Run fsck.ext4 on this image?", noting that the workspace VM must be stopped and that the tool can modify the image — then runs a forced auto-repair. For a raw image `fsck` runs on the file directly; for a partitioned disk the image is attached with `hdiutil` without mounting, the ext4 slice is checked, and the image is detached afterward. No elevated privileges are involved.
+
+Results appear in a report sheet with a plain-language summary — "Filesystem is clean.", "Filesystem errors were corrected.", or "Filesystem errors remain UNCORRECTED." — plus the full tool output; the image is then reopened.
+
+> **Note:** macOS ships no `e2fsprogs`. If the tool is missing, an alert reads **fsck.ext4 is not installed** with the fix `brew install e2fsprogs`. The app searches its own bundle first, then `$PATH`, then Homebrew's keg-only `e2fsprogs` locations.
+
+### When to reach for it
+
+The browser turns a stopped workspace's disk into something you can inspect and salvage from the host:
+
+- **Recover a file** from a workspace you would rather not boot — pull out an uncommitted change or a log from `home.img` with **Extract…**.
+- **Inspect a checkpoint** before you roll back, to confirm it holds what you expect. Pair this with **Restore home…** and **Reset to base…**, both covered under [checkpoints and rollback](06-sessions.mdx#checkpoints-and-rollback).
+- **Rescue a workspace that won't boot** — replace one bad config file in place, then run `fsck` if the write left the journal needing recovery. See [Troubleshooting](17-troubleshooting.mdx) for boot-failure diagnosis.
+
+## Developer defaults
+
+Two low-level knobs are read from the app's UserDefaults domain, `io.bromure.agentic-coding`. Set them with `defaults write` while the app is not running, then relaunch:
+
+| Key | Effect | Default |
+| --- | --- | --- |
+| `vm.homeImageGB` | Apparent (guest-visible) size, in GiB, of a **newly created** ext4 home image. The host file is sparse, so this costs nothing up front. Clamped to 8–1024. | `64` |
+| `vm.mtu` | MTU clamp for a workspace VM's primary NIC, written into the guest on each boot. The default of `1280` is VPN-safe (WireGuard, IKEv2, and corporate PMTU paths). | `1280` |
+
+For example, to make future workspaces' home images appear as 128 GiB:
+
+```
+defaults write io.bromure.agentic-coding vm.homeImageGB -int 128
+```
+
+> **Note:** `vm.homeImageGB` affects only home images created *after* the change; existing images keep their size. A home image can be grown later (an online truncate plus `resize2fs`) but not shrunk.
+
+> **Tip:** For genuinely throwaway work, `bromure-ac vm run --rm` boots a Docker-style disposable workspace whose disk is deleted when the VM stops — documented in [Automation & the CLI](16-automation-cli.mdx).

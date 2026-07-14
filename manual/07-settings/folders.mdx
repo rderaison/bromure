@@ -1,0 +1,47 @@
+---
+title: "Folders"
+description: "Share host folders into the workspace VM, mounted read-write under the ubuntu home directory."
+order: 7.5
+---
+
+# Folders
+
+The **Folders** pane lists the folders on your Mac that are shared into this workspace's VM. A shared folder is the bridge between your real filesystem and the sandbox: it is where the agent reads the code it works on and writes the changes it makes. Everything else the VM touches — its home directory, its system disk — is disposable and isolated; a shared folder is not. It is a live, read-write window into your Mac.
+
+<p align="center">
+  <img src="../images/editor-folders.en.jpg" width="600" alt="The Folders pane of the Edit workspace window, showing the empty-state message No folders shared and an Add folder button" />
+</p>
+
+The pane's caption states the rule exactly: **Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per workspace.** With no folders configured it reads **No folders shared.**
+
+## How folders are shared
+
+Each folder you add is attached to the VM as a [virtiofs](../04-concepts.mdx) share and mounted at `/home/ubuntu/<basename>`, where `<basename>` is the folder's own name. Sharing `~/Documents` makes it appear inside the VM as `~ubuntu/Documents` (that is, `/home/ubuntu/Documents`); sharing `~/code/bromure` appears as `/home/ubuntu/bromure`. Only the last path component is used for the mount name, so two folders with the same basename from different locations would collide — give one of them a distinct directory name if you need both.
+
+The share is **read-write**. The agent inside the VM can create, modify, and delete files in a shared folder exactly as a local process on your Mac could, and those changes are immediate and permanent on the host side. This is what makes the workspace useful: the agent edits your working copy in place, and `git`, your editor, and your other tools on the Mac see the edits as they happen.
+
+Because shares are attached when the VM is configured at startup, a change to this list applies the next time the workspace's VM boots. Adding or removing a folder while a session is running does not hot-plug it — save the change, then restart the session to pick it up.
+
+> **Warning:** A shared folder is not part of the sandbox. It survives everything that resets the VM. Deleting a workspace explicitly leaves it alone — the confirmation dialog reads "The mounted host folder is untouched." — and if a workspace is ever flagged [compromised](../18-glossary.mdx) and wiped, its shared folders are *not* wiped and may still hold files the agent wrote. Share only the folders the agent actually needs, and review a shared folder by hand after any compromise event. See [Credentials & the wire boundary](../08-credentials.mdx) for the compromise flow.
+
+## Adding and removing folders
+
+To share a folder, click **Add folder…** at the bottom of the pane. This opens a directory picker in which you can select one or more folders at once; each selected directory becomes a new row. The button is disabled once the workspace already has eight folders — the per-workspace maximum.
+
+Each configured folder appears as a row showing the folder's name and its full path on your Mac. Click the minus button on a row to stop sharing that folder; removing a row here never deletes the folder or its contents on the host — it only detaches it from the VM at the next boot.
+
+The list of currently shared folders is also visible from the running session: the session window's info panel shows a **Shared folders** list so you can confirm at a glance what the agent can reach. See [Sessions](../06-sessions.mdx).
+
+## Settings reference
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| **Folder list** | List of host paths | Empty | Each row shows the folder name and its full host path, with a minus button to remove it. Mounted read-write at `/home/ubuntu/<basename>`. |
+| **Add folder…** | Directory picker (multi-select) | — | Adds one or more folders. Disabled once eight folders are configured. |
+
+## Related chapters
+
+- [Concepts](../04-concepts.mdx) — how the VM, its disposable layers, and virtiofs shares fit together.
+- [Sessions](../06-sessions.mdx) — the running session window and its shared-folders list.
+- [Credentials & the wire boundary](../08-credentials.mdx) — what a compromise wipe does and does not touch.
+- [Settings Reference](index.mdx) — all panes at a glance.

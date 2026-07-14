@@ -1,0 +1,157 @@
+---
+title: "Introduction"
+description: "What Bromure Agentic Coding is, the security model behind it, its pillar features, and how this manual is organized."
+order: 1
+---
+
+# Introduction
+
+Bromure Agentic Coding is a macOS application that runs AI coding agents — Claude Code, Codex CLI, Grok CLI, and ordinary shell tooling — inside a hardware-virtualized Linux VM on your own Mac, built on Apple's Virtualization.framework. The agent gets a full, persistent Ubuntu development environment; your real credentials never enter it. Everything the agent sends to the outside world passes through a single host-side gateway where isolation, credential protection, supply-chain scanning, prompt-injection detection, and audit tracing are all enforced — a boundary the agent cannot reach around.
+
+This manual documents Bromure Agentic Coding 4.3.0. The executable is `bromure-cli`, the bundle ID is `io.bromure.agentic-coding`, and the app requires macOS 14 (Sonoma) or later on Apple Silicon. Full product details, screenshots, and downloads are published at [bromure.io](https://bromure.io).
+
+## What is Bromure Agentic Coding?
+
+Modern coding agents are powerful and, by design, autonomous: they read files, run shell commands, install packages, and call APIs on your behalf. Run one directly on your Mac and it inherits everything your shell has — your SSH keys, your `~/.aws` credentials, your kubeconfig, your API tokens. A single malicious dependency or a prompt-injected web page is then one step away from all of them.
+
+Bromure Agentic Coding changes the terms of that bargain. Each [workspace](18-glossary.mdx) you create owns its own persistent Linux VM — its own kernel, disk, MAC address, and network namespace. The agent runs inside the VM with durable state (cloned repositories, package caches, virtualenvs, shell history), so it feels like a normal development machine. But the environment contains only intentionally invalid [fake credentials](18-glossary.mdx); the real values live encrypted on the host and are injected on the wire, per destination, with your consent.
+
+When you launch the app you land in the workspace browser — the main window shown below. The sidebar lists your workspaces under **WORKSPACES** (with a **Grid** overview at the top and an **AUTOMATIONS** section beneath), and each workspace shows a status pill: **Off**, **Suspended**, or **Running**. Selecting a workspace shows its detail pane: cards for CPU, Memory, vCPUs, Disk, and Uptime, a CONFIGURATION summary (which agent and credential mode the workspace uses, whether Guardrails and the prompt-injection scan are enabled, and which folders are shared), and a **Start** button to boot its VM.
+
+<p align="center">
+  <img src="images/workspaces.en.jpg" width="700" alt="The workspace browser: sidebar with two workspaces, detail pane with resource cards and a configuration summary" />
+</p>
+
+In the screenshot, the workspace "Codex Sandbox" is powered off: the resource cards show the allocation it will boot with (8 GB of memory, 4 vCPUs), and the CONFIGURATION section shows Claude Code configured in Cloud mode with an API token, Guardrails and the prompt-injection scan off, and no shared folders. One click on **Start** boots the VM; the same pane then shows live CPU, disk, and uptime figures.
+
+## Who it is for
+
+Bromure Agentic Coding is built for three overlapping audiences:
+
+- **Individual developers** who want to run coding agents with real credentials — Anthropic, OpenAI, AWS, Kubernetes, GitHub — without handing those credentials to the agent itself. You get the convenience of an agent that can deploy, push, and provision, with the assurance that a compromised session leaks nothing but decoys.
+- **Security-conscious teams** that want every agent action observable: which model was called, which tools ran, which files were touched, which commands executed, which credentials were used and where. The encrypted local trace answers "what did the agent actually do?" after the fact.
+- **Platform and security engineering** in organizations that need fleet-wide policy: enrolled installs stream session metadata to the organization's workspace, credentials can be issued to the app rather than to developers' shells, and off-boarding a machine is a single control-plane action. See [Enterprise](15-enterprise.mdx).
+
+You do not need to be a virtualization expert. The app downloads a prebuilt, signed base image on first launch, boots VMs in the background, and presents everything through a native macOS interface. If you can use a terminal, you can use Bromure Agentic Coding.
+
+## Two sibling apps
+
+Bromure Agentic Coding ships from the same open-source repository as its sibling, **Bromure** (the web browser variant, sometimes called Bromure Web). Both are built on Apple's Virtualization.framework and share the same VM and image machinery, but they take opposite positions on VM lifecycle:
+
+| | Bromure (Web) | Bromure Agentic Coding |
+| --- | --- | --- |
+| Purpose | Disposable browsing sessions | Sandboxed AI coding agents |
+| Guest OS | Alpine Linux + Chromium | Ubuntu 24.04 |
+| VM lifecycle | Ephemeral — destroyed when the window closes | Persistent — one VM per workspace, state survives |
+| What is protected | Everything: no data outlives the session | The secrets surface: real credentials never enter the VM |
+| Bundle ID | `io.bromure.app` | `io.bromure.agentic-coding` |
+
+The philosophies are complementary. Browsing is stateless by nature, so Bromure Web destroys every VM at window close and nothing persists. Coding is stateful by nature — you need your clones, caches, and history tomorrow — so Bromure Agentic Coding deliberately keeps VMs alive and instead controls what the VM can ever see or exfiltrate. This manual covers Bromure Agentic Coding; Bromure Web is mentioned only where the two apps interact (for example, the embedded agent browser downloads its image from the same catalog as Bromure Web).
+
+## The single-boundary security model
+
+The product's defining idea is that every protection is enforced at one place: a host-side [MITM proxy](18-glossary.mdx) through which all outbound HTTPS from the VM flows. The guest's `HTTPS_PROXY` points at it, and the guest network is shaped so the proxy is the only path out. Because the boundary lives on the host, code inside the VM — including a fully compromised agent — cannot disable, bypass, or lie to it.
+
+At that boundary, three things happen to every request:
+
+1. **TLS termination.** The proxy terminates the VM's TLS using the [Bromure root CA](18-glossary.mdx), a per-install certificate authority generated at first launch. Its public certificate is mounted into every VM's trust store at boot; its private key never leaves the host.
+2. **Inspection and rewriting.** The proxy inspects the request, applies policy (consent, scanning, detection, tracing), and — where a credential is involved — swaps the fake value for the real one. Swaps cover bearer and `x-api-key` headers, OAuth refresh bodies (opt-in), full AWS SigV4 re-signing, Kubernetes credentials, Docker registry auth, and SSH signatures via an ssh-agent bridge over [vsock](18-glossary.mdx).
+3. **Re-encryption.** The rewritten request is re-encrypted to the real upstream over a normal TLS connection.
+
+The credential side of this is strict by construction. The VM only ever holds fakes with realistic prefixes and lengths — for example `ANTHROPIC_API_KEY=sk-ant-api03-brm-…`, a fake AWS secret key, synthetic kubeconfig tokens. Swaps are host-suffix-scoped: a credential registered for `api.anthropic.com` is never injected toward a look-alike domain. And the system fails closed: if the proxy is somehow bypassed, the only credential on the wire is a fake that no upstream accepts (AWS, for instance, returns `InvalidSignatureException`). Real values live only in the host process, encrypted with AES-256-GCM, with the master key in the macOS Data Protection Keychain.
+
+A [compromise detector](18-glossary.mdx) closes the loop: an Aho-Corasick automaton built over every fake token registered for the workspace scans each outbound request body in a single pass. If a fake is headed to a host outside its swap scope — the signature of an exfiltration attempt — the proxy refuses the swap and alerts you. Because only the fake leaked, the real credential never needs rotation.
+
+The same boundary is where everything else plugs in: package downloads are scanned as they cross it, untrusted content is checked for prompt injection as it comes back through it, the audit trace records what crossed it, and the Fusion panel, local inference, and remote access all operate on it. One boundary, every control.
+
+## The pillars
+
+Each of the following capabilities has a dedicated chapter later in the manual; this section gives you the shape of each one.
+
+### Isolation
+
+Every workspace maps to its own persistent VM with its own kernel, virtual disk, MAC address, network namespace, and per-workspace proxy listener. A malicious package or a rogue agent process can trash the VM — and only the VM. Your macOS host, your other workspaces, and your real files stay untouched, except for folders you explicitly share. VMs boot from a signed Ubuntu 24.04 base image derived by [APFS copy-on-write clone](18-glossary.mdx), so creating a workspace is instant, and resuming a **Suspended** workspace restores its RAM snapshot in place; the pre-warmed VM pool is reserved for the ephemeral browser sidecar. Concepts are covered in [Core concepts](04-concepts.mdx) and day-to-day management in [Workspaces](05-workspaces.mdx).
+
+### Credential protection and consent
+
+Real credentials never enter the VM; the proxy swaps fakes for real values on the wire, as described above. On top of the swap, Bromure Agentic Coding adds per-use governance: credentials can require your explicit consent per destination, grants carry a TTL (allow for 5 minutes, for 1 hour, or for the rest of the session), and read-only scoping is available. Hiding a token is not the same as governing its use — Bromure does both. See [Credentials](08-credentials.mdx).
+
+### Supply-chain scanning
+
+Package installs are the most common way hostile code enters a development environment, so the proxy scans them as they are fetched. Four mechanisms combine: an age gate (brand-new package versions are held back), OSV vulnerability lookups, socket.dev behavioral analysis, and Delpi. Verdicts are enforced at the wire — a blocked package never reaches the VM — with a consented bypass when you know what you are doing. See [Supply-chain scanning](09-supply-chain.mdx).
+
+### Prompt-injection detection
+
+Content the agent reads from the outside world — web pages, API responses, files — can carry instructions aimed at the agent rather than at you. Bromure Agentic Coding scans untrusted content crossing the boundary with two local classifier models, PromptGuard and ModernBERT, running on your own hardware. Detections surface as a block/allow decision with the flagged text shown to you, not to the agent. See [Prompt-injection detection](10-prompt-injection.mdx).
+
+### Tracing and audit
+
+Every session can be recorded as an encrypted full-session trace: LLM calls (model, tokens, latency), tool calls, shell commands, file reads and writes, credential uses, and contacted domains. The local Trace Inspector lets you replay what an agent did and answer questions after the fact. On enterprise-enrolled installs, session metadata additionally streams to the organization's workspace over mutual TLS — never raw prompts or model responses, and never secret values. Individual (un-enrolled) installs stream nothing; a per-workspace **Private mode** toggle suppresses streaming entirely, and a visible indicator appears in the session window whenever streaming is active. See [Tracing](11-tracing.mdx).
+
+### Fusion
+
+Because every LLM call crosses the proxy, the proxy can do more than pass it through. Fusion turns one request into a panel: several models answer, a judge model evaluates the candidates, and a synthesized best answer goes back to the agent — all on the wire, transparent to the agent, no agent configuration required. See [Fusion](12-fusion.mdx).
+
+### Local and hybrid inference
+
+The same interception point lets you route model calls to inference running on your own Apple Silicon (via MLX), or run hybrid: cloud models normally, with local fallback when the cloud is unreachable. Local models also power the on-device classifiers used elsewhere in the product. See [Local models](13-local-models.mdx).
+
+### Remote access
+
+Your sandbox is reachable from anywhere: through the app itself, from the command line, or over SSH. A second Mac running Bromure Agentic Coding can mirror a remote instance one-to-one — grid, workspaces, tabs, and automations — over an SSH tunnel (**Workspaces** menu → **Connect to Remote Bromure…**). Crucially, security does not weaken when you go remote: consent prompts for credential use, supply-chain bypasses, guardrail writes, and prompt-injection decisions are rendered on the host side of the connection, where a compromised guest can neither see nor forge them, and any timeout or dismissal is treated as a denial. See [Remote access](14-remote-access.mdx).
+
+### Enterprise management
+
+Organizations enroll installs against a bromure.io workspace with a six-word code (`bromure-cli enroll`). Enrollment issues the install a mutual-TLS certificate, enables managed profiles pushed from the control plane, and activates the metadata event stream described under tracing. Off-boarding is one control-plane action that revokes the install's certificate. Two capabilities are Enterprise-tier and surfaced in [Bromure Enterprise Manager](18-glossary.mdx): the fleet-wide supply-chain inventory (every dependency fetched by any enrolled machine, with verdicts, searchable) and token-usage rollups per file, repository, and model. See [Enterprise](15-enterprise.mdx).
+
+## How it compares to other tools
+
+The README's comparison matrix (compiled from each project's public documentation in June 2026) runs the same threat model across the tools people commonly reach for. The pattern it reveals: most tools pick one of the five controls — isolation, keeping secrets out of the agent, scoping credential use, supply-chain scanning, prompt-injection detection — and stop there.
+
+- **Dev Containers (VS Code)** isolate the toolchain, but the container shares the host kernel and the setup actively forwards your SSH agent and git credentials into the environment the agent runs in. There is no per-use credential scoping, registry scanning, or injection detection.
+- **nono** is a kernel sandbox: syscall allow-lists with an approval flow and an egress filter, and an immutable local audit log. It blocks access to key files and proxies some credentials, but the agent has no kernel of its own, and package scanning and injection detection are out of scope.
+- **agent-vault (octokraft)** pipes secrets into processes so there is no read path to the raw value, with per-secret TTLs. But the agent itself runs in place on your machine — there is no isolation boundary at all.
+- **Agent Vault (Infisical)** is an HTTP credential proxy: it attaches credentials on the wire, so the agent never reads them, and it filters egress per endpoint. The agent, however, runs unboxed, and there is no scanning or detection.
+- **Docker Sandboxes** (an experimental preview) come closest on isolation: a microVM with its own kernel, and a host proxy that injects credential headers so raw values stay out of the VM. The gap is governance: the brokered credential is attached to any outbound request the sandbox makes, so a malicious package installed inside can spend it against an allow-listed domain without ever seeing it — and nothing scans that package on the way in.
+- **Capsem** is an air-gapped hardware VM with domain- and method/path-level egress rules and full HTTP-body request logging. But real API keys live inside the VM, which is precisely the thing that must not be true when the workload is a possibly-compromised agent.
+
+No tool in the matrix offers supply-chain scanning or prompt-injection detection; those two columns are empty for everyone but Bromure. Bromure Agentic Coding enforces all five controls at the single proxy boundary, then adds what a secret broker never could, because it owns the wire: the Fusion model panel, local and hybrid inference, and remote attach from the app, CLI, or SSH. Fleet-wide package inventory and token-usage analytics are Enterprise-tier, surfaced in Bromure Enterprise Manager.
+
+Comparison data ages quickly. A more detailed and current matrix is maintained at [bromure.io/en/feature-matrix](https://bromure.io/en/feature-matrix), and the README invites corrections by issue if a row about another tool has gone stale.
+
+## Requirements at a glance
+
+| Requirement | Detail |
+| --- | --- |
+| macOS | 14 (Sonoma) or later |
+| Hardware | Apple Silicon (M1 or newer). There is no Intel build — Virtualization.framework only supports ARM64 guests on Apple Silicon hosts. |
+| Disk | The Ubuntu base image is a 24 GB logical sparse disk, roughly 6–8 GB physically on disk; each workspace adds a copy-on-write clone that grows with use. |
+| Network | First launch downloads the prebuilt, ed25519-signed base image from `dl.bromure.io`. Offline, the app falls back to building the image locally (about 10 minutes). |
+| Proprietary agents | Claude Code, Codex CLI, Grok CLI, and Google Cloud SDK cannot ship inside the redistributable image; they are installed on your machine as signed catalog postinstall steps. Running first-time setup consents to the baseline steps; only steps published in a later update prompt you for approval afterward. |
+
+Step-by-step download and first-launch instructions are in [Installation](02-installation.mdx).
+
+## License and authorship
+
+The Bromure repository is open source under the MIT License (Copyright 2026 Renaud Deraison) and free to use. Authorship is credited to Renaud Deraison (prompting) and Claude + Opus 4.7 (implementation).
+
+One distinction worth keeping in mind as you read this manual: the two apps themselves are open source, but the enterprise features — enrollment, managed profiles, the cloud event stream, and Bromure Enterprise Manager — are tied to the hosted control plane at bromure.io, which is a commercial service. Nothing in the single-user experience depends on it: an un-enrolled install streams nothing anywhere, and every security pillar works entirely on your own Mac.
+
+## Getting help
+
+- **[bromure.io](https://bromure.io)** — product documentation, screenshots, downloads, the technical whitepaper, and the detailed feature matrix.
+- **GitHub issues** — bug reports, feature requests, and corrections to the comparison matrix belong on the project's GitHub repository (linked from [bromure.io](https://bromure.io)).
+- **This manual** — [Troubleshooting](17-troubleshooting.mdx) collects diagnostic procedures and known issues; the [Glossary](18-glossary.mdx) defines every term of art used in these chapters.
+
+## How this manual is organized
+
+The manual reads front to back for newcomers and serves as a random-access reference afterward:
+
+- **Getting started** — [Installation](02-installation.mdx) covers downloading and installing the app and first launch; [Quick start](03-quick-start.mdx) takes you from a fresh install to a running agent in one sitting.
+- **Foundations** — [Core concepts](04-concepts.mdx) explains the architecture (VMs, the proxy boundary, images, the credential model); [Workspaces](05-workspaces.mdx) and [Sessions](06-sessions.mdx) cover the two objects you interact with daily; [The Embedded Browser](06a-browser.mdx) covers the agent-drivable Chromium; [Automations](06b-automations.mdx) covers scheduled, unattended agent runs.
+- **Settings reference** — [Settings](07-settings/index.mdx) documents every pane of the **Edit workspace** editor, one page per pane, plus the app-wide Automation pane.
+- **The pillars in depth** — [Credentials](08-credentials.mdx), [Supply-chain scanning](09-supply-chain.mdx), [Prompt-injection detection](10-prompt-injection.mdx), [Tracing](11-tracing.mdx), [Fusion](12-fusion.mdx), and [Local models](13-local-models.mdx) each expand a pillar into full operational detail.
+- **Beyond one Mac** — [Remote access](14-remote-access.mdx) covers CLI, SSH, and mirroring a remote instance; [Enterprise](15-enterprise.mdx) covers enrollment, fleet management, and the cloud event stream.
+- **Reference** — [Automation and the CLI](16-automation-cli.mdx), [Advanced](16a-advanced.mdx), [Troubleshooting](17-troubleshooting.mdx), the [Glossary](18-glossary.mdx), and the [Appendix](19-appendix.mdx).
+
+Continue with [Installation](02-installation.mdx).

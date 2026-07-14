@@ -333,16 +333,22 @@ public extension Profile {
             if real.isEmpty { continue }
             let consentID: String? = entry.requireApproval
                 ? ConsentCredentialID.manualToken(entry.id) : nil
-            entries.append(.init(
-                realValue: real,
-                fakeValue: SessionTokenPlan.deriveFake(prefix: "brm_",
-                                                       real: real, salt: salt),
-                purpose: .manual(name: entry.name,
-                                 envVarName: entry.envVarName,
-                                 hostFilter: entry.hostFilter),
-                consentCredentialID: consentID,
-                consentDisplayName: entry.name.isEmpty
-                    ? "manual token" : "“\(entry.name)” token"))
+            let fake = SessionTokenPlan.deriveFake(prefix: "brm_", real: real, salt: salt)
+            // One token may authenticate to several hosts: fan out to one plan
+            // entry per scope, all sharing the same real/fake pair. The env var
+            // is exported only once (by the first entry) so the guest doesn't
+            // see a duplicated export.
+            for (i, host) in entry.effectiveHostScopes.enumerated() {
+                entries.append(.init(
+                    realValue: real,
+                    fakeValue: fake,
+                    purpose: .manual(name: entry.name,
+                                     envVarName: i == 0 ? entry.envVarName : "",
+                                     hostFilter: host),
+                    consentCredentialID: consentID,
+                    consentDisplayName: entry.name.isEmpty
+                        ? "manual token" : "“\(entry.name)” token"))
+            }
         }
 
         // MCP server bearer tokens.

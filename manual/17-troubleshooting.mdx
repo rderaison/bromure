@@ -1,0 +1,326 @@
+---
+title: "Troubleshooting"
+description: "Diagnose and fix the problems you are most likely to hit — setup and image downloads, workspaces that won't boot, authentication, certificates, supply-chain blocks, disk space, and remote access."
+order: 17
+---
+
+# Troubleshooting
+
+This chapter is organized by symptom. Each entry states the likely cause and the steps to fix it. Start with [First stop: logs, health, and app state](#first-stop-logs-health-and-app-state) — nearly every diagnosis below relies on one of those three sources — then jump to the section that matches what you are seeing.
+
+Two facts underlie most of what follows. First, a workspace is a persistent sandbox: its system disk (`disk.img`) and Linux home (`home.img`) survive across launches, so a problem in one is not cured by simply relaunching. Second, Bromure Agentic Coding enforces security policy on the *host*, before traffic reaches the VM — so blocks and errors that appear "inside" the guest are usually the host proxy speaking, and are resolved in the app, not the VM.
+
+## First stop: logs, health, and app state
+
+Before changing anything, find out what the app itself is reporting.
+
+### The Security Log
+
+Open **Window** → **Security Log…**. This is a live tail of every security event the host proxy emits: supply-chain lookups and 451 blocks, install-script strips, prompt-injection detections, credential swaps and leak warnings, Fusion and routing changes, and remote-access events. Use the **Filter…** field to narrow to a package name, host, or workspace, and uncheck **Auto-scroll** to hold your place while you read.
+
+> **Note:** The Security Log is an in-memory ring buffer of roughly 5,000 lines and does **not** persist across app restarts. If you need a durable copy — or you are chasing something that crashes the app — launch `bromure-cli` from a terminal (next section); every log line is also mirrored to stderr.
+
+### Capturing stderr from a terminal
+
+The app mirrors its logs to standard error. Launching it from a terminal gives you a durable, copyable record that outlives an app restart or a crash:
+
+```
+"/Applications/Bromure Agentic Coding.app/Contents/MacOS/bromure-cli" run
+```
+
+For deeper detail, set a debug variable before the command (see the [Appendix](19-appendix.mdx#environment-variables-and-launch-arguments)):
+
+- `BROMURE_AC_DEBUG=1` — timestamped debug for the automation engine, injection classifiers, and trace pipeline.
+- `BROMURE_CLI_DEBUG=1` — control-socket connection diagnostics for CLI commands.
+- `BROMURE_REPAIR_DEBUG=1` — local-inference repair-proxy diagnostics, appended to `/tmp/bromure-repair.log`.
+
+### The automation health check (GET /health)
+
+The app runs an owner-only control socket at `~/Library/Application Support/BromureAC/control.sock` whenever it is running. You can confirm the app is alive and answering by asking it for its health, which returns a small JSON object:
+
+```
+curl --unix-socket "$HOME/Library/Application Support/BromureAC/control.sock" http://localhost/health
+```
+
+```json
+{ "status": "ok", "service": "bromure-ac-automation", "debugEnabled": false }
+```
+
+If you have turned on the loopback automation server (**Preferences** → **Automation**, off by default), the same endpoint is reachable over TCP on the configured port — `9223` by default:
+
+```
+curl http://127.0.0.1:9223/health
+```
+
+A refused connection means the app (or its headless agent) is not running; `bromure-cli vm ls` will start the background agent on demand and is another quick liveness check. The `debugEnabled` flag reports whether `BROMURE_DEBUG_CLAUDE` unlocked the debug endpoints.
+
+### The setup console log
+
+During a base-image install, the setup window has a collapsed **Console output** disclosure that streams the raw installer log, with a **Copy** button. Expand it to watch progress, and copy the whole log if you need to attach it to a bug report. Only the last 100 lines stay on screen, so copy before the window closes.
+
+## Setup and base-image installation
+
+The app cannot run any workspace until a Linux base image exists. First launch shows the **Welcome to Bromure Agentic Coding** window; clicking **Get Started** runs the same install as `bromure-cli init`. The full flow is documented in [Installation](02-installation.mdx); this section covers what to do when it fails.
+
+<p align="center">
+  <img src="images/welcome.en.jpg" width="700" alt="The Welcome to Bromure Agentic Coding window, with a one-paragraph description of first-time setup and a Get Started button" />
+</p>
+
+### The prebuilt download fails or stalls
+
+**Cause.** The preferred path downloads a signed, gzipped image (~3 GB) from `https://dl.bromure.io`, verifies its SHA-256, and expands it. A network interruption, a CDN hiccup, or a checksum mismatch aborts it. The download already retries up to three times, re-fetching the catalog between attempts (the weekly publish can delete the previous build mid-download).
+
+**Fix.** Watch the status pill and **Console output** in the setup window. On a download-side failure the GUI shows an **Image download failed** alert offering **Build Locally** or **Cancel**:
+
+1. If you are online and it was a transient failure, dismiss and retry from the app menu: **Rebuild Base Image…** → **Download Prebuilt**.
+2. If the download will not succeed (restrictive network, blocked CDN), choose **Build Locally** to bake the image on your Mac instead (about 10 minutes). This produces the same image.
+3. From the command line, `bromure-cli init` falls back to the local build automatically without prompting.
+
+### "Network Issue During Base-Image Build"
+
+**Cause.** The local build boots a throwaway Alpine installer VM that needs a DHCP lease and outbound access. On some VPNs and locked-down networks it gets no lease, or its downloads are black-holed by an MTU mismatch.
+
+**Fix.** The build stops with a **Network Issue During Base-Image Build** alert offering **Repair and Retry** (restarts the macOS networking daemons via the Network Healer — asks for your admin password) or **Cancel**. If it keeps failing on a VPN, clamp the guest NIC MTU before retrying (WireGuard-style tunnels often need 1280 or lower):
+
+```
+defaults write io.bromure.agentic-coding vm.mtu -int 1280
+```
+
+The MTU already defaults to `1280`; lower it further only if a corporate PMTU path demands it.
+
+### The install runs out of disk space
+
+**Cause.** Every image install requires at least 8 GB free up front on the volume holding the support directory, and a mid-build monitor aborts if free space drops below 1 GB (so `apt`/`debootstrap` do not retry into an unexplained timeout).
+
+**Fix.** Free up space and retry. See [Disk space](#disk-space-where-it-goes-and-how-to-reclaim-it) for what consumes the most.
+
+### The base image is left in a partial state
+
+**Cause.** Cancelling mid-install, or a failed build, leaves transient files behind: `base.img.partial`, `base.img.gz.partial`, and `efivars.partial` in the support directory. Their presence means an install is either running or was interrupted. The real image is only ever promoted atomically, so an existing working image stays usable throughout.
+
+**Fix.** Re-run the install to completion (**Rebuild Base Image…** or `bromure-cli init`). To start over from scratch, `bromure-cli reset` deletes the four base-image artifacts (`base.img`, `efivars.bin`, `base.version`, `image-state.json`) after a confirmation — it does **not** touch your workspaces, the cached Alpine files, or the cached catalog. Confirm what is installed at any time with `bromure-cli info`, which prints the version stamp, logical and physical size, and path (or "No base image yet.").
+
+## A workspace won't start or resume
+
+Select the workspace in the sidebar to see its dashboard: the state pill (**Off**, **Suspended**, **Running**), the CPU / Memory / vCPUs / Disk / Uptime cards, the **CONFIGURATION** summary, and a **Start** or **Resume** button. Workspace lifecycle is covered in [Workspaces](05-workspaces.mdx); the symptoms below are the ones that leave a VM stuck.
+
+<p align="center">
+  <img src="images/workspaces.en.jpg" width="700" alt="The workspace browser: a sidebar listing workspaces with Off state pills, and a detail pane showing CPU, Memory, vCPUs, Disk and Uptime cards, a Configuration summary, and a Start button" />
+</p>
+
+### Start does nothing, or the VM never finishes booting
+
+**Cause.** Unlike the browser pane, workspace VMs are not pre-warmed — they cold-boot from their copy-on-write disk (or restore from a suspend snapshot), which takes a few seconds. A CLI attach waits up to about 60 seconds through boot. A genuinely stuck boot usually means a broken guest filesystem or a config file the guest chokes on.
+
+**Fix.**
+
+1. Give it time, then check the CPU sparkline on the dashboard — flat at zero after a minute means it is not making progress.
+2. Reboot in place from the dashboard action bar (**Reboot** → **Hard reboot** tears it down immediately).
+3. If it still will not boot, the disk itself may be damaged. Restore to a recent good state from the workspace's rollback UI, or use **Reset disk** to re-clone from the base image (this keeps the home directory; it drops any saved RAM snapshot and tab state). **Reset to base…** is the nuclear option.
+4. To repair rather than reset, inspect the stopped disk with the ext4 browser — see [Recover a workspace that a bad file prevents from booting](#recover-a-workspace-that-a-bad-file-prevents-from-booting).
+
+### A suspended workspace refuses to resume
+
+**Cause.** Resuming restores saved RAM (`vm.state`) and tab layout (`tabs.json`), which requires the workspace's persistent machine identity and MAC. If the workspace's shared folders changed while it was suspended, resuming would be unsafe.
+
+**Fix.** When shares changed, the app asks **Discard suspended VM for "…"?** — choose **Discard & save**; the next launch cold-boots cleanly. Your home and shared-folder files are unaffected. Note that a saved RAM snapshot is always dropped when the disk is reset or wiped: a fresh disk paired with old RAM would corrupt instantly, so this is by design.
+
+### The workspace is marked "Compromised"
+
+**Cause.** The proxy detected an outbound attempt to leak a session credential to a host it was not minted for and you chose **Shut Down** or **Save for Investigation**. The workspace is flagged with `compromised.flag` and the picker badges it "Compromised — launching will prompt to wipe disk and home."
+
+**Fix.** The next launch refuses to boot until you confirm the wipe. **Wipe and Launch** removes the disk, home, RAM snapshot, and tab state, then boots a fresh VM immediately — your tokens, SSH keys, and workspace settings are preserved. Shared project folders live outside Bromure's storage and are **not** wiped, so review them by hand for contaminated files. The full detection flow is in [Credentials](08-credentials.mdx).
+
+### Not enough free disk space
+
+**Cause.** Creating any copy-on-write clone or home image refuses to proceed with less than 1 GB free on the volume, failing fast with a disk-full error rather than wedging mid-session.
+
+**Fix.** Free up space (see [Disk space](#disk-space-where-it-goes-and-how-to-reclaim-it)) and try **Start** again.
+
+### Recover a workspace that a bad file prevents from booting
+
+**Cause.** A misconfiguration written into the guest — a broken `/etc/fstab`, a corrupt dotfile — can stop the VM booting before you can log in to fix it. Because macOS cannot mount ext4, you cannot just open the disk in Finder.
+
+**Fix.** Use the built-in userland ext4 browser, with the **workspace VM stopped**:
+
+1. **Workspaces** menu → **Open ext4 file…**, then choose the workspace's `disk.img` or `home.img` under `~/Library/Application Support/BromureAC/profiles/`.
+2. Browse to the offending file. Right-click to **Preview** or **Extract…** it to your Mac.
+3. To patch it in place, click **Enable Editing…** (there is an explicit warning — never edit an image a running VM has open), then right-click → **Replace…** with a corrected copy from your Mac.
+4. If the browser reports the journal needs recovery, run **Run fsck…** first (requires `e2fsprogs`; the app suggests `brew install e2fsprogs` if it is missing).
+
+> **Warning:** In-place replacement only works when the new contents fit the file's already-allocated blocks — growing a file is refused ("That file would need to grow"). Use it to fix configs and pull files out, not to add data.
+
+### "Reset disk" / "Erase home…" are greyed out
+
+**Cause.** These destructive actions are refused while the workspace's session window is open.
+
+**Fix.** Close the session window first (the button tooltip says "Close the session window first."), then retry.
+
+## Agent authentication failures
+
+The design keeps real credentials off the VM: the guest runs with placeholder ("fake") tokens, and the host proxy swaps in real secrets on the wire. Most "auth" symptoms trace back to that boundary. See [Credentials](08-credentials.mdx) for the full model.
+
+### The agent — or you — sees a fake API key
+
+**Cause.** This is expected. Environment variables like `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GH_TOKEN`, and the AWS variables inside the VM are deliberate decoys. The proxy substitutes the real value host-side for allowed destinations, so a leaked fake is worthless.
+
+**Fix.** Nothing — do not try to "correct" the key inside the VM. If real requests are failing with an authentication error at the provider, the problem is the *real* secret on the host: open the workspace's **Credentials** pane and re-enter it. A fake token that shows up in a request to the *wrong* host will trip [compromise detection](08-credentials.mdx) rather than authenticate.
+
+### A subscription login (Register with Claude / ChatGPT / Grok) stopped working
+
+**Cause.** In **Subscription** auth mode, the OAuth tokens were captured once in a throwaway registration VM and stored encrypted on the host (`claude-subscription.enc`, `codex-subscription.enc`, `grok-subscription.enc`); the host owns the refresh. If the refresh token is revoked, expired, or the account's session ends, the host can no longer mint a valid bearer and requests start failing.
+
+**Fix.** Re-register. In the workspace's **Agents** pane, forget the stored subscription and run **Register with Claude / ChatGPT / Grok** again — this launches a fresh throwaway VM, captures new tokens, and stores them host-side. The bogus key inside the workspace never changes.
+
+### "Swap subscription token?" keeps appearing, or was declined by mistake
+
+**Cause.** This is the *other* subscription mechanism: when an agent logs in with a real token inside the VM, the proxy detects it and offers to move it to the host so the real secret leaves the guest. The choice is remembered per workspace and per provider.
+
+**Fix.** In the workspace's **Tracing** pane, the **Claude subscription token swap** and **Codex subscription token swap** rows show **Active** or **Declined** with a reset control — **Forget swap (re-prompt next session)** or **Re-enable prompt**. Reset to be asked again at the next session. Consent and per-session grants are in-memory only and do not survive an app restart.
+
+## TLS and certificate errors inside the VM
+
+### "self-signed certificate" or "unable to get local issuer certificate"
+
+**Cause.** All guest HTTPS is intercepted by the host MITM proxy, which re-signs traffic with a per-install root CA. Tools inside the VM trust it through the CA bundle environment variables Bromure sets for node, python, go, rust, curl, deno, and the AWS SDK, plus the CA file staged into the meta share (`bromure-ca.pem`). A tool that ignores those variables — or a container that brings its own trust store — will reject the proxy's certificate.
+
+**Fix.**
+
+1. For most tools, no action is needed. If a specific tool fails, point it at the system/exported CA bundle rather than disabling verification; the CA file is available inside the guest and the standard `*_CA_BUNDLE` / `SSL_CERT_FILE` style variables are already exported.
+2. For a Docker container that needs to reach the network, use the **Run a new container** sheet's **Inherit HTTP proxy settings** toggle so `http_proxy`/`https_proxy` propagate, and mount or install the CA where the container's tools look for it.
+3. If certificate errors appear only *after* you deleted or rotated the CA (below), relaunch affected sessions so the new CA is re-staged.
+
+### Rotating the root CA
+
+**Cause / when to do it.** The root CA private key lives at `~/Library/Application Support/BromureAC/ca/key.pem` (mode `0600`) with its certificate in `cert.pem`. You may want to rotate it if you suspect the key was exposed.
+
+**Fix.** Quit the app, delete the `ca/` directory, and relaunch — a fresh CA is generated and re-staged into workspaces on their next launch. Existing captured trace bodies are unaffected, but any guest that pinned the old certificate will need to re-trust the new one.
+
+## Supply-chain blocks
+
+When an agent's `npm install`, `pip install`, or similar fails with a distinctive error, the host supply-chain pipeline most likely intervened. The policy, its layers, and the Security Log are documented in [Supply-Chain Protection](09-supply-chain.mdx) and the [Supply Chain settings](07-settings/supply-chain.mdx) reference.
+
+### An install failed with HTTP 451
+
+**Cause.** A 451 ("Unavailable For Legal Reasons") is Bromure's supply-chain block — chosen so it is distinguishable at a glance from the 403 that [Guardrails](07-settings/guardrails.mdx) uses. The package manager prints the reason verbatim in its error output, for example:
+
+```
+Bromure Supply-Chain Security blocked this request: npm package foo@1.2.3
+published 4 hours ago — policy requires 2 days minimum
+```
+
+**Fix.** Read the reason. The common triggers and their remedies:
+
+| Reason in the message | Layer | How to proceed |
+|---|---|---|
+| "published … ago — policy requires N days" | Age gate | Pin an older version, or add the package to **Exempt packages** in the workspace's **Supply Chain** pane. |
+| A CVE / advisory at or above your threshold | OSV or socket.dev | Choose a patched version, or raise the **Block at severity** threshold. |
+| Flagged as compromised / malware / typosquat | socket.dev | Treat as a real signal — verify the package name before overriding. |
+
+### Reading the Security Log for the reason
+
+Open **Window** → **Security Log…** and re-run the install. Rows are color-coded: blue for outbound lookups, green for clean verdicts, red for blocks and failures, orange for stripped install scripts, and an accent `[supply-chain]` line each time a policy is engaged. A fully clean install still emits an "inspecting `pkg@ver`" line per artifact — that is deliberate, so a quiet log means "everything cached", not "proxy bypassed."
+
+### Overriding a block
+
+**Fix.** Supply-chain layers are per-workspace on/off toggles, edited live (no VM restart needed). To let a specific package through, either add an exemption/allowlist entry in the **Supply Chain** pane, or lower/disable the relevant layer for that workspace. Saving pushes the change to running sessions immediately.
+
+### Every install prompts for consent (offline, or socket.dev + Cargo)
+
+**Cause.** When OSV or socket.dev is enabled but cannot produce a verdict — the network is down, or the ecosystem is unsupported — Bromure **fails closed**, holding each package for your consent rather than allowing it silently. Two situations produce a prompt per package:
+
+- **Working offline** with OSV or socket.dev enabled: every uncached package is held.
+- **socket.dev with Cargo:** socket.dev has no Cargo support, so every `crates.io` artifact yields no verdict.
+
+**Fix.** For offline stints, disable OSV and socket.dev — the age gate keeps working from already-cached metadata without connectivity. For heavy Rust work, either switch off socket.dev or answer the prompts (grants are keyed per `package@version`). The PyPI publish-time backstop is the one check that fails *open* on a pure network error.
+
+## Prompt-injection false positives
+
+The prompt-injection detector scans tool-result spans returned to the agent and can log, ask, or block. Its behavior and tuning live in [Prompt Injection](10-prompt-injection.mdx) and the [Prompt Injection settings](07-settings/prompt-injection.mdx) reference.
+
+### A legitimate request was flagged or blocked
+
+**Cause.** The classifier scored an incoming span above the workspace's threshold — security documentation, a page that quotes an attack, or a snippet that reads like an instruction to the agent can all look injection-shaped.
+
+**Fix.**
+
+1. Check the Security Log — the local line carries a short preview of the flagged snippet so you can judge whether it was a real attempt.
+2. If it was a false positive and blocks are getting in the way, change the workspace's prompt-injection mode from **Block** to **Ask** (you decide per detection) or **Log** (record only, never block) in the **Prompt Injection** pane.
+3. Model downloads and per-toggle behavior are per workspace, so a noisy research workspace can run in **Log** mode while a production one stays on **Block**.
+
+### Event-trigger automations are all blocked
+
+**Cause.** Event-triggered automations *require* the PromptGuard model. Without it, every event run is blocked with "PromptGuard model not installed — event triggers require it (download in Settings)." This is by design, not a bug.
+
+**Fix.** Install the PromptGuard model from the **Prompt Injection** pane (or **Preferences** → **Automation**). If a detector toggle is on but the model failed to download — for example, the disk was full — the workspace runs unprotected and the failure is logged; re-download once space is available.
+
+## Disk space: where it goes and how to reclaim it
+
+### What consumes space
+
+Storage lives under `~/Library/Application Support/BromureAC/` (see the [Appendix](19-appendix.mdx#the-support-directory) for the full map). The heavy consumers, largest first:
+
+| What | Where | Typical size |
+|---|---|---|
+| The Ubuntu base image | `base.img` | 24 GB logical, ~6–8 GB physical |
+| Per-workspace system disks | `profiles/<uuid>/disk.img` | Copy-on-write clone of the base; grows only as the guest writes |
+| Per-workspace homes | `profiles/<uuid>/home.img` | Sparse ext4, 64 GB apparent by default, allocated lazily |
+| Suspended-VM RAM snapshots | `profiles/<uuid>/vm.state` | Roughly the workspace's allocated RAM (2–32 GB) per suspended workspace |
+| Disk / home checkpoints | `profiles/<uuid>/checkpoints/` | Real space as they diverge from the live disk |
+| Local inference models | `models/<org>--<name>/` | Multiple GB per model |
+| Detector models | `Models/prompt-injection/`, `Models/claudemd-guard/` | ~300 MB and ~600 MB respectively |
+| Trace bodies | `traces/` | Capped: 100 MB per session, 5 GB total |
+
+> **Note:** The dashboard's Disk card prefers the guest's own `df` numbers over the host clone's allocation, because a copy-on-write clone over-reports usage — blocks freed inside the guest stay materialized in the clone.
+
+### Reclaiming space
+
+- **Shut down suspended workspaces** you are not using. A full shutdown clears `vm.state`; the workspace cold-boots next time.
+- **Remove unused local models** with `bromure-cli model rm <id>` (frees the weights from both the new layout and the legacy Hugging Face cache).
+- **Reset a bloated workspace disk** with **Reset disk** (re-clones from base, keeps the home) or delete old checkpoints from the rollback UI.
+- **Clear traces** with `bromure-cli trace clear` — wipes both the in-memory ring and the on-disk bodies.
+- **Delete a whole workspace** you no longer need with `bromure-cli workspaces rm <workspace>` (removes disk and home after confirmation).
+- **Reclaim the base image** with `bromure-cli reset` if you want to start fresh (workspaces are untouched, so re-`init` afterward).
+
+## Remote access and the fat client
+
+The optional SSH remote-access front door and the fat-client mirror are covered in [Remote Access](14-remote-access.mdx). The symptoms below are the ones that block a connection.
+
+### Cannot connect over SSH (port 2222)
+
+**Cause.** The remote front door is **disabled by default**. It is also an embedded server (not the system `sshd`), so enabling macOS Remote Login does nothing for it, and it is automatically paused during any base-image install or amendment.
+
+**Fix.**
+
+1. Check state with `bromure-cli remote status` — it prints whether the server is ENABLED and running, the bind address and port, the auth methods, the host-key fingerprint, a ready-made `ssh -p <port> <user>@<host>` connect string, and the authorized-key list.
+2. Enable it with `bromure-cli remote enable` (defaults: port `2222`, bind `0.0.0.0`, both auth methods on). It errors if both auth methods are disabled, if the port is below 1024, or while the base image is missing or installing.
+3. Add your public key with `bromure-cli remote key add <path-or-key>`. Adding or removing a key restarts the listener and drops live connections — expected behavior.
+
+### Host-key or fingerprint (TOFU) mismatch
+
+**Cause.** The fat client pins each remote's host key on first connect (trust-on-first-use), stored in `~/Library/Application Support/BromureAC/remote-client/known_hosts`. Pinning is per endpoint (`address:port`), so editing a saved host's address or port invalidates the carried pin and correctly re-triggers the trust prompt. A mismatch on an unchanged endpoint means the remote's key changed — or something is intercepting the connection.
+
+**Fix.** If you legitimately rebuilt the remote, remove its pin and reconnect to re-trust. If you did not expect the key to change, stop and investigate before accepting it.
+
+### The remote grid or browser pane won't mirror
+
+**Cause.** A *headless* remote — the app is running but has no unified window open — cannot accept or serve grid-layout edits, though everything else mirrors. Some prompt-driven worktree operations (new worktree, merge, resolve) are also not available from the fat client in v1, and multi-host subnet aliasing is a documented design limitation, not a shipped behavior: a single remote host is the supported configuration.
+
+**Fix.** Open a session window on the remote so it has a unified window to mirror. For worktree create/merge/resolve on a remote, use the SSH/TUI remote menu instead of the fat-client toolbar.
+
+### The system-wide tunnel needs approval
+
+**Cause.** The fat client's optional system-wide tunnel uses a privileged launchd daemon registered through SMAppService. Its first registration surfaces a background-item approval toggle.
+
+**Fix.** Approve **Bromure Agentic Coding** under **System Settings** → **General** → **Login Items & Extensions** (the app can open that pane for you). Over the tunnel, an ICMP ping to a remote guest is answered locally and confirms routing, not guest liveness.
+
+## Reporting a bug
+
+When you file a report at [bromure.io](https://bromure.io), include enough for a maintainer to reproduce:
+
+1. **App and image versions** — the app version (4.3.0) and `bromure-cli info` output (the base-image version stamp, sizes, and path).
+2. **The stderr log** — launch `bromure-cli` from a terminal as shown in [Capturing stderr](#capturing-stderr-from-a-terminal), reproduce the problem, and attach the output. Add `BROMURE_AC_DEBUG=1` if the maintainer asks for more detail.
+3. **The relevant window** — for setup failures, the copied **Console output** from the setup window; for security-related behavior, the filtered **Security Log**.
+4. **What you expected versus what happened**, and whether the workspace was Off, Suspended, or Running.
+
+Do not include real secrets — trace records and log lines already redact them to short previews, and the app is built so real credentials never enter a VM in the first place. If your Mac is enrolled with a bromure.io workspace, route reports through your organization's administrator; enrollment-related state is visible to them and not to Bromure directly. Enrollment is covered in [Enterprise](15-enterprise.mdx).

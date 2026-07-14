@@ -23,3 +23,8 @@ Tests/node_modules/
 # that's how a dangling absolute symlink got committed and broke fresh CI
 # checkouts once.
 /vendor
+
+# Generated, regenerable manual artifacts (the MDX source under manual/ is
+# tracked; the rendered site and the packaged tarball are not).
+manual/_site/
+bromure-agentic-coding-manual.tgz

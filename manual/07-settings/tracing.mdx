@@ -1,0 +1,80 @@
+---
+title: "Tracing"
+description: "Configure how much of the workspace's network traffic the proxy records for audit, and manage privacy-related switches."
+order: 7.9
+---
+
+# Tracing
+
+Every request a workspace makes — agent traffic to LLM providers, package downloads, API calls to your infrastructure — passes through Bromure Agentic Coding's host-side proxy. The **Tracing** pane controls how much of that traffic the proxy records for this workspace, from nothing at all to complete request and response bodies. Everything recorded stays on your Mac, encrypted at rest, and is browsable in the Trace Inspector or from the `bromure-cli trace` command line.
+
+<p align="center">
+  <img src="../images/editor-tracing.en.jpg" width="600" alt="The Tracing pane of the workspace settings editor, showing the Session trace picker set to AI request details" />
+</p>
+
+Tracing is configured per workspace: a scratch workspace can run silent while a production-facing one records every AI exchange. This page documents the settings pane; the [trace level](../18-glossary.mdx), the Trace Inspector window, WebSocket transcripts, and the trace CLI are covered in depth in the [Tracing chapter](../11-tracing.mdx).
+
+## Session trace
+
+The **Session trace** picker selects one of four recording levels:
+
+| Level | What is recorded |
+|---|---|
+| **Off** | Nothing. |
+| **Activity only** | One metadata record per request: timestamp, host, method, path, status, request and response sizes, latency, the token-swap report, and credential-leak warnings. No bodies. |
+| **AI request details** | Everything from **Activity only**, plus full request and response bodies for known LLM hosts: Anthropic, OpenAI/ChatGPT, Google, Cohere, Mistral, Perplexity, x.ai/Grok, Groq, Replicate, HuggingFace, and the local-inference host when a workspace routes to a local model. |
+| **Everything** | Bodies for every host, not just LLM providers. Uses disk fastest; capped at 100 MB of bodies per session and 5 GB total. |
+
+New workspaces default to **AI request details** (via the preferences template), so agent conversations are auditable out of the box. Workspaces created before this setting existed decode as **Off**.
+
+> **Tip:** **Activity only** is a good fit when you want the audit trail — which hosts were contacted, whether credentials were swapped or leaked — without storing prompt or response text on disk.
+
+## How trace data is stored
+
+Metadata is appended as one JSON line per request to `~/Library/Application Support/BromureAC/traces/YYYY-MM-DD/<sessionID>.jsonl`. Captured bodies are stored one level deeper, in a per-session subdirectory, as `traces/YYYY-MM-DD/<sessionID>/<recordID>.req.enc` / `<recordID>.res.enc`, AES-GCM-encrypted with the same Keychain-held master key that protects workspace secrets, with file permissions `0600`.
+
+Before anything is written:
+
+- Sensitive headers (`Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `x-amz-security-token`, `api-key`, and any header ending in `-api-key`) are rewritten to `<redacted>`.
+- Token swaps and suspected leaks are recorded as first/last-character previews only — real secret bytes never enter a trace record.
+
+Retention is automatic: per-session bodies are capped at 100 MB (oldest body files are evicted; the metadata lines are kept), and the whole traces directory is capped at 5 GB (oldest day-directories deleted first).
+
+> **Warning:** At the **AI request details** and **Everything** levels, the full prompt and response text of AI exchanges is on disk — encrypted, but present. If the vault master key is ever rotated, previously captured bodies can no longer be decrypted; the inspector then shows "(not captured / decryption failed)".
+
+## Private mode
+
+The **Private mode** switch appears only on Macs enrolled with a bromure.io workspace. When enabled, sessions for this workspace stop streaming session metadata — tools used, files touched, commands run, token usage — to the enrolled bromure.io workspace. Local tracing and the Trace Inspector are unaffected.
+
+This is useful when you work with a personal API key in one workspace and do not want that activity visible to your organization's admins. On unenrolled Macs the switch is hidden (there is nothing being streamed), which is why it does not appear in the screenshot above. See the [Enterprise chapter](../15-enterprise.mdx) for what enrolled installs stream.
+
+Default: off.
+
+## Subscription token swap
+
+When an agent authenticates with **Subscription (interactive login)**, the proxy offers to keep the real Claude or Codex OAuth tokens on the host and serve fakes inside the VM — the same fake-to-real [token swap](../18-glossary.mdx) model used for API keys. The first time this happens for a workspace, the proxy asks for consent.
+
+Once that prompt has been answered, one or two status rows appear at the bottom of the Tracing pane:
+
+- **Claude subscription token swap** — status for the Claude OAuth tokens.
+- **Codex subscription token swap** — status for the Codex / ChatGPT OAuth tokens, managed independently so a workspace using both agents can decide per provider.
+
+Each row shows either **Active** ("the proxy is keeping the real OAuth tokens on this Mac and serving fakes inside the VM") or **Declined**, together with a reset control: **Forget swap (re-prompt next session)** when active, or **Re-enable prompt** when declined. Resetting returns the state to unset, and the proxy asks again at the next session.
+
+Until the proxy has prompted at least once, the rows are hidden entirely.
+
+## Viewing what was recorded
+
+- **Trace Inspector** — open it from the Window menu (**Trace Inspector…**, ⇧⌘I). It shows a live, filterable list of every recorded exchange across all workspaces, with leak and swap badges, and renders captured AI exchanges as a parsed conversation.
+- **Command line** — with the app running, `bromure-cli trace ls`, `trace summary`, `trace hostnames`, `trace leaks`, and `trace clear` give the same data in the terminal.
+
+Both are documented in the [Tracing chapter](../11-tracing.mdx).
+
+## Settings reference
+
+| Setting | Type | Default |
+|---|---|---|
+| **Session trace** | Picker: **Off** / **Activity only** / **AI request details** / **Everything** | **AI request details** for new workspaces; **Off** for profiles that predate the setting |
+| **Private mode** | Switch (enrolled Macs only) | Off |
+| **Claude subscription token swap** | Status row + reset button (shown only after the proxy has prompted) | Unset (hidden) |
+| **Codex subscription token swap** | Status row + reset button (shown only after the proxy has prompted) | Unset (hidden) |

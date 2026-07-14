@@ -38,6 +38,9 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
     /// support via a discriminator field.
     public var auth: Auth
 
+    /// A kubeconfig is configured once it names a server to talk to.
+    public var isUsable: Bool { !serverURL.trimmingCharacters(in: .whitespaces).isEmpty }
+
     public enum Auth: Codable, Equatable, Sendable {
         /// Static bearer token (rotated rarely).
         case bearerToken(String)
@@ -219,24 +222,26 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
     /// Env var name to inject the fake under (e.g. "STRIPE_API_KEY").
     /// Empty = inject nothing, the user has to copy-paste manually.
     public var envVarName: String
-    /// Optional host scope. Empty = swap on any host where the fake
-    /// appears. Non-empty = exact-or-subdomain match: a scope of
+    /// Host scopes. Empty = swap on any host where the fake appears. Each
+    /// non-empty entry is an exact-or-subdomain match: a scope of
     /// `example.com` swaps on requests to `example.com` and any
     /// `*.example.com`, but not on `example.com.evil.com`. Match is
-    /// case-insensitive. Substring matching is deliberately NOT used.
-    public var hostFilter: String
+    /// case-insensitive; substring matching is deliberately NOT used. One
+    /// token may authenticate to several hosts (each becomes its own swap
+    /// scope, sharing the token's single deterministic fake).
+    public var hostFilters: [String]
     /// When true, every fake→real substitution for this token prompts
     /// the user on the host. See `ConsentBroker`.
     public var requireApproval: Bool
 
     public init(id: UUID = UUID(), name: String = "", realValue: String = "",
-                envVarName: String = "", hostFilter: String = "",
+                envVarName: String = "", hostFilters: [String] = [],
                 requireApproval: Bool = false) {
         self.id = id
         self.name = name
         self.realValue = realValue
         self.envVarName = envVarName
-        self.hostFilter = hostFilter
+        self.hostFilters = hostFilters
         self.requireApproval = requireApproval
     }
 
@@ -244,8 +249,18 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
         !realValue.isEmpty
     }
 
+    /// The scopes that produce a swap: the non-empty host filters, or a
+    /// single "any host" (empty string) sentinel when none are set.
+    public var effectiveHostScopes: [String] {
+        let hosts = hostFilters.map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return hosts.isEmpty ? [""] : hosts
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case id, name, realValue, envVarName, hostFilter, requireApproval
+        // `hostFilter` (singular) is the legacy pre-multi-host key, decoded for
+        // migration only; new profiles write `hostFilters`.
+        case id, name, realValue, envVarName, hostFilter, hostFilters, requireApproval
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -253,7 +268,13 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
         name            = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
         realValue       = try c.decodeIfPresent(String.self, forKey: .realValue) ?? ""
         envVarName      = try c.decodeIfPresent(String.self, forKey: .envVarName) ?? ""
-        hostFilter      = try c.decodeIfPresent(String.self, forKey: .hostFilter) ?? ""
+        if let list = try c.decodeIfPresent([String].self, forKey: .hostFilters) {
+            hostFilters = list
+        } else if let single = try c.decodeIfPresent(String.self, forKey: .hostFilter), !single.isEmpty {
+            hostFilters = [single]           // migrate legacy single-host profiles
+        } else {
+            hostFilters = []
+        }
         requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
     }
     public func encode(to encoder: Encoder) throws {
@@ -262,7 +283,7 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
         try c.encode(name, forKey: .name)
         try c.encode(realValue, forKey: .realValue)
         try c.encode(envVarName, forKey: .envVarName)
-        try c.encode(hostFilter, forKey: .hostFilter)
+        if !hostFilters.isEmpty { try c.encode(hostFilters, forKey: .hostFilters) }
         if requireApproval { try c.encode(true, forKey: .requireApproval) }
     }
 }
@@ -987,6 +1008,27 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// browser is fully ephemeral (a clean profile discarded on close).
     public var browserPersistent: Bool
 
+    /// Whether the embedded browser may upload files via the in-page file
+    /// picker (and the host file-transfer bridge). Default true.
+    public var browserAllowUploads: Bool
+    /// Whether the embedded browser may download files. Default true.
+    public var browserAllowDownloads: Bool
+    /// Whether the embedded browser may use the camera (getUserMedia video).
+    /// Default false — the host camera is never exposed unless you opt in.
+    public var browserWebcam: Bool
+    /// Whether the embedded browser may use the microphone. Default false.
+    public var browserMicrophone: Bool
+
+    /// True when a setting that only applies at browser boot differs from
+    /// `other`; a live browser must be restarted to pick the change up.
+    public func browserBootSettingsDiffer(from other: Profile) -> Bool {
+        browserPersistent != other.browserPersistent
+            || browserAllowUploads != other.browserAllowUploads
+            || browserAllowDownloads != other.browserAllowDownloads
+            || browserWebcam != other.browserWebcam
+            || browserMicrophone != other.browserMicrophone
+    }
+
     /// **Fusion** configuration. The agents whose answers are fused on a
     /// Claude-Code text turn (any subset of the configured providers, 1–3).
     /// Fusion engages per-session from the title-bar toggle; it's only
@@ -1350,6 +1392,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         traceLevel: TraceLevel = .aiDetails,
         privateMode: Bool = false,
         browserPersistent: Bool = false,
+        browserAllowUploads: Bool = true,
+        browserAllowDownloads: Bool = true,
+        browserWebcam: Bool = false,
+        browserMicrophone: Bool = false,
         fusionLegs: Set<Tool> = [],
         fusionJudgeProvider: Tool? = nil,
         fusionJudgeModel: String? = nil,
@@ -1424,6 +1470,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.traceLevel = traceLevel
         self.privateMode = privateMode
         self.browserPersistent = browserPersistent
+        self.browserAllowUploads = browserAllowUploads
+        self.browserAllowDownloads = browserAllowDownloads
+        self.browserWebcam = browserWebcam
+        self.browserMicrophone = browserMicrophone
         self.fusionLegs = fusionLegs
         self.fusionJudgeProvider = fusionJudgeProvider
         self.fusionJudgeModel = fusionJudgeModel
@@ -1502,6 +1552,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case traceLevel
         case privateMode
         case browserPersistent
+        case browserAllowUploads
+        case browserAllowDownloads
+        case browserWebcam
+        case browserMicrophone
         case fusionEnabled   // legacy; decoded for migration, never encoded
         case fusionLegs
         case fusionJudgeProvider
@@ -1597,6 +1651,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         traceLevel = try c.decodeIfPresent(TraceLevel.self, forKey: .traceLevel) ?? .off
         privateMode = try c.decodeIfPresent(Bool.self, forKey: .privateMode) ?? false
         browserPersistent = try c.decodeIfPresent(Bool.self, forKey: .browserPersistent) ?? false
+        browserAllowUploads = try c.decodeIfPresent(Bool.self, forKey: .browserAllowUploads) ?? true
+        browserAllowDownloads = try c.decodeIfPresent(Bool.self, forKey: .browserAllowDownloads) ?? true
+        browserWebcam = try c.decodeIfPresent(Bool.self, forKey: .browserWebcam) ?? false
+        browserMicrophone = try c.decodeIfPresent(Bool.self, forKey: .browserMicrophone) ?? false
         // Fusion config. New keys default to empty/nil. Legacy profiles that
         // had `fusionEnabled == true` migrate to fusing whatever providers they
         // had credentials for — resolved lazily by `fusionConfigurable`, so we
@@ -1693,6 +1751,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if browserPersistent {
             try c.encode(browserPersistent, forKey: .browserPersistent)
         }
+        // Encode only when non-default so existing profiles stay compact and
+        // migrate to the right defaults (uploads/downloads on, media off).
+        if !browserAllowUploads { try c.encode(browserAllowUploads, forKey: .browserAllowUploads) }
+        if !browserAllowDownloads { try c.encode(browserAllowDownloads, forKey: .browserAllowDownloads) }
+        if browserWebcam { try c.encode(browserWebcam, forKey: .browserWebcam) }
+        if browserMicrophone { try c.encode(browserMicrophone, forKey: .browserMicrophone) }
         // Only emit privateMode when true — keeps default-config JSON
         // small for the common (managed-mode-streaming) case.
         if privateMode {
@@ -4212,5 +4276,257 @@ private extension JSONEncoder {
         e.dateEncodingStrategy = .iso8601
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
         return e
+    }
+}
+
+// MARK: - Configured-credential enumeration (Credentials + Guardrails panes)
+
+/// Category buckets for the Credentials pane's grouped, configured-only list.
+public enum CredentialCategory: Int, CaseIterable, Sendable {
+    case agents, git, cloud, databases, ssh, other
+    public var title: String {
+        switch self {
+        case .agents:    return "Agents"
+        case .git:       return "Git"
+        case .cloud:     return "Cloud"
+        case .databases: return "Databases"
+        case .ssh:       return "SSH"
+        case .other:     return "Other"
+        }
+    }
+    public var symbol: String {
+        switch self {
+        case .agents:    return "sparkles"
+        case .git:       return "arrow.triangle.branch"
+        case .cloud:     return "cloud.fill"
+        case .databases: return "cylinder.split.1x2.fill"
+        case .ssh:       return "key.fill"
+        case .other:     return "ellipsis.curlybraces"
+        }
+    }
+}
+
+/// A stable reference to one configured credential on a `Profile`. Both the
+/// Credentials pane (shows only configured credentials) and the Guardrails pane
+/// (approval + write-mode per credential) enumerate these so the two stay in
+/// lockstep with what actually produces a swap at session launch.
+public enum CredentialRef: Hashable, Sendable, Identifiable {
+    case primaryToolKey
+    case additionalTool(Profile.Tool)
+    case git(UUID)
+    case manual(UUID)
+    case docker(UUID)
+    case database(UUID)
+    case kube(UUID)
+    case aws
+    case digitalOcean
+    case linear
+    case managedSSHKey
+    case importedSSHKey(UUID)
+
+    public var id: String {
+        switch self {
+        case .primaryToolKey:        return "primaryToolKey"
+        case .additionalTool(let u): return "tool:\(u.rawValue)"
+        case .git(let u):            return "git:\(u.uuidString)"
+        case .manual(let u):         return "manual:\(u.uuidString)"
+        case .docker(let u):         return "docker:\(u.uuidString)"
+        case .database(let u):       return "db:\(u.uuidString)"
+        case .kube(let u):           return "kube:\(u.uuidString)"
+        case .aws:                   return "aws"
+        case .digitalOcean:          return "do"
+        case .linear:                return "linear"
+        case .managedSSHKey:         return "ssh-managed"
+        case .importedSSHKey(let u): return "ssh:\(u.uuidString)"
+        }
+    }
+
+    public var category: CredentialCategory {
+        switch self {
+        case .primaryToolKey, .additionalTool:              return .agents
+        case .git:                                          return .git
+        case .aws, .digitalOcean, .docker, .kube, .linear:  return .cloud
+        case .database:                                     return .databases
+        case .managedSSHKey, .importedSSHKey:               return .ssh
+        case .manual:                                       return .other
+        }
+    }
+
+    public var symbol: String {
+        switch self {
+        case .primaryToolKey, .additionalTool: return "sparkles"
+        case .git:                             return "arrow.triangle.branch"
+        case .manual:                          return "key.horizontal.fill"
+        case .docker:                          return "shippingbox.fill"
+        case .database:                        return "cylinder.split.1x2.fill"
+        case .kube:                            return "shippingbox.fill"
+        case .aws:                             return "server.rack"
+        case .digitalOcean:                    return "cloud.fill"
+        case .linear:                          return "line.diagonal"
+        case .managedSSHKey, .importedSSHKey:  return "key.fill"
+        }
+    }
+
+    /// Which credential-editor type this ref belongs to (drives the edit sheet).
+    public var editorType: CredentialEditorType {
+        switch self {
+        case .primaryToolKey, .additionalTool: return .agents
+        case .git:                             return .git
+        case .manual:                          return .manual
+        case .docker:                          return .docker
+        case .database:                        return .database
+        case .kube:                            return .kubernetes
+        case .aws:                             return .aws
+        case .digitalOcean:                    return .digitalOcean
+        case .linear:                          return .linear
+        case .managedSSHKey, .importedSSHKey:  return .ssh
+        }
+    }
+}
+
+/// The distinct credential kinds the "Add credential" picker offers; also the
+/// editor page a Credentials-pane row opens.
+public enum CredentialEditorType: String, CaseIterable, Identifiable, Sendable {
+    case agents, git, ssh, aws, digitalOcean, linear, kubernetes, docker, database, manual
+    public var id: String { rawValue }
+    public var title: String {
+        switch self {
+        case .agents:       return "Agent API key"
+        case .git:          return "Git token"
+        case .ssh:          return "SSH key"
+        case .aws:          return "AWS credentials"
+        case .digitalOcean: return "DigitalOcean token"
+        case .linear:       return "Linear API key"
+        case .kubernetes:   return "Kubernetes"
+        case .docker:       return "Container registry"
+        case .database:     return "Database"
+        case .manual:       return "Other API key"
+        }
+    }
+    public var symbol: String {
+        switch self {
+        case .agents:       return "sparkles"
+        case .git:          return "arrow.triangle.branch"
+        case .ssh:          return "key.fill"
+        case .aws:          return "server.rack"
+        case .digitalOcean: return "cloud.fill"
+        case .linear:       return "line.diagonal"
+        case .kubernetes:   return "shippingbox.fill"
+        case .docker:       return "shippingbox.fill"
+        case .database:     return "cylinder.split.1x2.fill"
+        case .manual:       return "key.horizontal.fill"
+        }
+    }
+    public var subtitle: String {
+        switch self {
+        case .agents:       return "Anthropic, OpenAI, or xAI API key for a coding agent"
+        case .git:          return "Personal access token for GitHub, GitLab, or Bitbucket"
+        case .ssh:          return "Import a private key, or use the per-workspace key"
+        case .aws:          return "Static IAM keys or SSO — SigV4-signed on the wire"
+        case .digitalOcean: return "doctl / API personal access token"
+        case .linear:       return "Linear personal API key"
+        case .kubernetes:   return "A cluster context (token, client cert, or exec plugin)"
+        case .docker:       return "Registry login for Docker Hub, ghcr.io, and others"
+        case .database:     return "MongoDB Data API, ClickHouse, or Elasticsearch"
+        case .manual:       return "Any other token — you choose the env var and host(s)"
+        }
+    }
+}
+
+public extension Profile {
+    /// Every credential that is actually configured (produces a swap), in
+    /// category order. The single list the Credentials and Guardrails panes
+    /// consume, using the same usability predicates as `makeTokenPlan`.
+    func configuredCredentials() -> [CredentialRef] {
+        var refs: [CredentialRef] = []
+        // Agents
+        if authMode == .token, !(apiKey ?? "").isEmpty { refs.append(.primaryToolKey) }
+        for spec in additionalTools where spec.authMode == .token && !(spec.apiKey ?? "").isEmpty {
+            refs.append(.additionalTool(spec.id))
+        }
+        // Git
+        for c in gitHTTPSCredentials where c.isUsable { refs.append(.git(c.id)) }
+        // Cloud
+        if awsCredentials.isUsable { refs.append(.aws) }
+        if !digitalOceanToken.isEmpty { refs.append(.digitalOcean) }
+        if !linearToken.isEmpty { refs.append(.linear) }
+        for r in dockerRegistries where r.isUsable { refs.append(.docker(r.id)) }
+        for k in kubeconfigs where k.isUsable { refs.append(.kube(k.id)) }
+        // Databases
+        for d in httpDatabases where d.isUsable { refs.append(.database(d.id)) }
+        // SSH
+        if sshPublicKey != nil { refs.append(.managedSSHKey) }
+        for k in importedSSHKeys { refs.append(.importedSSHKey(k.id)) }
+        // Other
+        for m in manualTokens where m.isUsable { refs.append(.manual(m.id)) }
+        return refs
+    }
+
+    /// Configured credentials grouped by category (only non-empty categories),
+    /// in display order.
+    func configuredCredentialsByCategory() -> [(CredentialCategory, [CredentialRef])] {
+        let all = configuredCredentials()
+        return CredentialCategory.allCases.compactMap { cat in
+            let items = all.filter { $0.category == cat }
+            return items.isEmpty ? nil : (cat, items)
+        }
+    }
+
+    /// A short human title for a credential row.
+    func credentialTitle(_ ref: CredentialRef) -> String {
+        switch ref {
+        case .primaryToolKey:
+            return "\(tool.displayName) API key"
+        case .additionalTool(let u):
+            return (additionalTools.first { $0.id == u }?.tool.displayName ?? "Agent") + " API key"
+        case .git(let u):
+            guard let c = gitHTTPSCredentials.first(where: { $0.id == u }) else { return "Git token" }
+            return c.username.isEmpty ? "Git token (\(c.host))" : "\(c.username)@\(c.host)"
+        case .manual(let u):
+            let m = manualTokens.first { $0.id == u }
+            if let n = m?.name, !n.isEmpty { return n }
+            if let e = m?.envVarName, !e.isEmpty { return e }
+            return "Manual token"
+        case .docker(let u):
+            return dockerRegistries.first { $0.id == u }?.host ?? "Registry"
+        case .database(let u):
+            guard let d = httpDatabases.first(where: { $0.id == u }) else { return "Database" }
+            return d.name.isEmpty ? d.engine.displayName : d.name
+        case .kube(let u):
+            return kubeconfigs.first { $0.id == u }?.name ?? "Kubernetes"
+        case .aws:            return "AWS credentials"
+        case .digitalOcean:   return "DigitalOcean token"
+        case .linear:         return "Linear API key"
+        case .managedSSHKey:  return "Workspace SSH key"
+        case .importedSSHKey(let u):
+            return importedSSHKeys.first { $0.id == u }?.label ?? "SSH key"
+        }
+    }
+
+    /// The destination host(s) shown under a credential row (informational).
+    func credentialHosts(_ ref: CredentialRef) -> [String] {
+        func toolHosts(_ t: Tool) -> [String] {
+            switch t {
+            case .claude: return ["anthropic.com"]
+            case .codex:  return ["openai.com"]
+            case .grok:   return ["x.ai"]
+            }
+        }
+        switch ref {
+        case .primaryToolKey: return toolHosts(tool)
+        case .additionalTool(let u): return toolHosts(additionalTools.first { $0.id == u }?.tool ?? tool)
+        case .git(let u): return gitHTTPSCredentials.first { $0.id == u }.map { [$0.host] } ?? []
+        case .manual(let u):
+            return manualTokens.first { $0.id == u }?.hostFilters.filter { !$0.isEmpty } ?? []
+        case .docker(let u): return dockerRegistries.first { $0.id == u }.map { [$0.host] } ?? []
+        case .database(let u): return httpDatabases.first { $0.id == u }.map { [$0.host] } ?? []
+        case .kube(let u):
+            guard let k = kubeconfigs.first(where: { $0.id == u }) else { return [] }
+            return [URL(string: k.serverURL)?.host ?? k.serverURL]
+        case .aws:          return ["amazonaws.com"]
+        case .digitalOcean: return ["digitalocean.com"]
+        case .linear:       return ["linear.app"]
+        case .managedSSHKey, .importedSSHKey: return []
+        }
     }
 }

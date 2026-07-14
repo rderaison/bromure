@@ -59,6 +59,10 @@ private struct GradientIcon: View {
 public extension Notification.Name {
     static let bromureACSelectEditorCategory =
         Notification.Name("io.bromure.ac.selectEditorCategory")
+    /// Debug/screenshot hook: present a Credentials-pane sheet (object is a
+    /// spec string: "picker", "editor:<type>", or "envimport").
+    static let bromureACPresentCredentialSheet =
+        Notification.Name("io.bromure.ac.presentCredentialSheet")
 }
 
 enum EditorCategory: String, CaseIterable, Identifiable {
@@ -181,6 +185,144 @@ struct ProfileStorageContext {
     }
 }
 
+// MARK: - Env-file import model + review sheet
+
+struct EnvImportState: Identifiable {
+    let id = UUID()
+    var fileName: String
+    var recognized: [EnvRecognizedRow]
+    var unrecognized: [EnvUnrecognizedRow]
+    var importCount: Int {
+        recognized.filter { $0.include }.count + unrecognized.filter { $0.include }.count
+    }
+    static let blank = EnvImportState(fileName: "", recognized: [], unrecognized: [])
+}
+struct EnvRecognizedRow: Identifiable {
+    let id = UUID()
+    let slot: EnvFileImport.Slot
+    let name: String
+    let value: String
+    var include: Bool
+    var note: String
+    var gitUsername: String = ""
+    var needsGitUsername: Bool { if case .gitToken = slot { return true } ; return false }
+}
+struct EnvUnrecognizedRow: Identifiable {
+    let id = UUID()
+    let name: String
+    let value: String
+    var include: Bool = true
+    var hostsText: String = ""
+}
+
+/// The env-import review sheet, bound to the live `EnvImportState`. A separate
+/// view (rather than an inline sheet closure) so its bindings always resolve to
+/// the current state — an inline closure reading the parent's optional @State
+/// captures a stale value and renders empty.
+struct EnvImportReviewView: View {
+    @Binding var state: EnvImportState
+    var onCancel: () -> Void
+    var onImport: () -> Void
+
+    private static func masked(_ v: String) -> String {
+        if v.count <= 8 { return String(repeating: "•", count: max(v.count, 1)) }
+        return v.prefix(4) + "…" + v.suffix(4)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Image(systemName: "square.and.arrow.down").foregroundStyle(.tint)
+                Text("Import from \(state.fileName)").font(.headline)
+                Spacer()
+                Button("Cancel") { onCancel() }.keyboardShortcut(.cancelAction)
+            }
+            .padding()
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if !state.recognized.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("RECOGNIZED").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                            ForEach($state.recognized) { $row in recognizedRow($row) }
+                        }
+                    }
+                    if !state.unrecognized.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("UNRECOGNIZED").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                            Text("Import these as generic tokens. Set the host(s) each one authenticates to so the fake is only swapped for the real value on those hosts. Leave blank to allow any host.")
+                                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            ForEach($state.unrecognized) { $row in unrecognizedRow($row) }
+                        }
+                    }
+                }
+                .padding()
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("Import \(state.importCount) credential\(state.importCount == 1 ? "" : "s")") {
+                    onImport()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(state.importCount == 0)
+            }
+            .padding()
+        }
+        .frame(width: 580, height: 560)
+    }
+
+    @ViewBuilder
+    private func recognizedRow(_ row: Binding<EnvRecognizedRow>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Toggle("", isOn: row.include).labelsHidden()
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(EnvFileImport.displayName(for: row.wrappedValue.slot))
+                        .font(.subheadline.weight(.medium))
+                    Text("\(row.wrappedValue.name) = \(Self.masked(row.wrappedValue.value))")
+                        .font(.caption.monospaced()).foregroundStyle(.secondary)
+                    if !row.wrappedValue.note.isEmpty {
+                        Text(row.wrappedValue.note).font(.caption2).foregroundStyle(.orange)
+                    }
+                }
+                Spacer()
+            }
+            if row.wrappedValue.needsGitUsername {
+                HStack(spacing: 6) {
+                    Text("Git username").font(.caption).foregroundStyle(.secondary)
+                    TextField("", text: row.gitUsername, prompt: Text("you"))
+                        .textFieldStyle(.roundedBorder).frame(maxWidth: 180)
+                }
+                .padding(.leading, 26)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func unrecognizedRow(_ row: Binding<EnvUnrecognizedRow>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Toggle("", isOn: row.include).labelsHidden()
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(row.wrappedValue.name).font(.subheadline.weight(.medium).monospaced())
+                    Text(Self.masked(row.wrappedValue.value)).font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            HStack(spacing: 6) {
+                Text("Host(s)").font(.caption).foregroundStyle(.secondary)
+                TextField("", text: row.hostsText,
+                          prompt: Text("api.example.com, example.dev  (blank = any host)"))
+                    .textFieldStyle(.roundedBorder)
+            }
+            .padding(.leading, 26)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 struct ProfileEditorView: View {
     @State private var draft: Profile
     @State private var selectedCategory: EditorCategory = .general
@@ -215,6 +357,25 @@ struct ProfileEditorView: View {
     @State private var expandedCredsSections: Set<String> = []
     @State private var discoveredSSOProfiles: [DiscoveredSSOProfile] = []
     @State private var awsFolderGranted: Bool = false
+
+    /// The Credentials pane's add/edit sheet — either the type picker or one
+    /// type's editor. Nil when nothing is presented.
+    @State private var credSheet: CredentialSheet?
+    /// The env-file import review flow. Nil when not importing.
+    @State private var envImport = EnvImportState.blank
+    @State private var showEnvImport = false
+    @State private var showEnvFileImporter = false
+
+    enum CredentialSheet: Identifiable {
+        case picker
+        case editor(CredentialEditorType)
+        var id: String {
+            switch self {
+            case .picker:          return "picker"
+            case .editor(let t):   return "editor:\(t.rawValue)"
+            }
+        }
+    }
 
     struct ImportSheetState: Identifiable {
         let id = UUID()
@@ -376,6 +537,20 @@ struct ProfileEditorView: View {
         .sheet(item: $importSheet) { sheet in
             importSheetView(for: sheet)
         }
+        .sheet(item: $credSheet) { sheet in
+            credentialSheetView(sheet)
+        }
+        .sheet(isPresented: $showEnvImport) {
+            EnvImportReviewView(
+                state: $envImport,
+                onCancel: { showEnvImport = false },
+                onImport: { applyEnvImport() })
+        }
+        .fileImporter(isPresented: $showEnvFileImporter,
+                      allowedContentTypes: [.data, .text, .plainText, .item],
+                      allowsMultipleSelection: false) { result in
+            handleEnvFilePicked(result)
+        }
         .onReceive(NotificationCenter.default.publisher(
             for: .bromureACSelectEditorCategory)) { note in
             // ScriptCommands lower-cases the category name before
@@ -392,6 +567,10 @@ struct ProfileEditorView: View {
                }) {
                 selectedCategory = cat
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: .bromureACPresentCredentialSheet)) { note in
+            presentDebugCredentialSheet(note.object as? String ?? "")
         }
         // Bug#6: enabling local mode + choosing a model also configures the
         // workspace's agents to use it (auth → "Local model"), so it's not a
@@ -908,189 +1087,362 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private var credentialsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Git identity (always visible — short, used by ~all
-            // profiles, doesn't deserve to hide behind a chevron).
+        VStack(alignment: .leading, spacing: 12) {
+            // Git identity (always visible — short, used by ~all profiles, and
+            // carries no secret so it isn't a "credential" in the list below).
             VStack(alignment: .leading, spacing: 6) {
-                Text("Git Identity")
-                    .font(.headline)
+                Text("Git Identity").font(.headline)
                 TextField("user.name", text: $draft.gitUserName, prompt: Text("Your Name"))
                     .textFieldStyle(.roundedBorder)
                 TextField("user.email", text: $draft.gitUserEmail, prompt: Text("you@example.com"))
                     .textFieldStyle(.roundedBorder)
                 Text("Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.bottom, 4)
-
-            credentialsDisclosure(
-                key: "ssh",
-                title: NSLocalizedString("SSH Keys", comment: ""),
-                symbol: "key.fill",
-                count: sshKeyCount
-            ) {
-                sshKeySubsection
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
-            credentialsDisclosure(
-                key: "github",
-                title: NSLocalizedString("GitHub Tokens", comment: ""),
-                symbol: "cat.fill",
-                count: gitTokenCount(filter: { isGitHub($0.host) })
-            ) {
-                gitTokenSubsection(displayName: "GitHub",
-                                   defaultHost: "github.com",
-                                   filter: { isGitHub($0.host) })
+            Divider()
+
+            // Only what's configured — grouped by category. Real values stay on
+            // the host; the "ask before use" control lives in the Guardrails pane.
+            let groups = draft.configuredCredentialsByCategory()
+            if groups.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "key.slash").font(.title2).foregroundStyle(.secondary)
+                    Text("No credentials yet").font(.subheadline.weight(.medium))
+                    Text("Add an API key, token, or SSH key — or import an env file. Real values stay on your Mac; the VM only ever holds a fake.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity).padding(.vertical, 18)
+            } else {
+                ForEach(groups, id: \.0) { group in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(group.0.title.uppercased())
+                            .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                        ForEach(group.1) { ref in configuredCredentialRow(ref) }
+                    }
+                }
             }
 
-            credentialsDisclosure(
-                key: "gitlab",
-                title: NSLocalizedString("GitLab Tokens", comment: ""),
-                symbol: "testtube.2",
-                count: gitTokenCount(filter: { isGitLab($0.host) })
-            ) {
-                gitTokenSubsection(displayName: "GitLab",
-                                   defaultHost: "gitlab.com",
-                                   filter: { isGitLab($0.host) })
+            HStack {
+                Button { credSheet = .picker } label: {
+                    Label("Add credential", systemImage: "plus")
+                }
+                Button { beginEnvImport() } label: {
+                    Label("Import env file…", systemImage: "square.and.arrow.down")
+                }
+                Spacer()
             }
+            .buttonStyle(.bordered).controlSize(.small).padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 
-            credentialsDisclosure(
-                key: "bitbucket",
-                title: NSLocalizedString("Bitbucket Tokens", comment: ""),
-                symbol: "hammer.fill",
-                count: gitTokenCount(filter: { isBitbucket($0.host) })
-            ) {
-                gitTokenSubsection(displayName: "Bitbucket",
-                                   defaultHost: "bitbucket.org",
-                                   filter: { isBitbucket($0.host) })
+    /// One configured-credential summary row: icon, title, host(s), and an
+    /// edit/remove menu. Tapping opens the type's editor (or the Agents pane
+    /// for agent API keys, which are configured there).
+    @ViewBuilder
+    private func configuredCredentialRow(_ ref: CredentialRef) -> some View {
+        let hosts = draft.credentialHosts(ref)
+        HStack(spacing: 8) {
+            Image(systemName: ref.symbol).foregroundStyle(.secondary).frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(draft.credentialTitle(ref)).font(.subheadline)
+                if !hosts.isEmpty {
+                    Text(hosts.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary)
+                }
             }
+            Spacer(minLength: 8)
+            Menu {
+                Button(ref.editorType == .agents ? "Edit in Agents…" : "Edit…") {
+                    openCredentialEditor(ref)
+                }
+                if ref.editorType != .agents {
+                    Button("Remove", role: .destructive) { removeCredential(ref) }
+                }
+            } label: {
+                Image(systemName: "ellipsis").frame(width: 22, height: 18).contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton).fixedSize()
+        }
+        .padding(.vertical, 5).padding(.horizontal, 8)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onTapGesture { openCredentialEditor(ref) }
+    }
 
-            credentialsDisclosure(
-                key: "linear",
-                title: NSLocalizedString("Linear", comment: ""),
-                symbol: "line.diagonal",
-                count: draft.linearToken.isEmpty ? 0 : 1
-            ) {
-                linearSubsection
-            }
-
-            credentialsDisclosure(
-                key: "k8s",
-                title: NSLocalizedString("Kubernetes", comment: ""),
-                symbol: "shippingbox.fill",
-                count: draft.kubeconfigs.count
-            ) {
-                kubernetesSubsection
-            }
-
-            credentialsDisclosure(
-                key: "do",
-                title: NSLocalizedString("DigitalOcean", comment: ""),
-                symbol: "cloud.fill",
-                count: draft.digitalOceanToken.isEmpty ? 0 : 1
-            ) {
-                digitalOceanSubsection
-            }
-
-            credentialsDisclosure(
-                key: "aws",
-                title: NSLocalizedString("AWS", comment: ""),
-                symbol: "server.rack",
-                count: draft.awsCredentials.isUsable ? 1 : 0
-            ) {
-                awsSubsection
-            }
-
-            credentialsDisclosure(
-                key: "docker",
-                title: NSLocalizedString("Container Registries", comment: ""),
-                symbol: "shippingbox.and.arrow.backward.fill",
-                count: draft.dockerRegistries.filter { $0.isUsable }.count
-            ) {
-                dockerRegistriesSubsection
-            }
-
-            credentialsDisclosure(
-                key: "mongo",
-                title: NSLocalizedString("MongoDB", comment: ""),
-                symbol: "leaf.fill",
-                count: databaseCount(.mongoDataAPI)
-            ) {
-                databaseSubsection(.mongoDataAPI)
-            }
-
-            credentialsDisclosure(
-                key: "clickhouse",
-                title: NSLocalizedString("ClickHouse", comment: ""),
-                symbol: "bolt.horizontal.fill",
-                count: databaseCount(.clickHouse)
-            ) {
-                databaseSubsection(.clickHouse)
-            }
-
-            credentialsDisclosure(
-                key: "elastic",
-                title: NSLocalizedString("Elasticsearch", comment: ""),
-                symbol: "magnifyingglass",
-                count: databaseCount(.elasticsearch)
-            ) {
-                databaseSubsection(.elasticsearch)
-            }
-
-            credentialsDisclosure(
-                key: "other",
-                title: NSLocalizedString("Other API keys", comment: ""),
-                symbol: "key.horizontal.fill",
-                count: draft.manualTokens.count
-            ) {
-                otherTokensSubsection
-            }
+    private func openCredentialEditor(_ ref: CredentialRef) {
+        if ref.editorType == .agents {
+            NotificationCenter.default.post(name: .bromureACSelectEditorCategory, object: "agents")
+        } else {
+            credSheet = .editor(ref.editorType)
         }
     }
+
+    private func removeCredential(_ ref: CredentialRef) {
+        switch ref {
+        case .git(let u):          draft.gitHTTPSCredentials.removeAll { $0.id == u }
+        case .manual(let u):       draft.manualTokens.removeAll { $0.id == u }
+        case .docker(let u):       draft.dockerRegistries.removeAll { $0.id == u }
+        case .database(let u):     draft.httpDatabases.removeAll { $0.id == u }
+        case .kube(let u):         draft.kubeconfigs.removeAll { $0.id == u }
+        case .importedSSHKey(let u): draft.importedSSHKeys.removeAll { $0.id == u }
+        case .aws:                 draft.awsCredentials = AWSCredentials()
+        case .digitalOcean:        draft.digitalOceanToken = ""
+        case .linear:              draft.linearToken = ""
+        case .managedSSHKey:       draft.sshPublicKey = nil; generateSSH = false
+        case .primaryToolKey, .additionalTool: break   // configured in the Agents pane
+        }
+    }
+
 
     private func databaseCount(_ engine: HTTPDatabaseEndpoint.Engine) -> Int {
         draft.httpDatabases.filter { $0.engine == engine && $0.isUsable }.count
     }
 
-    // MARK: - Disclosure helper
+    // MARK: - Add / edit credential sheet
 
     @ViewBuilder
-    private func credentialsDisclosure<Content: View>(
-        key: String,
-        title: String,
-        symbol: String,
-        count: Int,
-        @ViewBuilder content: @escaping () -> Content
-    ) -> some View {
-        DisclosureGroup(isExpanded: Binding(
-            get: { expandedCredsSections.contains(key) },
-            set: { isOpen in
-                if isOpen { expandedCredsSections.insert(key) }
-                else      { expandedCredsSections.remove(key) }
-            })) {
-            content()
-                .padding(.top, 8)
-                .padding(.bottom, 4)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: symbol)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18)
-                Text(title)
-                    .font(.headline)
-                if count > 0 {
-                    Text("\(count)")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
-                }
+    private func credentialSheetView(_ sheet: CredentialSheet) -> some View {
+        switch sheet {
+        case .picker:          addCredentialPicker
+        case .editor(let type): credentialEditorSheet(type)
+        }
+    }
+
+    private var addCredentialPicker: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Add credential").font(.headline)
                 Spacer()
+                Button("Cancel") { credSheet = nil }.keyboardShortcut(.cancelAction)
+            }
+            .padding()
+            Divider()
+            ScrollView {
+                VStack(spacing: 0) {
+                    // Agent API keys are configured in the Agents pane, so the
+                    // picker offers everything else.
+                    ForEach(CredentialEditorType.allCases.filter { $0 != .agents }) { type in
+                        Button { credSheet = .editor(type) } label: {
+                            HStack(spacing: 11) {
+                                Image(systemName: type.symbol)
+                                    .foregroundStyle(.tint).frame(width: 22)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(type.title).font(.subheadline.weight(.medium))
+                                    Text(type.subtitle).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+                            }
+                            .padding(.vertical, 9).padding(.horizontal, 14).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        Divider()
+                    }
+                }
+            }
+            Text("Agent API keys (Anthropic, OpenAI, xAI) are configured in the Agents pane.")
+                .font(.caption).foregroundStyle(.secondary).padding(10)
+        }
+        .frame(width: 460, height: 520)
+    }
+
+    @ViewBuilder
+    private func credentialEditorSheet(_ type: CredentialEditorType) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Image(systemName: type.symbol).foregroundStyle(.tint)
+                Text(type.title).font(.headline)
+                Spacer()
+                Button("Done") { credSheet = nil }.keyboardShortcut(.defaultAction)
+            }
+            .padding()
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    credentialEditorBody(type)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(width: 560, height: 560)
+    }
+
+    @ViewBuilder
+    private func credentialEditorBody(_ type: CredentialEditorType) -> some View {
+        switch type {
+        case .agents:
+            EmptyView()
+        case .git:
+            VStack(alignment: .leading, spacing: 16) {
+                gitProviderEditor("GitHub", "github.com", { isGitHub($0.host) })
+                gitProviderEditor("GitLab", "gitlab.com", { isGitLab($0.host) })
+                gitProviderEditor("Bitbucket", "bitbucket.org", { isBitbucket($0.host) })
+            }
+        case .ssh:          sshKeySubsection
+        case .aws:          awsSubsection
+        case .digitalOcean: digitalOceanSubsection
+        case .linear:       linearSubsection
+        case .kubernetes:   kubernetesSubsection
+        case .docker:       dockerRegistriesSubsection
+        case .database:
+            VStack(alignment: .leading, spacing: 18) {
+                databaseGroupEditor(.mongoDataAPI)
+                databaseGroupEditor(.clickHouse)
+                databaseGroupEditor(.elasticsearch)
+            }
+        case .manual:       otherTokensSubsection
+        }
+    }
+
+    @ViewBuilder
+    private func gitProviderEditor(_ name: String, _ host: String,
+                                   _ filter: @escaping (GitHTTPSCredential) -> Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(name).font(.subheadline.weight(.semibold))
+            gitTokenSubsection(displayName: name, defaultHost: host, filter: filter)
+        }
+    }
+
+    @ViewBuilder
+    private func databaseGroupEditor(_ engine: HTTPDatabaseEndpoint.Engine) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(engine.displayName).font(.subheadline.weight(.semibold))
+            databaseSubsection(engine)
+        }
+    }
+
+    // MARK: - Import env file
+
+    private func beginEnvImport() { showEnvFileImporter = true }
+
+    /// Debug/screenshot hook: present a Credentials-pane sheet without a click.
+    /// "picker", "editor:<type>", or "envimport" (with synthesized demo rows).
+    private func presentDebugCredentialSheet(_ spec: String) {
+        switch spec {
+        case "picker":
+            credSheet = .picker
+        case "envimport":
+            // Drive the REAL parse→classify→populate path with a sample file.
+            // Deferred off the notification tick so the state set lands in a
+            // clean update cycle (the file-picker flow already does this).
+            let sample = """
+                export OPENAI_API_KEY=sk-proj-abcdef1234567890
+                export GH_TOKEN='ghp_wxyz9876543210'
+                AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+                GRRR_ANOTHER_KEY=s3cret-value-abcdef   # unknown service
+                WIDGET_TOKEN="wgt_0123456789"
+                """
+            importEnvText(sample, fileName: "sample.env")
+        default:
+            if spec.hasPrefix("editor:"),
+               let t = CredentialEditorType(rawValue: String(spec.dropFirst("editor:".count))) {
+                credSheet = .editor(t)
             }
         }
     }
+
+    private func handleEnvFilePicked(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, let url = urls.first else { return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            importError = "Couldn't read \(url.lastPathComponent) as text."
+            return
+        }
+        importEnvText(text, fileName: url.lastPathComponent)
+    }
+
+    /// Parse env text, classify against known credentials, and present the
+    /// review sheet. Shared by the file picker and the debug hook.
+    private func importEnvText(_ text: String, fileName: String) {
+        let cls = EnvFileImport.classify(EnvFileImport.parse(text))
+        let recognized: [EnvRecognizedRow] = cls.recognized.map { pair in
+            let already = isSlotConfigured(pair.slot)
+            return EnvRecognizedRow(
+                slot: pair.slot, name: pair.variable.name, value: pair.variable.value,
+                include: !already,
+                note: already ? "Already configured — check to overwrite." : "",
+                gitUsername: draft.gitUserName)
+        }
+        let unrecognized = cls.unrecognized.map { EnvUnrecognizedRow(name: $0.name, value: $0.value) }
+        if recognized.isEmpty && unrecognized.isEmpty {
+            importError = "No importable variables found in \(fileName)."
+            return
+        }
+        envImport = EnvImportState(fileName: fileName,
+                                   recognized: recognized, unrecognized: unrecognized)
+        showEnvImport = true
+    }
+
+    private func isSlotConfigured(_ slot: EnvFileImport.Slot) -> Bool {
+        switch slot {
+        case .toolKey(let t):
+            if draft.tool == t { return !(draft.apiKey ?? "").isEmpty }
+            return draft.additionalTools.contains { $0.tool == t && !($0.apiKey ?? "").isEmpty }
+        case .gitToken(let host):
+            return draft.gitHTTPSCredentials.contains { $0.host == host && $0.isUsable }
+        case .digitalOcean: return !draft.digitalOceanToken.isEmpty
+        case .linear:       return !draft.linearToken.isEmpty
+        case .awsAccessKeyID, .awsSecretAccessKey, .awsSessionToken:
+            return draft.awsCredentials.isUsable
+        }
+    }
+
+
+
+    private func applyEnvImport() {
+        let state = envImport
+        var awsAccess = "", awsSecret = "", awsSession = "", awsAny = false
+        for row in state.recognized where row.include {
+            switch row.slot {
+            case .toolKey(let t):
+                if draft.tool == t {
+                    draft.apiKey = row.value; draft.authMode = .token
+                } else if let i = draft.additionalTools.firstIndex(where: { $0.tool == t }) {
+                    draft.additionalTools[i].apiKey = row.value
+                    draft.additionalTools[i].authMode = .token
+                } else {
+                    draft.additionalTools.append(.init(tool: t, authMode: .token, apiKey: row.value))
+                }
+            case .gitToken(let host):
+                let user = row.gitUsername.trimmingCharacters(in: .whitespaces)
+                if let i = draft.gitHTTPSCredentials.firstIndex(where: { $0.host == host }) {
+                    draft.gitHTTPSCredentials[i].token = row.value
+                    if !user.isEmpty { draft.gitHTTPSCredentials[i].username = user }
+                } else {
+                    draft.gitHTTPSCredentials.append(.init(host: host, username: user, token: row.value))
+                }
+            case .digitalOcean: draft.digitalOceanToken = row.value
+            case .linear:       draft.linearToken = row.value
+            case .awsAccessKeyID:    awsAccess = row.value; awsAny = true
+            case .awsSecretAccessKey: awsSecret = row.value; awsAny = true
+            case .awsSessionToken:   awsSession = row.value; awsAny = true
+            }
+        }
+        if awsAny {
+            draft.awsCredentials.authMode = .staticKeys
+            if !awsAccess.isEmpty { draft.awsCredentials.accessKeyID = awsAccess }
+            if !awsSecret.isEmpty { draft.awsCredentials.secretAccessKey = awsSecret }
+            if !awsSession.isEmpty { draft.awsCredentials.sessionToken = awsSession }
+        }
+        for row in state.unrecognized where row.include {
+            let hosts = row.hostsText
+                .split(whereSeparator: { $0 == "," || $0 == " " })
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            draft.manualTokens.append(.init(
+                name: row.name, realValue: row.value, envVarName: row.name, hostFilters: hosts))
+        }
+        showEnvImport = false
+    }
+
+    // MARK: - Disclosure helper
+
 
     // MARK: - Per-provider host predicates
 
@@ -1104,14 +1456,6 @@ struct ProfileEditorView: View {
     }
     private func isBitbucket(_ host: String) -> Bool {
         host.lowercased() == "bitbucket.org"
-    }
-    private var sshKeyCount: Int {
-        var n = draft.importedSSHKeys.count
-        if draft.sshPublicKey != nil || generateSSH { n += 1 }
-        return n
-    }
-    private func gitTokenCount(filter: (GitHTTPSCredential) -> Bool) -> Int {
-        draft.gitHTTPSCredentials.filter(filter).count
     }
 
     // MARK: - SSH
@@ -1164,7 +1508,6 @@ struct ProfileEditorView: View {
                     Toggle("Generate an ed25519 keypair", isOn: $generateSSH)
                 }
                 if draft.sshPublicKey != nil || generateSSH {
-                    requireApprovalToggle(isOn: $draft.sshKeyRequiresApproval)
                 }
             }
 
@@ -1329,7 +1672,6 @@ struct ProfileEditorView: View {
                 .buttonStyle(.borderless)
                 .help("Open DigitalOcean token page in your browser")
             }
-            requireApprovalToggle(isOn: $draft.digitalOceanTokenRequiresApproval)
         }
     }
 
@@ -1355,7 +1697,6 @@ struct ProfileEditorView: View {
                 .buttonStyle(.borderless)
                 .help("Open Linear API settings in your browser")
             }
-            requireApprovalToggle(isOn: $draft.linearTokenRequiresApproval)
         }
     }
 
@@ -1400,7 +1741,6 @@ struct ProfileEditorView: View {
                 awsSSOFields
             }
 
-            requireApprovalToggle(isOn: $draft.awsCredentials.requireApproval)
         }
     }
 
@@ -1821,26 +2161,6 @@ struct ProfileEditorView: View {
                             }
                             .buttonStyle(.borderless)
                         }
-                        Toggle(isOn: $draft.importedSSHKeys[idx].requireApproval) {
-                            Text(NSLocalizedString("Require approval to use", comment: ""))
-                                .font(.caption)
-                        }
-                        .toggleStyle(.checkbox)
-                        .controlSize(.small)
-                        // Disable if the imported key has no public-key
-                        // text — the gate looks the key up by wire-format
-                        // blob, which we extract from the .pub. Without
-                        // it we can't match incoming SIGN_REQUESTs to the
-                        // approval entry, and the toggle would silently
-                        // do nothing.
-                        .disabled(key.publicKeyText.isEmpty)
-                        .help(key.publicKeyText.isEmpty
-                              ? NSLocalizedString(
-                                "Public key text wasn't captured at import time — re-import with the matching .pub file alongside the private key to enable per-key gating.",
-                                comment: "")
-                              : NSLocalizedString(
-                                "Pop a confirmation dialog the first time this credential is used in a session. Off by default.",
-                                comment: ""))
                     }
                     .padding(8)
                     .background(Color(nsColor: .textBackgroundColor),
@@ -1975,6 +2295,34 @@ struct ProfileEditorView: View {
                         .font(.subheadline.weight(.semibold))
                 }
                 Text("Off (default) → the browser starts from a clean profile every time and forgets everything when the window closes — fully ephemeral. On → cookies, logins, and history are kept on an encrypted per-workspace disk (~/Library/Application Support/BromureAC/browser-profiles/), so the agent stays signed in to sites between sessions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("PERMISSIONS")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Toggle(isOn: $draft.browserAllowUploads) {
+                    Label("Allow file uploads", systemImage: "arrow.up.doc.fill")
+                        .font(.subheadline.weight(.semibold))
+                }
+                Toggle(isOn: $draft.browserAllowDownloads) {
+                    Label("Allow file downloads", systemImage: "arrow.down.doc.fill")
+                        .font(.subheadline.weight(.semibold))
+                }
+                Toggle(isOn: $draft.browserWebcam) {
+                    Label("Allow camera", systemImage: "video.fill")
+                        .font(.subheadline.weight(.semibold))
+                }
+                Toggle(isOn: $draft.browserMicrophone) {
+                    Label("Allow microphone", systemImage: "mic.fill")
+                        .font(.subheadline.weight(.semibold))
+                }
+                Text("Uploads and downloads are on by default. The camera and microphone are off by default — turning one on exposes that host device to pages the browser (and the agent) opens, and keeps WebRTC enabled. Changes take effect the next time the browser opens; an open browser is restarted to apply them.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2430,133 +2778,130 @@ struct ProfileEditorView: View {
         }
     }
 
-    @ViewBuilder
-    private func guardrailRow(_ title: String, systemImage: String,
-                              mode: Binding<GuardrailsPolicy.Mode>, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Label(title, systemImage: systemImage)
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Picker("", selection: mode) {
-                    ForEach(GuardrailsPolicy.Mode.allCases, id: \.self) { m in
-                        Text(m.displayName).tag(m)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(width: 200)
-            }
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
 
     @ViewBuilder
     private var guardrailsSection: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Guardrails strips destructive operations from the protocols this agent speaks. It's enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it. Blocked calls return a hard error the agent sees.")
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                guardrailRow("Kubernetes", systemImage: "shippingbox.fill",
-                             mode: $draft.guardrails.kubernetes,
-                             detail: "\(draft.guardrails.kubernetes.detail) \(NSLocalizedString("Applies to the kube API servers from this workspace's kubeconfigs (e.g. `kubectl delete` fails cleanly).", comment: ""))")
-                if draft.kubeconfigs.isEmpty && draft.guardrails.kubernetes != .off {
-                    Label("No kubeconfigs on this workspace — add one under Credentials for this to take effect.",
-                          systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
+                let refs = draft.configuredCredentials()
+                if refs.isEmpty {
+                    VStack(spacing: 6) {
+                        Image(systemName: "shield.slash").font(.title2).foregroundStyle(.secondary)
+                        Text("No credentials to guard").font(.subheadline.weight(.medium))
+                        Text("Add credentials in the Credentials pane. Each one appears here with an “ask before use” toggle and, where it applies, a write policy.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 22)
+                } else {
+                    ForEach(refs) { ref in
+                        guardrailCredentialRow(ref)
+                        Divider()
+                    }
+                    Text("A write policy is per service, so two credentials for the same service (e.g. two GitHub tokens) share one policy.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .padding(.top, 2)
                 }
-                Divider()
-                guardrailRow("AWS", systemImage: "cloud.fill", mode: $draft.guardrails.aws,
-                             detail: "\(draft.guardrails.aws.detail) \(NSLocalizedString("All *.amazonaws.com APIs; classified by action name (Delete*/Terminate* = destructive, Get*/List*/Describe* = read).", comment: ""))")
-                Divider()
-                guardrailRow("DigitalOcean", systemImage: "drop.fill", mode: $draft.guardrails.digitalOcean,
-                             detail: "\(draft.guardrails.digitalOcean.detail) \(NSLocalizedString("api.digitalocean.com — DELETE = destructive.", comment: ""))")
-                Divider()
-                guardrailRow(NSLocalizedString("Docker registries", comment: ""), systemImage: "cube.box.fill", mode: $draft.guardrails.docker,
-                             detail: "\(draft.guardrails.docker.detail) \(NSLocalizedString("Registries you've added under Credentials — pull = read, push = write, delete = destructive.", comment: ""))")
-                if draft.dockerRegistries.isEmpty && draft.guardrails.docker != .off {
-                    Label("No registries on this workspace — add one under Credentials for this to take effect.",
-                          systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Divider()
-                guardrailRow("GitHub", systemImage: "chevron.left.forwardslash.chevron.right",
-                             mode: $draft.guardrails.github,
-                             detail: "\(draft.guardrails.github.detail) \(NSLocalizedString("github.com REST API + git over HTTPS; read-only also blocks `git push`.", comment: ""))")
-                Divider()
-                guardrailRow("GitLab", systemImage: "chevron.left.forwardslash.chevron.right",
-                             mode: $draft.guardrails.gitlab,
-                             detail: "\(draft.guardrails.gitlab.detail) \(NSLocalizedString("gitlab.com REST API + git over HTTPS.", comment: ""))")
-                Divider()
-                guardrailRow("Bitbucket", systemImage: "chevron.left.forwardslash.chevron.right",
-                             mode: $draft.guardrails.bitbucket,
-                             detail: "\(draft.guardrails.bitbucket.detail) \(NSLocalizedString("bitbucket.org REST API + git over HTTPS.", comment: ""))")
-                Divider()
-                databaseGuardrails
             }
             .padding(.bottom, 8)
         }
     }
 
-    private func databaseEngineSymbol(_ engine: HTTPDatabaseEndpoint.Engine) -> String {
-        switch engine {
-        case .mongoDataAPI:  return "leaf.fill"
-        case .clickHouse:    return "bolt.horizontal.fill"
-        case .elasticsearch: return "magnifyingglass"
+    /// One configured credential in the Guardrails pane: ask-before-use, plus a
+    /// write-policy picker where the credential's service has one.
+    @ViewBuilder
+    private func guardrailCredentialRow(_ ref: CredentialRef) -> some View {
+        let hosts = draft.credentialHosts(ref)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: ref.symbol).foregroundStyle(.secondary).frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(draft.credentialTitle(ref)).font(.subheadline.weight(.medium))
+                    if !hosts.isEmpty {
+                        Text(hosts.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                if let mode = guardrailModeBinding(for: ref) {
+                    Picker("", selection: mode) {
+                        ForEach(GuardrailsPolicy.Mode.allCases, id: \.self) { m in
+                            Text(m.displayName).tag(m)
+                        }
+                    }
+                    .labelsHidden().pickerStyle(.menu).frame(width: 176)
+                }
+            }
+            requireApprovalToggle(isOn: approvalBinding(for: ref))
+                .padding(.leading, 26)
         }
+        .padding(.vertical, 3)
     }
-    private func databaseEngineDetail(_ engine: HTTPDatabaseEndpoint.Engine) -> String {
-        switch engine {
-        case .mongoDataAPI:
-            return NSLocalizedString("deleteOne/deleteMany = destructive; insert/update/replace = write; find/aggregate = read.", comment: "")
-        case .clickHouse:
-            return NSLocalizedString("DROP/TRUNCATE/DELETE and ALTER…DELETE = destructive; INSERT/CREATE = write; SELECT/SHOW = read.", comment: "")
-        case .elasticsearch:
-            return NSLocalizedString("DELETE + _delete_by_query = destructive; _search/_count/_msearch = read; _bulk/index/_update = write.", comment: "")
+
+    /// A `Binding<Bool>` into a configured credential's `requireApproval` flag,
+    /// hiding the per-struct vs. profile-scalar asymmetry.
+    private func approvalBinding(for ref: CredentialRef) -> Binding<Bool> {
+        switch ref {
+        case .primaryToolKey:        return $draft.apiKeyRequiresApproval
+        case .additionalTool(let t): return approvalArray(\.additionalTools, id: t, flag: \.requireApproval)
+        case .git(let u):            return approvalArray(\.gitHTTPSCredentials, id: u, flag: \.requireApproval)
+        case .manual(let u):         return approvalArray(\.manualTokens, id: u, flag: \.requireApproval)
+        case .docker(let u):         return approvalArray(\.dockerRegistries, id: u, flag: \.requireApproval)
+        case .database(let u):       return approvalArray(\.httpDatabases, id: u, flag: \.requireApproval)
+        case .kube(let u):           return approvalArray(\.kubeconfigs, id: u, flag: \.requireApproval)
+        case .importedSSHKey(let u): return approvalArray(\.importedSSHKeys, id: u, flag: \.requireApproval)
+        case .aws:                   return $draft.awsCredentials.requireApproval
+        case .digitalOcean:          return $draft.digitalOceanTokenRequiresApproval
+        case .linear:                return $draft.linearTokenRequiresApproval
+        case .managedSSHKey:         return $draft.sshKeyRequiresApproval
         }
     }
 
-    @ViewBuilder
-    private var databaseGuardrails: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Databases")
-                .font(.subheadline.weight(.semibold))
-            if draft.httpDatabases.isEmpty {
-                Text("No database endpoints configured. Add MongoDB, ClickHouse, or Elasticsearch endpoints under Credentials to guard them here.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                ForEach(draft.httpDatabases) { db in
-                    if let idx = draft.httpDatabases.firstIndex(where: { $0.id == db.id }) {
-                        let label = db.name.isEmpty
-                            ? "\(db.engine.displayName) — \(db.host.isEmpty ? "(no host)" : db.host)"
-                            : "\(db.name) (\(db.engine.displayName))"
-                        guardrailRow(label,
-                                     systemImage: databaseEngineSymbol(db.engine),
-                                     mode: $draft.httpDatabases[idx].guardrail,
-                                     detail: "\(db.guardrail.detail) \(databaseEngineDetail(db.engine))")
-                        if db.host.trimmingCharacters(in: .whitespaces).isEmpty
-                            && db.guardrail != .off {
-                            Label("Set this endpoint's host under Credentials for the guard to take effect.",
-                                  systemImage: "exclamationmark.triangle.fill")
-                                .font(.caption).foregroundStyle(.orange)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Divider()
-                    }
+    private func approvalArray<T: Identifiable>(
+        _ path: WritableKeyPath<Profile, [T]>, id: T.ID,
+        flag: WritableKeyPath<T, Bool>) -> Binding<Bool> {
+        Binding(
+            get: { draft[keyPath: path].first { $0.id == id }?[keyPath: flag] ?? false },
+            set: { v in
+                if let i = draft[keyPath: path].firstIndex(where: { $0.id == id }) {
+                    draft[keyPath: path][i][keyPath: flag] = v
                 }
-            }
+            })
+    }
+
+    /// The write-policy `Mode` binding for a credential whose service has one
+    /// (git forge, AWS, DigitalOcean, Docker, Kubernetes, databases); nil for
+    /// plain API keys / SSH keys / manual tokens.
+    private func guardrailModeBinding(for ref: CredentialRef) -> Binding<GuardrailsPolicy.Mode>? {
+        switch ref {
+        case .git(let u):
+            guard let host = draft.gitHTTPSCredentials.first(where: { $0.id == u })?.host.lowercased()
+            else { return nil }
+            if host == "github.com" || host.hasSuffix(".github.com") { return $draft.guardrails.github }
+            if host == "gitlab.com" || host.hasPrefix("gitlab.")     { return $draft.guardrails.gitlab }
+            if host == "bitbucket.org"                               { return $draft.guardrails.bitbucket }
+            return nil
+        case .aws:          return $draft.guardrails.aws
+        case .digitalOcean: return $draft.guardrails.digitalOcean
+        case .docker:       return $draft.guardrails.docker
+        case .kube:         return $draft.guardrails.kubernetes
+        case .database(let u):
+            return Binding(
+                get: { draft.httpDatabases.first { $0.id == u }?.guardrail ?? .off },
+                set: { v in
+                    if let i = draft.httpDatabases.firstIndex(where: { $0.id == u }) {
+                        draft.httpDatabases[i].guardrail = v
+                    }
+                })
+        default: return nil
         }
     }
+
 
     // MARK: - Supply Chain section
 
@@ -3313,21 +3658,21 @@ private struct ManualTokenRow: View {
                 credFieldHint("The agent reads the fake token from this variable inside the VM. Leave blank to inject nothing and copy it in yourself.")
             }
 
-            // Host — restricts where the fake is swapped back to the real key.
+            // Hosts — restrict where the fake is swapped back to the real key.
             VStack(alignment: .leading, spacing: 3) {
-                credFieldLabel("API host (optional)")
-                TextField("", text: $token.hostFilter, prompt: Text("api.stripe.com"))
+                credFieldLabel("API host(s) (optional)")
+                TextField("", text: Binding(
+                    get: { token.hostFilters.joined(separator: ", ") },
+                    set: { token.hostFilters = $0
+                        .split(whereSeparator: { $0 == "," || $0 == " " })
+                        .map { String($0) }
+                        .filter { !$0.isEmpty } }),
+                    prompt: Text("api.stripe.com, api.example.com"))
                     .textFieldStyle(.roundedBorder)
                     .labelsHidden()
-                credFieldHint("Hostname only, no https:// or path. The real key is only substituted on requests to this host and its subdomains. Leave blank to allow any host.")
+                credFieldHint("Hostnames only, comma-separated, no https:// or path. The real key is substituted only on requests to these hosts and their subdomains. Leave blank to allow any host.")
             }
 
-            Toggle(isOn: $token.requireApproval) {
-                Text(NSLocalizedString("Require approval to use", comment: ""))
-                    .font(.caption)
-            }
-            .toggleStyle(.checkbox)
-            .controlSize(.small)
         }
         .padding(10)
         .background(Color(nsColor: .textBackgroundColor),
@@ -4072,12 +4417,6 @@ private struct ToolConfigCard: View {
                         )
                     )
                     .textFieldStyle(.roundedBorder)
-                    Toggle(isOn: $spec.requireApproval) {
-                        Text(NSLocalizedString("Require approval to use", comment: ""))
-                            .font(.caption)
-                    }
-                    .toggleStyle(.checkbox)
-                    .controlSize(.small)
                 case .subscription:
                     EmptyView()
                 case .bedrock:
@@ -4172,12 +4511,6 @@ private struct KubeconfigRow: View {
                     Divider()
                     authPicker
                     authFields
-                    Toggle(isOn: $entry.requireApproval) {
-                        Text(NSLocalizedString("Require approval to use", comment: ""))
-                            .font(.caption)
-                    }
-                    .toggleStyle(.checkbox)
-                    .controlSize(.small)
                 }
                 .padding(.top, 6)
             } label: {
@@ -4417,12 +4750,6 @@ private struct HTTPSCredentialRow: View {
                     }
                 }
             }
-            Toggle(isOn: $credential.requireApproval) {
-                Text(NSLocalizedString("Require approval to use", comment: ""))
-                    .font(.caption)
-            }
-            .toggleStyle(.checkbox)
-            .controlSize(.small)
         }
         .padding(8)
         .background(Color(nsColor: .textBackgroundColor),
@@ -4569,12 +4896,6 @@ private struct DatabaseEndpointRow: View {
                 credFieldHint("Variable(s) the fake secret is exported under in the VM — comma-separated for more than one. Reference these from your code / connection string.")
             }
 
-            Toggle(isOn: $endpoint.requireApproval) {
-                Text(NSLocalizedString("Require approval to use", comment: ""))
-                    .font(.caption)
-            }
-            .toggleStyle(.checkbox)
-            .controlSize(.small)
         }
         .padding(8)
         .background(Color(nsColor: .textBackgroundColor),
@@ -4645,12 +4966,6 @@ private struct DockerRegistryRow: View {
                     }
                 }
             }
-            Toggle(isOn: $cred.requireApproval) {
-                Text(NSLocalizedString("Require approval to use", comment: ""))
-                    .font(.caption)
-            }
-            .toggleStyle(.checkbox)
-            .controlSize(.small)
         }
         .padding(8)
         .background(Color(nsColor: .textBackgroundColor),

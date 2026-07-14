@@ -1,0 +1,256 @@
+---
+title: "Appendix — File Locations, Ports & Environment"
+description: "Curated reference tables: where Bromure Agentic Coding keeps its data on disk, the network ports and subnets it uses, its environment variables and launch arguments, and a guest-VM cheat sheet."
+order: 19
+---
+
+# Appendix — File Locations, Ports & Environment
+
+This appendix collects the concrete facts scattered through the rest of the manual into reference tables: on-disk locations, network ports, environment variables and launch arguments, and a guest-VM cheat sheet. Everything here is keyed to the shipping build (version 4.3.0, bundle ID `io.bromure.agentic-coding`). For the commands that read and write these, see [Automation & the CLI](16-automation-cli.mdx); for what gets created at install time, see [Installation](02-installation.mdx).
+
+Placeholders used below: `<uuid>` is a workspace's identifier, `<version>` a pinned tool version, `<org>--<name>` a model repository, and `<host-UUID>` a saved remote host.
+
+## On-disk locations
+
+Everything the app owns lives under one support directory, plus a handful of files outside it and a few Keychain items. The tables below are deduplicated and grouped; a path ending in `/` is a directory.
+
+### The support directory
+
+The app's support root is `~/Library/Application Support/BromureAC/`. The paths below are relative to it.
+
+| Path | Holds |
+|---|---|
+| `base.img` | The Ubuntu 24.04 base image every workspace clones from (24 GB logical, ~6–8 GB physical). |
+| `efivars.bin` | EFI variable store the base image boots with. |
+| `base.version` | Installed image version stamp, e.g. `200` or `200.1`. |
+| `image-state.json` | Image provenance and the UUIDs of applied postinstall steps. |
+| `img-catalog.json` | Cached copy of the downloaded image catalog. |
+| `browser-img-catalog.json` | Cached catalog for the embedded browser image. |
+| `catalog.json` | Cached remote catalog manifest for local inference models. |
+| `base.img.partial`, `base.img.gz.partial`, `efivars.partial` | Transient install files; their presence means an install is running or was interrupted. |
+| `alpine-vmlinuz`, `alpine-initramfs`, `alpine-initramfs-shimmed` | Cached Alpine netboot installer files used by the local build. |
+| `browser/` | AC's own copy of the Alpine/Chromium browser image (`linux-base.img`, `vmlinuz`, `initrd`) when Bromure Web's copy is absent. |
+| `browser-profiles/<uuid>/image/profile.img` | Encrypted persistent Chromium profile disk ("Stay signed in to websites"). |
+| `ca/cert.pem`, `ca/key.pem` | The per-install Bromure Agentic Coding Root CA (key mode `0600`). Delete the `ca/` directory to rotate it. |
+| `control.sock` | Owner-only (`0600`) Unix control socket the CLI and control plane speak HTTP over. |
+| `profile-macs.json` | Deterministic per-workspace MAC bindings. |
+| `dhcp-leases.sqlite` | Persistent DHCP leases for the shared NAT switch. |
+| `default-ssh/id_ed25519.raw`, `default-ssh/id_ed25519.pub` | Shared default SSH keypair copied into each new workspace. |
+| `profile-template.json`, `profile-template.enc` | The Preferences "Defaults" template new workspaces inherit (kept outside `profiles/` so it never shows in the picker). |
+| `automations.json` | Scheduled automations plus run history (max 1000 records), next-fire times, and event-poll high-water marks. |
+| `grid-layout.json` | Terminal Grid membership. |
+| `engine-master.key` | 32-byte master secret for per-VM local-inference engine keys. |
+| `engine-spawn.json` | Local-inference engine child spawn config (models, memory budget, port). |
+| `fake-salt.bin` | Per-install 32-byte salt for deriving fake tokens (`0600`). Deleting it rotates every fake on this Mac. |
+| `secrets-master.key` | `0600` fallback AES-256 master key, used only when the Data Protection Keychain is unreachable. |
+| `claude-subscription.enc`, `codex-subscription.enc`, `grok-subscription.enc` | AES-GCM-encrypted, host-owned subscription OAuth stores (shared default plus per-workspace overrides), `0600`. |
+| `cloudflared/<version>/cloudflared` | Pinned, checksum-verified `cloudflared` binary, with a `current` symlink alongside. |
+| `ghostty/` | Generated terminal configs (base plus per-workspace). |
+
+### Per-workspace storage
+
+Each workspace is a self-contained directory at `profiles/<uuid>/` under the support root. See [Workspaces](05-workspaces.mdx) and [Concepts](04-concepts.mdx) for how these are used.
+
+| Path (under `profiles/<uuid>/`) | Holds |
+|---|---|
+| `profile.json` | Workspace definition, including the `supplyChain` policy block; socket.dev and Delpi API keys are stored here host-side and never copied into the VM. Only non-default fields are written. |
+| `secrets.enc` | AES-GCM-encrypted workspace secrets (`chmod 600`). |
+| `disk.img` | System disk — an APFS copy-on-write clone of `base.img`. |
+| `home.img` | Sparse ext4 image holding `/home/ubuntu` (modern home model). |
+| `home/` | Legacy virtiofs home directory (pre-upgrade workspaces). |
+| `boot-home/` | Tiny bootstrap home shared on ext4-model boots. |
+| `home.pre-ext4/` | Backup of the home kept after the storage upgrade. |
+| `checkpoints/`, `checkpoints/home/` | Boot-proven disk and home rollback clones. |
+| `vm.state` | Suspended-VM RAM snapshot. |
+| `tabs.json` | Saved tab layout, honored only when `vm.state` exists. |
+| `machine-identifier.bin` | Persistent VZ machine identity (required to restore a suspended VM). |
+| `compromised.flag` | Wipe-on-next-launch marker set after a detected credential leak. |
+| `meta-share/` | Per-launch read-only guest config share (`api_key.env`, `proxy.env`, the CA cert, agents, MCP configs). |
+| `outbox/` | Per-launch writable guest→host event share. |
+| `agent/` (and `agent/imported/`), `ssh/` | Per-workspace SSH key material; imported keys live under `agent/imported/`, `ssh/` is the legacy dir. |
+
+### Models and detectors
+
+| Path (under the support root) | Holds |
+|---|---|
+| `models/<org>--<name>/` | Downloaded MLX inference model weights (flat per-repo layout). |
+| `models/<org>--<name>/.incomplete` | In-progress or interrupted-download sentinel. |
+| `Models/prompt-injection/` | PromptGuard detector assets (`model.onnx`, tokenizer files, optional `bromure-injection.json` overrides). |
+| `Models/claudemd-guard/` | ModernBERT rules-file detector assets. |
+| `traces/YYYY-MM-DD/<sessionID>.jsonl` | Per-session trace metadata, one JSON record per line. |
+| `traces/YYYY-MM-DD/<sessionID>/<recordID>.req.enc`, `.res.enc` | Captured request/response bodies, AES-GCM-encrypted (`0600`). |
+
+### Enrollment, remote access, and the fat client
+
+| Path (under the support root) | Holds |
+|---|---|
+| `managed/install.json` | Enrollment identity: install ID, workspace slug, user, server URL, device name, enrolled-at. |
+| `managed/leaf.crt` | mTLS leaf certificate (PEM, inspectable). |
+| `managed/leaf.serial` | Pointer to the Keychain entry holding the current leaf's private key. |
+| `managed/ca.crt` | Workspace organization CA certificate (PEM). |
+| `managed/health` | Persisted enrollment health (`ok` / `tokenRejected` / `revoked`). |
+| `remote/hostkey_ed25519`, `remote/hostkey_ed25519.pub` | Embedded SSH server host key (dir mode `0700`, key `0600`). |
+| `remote/authorized_keys` | Public keys allowed through the SSH front door (`0600`). |
+| `remote/overlay-key` | Optional overlay-keychord override for the SSH remote menu. |
+| `remote-client/id_ed25519`, `.pub` | The fat client's SSH client keypair (comment `bromure-ac-fatclient`). |
+| `remote-client/known_hosts` | Trust-on-first-use pins of remote host keys. |
+| `remote-client/hosts.json` | Saved remote servers ("Recent Servers"). |
+| `remote-client/hosts/<host-UUID>/grid-layout.json`, `automations.json` | Per-host mirror persistence so a remote grid never clobbers the local one. |
+
+> **Note:** The `remote-client/` subtree relocates with `CFFIXED_USER_HOME`, which is how two isolated instances can be run side by side for testing.
+
+### Outside the support directory
+
+| Path | Holds |
+|---|---|
+| `~/Library/LaunchAgents/io.bromure.agentic-coding.boot.plist` | Boot-at-login LaunchAgent, written when any workspace enables "Start this VM at login". |
+| `<app>/Contents/Library/LaunchDaemons/io.bromure.fatclient-tunnel.plist` | Embedded privileged tunnel daemon, registered on demand via SMAppService. |
+| `/var/run/io.bromure.fatclient-tunnel.sock` | Privileged tunnel daemon socket (root-created, `chmod 600`, chowned to the console user). |
+| `/tmp/bromure-ac-cm-<first-12-of-host-UUID>` | Per-host SSH ControlMaster socket (kept in `/tmp` because the support path exceeds the AF_UNIX length limit). |
+| `/tmp/bromure-repair.log` | Local-inference repair-proxy debug log (only with `BROMURE_REPAIR_DEBUG`). |
+| `/usr/local/bin/bromure-cli` | Optional CLI symlink to the app binary, offered once at first launch. |
+| `<NSTemporaryDirectory>/bromure-ac-agent-<pid>.sock` | Bromure's private host-side ssh-agent socket. |
+| `$TMPDIR/bromure/session-<uuid>.img` (and `-aux.img`) | Ephemeral browser-VM copy-on-write clones, deleted on teardown. |
+| `<app temp dir>/bromure-files/<profile-id>/` | Download cache for guest files opened from the file browser. |
+| `~/Library/Application Support/Bromure/` | Bromure Web's support dir; AC reads its browser image from here when present. |
+| `~/.cache/bromure-ghostty` | Zig toolchain cache used only when building the terminal framework from source. |
+
+### Keychain items and defaults domain
+
+Secrets that must survive with OS-level protection live in the macOS Keychain, not on disk.
+
+| Keychain service | Account | Holds |
+|---|---|---|
+| `io.bromure.agentic-coding.master-key` | `v1` | The AES-256 secrets-vault master key (Data Protection Keychain). |
+| `io.bromure.agentic-coding.ssh-key-passphrases` | `<profileUUID>/<filename>` | Passphrases for imported SSH keys. |
+| `io.bromure.agentic-coding.managed-install` | `install-token`, `leaf-cert-key-<serial>` | Enrollment bearer token and per-serial leaf private keys. |
+
+All UserDefaults for the app live in the domain `io.bromure.agentic-coding` (read and written with `defaults read`/`defaults write`).
+
+## Network ports and subnets
+
+### TCP and loopback ports
+
+Bromure Agentic Coding opens no fixed inbound ports by default. The two optional services below are off until you enable them; the rest are loopback-only and either dynamic or internal.
+
+| Port | Purpose | Bound where |
+|---|---|---|
+| `9223` (default) | Automation HTTP API and `bromure-cli mcp` backend. Off by default (`automation.enabled`); chosen one off from the browser product's 9222 so both apps can run side by side. Serves `GET /health`. | `127.0.0.1` (configurable via `automation.bindAddress`; non-loopback binds are unauthenticated and warned against). |
+| `2222` (default) | Optional SSH remote-access front door. Disabled by default; configurable to any port ≥ 1024. | `0.0.0.0` by default (configurable via `remoteAccess.bindAddress`). |
+| `28500`–`28599` | MCP OAuth callback listener (`http://127.0.0.1:<port>/callback`). | `127.0.0.1`. |
+| dynamic | Local inference engine, allocated at first spawn to avoid colliding with Ollama/LM Studio on 11434. | `127.0.0.1` (never `0.0.0.0`). |
+| dynamic | Local-inference tool-call repair proxy. | `127.0.0.1`. |
+| ephemeral | Per-remote-host SOCKS5 forwarder used by the fat client's browser pane. | Bound `0.0.0.0` but peer-filtered to loopback plus `192.168.127.x`. |
+
+Two loopback endpoints exist *inside* the guest, not on the Mac: `127.0.0.1:8080` (the in-VM HTTP(S) proxy every shell exports as `HTTPS_PROXY`) and `127.0.0.1:11434` (where the on-host local inference engine appears, via a vsock bridge).
+
+Installation itself opens no TCP ports; the base-image build's package proxy binds an ephemeral localhost port per build.
+
+### Virtual-network subnets
+
+| Subnet | Purpose |
+|---|---|
+| `192.168.64.0/24` | Default NAT subnet for workspace VMs (gateway `.1`, DHCP pool `.2`–`.254`, 24 h leases). Auto-relocated if the Mac's LAN already uses it. |
+| `192.168.65.0/24`–`192.168.126.0/24` | Range Bromure Web instances relocate into, keeping AC and Web from colliding. |
+| `192.168.127.0/24` | The fat client's pinned local browser-VM subnet (gateway `.127.1`), so the gateway is predictable. |
+| `100.64.<n>.0/24` | CGNAT alias subnets for fleet subnet collisions — implemented and tested but not yet wired into the runtime path (single remote host is the supported configuration). |
+| `10.98.<unit>.0/30` | Point-to-point link networks used by the privileged utun tunnel daemon. |
+
+### Host↔guest vsock bridges
+
+Host and guest communicate over virtio sockets (vsock), which have no IP binding — they are numbered channels between the host (CID 2) and each guest. They are internal plumbing, listed here for diagnostics.
+
+| vsock port | Bridge |
+|---|---|
+| 5800 | Shell-exec agent — powers `bromure-cli exec`, the control-socket exec route, and the file-explorer pane. |
+| 5010 | Loopback OAuth-callback relay (delivers OAuth redirects back into in-VM CLIs). |
+| 5830 | Host side of the built-in browser MCP server (the guest stdio shim connects out). |
+| 8443 | HTTPS MITM proxy — the guest's egress. |
+| 8444 | ssh-agent bridge (backs `SSH_AUTH_SOCK`). |
+| 8445 | AWS `credential_process` helper. |
+| 8446 | Claude subscription-token agent, and the on-host local-inference bridge (guest `127.0.0.1:11434`). |
+| 8447 | Codex/ChatGPT subscription-token agent. |
+| 5000 | Browser-VM config agent (host→guest JSON config at claim). |
+| 5100 | Browser-VM file transfer bridge (16 MB max frame, 10 GB max file). |
+| 5200 | Browser-VM Chrome DevTools Protocol bridge (screenshots, eval). |
+| 5300 / 5400 | Browser-VM link-sender / webcam. |
+| 5810 | Browser-VM native-tabs bridge. |
+| 5900 | Browser-VM network-trace bridge. |
+
+## Environment variables and launch arguments
+
+These influence the app at launch. Most are for debugging, testing, or building from source; the **Audience** column flags who each is for. Set an environment variable before launching the binary, or pass a launch argument after it.
+
+| Name | Effect | Audience |
+|---|---|---|
+| `-AppleLanguages "(fr)"` (launch arg) | Standard macOS locale override; forces the UI language. Stripped before argument parsing so locale-forcing relaunches work. | End user |
+| `BROMURE_DEBUG_CLAUDE` | Unlocks the debug endpoints on the TCP automation API (`/app/state`, exec, `/vms`, `/debug/ui-shot`, `/detect/prompt-injection`), lets secrets travel through the AppleScript/MCP profile-JSON bridges, and is required for `bromure-cli mcp --debug` VM tools. | Power user / debugging |
+| `BROMURE_AC_DEBUG=1` | Timestamped stderr debug for the automation engine, injection classifiers, rules scanner, and trace pipeline. | Debugging |
+| `BROMURE_CLI_DEBUG` | Verbose control-socket connection diagnostics on stderr for CLI commands. | Debugging (CLI) |
+| `BROMURE_REPAIR_DEBUG` | Local-inference repair-proxy request/response diagnostics, appended to `/tmp/bromure-repair.log`. | Debugging (local models) |
+| `BROMURE_INFER_DEBUG` | Per-request engine stats (slot, prefilled tokens, TTFT, tok/s) to stderr. | Debugging (local models) |
+| `BROMURE_FATCLIENT_LOG` | Unbuffered fat-client stderr logging. | Debugging (remote) |
+| `BROMURE_ATTACH_DEBUG=<path>` | Also append the fat-client log to a file. | Debugging (remote) |
+| `BROMURE_INJECTION_COREML=1` | Run the injection classifiers on the CoreML/Neural Engine provider (defaults to CPU; CoreML roughly 5× the resident memory at identical accuracy). | Power user |
+| `BROMURE_NO_COREML` | Force-disable CoreML for the classifiers even if `BROMURE_INJECTION_COREML` is set. | Power user |
+| `BROMURE_GPU_CACHE_GB` | MLX GPU buffer-cache cap in GB (default 4). | Power user (local models) |
+| `BROMURE_KVBITS`, `BROMURE_KVBITS_START`, `BROMURE_CACHE_SLOTS`, `BROMURE_THINKING` | Local-inference tuning: KV-cache quantization bits and threshold, KV-cache session slots (1–8, default 4), and disabling silent thinking. See [Local Models](13-local-models.mdx). | Power user (local models) |
+| `VISUAL` / `EDITOR` | Editor used by `bromure-cli workspaces edit` (falls back to `vi`). | End user (CLI) |
+| `BROMURE_MANAGED_URL` | Override the bromure.io API base used for enrollment, heartbeat, and cert issuance. | Enterprise admin |
+| `BROMURE_FATCLIENT_OPEN` | Pure fat-client launch: skips the first-run setup window (no local base image needed) and suppresses the `bromure-cli` symlink prompt. | Advanced / testing |
+| `BROMURE_IMAGE_CATALOG_BASE` | Point image downloads at a local/staging catalog; **also disables catalog signature verification**. Test and pipeline use only. | Test / CI |
+| `BROMURE_INSTALL_BROWSER_IMAGE=1` | Auto-download AC's copy of the embedded browser image at launch (the normal trigger is the browser pane or **Settings** → **Browser**). | Test / debug |
+| `CODESIGN_IDENTITY` | `build.sh` signing identity; unset falls back to ad-hoc `-` (no Gatekeeper, iCloud, or vmnet). | Developer (build) |
+| `DEVELOPER_ID`, `APPLE_ID`, `TEAM_ID`, `APP_PASSWORD` | `package.sh` Developer ID signing and notarization. `DEVELOPER_ID` is required; the notarization trio is optional (a signed but un-notarized DMG results without it). | Developer / publisher |
+| `DRY_RUN=1`, `KEEP_PREVIOUS=1`, `KEEP_STAGING=1` | Image publish/rehearsal pipeline switches. | Publisher |
+
+The engine also sets internal variables for its own child processes (`BROMURE_ENGINE_KEY`, `BROMURE_ENGINE_MASTER`) and the throwaway registration VM sets `BROMURE_AC_REGISTER`; these are not meant to be set by hand.
+
+### UserDefaults keys (`defaults write`)
+
+Persistent settings in the `io.bromure.agentic-coding` domain. Most have UI equivalents; the `vm.*` and developer knobs are set with `defaults write`.
+
+| Key | Effect | Default |
+|---|---|---|
+| `automation.enabled` | Turn the loopback automation HTTP API on. | `false` |
+| `automation.port` | Automation API port. | `9223` |
+| `automation.bindAddress` | Automation API bind address. | `127.0.0.1` |
+| `remoteAccess.enabled` | Enable the SSH remote-access front door. | `false` |
+| `remoteAccess.port` | SSH front-door port (≥ 1024). | `2222` |
+| `remoteAccess.bindAddress` | SSH front-door bind address. | `0.0.0.0` |
+| `remoteAccess.passwordAuth`, `remoteAccess.pubkeyAuth` | SSH auth methods. | both on |
+| `vm.homeImageGB` | Apparent (guest-visible) size of a new ext4 home image, in GiB (8–1024; sparse, so it costs nothing up front). | `64` |
+| `vm.mtu` | Guest NIC MTU clamp — lower it on VPN hosts that black-hole installer downloads. | `1280` |
+| `vm.networkMode`, `vm.bridgedInterface`, `vm.dnsServers` | Browser-pool network mode, bridged interface, and DHCP DNS override. | mode NAT; others unset |
+| `vm.extraChromeFlags`, `vm.chromeEnvExtra` | Developer knobs appended to the browser VM's Chromium launch. | unset |
+| `cloudflareTunnel.consented` | One-time consent for exposing HTTP services via Cloudflare quick tunnels. | `false` |
+| `cliSymlinkDeclined` | Set when you pick "Don't Ask Again" on the `bromure-cli` symlink offer. | `false` |
+| `ac.sidebarWidth`, `ac.filePaneOpen` | Persisted sidebar width and file-pane open state. | app-set |
+
+## Guest-VM cheat sheet
+
+Inside a running workspace VM you are `ubuntu`, an ordinary user (`sudo`-capable) whose home is `/home/ubuntu`. The host wires up mounts and environment so package managers, agents, and Git work without any in-guest setup. See [Concepts](04-concepts.mdx) for the mechanics.
+
+### Mount points
+
+| Path | What it is |
+|---|---|
+| `/home/ubuntu` | Your home — the ext4 `home.img` (modern) or a virtiofs share (legacy). |
+| `/mnt/bromure-meta` | Read-only per-launch config share: `api_key.env`, `proxy.env`, the CA cert, guest agents, MCP configs, hostname/MTU hints. |
+| `/mnt/bromure-outbox` | Writable guest→host event share (one-shot event files the host reads). |
+| `/mnt/bromure-share-N` | Shared project folders (up to 8), also symlinked into your home as `~/<basename>`. |
+| `/mnt/bromure-meta/bromure-browser-mcp.py` | The generated browser-MCP stdio↔vsock shim, staged read-only into every workspace. |
+| `~/.bromure/pastes/` | Image pastes dropped into the terminal (auto-cleaned after 7 days). |
+
+### Environment set by the host
+
+| Variable | Value / effect |
+|---|---|
+| `http_proxy`, `https_proxy`, `HTTPS_PROXY` | `http://127.0.0.1:8080` — the in-VM bridge that carries all guest HTTPS to the host MITM proxy. |
+| `NO_PROXY` | `localhost,127.0.0.1,::1`. |
+| `SSH_AUTH_SOCK` | `/tmp/bromure-agent.sock` — bridged over vsock to the host ssh-agent (only per-workspace and explicitly-imported keys are reachable; your macOS login agent is never exposed). |
+| CA bundle variables | The re-signing root CA is trusted through the standard bundle variables for node, python, go, rust, curl, deno, and the AWS SDK. |
+| Agent API keys | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GH_TOKEN`, `GITLAB_TOKEN`, `DIGITALOCEAN_ACCESS_TOKEN`, `LINEAR_API_KEY`, the AWS variables, and any manual/database variables — all **placeholder** values; the host swaps in the real secret on the wire. |
+| Local-mode agent variables | When a workspace routes to a local model, Claude Code sees `ANTHROPIC_BASE_URL=https://bromure.llm`, a per-VM `ANTHROPIC_AUTH_TOKEN`, model aliases set to the `bromure-local` sentinel, and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. |
+
+> **Warning:** Every credential the guest can read is a decoy. A fake token scoped to one host that appears in a request bound for a different host is the signature of exfiltration and trips [compromise detection](08-credentials.mdx) — it never authenticates anything.

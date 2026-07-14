@@ -2231,6 +2231,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 switch which {
                 case "picker": window = self.mainWindow
                 case "editor": window = self.editorWindow
+                case "sheet":  window = self.editorWindow?.attachedSheet
                 default:       window = self.unifiedWindow
                 }
                 return self.debugRenderWindow(window, to: path)
@@ -2269,6 +2270,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     let raw = (params["category"] as? String ?? "").lowercased()
                     guard !raw.isEmpty else { return ["error": "category required"] }
                     NotificationCenter.default.post(name: .bromureACSelectEditorCategory, object: raw)
+                    return ["ok": true]
+                case "present-sheet":
+                    let spec = (params["sheet"] as? String) ?? ""
+                    NotificationCenter.default.post(name: .bromureACPresentCredentialSheet, object: spec)
                     return ["ok": true]
                 case "close":
                     self.closeEditorWindow()
@@ -4916,7 +4921,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // when there's actually a live browser to restart, same pattern
         // as the shared-folders alert above. Cancel aborts the save.
         if let original = editing,
-           original.browserPersistent != profile.browserPersistent,
+           original.browserBootSettingsDiffer(from: profile),
            let controller = unifiedWindow?.existingBrowserController(for: profile.id),
            controller.state != .idle {
             let alert = NSAlert()
@@ -4924,7 +4929,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 format: NSLocalizedString("Restart the browser for “%@”?", comment: ""),
                 profile.name)
             alert.informativeText = NSLocalizedString(
-                "Changing “Stay signed in to websites” takes effect by restarting this workspace's browser — its open tabs will close.\n\nSaved sign-ins stay on the encrypted per-workspace disk: they're used while the setting is on and simply ignored while it's off.",
+                "Changing the browser's permissions (uploads, downloads, camera, microphone) or “Stay signed in to websites” takes effect by restarting this workspace's browser — its open tabs will close.\n\nSaved sign-ins stay on the encrypted per-workspace disk: they're used while the setting is on and simply ignored while it's off.",
                 comment: "")
             alert.alertStyle = .warning
             alert.addButton(withTitle: NSLocalizedString("Restart & Save", comment: ""))
@@ -5029,7 +5034,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // immediately instead of on the next teardown. Runs after the
         // `profiles` refresh above so the new controller reads the saved
         // value.
-        if let original = editing, original.browserPersistent != profile.browserPersistent {
+        if let original = editing, original.browserBootSettingsDiffer(from: profile) {
             unifiedWindow?.rebootBrowser(for: profile.id)
         }
     }

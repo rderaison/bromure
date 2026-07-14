@@ -1,0 +1,62 @@
+---
+title: "Fusion"
+description: "Multi-model answer synthesis (BETA): choose which models to fuse and which model judges and writes the final reply."
+order: 7.4
+---
+
+# Fusion
+
+**Fusion** is Bromure Agentic Coding's multi-model answer synthesis, and it is the only settings pane that carries a **BETA** badge (an orange capsule next to the title). When engaged, Fusion answers each prompt with *multiple* models at once, has a judge model map where they agree, conflict, and each shine, then synthesizes a single best reply — delivered to Claude Code as if one model wrote it.
+
+Fusion runs on the **Claude Code** session, because it works by intercepting Claude's API, so it needs at least two configured [legs](../18-glossary.mdx) — your Claude Code session always counts as one. This pane sets *which* models take part and *which* model judges; you then engage Fusion per session from the ⚡ button in the session title bar. What happens on the wire — how tool-call turns are passed through unfused, how the judge maps the drafts, and how the fused answer is streamed back — is the subject of the [Fusion](../12-fusion.mdx) chapter.
+
+<p align="center">
+  <img src="../images/editor-fusion.en.jpg" width="600" alt="The Fusion pane of the Edit workspace window, with a BETA badge, a Models to fuse group listing Claude Code, Codex, Grok, and Local model, and a Judge group with Provider and Model pickers" />
+</p>
+
+## Models to fuse
+
+The **Models to fuse** group is a checklist of the models whose drafts are combined. The helper line reads *Your Claude Code session is always one of the fused models; pick the others.*
+
+- **Claude Code (Anthropic) — your session** — always a leg.
+- **Codex (OpenAI)** and **Grok (xAI)** — each needs a usable credential from the [Agents](agents.mdx) pane. Without one, the row is disabled and labeled **— no cloud credential (configure it in Agents)**.
+- **Local model** — fuses in an on-device model as an extra leg. It has its own model picker; the row is disabled and labeled **— download one in Local Models** until a model is installed in the [Local Models](local-models.mdx) pane.
+
+Fusion needs at least two usable models. While fewer are selected, an orange notice reminds you: *Pick at least two models to fuse — your Claude Code session counts as one, so add one more (a cloud agent or a local model).* Any leg that later lacks a credential or fails at request time is dropped silently, and if fewer than two answers come back the exchange falls back to Claude's own reply.
+
+## Judge
+
+The **Judge** group chooses the model that, in the pane's words, *weighs the drafts and writes the final answer*. It has two pickers:
+
+- **Provider** — the backend that runs the judge. The list is the usable cloud providers, plus **Local** when a local model is installed. Defaults to the first usable provider.
+- **Model** — the specific judge model. Leave it on **(default)** to let the provider pick its default, or choose a specific one. Cloud model lists are fetched live from the provider; a previously-saved custom model stays selectable even if it is not in the fetched list. When the judge provider is **Local**, the picker offers your installed catalog models.
+
+## Engaging Fusion
+
+Configuring this pane arms Fusion but does not turn it on. You engage it per session with the ⚡ bolt in the session title bar, which has three states:
+
+| Bolt | Meaning |
+|---|---|
+| Hollow, disabled | Fewer than two usable models are configured. Its tooltip explains that Fusion needs at least two models enabled. |
+| Filled dark grey | Fusion is available but disengaged. Click to engage. |
+| Filled yellow | Fusion is engaged — answers are synthesized across your selected models. Click to disengage. |
+
+You can also engage or disengage Fusion for a running workspace from the command line with `bromure-cli vm fusion enable|disable <workspace>`. Both paths are covered in the [Fusion](../12-fusion.mdx) chapter.
+
+> **Note:** Fusion only affects the **Claude Code** session — it intercepts Anthropic's API. Sessions running Codex or Grok as their own agent are not fused, even though those providers can serve as Fusion legs or the judge for Claude Code.
+
+## Settings reference
+
+| Setting | Description |
+|---|---|
+| **Models to fuse** | Checkboxes: **Claude Code (Anthropic) — your session** (always a leg), **Codex (OpenAI)**, **Grok (xAI)** (each needs a usable credential from Agents), and **Local model** with a model picker (needs an installed local model). Default: none selected. At least two usable models are required to engage. |
+| **Judge — Provider** | Which backend runs the judge and synthesis: a usable cloud provider, or **Local** when a local model is installed. Default: the first usable provider. |
+| **Judge — Model** | The specific judge model; cloud lists are fetched live, saved custom entries stay selectable. Default: **(default)** — the provider's default judge model. |
+| **Fusion engaged** | Per-session ⚡ toggle in the session title bar (not stored in this pane). Default: disengaged. |
+
+## Related chapters
+
+- [Fusion](../12-fusion.mdx) — how the legs, judge, and synthesis run inside the proxy, plus the CLI and trace records.
+- [Agents](agents.mdx) — where the cloud credentials that make a leg usable are configured.
+- [Local Models](local-models.mdx) — downloading the model behind the **Local model** leg or a **Local** judge.
+- [Sessions](../06-sessions.mdx) — the session title bar and the ⚡ engage button.
