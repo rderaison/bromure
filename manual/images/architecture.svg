@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1064 660" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-label="Bromure Agentic Coding architecture: a macOS host process with the session window, secrets vault and per-workspace MITM proxy, connected over vsock bridges to a persistent Ubuntu workspace VM and an ephemeral Chromium browser sidecar VM on a private vmnet NAT switch.">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrowAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b45309"/>
+    </marker>
+    <style>
+      .host  { fill:#f1f5f9; stroke:#94a3b8; }
+      .card  { fill:#ffffff; stroke:#cbd5e1; }
+      .vm    { fill:#fffbeb; stroke:#f59e0b; }
+      .browser { fill:#f5f3ff; stroke:#a78bfa; }
+      .proxy { fill:#fff7ed; stroke:#fb923c; }
+      .net   { fill:#ecfeff; stroke:#22d3ee; }
+      .title { font-size:15px; font-weight:700; fill:#0f172a; }
+      .h     { font-size:13px; font-weight:700; fill:#0f172a; }
+      .t     { font-size:11.5px; fill:#334155; }
+      .mono  { font-family:'SF Mono',ui-monospace,Menlo,monospace; font-size:10.5px; fill:#475569; }
+      .lbl   { font-size:10.5px; fill:#64748b; }
+      .egress{ font-size:11.5px; fill:#7c2d12; font-weight:600; }
+      .edge  { stroke:#64748b; stroke-width:1.5; fill:none; }
+      .edgeA { stroke:#b45309; stroke-width:2; fill:none; }
+      @media (prefers-color-scheme: dark) {
+        .host  { fill:#1e293b; stroke:#475569; }
+        .card  { fill:#0f172a; stroke:#334155; }
+        .vm    { fill:#292014; stroke:#b45309; }
+        .browser { fill:#20183a; stroke:#7c3aed; }
+        .proxy { fill:#2a1a0e; stroke:#c2610c; }
+        .net   { fill:#0b2b30; stroke:#0e7490; }
+        .title,.h { fill:#f1f5f9; }
+        .t    { fill:#cbd5e1; }
+        .mono { fill:#94a3b8; }
+        .lbl  { fill:#94a3b8; }
+        .egress { fill:#fdba74; }
+      }
+    </style>
+  </defs>
+
+  <!-- macOS host boundary -->
+  <rect class="host" x="12" y="34" width="740" height="612" rx="14"/>
+  <text class="title" x="34" y="60">macOS host (your Mac)</text>
+  <text class="lbl" x="34" y="78">Bromure Agentic Coding — host process</text>
+
+  <!-- host-process components -->
+  <rect class="card" x="34" y="92" width="210" height="118" rx="9"/>
+  <text class="h" x="46" y="114">Session window</text>
+  <text class="t" x="46" y="134">terminals · panes ·</text>
+  <text class="t" x="46" y="150">dashboards · Grid</text>
+  <text class="t" x="46" y="174">rich client mirrors a</text>
+  <text class="t" x="46" y="190">remote 1:1 over SSH</text>
+
+  <rect class="card" x="258" y="92" width="196" height="118" rx="9"/>
+  <text class="h" x="270" y="114">Secrets vault</text>
+  <text class="t" x="270" y="134">real credentials</text>
+  <text class="t" x="270" y="150">AES-256-GCM</text>
+  <text class="t" x="270" y="166">master key in the</text>
+  <text class="t" x="270" y="182">macOS Keychain</text>
+  <text class="t" x="270" y="200">op:// resolved on the fly</text>
+
+  <rect class="proxy" x="468" y="92" width="266" height="118" rx="9"/>
+  <text class="h" x="480" y="114">MITM proxy <tspan class="lbl">(one per workspace)</tspan></text>
+  <text class="t" x="480" y="136">TLS terminate</text>
+  <text class="t" x="480" y="152">fake → real swap · SigV4 re-sign</text>
+  <text class="t" x="480" y="168">1Password refresh (120s)</text>
+  <text class="t" x="480" y="184">compromise detector</text>
+
+  <!-- vault feeds the proxy the real values -->
+  <path class="edgeA" d="M454,150 L466,150" marker-end="url(#arrowAccent)"/>
+
+  <!-- egress to the internet with real credentials -->
+  <path class="edgeA" d="M734,151 L884,151" marker-end="url(#arrowAccent)"/>
+  <text class="egress" x="810" y="121" text-anchor="middle">HTTPS on the wire</text>
+  <text class="egress" x="810" y="137" text-anchor="middle">with real credentials</text>
+  <rect class="card" x="886" y="92" width="168" height="118" rx="9"/>
+  <text class="h" x="898" y="114">Upstream APIs</text>
+  <text class="mono" x="898" y="136">api.anthropic.com</text>
+  <text class="mono" x="898" y="154">github.com</text>
+  <text class="mono" x="898" y="172">*.amazonaws.com</text>
+  <text class="lbl" x="898" y="194">…and every other host</text>
+
+  <!-- vsock bridges band -->
+  <path class="edge" d="M139,210 L139,250" marker-end="url(#arrow)"/>
+  <path class="edgeA" d="M601,210 L601,250" marker-start="url(#arrowAccent)" marker-end="url(#arrowAccent)"/>
+  <rect x="34" y="250" width="700" height="52" rx="8" fill="none" stroke="#94a3b8" stroke-dasharray="4 3"/>
+  <text class="lbl" x="44" y="268">vsock bridges</text>
+  <text class="mono" x="44" y="286">tmux + shell-exec 5800 · ssh-agent 8444 · token agents 8446/8447 · AWS 8445</text>
+  <text class="mono" x="44" y="300">OAuth relay 5010 · browser MCP 5830</text>
+  <text class="mono" x="620" y="278" text-anchor="middle">vsock 8443</text>
+  <text class="lbl" x="620" y="294" text-anchor="middle">(all guest HTTPS)</text>
+
+  <!-- Workspace VM -->
+  <rect class="vm" x="34" y="316" width="700" height="112" rx="9"/>
+  <text class="h" x="46" y="338">Workspace VM — Ubuntu 24.04 · persistent · one per workspace</text>
+  <text class="t" x="46" y="360">coding agent + shells in tmux</text>
+  <text class="t" x="46" y="378">Bromure root CA in the trust store</text>
+  <text class="mono" x="360" y="360">only fake credentials (brm_…)</text>
+  <text class="mono" x="360" y="378">HTTPS_PROXY=http://127.0.0.1:8080</text>
+  <text class="mono" x="46" y="402">disk.img — system, APFS CoW clone</text>
+  <text class="mono" x="360" y="402">home.img — /home/ubuntu, ext4</text>
+
+  <!-- vmnet switch -->
+  <path class="edge" d="M384,428 L384,456" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <rect class="net" x="180" y="456" width="408" height="46" rx="8"/>
+  <text class="h" x="196" y="476">vmnet NAT switch <tspan class="mono">· 172.16.x.x/24 (per install)</tspan></text>
+  <text class="lbl" x="196" y="494">one L2 segment · VM ↔ VM reachable · guests get their IP by DHCP</text>
+
+  <!-- Browser sidecar VM -->
+  <path class="edge" d="M384,502 L384,530" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <rect class="browser" x="34" y="530" width="700" height="94" rx="9"/>
+  <text class="h" x="46" y="552">Browser sidecar VM — Alpine + Chromium · ephemeral</text>
+  <text class="t" x="46" y="574">CoW clone in the temp directory, deleted when the pane closes</text>
+  <text class="t" x="46" y="596">the agent's browser_* tools drive it; page traffic shares this private network</text>
+  <text class="lbl" x="46" y="614">in the rich client, a browser Claude opens is relayed to this Mac's pane</text>
+</svg>

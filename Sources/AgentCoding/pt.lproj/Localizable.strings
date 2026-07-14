@@ -1158,3 +1158,30 @@
 "Expose services to the internet via Cloudflare Tunnel?" = "Expor serviços à Internet via Cloudflare Tunnel?";
 "Bromure will download cloudflared %@ (~18 MB) from GitHub, verify it against a pinned checksum and Cloudflare's Developer ID signature, and run one tunnel process per exposed service (recorded in the Supply Chain Log).\n\nTraffic transits Cloudflare's network under their Terms of Service (cloudflare.com/terms).\n\nEach service gets a random public https://….trycloudflare.com URL — anyone who has it can reach the service, so make sure the service itself expects that. The URL changes if the tunnel restarts." = "O Bromure baixará o cloudflared %@ (~18 MB) do GitHub, o verificará com uma soma de verificação fixada e a assinatura Developer ID da Cloudflare, e executará um processo de túnel por serviço exposto (registrado no Log da cadeia de suprimentos).\n\nO tráfego transita pela rede da Cloudflare de acordo com seus Termos de Serviço (cloudflare.com/terms).\n\nCada serviço recebe um URL público aleatório https://….trycloudflare.com — qualquer pessoa que o tenha pode acessar o serviço, portanto certifique-se de que o próprio serviço espere isso. O URL muda se o túnel for reiniciado.";
 "Agree & Expose" = "Concordar e expor";
+
+/* --- Localization batch: rich-client editors, subnet migration, 1Password --- */
+"1Password CLI not found" = "1Password CLI não encontrado";
+"“%@” uses a 1Password secret reference (op://…), but the 1Password CLI (op) isn't installed or isn't on the path. Install it, sign in, then restart the workspace." = "“%@” usa uma referência de segredo do 1Password (op://…), mas o 1Password CLI (op) não está instalado ou não está no path. Instale-o, faça login e reinicie o espaço de trabalho.";
+"Get 1Password CLI" = "Obter o 1Password CLI";
+"Couldn't load a 1Password secret for “%@”" = "Não foi possível carregar um segredo do 1Password para “%@”";
+"Make sure you're signed in to 1Password (run `op signin`) and the referenced item exists, then restart the workspace." = "Verifique se você fez login no 1Password (execute `op signin`) e se o item referenciado existe, depois reinicie o espaço de trabalho.";
+"Give this Mac its own private VM subnet?" = "Dar a este Mac sua própria sub-rede de VM privada?";
+"Every Bromure install uses the same 192.168.64.0/24 network for its workspace VMs. If you connect to more than one remote from the rich client, those identical subnets collide and the VPN can't tell them apart.\n\nBromure can move this Mac's VMs onto a private, randomly chosen 172.16.x.x network instead. You can change or re-randomize it later in Settings › Resources." = "Cada instalação do Bromure usa a mesma rede 192.168.64.0/24 para suas VMs de espaço de trabalho. Se você se conectar a mais de um remoto pelo rich client, essas sub-redes idênticas entram em conflito e a VPN não consegue distingui-las.\n\nEm vez disso, o Bromure pode mover as VMs deste Mac para uma rede 172.16.x.x privada, escolhida aleatoriamente. Você pode alterá-la ou gerar um novo valor aleatório depois em Settings › Resources.";
+"Migrate Now" = "Migrar agora";
+"Later" = "Depois";
+"Don’t Ask Again" = "Não perguntar novamente";
+"Restart “%@” to apply these changes?" = "Reiniciar “%@” para aplicar estas alterações?";
+"Some settings you changed (like networking, memory, or shared folders) are baked into the VM at boot, so the running workspace won't pick them up until it restarts." = "Algumas configurações que você alterou (como rede, memória ou pastas compartilhadas) são incorporadas à VM na inicialização, portanto o espaço de trabalho em execução só as aplicará após reiniciar.";
+"Restart Now" = "Reiniciar agora";
+"New workspace — %@" = "Novo espaço de trabalho — %@";
+"New SSH key generated" = "Nova chave SSH gerada";
+"Add this public key to your Git host:\n\n%@" = "Adicione esta chave pública ao seu host Git:\n\n%@";
+"Couldn't create the workspace" = "Não foi possível criar o espaço de trabalho";
+"Edit automation" = "Editar automação";
+"Delete “%@”?" = "Apagar “%@”?";
+"This removes the automation on the remote. It can't be undone." = "Isto remove a automação no remoto. Não pode ser desfeito.";
+"A 1Password secret reference (op://…). Only this path is stored — Bromure resolves the secret with the op CLI at launch and refreshes it every 2 minutes; the VM only ever sees a fake." = "Uma referência de segredo do 1Password (op://…). Apenas este caminho é armazenado — o Bromure resolve o segredo com o op CLI na inicialização e o atualiza a cada 2 minutos; a VM sempre vê apenas um valor falso.";
+"Your real API key. Stays on macOS — the VM only ever sees a fake stand-in. You can also paste a 1Password reference (op://vault/item/field)." = "Sua chave de API real. Permanece no macOS — a VM sempre vê apenas um substituto falso. Você também pode colar uma referência do 1Password (op://vault/item/field).";
+"Workspace subnet" = "Sub-rede do espaço de trabalho";
+"Use a private subnet (avoids clashes across remotes)" = "Usar uma sub-rede privada (evita conflitos entre remotos)";
+"Each install normally uses 192.168.64.0/24, which collides when the rich client mirrors more than one remote. A private 172.16.x.x subnet keeps them distinct. Changes apply the next time your workspaces start." = "Cada instalação normalmente usa 192.168.64.0/24, que entra em conflito quando o rich client espelha mais de um remoto. Uma sub-rede 172.16.x.x privada os mantém distintos. As alterações são aplicadas na próxima vez que seus espaços de trabalho iniciarem.";

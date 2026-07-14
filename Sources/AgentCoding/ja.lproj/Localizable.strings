@@ -1158,3 +1158,30 @@
 "Expose services to the internet via Cloudflare Tunnel?" = "Cloudflare Tunnel 経由でサービスをインターネットに公開しますか?";
 "Bromure will download cloudflared %@ (~18 MB) from GitHub, verify it against a pinned checksum and Cloudflare's Developer ID signature, and run one tunnel process per exposed service (recorded in the Supply Chain Log).\n\nTraffic transits Cloudflare's network under their Terms of Service (cloudflare.com/terms).\n\nEach service gets a random public https://….trycloudflare.com URL — anyone who has it can reach the service, so make sure the service itself expects that. The URL changes if the tunnel restarts." = "Bromure は GitHub から cloudflared %@（~18 MB）をダウンロードし、固定されたチェックサムと Cloudflare の Developer ID 署名で検証し、公開されたサービスごとに 1 つのトンネルプロセスを実行します（サプライチェーン ログに記録されます）。\n\nトラフィックは Cloudflare の利用規約（cloudflare.com/terms）に基づき、そのネットワークを経由します。\n\n各サービスにはランダムな公開 URL https://….trycloudflare.com が割り当てられます。これを知っている人は誰でもサービスにアクセスできるため、サービス自体がそれを想定していることを確認してください。トンネルが再起動すると URL は変わります。";
 "Agree & Expose" = "同意して公開";
+
+/* --- Localization batch: rich-client editors, subnet migration, 1Password --- */
+"1Password CLI not found" = "1Password CLI が見つかりません";
+"“%@” uses a 1Password secret reference (op://…), but the 1Password CLI (op) isn't installed or isn't on the path. Install it, sign in, then restart the workspace." = "“%@” は 1Password のシークレット参照（op://…）を使用していますが、1Password CLI（op）がインストールされていないか、パスが通っていません。インストールしてサインインし、ワークスペースを再起動してください。";
+"Get 1Password CLI" = "1Password CLI を入手";
+"Couldn't load a 1Password secret for “%@”" = "“%@” の 1Password シークレットを読み込めませんでした";
+"Make sure you're signed in to 1Password (run `op signin`) and the referenced item exists, then restart the workspace." = "1Password にサインインしていること（`op signin` を実行）と、参照先のアイテムが存在することを確認してから、ワークスペースを再起動してください。";
+"Give this Mac its own private VM subnet?" = "この Mac に専用のプライベート VM サブネットを割り当てますか？";
+"Every Bromure install uses the same 192.168.64.0/24 network for its workspace VMs. If you connect to more than one remote from the rich client, those identical subnets collide and the VPN can't tell them apart.\n\nBromure can move this Mac's VMs onto a private, randomly chosen 172.16.x.x network instead. You can change or re-randomize it later in Settings › Resources." = "すべての Bromure インストールは、ワークスペース VM に同じ 192.168.64.0/24 ネットワークを使用します。リッチクライアントから複数のリモートに接続すると、これらの同一のサブネットが衝突し、VPN はそれらを区別できません。\n\nBromure は代わりに、この Mac の VM をプライベートでランダムに選ばれた 172.16.x.x ネットワークへ移動できます。この設定は後から Settings › Resources で変更または再ランダム化できます。";
+"Migrate Now" = "今すぐ移行";
+"Later" = "後で";
+"Don’t Ask Again" = "今後表示しない";
+"Restart “%@” to apply these changes?" = "“%@” を再起動して変更を適用しますか？";
+"Some settings you changed (like networking, memory, or shared folders) are baked into the VM at boot, so the running workspace won't pick them up until it restarts." = "変更した一部の設定（ネットワーク、メモリ、共有フォルダなど）は起動時に VM へ組み込まれるため、実行中のワークスペースは再起動するまでそれらを反映しません。";
+"Restart Now" = "今すぐ再起動";
+"New workspace — %@" = "新規ワークスペース — %@";
+"New SSH key generated" = "新しい SSH 鍵を生成しました";
+"Add this public key to your Git host:\n\n%@" = "この公開鍵を Git ホストに追加してください：\n\n%@";
+"Couldn't create the workspace" = "ワークスペースを作成できませんでした";
+"Edit automation" = "自動化を編集";
+"Delete “%@”?" = "“%@” を削除しますか？";
+"This removes the automation on the remote. It can't be undone." = "リモート上の自動化が削除されます。この操作は取り消せません。";
+"A 1Password secret reference (op://…). Only this path is stored — Bromure resolves the secret with the op CLI at launch and refreshes it every 2 minutes; the VM only ever sees a fake." = "1Password のシークレット参照（op://…）。保存されるのはこのパスのみです — Bromure は起動時に op CLI でシークレットを解決し、2 分ごとに更新します。VM が目にするのは常に偽の値だけです。";
+"Your real API key. Stays on macOS — the VM only ever sees a fake stand-in. You can also paste a 1Password reference (op://vault/item/field)." = "実際の API キー。macOS 上にとどまります — VM は常に偽の代替値しか目にしません。1Password の参照（op://vault/item/field）を貼り付けることもできます。";
+"Workspace subnet" = "ワークスペースのサブネット";
+"Use a private subnet (avoids clashes across remotes)" = "プライベートサブネットを使用（リモート間の衝突を回避）";
+"Each install normally uses 192.168.64.0/24, which collides when the rich client mirrors more than one remote. A private 172.16.x.x subnet keeps them distinct. Changes apply the next time your workspaces start." = "各インストールは通常 192.168.64.0/24 を使用しますが、リッチクライアントが複数のリモートをミラーリングすると衝突します。プライベートな 172.16.x.x サブネットにより、それらを区別できます。変更は次回ワークスペースの起動時に適用されます。";

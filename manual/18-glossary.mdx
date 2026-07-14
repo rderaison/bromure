@@ -10,6 +10,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 ## A
 
+**1Password reference** — A credential value stored as a 1Password secret reference (`op://vault/item/field`, or the `{{ op://… }}` brace form) rather than the secret itself. Bromure resolves it host-side with the `op` CLI at launch and re-resolves every 2 minutes; only the reference is ever on disk and the VM only ever holds a fake. See [Credentials](08-credentials.mdx).
+
 **AC MCP server** — The stdio Model Context Protocol server started by `bromure-cli mcp`, exposing `bromure_ac_*` tools that let an outside agent manage workspaces and sessions. It wraps the automation HTTP API and AppleScript. See [Automation & CLI](16-automation-cli.mdx).
 
 **Age gate** — The supply-chain layer that refuses package versions younger than a cutoff (2 days by default), on the theory that a freshly published release is the one most likely to be a just-hijacked package. Floating references silently resolve to the newest allowed version. See [Supply-Chain Protection](09-supply-chain.mdx).
@@ -321,6 +323,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 **Wire boundary** — The product's central idea: all outbound HTTPS from the guest passes through the host-side MITM proxy, and every protection — secret-keeping, credential scoping, supply-chain scanning, injection detection, tracing — is enforced at that one point the agent cannot reach around. See [Concepts](04-concepts.mdx).
 
 **Workspace (profile)** — One isolated agent environment: a persistent Ubuntu VM with its own system disk, ext4 home, agents, credentials, folders, and policies, stored under `~/Library/Application Support/BromureAC/profiles/<uuid>/`. It is called a workspace in the interface and a profile in code, `profile.json`, and CLI flags. See [Workspaces](05-workspaces.mdx).
+
+**Workspace subnet** — The private `/24` network Bromure's own vmnet switch leases to this Mac's workspace VMs. Chosen at random inside `172.16.0.0/12` per install (it was a shared `192.168.64.0/24`) so a rich client mirroring several remotes never sees colliding subnets; view or re-randomise it under Settings → Resources. See [Remote Access](14-remote-access.mdx).
 
 **Worktree run (branch slug)** — An automation run executed in a git worktree on branch `wt/<slug>`, where the slug combines a sanitized name, a timestamp, and a per-event suffix so repeated fires never collide. See [Automation & CLI](16-automation-cli.mdx).
 

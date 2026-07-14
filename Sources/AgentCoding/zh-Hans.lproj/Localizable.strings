@@ -1158,3 +1158,30 @@
 "Expose services to the internet via Cloudflare Tunnel?" = "通过 Cloudflare Tunnel 将服务公开到互联网?";
 "Bromure will download cloudflared %@ (~18 MB) from GitHub, verify it against a pinned checksum and Cloudflare's Developer ID signature, and run one tunnel process per exposed service (recorded in the Supply Chain Log).\n\nTraffic transits Cloudflare's network under their Terms of Service (cloudflare.com/terms).\n\nEach service gets a random public https://….trycloudflare.com URL — anyone who has it can reach the service, so make sure the service itself expects that. The URL changes if the tunnel restarts." = "Bromure 将从 GitHub 下载 cloudflared %@（约 18 MB），依据固定的校验和以及 Cloudflare 的 Developer ID 签名进行验证，并为每个公开的服务运行一个隧道进程（记录在供应链日志中）。\n\n流量将根据 Cloudflare 的服务条款（cloudflare.com/terms）经由其网络传输。\n\n每个服务都会获得一个随机的公开 URL https://….trycloudflare.com——任何拿到它的人都能访问该服务，因此请确保该服务本身预期如此。隧道重启后 URL 会改变。";
 "Agree & Expose" = "同意并公开";
+
+/* --- Localization batch: rich-client editors, subnet migration, 1Password --- */
+"1Password CLI not found" = "未找到 1Password CLI";
+"“%@” uses a 1Password secret reference (op://…), but the 1Password CLI (op) isn't installed or isn't on the path. Install it, sign in, then restart the workspace." = "“%@”使用了 1Password 密钥引用（op://…），但 1Password CLI（op）尚未安装或不在路径中。请先安装并登录，然后重启工作区。";
+"Get 1Password CLI" = "获取 1Password CLI";
+"Couldn't load a 1Password secret for “%@”" = "无法为“%@”加载 1Password 密钥";
+"Make sure you're signed in to 1Password (run `op signin`) and the referenced item exists, then restart the workspace." = "请确认你已登录 1Password（运行 `op signin`）且引用的项目存在，然后重启工作区。";
+"Give this Mac its own private VM subnet?" = "为这台 Mac 分配专属的私有虚拟机子网？";
+"Every Bromure install uses the same 192.168.64.0/24 network for its workspace VMs. If you connect to more than one remote from the rich client, those identical subnets collide and the VPN can't tell them apart.\n\nBromure can move this Mac's VMs onto a private, randomly chosen 172.16.x.x network instead. You can change or re-randomize it later in Settings › Resources." = "每个 Bromure 安装都为其工作区虚拟机使用相同的 192.168.64.0/24 网络。如果你从富客户端连接到多个远程实例，这些相同的子网就会发生冲突，VPN 无法将它们区分开来。\n\nBromure 可以改为将这台 Mac 的虚拟机迁移到一个随机选择的私有 172.16.x.x 网络上。之后你可以在 Settings › Resources 中更改或重新随机分配。";
+"Migrate Now" = "立即迁移";
+"Later" = "稍后";
+"Don’t Ask Again" = "不再询问";
+"Restart “%@” to apply these changes?" = "重启“%@”以应用这些更改？";
+"Some settings you changed (like networking, memory, or shared folders) are baked into the VM at boot, so the running workspace won't pick them up until it restarts." = "你更改的某些设置（如网络、内存或共享文件夹）会在启动时写入虚拟机，因此正在运行的工作区需要重启后才会应用这些更改。";
+"Restart Now" = "立即重启";
+"New workspace — %@" = "新工作区 — %@";
+"New SSH key generated" = "已生成新的 SSH 密钥";
+"Add this public key to your Git host:\n\n%@" = "将此公钥添加到你的 Git 托管服务：\n\n%@";
+"Couldn't create the workspace" = "无法创建工作区";
+"Edit automation" = "编辑自动化";
+"Delete “%@”?" = "删除“%@”？";
+"This removes the automation on the remote. It can't be undone." = "这会删除远程实例上的该自动化。此操作无法撤销。";
+"A 1Password secret reference (op://…). Only this path is stored — Bromure resolves the secret with the op CLI at launch and refreshes it every 2 minutes; the VM only ever sees a fake." = "1Password 密钥引用（op://…）。仅存储此路径——Bromure 会在启动时通过 op CLI 解析该密钥，并每 2 分钟刷新一次；虚拟机始终只能看到一个伪造值。";
+"Your real API key. Stays on macOS — the VM only ever sees a fake stand-in. You can also paste a 1Password reference (op://vault/item/field)." = "你的真实 API 密钥。仅保留在 macOS 上——虚拟机始终只能看到一个伪造的替身。你也可以粘贴 1Password 引用（op://vault/item/field）。";
+"Workspace subnet" = "工作区子网";
+"Use a private subnet (avoids clashes across remotes)" = "使用私有子网（避免多个远程实例之间的冲突）";
+"Each install normally uses 192.168.64.0/24, which collides when the rich client mirrors more than one remote. A private 172.16.x.x subnet keeps them distinct. Changes apply the next time your workspaces start." = "每个安装通常使用 192.168.64.0/24，当富客户端镜像多个远程实例时会发生冲突。私有的 172.16.x.x 子网可使它们保持区分。更改将在你的工作区下次启动时生效。";

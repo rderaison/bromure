@@ -21,38 +21,9 @@ This split is what makes the product's security claim concrete: a prompt-injecte
 
 ## Architecture at a glance
 
-```
-┌────────────────────────────── macOS host (your Mac) ──────────────────────────────┐
-│                                                                                   │
-│  Bromure Agentic Coding — host process                                            │
-│                                                                                   │
-│  ┌────────────────────┐   ┌──────────────────────┐   ┌─────────────────────────┐  │
-│  │ Session window     │   │ Secrets vault        │   │ MITM proxy              │  │
-│  │ terminals, panes,  │   │ real credentials,    │──▶│ (one per workspace)     │──┼─▶ HTTPS with real
-│  │ dashboards, Grid   │   │ AES-256-GCM, master  │   │ TLS terminate ·         │  │   credentials on the
-│  └─────────┬──────────┘   │ key in the macOS     │   │ fake→real swap ·        │  │   wire, to
-│            │              │ Keychain             │   │ SigV4 re-sign ·         │  │   api.anthropic.com,
-│            │              └──────────────────────┘   │ compromise detector     │  │   github.com,
-│            │                                         └────────────▲────────────┘  │   *.amazonaws.com, …
-│            │ vsock bridges                                        │               │
-│            │ tmux attach + shell-exec 5800 · ssh-agent 8444 ·     │ vsock 8443    │
-│            │ token agents 8446/8447 · AWS creds 8445 ·            │ (all guest    │
-│            │ OAuth relay 5010 · browser MCP 5830                  │  HTTPS)       │
-│            ▼                                                      │               │
-│  ┌────────────────────────────────────────────────────────────────┴────────────┐  │
-│  │ Workspace VM — Ubuntu 24.04 · persistent · one per workspace                │  │
-│  │   coding agent + shells in tmux          only fake credentials (brm_…)      │  │
-│  │   Bromure root CA in the trust store     HTTPS_PROXY=http://127.0.0.1:8080  │  │
-│  │   disk.img (system, APFS CoW clone)      home.img (/home/ubuntu, ext4)      │  │
-│  └───────────────────────────────────┬─────────────────────────────────────────┘  │
-│                                      │ vmnet NAT switch · 192.168.64.0/24         │
-│                                      │ one L2 segment · VM ↔ VM reachable         │
-│  ┌───────────────────────────────────┴─────────────────────────────────────────┐  │
-│  │ Browser sidecar VM — Alpine + Chromium · ephemeral                          │  │
-│  │   CoW clone in the temp directory, deleted when the pane closes             │  │
-│  └─────────────────────────────────────────────────────────────────────────────┘  │
-└───────────────────────────────────────────────────────────────────────────────────┘
-```
+<figure>
+  <img src="images/architecture.svg" alt="Bromure Agentic Coding architecture: the macOS host process (session window, secrets vault, and a per-workspace MITM proxy that swaps fake credentials for real ones on the wire) connects over vsock bridges to a persistent Ubuntu workspace VM and an ephemeral Chromium browser sidecar VM sharing a private vmnet NAT switch." />
+</figure>
 
 Read the diagram bottom-up: the agent works in the workspace VM; its HTTPS leaves over vsock to the host proxy, which is the only place fake credentials become real ones; the session window attaches to the VM's terminals over separate vsock bridges; and an optional disposable browser VM shares the same private network so it can load the agent's dev servers.
 

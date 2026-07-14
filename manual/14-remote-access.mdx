@@ -179,9 +179,13 @@ When the tunnel is up the tooltip reads **Direct network access to the remote's 
 
 > **Note:** The tunnel needs an administrator account for the one-time approval. Without one, Bromure keeps working over the built-in SOCKS path — the helper is only needed to reach remote VMs from *other* apps. If macOS refuses the registration outright, an alert titled **Couldn't install the network helper** explains, and the toggle retries on the next click. A `ping` to a remote guest is answered locally by the tunnel: it confirms that routing is up, not that the guest is alive.
 
-### Multiple remotes (fleet subnet routing)
+### Multiple remotes (per-install subnets + fleet routing)
 
-You can mirror several remotes at once; each opens its own window, SOCKS forwarder, and (optionally) tunnel. When two remotes advertise the same subnet — the near-certain `192.168.64.0/24` collision — the first is routed literally and the second is given a `100.64.<n>.0/24` CGNAT-space alias, with a 1:1 host-octet-preserving remap so both can be reached at once.
+You can mirror several remotes at once; each opens its own window, SOCKS forwarder, and (optionally) tunnel. The trap this used to hit: every install historically used the same `192.168.64.0/24` network for its workspace VMs, so two mirrored remotes advertised identical subnets and the system-wide VPN could not tell them apart.
+
+**Per-install subnets** fix this at the source. Each Mac now picks a *random* `/24` inside `172.16.0.0/12` — skipping Docker's `172.17`–`172.20` range and any `/24` the host is already on — and uses it for all of its workspace VMs, so two independent installs almost never collide (172.16/12 is also the private range least likely to clash with a corporate LAN or VPN). On the first launch after updating, Bromure offers to migrate this Mac onto a private subnet — **Migrate Now**, **Later**, or **Don't Ask Again** — and you can change or re-randomise it any time under **Settings → Resources → Workspace subnet**. Guest addressing is pure DHCP from Bromure's own switch, so this is entirely host-side (no image rebuild), and the remote advertises its chosen subnet in `/state` so the rich client and the tunnel follow it automatically.
+
+For the rare case where two remotes *still* share a subnet, the first is routed literally and the second is given a `100.64.<n>.0/24` CGNAT-space alias, with a 1:1 host-octet-preserving remap so both can be reached at once.
 
 > **Warning:** Multi-host alias routing is implemented and unit-tested, but the runtime wiring that stitches an alias-aware PAC and browser-MCP remap across hosts is still pending. **A single remote host is the fully supported configuration today.** A known limitation of aliasing, once wired, is that a dev page emitting an absolute literal `http://192.168.64.x` link inside an *aliased* remote can misroute; literal (non-aliased) remotes are unaffected.
 
