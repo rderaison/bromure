@@ -262,6 +262,24 @@ function getProfileJSON(nameOrID) {
   return JSON.parse(out);
 }
 
+// Restore the SSH front door to its shipped defaults (disabled, bind 0.0.0.0)
+// on a persistent CI agent. `remote disable` only clears the enabled flag — it
+// leaves the last `remote enable --bind …` persisted, so section 25's
+// `--bind 127.0.0.1` would otherwise linger and trip section 19.2's "disabled
+// by default, bind 0.0.0.0". `remote enable` is the only writer of bindAddress,
+// so briefly re-enable on the default 0.0.0.0 then disable. Only fires when the
+// box is actually dirty (disabled + a non-default bind), so a clean agent —
+// and an unexpectedly *enabled* server, which 19.2 should still surface — are
+// both left untouched.
+function resetRemoteAccessDefaults() {
+  const s = cli(["remote", "status"], { allowFail: true });
+  if (!/Remote access:\s*disabled/i.test(s)) return; // no agent, or (unexpectedly) enabled
+  if (/Bind:\s*0\.0\.0\.0:/.test(s)) return;          // already at the default bind
+  cli(["remote", "enable", "--bind", "0.0.0.0", "--port", "2222", "--pubkey", "--no-password"],
+      { allowFail: true });
+  cli(["remote", "disable"], { allowFail: true });
+}
+
 function setProfileJSON(nameOrID, profileObj) {
   const json = JSON.stringify(profileObj);
   const out = ac(
@@ -1967,6 +1985,12 @@ async function main() {
   // ======================================================================
   console.log("\n--- 19. Remote access ---");
 
+  // On a persistent CI agent a prior run's section 25 leaves the SSH front door
+  // configured (bind 127.0.0.1 + an enrolled key), and `remote disable` doesn't
+  // restore the shipped defaults — which would trip 19.2 below. Neutralize any
+  // leftover bind here so 19.2 verifies the default reporting deterministically.
+  resetRemoteAccessDefaults();
+
   await test("19.1 remote --help lists status/enable/disable/key", async () => {
     const out = cli(["remote", "--help"], { allowFail: true });
     for (const sub of ["status", "enable", "disable", "key"]) assertIncludes(out, sub);
@@ -2350,6 +2374,7 @@ async function main() {
       console.log("  \x1b[33mSKIP\x1b[0m  Rich-client tests (no base image — run `bromure-ac init` first)");
     } else {
       let broughtUp = true;
+      let enrolledKeyFP = null;   // section-25's own key, dropped in teardown
       try {
         // Client keypair at the exact path RemoteTransport.ensureClientKey reads.
         if (!existsSync(`${KDIR}/id_ed25519`)) {
@@ -2357,7 +2382,8 @@ async function main() {
           execFileSync("ssh-keygen", ["-t", "ed25519", "-N", "", "-q", "-f", `${KDIR}/id_ed25519`]);
         }
         // Enroll it on THIS instance's SSH server (remote/authorized_keys).
-        cli(["remote", "key", "add", `${KDIR}/id_ed25519.pub`], { allowFail: true });
+        const addOut = cli(["remote", "key", "add", `${KDIR}/id_ed25519.pub`], { allowFail: true });
+        enrolledKeyFP = (addOut.match(/Added key:\s*(\S+)/) || [])[1] || null;
         // A self-mirror host record pointing back at localhost.
         writeFileSync(`${KDIR}/hosts.json`, JSON.stringify([{
           id: "11111111-1111-1111-1111-111111111111",
@@ -2427,6 +2453,18 @@ async function main() {
               await test("25.4 mount-terminal shows the workspace's terminal", async () => {
                 const r = await fc("mount-terminal", { workspace: wsID, window: 0 });
                 assert(r.ok === true, `mount-terminal failed: ${JSON.stringify(r)}`);
+                // A terminal only mounts for a running/booting VM; an off/suspended
+                // workspace shows the VM dashboard instead (shownWorkspace stays
+                // empty) — by design, exactly like the local window. Soft-skip the
+                // terminal assertion when the workspace isn't running, like 25.8,
+                // so the suite still runs on an agent with no booted workspace.
+                const st = await fc("get-mirror-state");
+                const w = (st.workspaces || []).find(
+                  (x) => String(x.id).toUpperCase() === wsID.toUpperCase());
+                if (!(w && /running|booting/i.test(String(w.state)))) {
+                  console.log("  \x1b[33mSKIP\x1b[0m  25.4 terminal assertion (workspace not running — dashboard shown)");
+                  return;
+                }
                 assertEq(String(r.shownWorkspace || "").toUpperCase(), wsID.toUpperCase(),
                          "mount-terminal didn't set shownWorkspace");
               });
@@ -2434,7 +2472,10 @@ async function main() {
               await test("25.5 create-workspace goes through to the server", async () => {
                 const NAME = "ACE2E_RC_Created";
                 deleteProfile(NAME);   // clear any stale copy from a prior run
-                const r = await fc("create-workspace", { doc: { name: NAME, color: "#33aa77" } });
+                // `color` is a ProfileColor enum (blue|red|green|orange|purple|
+                // pink|teal|gray), not a hex string — an invalid value makes the
+                // server reject the whole document (400 "Invalid profile document").
+                const r = await fc("create-workspace", { doc: { name: NAME, color: "green" } });
                 assert(r.ok === true, `create-workspace not acked: ${JSON.stringify(r)}`);
                 let created = null;
                 for (let i = 0; i < 20; i++) {
@@ -2514,7 +2555,12 @@ async function main() {
             }
           }
         } finally {
+          // Fully revert section 25's mutations so a persistent CI agent starts
+          // the next run's section 19 clean: disable, drop the key we enrolled,
+          // and restore the default bind (`remote disable` leaves --bind persisted).
           cli(["remote", "disable"], { allowFail: true });
+          if (enrolledKeyFP) cli(["remote", "key", "rm", enrolledKeyFP], { allowFail: true });
+          resetRemoteAccessDefaults();
           try { writeFileSync(`${KDIR}/hosts.json`, "[]"); } catch {}
         }
       }

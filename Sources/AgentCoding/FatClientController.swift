@@ -957,6 +957,11 @@ final class RemoteHostWindow: NSWindow {
     private var shownBrowser: Profile.ID?
     /// Test hook: auto-open the browser pane once a workspace is selected.
     private let autoBrowser = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_BROWSER"] != nil
+    /// True while a `/debug/fatclient` action is being serviced synchronously on
+    /// the main thread. Suppresses interactive modals (e.g. the VPN offer) that
+    /// would otherwise block the debug HTTP handler — which runs `debugPerform`
+    /// under `DispatchQueue.main.sync` — with nobody to dismiss them on CI.
+    private var debugDriving = false
     private var lastRevision = -1
     private var refreshTimer: Timer?
     /// Test hook: name of a workspace to auto-select once it's running (mounts
@@ -1660,6 +1665,8 @@ final class RemoteHostWindow: NSWindow {
     /// actions return the client-side state the server's `/state` can't report
     /// (selection, terminal focus, pane widths, browser open/collapse).
     func debugPerform(_ action: String, _ p: [String: Any]) -> [String: Any] {
+        debugDriving = true
+        defer { debugDriving = false }
         func resolveID() -> Profile.ID? {
             guard let key = p["workspace"] as? String else { return nil }
             if let u = UUID(uuidString: key) { return u }
@@ -1957,7 +1964,10 @@ final class RemoteHostWindow: NSWindow {
     /// so other apps can reach them by address too. No-op if the tunnel is
     /// already on, if we've asked before, or in headless auto-open (E2E) mode.
     private func offerBrowserVPNIfNeeded() {
-        guard !didOfferBrowserVPN, !controller.tunnelEnabled, !autoBrowser else { return }
+        // Never raise the blocking VPN modal while servicing a headless debug
+        // action — a nested `runModal()` would wedge the main-thread
+        // `/debug/fatclient` handler (no one is there to dismiss it on CI).
+        guard !didOfferBrowserVPN, !controller.tunnelEnabled, !autoBrowser, !debugDriving else { return }
         didOfferBrowserVPN = true
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
