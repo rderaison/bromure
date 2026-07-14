@@ -1027,7 +1027,15 @@ final class RemoteHostWindow: NSWindow {
         let fire = !event.isARepeat   // don't spawn/close on autorepeat
         switch chars {
         case "t":
-            if fire { controller.newTab(id) }
+            if fire {
+                // Remember which windows existed, create the shell on the
+                // server, then bring the new one to the front once the roster
+                // reflects it — so ⌘T's terminal becomes the active window like
+                // local mode instead of being created in the background.
+                let existing = Set(controller.tabsModel(for: id)?.tabs.map(\.index) ?? [])
+                controller.newTab(id)
+                showNewestTab(id, notIn: existing)
+            }
             return true
         case "w":
             if fire, let idx = shownWindowIndex { controller.closeTab(id, index: idx) }
@@ -1045,6 +1053,23 @@ final class RemoteHostWindow: NSWindow {
                 showWorkspace(id, window: tab.index)
             }
             return true
+        }
+    }
+
+    /// After ⌘T creates a shell on the server, mount + focus the new window as
+    /// soon as it surfaces in a /state poll (the create is async and the new
+    /// window index isn't known until the roster refreshes). `notIn` is the set
+    /// of window indices that existed before, so we pick the one that appeared.
+    private func showNewestTab(_ id: Profile.ID, notIn existing: Set<Int>) {
+        Task { @MainActor in
+            for _ in 0..<50 {   // ~5s; the roster polls ~every 0.75s
+                if let fresh = controller.tabsModel(for: id)?.tabs
+                    .map(\.index).filter({ !existing.contains($0) }).max() {
+                    showWorkspace(id, window: fresh)
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
         }
     }
 
