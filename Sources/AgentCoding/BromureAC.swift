@@ -2295,6 +2295,35 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "close":
                     self.closeEditorWindow()
                     return ["ok": true]
+                case "automation-seed":
+                    // Screenshot helper: ensure one demo automation exists so the
+                    // sidebar's Automations section — and the editor — aren't empty.
+                    guard let pid = self.profiles.first?.id else { return ["error": "no profile"] }
+                    let id: UUID
+                    if let existing = self.scheduledAutomationStore.automations.first {
+                        id = existing.id
+                    } else {
+                        let demo = ScheduledAutomation(
+                            name: "Review incoming PRs",
+                            profileID: pid,
+                            trigger: .githubPullRequest,
+                            githubRepo: "acme/webapp",
+                            tool: .claude,
+                            prompt: "Review this pull request for correctness, security, and style. Leave inline review comments and a short summary; do not merge.",
+                            repoPath: "~/webapp")
+                        self.scheduledAutomationStore.upsert(demo)
+                        id = demo.id
+                    }
+                    self.refreshSidebar()
+                    return ["id": id.uuidString]
+                case "automation-show":
+                    let key = (params["id"] as? String) ?? ""
+                    let id = UUID(uuidString: key) ?? self.scheduledAutomationStore.automations.first?.id
+                    self.unifiedWindow?.showAutomationEditor(id)
+                    return ["ok": true]
+                case "automation-close":
+                    _ = self.unifiedWindow?.clearAutomationEditor(force: true)
+                    return ["ok": true]
                 default:
                     return ["error": "unknown action: \(action)"]
                 }

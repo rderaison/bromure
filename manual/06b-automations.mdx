@@ -17,7 +17,7 @@ Automations are what turn the app from an interactive tool into an unattended on
 Automations live in their own group in the main window's sidebar, below **WORKSPACES** and the pinned **Grid** node. The **AUTOMATIONS** header carries a **+** button (tooltip *New automation*); each automation is one row, tinted with its owning workspace's accent color.
 
 <p align="center">
-  <img src="images/workspaces.en.jpg" width="700" alt="The main window sidebar showing a WORKSPACES section with the Grid node and workspaces, and below it an AUTOMATIONS section header with a plus button for creating a new automation." />
+  <img src="images/automations.en.jpg" width="700" alt="The main window: a WORKSPACES sidebar section with the Grid node and workspaces, and below it an AUTOMATIONS section listing a “Review incoming PRs” automation summarized as “PR · acme/webapp”." />
 </p>
 
 Each row shows:
@@ -36,6 +36,10 @@ Open the editor two ways:
 2. Right-click any terminal tab in the sidebar and choose **New automation…** — this pre-fills the automation's workspace and repository path from that tab's working directory.
 
 The editor is a single scrolling form with a pinned action bar. Fill it top to bottom:
+
+<p align="center">
+  <img src="images/automation-editor.en.jpg" width="820" alt="The automation editor open as a full-stage overlay: a header with the automation name and an Enabled switch, then Workspace, Trigger (Schedule / GitHub PR / GitHub Issue / GitHub Commit / Linear / After automation) with a Filters disclosure and Ignore backlog, and a Task section with the agent picker, repository path, and prompt. A pinned action bar shows Delete, Run Now, and Save." />
+</p>
 
 | Field | What it sets |
 | --- | --- |
