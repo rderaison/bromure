@@ -297,9 +297,11 @@ final class WorkspaceBrowserController {
             // needs to view a WebGL/canvas app it just built. Without this the
             // guest config-agent passes --disable-webgl --disable-3d-apis.
             enableWebGL: true,
-            // Per-workspace permission toggles (Settings → Browser). Uploads use
-            // the host file-transfer bridge (also gates fileUploadEnabled).
-            enableFileTransfer: permissions.allowUploads,
+            // Per-workspace permission toggles (Settings → Browser). The host
+            // file-transfer bridge carries bytes both ways — uploads (host→guest)
+            // and downloads (the guest file-agent pushes files that land in its
+            // ~/Downloads) — so keep it (and file-agent) alive if either is on.
+            enableFileTransfer: permissions.allowUploads || permissions.allowDownloads,
             enableClipboardSharing: true,
             // Camera/microphone are off by default. Turning either on keeps
             // WebRTC enabled (the webrtc-block extension loads only when BOTH
@@ -357,16 +359,26 @@ final class WorkspaceBrowserController {
             // 5900) streams the request log into an in-memory SQLite store the
             // browser_network MCP tool queries. Ephemeral, like the VM.
             trace = TraceBridge(socketDevice: socketDevice, inMemory: true)
-            // File picker: the guest file-picker extension dials vsock 5600 on
-            // every `<input type=file>` click; 5100 carries the bytes. Without
-            // these two host listeners the dialog silently no-ops. Gated on
-            // uploads, matching browserConfig()'s enableFileTransfer.
-            if permissions.allowUploads {
+            // File transfer (vsock 5100) carries bytes BOTH ways: uploads
+            // (host→guest, driven by the file-picker on 5600) and downloads
+            // (guest→host — the guest file-agent pushes anything that lands in
+            // its ~/Downloads). Bring the bridge up if either is allowed.
+            if permissions.allowUploads || permissions.allowDownloads {
                 let ft = FileTransferBridge(socketDevice: socketDevice)
                 fileTransferBridge = ft
-                let fp = FilePickerBridge(socketDevice: socketDevice)
-                fp.onSendFile = { [weak self] url in self?.fileTransferBridge?.sendFile(url: url) }
-                filePickerBridge = fp
+                // Uploads: the file-picker extension dials 5600 on every
+                // `<input type=file>` click; without this host listener the
+                // dialog silently no-ops.
+                if permissions.allowUploads {
+                    let fp = FilePickerBridge(socketDevice: socketDevice)
+                    fp.onSendFile = { [weak self] url in self?.fileTransferBridge?.sendFile(url: url) }
+                    filePickerBridge = fp
+                }
+                // Downloads: stream guest-pushed files straight to the host's
+                // ~/Downloads and surface them in the toolbar's downloads popover.
+                if permissions.allowDownloads {
+                    model.downloads.attach(bridge: ft)
+                }
             }
         } else {
             print("[browser] no vsock device — tabs/navigation disabled")
@@ -680,6 +692,7 @@ final class WorkspaceBrowserController {
         trace = nil
         filePickerBridge?.stop()
         filePickerBridge = nil
+        model.downloads.detach()
         fileTransferBridge?.stop()
         fileTransferBridge = nil
         vmView?.virtualMachine = nil

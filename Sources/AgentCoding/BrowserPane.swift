@@ -22,6 +22,10 @@ final class BrowserPaneModel {
     /// by TabBridge in WorkspaceBrowserController. Owns the tab list, address
     /// field state, and nav callbacks.
     let tabBar = NativeTabBarModel()
+    /// Safari-style downloads: files the guest browser downloaded, streamed to
+    /// the host's ~/Downloads and surfaced in a toolbar popover. Wired by
+    /// WorkspaceBrowserController when the workspace allows downloads.
+    let downloads = BrowserDownloadsModel()
     /// True once the VM controller has mounted a framebuffer into
     /// `framebufferContainer`; drives placeholder vs. live view.
     var hasFramebuffer = false
@@ -225,7 +229,7 @@ struct BrowserPaneView: View {
             // The exact Safari-compact tab bar from Bromure Web. Native-chrome
             // mode crops Chromium's own chrome out of the framebuffer, so this
             // is the browser's only chrome.
-            NativeCompactBarView(model: model.tabBar)
+            NativeCompactBarView(model: model.tabBar, downloads: model.downloads)
                 .frame(minHeight: 34)
                 .padding(.vertical, 3)
                 .background(Color(nsColor: .windowBackgroundColor))

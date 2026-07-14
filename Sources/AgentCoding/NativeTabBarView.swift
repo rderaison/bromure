@@ -266,6 +266,7 @@ final class NativeTabBarModel {
 
 struct NativeCompactBarView: View {
     @Bindable var model: NativeTabBarModel
+    @Bindable var downloads: BrowserDownloadsModel
 
     var body: some View {
         HStack(spacing: 6) {
@@ -323,9 +324,29 @@ struct NativeCompactBarView: View {
             .buttonStyle(.plain)
             .help("Toggle DevTools (F12)")
 
+            downloadsButton
+
             shareButton
         }
         .padding(.horizontal, 8)
+    }
+
+    /// Safari-style downloads button: appears once a file has been downloaded,
+    /// with a popover listing what landed in ~/Downloads. Fills in while a
+    /// transfer is still streaming from the guest.
+    @ViewBuilder private var downloadsButton: some View {
+        if !downloads.items.isEmpty {
+            let active = downloads.items.contains { $0.progress != nil }
+            Button(action: { downloads.popoverShown.toggle() }) {
+                Image(systemName: active ? "arrow.down.circle.fill" : "arrow.down.circle")
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .help(NSLocalizedString("Downloads", comment: "Browser downloads button"))
+            .popover(isPresented: $downloads.popoverShown, arrowEdge: .bottom) {
+                BrowserDownloadsView(model: downloads)
+            }
+        }
     }
 
     /// Standard macOS share menu (Mail, Messages, AirDrop, Safari Reading
