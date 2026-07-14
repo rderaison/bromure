@@ -55,6 +55,14 @@ final class WorkspaceBrowserController {
     /// Network trace (vsock 5900) — the guest trace extension's request log,
     /// backing browser_network. Nil until the VM attaches.
     private var trace: TraceBridge?
+    /// File-transfer bridge (vsock 5100) — pushes chosen-file bytes into the
+    /// guest. Backs the file picker; nil unless uploads are allowed.
+    private var fileTransferBridge: FileTransferBridge?
+    /// File-picker bridge (vsock 5600) — the guest's `<input type=file>` click
+    /// arrives here; we show a host NSOpenPanel and send the pick via
+    /// fileTransferBridge. Runs locally in both local and fat-client modes
+    /// (the browser VM is always local), so the panel opens on the user's Mac.
+    private var filePickerBridge: FilePickerBridge?
     /// Default landing page for a fresh ephemeral browser — blank, so an
     /// agent-driven navigate reuses the tab with no homepage flash, and a
     /// manual open starts clean.
@@ -62,6 +70,13 @@ final class WorkspaceBrowserController {
 
     /// The workspace this browser belongs to — keys its persistent profile disk.
     private let workspaceID: UUID
+
+    /// ⌘T while the browser pane is focused (Openbox grabs it in the guest and
+    /// bounces "t" back): open a new terminal SHELL, not a browser tab — ⌘T is
+    /// the shell shortcut everywhere. The browser's own new-tab moves to ⇧⌘T,
+    /// handled host-side in each window's `performKeyEquivalent`. Set by the
+    /// window that owns this browser; nil falls back to a browser tab.
+    var onNewShell: (() -> Void)?
     /// When true, Chromium's user-data-dir lives on an encrypted per-workspace
     /// disk so logins/cookies survive teardown (set from Profile.browserPersistent).
     let persistent: Bool
@@ -342,6 +357,17 @@ final class WorkspaceBrowserController {
             // 5900) streams the request log into an in-memory SQLite store the
             // browser_network MCP tool queries. Ephemeral, like the VM.
             trace = TraceBridge(socketDevice: socketDevice, inMemory: true)
+            // File picker: the guest file-picker extension dials vsock 5600 on
+            // every `<input type=file>` click; 5100 carries the bytes. Without
+            // these two host listeners the dialog silently no-ops. Gated on
+            // uploads, matching browserConfig()'s enableFileTransfer.
+            if permissions.allowUploads {
+                let ft = FileTransferBridge(socketDevice: socketDevice)
+                fileTransferBridge = ft
+                let fp = FilePickerBridge(socketDevice: socketDevice)
+                fp.onSendFile = { [weak self] url in self?.fileTransferBridge?.sendFile(url: url) }
+                filePickerBridge = fp
+            }
         } else {
             print("[browser] no vsock device — tabs/navigation disabled")
         }
@@ -352,9 +378,12 @@ final class WorkspaceBrowserController {
         tabBridge = bridge
         let bar = model.tabBar
         bridge.onTabsChanged = { tabs in bar.setTabs(tabs) }
-        bridge.onShortcut = { key in
+        bridge.onShortcut = { [weak self] key in
             switch key {
-            case "t": bar.onNewTab?()
+            case "t":
+                // ⌘T → new shell (the browser's new-tab is ⇧⌘T now). Falls back
+                // to a browser tab only if no shell hook is wired.
+                if let onNewShell = self?.onNewShell { onNewShell() } else { bar.onNewTab?() }
             case "w": if let id = bar.activeTab?.id { bar.onClose?(id) }
             case "r": if let id = bar.activeTab?.id { bar.onReload?(id) }
             case "l": bar.pendingFocusOnActiveChange = true   // ⌘L → focus the address bar
@@ -649,6 +678,10 @@ final class WorkspaceBrowserController {
         cdp = nil
         trace?.stop()
         trace = nil
+        filePickerBridge?.stop()
+        filePickerBridge = nil
+        fileTransferBridge?.stop()
+        fileTransferBridge = nil
         vmView?.virtualMachine = nil
         vmView = nil
         if let warm {

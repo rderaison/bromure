@@ -2330,6 +2330,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         }
 
+        // E2E: drive a rich-client mirror window. Resolves the target host
+        // (id / name / address) to its RemoteHostWindow — opening it if needed —
+        // and forwards the action to `debugPerform`.
+        server.onFatClientDebug = { [weak self] params in
+            MainActor.assumeIsolated {
+                guard let self else { return ["error": "no app"] }
+                let key = (params["host"] as? String) ?? ""
+                let hosts = RemoteTransport.loadHosts()
+                let host = hosts.first(where: {
+                    $0.id.uuidString.caseInsensitiveCompare(key) == .orderedSame
+                        || $0.name.caseInsensitiveCompare(key) == .orderedSame
+                        || $0.address == key
+                }) ?? hosts.first
+                guard let host else { return ["error": "no remote host configured"] }
+                if self.remoteHostWindows[host.id] == nil { self.openRemoteHost(host) }
+                guard let win = self.remoteHostWindows[host.id] else {
+                    return ["error": "mirror window not open"]
+                }
+                return win.debugPerform((params["action"] as? String) ?? "", params)
+            }
+        }
+
         server.onGetShellConnection = { [weak self] idOrName in
             guard let self else { return nil }
             guard let uuid = self.resolveRunningSessionID(idOrName) else { return nil }

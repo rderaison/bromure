@@ -64,6 +64,10 @@ final class ACAutomationServer {
     /// "ensure-profile" | "open" | "category" | "close". Lets the doc-screenshot
     /// script navigate over the control socket instead of AppleScript.
     var onEditorDebug: ((_ params: [String: Any]) -> [String: Any])?
+    /// E2E hook: drive a rich-client (fat-client) mirror window — see
+    /// `RemoteHostWindow.debugPerform`. Resolves the target host + workspace and
+    /// forwards the action.
+    var onFatClientDebug: ((_ params: [String: Any]) -> [String: Any])?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -485,6 +489,14 @@ final class ACAutomationServer {
                 return
             }
             let r = DispatchQueue.main.sync { self.onEditorDebug?(bodyJSON) ?? ["error": "no handler"] }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        case ("POST", "/debug/fatclient"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Local only"])
+                return
+            }
+            let r = DispatchQueue.main.sync { self.onFatClientDebug?(bodyJSON) ?? ["error": "no handler"] }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
         // Run the prompt-injection detectors on supplied text and return a

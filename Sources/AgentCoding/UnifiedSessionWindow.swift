@@ -785,6 +785,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 allowDownloads: profile?.browserAllowDownloads ?? true,
                 webcam: profile?.browserWebcam ?? false,
                 microphone: profile?.browserMicrophone ?? false))
+        // ⌘T inside the browser opens a new terminal SHELL (its new-tab is ⇧⌘T).
+        c.onNewShell = { [weak self] in self?.newTab(profileID: id) }
         browserControllers[id] = c
         return c
     }
@@ -1522,6 +1524,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // ⇧⌘T → new browser tab (⌘T is the shell shortcut). Caught here, before
+        // the keystroke reaches the guest, when a browser pane is shown.
+        if event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command, .shift],
+           event.charactersIgnoringModifiers?.lowercased() == "t",
+           let id = shownBrowser, let ctl = browserControllers[id] {
+            ctl.newTab("")
+            return true
+        }
         if handleACShortcut(event) { return true }
         return super.performKeyEquivalent(with: event)
     }

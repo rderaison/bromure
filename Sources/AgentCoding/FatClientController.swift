@@ -1011,7 +1011,15 @@ final class RemoteHostWindow: NSWindow {
     /// ⌃⌘B toggles the browser pane, ⌃⌘E the file-explorer pane — mirroring
     /// the local window's shortcuts.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command, .control] {
+        let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        // ⇧⌘T opens a new browser tab (⌘T is the shell shortcut). Caught here,
+        // before the keystroke reaches the guest, when a browser pane is shown.
+        if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "t",
+           let id = shownBrowser, let ctl = browserControllers[id] {
+            ctl.newTab("")
+            return true
+        }
+        if mods == [.command, .control] {
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "b": toggleBrowser(for: nil); return true
             case "e": toggleFilePane(); return true
@@ -1572,6 +1580,100 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.automationSelectedID = nil
     }
 
+    // MARK: E2E debug control surface (POST /debug/fatclient; debug-gated)
+
+    /// Drive rich-client features headlessly for the E2E harness. Control-plane
+    /// mutations tunnel to the server (asserted by polling the SERVER); UI-only
+    /// actions return the client-side state the server's `/state` can't report
+    /// (selection, terminal focus, pane widths, browser open/collapse).
+    func debugPerform(_ action: String, _ p: [String: Any]) -> [String: Any] {
+        func resolveID() -> Profile.ID? {
+            guard let key = p["workspace"] as? String else { return nil }
+            if let u = UUID(uuidString: key) { return u }
+            return controller.listModel.profileRows.first {
+                $0.name.caseInsensitiveCompare(key) == .orderedSame
+            }?.id
+        }
+        let focused = { (self.firstResponder === self.mountedTermView) && self.mountedTermView != nil }
+        switch action {
+        case "get-mirror-state":
+            return [
+                "connected": controller.connected,
+                "revision": controller.revision,
+                "vmnetSubnet": controller.vmnetSubnet ?? "",
+                "workspaces": controller.listModel.profileRows.map {
+                    ["id": $0.id.uuidString, "name": $0.name, "state": "\($0.state)"] as [String: Any]
+                },
+                "automations": controller.automationStore.automations.map {
+                    ["id": $0.id.uuidString, "name": $0.name] as [String: Any]
+                },
+                "shownWorkspace": shownWorkspace?.uuidString ?? "",
+                "selectedID": controller.listModel.selectedID?.uuidString ?? "",
+                "browserOpen": Array(browserOpen).map { $0.uuidString },
+                "shownBrowser": shownBrowser?.uuidString ?? "",
+                "browserWidth": Double(browserWidthConstraint.constant),
+                "filePaneWidth": Double(filePaneWidthConstraint.constant),
+                "sidebarWidth": Double(sidebarWidthConstraint.constant),
+                "terminalFocused": focused(),
+            ]
+        case "select":
+            guard let id = resolveID() else { return ["error": "workspace not found"] }
+            selectWorkspaceName(id)
+            return ["ok": true, "selectedID": controller.listModel.selectedID?.uuidString ?? "",
+                    "dashboardShown": shownDashboard?.id == id]
+        case "mount-terminal":
+            guard let id = resolveID() else { return ["error": "workspace not found"] }
+            showWorkspace(id, window: p["window"] as? Int ?? 0)
+            return ["ok": true, "shownWorkspace": shownWorkspace?.uuidString ?? "",
+                    "shownWindowIndex": shownWindowIndex ?? -1]
+        case "focused":   // read-back after the async focus settles
+            return ["terminalFocused": focused()]
+        case "start", "stop", "suspend", "reboot":
+            guard let id = resolveID() else { return ["error": "workspace not found"] }
+            switch action {
+            case "start":   controller.startWorkspace(id)
+            case "stop":    controller.shutdownWorkspace(id)
+            case "suspend": controller.suspendWorkspace(id)
+            default:
+                if (p["mode"] as? String) == "hard" { controller.hardRebootWorkspace(id) }
+                else { controller.restartWorkspace(id) }
+            }
+            return ["ok": true]
+        case "create-workspace":
+            guard let doc = p["doc"] as? [String: Any] else { return ["error": "doc required"] }
+            let c = controller
+            Task { @MainActor in _ = try? await c.createProfileDoc(doc) }
+            return ["ok": true]
+        case "edit-workspace":
+            guard let id = resolveID(), let doc = p["doc"] as? [String: Any] else {
+                return ["error": "workspace + doc required"]
+            }
+            let c = controller
+            Task { @MainActor in _ = try? await c.saveProfileDoc(id, doc) }
+            return ["ok": true]
+        case "new-automation":
+            guard let adoc = p["automation"] as? [String: Any],
+                  let data = try? JSONSerialization.data(withJSONObject: adoc) else {
+                return ["error": "automation doc required"]
+            }
+            let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+            guard let auto = try? dec.decode(ScheduledAutomation.self, from: data) else {
+                return ["error": "invalid automation doc"]
+            }
+            controller.upsertAutomation(auto)
+            return ["ok": true, "id": auto.id.uuidString]
+        case "toggle-browser":
+            guard let id = resolveID() else { return ["error": "workspace not found"] }
+            let open = p["open"] as? Bool ?? !browserOpen.contains(id)
+            setBrowserOpen(id, open)
+            return ["ok": true, "browserOpen": browserOpen.contains(id),
+                    "shownBrowser": shownBrowser?.uuidString ?? "",
+                    "browserWidth": Double(browserWidthConstraint.constant)]
+        default:
+            return ["error": "unknown action: \(action)"]
+        }
+    }
+
     private static func presentRemoteError(_ title: String, _ error: Error) {
         let a = NSAlert()
         a.alertStyle = .warning
@@ -1658,6 +1760,8 @@ final class RemoteHostWindow: NSWindow {
                 webcam: profile?.browserWebcam ?? false,
                 microphone: profile?.browserMicrophone ?? false),
             remoteProxy: .init(subnetCIDR: subnet, socksPort: port))
+        // ⌘T inside the browser opens a new terminal SHELL (its new-tab is ⇧⌘T).
+        c.onNewShell = { [weak self] in self?.controller.newTab(id) }
         browserControllers[id] = c
         return c
     }
