@@ -44,7 +44,7 @@ pipeline {
                     docker create --name rstub resolv-stub-builder
                     docker cp rstub:/out/libresolv_stub.so "$STUB"
                     docker rm rstub
-                    file "$STUB"
+                    ls -l "$STUB"
                 '''
             }
         }
