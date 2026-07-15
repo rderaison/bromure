@@ -53,6 +53,8 @@ pipeline {
             steps {
                 sh '''
                     set -e
+                    git config user.name "Renaud Deraison"
+                    git config user.email "renaud@secl.io"
                     git add "$STUB"
                     if git diff --cached --quiet; then
                         echo "libresolv_stub.so unchanged — nothing to commit"
