@@ -1349,9 +1349,11 @@ final class ScheduledAutomationEngine {
         if let slugSuffix { slug += "-" + slugSuffix }
         let detail = detailOverride ?? slug
         // "run", not "create": the guest makes a worktree when the path is a
-        // git repo and falls back to a plain agent tab when it isn't.
-        let args = [Self.guestPath(a.repoPath), slug, a.name,
-                    a.tool.rawValue, promptOverride ?? a.prompt]
+        // git repo and falls back to a plain agent tab when it isn't. The
+        // prompt carries the unattended-run operating constraints (no
+        // questions, no sub-agents) appended for every fire.
+        let args = [Self.guestPath(a.repoPath), slug, a.name, a.tool.rawValue,
+                    Self.withAutomationDirectives(promptOverride ?? a.prompt)]
 
         // Clone-first run: a disposable duplicate of the workspace, never
         // the workspace itself. Claude-only — the teardown when the run
@@ -1542,6 +1544,36 @@ final class ScheduledAutomationEngine {
                                               comment: "chained run detail"),
                     upstream.name, branch))
         }
+    }
+
+    /// Operating constraints appended to every automation's prompt. An
+    /// automation runs unattended in a headless tab, so two failure modes are
+    /// closed off in the prompt itself:
+    ///   • a clarifying question would hang the run forever — no one is there
+    ///     to answer it;
+    ///   • a spawned sub-agent's exit can trip the run's own done-detection
+    ///     (Claude's Stop hook fires when the sub-agent stops), ending the run
+    ///     before the real work is finished.
+    /// Appended (never prepended) so it stays the last word after any
+    /// `{{pr.*}}` / chain context a trigger already spliced onto the prompt.
+    nonisolated static let automationDirectives = """
+    ---
+    Operating constraints for this run (added automatically): This is an \
+    unattended, automated run — there is no human available to respond. Do \
+    not ask questions or wait for confirmation, approval, or clarification at \
+    any point; make reasonable assumptions and carry the task through to \
+    completion on your own. Do not spawn sub-agents or use any Task / agent / \
+    delegation tool — do all of the work yourself in this single session.
+    """
+
+    /// Append `automationDirectives` to a fire's prompt. A prompt-less
+    /// automation is left untouched: the guest sends the "-" no-prompt
+    /// sentinel and the agent starts idle, so bare directives with no task
+    /// would be pointless.
+    nonisolated static func withAutomationDirectives(_ prompt: String) -> String {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return prompt }
+        return prompt + "\n\n" + automationDirectives
     }
 
     /// Fill `{{chain.*}}` variables into a chained prompt. Prompts using

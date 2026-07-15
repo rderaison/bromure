@@ -437,6 +437,24 @@ struct ScheduledAutomationTests {
         #expect(out.contains("wt/nightly-0709"))
     }
 
+    // MARK: Unattended-run directives
+
+    @Test("Automation directives are appended after the prompt")
+    func directivesAppended() {
+        let out = ScheduledAutomationEngine.withAutomationDirectives("Fix the flaky test.")
+        #expect(out.hasPrefix("Fix the flaky test.\n\n"))
+        #expect(out.hasSuffix(ScheduledAutomationEngine.automationDirectives))
+        // The two failure modes the directives close off.
+        #expect(out.localizedCaseInsensitiveContains("sub-agent"))
+        #expect(out.localizedCaseInsensitiveContains("do not ask"))
+    }
+
+    @Test("A blank prompt is left untouched (no bare directives)")
+    func directivesSkipBlankPrompt() {
+        #expect(ScheduledAutomationEngine.withAutomationDirectives("") == "")
+        #expect(ScheduledAutomationEngine.withAutomationDirectives("   \n ") == "   \n ")
+    }
+
     // MARK: Unattended-run warnings
 
     @MainActor

@@ -1976,23 +1976,33 @@ def _save_claude_transcript(wt_dir):
 def _automation_finish(branch):
     """End-of-run cleanup for an automation worktree tab: stash the Claude
     transcript in the worktree, then close the tab. The worktree itself is
-    kept — it's the run's result."""
+    kept — it's the run's result — UNLESS the run produced nothing worth
+    keeping (no commits beyond its parent and a clean working tree), in which
+    case the worktree + branch are removed so no-op runs don't pile up."""
     out = _capture(["tmux", "list-windows", "-t", TMUX_S, "-F",
                     "#{window_id}\t#{@worktree}\t#{@label}\t"
-                    "#{pane_current_path}"])
-    win_id = tool = wt_dir = ""
+                    "#{pane_current_path}\t#{@parent_branch}\t#{@root_repo}"])
+    win_id = tool = wt_dir = parent = root = ""
     for line in out.splitlines():
-        parts = (line.split("\t") + ["", "", "", ""])[:4]
+        parts = (line.split("\t") + ["", "", "", "", "", ""])[:6]
         if parts[1] == branch:
-            win_id, tool, wt_dir = parts[0], parts[2], parts[3]
+            win_id, tool, wt_dir, parent, root = (
+                parts[0], parts[2], parts[3], parts[4], parts[5])
             break
     if not win_id:
         log("automation", "finish: no window for %s" % branch)
         return
-    if wt_dir and tool == "claude":
+    # Decide BEFORE writing the transcript: the transcript file would itself
+    # dirty the working tree and defeat the "produced nothing" check.
+    empty = bool(root) and _worktree_is_empty(root, branch, parent)
+    if not empty and wt_dir and tool == "claude":
         _save_claude_transcript(wt_dir)
     _tmux_ok("kill-window", "-t", win_id)
-    log("automation", "finished %s — transcript saved, tab closed" % branch)
+    if empty:
+        _worktree_remove(root, branch)
+        log("automation", "finished %s — empty run, worktree removed" % branch)
+    else:
+        log("automation", "finished %s — transcript saved, tab closed" % branch)
 
 
 # Prompt the coding agent gets when a merge conflicts (verbatim from source).
@@ -2099,6 +2109,33 @@ def _worktree_remove(root, branch):
     subprocess.run(["git", "-C", root, "worktree", "prune"],
                    stdout=_DEVNULL, stderr=_DEVNULL)
     _wt_registry_del(os.path.basename(root), branch)
+
+
+def _worktree_is_empty(root, branch, parent):
+    """True only when an automation worktree produced nothing worth keeping: a
+    clean working tree AND no commits beyond the branch it was cut from. Any
+    git uncertainty — missing checkout, unknown parent, or a command failure —
+    returns False: never delete a worktree on a doubtful signal."""
+    wdir = _worktree_dir_for_branch(root, branch)
+    if not wdir or not os.path.isdir(wdir):
+        return False
+    # Staged, modified, or untracked files → the run left work behind.
+    st = subprocess.run(["git", "-C", wdir, "status", "--porcelain"],
+                        capture_output=True, text=True)
+    if st.returncode != 0 or st.stdout.strip():
+        return False
+    if not parent:
+        return False
+    # Commits on this branch that the parent doesn't have → keep the result.
+    cnt = subprocess.run(
+        ["git", "-C", wdir, "rev-list", "--count", "%s..%s" % (parent, branch)],
+        capture_output=True, text=True)
+    if cnt.returncode != 0:
+        return False
+    try:
+        return int(cnt.stdout.strip()) == 0
+    except ValueError:
+        return False
 
 
 def _worktree_terminal(root, branch):
