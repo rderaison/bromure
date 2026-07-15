@@ -1,0 +1,84 @@
+// Jenkinsfile.resolv-stub — compile the glibc-compat shim
+// (libresolv_stub.so) for arm64/musl in Docker and commit the prebuilt
+// binary back to git, mirroring how the out-of-tree kernel modules
+// (v4l2loopback, rtc-pl031) ship as committed artifacts instead of being
+// built on the end-user's machine.
+//
+// Why prebuilt-and-committed: warp-cli is a Debian (glibc) binary, and on
+// musl Alpine it can't relocate __res_init (gcompat lacks it) or glibc's
+// fcntl64. libresolv_stub.so supplies both. The shim is pure userspace
+// against musl — kernel-independent — so one arm64 build serves every
+// guest kernel, and shipping the committed .so inside the app bundle
+// (Resources/vm-setup is .copy'd wholesale) lets the fix reach users
+// without a full base-image rebuild or a LinuxImageManager.imageVersion
+// bump.
+//
+//   Source of truth: Sources/SandboxEngine/Resources/vm-setup/configs/resolv-stub.c
+//   Output (committed): Sources/SandboxEngine/Resources/vm-setup/resolv-stub/libresolv_stub.so
+//
+// Runs on the arm64 macOS builder (Docker Desktop builds linux/arm64
+// natively). It's a no-op commit whenever the source hasn't changed, so
+// it's safe to trigger on every push to a branch that touches the stub.
+pipeline {
+    agent { label 'macosx-builder' }
+
+    options {
+        timeout(time: 20, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        VM_SETUP = 'Sources/SandboxEngine/Resources/vm-setup'
+        STUB     = 'Sources/SandboxEngine/Resources/vm-setup/resolv-stub/libresolv_stub.so'
+    }
+
+    stages {
+        stage('Build stub in Docker') {
+            steps {
+                sh '''
+                    set -eu
+                    docker rm -f rstub 2>/dev/null || true
+                    docker build --no-cache --platform linux/arm64 \
+                        -f "$VM_SETUP/resolv-stub/Dockerfile" \
+                        -t resolv-stub-builder "$VM_SETUP"
+                    docker create --name rstub resolv-stub-builder
+                    docker cp rstub:/out/libresolv_stub.so "$STUB"
+                    docker rm rstub
+                    file "$STUB"
+                '''
+            }
+        }
+
+        stage('Commit binary') {
+            steps {
+                sh '''
+                    set -e
+                    git add "$STUB"
+                    if git diff --cached --quiet; then
+                        echo "libresolv_stub.so unchanged — nothing to commit"
+                    else
+                        git commit -m "sandbox: rebuild libresolv_stub.so (glibc-compat shim)
+
+Prebuilt arm64/musl libresolv_stub.so, compiled in Docker from
+configs/resolv-stub.c. Supplies __res_init and forwards glibc's
+fcntl64 to musl so the Cloudflare warp-cli binary relocates on
+Alpine. Committed like the kernel modules so it ships in the app
+bundle without an imageVersion bump.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+                        git push origin HEAD:refs/heads/${GIT_BRANCH#*/}
+                    fi
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                docker rm -f rstub 2>/dev/null || true
+                docker rmi resolv-stub-builder 2>/dev/null || true
+            '''
+        }
+    }
+}
