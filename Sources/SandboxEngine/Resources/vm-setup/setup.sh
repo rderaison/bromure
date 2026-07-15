@@ -192,11 +192,19 @@ ls -la /mnt/sbin/init || {
 retry chroot /mnt apk add gcompat libstdc++ ca-certificates nftables iproute2 \
     glib nss nspr libgcc
 
-# Build glibc resolver stub (gcompat lacks __res_init)
-retry apk add gcc musl-dev
-cp "$SCRIPT_DIR/configs/resolv-stub.c" /tmp/resolv_stub.c
-gcc -shared -o /mnt/usr/lib/libresolv_stub.so /tmp/resolv_stub.c
-rm -f /tmp/resolv_stub.c
+# Install the glibc resolver stub. gcompat lacks __res_init and newer
+# warp-cli also needs fcntl64; the shim (configs/resolv-stub.c) supplies
+# both. It's cross-compiled for arm64/musl by Jenkinsfile.resolv-stub and
+# committed to git, so image generation just copies the prebuilt .so in —
+# no gcc/musl-dev toolchain needed in the installer VM. Fail the build if
+# it's missing, mirroring the kernel-module distribution gate below.
+STUB_SO="$SCRIPT_DIR/resolv-stub/libresolv_stub.so"
+[ -f "$STUB_SO" ] || {
+    echo "SANDBOX_SETUP_FAILED: prebuilt libresolv_stub.so missing at $STUB_SO — build it with Jenkinsfile.resolv-stub"
+    exit 1
+}
+cp "$STUB_SO" /mnt/usr/lib/libresolv_stub.so
+chmod 0755 /mnt/usr/lib/libresolv_stub.so
 
 # ---------------------------------------------------------------------------
 # Install proxy and DNS tools
