@@ -26,22 +26,35 @@ public actor PromptInjectionConsentBroker {
         pending[key] = []
         let name = profileNames[profileID] ?? "this workspace"
         let allow: Bool
-        if RemoteConsent.isActive(for: profileID) {
-            // No GUI (SSH/CLI): prompt in the workspace's tmux. nil/Block → block.
+        let route = RemoteConsent.route(for: profileID)
+        if route == .localAlert {
+            allow = await Self.ask(profileName: name, detectorName: detectorName,
+                                   source: source, flaggedText: flaggedText)
+        } else {
+            // Remote: a fat client renders a native NSAlert on its own Mac (over
+            // the tunnel); a plain SSH/CLI attach gets the tmux popup. The
+            // flagged text rides in the body. Block (index 0) is the safe
+            // default; only an explicit "Allow" lets it through.
             let title = String(format: NSLocalizedString("Possible %@ in “%@”",
                 comment: "Prompt-injection consent title"), detectorName, name)
             let message = String(format: NSLocalizedString(
                 "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@",
                 comment: "Prompt-injection consent body (remote)"),
                 source, String(flaggedText.prefix(1500)))
-            let idx = await Task.detached {
-                RemoteConsent.choose(profileID: profileID, title: title, message: message,
-                                     choices: ["Block this request", "Allow this request"])
-            }.value
+            let choices = [NSLocalizedString("Block this request", comment: ""),
+                           NSLocalizedString("Allow this request", comment: "")]
+            let idx: Int?
+            if route == .fatClient {
+                idx = await RemoteConsent.chooseOnFatClient(
+                    profileID: profileID, title: title, message: message,
+                    choices: choices, denyIndex: 0)
+            } else {
+                idx = await Task.detached {
+                    RemoteConsent.choose(profileID: profileID, title: title, message: message,
+                                         choices: choices)
+                }.value
+            }
             allow = (idx == 1)   // only an explicit "Allow" lets it through
-        } else {
-            allow = await Self.ask(profileName: name, detectorName: detectorName,
-                                   source: source, flaggedText: flaggedText)
         }
         decisions[key] = allow
         let waiters = pending.removeValue(forKey: key) ?? []

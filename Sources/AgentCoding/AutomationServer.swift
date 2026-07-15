@@ -1305,23 +1305,39 @@ final class ACAutomationServer {
         let hbytes = Array(header.utf8)
         _ = hbytes.withUnsafeBytes { Darwin.write(clientFD, $0.baseAddress, hbytes.count) }
 
-        // For the life of this attach the session is "in CLI/SSH mode" — consent
-        // prompts go to a tmux popup the attached user can see, not an NSAlert.
-        // Key by the canonical UUID (the CLI may pass a name/short id) so the
-        // consent broker, which queries by UUID, actually matches.
-        let attachKey = (DispatchQueue.main.sync { self.onResolveProfileID?(profileID) }) ?? profileID
-        // Register a consent gate for the life of this attach: a gate firing for
-        // this profile renders its prompt on THIS user's terminal (clientFD),
-        // never in the guest, so a compromised guest can't forge approval.
-        let gate = PumpConsentGate()
-        Self.registerGate(gate, for: attachKey)
-        defer { Self.unregisterGate(gate, for: attachKey) }
-        Self.pump(clientFD, vsockFD, gate: gate, afterConsent: { [weak self] in
-            // Repaint the guest's tmux over where the prompt was — a tmux command,
-            // not pane input, so we never inject keystrokes into the agent.
-            _ = self?.vmExec(profileID: attachKey,
-                             command: "tmux refresh-client 2>/dev/null || true", timeoutSeconds: 5)
-        })
+        // GUI-fronted attaches (the app's own native terminal, or a fat-client
+        // mirror terminal) present MITM consent as a native NSAlert — locally, or
+        // routed to the fat client — never in this terminal. They register NO
+        // tmux consent gate, so `RemoteConsent.route` sees "not interactively
+        // attached" and picks the NSAlert/fat-client path. A plain SSH/CLI attach
+        // (no flag) registers a gate so a headless user can approve on their
+        // terminal, where consent prompts go to a tmux popup instead of an
+        // NSAlert nobody would see.
+        let guiConsent = bodyJSON["guiConsent"] as? Bool ?? false
+        let gateNote = guiConsent ? "no tmux gate (NSAlert/fat-client)" : "tmux consent gate"
+        FileHandle.standardError.write(Data(
+            "[consent] interactive attach pid=\(profileID.prefix(8)) guiConsent=\(guiConsent) → \(gateNote)\n".utf8))
+        if guiConsent {
+            Self.pump(clientFD, vsockFD)   // plain transparent pump, no consent gate
+        } else {
+            // Key by the canonical UUID (the CLI may pass a name/short id) so the
+            // consent broker, which queries by UUID, actually matches.
+            let attachKey = (DispatchQueue.main.sync { self.onResolveProfileID?(profileID) }) ?? profileID
+            // Register a consent gate for the life of this attach: a gate firing
+            // for this profile renders its prompt on THIS user's terminal
+            // (clientFD), never in the guest, so a compromised guest can't forge
+            // approval.
+            let gate = PumpConsentGate()
+            Self.registerGate(gate, for: attachKey)
+            defer { Self.unregisterGate(gate, for: attachKey) }
+            Self.pump(clientFD, vsockFD, gate: gate, afterConsent: { [weak self] in
+                // Repaint the guest's tmux over where the prompt was — a tmux
+                // command, not pane input, so we never inject keystrokes into
+                // the agent.
+                _ = self?.vmExec(profileID: attachKey,
+                                 command: "tmux refresh-client 2>/dev/null || true", timeoutSeconds: 5)
+            })
+        }
         _ = conn.conn   // keep the vsock connection alive for the whole pump
         Darwin.close(clientFD)
     }

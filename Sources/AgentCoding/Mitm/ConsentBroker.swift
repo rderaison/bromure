@@ -172,27 +172,39 @@ public actor ConsentBroker {
 
         let profileName = profileNames[profileID] ?? "(unknown workspace)"
         let decision: Decision
-        if RemoteConsent.isActive(for: profileID) {
-            // No GUI (SSH/CLI): prompt in the workspace's tmux. nil → deny.
+        let route = RemoteConsent.route(for: profileID)
+        if route == .localAlert {
+            decision = await Self.askUser(profileName: profileName,
+                                          credentialDisplayName: credentialDisplayName,
+                                          scopeHint: scopeHint)
+        } else {
+            // Remote: a fat client renders a native NSAlert on its own Mac (over
+            // the tunnel); a plain SSH/CLI attach gets the tmux popup. Same
+            // choices and index mapping either way; nil (deny/timeout) → deny.
             let title = String(format: NSLocalizedString("Allow “%@” to use %@?",
                 comment: "Consent prompt: profile name + credential display name"),
                 profileName, credentialDisplayName)
-            let choices = ["Allow for 1 hour", "Allow for 5 minutes",
-                           "Allow for the rest of the session", "Don't allow"]
-            let idx = await Task.detached {
-                RemoteConsent.choose(profileID: profileID, title: title,
-                                     message: scopeHint, choices: choices)
-            }.value
+            let choices = [NSLocalizedString("Allow for 1 hour", comment: ""),
+                           NSLocalizedString("Allow for 5 minutes", comment: ""),
+                           NSLocalizedString("Allow for the rest of the session", comment: ""),
+                           NSLocalizedString("Don't allow", comment: "")]
+            let idx: Int?
+            if route == .fatClient {
+                idx = await RemoteConsent.chooseOnFatClient(
+                    profileID: profileID, title: title, message: scopeHint,
+                    choices: choices, denyIndex: choices.count - 1)
+            } else {
+                idx = await Task.detached {
+                    RemoteConsent.choose(profileID: profileID, title: title,
+                                         message: scopeHint, choices: choices)
+                }.value
+            }
             switch idx {
             case 0:  decision = .allow1hr
             case 1:  decision = .allow5min
             case 2:  decision = .allowSession
             default: decision = .deny   // "Don't allow" or timeout/failure
             }
-        } else {
-            decision = await Self.askUser(profileName: profileName,
-                                          credentialDisplayName: credentialDisplayName,
-                                          scopeHint: scopeHint)
         }
 
         let allow: Bool

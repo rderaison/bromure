@@ -89,20 +89,36 @@ enum DelpiRegistry {
         alertLock.unlock()
         guard firstTime else { return }
 
-        // Headless (SSH/TUI) sessions have no GUI to alert; the log
-        // line above plus the rewritten npm error keep them informed.
-        guard !RemoteConsent.isActive(for: profileID) else { return }
-        Task { @MainActor in
-            let alert = NSAlert()
-            alert.messageText = NSLocalizedString(
-                "Delpi rejected your API key", comment: "Delpi auth failure alert title")
-            alert.informativeText = String(format: NSLocalizedString(
-                "The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain.",
-                comment: "Delpi auth failure alert body"), status)
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
+        let title = NSLocalizedString(
+            "Delpi rejected your API key", comment: "Delpi auth failure alert title")
+        let body = String(format: NSLocalizedString(
+            "The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain.",
+            comment: "Delpi auth failure alert body"), status)
+
+        switch RemoteConsent.route(for: profileID) {
+        case .localAlert:
+            Task { @MainActor in
+                let alert = NSAlert()
+                alert.messageText = title
+                alert.informativeText = body
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        case .fatClient:
+            // Surface it on the connected fat client's Mac (over the tunnel).
+            // Fire-and-forget: a one-button acknowledgement, no decision needed.
+            Task { @MainActor in
+                _ = await PendingPromptBroker.shared.askAsync(
+                    profileID: profileID, title: title, message: body,
+                    buttons: [NSLocalizedString("OK", comment: "")],
+                    fallback: 0, timeout: 120)
+            }
+        case .terminalPump:
+            // Headless (SSH/TUI) sessions have no GUI to alert; the log line
+            // above plus the rewritten npm error keep them informed.
+            break
         }
     }
 }

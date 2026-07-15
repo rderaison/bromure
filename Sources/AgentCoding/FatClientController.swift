@@ -50,6 +50,12 @@ final class RemoteHostController {
     private(set) var bootTimes: [Profile.ID: Date] = [:]
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
+    /// Decision prompts we're currently showing, in the order shown, so a later
+    /// poll can dismiss the topmost the instant its id leaves /state (answered
+    /// on another surface — another fat client, or the host locally). Only the
+    /// topmost alert is app-modal and directly dismissable; lower ones clear as
+    /// the modal stack unwinds.
+    private var openPromptStack: [(id: String, alert: NSAlert)] = []
     /// Shared-folder paths per running VM (feeds the remote file browser's
     /// location list — browsed via the guest, since the host dirs live on A).
     private(set) var mounts: [Profile.ID: [String]] = [:]
@@ -384,6 +390,21 @@ final class RemoteHostController {
         // Prune answered/expired ids so the set can't grow unbounded.
         let current = Set(prompts.compactMap { $0["id"] as? String })
         promptedIDs.formIntersection(current)
+        // A prompt can be answered on another surface (another fat client, or
+        // the host locally) while we're still showing it. When its id leaves
+        // /state, dismiss our alert so the user isn't left staring at a stale
+        // one. This runs re-entrantly: a `runModal()` below keeps the poll timer
+        // firing (its run loop is a `.common` mode), so a later poll lands here
+        // while an alert is up. Only the topmost alert is app-modal and thus
+        // directly abortable; the `modalWindow` guard makes sure we only ever
+        // end our own alert, never some unrelated modal.
+        if let top = openPromptStack.last, !current.contains(top.id),
+           NSApp.modalWindow === top.alert.window {
+            // Drop it before aborting so a re-entrant poll (during the unwind)
+            // doesn't fire a second abortModal at the session underneath.
+            openPromptStack.removeLast()
+            NSApp.abortModal()
+        }
         for p in prompts {
             guard let id = p["id"] as? String, !promptedIDs.contains(id) else { continue }
             promptedIDs.insert(id)
@@ -397,7 +418,17 @@ final class RemoteHostController {
                 alert.buttons.first?.keyEquivalent = ""
             }
             NSApp.activate(ignoringOtherApps: true)
+            openPromptStack.append((id: id, alert: alert))
             let resp = alert.runModal()
+            if let i = openPromptStack.lastIndex(where: { $0.id == id }) {
+                openPromptStack.remove(at: i)
+            }
+            // Aborted because the prompt was answered on another surface: it's
+            // already gone from /state, so there's nothing to send back.
+            if resp == .abort {
+                alert.window.orderOut(nil)
+                continue
+            }
             let choice = resp.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
             send("POST", "/prompts/\(ControlClient.encodeSegment(id))/answer",
                  body: ["choice": max(0, min(choice, buttons.count - 1))])

@@ -31,14 +31,36 @@ final class PendingPromptBroker {
     }
 
     private(set) var prompts: [UUID: Prompt] = [:]
-    /// When `/state` was last polled — a live fat client polls sub-second, so
-    /// a stale value means nobody is listening and `ask` should not wait.
-    private var lastPollAt: Date?
 
-    /// Unanswered prompts, for `/state`. Also records the poll so `ask` knows
-    /// a client is listening.
+    /// When `/state` was last polled — a live fat client polls sub-second, so
+    /// a stale value means nobody is listening. Kept in a lock-protected static
+    /// (not just on the main actor) because the MITM consent brokers ask,
+    /// off-main from their actors, whether a fat client is watching — see
+    /// `hasLiveListener()`.
+    private static let pollLock = NSLock()
+    nonisolated(unsafe) private static var lastPollAt: Date?
+    /// A recent `/state` poll means a fat client is watching, so consent
+    /// prompts should route to its NSAlert. Window matches `ask`'s own guard.
+    private static let listenerWindow: TimeInterval = 10
+
+    private static func recordPoll() {
+        pollLock.lock(); lastPollAt = Date(); pollLock.unlock()
+    }
+
+    /// True when a fat client polled `/state` within the last few seconds — a
+    /// rich GUI client is connected and can render a consent NSAlert on its
+    /// own screen. Thread-safe: the MITM consent brokers call this from their
+    /// actors to decide between a fat-client alert and a tmux popup.
+    nonisolated static func hasLiveListener() -> Bool {
+        pollLock.lock(); defer { pollLock.unlock() }
+        guard let t = lastPollAt else { return false }
+        return Date().timeIntervalSince(t) < listenerWindow
+    }
+
+    /// Unanswered prompts, for `/state`. Also records the poll so `ask` and
+    /// `hasLiveListener` know a client is listening.
     func pendingList() -> [[String: Any]] {
-        lastPollAt = Date()
+        Self.recordPoll()
         return prompts.values.filter { $0.answer == nil }.map {
             [
                 "id": $0.id.uuidString,
@@ -66,7 +88,7 @@ final class PendingPromptBroker {
     /// returns `fallback` immediately instead of stalling the caller.
     func ask(profileID: UUID?, title: String, message: String,
              buttons: [String], fallback: Int, timeout: TimeInterval = 180) -> Int {
-        guard let poll = lastPollAt, Date().timeIntervalSince(poll) < 10 else { return fallback }
+        guard Self.hasLiveListener() else { return fallback }
         let p = Prompt(id: UUID(), profileID: profileID, title: title,
                        message: message, buttons: buttons, fallback: fallback)
         prompts[p.id] = p
@@ -75,6 +97,34 @@ final class PendingPromptBroker {
         while Date() < deadline {
             if let a = prompts[p.id]?.answer { return a }
             RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.1))
+        }
+        return fallback
+    }
+
+    /// Async twin of `ask`, for the MITM consent path where prompts fire
+    /// autonomously and CONCURRENTLY (four independent broker actors). It waits
+    /// by suspending on `Task.sleep` rather than pumping `RunLoop.main.run`, so:
+    ///  • concurrent consents don't nest main-thread run loops (the sync `ask`
+    ///    pump can only unwind LIFO, which would withhold an already-answered
+    ///    prompt behind an unrelated open one); each `askAsync` yields the main
+    ///    actor between polls, so every waiter observes its own answer at once.
+    ///  • it fails fast (~within the listener window) if the fat client stops
+    ///    polling `/state` — the client disconnected — instead of stalling the
+    ///    whole timeout, mirroring how the tmux consent gate denies on detach.
+    /// The sync `ask` above stays for the lifecycle prompts, which are user-
+    /// initiated, sequential, and called from synchronous @MainActor code.
+    func askAsync(profileID: UUID?, title: String, message: String,
+                  buttons: [String], fallback: Int, timeout: TimeInterval = 120) async -> Int {
+        guard Self.hasLiveListener() else { return fallback }
+        let id = UUID()
+        prompts[id] = Prompt(id: id, profileID: profileID, title: title,
+                             message: message, buttons: buttons, fallback: fallback)
+        defer { prompts[id] = nil }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let a = prompts[id]?.answer { return a }
+            if !Self.hasLiveListener() { return fallback }   // client gone → fail fast
+            try? await Task.sleep(nanoseconds: 100_000_000)  // 0.1s; yields the main actor
         }
         return fallback
     }

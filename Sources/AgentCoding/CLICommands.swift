@@ -489,8 +489,12 @@ struct VMAttachWindow: ParsableCommand {
                 let vmID = (vmObj["id"] as? String) ?? vm
                 let start = Date()
                 do {
+                    // The native terminal surface (and the fat-client mirror
+                    // terminal) is GUI-fronted: its consent prompts are NSAlerts,
+                    // not tmux popups — so mark the attach accordingly.
                     try InteractiveExec.run(client: client, vm: vmID,
-                                            view: UUID().uuidString, window: windowIndex)
+                                            view: UUID().uuidString, window: windowIndex,
+                                            guiConsent: true)
                     // A real attach runs until the tmux client exits. If it
                     // returned almost immediately AND we're still early in
                     // boot, the session probably wasn't ready — retry rather
@@ -1403,8 +1407,14 @@ enum InteractiveExec {
     /// default) disables interception, leaving a plain transparent pump.
     /// `view`/`window` select the guest's grouped-tmux-session attach for a
     /// host terminal view (see shell-agent.py) instead of running `command`.
+    /// `guiConsent` marks a GUI-fronted attach — the app's own native terminal
+    /// (a libghostty surface) or a fat-client mirror terminal — whose MITM
+    /// consent prompts are shown as a native NSAlert (locally) or routed to the
+    /// fat client, never drawn in this terminal. The server then registers NO
+    /// tmux consent gate for the attach; a plain SSH/CLI attach (default) does,
+    /// so a headless user can still approve on their terminal.
     static func run(client: ControlClient, vm: String, command: String = "",
-                    view: String? = nil, window: Int? = nil,
+                    view: String? = nil, window: Int? = nil, guiConsent: Bool = false,
                     overlayTrigger: UInt8? = nil, onOverlay: (() -> [UInt8])? = nil) throws {
         var ws = winsize()
         _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws)
@@ -1415,6 +1425,7 @@ enum InteractiveExec {
                                    "cols": cols0, "rows": rows0]
         if let view { body["view"] = view }
         if let window { body["window"] = window }
+        if guiConsent { body["guiConsent"] = true }
         let fd = try client.openStream(
             "POST", "/vms/\(ControlClient.encodeSegment(vm))/exec", body: body)
         defer { Darwin.close(fd) }
