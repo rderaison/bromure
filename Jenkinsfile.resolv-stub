@@ -16,11 +16,11 @@
 //   Source of truth: Sources/SandboxEngine/Resources/vm-setup/configs/resolv-stub.c
 //   Output (committed): Sources/SandboxEngine/Resources/vm-setup/resolv-stub/libresolv_stub.so
 //
-// Runs on the arm64 macOS builder (Docker Desktop builds linux/arm64
-// natively). It's a no-op commit whenever the source hasn't changed, so
-// it's safe to trigger on every push to a branch that touches the stub.
+// Runs on the kube-builder-a node (arm64 Docker). It's a no-op commit
+// whenever the source hasn't changed, so it's safe to trigger on every
+// push to a branch that touches the stub.
 pipeline {
-    agent { label 'macosx-builder' }
+    agent { label 'kube-builder-a' }
 
     options {
         timeout(time: 20, unit: 'MINUTES')
