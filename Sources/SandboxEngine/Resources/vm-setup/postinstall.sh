@@ -248,11 +248,29 @@ fi
 rm -rf /mnt/tmp/bromure-postinstall
 
 log "unmounting target"
-umount /tmp/postinstall || true
-umount /mnt/dev  || true
-umount /mnt/proc || true
-umount /mnt/sys  || true
-umount /mnt
+
+# A step may leave a daemon running inside the chroot — newer warp-cli
+# spawns the warp-svc background service even for `--version`. Its open
+# fds and cwd keep /mnt/dev and /mnt busy, so the umounts below fail, the
+# script errors before poweroff, and the VM hangs at a login shell. Kill
+# anything still rooted in the chroot first; this teardown runs with root
+# '/', so it never matches (and can't kill) itself.
+for p in /proc/[0-9]*; do
+    [ -e "$p/root" ] || continue
+    case "$(readlink "$p/root" 2>/dev/null)" in
+        /mnt|/mnt/*) kill -9 "${p#/proc/}" 2>/dev/null || true ;;
+    esac
+done
+sync
+sleep 1
+
+# Lazy fallback only as a last resort; the kill above should let the plain
+# umount succeed, which matters because e2fsck runs on /dev/vda next.
+umount /tmp/postinstall || umount -l /tmp/postinstall || true
+umount /mnt/dev  || umount -l /mnt/dev  || true
+umount /mnt/proc || umount -l /mnt/proc || true
+umount /mnt/sys  || umount -l /mnt/sys  || true
+umount /mnt      || umount -l /mnt      || true
 sync
 
 # Same integrity gate as the AC pipeline: never promote an image whose
