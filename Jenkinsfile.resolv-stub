@@ -51,8 +51,14 @@ pipeline {
 
         stage('Commit binary') {
             steps {
+                // The SCM credential is only bound during Checkout SCM; the
+                // push runs in a plain sh step, so load the same SSH key via
+                // sshagent. kube-builder-a is an ephemeral pod with no
+                // known_hosts, hence accept-new.
+                sshagent(credentials: ['993ae120-54c2-45af-bdd0-2303d982cac7']) {
                 sh '''
                     set -e
+                    export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new"
                     git config user.name "Renaud Deraison"
                     git config user.email "renaud@secl.io"
                     git add "$STUB"
@@ -71,6 +77,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
                         git push origin HEAD:refs/heads/${GIT_BRANCH#*/}
                     fi
                 '''
+                }
             }
         }
     }
