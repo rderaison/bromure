@@ -153,9 +153,10 @@ struct CodingTasksSection: View {
         return parts.joined(separator: " · ")
     }
 
-    /// Red when any running task's agent needs the user.
-    private var needsAttention: Bool {
-        store.tasks(in: .inProgress).contains { task in
+    /// What the badge counts: running tasks whose agent is waiting on the
+    /// user right now.
+    private var attentionCount: Int {
+        store.tasks(in: .inProgress).filter { task in
             guard let slug = task.branchSlug,
                   let entry = model.entries.first(where: { $0.id == task.profileID })
             else { return false }
@@ -163,7 +164,7 @@ struct CodingTasksSection: View {
                 AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
                     && $0.agentStatus == .needsInput
             }
-        }
+        }.count
     }
 
     var body: some View {
@@ -180,14 +181,6 @@ struct CodingTasksSection: View {
                 .buttonStyle(.plain)
                 .help(NSLocalizedString("Open the coding board (⇧⌘T)", comment: ""))
                 Spacer()
-                Button(action: onShowBoard) {
-                    Image(systemName: "rectangle.split.3x1")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(model.taskBoardSelected
-                                         ? Color.accentColor : .secondary)
-                }
-                .buttonStyle(.plain)
-                .help(NSLocalizedString("Coding board", comment: ""))
             }
             .padding(.leading, 8)
             .padding(.trailing, 6)
@@ -198,12 +191,13 @@ struct CodingTasksSection: View {
                 HStack(spacing: 8) {
                     Image(systemName: "checklist")
                         .font(.system(size: 11))
-                        .foregroundStyle(needsAttention ? .red : .secondary)
+                        .foregroundStyle(attentionCount > 0 ? .red : .secondary)
                     Text(statusLine)
                         .font(.system(size: 12))
                         .foregroundStyle(model.taskBoardSelected ? .primary : .secondary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
+                    SidebarAttentionBadge(count: attentionCount)
                 }
                 .padding(.vertical, 4)
                 .padding(.horizontal, 6)
@@ -632,6 +626,21 @@ private struct TaskEditorSheet: View {
     @State private var preview = false
     @State private var validationExpanded = true
 
+    /// A persistent caption above a control — TextFields only show their
+    /// title as disappearing placeholder text, which leaves a prefilled
+    /// field (like the "~" start path) unlabeled. Same pattern as the
+    /// automation editor.
+    @ViewBuilder
+    private func captioned(_ title: String,
+                           @ViewBuilder _ content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+            content()
+        }
+    }
+
     private var selectedProfile: Profile? {
         profiles.first { $0.id == task.profileID }
     }
@@ -662,28 +671,38 @@ private struct TaskEditorSheet: View {
                 .font(.system(size: 14, weight: .semibold))
                 .textFieldStyle(.roundedBorder)
 
-            HStack(spacing: 10) {
-                Picker(NSLocalizedString("Workspace", comment: ""),
-                       selection: $task.profileID) {
-                    ForEach(profiles) { Text($0.name).tag($0.id) }
-                }
-                .frame(maxWidth: 230)
-                .onChange(of: task.profileID) {
-                    if !toolChoices.contains(where: { $0.tool == task.tool }),
-                       let primary = selectedProfile?.tool {
-                        task.tool = primary
+            HStack(alignment: .top, spacing: 12) {
+                captioned(NSLocalizedString("Workspace", comment: "")) {
+                    Picker("", selection: $task.profileID) {
+                        ForEach(profiles) { Text($0.name).tag($0.id) }
+                    }
+                    .labelsHidden()
+                    .onChange(of: task.profileID) {
+                        if !toolChoices.contains(where: { $0.tool == task.tool }),
+                           let primary = selectedProfile?.tool {
+                            task.tool = primary
+                        }
                     }
                 }
-                Picker(NSLocalizedString("Agent", comment: ""), selection: $task.tool) {
-                    ForEach(toolChoices) { spec in
-                        Text(spec.tool.displayName).tag(spec.tool)
+                .frame(maxWidth: 220)
+                captioned(NSLocalizedString("Agent", comment: "")) {
+                    Picker("", selection: $task.tool) {
+                        ForEach(toolChoices) { spec in
+                            Text(spec.tool.displayName).tag(spec.tool)
+                        }
                     }
+                    .labelsHidden()
                 }
-                .frame(maxWidth: 180)
-                TextField(NSLocalizedString("Repository path", comment: ""),
-                          text: $task.repoPath, prompt: Text(verbatim: "~/my-repo"))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                .frame(maxWidth: 160)
+                captioned(NSLocalizedString("Start the agent in — a folder inside the workspace",
+                                            comment: "task editor")) {
+                    TextField("", text: $task.repoPath, prompt: Text(verbatim: "~/my-repo"))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+                        .help(NSLocalizedString(
+                            "A path inside the workspace VM. \"~\" is the home folder (/home/ubuntu). When it's a git repository, the task runs in its own worktree and branch there.",
+                            comment: "task editor"))
+                }
             }
 
             HStack {

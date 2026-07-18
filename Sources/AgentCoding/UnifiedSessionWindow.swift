@@ -413,11 +413,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onDelete:    { [weak self] id in self?.acDelegate?.sidebarDeleteProfile(id) },
             onNewProfile: { [weak self] in self?.acDelegate?.openEditorWindow(editing: nil) },
             automationStore: acDelegate.scheduledAutomationStore,
-            onSelectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
             onNewAutomation:    { [weak self] in self?.showAutomationEditor(nil) },
-            onRunAutomation:    { [weak self] id in self?.acDelegate?.runAutomationNow(id) },
-            onToggleAutomation: { [weak self] id in self?.acDelegate?.toggleAutomation(id) },
-            onDeleteAutomation: { [weak self] id in self?.acDelegate?.confirmDeleteAutomation(id) },
             onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
             taskStore: acDelegate.codingTaskStore,
             onShowTaskBoard: { [weak self] in self?.showTaskBoard() })
@@ -1427,6 +1423,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         self?.acDelegate?.scheduledAutomationStore.acknowledge(id)
                     }))
             let host = NSHostingView(rootView: view)
+            // The board's SwiftUI max-width must never resize the WINDOW —
+            // same required-constraint gotcha as the file pane (sizingOptions).
+            host.sizingOptions = []
             host.translatesAutoresizingMaskIntoConstraints = false
             kanbanSlot.addSubview(host)
             NSLayoutConstraint.activate([
@@ -1495,6 +1494,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         self?.acDelegate?.codingTaskEngine.validate(task.id)
                     }))
             let host = NSHostingView(rootView: view)
+            host.sizingOptions = []
             host.translatesAutoresizingMaskIntoConstraints = false
             taskBoardSlot.addSubview(host)
             NSLayoutConstraint.activate([
@@ -1748,11 +1748,7 @@ struct SessionSidebar: View {
     /// Scheduled automations — the third sidebar group, after the
     /// workspace rows.
     var automationStore: ScheduledAutomationStore
-    let onSelectAutomation: (UUID) -> Void
     let onNewAutomation: () -> Void
-    let onRunAutomation: (UUID) -> Void
-    let onToggleAutomation: (UUID) -> Void
-    let onDeleteAutomation: (UUID) -> Void
     /// Open the automation kanban board as the stage surface.
     let onShowAutomationBoard: () -> Void
     /// Coding-task board (host window only — nil hides the Tasks section).
@@ -1795,6 +1791,19 @@ struct SessionSidebar: View {
                         onRemoveCell: onRemoveGridCell,
                         onFocusCell: onFocusGridCell,
                         onDropPayload: onDropGridPayload)
+                    // The boards live right under the Grid: they're global
+                    // surfaces like it, not per-workspace rows.
+                    AutomationsSection(
+                        store: automationStore,
+                        model: model,
+                        onNew: onNewAutomation,
+                        onShowBoard: onShowAutomationBoard)
+                    if let taskStore {
+                        CodingTasksSection(
+                            store: taskStore,
+                            model: model,
+                            onShowBoard: onShowTaskBoard)
+                    }
                     ForEach(model.profileRows) { row in
                         VMSection(
                             row: row,
@@ -1819,21 +1828,6 @@ struct SessionSidebar: View {
                             onReset: onReset,
                             onDelete: onDelete,
                             onAddAllToGrid: onAddAllToGrid)
-                    }
-                    AutomationsSection(
-                        store: automationStore,
-                        model: model,
-                        onSelect: onSelectAutomation,
-                        onNew: onNewAutomation,
-                        onRunNow: onRunAutomation,
-                        onToggle: onToggleAutomation,
-                        onDelete: onDeleteAutomation,
-                        onShowBoard: onShowAutomationBoard)
-                    if let taskStore {
-                        CodingTasksSection(
-                            store: taskStore,
-                            model: model,
-                            onShowBoard: onShowTaskBoard)
                     }
                 }
                 .padding(.horizontal, 8)

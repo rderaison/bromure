@@ -1924,6 +1924,7 @@ final class RemoteHostWindow: NSWindow {
                     openRun: { [weak self] run in self?.runWindowManager.open(run: run) },
                     acknowledge: { c.acknowledgeRun($0) }))
             let host = NSHostingView(rootView: view)
+            host.sizingOptions = []   // never let board sizing resize the mirror window
             host.translatesAutoresizingMaskIntoConstraints = false
             kanbanHost = host
         }
@@ -2023,6 +2024,7 @@ final class RemoteHostWindow: NSWindow {
                         c.taskCommand(task.id, "validate")
                     }))
             let host = NSHostingView(rootView: view)
+            host.sizingOptions = []
             host.translatesAutoresizingMaskIntoConstraints = false
             taskBoardHost = host
         }
@@ -2520,11 +2522,7 @@ final class RemoteHostWindow: NSWindow {
             onDelete: { _ in },
             onNewProfile: { [weak self] in self?.createWorkspace() },
             automationStore: c.automationStore,
-            onSelectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
             onNewAutomation: { [weak self] in self?.showAutomationEditor(nil) },
-            onRunAutomation: { [weak self] id in self?.controller.runAutomation(id) },
-            onToggleAutomation: { [weak self] id in self?.controller.toggleAutomation(id) },
-            onDeleteAutomation: { [weak self] id in self?.controller.deleteAutomation(id) },
             onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
             taskStore: c.taskStore,
             onShowTaskBoard: { [weak self] in self?.showTaskBoard() })
