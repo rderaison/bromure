@@ -1206,9 +1206,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let tab = pane(for: id)?.model.tabs.first(where: { $0.index == index }) else { return }
         tab.agentStatus = status
         // A finished Claude tab may be an automation run — the engine saves
-        // its transcript and closes the tab if so.
+        // its transcript and closes the tab if so — or a coding task, which
+        // moves to Testing.
         if status == .done {
             scheduledAutomationEngine.agentFinished(
+                profileID: id, worktreeBranch: tab.worktreeBranch)
+            codingTaskEngine.agentFinished(
                 profileID: id, worktreeBranch: tab.worktreeBranch)
         }
     }
@@ -1262,6 +1265,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     let scheduledAutomationStore = ScheduledAutomationStore()
     private(set) lazy var scheduledAutomationEngine =
         ScheduledAutomationEngine(store: scheduledAutomationStore, delegate: self)
+
+    /// Coding kanban (sidebar "Tasks"): agent-driven tasks flowing Backlog →
+    /// In Progress → Testing → Done through git worktrees.
+    let codingTaskStore = CodingTaskStore()
+    private(set) lazy var codingTaskEngine =
+        CodingTaskEngine(store: codingTaskStore, delegate: self)
 
     /// Profiles created with `vm run --rm`: deleted (profile + disk) when their
     /// VM stops, mirroring `docker run --rm`.
@@ -2266,6 +2275,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     else { return ["error": "unknown run"] }
                     self.openAutomationRun(run)
                     window = self.automationRunWindows.window(for: runID)
+                case "tasks":
+                    // Coding-task board as the stage surface.
+                    self.unifiedWindow?.showTaskBoard()
+                    window = self.unifiedWindow
+                case let w where w.hasPrefix("review:"):
+                    // A task's review window ("review:<task-uuid>").
+                    guard let taskID = UUID(uuidString: String(w.dropFirst(7))),
+                          self.codingTaskStore.task(taskID) != nil
+                    else { return ["error": "unknown task"] }
+                    self.taskReviewWindows.open(taskID: taskID)
+                    window = self.taskReviewWindows.window(for: taskID)
                 default:       window = self.unifiedWindow
                 }
                 return self.debugRenderWindow(window, to: path)
@@ -2509,6 +2529,57 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 else { return false }
                 self.scheduledAutomationStore.acknowledge(runID)
                 return true
+            }
+        }
+        server.onListTasks = { [weak self] in
+            MainActor.assumeIsolated {
+                ["tasks": self?.codingTaskStore.tasks.compactMap(Self.codableToDict) ?? []]
+            }
+        }
+        server.onUpsertTask = { [weak self] doc in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let data = try? JSONSerialization.data(withJSONObject: doc)
+                else { return false }
+                let dec = JSONDecoder()
+                dec.dateDecodingStrategy = .iso8601
+                guard let task = try? dec.decode(CodingTask.self, from: data) else { return false }
+                self.codingTaskStore.upsert(task)
+                return true
+            }
+        }
+        server.onTaskCommand = { [weak self] id, action, body in
+            MainActor.assumeIsolated {
+                guard let self else { return ["error": "no app"] }
+                guard self.codingTaskStore.task(id) != nil else { return ["error": "unknown task"] }
+                switch action {
+                case "start":
+                    self.codingTaskEngine.start(id)
+                case "send-back":
+                    Task { @MainActor in await self.codingTaskEngine.sendBack(id) }
+                case "merge":
+                    self.codingTaskEngine.merge(id)
+                case "to-testing":
+                    self.codingTaskEngine.moveToTesting(id)
+                case "to-in-progress":
+                    self.codingTaskEngine.moveToInProgress(id)
+                case "close-no-merge":
+                    self.codingTaskEngine.closeWithoutMerge(id)
+                case "comment":
+                    guard let text = body["text"] as? String, !text.isEmpty else {
+                        return ["error": "text required"]
+                    }
+                    self.codingTaskStore.mutate(id) {
+                        $0.comments.append(ReviewComment(
+                            text: text, file: body["file"] as? String))
+                    }
+                case "delete":
+                    self.codingTaskStore.remove(id)
+                default:
+                    return ["error": "unknown action", "action": action]
+                }
+                let stage = self.codingTaskStore.task(id)?.stage.rawValue ?? "deleted"
+                return ["ok": true, "stage": stage]
             }
         }
         server.onGuestFileOp = { [weak self] idOrName, op, timeout in
@@ -6690,6 +6761,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case "finish":
             guard args.count >= 1 else { return false }   // worktree branch
             name = "automation-finish"; encoded = [b64(args[0])]
+        case "task-resume":
+            // Coding board review round: reopen the agent on an existing
+            // worktree with a follow-up prompt.
+            guard args.count >= 6 else { return false }   // root, branch, parent, display, tool, prompt
+            name = "task-resume"
+            let prompt = args[5].isEmpty ? "-" : b64(args[5])
+            encoded = args.prefix(5).map(b64) + [prompt]
         case "merge":
             guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
             name = "worktree-merge"; encoded = args.prefix(5).map(b64)
@@ -6996,6 +7074,50 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func openAutomationRun(_ run: AutomationRunRecord) {
         automationRunWindows.open(run: run)
+    }
+
+    /// Review windows for the coding board's Testing cards.
+    private(set) lazy var taskReviewWindows = TaskReviewWindowManager(
+        context: TaskReviewWindowManager.Context(
+            store: { [weak self] in self?.codingTaskStore },
+            fetchReview: { [weak self] task in
+                await self?.fetchTaskReview(task)
+            },
+            openTerminal: { [weak self] task in
+                guard let self, let slug = task.branchSlug else { return }
+                self.unifiedWindow?.focusWorktreeTab(
+                    profileID: task.profileID, slug: slug)
+            },
+            accentHex: { [weak self] id in
+                self?.profile(for: id)?.color.hexInUI ?? "#888888"
+            },
+            workspaceName: { [weak self] id in
+                self?.profile(for: id)?.name ?? ""
+            },
+            sendBack: { [weak self] taskID in
+                guard let self else { return }
+                Task { @MainActor in await self.codingTaskEngine.sendBack(taskID) }
+            },
+            merge: { [weak self] taskID in
+                self?.codingTaskEngine.merge(taskID)
+            },
+            addComment: { [weak self] taskID, text, file in
+                self?.codingTaskStore.mutate(taskID) {
+                    $0.comments.append(ReviewComment(text: text, file: file))
+                }
+            }))
+
+    /// The review window's data: commits, status, and full diff of the
+    /// task's branch against its parent — read live from the guest so it
+    /// always reflects the worktree as it is right now (including work the
+    /// agent hasn't committed).
+    func fetchTaskReview(_ task: CodingTask) async -> TaskReviewData? {
+        guard let wt = task.worktreeDir, !wt.isEmpty,
+              let parent = task.parentBranch, !parent.isEmpty else { return nil }
+        let cmd = TaskReviewData.guestCommand(worktreeDir: wt, parent: parent)
+        guard let out = try? await guestExec(profileID: task.profileID,
+                                             command: cmd, timeout: 30) else { return nil }
+        return TaskReviewData.parse(out)
     }
 
     /// Copy a finished automation run's Claude transcript out of the guest

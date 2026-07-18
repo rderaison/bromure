@@ -1919,6 +1919,41 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
     _wt_registry_add(repo_name, branch, parent_branch, display, tool)
 
 
+def _task_resume(main_root, branch, parent, display, tool, prompt_b64):
+    """Coding-board review feedback: reopen an agent tab in an EXISTING
+    worktree checkout (no new worktree) with a follow-up prompt. Yolo —
+    a task run is unattended until its next review. The host only sends
+    this when the task's tab is gone; a live tab gets the feedback typed
+    into its session instead."""
+    if prompt_b64 == "-":
+        prompt_b64 = ""
+    wt_dir = ""
+    cur = ""
+    for line in _capture(["git", "-C", main_root, "worktree", "list",
+                          "--porcelain"]).splitlines():
+        if line.startswith("worktree "):
+            cur = line.split(" ", 1)[1]
+        elif line == "branch refs/heads/" + branch:
+            wt_dir = cur
+            break
+    if not wt_dir or not os.path.isdir(wt_dir):
+        worktree_err("task-resume: no worktree checkout for %s" % branch)
+        return
+    env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    if _YOLO_FLAGS.get(tool):
+        env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
+        _preaccept_yolo(tool)
+    win = _new_window(command="bash -l", cwd=wt_dir, env=env)
+    if not win:
+        worktree_err("task-resume: could not open a tab for %s" % branch)
+        return
+    _set_window_option(win, "@worktree", branch)
+    _set_window_option(win, "@parent_branch", parent)
+    _set_window_option(win, "@root_repo", main_root)
+    _set_window_option(win, "@label", tool)
+    _set_window_option(win, "@display", display)
+
+
 def _automation_tab(cwd, display, tool, prompt_b64):
     """Plain agent tab for an automation whose path isn't a git repo: same
     launch env as a worktree tab, no git anything. Always yolo — an
@@ -2745,6 +2780,12 @@ def _dispatch_command(action, arg):
     elif action == "automation-finish":
         f = _fields(arg, 1)
         _bg(_automation_finish, _b64d(f[0]))
+    elif action == "task-resume":
+        # Coding board: reopen the agent in an existing worktree with a
+        # follow-up prompt. Fields 1-5 base64, field 6 the raw prompt b64.
+        f = _fields(arg, 6)
+        _bg(_task_resume, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
+            _b64d(f[3]), _b64d(f[4]), f[5])
     elif action == "worktree-merge":
         f = _fields(arg, 5)
         _bg(_worktree_merge, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),

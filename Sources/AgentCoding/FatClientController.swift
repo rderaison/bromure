@@ -110,7 +110,12 @@ final class RemoteHostController {
         dataDir = base
         gridStore = GridLayoutStore(saveURL: base.appendingPathComponent("grid-layout.json"))
         automationStore = ScheduledAutomationStore(fileURL: base.appendingPathComponent("automations.json"))
+        taskStore = CodingTaskStore(fileURL: base.appendingPathComponent("tasks.json"))
     }
+
+    /// Mirror of the remote coding-task board (read model; edits ride the
+    /// tunnel and the mirror confirms on poll).
+    let taskStore: CodingTaskStore
 
     /// Per-host client-side data dir (mirror JSONs, fetched-transcript cache).
     let dataDir: URL
@@ -203,6 +208,7 @@ final class RemoteHostController {
         applyWorkspaces(workspaces, vms: vms)
         applyGrid(grid)
         applyAutomations(autos)
+        applyTasks((snapshot["tasks"] as? [String: Any]) ?? [:])
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         revision &+= 1
         if revision == 1 {
@@ -482,6 +488,15 @@ final class RemoteHostController {
         let nextFires = ((autos["nextFires"] as? [String: String]) ?? [:])
             .compactMapValues { iso.date(from: $0) }
         automationStore.mirror(automations: automations, runs: runs, nextFires: nextFires)
+    }
+
+    private func applyTasks(_ payload: [String: Any]) {
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let tasks = ((payload["tasks"] as? [[String: Any]]) ?? []).compactMap { dict -> CodingTask? in
+            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+            return try? dec.decode(CodingTask.self, from: data)
+        }
+        taskStore.mirror(tasks: tasks)
     }
 
     // MARK: Actions (client → remote), routed over the tunnel
@@ -855,6 +870,18 @@ final class RemoteHostController {
     /// (the acknowledged state lives on the host; the mirror confirms on poll).
     func acknowledgeRun(_ id: UUID) {
         send("POST", "/automation-runs/\(ControlClient.encodeSegment(id.uuidString))/acknowledge")
+    }
+
+    // Coding-board verbs, over the tunnel; the mirror confirms on poll.
+    func taskCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
+        send("POST", "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
+    }
+    func deleteTask(_ id: UUID) {
+        send("DELETE", "/tasks/\(ControlClient.encodeSegment(id.uuidString))")
+    }
+    func upsertTask(_ task: CodingTask) {
+        guard let doc = ACAppDelegate.codableToDict(task) else { return }
+        send("POST", "/tasks", body: doc)
     }
 
     /// Fetch a run's archived transcript from the host, over the tunnel.
@@ -1879,6 +1906,7 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.automationBoardSelected = true
         gridView?.removeFromSuperview()
         unmountTerminal()
+        clearTaskBoard()
         clearVMDashboard()
         clearDockerDashboard()
         hideShownBrowser()
@@ -1906,6 +1934,87 @@ final class RemoteHostWindow: NSWindow {
         guard controller.listModel.automationBoardSelected else { return }
         controller.listModel.automationBoardSelected = false
         kanbanHost?.removeFromSuperview()
+    }
+
+    // MARK: Coding-task board (mirrors the local stage surface)
+
+    private var taskBoardHost: NSHostingView<CodingKanbanView>?
+
+    /// Review windows for the mirrored board: the diff is read from the
+    /// remote guest over the tunnel; comments and stage moves POST to the
+    /// host and the mirror confirms on poll.
+    private lazy var taskReviewWindows = TaskReviewWindowManager(
+        context: TaskReviewWindowManager.Context(
+            store: { [weak self] in self?.controller.taskStore },
+            fetchReview: { [weak self] task in
+                guard let self, let wt = task.worktreeDir, !wt.isEmpty,
+                      let parent = task.parentBranch, !parent.isEmpty else { return nil }
+                let cmd = TaskReviewData.guestCommand(worktreeDir: wt, parent: parent)
+                guard let out = try? await self.controller.guestExec(
+                    task.profileID, command: cmd, timeout: 30) else { return nil }
+                return TaskReviewData.parse(out)
+            },
+            openTerminal: { [weak self] task in self?.jumpToTask(task) },
+            accentHex: { [weak self] id in
+                self?.controller.profile(for: id)?.color.hexInUI ?? "#888888"
+            },
+            workspaceName: { [weak self] id in
+                self?.controller.profile(for: id)?.name ?? ""
+            },
+            sendBack: { [weak self] id in self?.controller.taskCommand(id, "send-back") },
+            merge: { [weak self] id in self?.controller.taskCommand(id, "merge") },
+            addComment: { [weak self] id, text, file in
+                var body: [String: Any] = ["text": text]
+                if let file { body["file"] = file }
+                self?.controller.taskCommand(id, "comment", body: body)
+            }))
+
+    private func jumpToTask(_ task: CodingTask) {
+        guard let slug = task.branchSlug,
+              let tab = controller.tabsModel(for: task.profileID)?.tabs.first(where: {
+                  AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
+              }) else { return }
+        showWorkspace(task.profileID, window: tab.index)
+        makeKeyAndOrderFront(nil)
+    }
+
+    func showTaskBoard() {
+        controller.listModel.gridSelected = false
+        controller.listModel.selectedID = nil
+        controller.listModel.taskBoardSelected = true
+        gridView?.removeFromSuperview()
+        unmountTerminal()
+        clearAutomationBoard()
+        clearVMDashboard()
+        clearDockerDashboard()
+        hideShownBrowser()
+        if taskBoardHost == nil {
+            let c = controller
+            let view = CodingKanbanView(
+                store: c.taskStore,
+                model: c.listModel,
+                profilesProvider: { c.profiles },
+                actions: CodingKanbanView.Actions(
+                    start: { c.taskCommand($0, "start") },
+                    openReview: { [weak self] id in self?.taskReviewWindows.open(taskID: id) },
+                    jumpToRun: { [weak self] task in self?.jumpToTask(task) },
+                    moveToTesting: { c.taskCommand($0, "to-testing") },
+                    backToInProgress: { c.taskCommand($0, "to-in-progress") },
+                    merge: { c.taskCommand($0, "merge") },
+                    closeNoMerge: { c.taskCommand($0, "close-no-merge") },
+                    delete: { c.deleteTask($0) },
+                    save: { c.upsertTask($0) }))
+            let host = NSHostingView(rootView: view)
+            host.translatesAutoresizingMaskIntoConstraints = false
+            taskBoardHost = host
+        }
+        mount(taskBoardHost!)
+    }
+
+    private func clearTaskBoard() {
+        guard controller.listModel.taskBoardSelected else { return }
+        controller.listModel.taskBoardSelected = false
+        taskBoardHost?.removeFromSuperview()
     }
 
     // MARK: E2E debug control surface (POST /debug/fatclient; debug-gated)
@@ -1951,6 +2060,21 @@ final class RemoteHostWindow: NSWindow {
             selectWorkspaceName(id)
             return ["ok": true, "selectedID": controller.listModel.selectedID?.uuidString ?? "",
                     "dashboardShown": shownDashboard?.id == id]
+        case "coding-board":
+            // Show the mirrored coding board and report its column counts.
+            // Optional "shot" writes an offscreen PNG of the window.
+            showTaskBoard()
+            let tasks = controller.taskStore.tasks
+            if let shot = p["shot"] as? String {
+                contentView?.layoutSubtreeIfNeeded()
+                writeSnapshot(to: shot)
+            }
+            return ["ok": true,
+                    "boardShown": controller.listModel.taskBoardSelected,
+                    "backlog": tasks.filter { $0.stage == .backlog }.count,
+                    "inProgress": tasks.filter { $0.stage == .inProgress }.count,
+                    "testing": tasks.filter { $0.stage == .testing }.count,
+                    "done": tasks.filter { $0.stage == .done }.count]
         case "automation-board":
             // Show the mirrored kanban board and report its column counts —
             // the FC-board E2E assertion surface. Optional "shot" writes an
@@ -2383,7 +2507,9 @@ final class RemoteHostWindow: NSWindow {
             onRunAutomation: { [weak self] id in self?.controller.runAutomation(id) },
             onToggleAutomation: { [weak self] id in self?.controller.toggleAutomation(id) },
             onDeleteAutomation: { [weak self] id in self?.controller.deleteAutomation(id) },
-            onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() })
+            onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
+            taskStore: c.taskStore,
+            onShowTaskBoard: { [weak self] in self?.showTaskBoard() })
     }
 
     // MARK: Stage
@@ -2393,6 +2519,7 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.selectedID = nil
         unmountTerminal()
         clearAutomationBoard()
+        clearTaskBoard()
         clearVMDashboard()
         clearDockerDashboard()
         // The Grid has no browser pane — collapse any shown browser (it stays
@@ -2424,6 +2551,7 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.selectedID = id
         gridView?.removeFromSuperview()
         clearAutomationBoard()
+        clearTaskBoard()
         clearDockerDashboard()
         unmountTerminal()
         showVMDashboard(id)
@@ -2436,6 +2564,7 @@ final class RemoteHostWindow: NSWindow {
         // Detach the grid so its surfaces don't fight for the stage.
         gridView?.removeFromSuperview()
         clearAutomationBoard()
+        clearTaskBoard()
         clearDockerDashboard()
         // Same gate as the local window's `selectRow`: an off/suspended VM has
         // no terminal to attach — mounting one anyway left the login greeting
@@ -2518,6 +2647,7 @@ final class RemoteHostWindow: NSWindow {
         gridView?.removeFromSuperview()
         unmountTerminal()
         clearAutomationBoard()
+        clearTaskBoard()
         clearVMDashboard()
         if let prev = dockerShownFor, prev != id {
             controller.setDockerWatch(prev, on: false)

@@ -266,9 +266,9 @@ struct AutomationKanbanView: View {
     }
 }
 
-// MARK: - Column container
+// MARK: - Column container (shared with the coding board)
 
-private struct KanbanColumn<Content: View>: View {
+struct KanbanColumn<Content: View>: View {
     let title: String
     let systemImage: String
     let count: Int
@@ -320,7 +320,7 @@ private struct KanbanColumn<Content: View>: View {
 // MARK: - Cards
 
 /// Shared card chrome: rounded, hairline border, hover-highlight.
-private struct CardChrome: ViewModifier {
+struct CardChrome: ViewModifier {
     var borderTint: Color = .clear
     @State private var hovering = false
 

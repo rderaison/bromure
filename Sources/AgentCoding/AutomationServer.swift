@@ -70,6 +70,12 @@ final class ACAutomationServer {
     var onFatClientDebug: ((_ params: [String: Any]) -> [String: Any])?
     /// Fat-client board: dismiss a failed/blocked run from Needs Attention.
     var onAcknowledgeRun: ((_ runID: UUID) -> Bool)?
+    /// Coding board: list tasks / upsert a task doc.
+    var onListTasks: (() -> [String: Any])?
+    var onUpsertTask: ((_ doc: [String: Any]) -> Bool)?
+    /// Coding board verbs: start / send-back / merge / to-testing / comment /
+    /// delete on one task. Returns a JSON-able result ("error" key on failure).
+    var onTaskCommand: ((_ id: UUID, _ action: String, _ body: [String: Any]) -> [String: Any])?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -450,6 +456,7 @@ final class ACAutomationServer {
                     "vms": self.onListVMs?() ?? [],
                     "gridLayout": self.onGetGridLayout?() ?? ["cells": []],
                     "automations": self.onListAutomations?() ?? ["automations": [], "runs": []],
+                    "tasks": self.onListTasks?() ?? ["tasks": []],
                     // Decision prompts awaiting a remote answer (storage
                     // upgrade, drift reset, …) — the fat client renders these
                     // as local alerts and answers via POST /prompts/{id}/answer.
@@ -613,6 +620,33 @@ final class ACAutomationServer {
             let sel = String(p.dropFirst("/remote/keys/".count)).removingPercentEncoding
                 ?? String(p.dropFirst("/remote/keys/".count))
             let r = DispatchQueue.main.sync { self.onRemoteRemoveKey?(sel) ?? ["error": "unavailable"] }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        // Coding board: GET /tasks lists, POST /tasks upserts a task doc,
+        // POST /tasks/{id}/{start|send-back|merge|to-testing|comment} and
+        // DELETE /tasks/{id} drive one task. CLI/E2E/fat-client surface.
+        case ("GET", "/tasks"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let list = DispatchQueue.main.sync { self.onListTasks?() ?? ["tasks": []] }
+            sendResponse(fd: fd, status: 200, body: list)
+
+        case ("POST", "/tasks"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let ok = DispatchQueue.main.sync { self.onUpsertTask?(bodyJSON) ?? false }
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
+
+        case (let m, let p) where p.hasPrefix("/tasks/"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let rest = String(p.dropFirst("/tasks/".count))
+            let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
+            guard let id = parts.first.flatMap({ $0.removingPercentEncoding })
+                .flatMap(UUID.init(uuidString:)) else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad task id"]); return
+            }
+            let action = m == "DELETE" ? "delete" : (parts.count > 1 ? parts[1] : "")
+            let r = DispatchQueue.main.sync {
+                self.onTaskCommand?(id, action, bodyJSON) ?? ["error": "no handler"]
+            }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
         // Fat-client automation RUN actions (id is a run id, not an
