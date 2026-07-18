@@ -32,6 +32,12 @@ final class RemoteHostController {
     /// Per-workspace tab models (live, shared into `VMEntry` by reference so the
     /// sidebar tab rows and the grid update together).
     private var tabsModels: [Profile.ID: TabsModel] = [:]
+    /// Called after a running workspace's tab roster is applied, with the tmux
+    /// window indices that exist right now. The mirror window retires cached
+    /// surfaces for dead windows — a killed window's grouped view session
+    /// silently drifts to another window, so a stale surface (still cached
+    /// under the dead index) would keep showing the wrong terminal.
+    var onTabsApplied: ((Profile.ID, Set<Int>) -> Void)?
     /// Minimal mirrored profiles (id/name/color/tool) — the grid needs a
     /// `Profile` for appearance and the deleted-workspace check.
     private(set) var profilesByID: [Profile.ID: Profile] = [:]
@@ -279,7 +285,11 @@ final class RemoteHostController {
             }
             applyRemotePorts(model, vm)
             applyRemoteDocker(model, vm)
-            applyRemoteTabs(model, (vm["tabs"] as? [[String: Any]]) ?? [])
+            let tabDicts = (vm["tabs"] as? [[String: Any]]) ?? []
+            applyRemoteTabs(model, tabDicts)
+            // An empty roster means tmux isn't up yet (boot), not "all windows
+            // closed" — only reconcile surfaces against a populated list.
+            if !tabDicts.isEmpty { onTabsApplied?(id, Set(model.tabs.map(\.index))) }
             let name = vm["name"] as? String ?? profilesByID[id]?.name ?? "?"
             entries.append(SessionListModel.VMEntry(
                 id: id, name: name,
@@ -1059,6 +1069,9 @@ final class RemoteHostWindow: NSWindow {
         buildLayout()
         buildToolbar()
         showGrid()
+        controller.onTabsApplied = { [weak self] id, live in
+            self?.reconcileSurfaces(for: id, liveWindows: live)
+        }
         controller.start()
         let t = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshStageIfNeeded() }
@@ -2165,12 +2178,25 @@ final class RemoteHostWindow: NSWindow {
             },
             onAddAllToGrid: { _ in },
             onSelect: { [weak self] id in self?.selectWorkspaceName(id) },
-            onSelectTab: { [weak self] id, idx in
-                self?.controller.selectTab(id, index: idx); self?.showWorkspace(id, window: idx)
+            // The sidebar emits model POSITIONS (row order); the remote API and
+            // the surface cache want tmux WINDOW INDICES — map first, exactly
+            // like the local window does in `SessionPane`. Passing the position
+            // straight through mis-selects (and worse, mis-closes) tabs as soon
+            // as window indices have gaps.
+            onSelectTab: { [weak self] id, pos in
+                guard let self, let index = self.windowIndex(for: id, position: pos) else { return }
+                self.controller.selectTab(id, index: index)
+                self.showWorkspace(id, window: index)
             },
             onNewTab: { [weak self] id in self?.controller.newTab(id) },
-            onCloseTab: { [weak self] id, idx in self?.controller.closeTab(id, index: idx) },
-            onTabAction: { [weak self] id, idx, action in self?.controller.worktree(id, index: idx, action: action) },
+            onCloseTab: { [weak self] id, pos in
+                guard let self, let index = self.windowIndex(for: id, position: pos) else { return }
+                self.controller.closeTab(id, index: index)
+            },
+            onTabAction: { [weak self] id, pos, action in
+                guard let self, let index = self.windowIndex(for: id, position: pos) else { return }
+                self.controller.worktree(id, index: index, action: action)
+            },
             onSelectDocker: { [weak self] id in self?.showDockerDashboard(id) },
             onOpenContainer: { [weak self] id, cid in self?.showDockerDashboard(id, container: cid) },
             onDetachVM: { _ in },
@@ -2359,9 +2385,66 @@ final class RemoteHostWindow: NSWindow {
         dockerHost = nil
     }
 
+    /// Sidebar tab callbacks emit model *positions* (row order); the remote
+    /// API and the surface cache speak tmux *window indices*, which diverge
+    /// once windows have been closed (gaps). Map exactly like the local
+    /// window's `SessionPane.switchTo` does.
+    private func windowIndex(for id: Profile.ID, position: Int) -> Int? {
+        guard let tabs = controller.tabsModel(for: id)?.tabs,
+              tabs.indices.contains(position) else { return nil }
+        return tabs[position].index
+    }
+
+    /// Roster reconciliation — the fat-client twin of `SessionPane.applyTabList`'s
+    /// retire pass. Drop cached surfaces whose tmux window is gone: a killed
+    /// window's grouped view session drifts to a neighboring window, and the
+    /// stale surface — still cached under the dead index — would show that
+    /// wrong terminal forever once the index gets reused (e.g. after nightly
+    /// automations close their tabs).
+    private func reconcileSurfaces(for id: Profile.ID, liveWindows: Set<Int>) {
+        termControllers[id]?.retire(windowsNotIn: liveWindows)
+        popOutControllers[id]?.retire(windowsNotIn: liveWindows)
+        // The stage was showing a now-dead window → fall back to the
+        // workspace's active tab instead of leaving an empty stage.
+        if shownWorkspace == id, let idx = shownWindowIndex, !liveWindows.contains(idx) {
+            mountedTermView = nil          // retire already tore the view down
+            shownWindowIndex = nil
+            showWorkspace(id)
+        }
+        // Same fallback for a pop-out window the retire left empty.
+        if let win = popOutWindows[id], let content = win.contentView,
+           content.subviews.isEmpty,
+           let active = controller.tabsModel(for: id)?.activeTab?.index,
+           let view = popOutControllers[id]?.view(forWindow: active) {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(view)
+            NSLayoutConstraint.activate([
+                view.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                view.topAnchor.constraint(equalTo: content.topAnchor),
+                view.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            ])
+        }
+    }
+
     private func mountTerminal(for id: Profile.ID, window idx: Int) {
         guard let profile = controller.profile(for: id) else {
             unmountTerminal(); return
+        }
+        // Never attach a surface to a window the roster doesn't list: the
+        // guest's `select-window` would fail and the grouped view session
+        // would stay on an arbitrary window — cached under this index,
+        // permanently wrong. (An empty roster means the VM is still booting;
+        // window 0 is about to exist, so let that through.) A stale reference
+        // — e.g. a grid cell for a since-closed window — falls back to the
+        // workspace's active tab.
+        if let tabs = controller.tabsModel(for: id)?.tabs, !tabs.isEmpty,
+           !tabs.contains(where: { $0.index == idx }) {
+            if let fallback = controller.tabsModel(for: id)?.activeTab?.index,
+               fallback != idx {
+                mountTerminal(for: id, window: fallback)
+            }
+            return
         }
         // Same workspace + window already mounted → just re-grab keyboard focus
         // (a re-click on the tab should let you type without clicking the pane).
