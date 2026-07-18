@@ -140,6 +140,19 @@ final class RemoteAccessServer {
         // mlkem768x25519-sha256) once upstream adds PQ KEX.
         let bootstrap = ServerBootstrap(group: g)
             .serverChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+            // Reap dead peers. A fat client that vanishes without a FIN
+            // (sleep, force-quit, network drop) used to leave its connection
+            // ESTABLISHED forever — with the session child, its pty, and the
+            // guest tmux view session leaked behind it, each holding fds in
+            // this process. NIOSSH has no protocol-level keepalive (OpenSSH's
+            // ClientAliveInterval), so use the kernel's: first probe after 60s
+            // idle, then every 30s; 4 misses (~3 min total) drops the
+            // connection → channelInactive → SSHPTYSessionHandler tears the
+            // whole session down. Live-but-idle clients just ACK the probes.
+            .childChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_KEEPALIVE), value: 1)
+            .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPALIVE), value: 60)
+            .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPINTVL), value: 30)
+            .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPCNT), value: 4)
             .childChannelInitializer { channel in
                 // Per-connection delegate carrying this peer's IP for the
                 // rate limiter; the throttle state itself is shared.
