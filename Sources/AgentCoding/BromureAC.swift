@@ -2407,6 +2407,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onListTrace = { [weak self] profileKey in self?.automationTraceList(profileKey) ?? [] }
         server.onClearTrace = { [weak self] in self?.mitmEngine?.traceStore.clear() ?? 0 }
+        server.onListTraceRecords = { [weak self] profileKey in self?.automationTraceRecords(profileKey) ?? [] }
+        server.onLoadTraceBody = { [weak self] id, kind in self?.automationLoadTraceBody(id, kind) }
         // Local inference now flows through the MITM (guest → https://bromure.llm
         // → MITM → engine), so the MITM records the trace + drives the thinking
         // indicator exactly like cloud — no separate local trace path (which is
@@ -2560,6 +2562,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "conversation": rec.isConversation,
             ]
         }
+    }
+
+    /// Full `TraceRecord`s (newest first), optionally filtered to one workspace —
+    /// the fat-client Trace Inspector's data source over the tunneled control
+    /// socket. Unlike `automationTraceList` (preview dicts for the CLI) these are
+    /// the real records the local inspector binds to, so the mirror renders 1:1.
+    @MainActor private func automationTraceRecords(_ profileKey: String?) -> [TraceRecord] {
+        guard let engine = mitmEngine else { return [] }
+        let wantID: Profile.ID? = profileKey.flatMap { profileByNameOrID($0)?.id }
+        return engine.traceStore.recent.filter { wantID == nil || $0.profileID == wantID }
+    }
+
+    /// Decrypt one trace record's captured body for the fat client. The record is
+    /// looked up in the in-memory ring by id; the bytes are read back from disk
+    /// and AES-GCM-decrypted with this host's key before crossing the tunnel.
+    @MainActor private func automationLoadTraceBody(_ id: UUID, _ kind: TraceStore.BodyKind) -> Data? {
+        guard let store = mitmEngine?.traceStore,
+              let rec = store.recent.first(where: { $0.id == id }) else { return nil }
+        return store.loadBody(for: rec, kind: kind)
     }
 
     /// Toggle Fusion for a running VM's profile (`vm fusion enable|disable`).

@@ -110,6 +110,14 @@ final class ACAutomationServer {
     // MITM trace inspection (CLI `trace …`) + fusion toggle (`vm fusion`).
     var onListTrace: ((_ profileKey: String?) -> [[String: Any]])?
     var onClearTrace: (() -> Int)?
+    /// Full `TraceRecord`s (not the preview-only summary `onListTrace` gives the
+    /// CLI) — backs the fat-client Trace Inspector, which needs swaps, bodyStored,
+    /// timestamps, etc. to render the same detail pane a local window does.
+    var onListTraceRecords: ((_ profileKey: String?) -> [TraceRecord])?
+    /// Decrypt and return one record's request/response body. The bytes are
+    /// AES-GCM-sealed with *this* host's SecretsVault key, so only the remote can
+    /// read them — it decrypts and ships plaintext over the (encrypted) tunnel.
+    var onLoadTraceBody: ((_ id: UUID, _ kind: TraceStore.BodyKind) -> Data?)?
     var onSetFusion: ((_ idOrName: String, _ engaged: Bool) -> [String: Any])?
     // Local-inference routing (vLLM.md): `vm routing`, `vm hybrid`, `model use`.
     var onSetRouting: ((_ idOrName: String, _ mode: String) -> [String: Any])?
@@ -629,7 +637,7 @@ final class ACAutomationServer {
         case (let m, let p) where p.hasPrefix("/profiles/"):
             handleProfileRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)
 
-        case (let m, let p) where p == "/trace" || p.hasPrefix("/trace?"):
+        case (let m, let p) where p == "/trace" || p.hasPrefix("/trace?") || p.hasPrefix("/trace/"):
             handleTraceRoute(fd: fd, method: m, path: p)
 
         // /sessions/{id} and /sessions/{id}/exec
@@ -972,16 +980,54 @@ final class ACAutomationServer {
             sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
             return
         }
-        // Optional ?profile=<key> filter.
-        var profileKey: String?
+        // Split "/path?a=b&c=d" into the bare path + a decoded query map.
+        let bare: String
+        var query: [String: String] = [:]
         if let qIdx = path.firstIndex(of: "?") {
+            bare = String(path[..<qIdx])
             for pair in path[path.index(after: qIdx)...].split(separator: "&") {
                 let kv = pair.split(separator: "=", maxSplits: 1)
-                if kv.count == 2, kv[0] == "profile" {
-                    profileKey = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                if kv.count == 2 {
+                    query[String(kv[0])] = String(kv[1]).removingPercentEncoding ?? String(kv[1])
                 }
             }
+        } else {
+            bare = path
         }
+        let profileKey = query["profile"]
+
+        // Fat-client Trace Inspector back-channel: full records + decrypted bodies.
+        switch bare {
+        case "/trace/records":
+            guard method == "GET" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let recs = DispatchQueue.main.sync { self.onListTraceRecords?(profileKey) ?? [] }
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let dicts: [[String: Any]] = recs.compactMap { rec in
+                guard let data = try? encoder.encode(rec),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else { return nil }
+                return obj
+            }
+            sendResponse(fd: fd, status: 200, body: ["records": dicts])
+            return
+        case "/trace/body":
+            guard method == "GET" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            guard let idStr = query["id"], let id = UUID(uuidString: idStr),
+                  let kind = query["kind"].flatMap(TraceStore.BodyKind.init(rawValue:)) else {
+                sendResponse(fd: fd, status: 400, body: ["error": "id and kind (request|response) required"]); return
+            }
+            let data = DispatchQueue.main.sync { self.onLoadTraceBody?(id, kind) }
+            sendResponse(fd: fd, status: 200, body: ["body": data?.base64EncodedString() ?? ""])
+            return
+        default:
+            break
+        }
+
         switch method {
         case "GET":
             let recs = DispatchQueue.main.sync { self.onListTrace?(profileKey) ?? [] }

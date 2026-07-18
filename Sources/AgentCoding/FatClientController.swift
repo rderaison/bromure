@@ -652,6 +652,43 @@ final class RemoteHostController {
 
     /// Full profile document for the settings editor (secrets blanked
     /// server-side; blank fields keep their stored value on save).
+    // MARK: Trace inspection (fat-client Trace Inspector, over the tunnel)
+
+    /// Pull the remote's full MITM trace records, optionally scoped to one
+    /// workspace. Decoded from `/trace/records`'s JSON straight into the same
+    /// `TraceRecord` the local inspector binds to. Best-effort: returns [] on any
+    /// transport/HTTP error so the inspector just shows an empty list.
+    func fetchTraceRecords(profileID: Profile.ID?) async -> [TraceRecord] {
+        let host = self.host
+        var path = "/trace/records"
+        if let profileID { path += "?profile=\(seg(profileID))" }
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("GET", path)
+        }.value
+        guard let resp, resp.status == 200,
+              let raw = resp.json["records"] as? [[String: Any]] else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return raw.compactMap { dict in
+            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+            return try? decoder.decode(TraceRecord.self, from: data)
+        }
+    }
+
+    /// Fetch and base64-decode one record's captured body. The remote does the
+    /// AES-GCM decryption (it holds the key); we just move plaintext over the
+    /// already-encrypted tunnel. nil = not captured / decryption failed remotely.
+    func fetchTraceBody(id: UUID, kind: TraceStore.BodyKind) async -> Data? {
+        let host = self.host
+        let path = "/trace/body?id=\(id.uuidString)&kind=\(kind.rawValue)"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("GET", path)
+        }.value
+        guard let resp, resp.status == 200,
+              let b64 = resp.json["body"] as? String, !b64.isEmpty else { return nil }
+        return Data(base64Encoded: b64)
+    }
+
     func fetchProfileDoc(_ id: Profile.ID) async throws -> [String: Any] {
         let host = self.host
         let path = "/profiles/\(seg(id))?full=1"
@@ -824,6 +861,7 @@ struct RemoteToolbarBar: View {
     let controller: RemoteHostController
     let onFiles: (Profile.ID) -> Void
     let onReboot: (Profile.ID) -> Void
+    let onTrace: (Profile.ID) -> Void
     let onSettings: (Profile.ID) -> Void
     let onDetach: (Profile.ID) -> Void
     let onToggleFusion: (Profile.ID, Bool) -> Void
@@ -859,6 +897,7 @@ struct RemoteToolbarBar: View {
                 FusionToggle(model: entry.model) { on in onToggleFusion(entry.id, on) }
                 HeaderIcon(system: "folder", help: "Browse files") { onFiles(entry.id) }
                 HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
+                HeaderIcon(system: "doc.text.magnifyingglass", help: "Inspect trace (⇧⌘I)") { onTrace(entry.id) }
                 HeaderIcon(system: "gearshape", help: "Edit workspace") { onSettings(entry.id) }
                 HeaderIcon(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") { onDetach(entry.id) }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
@@ -963,6 +1002,11 @@ final class RemoteHostWindow: NSWindow {
     /// and prompt to restart when a VM-baked field (network, memory, mounts, …)
     /// changed — the remote applies those only on a fresh launch.
     private var settingsOriginals: [Profile.ID: Profile] = [:]
+    /// The Trace Inspector (MITM proxy logs) — the same `TraceInspectorView` the
+    /// local window opens, backed by a `RemoteTraceStore` that fetches the
+    /// remote's records + decrypted bodies over the tunnel. One per host window.
+    private var traceInspectorWindow: NSWindow?
+    private var remoteTraceStore: RemoteTraceStore?
     /// The "+" new-workspace editor — creates on the remote (`POST /profiles`).
     private var newWorkspaceWindow: NSWindow?
     /// The automation editor window — creates/edits on the remote
@@ -1030,6 +1074,10 @@ final class RemoteHostWindow: NSWindow {
         fileBrowserWindows.removeAll()
         for (_, w) in settingsWindows { w.close() }
         settingsWindows.removeAll()
+        traceInspectorWindow?.close()   // willClose → reapTraceInspector stops polling
+        traceInspectorWindow = nil
+        remoteTraceStore?.stop()
+        remoteTraceStore = nil
         for id in Array(popOutWindows.keys) {
             popOutWindows[id]?.close()   // willClose → reapPopOut retires the controller
         }
@@ -1123,6 +1171,12 @@ final class RemoteHostWindow: NSWindow {
         if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "t",
            let id = shownBrowser, let ctl = browserControllers[id] {
             ctl.newTab("")
+            return true
+        }
+        // ⇧⌘I opens the Trace Inspector, scoped to the workspace in view (else all)
+        // — the local window's shortcut, applied to the remote's traces.
+        if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "i" {
+            openTraceInspector(for: shownWorkspace ?? shownDashboard?.id ?? controller.listModel.selectedID)
             return true
         }
         if mods == [.command, .control] {
@@ -1326,6 +1380,7 @@ final class RemoteHostWindow: NSWindow {
             controller: controller,
             onFiles: { [weak self] id in self?.openFileBrowser(id) },
             onReboot: { [weak self] id in self?.confirmReboot(id) },
+            onTrace: { [weak self] id in self?.openTraceInspector(for: id) },
             onSettings: { [weak self] id in self?.openWorkspaceSettings(id) },
             onDetach: { [weak self] id in self?.popOutWorkspace(id) },
             onToggleFusion: { [weak self] id, on in self?.controller.setFusion(id, engaged: on) },
@@ -1797,6 +1852,18 @@ final class RemoteHostWindow: NSWindow {
             return ["ok": true, "browserOpen": browserOpen.contains(id),
                     "shownBrowser": shownBrowser?.uuidString ?? "",
                     "browserWidth": Double(browserWidthConstraint.constant)]
+        case "open-trace":
+            // `workspace` optional → scope the filter (nil = all workspaces).
+            openTraceInspector(for: resolveID())
+            return ["ok": true, "traceWindowOpen": traceInspectorWindow != nil]
+        case "trace-records":
+            // Read-back after the store's poll lands — record count + hosts so a
+            // test can assert the remote's traces mirrored across the tunnel.
+            let recs = remoteTraceStore?.recent ?? []
+            return ["ok": true,
+                    "count": recs.count,
+                    "hosts": Array(Set(recs.map(\.host))).sorted(),
+                    "traceWindowOpen": traceInspectorWindow != nil]
         default:
             return ["error": "unknown action: \(action)"]
         }
@@ -1864,6 +1931,48 @@ final class RemoteHostWindow: NSWindow {
         popOutWindows[id] = nil
         popOutControllers[id]?.retireAll()
         popOutControllers[id] = nil
+    }
+
+    // MARK: Trace Inspector (MITM proxy logs, fetched over the tunnel)
+
+    /// Open (or refocus) the Trace Inspector for this host. Pass a workspace id to
+    /// pre-scope the filter to it (the toolbar button does), nil for all
+    /// workspaces (the ⇧⌘I shortcut). Mirrors `ACAppDelegate.openTraceInspector`,
+    /// but the store polls the remote instead of reading local disk.
+    func openTraceInspector(for id: Profile.ID?) {
+        let store = remoteTraceStore ?? RemoteTraceStore(controller: controller)
+        remoteTraceStore = store
+        store.start()
+        let view = TraceInspectorView(store: store, profiles: controller.profiles,
+                                      initialProfileFilter: id)
+        if let win = traceInspectorWindow {
+            // Re-host so the filter lands on the workspace the user clicked from.
+            win.contentView = NSHostingView(rootView: view)
+            win.makeKeyAndOrderFront(nil)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 600),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false)
+        win.title = "\(NSLocalizedString("Trace Inspector", comment: "")) — \(controller.host.name)"
+        win.center()
+        win.contentView = NSHostingView(rootView: view)
+        win.isReleasedWhenClosed = false
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: win, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.reapTraceInspector() }
+        }
+        win.makeKeyAndOrderFront(nil)
+        traceInspectorWindow = win
+    }
+
+    /// Stop polling the remote once the inspector window is gone.
+    private func reapTraceInspector() {
+        remoteTraceStore?.stop()
+        remoteTraceStore = nil
+        traceInspectorWindow = nil
     }
 
     // MARK: Browser pane

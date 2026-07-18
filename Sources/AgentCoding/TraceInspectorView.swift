@@ -1,6 +1,25 @@
 import AppKit
 import SwiftUI
 
+/// What the Trace Inspector needs from its backing store, so the same view
+/// renders either the local `TraceStore` (reads disk) or the fat-client
+/// `RemoteTraceStore` (fetches over the SSH-tunneled control socket). Both are
+/// `@Observable`, so SwiftUI tracks `recent` for live updates. Body loads are
+/// `async` because the remote fetch is a round-trip; the local store just wraps
+/// its synchronous disk read.
+@MainActor
+protocol TraceInspectorStore: AnyObject, Observable {
+    var recent: [TraceRecord] { get }
+    func reload()
+    func fetchBody(for record: TraceRecord, kind: TraceStore.BodyKind) async -> Data?
+}
+
+extension TraceStore: TraceInspectorStore {
+    func fetchBody(for record: TraceRecord, kind: BodyKind) async -> Data? {
+        loadBody(for: record, kind: kind)
+    }
+}
+
 /// Trace Inspector: live + historical view of every MITM exchange
 /// the proxy has recorded for any profile that opted into tracing.
 ///
@@ -12,15 +31,15 @@ import SwiftUI
 /// Filter controls at the top: profile, host substring, leak-only.
 /// SwiftUI tracks `store.recent` directly (it's @Observable) so new
 /// records appear without polling.
-struct TraceInspectorView: View {
-    let store: TraceStore
+struct TraceInspectorView<Store: TraceInspectorStore>: View {
+    let store: Store
     let profiles: [Profile]
     /// Pre-fill the profile filter when the window is opened from a
     /// per-profile entry point (e.g. the session window's toolbar
     /// button). nil = "All profiles" by default.
     let initialProfileFilter: UUID?
 
-    init(store: TraceStore, profiles: [Profile],
+    init(store: Store, profiles: [Profile],
          initialProfileFilter: UUID? = nil) {
         self.store = store
         self.profiles = profiles
@@ -35,6 +54,7 @@ struct TraceInspectorView: View {
     @State private var conversationsOnly: Bool = false
     @State private var bodyRequest: Data?
     @State private var bodyResponse: Data?
+    @State private var bodyLoadTask: Task<Void, Never>?
     @State private var detailMode: DetailMode = .conversation
     @FocusState private var listFocused: Bool
 
@@ -442,11 +462,21 @@ struct TraceInspectorView: View {
     }
 
     private func reloadBodies(for rec: TraceRecord) {
+        bodyLoadTask?.cancel()
         guard rec.bodyStored else {
-            bodyRequest = nil; bodyResponse = nil; return
+            bodyRequest = nil; bodyResponse = nil; bodyLoadTask = nil; return
         }
-        bodyRequest  = store.loadBody(for: rec, kind: .request)
-        bodyResponse = store.loadBody(for: rec, kind: .response)
+        // Clear immediately so a slow remote fetch never shows the previous
+        // record's bytes, then load async (a tunnel round-trip for the remote
+        // store; a plain disk read for the local one).
+        bodyRequest = nil; bodyResponse = nil
+        bodyLoadTask = Task {
+            let req = await store.fetchBody(for: rec, kind: .request)
+            let res = await store.fetchBody(for: rec, kind: .response)
+            if Task.isCancelled { return }
+            bodyRequest = req
+            bodyResponse = res
+        }
     }
 
     private func metaCell(_ k: String, _ v: String) -> some View {
