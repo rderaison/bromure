@@ -1251,10 +1251,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         servedBy: servedByMarker)
     }
 
-    /// True iff the request contains the HTTP/1.1 upgrade tokens for
-    /// WebSocket. Both `Upgrade: websocket` and a `Connection` header
-    /// listing `Upgrade` are required by RFC 6455 — but in practice
-    /// either is enough to know we should *not* hand this to URLSession.
+    /// True iff the request is an HTTP/1.1 protocol upgrade of any kind.
+    /// Both `Upgrade: websocket` and a `Connection` header listing
+    /// `Upgrade` are required by RFC 6455 — but in practice either is
+    /// enough to know we should *not* hand this to URLSession.
+    ///
+    /// The `Connection: Upgrade` half is deliberately protocol-agnostic:
+    /// `kubectl exec` upgrades to `SPDY/3.1` (and newer kubectl to
+    /// `v5.channel.k8s.io` over WebSocket). Both must reach the raw pump,
+    /// so do NOT tighten this to require the `websocket` token.
     private func isWebSocketUpgrade(rawRequest: Data) -> Bool {
         guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)),
               let headerStr = String(data: rawRequest.subdata(in: 0..<endRange.lowerBound),
@@ -1307,10 +1312,53 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                         host: String, port: Int,
                                         captureBody: Bool,
                                         onUpstreamMessage: (@Sendable (WSMessage) -> Void)? = nil) async throws -> WebSocketResult {
+        // This path bypasses URLSession, so it must resolve the same
+        // upstream TLS material `ClientCertChallengeDelegate` supplies on
+        // the ordinary request path: the profile's client identity and the
+        // pinned cluster CA. Skipping either is what made `kubectl exec`
+        // (an HTTP upgrade) fail its upstream handshake against a private
+        // API server while `kubectl get` succeeded.
+        let identityEntry = clientIdentities.entry(for: host, profileID: profileID)
+        // Same consent gate the URLSession path applies to the identity, so
+        // an upgrade can't become a way around a prompt that an ordinary
+        // request would raise.
+        if let entry = identityEntry, let credID = entry.consentCredentialID {
+            FileHandle.standardError.write(Data(
+                "[mitm] client-cert use on \(host) (upgrade) gated → consent \(credID)\n".utf8))
+            let allowed = await consent.consent(
+                profileID: profileID,
+                credentialID: credID,
+                credentialDisplayName: entry.consentDisplayName ?? credID,
+                scopeHint: String(format: NSLocalizedString(
+                    "to authenticate with the API server at %@",
+                    comment: ""), host))
+            if !allowed {
+                // Deny with a real HTTP response rather than dropping the
+                // tunnel — an unexplained close surfaces in the guest as
+                // "unexpected EOF", which is precisely the failure this
+                // path used to produce.
+                let body = "Bromure: client-certificate use denied for \(host)\n"
+                let resp = "HTTP/1.1 403 Forbidden\r\n"
+                    + "Content-Type: text/plain\r\n"
+                    + "Content-Length: \(body.utf8.count)\r\n"
+                    + "Connection: close\r\n\r\n" + body
+                try serverTLS.write(Data(resp.utf8))
+                return WebSocketResult(handshakeResponse: Data(resp.utf8),
+                                       transcript: nil,
+                                       clientBytes: rawRequest.count,
+                                       upstreamBytes: 0,
+                                       statusCode: 403)
+            }
+        }
+        let clientIdentity = identityEntry?.identity
+        let pinnedCA = clusterCAs.ca(for: host, profileID: profileID)
+
         let upstreamFD = try connectTCP(host: host, port: port)
         let upstreamTLS: TLSClientStream
         do {
-            upstreamTLS = try TLSClientStream(fd: upstreamFD, peerName: host)
+            upstreamTLS = try TLSClientStream(fd: upstreamFD, peerName: host,
+                                              clientIdentity: clientIdentity,
+                                              pinnedCA: pinnedCA)
             try upstreamTLS.handshake()
         } catch {
             close(upstreamFD)
@@ -2768,65 +2816,6 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
         self.host = host
     }
 
-    /// Accept a server cert that the SSL policy rejected *only* because of
-    /// Apple's 398-day max-validity rule (which can fire on any cert in the
-    /// chain — the long-lived self-signed cluster CA or the API server leaf).
-    ///
-    /// We re-evaluate the same trust (anchors still pinned to the user's
-    /// cluster CA) with a **Basic X.509** policy, which checks chain-to-anchor
-    /// and per-cert temporal validity (expired / not-yet-valid) but does NOT
-    /// apply the SSL-only 398-day span rule. If that passes, the cert really
-    /// does chain to the CA the user pinned for this host and isn't expired.
-    /// Basic X.509 skips hostname binding, so we re-add it ourselves
-    /// (best-effort) against the leaf's SANs — only refusing on a positive
-    /// mismatch, never on a parsing gap.
-    static func acceptPinnedDespiteValidityPeriod(_ trust: SecTrust, host: String) -> Bool {
-        let basic = SecPolicyCreateBasicX509()
-        SecTrustSetPolicies(trust, [basic] as CFArray)
-        var err: CFError?
-        guard SecTrustEvaluateWithError(trust, &err) else { return false }
-        // Index 0 of the evaluated chain is the leaf. (SecTrustGetCertificateAtIndex
-        // was deprecated in macOS 12; SecTrustCopyCertificateChain is the
-        // replacement and returns the full chain leaf-first.)
-        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
-              let leaf = chain.first else { return true }
-        return hostnameMatch(leaf, host: host) != .mismatch
-    }
-
-    private enum HostMatch { case match, mismatch, noSANs }
-
-    /// Best-effort hostname/IP match against the leaf cert's SANs. Returns
-    /// `.noSANs` (treated as acceptable) when we can't read SANs, so a parsing
-    /// limitation never blocks a connection that already chained to the pinned
-    /// CA.
-    private static func hostnameMatch(_ cert: SecCertificate, host: String) -> HostMatch {
-        guard let values = SecCertificateCopyValues(
-                cert, [kSecOIDSubjectAltName] as CFArray, nil) as? [CFString: Any],
-              let san = values[kSecOIDSubjectAltName] as? [CFString: Any],
-              let entries = san[kSecPropertyKeyValue] as? [[CFString: Any]] else {
-            return .noSANs
-        }
-        let target = host.lowercased()
-        let targetIsIP = target.allSatisfy { $0.isNumber || $0 == "." || $0 == ":" }
-        var sawAny = false
-        for entry in entries {
-            guard let value = (entry[kSecPropertyKeyValue] as? String)?.lowercased() else { continue }
-            let label = (entry[kSecPropertyKeyLabel] as? String)?.lowercased() ?? ""
-            sawAny = true
-            if targetIsIP {
-                if label.contains("ip"), value == target { return .match }
-            } else if label.contains("dns") || label.contains("name") {
-                if value == target { return .match }
-                if value.hasPrefix("*.") {
-                    let suffix = value.dropFirst(1)            // ".example.com"
-                    if target.hasSuffix(suffix),
-                       !target.dropLast(suffix.count).contains(".") { return .match }
-                }
-            }
-        }
-        return sawAny ? .mismatch : .noSANs
-    }
-
     func urlSession(_ session: URLSession,
                     didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition,
@@ -2880,39 +2869,9 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
                 completionHandler(.performDefaultHandling, nil)
                 return
             }
-            // Anchor exclusively against the user-supplied CA — the
-            // private k8s root almost never chains to macOS's bundled
-            // roots, and falling back would defeat the override.
-            SecTrustSetAnchorCertificates(trust, [ca] as CFArray)
-            SecTrustSetAnchorCertificatesOnly(trust, true)
-            // Use the SSL policy with hostname binding. BasicX509 alone
-            // would let any cert chained to the same pinned CA satisfy
-            // a request for any hostname under that CA — fine for
-            // single-cert clusters, fatal for any cluster with kubelet /
-            // etcd / sibling-API certs under the same root. Apple's
-            // max-validity / CT restrictions only apply when chaining
-            // to system roots; against a custom anchor with
-            // anchorCertificatesOnly=true the long self-signed cluster
-            // cert lifetimes are accepted.
-            let policy = SecPolicyCreateSSL(true, host as CFString)
-            SecTrustSetPolicies(trust, [policy] as CFArray)
-            var err: CFError?
-            if SecTrustEvaluateWithError(trust, &err) {
-                completionHandler(.useCredential, URLCredential(trust: trust))
-            } else if Self.acceptPinnedDespiteValidityPeriod(trust, host: host) {
-                // The user explicitly pinned this cluster CA, so Apple's
-                // 398-day SSL max-validity policy shouldn't reject the
-                // long-lived self-signed kube-apiserver cert it issued. We
-                // re-checked with a Basic X.509 policy (chain-to-pinned-anchor
-                // + not expired, *without* the SSL-only 398-day rule) plus a
-                // best-effort hostname match, so this isn't a blanket bypass.
-                FileHandle.standardError.write(Data(
-                    "[mitm] \(host): cert chains to the pinned cluster CA (Basic X.509 ok); accepting despite Apple's 398-day SSL max-validity rule\n".utf8))
+            if PinnedClusterTrust.evaluate(trust, ca: ca, host: host) {
                 completionHandler(.useCredential, URLCredential(trust: trust))
             } else {
-                let reason = (err as Error?).map { "\($0)" } ?? "unknown"
-                FileHandle.standardError.write(Data(
-                    "[mitm] trust eval failed for \(host) using registered CA: \(reason)\n".utf8))
                 completionHandler(.cancelAuthenticationChallenge, nil)
             }
 

@@ -1,4 +1,5 @@
 import Foundation
+@preconcurrency import Security
 
 /// Server-side TLS termination over an already-connected socket FD,
 /// using SecureTransport (SSLContext). Yes, SSLContext is deprecated
@@ -105,18 +106,29 @@ final class TLSServerStream: @unchecked Sendable {
 /// Client-side TLS over an already-connected upstream socket FD.
 /// Mirror of `TLSServerStream` but with `clientSide` role and a
 /// peer-domain-name set so SecureTransport sends SNI and validates
-/// the upstream cert against the system trust store.
+/// the upstream cert.
 ///
-/// Used by the WebSocket-upgrade fast-path in `HTTPProxy.swift`,
-/// where URLSession can't represent the raw 101-Switching-Protocols
-/// + bidirectional byte stream that follows.
+/// Used by the HTTP-upgrade fast-path in `HTTPProxy.swift`, where
+/// URLSession can't represent the raw 101-Switching-Protocols +
+/// bidirectional byte stream that follows.
+///
+/// `clientIdentity` and `pinnedCA` mirror what `ClientCertChallengeDelegate`
+/// does for the URLSession path: without them this path can only reach
+/// upstreams that need no mTLS and chain to a system root — which excludes
+/// most k8s API servers, and so excluded `kubectl exec`.
 @available(macOS, deprecated: 10.15, message: "wraps SSLContext deliberately — Network.framework can't take a raw socket FD")
 final class TLSClientStream: @unchecked Sendable {
     private let fd: Int32
     private let ctx: SSLContext
+    private let peerName: String
+    private let pinnedCA: SecCertificate?
 
-    init(fd: Int32, peerName: String) throws {
+    init(fd: Int32, peerName: String,
+         clientIdentity: SecIdentity? = nil,
+         pinnedCA: SecCertificate? = nil) throws {
         self.fd = fd
+        self.peerName = peerName
+        self.pinnedCA = pinnedCA
         guard let ctx = SSLCreateContext(nil, .clientSide, .streamType) else {
             throw MitmError.tlsHandshakeFailed(errSSLInternal)
         }
@@ -136,6 +148,23 @@ final class TLSClientStream: @unchecked Sendable {
             SSLSetPeerDomainName(ctx, cstr, strlen(cstr))
         }
         if status != errSecSuccess { throw MitmError.tlsHandshakeFailed(status) }
+
+        // mTLS: answer the upstream's CertificateRequest with the
+        // profile's identity (k8s client-certificate-data, internal
+        // mTLS APIs).
+        if let clientIdentity {
+            status = SSLSetCertificate(ctx, [clientIdentity] as CFArray)
+            if status != errSecSuccess { throw MitmError.tlsHandshakeFailed(status) }
+        }
+
+        // Pinned CA: stop the handshake after the server cert arrives so
+        // `evaluatePinnedServerTrust` can anchor it at the user's cluster
+        // CA. Without the break, SecureTransport evaluates against the
+        // system trust store and fails a private k8s root outright.
+        if pinnedCA != nil {
+            status = SSLSetSessionOption(ctx, .breakOnServerAuth, true)
+            if status != errSecSuccess { throw MitmError.tlsHandshakeFailed(status) }
+        }
     }
 
     deinit {
@@ -150,9 +179,30 @@ final class TLSClientStream: @unchecked Sendable {
                 return
             case errSSLWouldBlock:
                 continue
+            case errSSLPeerAuthCompleted:
+                // The `errSSLServerAuthCompleted` spelling is a C #define
+                // alias that doesn't import into Swift. Only reachable with
+                // `.breakOnServerAuth`, i.e. when a pinned CA is set.
+                // Evaluate, then resume the handshake.
+                try evaluatePinnedServerTrust()
+                continue
             default:
                 throw MitmError.tlsHandshakeFailed(status)
             }
+        }
+    }
+
+    /// Anchor the upstream's server cert at the pinned cluster CA, using
+    /// the same verdict logic as the URLSession path.
+    private func evaluatePinnedServerTrust() throws {
+        guard let pinnedCA else { return }
+        var trust: SecTrust?
+        let status = SSLCopyPeerTrust(ctx, &trust)
+        guard status == errSecSuccess, let trust else {
+            throw MitmError.tlsHandshakeFailed(status)
+        }
+        guard PinnedClusterTrust.evaluate(trust, ca: pinnedCA, host: peerName) else {
+            throw MitmError.tlsHandshakeFailed(errSSLXCertChainInvalid)
         }
     }
 

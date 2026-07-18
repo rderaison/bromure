@@ -136,6 +136,113 @@ public final class ClusterCATrustRegistry: @unchecked Sendable {
     }
 }
 
+// MARK: - Pinned cluster-CA trust evaluation
+
+/// Server-trust evaluation against a user-pinned cluster CA, shared by
+/// the two upstream TLS paths: `ClientCertChallengeDelegate` (URLSession,
+/// used for ordinary requests) and `TLSClientStream` (the raw
+/// HTTP-upgrade fast path used by `kubectl exec`). Both must reach the
+/// same verdict — a host that `kubectl get` can talk to is a host
+/// `kubectl exec` must be able to talk to.
+public enum PinnedClusterTrust {
+    /// Evaluate `trust` for `host`, anchored exclusively at `ca`.
+    /// Returns true iff the server cert chains to the pinned CA and
+    /// binds to `host`.
+    public static func evaluate(_ trust: SecTrust, ca: SecCertificate, host: String) -> Bool {
+        // Anchor exclusively against the user-supplied CA — the private
+        // k8s root almost never chains to macOS's bundled roots, and
+        // falling back would defeat the override.
+        SecTrustSetAnchorCertificates(trust, [ca] as CFArray)
+        SecTrustSetAnchorCertificatesOnly(trust, true)
+        // Use the SSL policy with hostname binding. BasicX509 alone would
+        // let any cert chained to the same pinned CA satisfy a request for
+        // any hostname under that CA — fine for single-cert clusters, fatal
+        // for any cluster with kubelet / etcd / sibling-API certs under the
+        // same root. Apple's max-validity / CT restrictions only apply when
+        // chaining to system roots; against a custom anchor with
+        // anchorCertificatesOnly=true the long self-signed cluster cert
+        // lifetimes are accepted.
+        let policy = SecPolicyCreateSSL(true, host as CFString)
+        SecTrustSetPolicies(trust, [policy] as CFArray)
+        var err: CFError?
+        if SecTrustEvaluateWithError(trust, &err) { return true }
+        if acceptPinnedDespiteValidityPeriod(trust, host: host) {
+            // The user explicitly pinned this cluster CA, so Apple's 398-day
+            // SSL max-validity policy shouldn't reject the long-lived
+            // self-signed kube-apiserver cert it issued. We re-checked with a
+            // Basic X.509 policy (chain-to-pinned-anchor + not expired,
+            // *without* the SSL-only 398-day rule) plus a best-effort
+            // hostname match, so this isn't a blanket bypass.
+            FileHandle.standardError.write(Data(
+                "[mitm] \(host): cert chains to the pinned cluster CA (Basic X.509 ok); accepting despite Apple's 398-day SSL max-validity rule\n".utf8))
+            return true
+        }
+        let reason = (err as Error?).map { "\($0)" } ?? "unknown"
+        FileHandle.standardError.write(Data(
+            "[mitm] trust eval failed for \(host) using registered CA: \(reason)\n".utf8))
+        return false
+    }
+
+    /// Accept a server cert that the SSL policy rejected *only* because of
+    /// Apple's 398-day max-validity rule (which can fire on any cert in the
+    /// chain — the long-lived self-signed cluster CA or the API server leaf).
+    ///
+    /// We re-evaluate the same trust (anchors still pinned to the user's
+    /// cluster CA) with a **Basic X.509** policy, which checks chain-to-anchor
+    /// and per-cert temporal validity (expired / not-yet-valid) but does NOT
+    /// apply the SSL-only 398-day span rule. If that passes, the cert really
+    /// does chain to the CA the user pinned for this host and isn't expired.
+    /// Basic X.509 skips hostname binding, so we re-add it ourselves
+    /// (best-effort) against the leaf's SANs — only refusing on a positive
+    /// mismatch, never on a parsing gap.
+    static func acceptPinnedDespiteValidityPeriod(_ trust: SecTrust, host: String) -> Bool {
+        let basic = SecPolicyCreateBasicX509()
+        SecTrustSetPolicies(trust, [basic] as CFArray)
+        var err: CFError?
+        guard SecTrustEvaluateWithError(trust, &err) else { return false }
+        // Index 0 of the evaluated chain is the leaf. (SecTrustGetCertificateAtIndex
+        // was deprecated in macOS 12; SecTrustCopyCertificateChain is the
+        // replacement and returns the full chain leaf-first.)
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              let leaf = chain.first else { return true }
+        return hostnameMatch(leaf, host: host) != .mismatch
+    }
+
+    private enum HostMatch { case match, mismatch, noSANs }
+
+    /// Best-effort hostname/IP match against the leaf cert's SANs. Returns
+    /// `.noSANs` (treated as acceptable) when we can't read SANs, so a parsing
+    /// limitation never blocks a connection that already chained to the pinned
+    /// CA.
+    private static func hostnameMatch(_ cert: SecCertificate, host: String) -> HostMatch {
+        guard let values = SecCertificateCopyValues(
+                cert, [kSecOIDSubjectAltName] as CFArray, nil) as? [CFString: Any],
+              let san = values[kSecOIDSubjectAltName] as? [CFString: Any],
+              let entries = san[kSecPropertyKeyValue] as? [[CFString: Any]] else {
+            return .noSANs
+        }
+        let target = host.lowercased()
+        let targetIsIP = target.allSatisfy { $0.isNumber || $0 == "." || $0 == ":" }
+        var sawAny = false
+        for entry in entries {
+            guard let value = (entry[kSecPropertyKeyValue] as? String)?.lowercased() else { continue }
+            let label = (entry[kSecPropertyKeyLabel] as? String)?.lowercased() ?? ""
+            sawAny = true
+            if targetIsIP {
+                if label.contains("ip"), value == target { return .match }
+            } else if label.contains("dns") || label.contains("name") {
+                if value == target { return .match }
+                if value.hasPrefix("*.") {
+                    let suffix = value.dropFirst(1)            // ".example.com"
+                    if target.hasSuffix(suffix),
+                       !target.dropLast(suffix.count).contains(".") { return .match }
+                }
+            }
+        }
+        return sawAny ? .mismatch : .noSANs
+    }
+}
+
 // MARK: - Kubeconfig materialization + secret extraction
 
 /// Builds the synthetic kubeconfig file we drop into the VM and
