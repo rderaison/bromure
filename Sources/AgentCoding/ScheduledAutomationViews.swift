@@ -14,6 +14,8 @@ struct AutomationsSection: View {
     let onRunNow: (UUID) -> Void
     let onToggle: (UUID) -> Void
     let onDelete: (UUID) -> Void
+    /// Open the kanban board (Scheduled / In Progress / Done) in the stage.
+    let onShowBoard: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -24,6 +26,14 @@ struct AutomationsSection: View {
                     .textCase(.uppercase)
                     .tracking(0.7)
                 Spacer()
+                Button(action: onShowBoard) {
+                    Image(systemName: "rectangle.split.3x1")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(model.automationBoardSelected
+                                         ? Color.accentColor : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help(NSLocalizedString("Automation board", comment: ""))
                 Button(action: onNew) {
                     Image(systemName: "plus")
                         .font(.system(size: 10, weight: .semibold))
@@ -1182,7 +1192,7 @@ struct AutomationEditorView: View {
                     .disabled(draft.tool != .claude)
                 hint(draft.tool == .claude
                      ? NSLocalizedString(
-                        "The transcript is saved to .bromure-automation/transcript.jsonl in the worktree first. Turn off to leave the session up for inspection.",
+                        "The transcript is saved first — readable any time from the run's card on the automation board. Turn off to leave the session up for inspection.",
                         comment: "")
                      : NSLocalizedString(
                         "Only Claude reports completion reliably (its Stop hook); other agents' tabs stay open.",

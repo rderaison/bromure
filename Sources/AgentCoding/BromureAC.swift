@@ -2249,6 +2249,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "picker": window = self.mainWindow
                 case "editor": window = self.editorWindow
                 case "sheet":  window = self.editorWindow?.attachedSheet
+                case "board":
+                    // Kanban board as the stage surface, then the unified
+                    // window — E2E/doc-screenshot hook for the board.
+                    self.unifiedWindow?.showAutomationBoard()
+                    window = self.unifiedWindow
+                case let w where w.hasPrefix("run:"):
+                    // A run-detail window ("run:<run-uuid>"): open (or find)
+                    // it and render it — E2E hook for the live-terminal /
+                    // transcript window.
+                    guard let runID = UUID(uuidString: String(w.dropFirst(4))),
+                          let run = self.scheduledAutomationStore.runs
+                              .first(where: { $0.id == runID })
+                              ?? AutomationRunArchive.loadArchivedRuns()
+                              .first(where: { $0.id == runID })
+                    else { return ["error": "unknown run"] }
+                    self.openAutomationRun(run)
+                    window = self.automationRunWindows.window(for: runID)
                 default:       window = self.unifiedWindow
                 }
                 return self.debugRenderWindow(window, to: path)
@@ -2482,6 +2499,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             MainActor.assumeIsolated {
                 guard let self, let uuid = UUID(uuidString: id) else { return false }
                 self.toggleAutomation(uuid)
+                return true
+            }
+        }
+        server.onAcknowledgeRun = { [weak self] runID in
+            MainActor.assumeIsolated {
+                guard let self,
+                      self.scheduledAutomationStore.runs.contains(where: { $0.id == runID })
+                else { return false }
+                self.scheduledAutomationStore.acknowledge(runID)
                 return true
             }
         }
@@ -2849,9 +2875,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Scheduled automations + run history, JSON-encoded from the Codable
     /// models so the fat client mirrors (and can round-trip) them verbatim.
     @MainActor func automationScheduledList() -> [String: Any] {
-        [
+        let iso = ISO8601DateFormatter()
+        return [
             "automations": scheduledAutomationStore.automations.compactMap(Self.codableToDict),
             "runs": scheduledAutomationStore.runs.compactMap(Self.codableToDict),
+            "nextFires": scheduledAutomationStore.allNextFires()
+                .mapValues { iso.string(from: $0) },
         ]
     }
 
@@ -6951,6 +6980,58 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func saveAutomation(_ automation: ScheduledAutomation) {
         scheduledAutomationStore.upsert(automation)
         scheduledAutomationEngine.tick()
+    }
+
+    /// Standalone windows onto individual automation runs — the kanban
+    /// board's card-click target (live terminal while running, transcript
+    /// after).
+    private(set) lazy var automationRunWindows = AutomationRunWindowManager(
+        context: AutomationRunWindowManager.Context(
+            store: { [weak self] in self?.scheduledAutomationStore },
+            profile: { [weak self] id in self?.profile(for: id) },
+            tabsModel: { [weak self] id in self?.pane(for: id)?.model },
+            accentHex: { [weak self] id in
+                self?.profile(for: id)?.color.hexInUI ?? "#888888"
+            }))
+
+    func openAutomationRun(_ run: AutomationRunRecord) {
+        automationRunWindows.open(run: run)
+    }
+
+    /// Copy a finished automation run's Claude transcript out of the guest
+    /// into the host-side per-run archive (runs/<runID>/transcript.jsonl).
+    /// Called by the engine BEFORE automation-finish: an empty run's worktree
+    /// (with its guest-side transcript copy) is removed there, and a
+    /// clone-first run's VM is destroyed moments later — the host copy is the
+    /// one that survives.
+    ///
+    /// The transcript is located by the worktree slug: Claude Code encodes
+    /// the project path with '/' and '.' mapped to '-', so the run's project
+    /// dir under ~/.claude/projects ends in "-<slug>". No tab roster needed —
+    /// this works for detached sessions and clones alike.
+    func pullAutomationTranscript(profileID: Profile.ID, branch: String, runID: UUID) async {
+        guard branch.hasPrefix("wt/") else { return }
+        let slug = String(branch.dropFirst(3))
+        // Slugs are [a-z0-9-] by construction (branchSlug(for:at:) plus the
+        // guest's -N suffix) — safe to splice into the shell line.
+        guard slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" }),
+              !slug.isEmpty else { return }
+        let cmd = """
+        d=$(ls -td ~/.claude/projects/*-\(slug) 2>/dev/null | head -1); \
+        if [ -n "$d" ]; then ls -t "$d"/*.jsonl 2>/dev/null | head -1 \
+        | xargs -r cat | head -c 25000000; fi
+        """
+        do {
+            let out = try await guestExec(profileID: profileID, command: cmd, timeout: 60)
+            guard !out.isEmpty else {
+                BACDebug.log("automation", "no transcript found in guest for \(branch)")
+                return
+            }
+            try AutomationRunArchive.saveTranscript(Data(out.utf8), runID: runID)
+            BACDebug.log("automation", "transcript for \(branch) archived (\(out.count) bytes)")
+        } catch {
+            BACDebug.log("automation", "transcript pull for \(branch) failed: \(error)")
+        }
     }
 
     func runAutomationNow(_ id: UUID) {

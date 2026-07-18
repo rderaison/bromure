@@ -107,9 +107,13 @@ final class RemoteHostController {
             .appendingPathComponent("hosts", isDirectory: true)
             .appendingPathComponent(host.id.uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        dataDir = base
         gridStore = GridLayoutStore(saveURL: base.appendingPathComponent("grid-layout.json"))
         automationStore = ScheduledAutomationStore(fileURL: base.appendingPathComponent("automations.json"))
     }
+
+    /// Per-host client-side data dir (mirror JSONs, fetched-transcript cache).
+    let dataDir: URL
 
     // MARK: Polling
 
@@ -474,7 +478,10 @@ final class RemoteHostController {
         }
         let automations = decode((autos["automations"] as? [[String: Any]]) ?? [], ScheduledAutomation.self)
         let runs = decode((autos["runs"] as? [[String: Any]]) ?? [], AutomationRunRecord.self)
-        automationStore.mirror(automations: automations, runs: runs)
+        let iso = ISO8601DateFormatter()
+        let nextFires = ((autos["nextFires"] as? [String: String]) ?? [:])
+            .compactMapValues { iso.date(from: $0) }
+        automationStore.mirror(automations: automations, runs: runs, nextFires: nextFires)
     }
 
     // MARK: Actions (client → remote), routed over the tunnel
@@ -844,6 +851,25 @@ final class RemoteHostController {
     func runAutomation(_ id: UUID) { send("POST", "/automations/\(ControlClient.encodeSegment(id.uuidString))/run") }
     func toggleAutomation(_ id: UUID) { send("POST", "/automations/\(ControlClient.encodeSegment(id.uuidString))/toggle") }
     func deleteAutomation(_ id: UUID) { send("DELETE", "/automations/\(ControlClient.encodeSegment(id.uuidString))") }
+    /// Dismiss a failed/blocked run from the board's Needs Attention column
+    /// (the acknowledged state lives on the host; the mirror confirms on poll).
+    func acknowledgeRun(_ id: UUID) {
+        send("POST", "/automation-runs/\(ControlClient.encodeSegment(id.uuidString))/acknowledge")
+    }
+
+    /// Fetch a run's archived transcript from the host, over the tunnel.
+    /// nil = none captured (or transport failure) — the run window shows the
+    /// outcome view instead.
+    func fetchRunTranscript(_ id: UUID) async -> Data? {
+        let host = self.host
+        let path = "/automation-runs/\(ControlClient.encodeSegment(id.uuidString))/transcript"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("GET", path)
+        }.value
+        guard let resp, resp.status == 200,
+              let b64 = resp.json["transcript"] as? String, !b64.isEmpty else { return nil }
+        return Data(base64Encoded: b64)
+    }
     func upsertAutomation(_ automation: ScheduledAutomation) {
         guard let doc = ACAppDelegate.codableToDict(automation) else { return }
         send("POST", "/automations", body: doc)
@@ -1814,6 +1840,74 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.automationSelectedID = nil
     }
 
+    // MARK: Automation kanban board (mirrors the local stage surface)
+
+    private var kanbanHost: NSHostingView<AutomationKanbanView>?
+
+    /// Run-detail windows for the mirrored board: the live terminal is a
+    /// remote attach over SSH; transcripts are fetched from the host once
+    /// and cached per run.
+    private lazy var runWindowManager = AutomationRunWindowManager(
+        context: AutomationRunWindowManager.Context(
+            store: { [weak self] in self?.controller.automationStore },
+            profile: { [weak self] id in self?.controller.profile(for: id) },
+            tabsModel: { [weak self] id in self?.controller.tabsModel(for: id) },
+            accentHex: { [weak self] id in
+                self?.controller.profile(for: id)?.color.hexInUI ?? "#888888"
+            },
+            remoteHost: controller.host.id,
+            transcriptURL: { [weak self] runID in
+                await self?.cachedRunTranscript(runID)
+            }))
+
+    /// Local cache for a fetched transcript. Transcripts are immutable once
+    /// archived on the host, so cache-forever is correct.
+    private func cachedRunTranscript(_ runID: UUID) async -> URL? {
+        let dir = controller.dataDir
+            .appendingPathComponent("run-transcripts", isDirectory: true)
+        let url = dir.appendingPathComponent("\(runID.uuidString).jsonl")
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        guard let data = await controller.fetchRunTranscript(runID) else { return nil }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        do { try data.write(to: url, options: .atomic) } catch { return nil }
+        return url
+    }
+
+    func showAutomationBoard() {
+        controller.listModel.gridSelected = false
+        controller.listModel.selectedID = nil
+        controller.listModel.automationBoardSelected = true
+        gridView?.removeFromSuperview()
+        unmountTerminal()
+        clearVMDashboard()
+        clearDockerDashboard()
+        hideShownBrowser()
+        if kanbanHost == nil {
+            let c = controller
+            let view = AutomationKanbanView(
+                store: c.automationStore,
+                model: c.listModel,
+                actions: AutomationKanbanView.Actions(
+                    selectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
+                    newAutomation: { [weak self] in self?.showAutomationEditor(nil) },
+                    runNow: { c.runAutomation($0) },
+                    toggle: { c.toggleAutomation($0) },
+                    delete: { [weak self] id in self?.confirmDeleteAutomation(id) },
+                    openRun: { [weak self] run in self?.runWindowManager.open(run: run) },
+                    acknowledge: { c.acknowledgeRun($0) }))
+            let host = NSHostingView(rootView: view)
+            host.translatesAutoresizingMaskIntoConstraints = false
+            kanbanHost = host
+        }
+        mount(kanbanHost!)
+    }
+
+    private func clearAutomationBoard() {
+        guard controller.listModel.automationBoardSelected else { return }
+        controller.listModel.automationBoardSelected = false
+        kanbanHost?.removeFromSuperview()
+    }
+
     // MARK: E2E debug control surface (POST /debug/fatclient; debug-gated)
 
     /// Drive rich-client features headlessly for the E2E harness. Control-plane
@@ -1857,6 +1951,33 @@ final class RemoteHostWindow: NSWindow {
             selectWorkspaceName(id)
             return ["ok": true, "selectedID": controller.listModel.selectedID?.uuidString ?? "",
                     "dashboardShown": shownDashboard?.id == id]
+        case "automation-board":
+            // Show the mirrored kanban board and report its column counts —
+            // the FC-board E2E assertion surface. Optional "shot" writes an
+            // offscreen PNG of the window.
+            showAutomationBoard()
+            let store = controller.automationStore
+            let cols = AutomationBoard.classify(runs: store.runs) { run in
+                guard let slug = run.branchSlug,
+                      let pid = run.runProfileID
+                          ?? store.automation(run.automationID)?.profileID,
+                      let tabs = controller.tabsModel(for: pid)?.tabs else { return false }
+                return tabs.contains {
+                    AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
+                }
+            }
+            if let shot = p["shot"] as? String {
+                contentView?.layoutSubtreeIfNeeded()
+                writeSnapshot(to: shot)
+            }
+            return ["ok": true,
+                    "boardShown": controller.listModel.automationBoardSelected,
+                    "automations": store.automations.count,
+                    "inProgress": cols.inProgress.count,
+                    "needsAttention": cols.needsAttention.count,
+                    "done": cols.done.count,
+                    "nextFiresMirrored": store.automations
+                        .filter { store.nextFire(for: $0.id) != nil }.count]
         case "mount-terminal":
             guard let id = resolveID() else { return ["error": "workspace not found"] }
             showWorkspace(id, window: p["window"] as? Int ?? 0)
@@ -2261,7 +2382,8 @@ final class RemoteHostWindow: NSWindow {
             onNewAutomation: { [weak self] in self?.showAutomationEditor(nil) },
             onRunAutomation: { [weak self] id in self?.controller.runAutomation(id) },
             onToggleAutomation: { [weak self] id in self?.controller.toggleAutomation(id) },
-            onDeleteAutomation: { [weak self] id in self?.controller.deleteAutomation(id) })
+            onDeleteAutomation: { [weak self] id in self?.controller.deleteAutomation(id) },
+            onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() })
     }
 
     // MARK: Stage
@@ -2270,6 +2392,7 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.gridSelected = true
         controller.listModel.selectedID = nil
         unmountTerminal()
+        clearAutomationBoard()
         clearVMDashboard()
         clearDockerDashboard()
         // The Grid has no browser pane — collapse any shown browser (it stays
@@ -2300,6 +2423,7 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.gridSelected = false
         controller.listModel.selectedID = id
         gridView?.removeFromSuperview()
+        clearAutomationBoard()
         clearDockerDashboard()
         unmountTerminal()
         showVMDashboard(id)
@@ -2311,6 +2435,7 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.selectedID = id
         // Detach the grid so its surfaces don't fight for the stage.
         gridView?.removeFromSuperview()
+        clearAutomationBoard()
         clearDockerDashboard()
         // Same gate as the local window's `selectRow`: an off/suspended VM has
         // no terminal to attach — mounting one anyway left the login greeting
@@ -2392,6 +2517,7 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.selectedID = id
         gridView?.removeFromSuperview()
         unmountTerminal()
+        clearAutomationBoard()
         clearVMDashboard()
         if let prev = dockerShownFor, prev != id {
             controller.setDockerWatch(prev, on: false)

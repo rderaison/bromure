@@ -344,10 +344,19 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     /// automation's own — i.e. the disposable clone of a clone-first run.
     /// Completion matching and teardown key off this.
     var runProfileID: UUID?
+    /// When the agent reported done (Claude's Stop hook). nil for a launched
+    /// run still working — or one whose agent never reports (non-Claude).
+    /// The kanban board's In Progress ↔ Done split keys off this plus tab
+    /// liveness.
+    var completedAt: Date?
+    /// Failed/blocked runs sit in the board's Needs Attention column until
+    /// the user dismisses them; this stamps the dismissal.
+    var acknowledgedAt: Date?
 
     init(id: UUID = UUID(), automationID: UUID, firedAt: Date,
          outcome: Outcome, detail: String, branchSlug: String? = nil,
-         itemKey: String? = nil, runProfileID: UUID? = nil) {
+         itemKey: String? = nil, runProfileID: UUID? = nil,
+         completedAt: Date? = nil, acknowledgedAt: Date? = nil) {
         self.id = id
         self.automationID = automationID
         self.firedAt = firedAt
@@ -356,6 +365,8 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
         self.branchSlug = branchSlug
         self.itemKey = itemKey
         self.runProfileID = runProfileID
+        self.completedAt = completedAt
+        self.acknowledgedAt = acknowledgedAt
     }
 }
 
@@ -433,8 +444,13 @@ final class ScheduledAutomationStore {
     // Doubles as the dedup memory (processed itemKeys live in run records),
     // so keep it generous — evicting a key would let that event re-fire.
     private static let maxRuns = 1000
+    /// Only the app's real store spills evicted runs to the on-disk archive.
+    /// Stores with an explicit fileURL are mirrors (fat client) or test
+    /// fixtures — neither owns this machine's run history.
+    private let archivesRuns: Bool
 
     init(fileURL: URL? = nil) {
+        archivesRuns = (fileURL == nil)
         if let fileURL {
             self.fileURL = fileURL
         } else {
@@ -470,26 +486,63 @@ final class ScheduledAutomationStore {
 
     func remove(_ id: UUID) {
         automations.removeAll { $0.id == id }
+        let removed = runs.filter { $0.automationID == id }
         runs.removeAll { $0.automationID == id }
         nextFires[id.uuidString] = nil
         pollStates[id.uuidString] = nil
         save()
+        if archivesRuns {
+            AutomationRunArchive.removeRuns(automationID: id,
+                                            alsoIDs: removed.map(\.id))
+        }
     }
 
     func record(_ run: AutomationRunRecord) {
         runs.insert(run, at: 0)
-        if runs.count > Self.maxRuns { runs.removeLast(runs.count - Self.maxRuns) }
+        if runs.count > Self.maxRuns {
+            // Nothing is ever dropped: runs leaving the in-memory window are
+            // spilled to the per-run archive, where the board's Done column
+            // can still load them.
+            let evicted = runs.suffix(runs.count - Self.maxRuns)
+            if archivesRuns { evicted.forEach(AutomationRunArchive.archive) }
+            runs.removeLast(runs.count - Self.maxRuns)
+        }
+        save()
+    }
+
+    /// Stamp a launched run as completed (the agent reported done). No-op if
+    /// the run isn't in the store's window anymore or is already stamped.
+    func markCompleted(_ runID: UUID, at date: Date = Date()) {
+        guard let i = runs.firstIndex(where: { $0.id == runID }),
+              runs[i].completedAt == nil else { return }
+        runs[i].completedAt = date
+        save()
+    }
+
+    /// Dismiss a failed/blocked run from the board's Needs Attention column.
+    func acknowledge(_ runID: UUID, at date: Date = Date()) {
+        guard let i = runs.firstIndex(where: { $0.id == runID }),
+              runs[i].acknowledgedAt == nil else { return }
+        runs[i].acknowledgedAt = date
         save()
     }
 
     /// Fat-client mirror: replace the whole automations + runs list from a
     /// remote snapshot, in memory only (no save — this store is a read model of
     /// another machine's state). No-op if nothing changed, so the `@Observable`
-    /// view doesn't churn on every poll.
-    func mirror(automations newAutomations: [ScheduledAutomation], runs newRuns: [AutomationRunRecord]) {
+    /// view doesn't churn on every poll. `nextFires` rides along so the
+    /// mirrored board/sidebar can show "next …" like the host does.
+    func mirror(automations newAutomations: [ScheduledAutomation],
+                runs newRuns: [AutomationRunRecord],
+                nextFires newNextFires: [String: Date]? = nil) {
         if automations != newAutomations { automations = newAutomations }
         if runs != newRuns { runs = newRuns }
+        if let newNextFires, nextFires != newNextFires { nextFires = newNextFires }
     }
+
+    /// Every planned next fire, keyed by automation id — the /state payload
+    /// for fat-client mirroring.
+    func allNextFires() -> [String: Date] { nextFires }
 
     func runs(for id: UUID) -> [AutomationRunRecord] {
         runs.filter { $0.automationID == id }
@@ -1496,19 +1549,30 @@ final class ScheduledAutomationEngine {
         else { return }
         finishSent.insert(branch)
 
+        // The run is over — stamp it (the kanban board's In Progress → Done
+        // transition keys off completedAt).
+        store.markCompleted(run.id)
+
         // Chained automations fire on the finish itself, independent of
         // closeWhenDone (leaving the tab open for inspection shouldn't
         // stall the pipeline).
         fireChained(after: automation, branch: branch)
 
-        guard automation.closeWhenDone else { return }
-        BACDebug.log("automation", "run done — saving transcript and closing tab for \(branch)")
+        BACDebug.log("automation", "run done — saving transcript for \(branch)")
+        let closeWhenDone = automation.closeWhenDone
         let cloneID = run.runProfileID
+        let runID = run.id
         // Small delay so the Stop hook's final transcript lines land on disk
         // before the guest copies the file.
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard let self, let delegate = self.delegate else { return }
+            // Host copy FIRST: automation-finish removes an empty run's
+            // worktree (with the guest-side transcript in it), and a
+            // clone-first run's whole VM is destroyed moments later.
+            await delegate.pullAutomationTranscript(
+                profileID: profileID, branch: branch, runID: runID)
+            guard closeWhenDone else { return }
             _ = delegate.automationWorktreeCommand(
                 profileNameOrID: profileID.uuidString, action: "finish", args: [branch])
             if let cloneID {

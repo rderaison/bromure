@@ -68,6 +68,8 @@ final class ACAutomationServer {
     /// `RemoteHostWindow.debugPerform`. Resolves the target host + workspace and
     /// forwards the action.
     var onFatClientDebug: ((_ params: [String: Any]) -> [String: Any])?
+    /// Fat-client board: dismiss a failed/blocked run from Needs Attention.
+    var onAcknowledgeRun: ((_ runID: UUID) -> Bool)?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -612,6 +614,35 @@ final class ACAutomationServer {
                 ?? String(p.dropFirst("/remote/keys/".count))
             let r = DispatchQueue.main.sync { self.onRemoteRemoveKey?(sel) ?? ["error": "unavailable"] }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        // Fat-client automation RUN actions (id is a run id, not an
+        // automation id): POST /automation-runs/{id}/acknowledge dismisses a
+        // failed/blocked run from the board's Needs Attention column;
+        // GET /automation-runs/{id}/transcript returns the archived Claude
+        // transcript (base64) so a fat client can render the native view.
+        case (let m, let p) where p.hasPrefix("/automation-runs/"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let rest = String(p.dropFirst("/automation-runs/".count))
+            let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
+            let idStr = parts.first.flatMap { $0.removingPercentEncoding } ?? ""
+            let action = parts.count > 1 ? parts[1] : ""
+            guard let runID = UUID(uuidString: idStr) else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad run id"]); return
+            }
+            switch (m, action) {
+            case ("POST", "acknowledge"):
+                let ok = DispatchQueue.main.sync { self.onAcknowledgeRun?(runID) ?? false }
+                sendResponse(fd: fd, status: ok ? 200 : 404, body: ["ok": ok])
+            case ("GET", "transcript"):
+                guard let data = try? Data(
+                    contentsOf: AutomationRunArchive.transcriptURL(for: runID)) else {
+                    sendResponse(fd: fd, status: 404, body: ["error": "No transcript"]); return
+                }
+                sendResponse(fd: fd, status: 200,
+                             body: ["transcript": data.base64EncodedString()])
+            default:
+                sendResponse(fd: fd, status: 404, body: ["error": "Not found", "path": path])
+            }
 
         // Fat-client automation edits: DELETE /automations/{id},
         // POST /automations/{id}/run, POST /automations/{id}/toggle.
