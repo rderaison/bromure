@@ -368,13 +368,31 @@ pipeline {
             // tunnel, then drives the whole rich-client control plane via
             // POST /debug/fatclient (connect + snapshot parity, dashboard,
             // terminal mount, create/edit workspace on the server, automation
-            // create+delete, browser collapse). No system sshd / OS keypair /
+            // create+delete, browser collapse, and the two mirrored kanban
+            // boards with their column counts). No system sshd / OS keypair /
             // authorized_keys needed — the app is its own SSH server. Needs the
             // base image from the Init stage; self-skips (SKIP) without one, and
             // disables remote access again in its own teardown.
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                     sh 'node Tests/ac-e2e.mjs --filter "^25\\."'
+                }
+            }
+        }
+
+        stage('26. Kanban boards') {
+            // The coding board's /tasks control plane (CRUD, verbs, 400s)
+            // plus its full VM lifecycle with the agent simulated guest-side:
+            // start → worktree + In Progress, done signal → Testing with
+            // captured branch/parent/checkout, comment + send-back →
+            // In Progress with the comment marked sent, merge → the commit
+            // on the parent branch, plan validation terminating with a
+            // stamped result, and the automation-run routes (transcript
+            // pulled to the host and served base64, failed-run acknowledge).
+            // Needs the base image; the VM half self-skips (SKIP) without it.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^26\\."'
                 }
             }
         }

@@ -487,12 +487,12 @@ final class ACAutomationServer {
             sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
 
         case ("GET", "/automations"):
-            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let list = DispatchQueue.main.sync { self.onListAutomations?() ?? ["automations": [], "runs": []] }
             sendResponse(fd: fd, status: 200, body: list)
 
         case ("POST", "/automations"):
-            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let ok = DispatchQueue.main.sync { self.onUpsertAutomation?(bodyJSON) ?? false }
             sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
 
@@ -626,17 +626,17 @@ final class ACAutomationServer {
         // POST /tasks/{id}/{start|send-back|merge|to-testing|comment} and
         // DELETE /tasks/{id} drive one task. CLI/E2E/fat-client surface.
         case ("GET", "/tasks"):
-            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let list = DispatchQueue.main.sync { self.onListTasks?() ?? ["tasks": []] }
             sendResponse(fd: fd, status: 200, body: list)
 
         case ("POST", "/tasks"):
-            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let ok = DispatchQueue.main.sync { self.onUpsertTask?(bodyJSON) ?? false }
             sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
 
         case (let m, let p) where p.hasPrefix("/tasks/"):
-            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let rest = String(p.dropFirst("/tasks/".count))
             let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
             guard let id = parts.first.flatMap({ $0.removingPercentEncoding })
@@ -655,7 +655,7 @@ final class ACAutomationServer {
         // GET /automation-runs/{id}/transcript returns the archived Claude
         // transcript (base64) so a fat client can render the native view.
         case (let m, let p) where p.hasPrefix("/automation-runs/"):
-            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let rest = String(p.dropFirst("/automation-runs/".count))
             let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
             let idStr = parts.first.flatMap { $0.removingPercentEncoding } ?? ""
@@ -681,7 +681,7 @@ final class ACAutomationServer {
         // Fat-client automation edits: DELETE /automations/{id},
         // POST /automations/{id}/run, POST /automations/{id}/toggle.
         case (let m, let p) where p.hasPrefix("/automations/"):
-            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let rest = String(p.dropFirst("/automations/".count))
             let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
             let id = parts.first.flatMap { $0.removingPercentEncoding } ?? ""
