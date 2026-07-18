@@ -1185,3 +1185,7 @@
 "Workspace subnet" = "工作区子网";
 "Use a private subnet (avoids clashes across remotes)" = "使用私有子网（避免多个远程实例之间的冲突）";
 "Each install normally uses 192.168.64.0/24, which collides when the rich client mirrors more than one remote. A private 172.16.x.x subnet keeps them distinct. Changes apply the next time your workspaces start." = "每个安装通常使用 192.168.64.0/24，当富客户端镜像多个远程实例时会发生冲突。私有的 172.16.x.x 子网可使它们保持区分。更改将在你的工作区下次启动时生效。";
+
+/* Grid — empty state */
+"Monitor several terminals at once" = "同时监控多个终端";
+"Drag terminals from the sidebar into this view to add them to the grid." = "将终端从侧边栏拖到此视图，即可添加到网格。";

@@ -1185,3 +1185,7 @@
 "Workspace subnet" = "Sub-rede do espaço de trabalho";
 "Use a private subnet (avoids clashes across remotes)" = "Usar uma sub-rede privada (evita conflitos entre remotos)";
 "Each install normally uses 192.168.64.0/24, which collides when the rich client mirrors more than one remote. A private 172.16.x.x subnet keeps them distinct. Changes apply the next time your workspaces start." = "Cada instalação normalmente usa 192.168.64.0/24, que entra em conflito quando o rich client espelha mais de um remoto. Uma sub-rede 172.16.x.x privada os mantém distintos. As alterações são aplicadas na próxima vez que seus espaços de trabalho iniciarem.";
+
+/* Grid — empty state */
+"Monitor several terminals at once" = "Monitore vários terminais ao mesmo tempo";
+"Drag terminals from the sidebar into this view to add them to the grid." = "Arraste terminais da barra lateral para esta vista para adicioná-los à grade.";

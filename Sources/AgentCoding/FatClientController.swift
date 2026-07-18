@@ -68,6 +68,9 @@ final class RemoteHostController {
     /// Last local Fusion toggle per workspace — suppresses the mirrored
     /// `fusionEngaged` for a beat so a stale poll can't flap the ⚡ button.
     private var fusionTouched: [Profile.ID: Date] = [:]
+    /// Last local grid edit — `applyGrid` skips while recent, so a stale
+    /// in-flight poll can't revert the edit before its POST lands.
+    private var gridTouched = Date.distantPast
 
     private var pollTimer: Timer?
     private let pollQueue = DispatchQueue(label: "io.bromure.fatclient.poll")
@@ -446,6 +449,10 @@ final class RemoteHostController {
     }
 
     private func applyGrid(_ grid: [String: Any]) {
+        // Skip briefly after a local grid edit so an in-flight (stale) poll
+        // can't flap the layout back before our POST lands on the remote
+        // (same pattern as fusionTouched).
+        guard Date().timeIntervalSince(gridTouched) > 3 else { return }
         let cells = (grid["cells"] as? [[String: Any]]) ?? []
         let parsed: [GridCell] = cells.compactMap { c in
             guard let pidStr = c["profileID"] as? String, let pid = UUID(uuidString: pidStr),
@@ -537,11 +544,13 @@ final class RemoteHostController {
 
     // Grid edits (last-writer-wins whole-layout replacement).
     func pushGridLayout() {
+        gridTouched = Date()
         let cells: [[String: Any]] = gridStore.cells.map {
             ["profileID": $0.profileID.uuidString, "windowIndex": $0.windowIndex, "label": $0.label]
         }
         var body: [String: Any] = ["cells": cells]
         if let f = gridStore.focusedCellID { body["focusedCellID"] = f }
+        if let z = gridStore.zoomedCellID { body["zoomedCellID"] = z }
         send("POST", "/grid-layout", body: body, then: false)
     }
 
@@ -2236,7 +2245,10 @@ final class RemoteHostWindow: NSWindow {
                 runState: { [weak self] pid in self?.controller.runState(for: pid) ?? .off },
                 onStart: { [weak self] pid in self?.controller.startWorkspace(pid) },
                 onJump: { [weak self] pid, idx in self?.showWorkspace(pid, window: idx) },
-                remoteHost: controller.host.id)
+                remoteHost: controller.host.id,
+                // Stage-side grid edits (✕, drop-add, swap, zoom) must reach
+                // the remote, or the next /state poll reverts them.
+                onEdited: { [weak self] in self?.controller.pushGridLayout() })
             let v = GridStageView(store: controller.gridStore, dataSource: ds)
             v.translatesAutoresizingMaskIntoConstraints = false
             gridView = v

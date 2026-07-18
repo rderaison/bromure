@@ -1188,3 +1188,7 @@
 "Workspace subnet" = "工作區子網路";
 "Use a private subnet (avoids clashes across remotes)" = "使用私有子網路（避免多個遠端之間衝突）";
 "Each install normally uses 192.168.64.0/24, which collides when the rich client mirrors more than one remote. A private 172.16.x.x subnet keeps them distinct. Changes apply the next time your workspaces start." = "每個安裝通常使用 192.168.64.0/24，當豐富型用戶端鏡像多個遠端時便會衝突。私有的 172.16.x.x 子網路可讓它們保持區隔。變更會在你的工作區下次啟動時套用。";
+
+/* Grid — empty state */
+"Monitor several terminals at once" = "同時監控多個終端機";
+"Drag terminals from the sidebar into this view to add them to the grid." = "將終端機從側邊欄拖曳到此檢視，即可加入網格。";

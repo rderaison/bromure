@@ -27,6 +27,12 @@ final class GridStageView: NSView {
         /// Fat-client: when set, cells attach to the workspace on this remote
         /// bromure-ac over SSH instead of the local control socket.
         var remoteHost: UUID? = nil
+        /// Called after any grid edit made *inside* the stage (drop-add,
+        /// remove, swap, zoom, focus). The local window persists via the
+        /// store itself, so this defaults to a no-op; the fat client uses it
+        /// to push the layout to the remote — without it, the next /state
+        /// poll reverts the edit (the "✕ does nothing" bug).
+        var onEdited: () -> Void = {}
     }
     private let dataSource: DataSource
 
@@ -34,6 +40,18 @@ final class GridStageView: NSView {
     private var controllers: [UUID: TerminalSessionController] = [:]
     private var cellViews: [String: GridCellView] = [:]
     private var reconcileTimer: Timer?
+    /// Onboarding hint shown while the grid has no cells (instead of a bare
+    /// black stage); doubles as the drop-target readout during a drag.
+    private var emptyStateHost: NSHostingView<GridEmptyState>?
+    /// A sidebar-terminal drag is hovering over the stage.
+    private var dropTargeted = false {
+        didSet {
+            guard dropTargeted != oldValue else { return }
+            layer?.borderWidth = dropTargeted ? 2 : 0
+            layer?.borderColor = NSColor.controlAccentColor.cgColor
+            emptyStateHost?.rootView = GridEmptyState(highlighted: dropTargeted)
+        }
+    }
 
     init(store: GridLayoutStore, dataSource: DataSource) {
         self.store = store
@@ -41,6 +59,10 @@ final class GridStageView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
+        // Accept sidebar-terminal drags anywhere on the stage, not just on
+        // the sidebar's Grid node (the payload rides the pasteboard as a
+        // plain string; non-grid strings are rejected in draggingEntered).
+        registerForDraggedTypes([.string])
     }
 
     required init?(coder: NSCoder) { fatalError("not supported") }
@@ -103,6 +125,7 @@ final class GridStageView: NSView {
                     // instead of on the next ~1s timer tick (which felt like
                     // "✕ does nothing", especially on placeholder/off cells).
                     self?.store.remove(id: cell.id)
+                    self?.dataSource.onEdited()
                     self?.reconcile()
                 },
                 onJump: { [weak self] in
@@ -151,7 +174,52 @@ final class GridStageView: NSView {
             }
         }
 
+        // 4. Empty grid → onboarding hint instead of a bare black stage.
+        if store.cells.isEmpty {
+            if emptyStateHost == nil {
+                let host = NSHostingView(rootView: GridEmptyState(highlighted: dropTargeted))
+                emptyStateHost = host
+                addSubview(host)
+            }
+        } else if let host = emptyStateHost {
+            host.removeFromSuperview()
+            emptyStateHost = nil
+        }
+
         needsLayout = true
+    }
+
+    // MARK: Drag & drop (add a terminal by dropping it anywhere on the stage)
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard dragPayload(sender) != nil else { return [] }
+        dropTargeted = true
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) { dropTargeted = false }
+    override func draggingEnded(_ sender: NSDraggingInfo) { dropTargeted = false }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        dropTargeted = false
+        guard let p = dragPayload(sender) else { return false }
+        store.add(profileID: p.profileID, windowIndex: p.windowIndex, label: p.label)
+        dataSource.onEdited()
+        reconcile()
+        // Land focus on the (possibly pre-existing) cell, like ⌘D's reveal.
+        let id = GridCell.id(profileID: p.profileID, windowIndex: p.windowIndex)
+        if store.cells.contains(where: { $0.id == id }) { focus(id) }
+        return true
+    }
+
+    /// The sidebar-terminal payload on a drag's pasteboard, nil for any other
+    /// string (e.g. a cell-header rearrange drag, which the cell headers'
+    /// own drop targets handle).
+    private func dragPayload(_ info: NSDraggingInfo)
+        -> (profileID: UUID, windowIndex: Int, label: String)? {
+        guard let strings = info.draggingPasteboard
+            .readObjects(forClasses: [NSString.self]) as? [String] else { return nil }
+        return strings.lazy.compactMap(GridDragPayload.decode).first
     }
 
     // MARK: Rearrange
@@ -163,6 +231,7 @@ final class GridStageView: NSView {
         store.swap(draggedID, targetID)
         // A zoomed cell would hide everything mid-animation; clear it.
         store.zoomedCellID = nil
+        dataSource.onEdited()
         needsLayout = true
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.22
@@ -183,11 +252,12 @@ final class GridStageView: NSView {
         if let surface = cellViews[id]?.terminalView {
             window?.makeFirstResponder(surface)
         }
+        dataSource.onEdited()
     }
 
     private func toggleZoom(_ id: String) {
         store.zoomedCellID = (store.zoomedCellID == id) ? nil : id
-        focus(id)
+        focus(id)   // focus() reports the edit (zoom + focus ride the same push)
         needsLayout = true
     }
 
@@ -206,6 +276,7 @@ final class GridStageView: NSView {
 
     override func layout() {
         super.layout()
+        emptyStateHost?.frame = bounds
         let cells = store.cells
         guard !cells.isEmpty else { return }
 
@@ -337,6 +408,34 @@ final class GridCellView: NSView {
 }
 
 // MARK: - SwiftUI chrome
+
+/// Onboarding hint shown when the grid has no cells: what the view is for
+/// and how to fill it. Rendered over the stage's black background (fixed
+/// colors — the window's light/dark appearance must not flip them), and
+/// brightened to the accent color while a terminal drag hovers.
+struct GridEmptyState: View {
+    var highlighted: Bool
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "square.grid.2x2")
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(highlighted ? Color(nsColor: .controlAccentColor)
+                                             : Color.white.opacity(0.35))
+            Text(NSLocalizedString("Monitor several terminals at once",
+                                   comment: "Empty grid view: title"))
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(highlighted ? 0.8 : 0.55))
+            Text(NSLocalizedString("Drag terminals from the sidebar into this view to add them to the grid.",
+                                   comment: "Empty grid view: how to add cells"))
+                .font(.system(size: 12))
+                .foregroundStyle(Color.white.opacity(highlighted ? 0.65 : 0.4))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 380)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
 
 struct GridCellHeader: View {
     @MainActor

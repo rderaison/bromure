@@ -1185,3 +1185,7 @@
 "Workspace subnet" = "ワークスペースのサブネット";
 "Use a private subnet (avoids clashes across remotes)" = "プライベートサブネットを使用（リモート間の衝突を回避）";
 "Each install normally uses 192.168.64.0/24, which collides when the rich client mirrors more than one remote. A private 172.16.x.x subnet keeps them distinct. Changes apply the next time your workspaces start." = "各インストールは通常 192.168.64.0/24 を使用しますが、リッチクライアントが複数のリモートをミラーリングすると衝突します。プライベートな 172.16.x.x サブネットにより、それらを区別できます。変更は次回ワークスペースの起動時に適用されます。";
+
+/* Grid — empty state */
+"Monitor several terminals at once" = "複数のターミナルを同時にモニタリング";
+"Drag terminals from the sidebar into this view to add them to the grid." = "サイドバーからターミナルをこのビューにドラッグすると、グリッドに追加できます。";
