@@ -1189,3 +1189,12 @@
 /* Grid — empty state */
 "Monitor several terminals at once" = "Mehrere Terminals gleichzeitig überwachen";
 "Drag terminals from the sidebar into this view to add them to the grid." = "Ziehen Sie Terminals aus der Seitenleiste in diese Ansicht, um sie zum Raster hinzuzufügen.";
+
+/* Tunnel — error visibility */
+"Waiting for the remote to report its workspace subnet (start a workspace) — click to cancel" = "Warten, bis die Gegenstelle ihr Workspace-Subnetz meldet (starten Sie einen Workspace) — zum Abbrechen klicken";
+"Waiting for the remote's network info" = "Warten auf die Netzwerkinformationen der Gegenstelle";
+"The remote hasn't reported its workspace subnet yet — it does so once a workspace VM is running. The tunnel connects automatically as soon as the subnet arrives; start (or resume) a workspace on the remote to trigger it." = "Die Gegenstelle hat ihr Workspace-Subnetz noch nicht gemeldet — das geschieht, sobald eine Workspace-VM läuft. Der Tunnel verbindet sich automatisch, sobald das Subnetz eintrifft; starten (oder setzen Sie fort) Sie einen Workspace auf der Gegenstelle, um dies auszulösen.";
+"Couldn't start the network tunnel" = "Netzwerktunnel konnte nicht gestartet werden";
+"%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure funktioniert weiterhin über seinen integrierten Pro-App-Tunnel — dieser Helfer fügt nur den direkten Zugriff auf die entfernten VMs aus anderen lokalen Apps hinzu.";
+"The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "Der privilegierte Netzwerk-Helfer ist nicht erreichbar. Prüfen Sie, ob „Bromure Agentic Coding“ unter Systemeinstellungen › Allgemein › Anmeldeobjekte erlaubt ist, und versuchen Sie es erneut.";
+"The network helper couldn't create the tunnel interface." = "Der Netzwerk-Helfer konnte die Tunnel-Schnittstelle nicht erstellen.";

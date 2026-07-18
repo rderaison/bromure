@@ -1191,3 +1191,12 @@
 /* Grid — empty state */
 "Monitor several terminals at once" = "Supervisa varios terminales a la vez";
 "Drag terminals from the sidebar into this view to add them to the grid." = "Arrastra terminales desde la barra lateral hasta esta vista para añadirlos a la cuadrícula.";
+
+/* Tunnel — error visibility */
+"Waiting for the remote to report its workspace subnet (start a workspace) — click to cancel" = "Esperando a que el remoto informe de la subred de sus espacios de trabajo (inicia un espacio de trabajo) — haz clic para cancelar";
+"Waiting for the remote's network info" = "Esperando la información de red del remoto";
+"The remote hasn't reported its workspace subnet yet — it does so once a workspace VM is running. The tunnel connects automatically as soon as the subnet arrives; start (or resume) a workspace on the remote to trigger it." = "El remoto aún no ha informado de la subred de sus espacios de trabajo — lo hace cuando una VM de espacio de trabajo está en ejecución. El túnel se conecta automáticamente en cuanto llega la subred; inicia (o reanuda) un espacio de trabajo en el remoto para activarlo.";
+"Couldn't start the network tunnel" = "No se pudo iniciar el túnel de red";
+"%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure sigue funcionando mediante su túnel integrado por aplicación — este ayudante solo añade acceso directo a las VM remotas desde otras aplicaciones locales.";
+"The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "El ayudante de red con privilegios no está accesible. Comprueba que “Bromure Agentic Coding” esté permitido en Ajustes del Sistema › General › Ítems de inicio y vuelve a intentarlo.";
+"The network helper couldn't create the tunnel interface." = "El ayudante de red no pudo crear la interfaz del túnel.";

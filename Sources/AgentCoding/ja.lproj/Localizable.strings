@@ -1189,3 +1189,12 @@
 /* Grid — empty state */
 "Monitor several terminals at once" = "複数のターミナルを同時にモニタリング";
 "Drag terminals from the sidebar into this view to add them to the grid." = "サイドバーからターミナルをこのビューにドラッグすると、グリッドに追加できます。";
+
+/* Tunnel — error visibility */
+"Waiting for the remote to report its workspace subnet (start a workspace) — click to cancel" = "リモートがワークスペースのサブネットを報告するのを待っています（ワークスペースを起動してください）— クリックでキャンセル";
+"Waiting for the remote's network info" = "リモートのネットワーク情報を待っています";
+"The remote hasn't reported its workspace subnet yet — it does so once a workspace VM is running. The tunnel connects automatically as soon as the subnet arrives; start (or resume) a workspace on the remote to trigger it." = "リモートはまだワークスペースのサブネットを報告していません — ワークスペース VM が起動すると報告されます。サブネットが届き次第、トンネルは自動的に接続します。リモートでワークスペースを起動（または再開）してください。";
+"Couldn't start the network tunnel" = "ネットワークトンネルを開始できませんでした";
+"%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure は内蔵のアプリ単位トンネルで引き続き動作します — このヘルパーは、他のローカルアプリからリモートの VM へ直接アクセスする機能を追加するだけです。";
+"The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "特権ネットワークヘルパーに接続できません。システム設定 › 一般 › ログイン項目で「Bromure Agentic Coding」が許可されていることを確認して、もう一度お試しください。";
+"The network helper couldn't create the tunnel interface." = "ネットワークヘルパーはトンネルインターフェイスを作成できませんでした。";

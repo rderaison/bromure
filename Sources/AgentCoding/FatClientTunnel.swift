@@ -35,20 +35,25 @@ final class FatClientTunnel {
     }
 
     /// Ensure the daemon is installed, ask it to create the utun + route, receive
-    /// the utun fd, and start the userspace forwarder. Returns false (degrading to
-    /// SOCKS) if the daemon isn't reachable/approved.
-    @discardableResult
-    func start() -> Bool {
-        guard !running else { return true }
+    /// the utun fd, and start the userspace forwarder. Returns nil on success,
+    /// or a user-facing reason (the app degrades to SOCKS) when the daemon
+    /// isn't reachable/approved — callers surface it, never drop it.
+    func start() -> String? {
+        guard !running else { return nil }
         FatClientTunnelInstaller.ensureRegistered()
         let fd = Self.connectDaemon()
         guard fd >= 0 else {
             FatClientLog.log("tunnel: daemon not reachable (approved in System Settings › Login Items?)")
-            return false
+            return NSLocalizedString(
+                "The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again.",
+                comment: "tunnel failure reason: helper socket connect failed")
         }
         _ = "SETUP \(localCIDR)\n".withCString { Darwin.write(fd, $0, strlen($0)) }
         guard let (msg, utun) = FatClientTunnelDaemon.recvFD(fd), msg.hasPrefix("OK "), utun >= 0 else {
-            Darwin.close(fd); FatClientLog.log("tunnel: SETUP failed"); return false
+            Darwin.close(fd); FatClientLog.log("tunnel: SETUP failed")
+            return NSLocalizedString(
+                "The network helper couldn't create the tunnel interface.",
+                comment: "tunnel failure reason: utun SETUP failed")
         }
         connFD = fd
         utunFD = utun
@@ -57,7 +62,7 @@ final class FatClientTunnel {
         forwarder = fwd
         Thread.detachNewThread { fwd.run() }
         FatClientLog.log("tunnel: up — \(localCIDR) → utun(fd \(utun)) → forward \(host.connectLabel)")
-        return true
+        return nil
     }
 
     func stop() {

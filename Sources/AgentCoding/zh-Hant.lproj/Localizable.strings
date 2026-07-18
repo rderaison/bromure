@@ -1192,3 +1192,12 @@
 /* Grid — empty state */
 "Monitor several terminals at once" = "同時監控多個終端機";
 "Drag terminals from the sidebar into this view to add them to the grid." = "將終端機從側邊欄拖曳到此檢視，即可加入網格。";
+
+/* Tunnel — error visibility */
+"Waiting for the remote to report its workspace subnet (start a workspace) — click to cancel" = "正在等待遠端回報其工作區子網路（請啟動一個工作區）——點按以取消";
+"Waiting for the remote's network info" = "正在等待遠端的網路資訊";
+"The remote hasn't reported its workspace subnet yet — it does so once a workspace VM is running. The tunnel connects automatically as soon as the subnet arrives; start (or resume) a workspace on the remote to trigger it." = "遠端尚未回報其工作區子網路——當有工作區虛擬機器執行時才會回報。子網路一到達，通道就會自動連線；在遠端啟動（或恢復）一個工作區即可觸發。";
+"Couldn't start the network tunnel" = "無法啟動網路通道";
+"%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure 會繼續透過其內建的逐應用程式通道運作——此輔助程式只是讓其他本機應用程式能直接存取遠端虛擬機器。";
+"The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "無法連線特權網路輔助程式。請確認「系統設定 › 一般 › 登入項目」中已允許「Bromure Agentic Coding」，然後再試一次。";
+"The network helper couldn't create the tunnel interface." = "網路輔助程式無法建立通道介面。";

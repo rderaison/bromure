@@ -297,7 +297,11 @@ public final class VMNetSwitch: @unchecked Sendable {
                     self.maxPacketSize = mps == 0 ? 1600 : mps
                 }
             } else {
-                print("[VMNetSwitch] vmnet_start_interface failed: status \(status.rawValue)")
+                // NSLog, not print: this failure means every VM silently falls
+                // back to NAT (no shared subnet, no /state vmnetSubnet, dead
+                // fat-client tunnels) — it must be findable in Console.app on
+                // a GUI launch, where stdout goes nowhere.
+                NSLog("[VMNetSwitch] vmnet_start_interface failed: status %d", status.rawValue)
             }
             sem.signal()
         }

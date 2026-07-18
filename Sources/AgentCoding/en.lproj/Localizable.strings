@@ -1191,3 +1191,12 @@
 /* Grid — empty state */
 "Monitor several terminals at once" = "Monitor several terminals at once";
 "Drag terminals from the sidebar into this view to add them to the grid." = "Drag terminals from the sidebar into this view to add them to the grid.";
+
+/* Tunnel — error visibility */
+"Waiting for the remote to report its workspace subnet (start a workspace) — click to cancel" = "Waiting for the remote to report its workspace subnet (start a workspace) — click to cancel";
+"Waiting for the remote's network info" = "Waiting for the remote's network info";
+"The remote hasn't reported its workspace subnet yet — it does so once a workspace VM is running. The tunnel connects automatically as soon as the subnet arrives; start (or resume) a workspace on the remote to trigger it." = "The remote hasn't reported its workspace subnet yet — it does so once a workspace VM is running. The tunnel connects automatically as soon as the subnet arrives; start (or resume) a workspace on the remote to trigger it.";
+"Couldn't start the network tunnel" = "Couldn't start the network tunnel";
+"%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps.";
+"The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again.";
+"The network helper couldn't create the tunnel interface." = "The network helper couldn't create the tunnel interface.";

@@ -580,14 +580,25 @@ final class RemoteHostController {
     /// non-interactive path (poll/apply) stays silent.
     func startTunnelIfNeeded(interactive: Bool = false) {
         guard tunnelEnabled, tunnel == nil else { return }
-        guard let cidr = vmnetSubnet else { return }   // resumes on first /state
+        guard let cidr = vmnetSubnet else {
+            // The remote reports its subnet only once a workspace VM has
+            // booted its vmnet interface — until then there is nothing to
+            // route. The opt-in stays set and apply() retries on every
+            // /state, so the tunnel connects by itself the moment a subnet
+            // appears. Say so instead of silently doing nothing (this exact
+            // path used to be an invisible dead click).
+            tunnelState = "waiting-subnet"
+            FatClientLog.log("tunnel: enabled, but the remote reports no vmnet subnet yet — waiting for /state")
+            if interactive { presentNoSubnetYet() }
+            return
+        }
         switch FatClientTunnelInstaller.state {
         case .enabled:
-            startTunnel(cidr: cidr)
+            startTunnel(cidr: cidr, interactive: interactive)
         case .notRegistered, .requiresApproval:
             switch FatClientTunnelInstaller.ensureRegistered() {   // register is idempotent
             case .enabled:
-                startTunnel(cidr: cidr)
+                startTunnel(cidr: cidr, interactive: interactive)
             case .requiresApproval:
                 guideThroughApproval(interactive: interactive, cidr: cidr)
             case .failed(let why):
@@ -597,6 +608,16 @@ final class RemoteHostController {
                 if interactive { presentRegistrationFailure(why) }
             }
         }
+    }
+
+    private func presentNoSubnetYet() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = NSLocalizedString("Waiting for the remote's network info", comment: "")
+        alert.informativeText = NSLocalizedString(
+            "The remote hasn't reported its workspace subnet yet — it does so once a workspace VM is running. The tunnel connects automatically as soon as the subnet arrives; start (or resume) a workspace on the remote to trigger it.",
+            comment: "")
+        alert.runModal()
     }
 
     private func presentRegistrationFailure(_ why: String) {
@@ -611,7 +632,7 @@ final class RemoteHostController {
 
     private func guideThroughApproval(interactive: Bool, cidr: String) {
         if FatClientTunnelInstaller.state == .enabled {
-            startTunnel(cidr: cidr)
+            startTunnel(cidr: cidr, interactive: interactive)
             return
         }
         tunnelState = "waiting-approval"
@@ -639,7 +660,9 @@ final class RemoteHostController {
                 guard let self else { timer.invalidate(); return }
                 if FatClientTunnelInstaller.state == .enabled {
                     timer.invalidate(); self.approvalPollTimer = nil
-                    if let cidr = self.vmnetSubnet { self.startTunnel(cidr: cidr) }
+                    // The user just walked the approval flow — a failure at
+                    // this point deserves an alert, not a silent grey icon.
+                    if let cidr = self.vmnetSubnet { self.startTunnel(cidr: cidr, interactive: true) }
                 } else if Date() > deadline {
                     timer.invalidate(); self.approvalPollTimer = nil
                     self.tunnelState = "off"
@@ -650,16 +673,29 @@ final class RemoteHostController {
         approvalPollTimer = t
     }
 
-    private func startTunnel(cidr: String) {
+    private func startTunnel(cidr: String, interactive: Bool = false) {
         let t = FatClientTunnel(host: host, localCIDR: cidr)
-        if t.start() {
+        if let why = t.start() {
+            tunnelState = "failed"
+            // Always in Console (not just the env-gated FatClientLog) — a
+            // shipped build's tunnel failure must leave a findable trace.
+            NSLog("[bromure-ac] tunnel start failed: %@", why)
+            if interactive { presentTunnelStartFailure(why) }
+        } else {
             tunnel = t
             tunnelState = "active"
             FatClientLog.log("tunnel: active for \(cidr)")
-        } else {
-            tunnelState = "failed"
-            FatClientLog.log("tunnel: start failed (helper unreachable?)")
         }
+    }
+
+    private func presentTunnelStartFailure(_ why: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("Couldn't start the network tunnel", comment: "")
+        alert.informativeText = String(format: NSLocalizedString(
+            "%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps.",
+            comment: "tunnel start failure alert body; %@ is the reason"), why)
+        alert.runModal()
     }
 
     /// Fusion toggle for the toolbar's ⚡ — rides the same control verb the
@@ -896,6 +932,7 @@ struct RemoteToolbarBar: View {
         switch controller.tunnelState {
         case "active":           NSLocalizedString("Direct network access to the remote's VMs is ON — click to turn off", comment: "network-tunnel toolbar toggle tooltip when active")
         case "waiting-approval": NSLocalizedString("Waiting for approval in System Settings › Login Items…", comment: "network-tunnel toolbar toggle tooltip while awaiting approval")
+        case "waiting-subnet":   NSLocalizedString("Waiting for the remote to report its workspace subnet (start a workspace) — click to cancel", comment: "network-tunnel toolbar toggle tooltip while no subnet is known yet")
         case "failed":           NSLocalizedString("Network tunnel failed — click to retry", comment: "network-tunnel toolbar toggle tooltip after failure")
         default:                 NSLocalizedString("Enable direct network access to the remote's VMs (192.168.x.x from any local app)", comment: "network-tunnel toolbar toggle tooltip when off")
         }
@@ -904,7 +941,7 @@ struct RemoteToolbarBar: View {
     var body: some View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
-            HeaderIcon(system: controller.tunnelState == "waiting-approval"
+            HeaderIcon(system: controller.tunnelState.hasPrefix("waiting")
                            ? "network.badge.shield.half.filled"
                            : (controller.tunnelState == "active"
                               ? "point.3.filled.connected.trianglepath.dotted"

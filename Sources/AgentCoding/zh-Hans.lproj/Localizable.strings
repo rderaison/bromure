@@ -1189,3 +1189,12 @@
 /* Grid — empty state */
 "Monitor several terminals at once" = "同时监控多个终端";
 "Drag terminals from the sidebar into this view to add them to the grid." = "将终端从侧边栏拖到此视图，即可添加到网格。";
+
+/* Tunnel — error visibility */
+"Waiting for the remote to report its workspace subnet (start a workspace) — click to cancel" = "正在等待远程实例报告其工作区子网（请启动一个工作区）——点击取消";
+"Waiting for the remote's network info" = "正在等待远程实例的网络信息";
+"The remote hasn't reported its workspace subnet yet — it does so once a workspace VM is running. The tunnel connects automatically as soon as the subnet arrives; start (or resume) a workspace on the remote to trigger it." = "远程实例尚未报告其工作区子网——当有工作区虚拟机运行时才会报告。子网一到达，隧道就会自动连接；在远程实例上启动（或恢复）一个工作区即可触发。";
+"Couldn't start the network tunnel" = "无法启动网络隧道";
+"%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure 会继续通过其内置的按应用隧道工作——此助手只是让其他本地应用能够直接访问远程虚拟机。";
+"The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "无法连接特权网络助手。请确认在“系统设置 › 通用 › 登录项”中已允许“Bromure Agentic Coding”，然后重试。";
+"The network helper couldn't create the tunnel interface." = "网络助手无法创建隧道接口。";

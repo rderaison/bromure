@@ -1189,3 +1189,12 @@
 /* Grid — empty state */
 "Monitor several terminals at once" = "Surveillez plusieurs terminaux à la fois";
 "Drag terminals from the sidebar into this view to add them to the grid." = "Faites glisser des terminaux depuis la barre latérale vers cette vue pour les ajouter à la grille.";
+
+/* Tunnel — error visibility */
+"Waiting for the remote to report its workspace subnet (start a workspace) — click to cancel" = "En attente du sous-réseau des espaces de travail de l'instance distante (démarrez un espace de travail) — cliquez pour annuler";
+"Waiting for the remote's network info" = "En attente des informations réseau de l'instance distante";
+"The remote hasn't reported its workspace subnet yet — it does so once a workspace VM is running. The tunnel connects automatically as soon as the subnet arrives; start (or resume) a workspace on the remote to trigger it." = "L'instance distante n'a pas encore communiqué le sous-réseau de ses espaces de travail — elle le fait dès qu'une VM d'espace de travail est en marche. Le tunnel se connecte automatiquement dès que le sous-réseau arrive ; démarrez (ou reprenez) un espace de travail sur l'instance distante pour le déclencher.";
+"Couldn't start the network tunnel" = "Impossible de démarrer le tunnel réseau";
+"%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure continue de fonctionner via son tunnel intégré par application — cet assistant n'ajoute que l'accès direct aux VM distantes depuis d'autres applications locales.";
+"The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "L'assistant réseau privilégié est injoignable. Vérifiez que « Bromure Agentic Coding » est autorisé dans Réglages Système › Général › Ouverture, puis réessayez.";
+"The network helper couldn't create the tunnel interface." = "L'assistant réseau n'a pas pu créer l'interface du tunnel.";
