@@ -353,7 +353,7 @@ struct CodingKanbanView: View {
 
     private var testingColumn: some View {
         let tasks = store.tasks(in: .testing)
-        return KanbanColumn(title: NSLocalizedString("Testing", comment: "kanban column"),
+        return KanbanColumn(title: NSLocalizedString("Testing/Review", comment: "kanban column"),
                             systemImage: "eye",
                             count: tasks.count,
                             tint: .purple,
@@ -495,9 +495,18 @@ private struct InProgressTaskCard: View {
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.red)
                     } else if status == nil {
-                        Text(NSLocalizedString("session gone", comment: "task card"))
-                            .font(.system(size: 10))
-                            .foregroundStyle(.orange)
+                        // No tab yet: within the boot/attach window that's
+                        // normal startup, not a lost session.
+                        if let started = task.startedAt,
+                           Date().timeIntervalSince(started) < 300 {
+                            Text(NSLocalizedString("starting…", comment: "task card"))
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                        } else {
+                            Text(NSLocalizedString("session gone", comment: "task card"))
+                                .font(.system(size: 10))
+                                .foregroundStyle(.orange)
+                        }
                     }
                 }
             }
@@ -660,6 +669,32 @@ private struct TaskEditorSheet: View {
     private var stored: CodingTask? { store.task(task.id) }
     private var validationInFlight: Bool { stored?.validationInFlight ?? false }
 
+    /// The Write/Preview description editor block. Frames come from the
+    /// caller: alone it fills the sheet's middle; with a plan review it
+    /// shares a VSplitView with the review pane.
+    private var editorArea: some View {
+        Group {
+            if preview {
+                ScrollView {
+                    MarkdownBlocks(text: task.details)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .background(RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.primary.opacity(0.03)))
+            } else {
+                TextEditor(text: $task.details)
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.primary.opacity(0.03)))
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .strokeBorder(Color.primary.opacity(0.12)))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(isNew
@@ -719,30 +754,26 @@ private struct TaskEditorSheet: View {
                 .labelsHidden()
             }
 
-            Group {
-                if preview {
-                    ScrollView {
-                        MarkdownBlocks(text: task.details)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(10)
-                    }
-                    .background(RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.primary.opacity(0.03)))
-                } else {
-                    TextEditor(text: $task.details)
-                        .font(.system(size: 12.5, design: .monospaced))
-                        .scrollContentBackground(.hidden)
-                        .padding(6)
-                        .background(RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.primary.opacity(0.03)))
-                }
-            }
-            .frame(minHeight: 280, maxHeight: .infinity)
-            .overlay(RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(Color.primary.opacity(0.12)))
-
+            // Editor + plan review share the sheet's flexible middle. With a
+            // review present they live in a VSplitView — drag the divider to
+            // give the verbose reviewer as much room as it needs — and the
+            // sheet itself never grows past the window (macOS clips sheets;
+            // the Save row must never fall off).
             if let result = stored?.validation, !validationInFlight {
-                validationSection(result)
+                VSplitView {
+                    editorArea
+                        .frame(minHeight: 110)
+                        .padding(.bottom, 6)
+                    validationSection(result)
+                        .frame(minHeight: 96)
+                        .padding(.top, 6)
+                }
+                .frame(maxHeight: .infinity)
+                .layoutPriority(1)
+            } else {
+                editorArea
+                    .frame(minHeight: 140, maxHeight: .infinity)
+                    .layoutPriority(1)
             }
 
             Text(NSLocalizedString(
@@ -786,7 +817,9 @@ private struct TaskEditorSheet: View {
             }
         }
         .padding(18)
-        .frame(minWidth: 680, minHeight: 560)
+        // Capped: content shares space inside this; the sheet itself must
+        // stay shorter than any reasonable window.
+        .frame(minWidth: 680, minHeight: 500, idealHeight: 620, maxHeight: 660)
     }
 
     /// The reviewer's questions/assumptions/risks, rendered under the
@@ -820,7 +853,7 @@ private struct TaskEditorSheet: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(10)
                 }
-                .frame(maxHeight: 180)
+                .frame(minHeight: 60, maxHeight: .infinity)
                 .background(RoundedRectangle(cornerRadius: 6)
                     .fill(Color.purple.opacity(0.06)))
                 .overlay(RoundedRectangle(cornerRadius: 6)

@@ -7176,6 +7176,36 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return TaskReviewData.parse(out)
     }
 
+    /// Pre-seed Claude's folder trust for a guest directory — the host-side
+    /// twin of agentd's `_pretrust`, for workspaces resumed from suspend
+    /// that still run a pre-fix agentd. Worktrees inherit the main repo's
+    /// trust (git common dir), so trusting the repo path covers the run.
+    /// Best-effort; same clobber race as the guest version.
+    func pretrustGuestPath(profileID: Profile.ID, dir rawDir: String) async {
+        let dir = rawDir
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let py = """
+        import json, os
+        p = os.path.expanduser("~/.claude.json")
+        try:
+            cfg = json.load(open(p)) if os.path.exists(p) else {}
+        except Exception:
+            cfg = {}
+        pr = cfg.setdefault("projects", {})
+        e = pr.setdefault(os.path.expanduser("\(dir)"), {})
+        if e.get("hasTrustDialogAccepted") is not True:
+            e["hasTrustDialogAccepted"] = True
+            tmp = p + ".tmp"
+            json.dump(cfg, open(tmp, "w"), indent=2)
+            os.replace(tmp, p)
+        """
+        let b64 = Data(py.utf8).base64EncodedString()
+        _ = try? await guestExec(
+            profileID: profileID,
+            command: "echo \(b64) | base64 -d | python3 -", timeout: 10)
+    }
+
     /// Copy a finished automation run's Claude transcript out of the guest
     /// into the host-side per-run archive (runs/<runID>/transcript.jsonl).
     /// Called by the engine BEFORE automation-finish: an empty run's worktree

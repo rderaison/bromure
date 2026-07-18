@@ -254,8 +254,11 @@ final class CodingTaskEngine {
     reasonable decisions on your own rather than waiting for confirmation. \
     When the task is complete, COMMIT all of your work to this branch with \
     clear commit messages: do not leave uncommitted changes, do not merge \
-    into any other branch, and do not push. If review feedback arrives \
-    later in this session, address it and commit again.
+    into any other branch, and do not push. Then, as your VERY LAST action, \
+    run this command to hand the task to review: \
+    `sh ~/.bromure/agent-status.sh done` \
+    If review feedback arrives later in this session, address it, commit \
+    again, and finish with that same command.
     """
 
     nonisolated static func prompt(for task: CodingTask) -> String {
@@ -307,7 +310,9 @@ final class CodingTaskEngine {
         Anything in the brief that conflicts with the codebase as it \
         actually is (missing files, different naming, already-done work).
 
-        Keep the whole reply under 300 words. The brief:
+        Be terse: short bullet points, no preamble, no praise, never restate \
+        the brief, write "None" for an empty section, hard cap 120 words \
+        total. The brief:
 
         ---
         \(brief)
@@ -360,22 +365,40 @@ final class CodingTaskEngine {
                     comment: "plan validation")
             }
         }
-        // Headless reviewer. `bash -lc` so the login env (agent proxy,
-        // PATH) applies, exactly like a terminal tab; prompt travels base64
-        // so arbitrary markdown survives the shell.
+        // Headless reviewer. `bash -ilc` — INTERACTIVE login shell — because
+        // the generated .bashrc that exports the agent's auth env (the
+        // subscription stand-in key the MITM proxy swaps, base URLs, PATH)
+        // guards on interactivity; a plain `bash -lc` skips it and claude
+        // reports "Not logged in". The tab auto-launch hooks in that same
+        // .bashrc gate on `-t 1` (a real tty), which an exec'd shell lacks,
+        // so nothing auto-starts. Prompt travels base64 so arbitrary
+        // markdown survives the shell.
         let b64 = Data(prompt.utf8).base64EncodedString()
         let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        let cmd = "bash -lc 'cd \(q) 2>/dev/null || cd ~; "
+        let cmd = "bash -ilc 'cd \(q) 2>/dev/null || cd ~; "
             + "claude -p --dangerously-skip-permissions "
             + "\"$(echo \(b64) | base64 -d)\" 2>&1 | head -c 20000'"
         do {
             let out = try await delegate.guestExec(profileID: profileID,
                                                    command: cmd, timeout: 240)
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty
-                ? NSLocalizedString("⚠️ The reviewer returned nothing — try again.",
-                                    comment: "plan validation")
-                : trimmed
+            guard !trimmed.isEmpty else {
+                return NSLocalizedString("⚠️ The reviewer returned nothing — try again.",
+                                         comment: "plan validation")
+            }
+            // Auth failures come back as Claude's terse CLI errors — turn
+            // them into the action the user can actually take.
+            if trimmed.contains("Not logged in") || trimmed.contains("/login") {
+                return trimmed + "\n\n" + NSLocalizedString(
+                    "⚠️ This workspace's Claude isn't signed in (subscription mode signs in interactively, inside the VM). Open a terminal tab in the workspace, run `claude`, complete `/login` once — the login persists in the workspace — then validate again.",
+                    comment: "plan validation")
+            }
+            if trimmed.contains("401") && trimmed.lowercased().contains("expired") {
+                return trimmed + "\n\n" + NSLocalizedString(
+                    "⚠️ The workspace's Claude credentials have expired. Re-authenticate once in a terminal tab of this workspace, then validate again.",
+                    comment: "plan validation")
+            }
+            return trimmed
         } catch {
             return String(format: NSLocalizedString(
                 "⚠️ Validation failed: %@", comment: "plan validation"),
@@ -387,7 +410,10 @@ final class CodingTaskEngine {
 
     /// Launch the task: agent in a fresh worktree of the task's repo, on a
     /// running workspace (booted first when it isn't). Same outbox path and
-    /// yolo mode as automation fires.
+    /// yolo mode as automation fires. The repo gets a host-side trust
+    /// pre-seed first — a belt to the guest agentd's `_pretrust` suspenders,
+    /// because a workspace resumed from suspend still runs the agentd it
+    /// booted with and may predate that fix.
     func start(_ taskID: UUID) {
         guard let task = store.task(taskID), task.stage == .backlog,
               let delegate else { return }
@@ -397,58 +423,73 @@ final class CodingTaskEngine {
             return
         }
         let slug = ScheduledAutomationEngine.branchSlug(for: task.title, at: Date())
-        let args = [ScheduledAutomationEngine.guestPath(task.repoPath), slug,
-                    task.title, task.tool.rawValue, Self.prompt(for: task)]
+        let guestPath = ScheduledAutomationEngine.guestPath(task.repoPath)
+        let args = [guestPath, slug, task.title, task.tool.rawValue,
+                    Self.prompt(for: task)]
+        let profileID = task.profileID
+        let title = task.title
+        let isClaude = task.tool == .claude
 
-        func markStarted() {
-            store.mutate(taskID) {
+        Task { [weak self] in
+            guard let self, let delegate = self.delegate else { return }
+            // Make sure the workspace is reachable (boot when it isn't).
+            var up = (try? await delegate.guestExec(profileID: profileID,
+                                                    command: "true", timeout: 5)) != nil
+            if !up {
+                BACDebug.log("tasks", "“\(title)”: workspace not running — starting")
+                if !self.pendingBoots.contains(profileID) {
+                    self.pendingBoots.insert(profileID)
+                    delegate.startProfileForAutomation(profileID)
+                }
+                let deadline = Date().addingTimeInterval(Self.bootTimeout)
+                while Date() < deadline {
+                    try? await Task.sleep(nanoseconds: Self.bootPollInterval)
+                    if (try? await delegate.guestExec(profileID: profileID,
+                                                      command: "true", timeout: 5)) != nil {
+                        up = true; break
+                    }
+                }
+                self.pendingBoots.remove(profileID)
+            }
+            guard up else {
+                self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
+                    "The workspace did not boot in time", comment: "task start") }
+                return
+            }
+            // The board's whole lifecycle — done-signal matching, diff
+            // review, merge — rides the task's worktree BRANCH. A non-repo
+            // start path silently falls back to a plain agent tab with no
+            // branch, and the card can never leave In Progress. Refuse it
+            // with the reason instead.
+            let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            let isRepo = (try? await delegate.guestExec(
+                profileID: profileID,
+                command: "git -C \(q) rev-parse --is-inside-work-tree >/dev/null 2>&1",
+                timeout: 10)) != nil
+            guard isRepo else {
+                self.store.mutate(taskID) { $0.lastError = String(
+                    format: NSLocalizedString(
+                        "“%@” isn't a git repository — tasks run on their own branch, so pick a repo folder (or `git init` it first).",
+                        comment: "task start"),
+                    task.repoPath) }
+                return
+            }
+            if isClaude {
+                await delegate.pretrustGuestPath(profileID: profileID, dir: guestPath)
+            }
+            guard delegate.automationWorktreeCommand(
+                profileNameOrID: profileID.uuidString, action: "run", args: args) else {
+                self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
+                    "Couldn't reach the workspace — is it running?", comment: "task start") }
+                return
+            }
+            BACDebug.log("tasks", "started “\(title)” → \(slug)")
+            self.store.mutate(taskID) {
                 $0.stage = .inProgress
                 $0.branchSlug = slug
                 $0.startedAt = Date()
                 $0.lastError = nil
             }
-        }
-
-        if delegate.automationWorktreeCommand(
-            profileNameOrID: task.profileID.uuidString, action: "run", args: args) {
-            BACDebug.log("tasks", "started “\(task.title)” → \(slug)")
-            markStarted()
-            return
-        }
-
-        // Workspace off/suspended: boot it, then queue the run.
-        BACDebug.log("tasks", "“\(task.title)”: workspace not running — starting")
-        if !pendingBoots.contains(task.profileID) {
-            pendingBoots.insert(task.profileID)
-            delegate.startProfileForAutomation(task.profileID)
-        }
-        let deadline = Date().addingTimeInterval(Self.bootTimeout)
-        let profileID = task.profileID
-        Task { [weak self] in
-            while Date() < deadline {
-                try? await Task.sleep(nanoseconds: Self.bootPollInterval)
-                guard let self, let delegate = self.delegate else { return }
-                if delegate.automationWorktreeCommand(
-                    profileNameOrID: profileID.uuidString, action: "run", args: args) {
-                    self.pendingBoots.remove(profileID)
-                    BACDebug.log("tasks", "started “\(task.title)” → \(slug) (after boot)")
-                    self.markStartedOnMain(taskID, slug: slug)
-                    return
-                }
-            }
-            guard let self else { return }
-            self.pendingBoots.remove(profileID)
-            self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
-                "The workspace did not boot in time", comment: "task start") }
-        }
-    }
-
-    private func markStartedOnMain(_ taskID: UUID, slug: String) {
-        store.mutate(taskID) {
-            $0.stage = .inProgress
-            $0.branchSlug = slug
-            $0.startedAt = Date()
-            $0.lastError = nil
         }
     }
 

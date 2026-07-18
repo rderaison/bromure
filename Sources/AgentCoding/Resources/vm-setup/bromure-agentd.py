@@ -1858,6 +1858,50 @@ def _preaccept_yolo(tool):
         log("worktree", "yolo pre-accept failed:", e)
 
 
+def _pretrust(tool, *dirs):
+    """Claude Code shows a folder-trust dialog the first time it opens a
+    project directory it has never seen — which stalls an unattended run
+    when the target repo was never opened interactively (worktrees inherit
+    the parent repo's trust, so this bites first-ever-touch repos only,
+    but those are exactly what a fresh automation or board task creates).
+    Pre-record trust for the run's directories in ~/.claude.json
+    projects.<path>.hasTrustDialogAccepted. Best-effort and racy against a
+    concurrently-running interactive claude rewriting the file from memory
+    (same caveat as _preaccept_yolo) — worst case the dialog appears,
+    which is exactly today's behavior."""
+    if tool != "claude":
+        return
+    path = os.path.join(HOME, ".claude.json")
+    try:
+        cfg = {}
+        if os.path.exists(path):
+            with open(path) as f:
+                cfg = json.load(f)
+        projects = cfg.get("projects")
+        if not isinstance(projects, dict):
+            projects = {}
+            cfg["projects"] = projects
+        changed = False
+        for d in dirs:
+            if not d:
+                continue
+            entry = projects.get(d)
+            if not isinstance(entry, dict):
+                entry = {}
+                projects[d] = entry
+            if entry.get("hasTrustDialogAccepted") is not True:
+                entry["hasTrustDialogAccepted"] = True
+                changed = True
+        if changed:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cfg, f, indent=2)
+            os.replace(tmp, path)
+    except Exception as e:
+        # Non-fatal: the run still starts, worst case Claude prompts.
+        log("worktree", "pretrust failed:", e)
+
+
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
     _ensure_seed_current()
     if prompt_b64 == "-":
@@ -1906,6 +1950,7 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
     if yolo and _YOLO_FLAGS.get(tool):
         _env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
         _preaccept_yolo(tool)
+        _pretrust(tool, wt_dir, main_root)
     win = _new_window(command="bash -l", cwd=wt_dir, env=_env)
     if not win:
         worktree_err("worktree: could not open a tab (created %s at %s)"
@@ -1943,6 +1988,7 @@ def _task_resume(main_root, branch, parent, display, tool, prompt_b64):
     if _YOLO_FLAGS.get(tool):
         env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
         _preaccept_yolo(tool)
+        _pretrust(tool, wt_dir, main_root)
     win = _new_window(command="bash -l", cwd=wt_dir, env=env)
     if not win:
         worktree_err("task-resume: could not open a tab for %s" % branch)
@@ -1967,6 +2013,7 @@ def _automation_tab(cwd, display, tool, prompt_b64):
     if _YOLO_FLAGS.get(tool):
         env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
         _preaccept_yolo(tool)
+        _pretrust(tool, cwd)
     win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
         worktree_err("automation: could not open a tab at %s" % cwd)

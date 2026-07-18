@@ -14,6 +14,9 @@ struct CodingTasksTests {
         #expect(p.hasPrefix("Fix the leak\n\n## Context"))
         #expect(p.contains("COMMIT all of your work"))
         #expect(p.contains("do not merge into any other branch"))
+        // The explicit hand-to-review signal — same script the Stop hook
+        // runs, so the transition doesn't depend on hook inference alone.
+        #expect(p.contains("agent-status.sh done"))
     }
 
     @Test("Feedback prompt lists unsent comments with file scopes")

@@ -1769,30 +1769,10 @@ struct SessionSidebar: View {
 
     private var fullSidebar: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Workspaces")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(0.7)
-                Spacer()
-            }
-            .padding(.leading, 16)
-            .padding(.trailing, 12)
-            .padding(.top, 12)
-            .padding(.bottom, 6)
-
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
-                    GridSection(
-                        store: gridStore,
-                        model: model,
-                        onSelect: onSelectGrid,
-                        onRemoveCell: onRemoveGridCell,
-                        onFocusCell: onFocusGridCell,
-                        onDropPayload: onDropGridPayload)
-                    // The boards live right under the Grid: they're global
-                    // surfaces like it, not per-workspace rows.
+                    // Boards first — the surfaces that summarize everything —
+                    // then the Workspaces group (label, Grid, rows).
                     AutomationsSection(
                         store: automationStore,
                         model: model,
@@ -1804,6 +1784,25 @@ struct SessionSidebar: View {
                             model: model,
                             onShowBoard: onShowTaskBoard)
                     }
+                    HStack {
+                        Text("Workspaces")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .textCase(.uppercase)
+                            .tracking(0.7)
+                        Spacer()
+                    }
+                    .padding(.leading, 8)
+                    .padding(.trailing, 6)
+                    .padding(.top, 14)
+                    .padding(.bottom, 4)
+                    GridSection(
+                        store: gridStore,
+                        model: model,
+                        onSelect: onSelectGrid,
+                        onRemoveCell: onRemoveGridCell,
+                        onFocusCell: onFocusGridCell,
+                        onDropPayload: onDropGridPayload)
                     ForEach(model.profileRows) { row in
                         VMSection(
                             row: row,
