@@ -1962,7 +1962,21 @@ final class RemoteHostWindow: NSWindow {
                 self?.controller.profile(for: id)?.name ?? ""
             },
             sendBack: { [weak self] id in self?.controller.taskCommand(id, "send-back") },
-            merge: { [weak self] id in self?.controller.taskCommand(id, "merge") },
+            merge: { [weak self] id, target, squash in
+                var body: [String: Any] = ["squash": squash]
+                if let target { body["target"] = target }
+                self?.controller.taskCommand(id, "merge", body: body)
+            },
+            openPR: { [weak self] id in self?.controller.taskCommand(id, "open-pr") },
+            fetchBranches: { [weak self] task in
+                guard let self, let root = task.rootRepo, !root.isEmpty else { return [] }
+                let cmd = "git -C '" + root.replacingOccurrences(of: "'", with: "'\\''")
+                    + "' for-each-ref refs/heads --format='%(refname:short)' 2>/dev/null | head -50"
+                guard let out = try? await self.controller.guestExec(
+                    task.profileID, command: cmd, timeout: 15) else { return [] }
+                return out.split(whereSeparator: \.isNewline).map(String.init)
+                    .filter { !$0.isEmpty && !$0.hasPrefix("wt/") }
+            },
             addComment: { [weak self] id, text, file in
                 var body: [String: Any] = ["text": text]
                 if let file { body["file"] = file }
@@ -2003,7 +2017,11 @@ final class RemoteHostWindow: NSWindow {
                     merge: { c.taskCommand($0, "merge") },
                     closeNoMerge: { c.taskCommand($0, "close-no-merge") },
                     delete: { c.deleteTask($0) },
-                    save: { c.upsertTask($0) }))
+                    save: { c.upsertTask($0) },
+                    validate: { task in
+                        c.upsertTask(task)
+                        c.taskCommand(task.id, "validate")
+                    }))
             let host = NSHostingView(rootView: view)
             host.translatesAutoresizingMaskIntoConstraints = false
             taskBoardHost = host

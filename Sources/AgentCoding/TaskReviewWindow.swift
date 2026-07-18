@@ -73,7 +73,13 @@ final class TaskReviewWindowManager {
         /// In Progress. Host: the task engine; fat client: POST /tasks/…
         /// over the tunnel.
         var sendBack: (UUID) -> Void
-        var merge: (UUID) -> Void
+        /// Merge the branch — into its parent by default, `target` when the
+        /// picker chose another branch, squashed on request.
+        var merge: (_ taskID: UUID, _ target: String?, _ squash: Bool) -> Void
+        /// "Create Pull Request…" — the worktree-pr agent flow.
+        var openPR: (UUID) -> Void
+        /// Branches of the task's repo, for the "Merge into…" picker.
+        var fetchBranches: (CodingTask) async -> [String]
         /// Append a review comment. Host: store.mutate; fat client: POST
         /// (the mirror confirms on the next poll).
         var addComment: (_ taskID: UUID, _ text: String, _ file: String?) -> Void
@@ -121,8 +127,13 @@ final class TaskReviewWindowManager {
                 self?.context.sendBack(taskID)
                 self?.close(taskID)
             },
-            onMerge: { [weak self] in
-                self?.context.merge(taskID)
+            fetchBranches: context.fetchBranches,
+            onMerge: { [weak self] target, squash in
+                self?.context.merge(taskID, target, squash)
+                self?.close(taskID)
+            },
+            onOpenPR: { [weak self] in
+                self?.context.openPR(taskID)
                 self?.close(taskID)
             })
         win.contentView = NSHostingView(rootView: view)
@@ -154,7 +165,9 @@ private struct TaskReviewView: View {
     let onOpenTerminal: () -> Void
     let onAddComment: (_ text: String, _ file: String?) -> Void
     let onSendBack: () -> Void
-    let onMerge: () -> Void
+    let fetchBranches: (CodingTask) async -> [String]
+    let onMerge: (_ target: String?, _ squash: Bool) -> Void
+    let onOpenPR: () -> Void
 
     @State private var data: TaskReviewData?
     @State private var loadFailed = false
@@ -162,6 +175,8 @@ private struct TaskReviewView: View {
     /// File path the draft comment is scoped to (via a file header's
     /// comment button); nil = about the whole change.
     @State private var draftFile: String?
+    /// Repo branches for the "Merge into…" picker (loaded with the diff).
+    @State private var branches: [String] = []
 
     private var task: CodingTask? { store.task(taskID) }
 
@@ -186,6 +201,7 @@ private struct TaskReviewView: View {
         data = nil; loadFailed = false
         if let fetched = await fetchReview(task) { data = fetched }
         else { loadFailed = true }
+        branches = await fetchBranches(task)
     }
 
     // MARK: Header
@@ -235,18 +251,59 @@ private struct TaskReviewView: View {
                       : String(format: NSLocalizedString(
                           "Send %d comment(s) to the agent and continue the task",
                           comment: ""), unsentCount))
-            Button {
-                onMerge()
-            } label: {
-                Label(String(format: NSLocalizedString("Merge into %@", comment: "review"),
-                             task?.parentBranch ?? "parent"),
-                      systemImage: "arrow.triangle.merge")
-            }
-            .buttonStyle(.borderedProminent)
+            mergeMenu
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .background(.bar)
+    }
+
+    /// The ways out of review: plain or squash merge into the parent, a
+    /// pull request, or a merge into any other branch of the repo.
+    private var mergeMenu: some View {
+        let parent = task?.parentBranch ?? "parent"
+        return Menu {
+            Button {
+                onMerge(nil, false)
+            } label: {
+                Label(String(format: NSLocalizedString("Merge into %@", comment: "review"),
+                             parent),
+                      systemImage: "arrow.triangle.merge")
+            }
+            Button {
+                onMerge(nil, true)
+            } label: {
+                Label(String(format: NSLocalizedString("Squash & Merge into %@",
+                                                       comment: "review"), parent),
+                      systemImage: "arrow.triangle.merge")
+            }
+            Divider()
+            Button {
+                onOpenPR()
+            } label: {
+                Label(NSLocalizedString("Create Pull Request…", comment: "review"),
+                      systemImage: "arrow.up.forward.square")
+            }
+            let others = branches.filter { $0 != task?.branch && $0 != parent }
+            if !others.isEmpty {
+                Divider()
+                Menu(NSLocalizedString("Merge into…", comment: "review")) {
+                    ForEach(others.prefix(30), id: \.self) { branch in
+                        Button(branch) { onMerge(branch, false) }
+                    }
+                }
+            }
+        } label: {
+            Label(String(format: NSLocalizedString("Merge into %@", comment: "review"),
+                         parent),
+                  systemImage: "arrow.triangle.merge")
+        } primaryAction: {
+            onMerge(nil, false)
+        }
+        .fixedSize()
+        .help(NSLocalizedString(
+            "Click to merge into the parent; hold for squash, pull-request, and other-branch options.",
+            comment: "review"))
     }
 
     // MARK: Diff content

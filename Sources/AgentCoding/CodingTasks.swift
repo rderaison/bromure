@@ -50,6 +50,17 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var completedAt: Date?
     /// Done via merge (true) or closed without merging (false).
     var merged: Bool
+    /// Done via "Create Pull Request" — the branch left for review on the
+    /// forge instead of merging locally.
+    var prOpened: Bool?
+    /// The plan-validation agent's markdown review (questions, assumptions,
+    /// risks) — produced in the backlog editor BEFORE the task starts, so
+    /// the clarifying questions get asked while a human is still in the loop.
+    var validation: String?
+    var validatedAt: Date?
+    /// When a validation round was requested — drives the editor's spinner
+    /// (a request newer than the last result = one in flight).
+    var validationRequestedAt: Date?
     /// Why the last start attempt failed, shown on the backlog card.
     var lastError: String?
 
@@ -61,6 +72,8 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
          comments: [ReviewComment] = [], createdAt: Date = Date(),
          startedAt: Date? = nil, testingAt: Date? = nil,
          completedAt: Date? = nil, merged: Bool = false,
+         prOpened: Bool? = nil, validation: String? = nil,
+         validatedAt: Date? = nil, validationRequestedAt: Date? = nil,
          lastError: String? = nil) {
         self.id = id
         self.title = title
@@ -80,7 +93,19 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         self.testingAt = testingAt
         self.completedAt = completedAt
         self.merged = merged
+        self.prOpened = prOpened
+        self.validation = validation
+        self.validatedAt = validatedAt
+        self.validationRequestedAt = validationRequestedAt
         self.lastError = lastError
+    }
+
+    /// A validation round is running: requested, with no result since.
+    /// Bounded so a host crash mid-round can't pin the editor's spinner.
+    var validationInFlight: Bool {
+        guard let requested = validationRequestedAt else { return false }
+        if let done = validatedAt, done >= requested { return false }
+        return Date().timeIntervalSince(requested) < 300
     }
 }
 
@@ -255,6 +280,109 @@ final class CodingTaskEngine {
         return out + "\n\n" + taskDirectives
     }
 
+    // MARK: Plan validation (backlog editor)
+
+    /// The reviewer prompt: read-only, questions-first, bounded. The brief
+    /// is spliced in verbatim; the user answers by editing the brief and
+    /// re-validating.
+    nonisolated static func validationPrompt(for task: CodingTask) -> String {
+        var brief = task.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let details = task.details.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !details.isEmpty { brief += "\n\n" + details }
+        return """
+        You are reviewing a task brief BEFORE another agent implements it in \
+        this repository (the current directory). Do NOT implement anything \
+        and do NOT modify any files — explore the code read-only as needed, \
+        then reply in markdown with exactly these sections:
+
+        ## Questions
+        Clarifying questions whose answers would change how the task is \
+        done — the things an implementer would otherwise have to guess. \
+        Number them. If the brief leaves nothing worth asking, write "None".
+
+        ## Assumptions
+        The defaults you would pick if the questions go unanswered.
+
+        ## Risks
+        Anything in the brief that conflicts with the codebase as it \
+        actually is (missing files, different naming, already-done work).
+
+        Keep the whole reply under 300 words. The brief:
+
+        ---
+        \(brief)
+        """
+    }
+
+    /// Run a validation round: boot the workspace if needed, run the
+    /// reviewer agent headless (`claude -p`) in the task's repo, and store
+    /// its reply on the task. Async and fire-and-forget from the caller's
+    /// perspective — the editor (and the fat-client mirror) watch the store.
+    func validate(_ taskID: UUID) {
+        guard let task = store.task(taskID), !task.validationInFlight else { return }
+        store.mutate(taskID) { $0.validationRequestedAt = Date() }
+        let prompt = Self.validationPrompt(for: task)
+        let guestPath = ScheduledAutomationEngine.guestPath(task.repoPath)
+        Task { [weak self] in
+            guard let self, let delegate = self.delegate else { return }
+            let result = await self.runValidation(
+                delegate: delegate, profileID: task.profileID,
+                guestPath: guestPath, prompt: prompt)
+            self.store.mutate(taskID) {
+                $0.validation = result
+                $0.validatedAt = Date()
+            }
+        }
+    }
+
+    private func runValidation(delegate: ACAppDelegate, profileID: UUID,
+                               guestPath: String, prompt: String) async -> String {
+        // Make sure the workspace is up (same boot courtesy as start()).
+        if (try? await delegate.guestExec(profileID: profileID,
+                                          command: "true", timeout: 5)) == nil {
+            if !pendingBoots.contains(profileID) {
+                pendingBoots.insert(profileID)
+                delegate.startProfileForAutomation(profileID)
+            }
+            let deadline = Date().addingTimeInterval(Self.bootTimeout)
+            var up = false
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: Self.bootPollInterval)
+                if (try? await delegate.guestExec(profileID: profileID,
+                                                  command: "true", timeout: 5)) != nil {
+                    up = true; break
+                }
+            }
+            pendingBoots.remove(profileID)
+            guard up else {
+                return NSLocalizedString(
+                    "⚠️ The workspace did not boot in time — try again.",
+                    comment: "plan validation")
+            }
+        }
+        // Headless reviewer. `bash -lc` so the login env (agent proxy,
+        // PATH) applies, exactly like a terminal tab; prompt travels base64
+        // so arbitrary markdown survives the shell.
+        let b64 = Data(prompt.utf8).base64EncodedString()
+        let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let cmd = "bash -lc 'cd \(q) 2>/dev/null || cd ~; "
+            + "claude -p --dangerously-skip-permissions "
+            + "\"$(echo \(b64) | base64 -d)\" 2>&1 | head -c 20000'"
+        do {
+            let out = try await delegate.guestExec(profileID: profileID,
+                                                   command: cmd, timeout: 240)
+            let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty
+                ? NSLocalizedString("⚠️ The reviewer returned nothing — try again.",
+                                    comment: "plan validation")
+                : trimmed
+        } catch {
+            return String(format: NSLocalizedString(
+                "⚠️ Validation failed: %@", comment: "plan validation"),
+                error.localizedDescription)
+        }
+    }
+
     // MARK: Start (Backlog → In Progress)
 
     /// Launch the task: agent in a fresh worktree of the task's repo, on a
@@ -405,28 +533,61 @@ final class CodingTaskEngine {
 
     // MARK: Merge (Testing → Done)
 
-    /// Merge the task's branch into its parent (the guest opens the usual
-    /// merge tab; conflicts spawn the resolver flow) and mark the task Done.
-    func merge(_ taskID: UUID) {
+    /// Merge the task's branch into its parent — or `target`, when the
+    /// review picked another branch — and mark the task Done. The guest
+    /// opens the usual merge tab (squash flavor on request); conflicts
+    /// spawn the resolver flow.
+    func merge(_ taskID: UUID, into targetOverride: String? = nil,
+               squash: Bool = false) {
         guard let task = store.task(taskID), task.stage == .testing,
-              let branch = task.branch, let parent = task.parentBranch,
+              let branch = task.branch,
+              let target = targetOverride ?? task.parentBranch,
               let root = task.rootRepo, let delegate else { return }
         let ok = delegate.automationWorktreeCommand(
             profileNameOrID: task.profileID.uuidString, action: "merge",
-            args: [branch, parent, root,
+            args: [branch, target, root,
                    String(format: NSLocalizedString("Merge → %@", comment: "merge tab"),
-                          parent),
-                   task.tool.rawValue])
+                          target),
+                   task.tool.rawValue, squash ? "squash" : "merge"])
         guard ok else {
             store.mutate(taskID) { $0.lastError = NSLocalizedString(
                 "Couldn't reach the workspace — is it running?", comment: "task merge") }
             return
         }
-        BACDebug.log("tasks", "“\(task.title)”: merging \(branch) → \(parent)")
+        BACDebug.log("tasks",
+                     "“\(task.title)”: \(squash ? "squash-" : "")merging \(branch) → \(target)")
         store.mutate(taskID) {
             $0.stage = .done
             $0.completedAt = Date()
             $0.merged = true
+            $0.lastError = nil
+        }
+    }
+
+    /// "Create Pull Request": the existing worktree-pr flow — an agent tab
+    /// that reviews, pushes, and `gh pr create`s the branch. The task closes
+    /// as "PR opened"; the merge happens on the forge.
+    func openPR(_ taskID: UUID) {
+        guard let task = store.task(taskID), task.stage == .testing,
+              let branch = task.branch, let parent = task.parentBranch,
+              let root = task.rootRepo, let delegate else { return }
+        let ok = delegate.automationWorktreeCommand(
+            profileNameOrID: task.profileID.uuidString, action: "pr",
+            args: [branch, parent, root,
+                   String(format: NSLocalizedString("PR: %@", comment: "pr tab"),
+                          task.title),
+                   task.tool.rawValue])
+        guard ok else {
+            store.mutate(taskID) { $0.lastError = NSLocalizedString(
+                "Couldn't reach the workspace — is it running?", comment: "task pr") }
+            return
+        }
+        BACDebug.log("tasks", "“\(task.title)”: opening PR for \(branch)")
+        store.mutate(taskID) {
+            $0.stage = .done
+            $0.completedAt = Date()
+            $0.merged = false
+            $0.prOpened = true
             $0.lastError = nil
         }
     }

@@ -28,6 +28,33 @@ struct CodingTasksTests {
         #expect(p.contains("commit"))
     }
 
+    @Test("Validation prompt is read-only, structured, and carries the brief")
+    func validationPrompt() {
+        let task = CodingTask(title: "Add caching",
+                              details: "Use an LRU with 100 entries.",
+                              profileID: UUID())
+        let p = CodingTaskEngine.validationPrompt(for: task)
+        #expect(p.contains("do NOT modify any files"))
+        #expect(p.contains("## Questions"))
+        #expect(p.contains("## Assumptions"))
+        #expect(p.contains("## Risks"))
+        #expect(p.contains("Add caching"))
+        #expect(p.contains("LRU with 100 entries"))
+    }
+
+    @Test("validationInFlight: requested-and-unanswered only, bounded")
+    func inFlight() {
+        var task = CodingTask(title: "t", profileID: UUID())
+        #expect(!task.validationInFlight)
+        task.validationRequestedAt = Date()
+        #expect(task.validationInFlight)
+        task.validatedAt = Date()
+        #expect(!task.validationInFlight)
+        task.validationRequestedAt = Date(timeIntervalSinceNow: -600)  // stale
+        task.validatedAt = nil
+        #expect(!task.validationInFlight)
+    }
+
     @Test("Tasks decode without optional fields (forward compat)")
     func decodeCompat() throws {
         let json = """

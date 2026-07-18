@@ -1488,6 +1488,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     save: { [weak self] task in
                         self?.acDelegate?.codingTaskStore.upsert(task)
+                    },
+                    validate: { [weak self] task in
+                        // Persist the draft first so the result has a home.
+                        self?.acDelegate?.codingTaskStore.upsert(task)
+                        self?.acDelegate?.codingTaskEngine.validate(task.id)
                     }))
             let host = NSHostingView(rootView: view)
             host.translatesAutoresizingMaskIntoConstraints = false

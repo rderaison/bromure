@@ -469,6 +469,24 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     addToGridItem.target = delegate
     wsMenu.addItem(addToGridItem)
 
+    wsMenu.addItem(NSMenuItem.separator())
+
+    // The two kanban boards — menu + shortcut peers of their (subtle)
+    // sidebar buttons.
+    let autoBoardItem = NSMenuItem(title: L("Automation Board"),
+                                   action: #selector(ACAppDelegate.showAutomationBoardAction(_:)),
+                                   keyEquivalent: "a")
+    autoBoardItem.keyEquivalentModifierMask = [.command, .shift]
+    autoBoardItem.target = delegate
+    wsMenu.addItem(autoBoardItem)
+
+    let taskBoardItem = NSMenuItem(title: L("Coding Board"),
+                                   action: #selector(ACAppDelegate.showTaskBoardAction(_:)),
+                                   keyEquivalent: "t")
+    taskBoardItem.keyEquivalentModifierMask = [.command, .shift]
+    taskBoardItem.target = delegate
+    wsMenu.addItem(taskBoardItem)
+
     let deleteWsItem = NSMenuItem(title: L("Delete"),
                                   action: #selector(ACAppDelegate.deleteWorkspaceAction(_:)),
                                   keyEquivalent: "")
@@ -2558,7 +2576,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "send-back":
                     Task { @MainActor in await self.codingTaskEngine.sendBack(id) }
                 case "merge":
-                    self.codingTaskEngine.merge(id)
+                    self.codingTaskEngine.merge(
+                        id, into: body["target"] as? String,
+                        squash: body["squash"] as? Bool ?? false)
+                case "open-pr":
+                    self.codingTaskEngine.openPR(id)
+                case "validate":
+                    self.codingTaskEngine.validate(id)
                 case "to-testing":
                     self.codingTaskEngine.moveToTesting(id)
                 case "to-in-progress":
@@ -4457,6 +4481,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc func addTerminalToGridAction(_ sender: Any?) {
         if let ctx = currentWorkspaceContext() { addActiveTerminalToGrid(in: ctx.pane) }
+    }
+
+    @objc func showAutomationBoardAction(_ sender: Any?) {
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.showAutomationBoard()
+    }
+
+    @objc func showTaskBoardAction(_ sender: Any?) {
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.showTaskBoard()
     }
 
     @objc func deleteWorkspaceAction(_ sender: Any?) {
@@ -6769,8 +6807,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let prompt = args[5].isEmpty ? "-" : b64(args[5])
             encoded = args.prefix(5).map(b64) + [prompt]
         case "merge":
-            guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
-            name = "worktree-merge"; encoded = args.prefix(5).map(b64)
+            // src, target, mainRoot, display, tool[, mode ("merge"/"squash")]
+            guard args.count >= 5 else { return false }
+            name = "worktree-merge"; encoded = args.prefix(6).map(b64)
         case "pr":
             guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
             name = "worktree-pr"; encoded = args.prefix(5).map(b64)
@@ -7098,14 +7137,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return }
                 Task { @MainActor in await self.codingTaskEngine.sendBack(taskID) }
             },
-            merge: { [weak self] taskID in
-                self?.codingTaskEngine.merge(taskID)
+            merge: { [weak self] taskID, target, squash in
+                self?.codingTaskEngine.merge(taskID, into: target, squash: squash)
+            },
+            openPR: { [weak self] taskID in
+                self?.codingTaskEngine.openPR(taskID)
+            },
+            fetchBranches: { [weak self] task in
+                await self?.fetchTaskBranches(task) ?? []
             },
             addComment: { [weak self] taskID, text, file in
                 self?.codingTaskStore.mutate(taskID) {
                     $0.comments.append(ReviewComment(text: text, file: file))
                 }
             }))
+
+    /// Repo branches for the review window's "Merge into…" picker.
+    func fetchTaskBranches(_ task: CodingTask) async -> [String] {
+        guard let root = task.rootRepo, !root.isEmpty else { return [] }
+        let cmd = "git -C '" + root.replacingOccurrences(of: "'", with: "'\\''")
+            + "' for-each-ref refs/heads --format='%(refname:short)' 2>/dev/null | head -50"
+        guard let out = try? await guestExec(profileID: task.profileID,
+                                             command: cmd, timeout: 15) else { return [] }
+        return out.split(whereSeparator: \.isNewline).map(String.init)
+            .filter { !$0.isEmpty && !$0.hasPrefix("wt/") }
+    }
 
     /// The review window's data: commits, status, and full diff of the
     /// task's branch against its parent — read live from the guest so it

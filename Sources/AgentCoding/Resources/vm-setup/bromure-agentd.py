@@ -2062,8 +2062,20 @@ _MERGE_WINDOW_CMD = (
     'echo "bromure: merged $WT_SRC into $WT_DST."; '
     'echo; echo Press Enter to close; read _; fi')
 
+# Squash flavor: one commit on the target from the branch's whole diff.
+# `merge --squash` sets no MERGE_HEAD — conflicts show as unmerged index
+# entries instead, so that's the resolver trigger here.
+_SQUASH_WINDOW_CMD = (
+    'git merge --squash "$WT_SRC"; echo; '
+    'if [ -n "$(git ls-files -u)" ]; then '
+    'echo "bromure: squash-merge conflicts — starting $BROMURE_AC_WT_TOOL to resolve…";'
+    ' echo; exec bash -l; else '
+    'git commit -m "$WT_MSG" >/dev/null 2>&1; '
+    'echo "bromure: squash-merged $WT_SRC into $WT_DST."; '
+    'echo; echo Press Enter to close; read _; fi')
 
-def _worktree_merge(branch, target, root, display, tool):
+
+def _worktree_merge(branch, target, root, display, tool, mode="merge"):
     _ensure_seed_current()
     tdir = _worktree_dir_for_branch(root, target)
     if not tdir:
@@ -2072,8 +2084,11 @@ def _worktree_merge(branch, target, root, display, tool):
         worktree_err("merge: no checkout for '%s'" % target)
         return
     rp64 = _b64e(_MERGE_PROMPT)
-    win = _new_window(command=_MERGE_WINDOW_CMD, cwd=tdir,
+    squash = (mode == "squash")
+    win = _new_window(command=_SQUASH_WINDOW_CMD if squash else _MERGE_WINDOW_CMD,
+                      cwd=tdir,
                       env={"WT_SRC": branch, "WT_DST": target,
+                           "WT_MSG": "Squash-merge %s" % branch,
                            "BROMURE_AC_WT_TOOL": tool,
                            "BROMURE_AC_WT_PROMPT": rp64})
     # @display "Merge → …" is the host's marker for a merge tab.
@@ -2787,9 +2802,10 @@ def _dispatch_command(action, arg):
         _bg(_task_resume, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
             _b64d(f[3]), _b64d(f[4]), f[5])
     elif action == "worktree-merge":
-        f = _fields(arg, 5)
+        # Optional 6th field: merge mode ("merge" default, "squash").
+        f = _fields(arg, 6)
         _bg(_worktree_merge, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            _b64d(f[3]), _b64d(f[4]))
+            _b64d(f[3]), _b64d(f[4]), _b64d(f[5]) if f[5] else "merge")
     elif action == "worktree-pr":
         f = _fields(arg, 5)
         _bg(_worktree_pr, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),

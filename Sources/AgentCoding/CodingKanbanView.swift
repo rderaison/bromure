@@ -169,11 +169,16 @@ struct CodingTasksSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack {
-                Text(NSLocalizedString("Tasks", comment: "sidebar section"))
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(0.7)
+                Button(action: onShowBoard) {
+                    Text(NSLocalizedString("Tasks", comment: "sidebar section"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(model.taskBoardSelected
+                                         ? Color.accentColor : .secondary)
+                        .textCase(.uppercase)
+                        .tracking(0.7)
+                }
+                .buttonStyle(.plain)
+                .help(NSLocalizedString("Open the coding board (⇧⌘T)", comment: ""))
                 Spacer()
                 Button(action: onShowBoard) {
                     Image(systemName: "rectangle.split.3x1")
@@ -228,6 +233,9 @@ struct CodingKanbanView: View {
         var closeNoMerge: (UUID) -> Void = { _ in }
         var delete: (UUID) -> Void = { _ in }
         var save: (CodingTask) -> Void = { _ in }
+        /// Persist the draft, then run the plan-validation agent; the
+        /// result lands on the stored task (editor watches the store).
+        var validate: (CodingTask) -> Void = { _ in }
     }
 
     var store: CodingTaskStore
@@ -254,10 +262,12 @@ struct CodingKanbanView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $editing) { task in
             TaskEditorSheet(
+                store: store,
                 task: task,
                 profiles: profilesProvider(),
                 isNew: store.task(task.id) == nil,
                 onSave: { saved in actions.save(saved); editing = nil },
+                onValidate: { draft in actions.validate(draft) },
                 onDelete: { id in actions.delete(id); editing = nil },
                 onCancel: { editing = nil })
         }
@@ -414,6 +424,15 @@ private struct BacklogTaskCard: View {
                         .font(.system(size: 12.5, weight: .semibold))
                         .lineLimit(2)
                     Spacer(minLength: 4)
+                    if task.validationInFlight {
+                        ProgressView().controlSize(.mini)
+                            .help(NSLocalizedString("Agent reviewing the plan…", comment: ""))
+                    } else if task.validation != nil {
+                        Image(systemName: "person.fill.checkmark")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.purple)
+                            .help(NSLocalizedString("Plan reviewed by the agent", comment: ""))
+                    }
                 }
                 if !task.details.isEmpty {
                     MarkdownBlocks(text: task.details, compact: true)
@@ -550,13 +569,29 @@ private struct DoneTaskCard: View {
     let task: CodingTask
     let accentHex: String
 
+    private var outcomeText: String {
+        if task.merged {
+            return String(format: NSLocalizedString("merged into %@", comment: ""),
+                          task.parentBranch ?? "parent")
+        }
+        if task.prOpened == true {
+            return NSLocalizedString("pull request opened", comment: "")
+        }
+        return NSLocalizedString("closed without merge", comment: "")
+    }
+
+    private var outcomeGlyph: (name: String, tint: Color) {
+        if task.merged { return ("arrow.triangle.merge", .green) }
+        if task.prOpened == true { return ("arrow.up.forward.square", .blue) }
+        return ("checkmark.circle", .secondary)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Image(systemName: task.merged
-                      ? "arrow.triangle.merge" : "checkmark.circle")
+                Image(systemName: outcomeGlyph.name)
                     .font(.system(size: 10))
-                    .foregroundStyle(task.merged ? .green : .secondary)
+                    .foregroundStyle(outcomeGlyph.tint)
                 Text(task.title)
                     .font(.system(size: 12, weight: .medium))
                     .lineLimit(2)
@@ -564,10 +599,7 @@ private struct DoneTaskCard: View {
                 Circle().fill(Color(hex: accentHex)).frame(width: 6, height: 6)
             }
             HStack {
-                Text(task.merged
-                     ? String(format: NSLocalizedString("merged into %@", comment: ""),
-                              task.parentBranch ?? "parent")
-                     : NSLocalizedString("closed without merge", comment: ""))
+                Text(outcomeText)
                     .font(.system(size: 10))
                     .foregroundStyle(task.merged ? .secondary : .tertiary)
                 Spacer(minLength: 0)
@@ -588,14 +620,17 @@ private struct DoneTaskCard: View {
 /// toggle — backlog items are supposed to be written with care, they become
 /// the agent's prompt verbatim.
 private struct TaskEditorSheet: View {
+    var store: CodingTaskStore
     @State var task: CodingTask
     let profiles: [Profile]
     let isNew: Bool
     let onSave: (CodingTask) -> Void
+    let onValidate: (CodingTask) -> Void
     let onDelete: (UUID) -> Void
     let onCancel: () -> Void
 
     @State private var preview = false
+    @State private var validationExpanded = true
 
     private var selectedProfile: Profile? {
         profiles.first { $0.id == task.profileID }
@@ -609,6 +644,12 @@ private struct TaskEditorSheet: View {
         !task.title.trimmingCharacters(in: .whitespaces).isEmpty
             && selectedProfile != nil
     }
+
+    /// The stored task, for validation state — the validate flow persists
+    /// the draft first, so results land in the store (and mirror to fat
+    /// clients) while this sheet stays open.
+    private var stored: CodingTask? { store.task(task.id) }
+    private var validationInFlight: Bool { stored?.validationInFlight ?? false }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -681,6 +722,10 @@ private struct TaskEditorSheet: View {
             .overlay(RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(Color.primary.opacity(0.12)))
 
+            if let result = stored?.validation, !validationInFlight {
+                validationSection(result)
+            }
+
             Text(NSLocalizedString(
                 "Starting the task launches the agent in a fresh worktree of the repository with this brief as its prompt. It works on its own branch and commits its changes; you review the diff in Testing, then merge.",
                 comment: "task editor"))
@@ -694,6 +739,24 @@ private struct TaskEditorSheet: View {
                         onDelete(task.id)
                     }
                 }
+                Button {
+                    onValidate(task)
+                } label: {
+                    if validationInFlight {
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.small)
+                            Text(NSLocalizedString("Reviewing…", comment: "task editor"))
+                        }
+                    } else {
+                        Label(NSLocalizedString("Validate Plan with Agent",
+                                                comment: "task editor"),
+                              systemImage: "person.fill.questionmark")
+                    }
+                }
+                .disabled(!canSave || validationInFlight)
+                .help(NSLocalizedString(
+                    "Saves the draft, then a read-only agent reviews the brief against the repository and asks its questions here — before anything runs. Boots the workspace if needed.",
+                    comment: "task editor"))
                 Spacer()
                 Button(NSLocalizedString("Cancel", comment: ""), action: onCancel)
                     .keyboardShortcut(.cancelAction)
@@ -705,5 +768,50 @@ private struct TaskEditorSheet: View {
         }
         .padding(18)
         .frame(minWidth: 680, minHeight: 560)
+    }
+
+    /// The reviewer's questions/assumptions/risks, rendered under the
+    /// editor. Answer by refining the brief above and re-validating.
+    private func validationSection(_ result: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.12)) { validationExpanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: validationExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.tertiary)
+                    Label(NSLocalizedString("Agent plan review", comment: "task editor"),
+                          systemImage: "person.fill.questionmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.purple)
+                    if let at = stored?.validatedAt {
+                        Text(at.formatted(date: .omitted, time: .shortened))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if validationExpanded {
+                ScrollView {
+                    MarkdownBlocks(text: result)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .frame(maxHeight: 180)
+                .background(RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.purple.opacity(0.06)))
+                .overlay(RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.purple.opacity(0.25)))
+                Text(NSLocalizedString(
+                    "Answer by refining the description above, then validate again.",
+                    comment: "task editor"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+        }
     }
 }

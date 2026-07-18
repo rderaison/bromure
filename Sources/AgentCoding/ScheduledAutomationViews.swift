@@ -20,11 +20,18 @@ struct AutomationsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack {
-                Text("Automations")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(0.7)
+                // The title itself opens the board — the icon alone was easy
+                // to miss.
+                Button(action: onShowBoard) {
+                    Text("Automations")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(model.automationBoardSelected
+                                         ? Color.accentColor : .secondary)
+                        .textCase(.uppercase)
+                        .tracking(0.7)
+                }
+                .buttonStyle(.plain)
+                .help(NSLocalizedString("Open the automation board (⇧⌘A)", comment: ""))
                 Spacer()
                 Button(action: onShowBoard) {
                     Image(systemName: "rectangle.split.3x1")
