@@ -2585,7 +2585,7 @@ async function main() {
                     await sleep(500);
                   }
                   assert(r && r.boardShown === true, `coding-board failed: ${JSON.stringify(r)}`);
-                  for (const k of ["backlog", "inProgress", "testing", "done"]) {
+                  for (const k of ["backlog", "planning", "inProgress", "testing", "done"]) {
                     assert(typeof r[k] === "number", `coding-board missing count "${k}"`);
                   }
                   assert(seen, "server-side task never surfaced in the mirrored board counts");
@@ -2774,7 +2774,11 @@ async function main() {
             assert(up.ok === true, `task upsert failed: ${JSON.stringify(up)}`);
             const start = await api("POST", `/tasks/${KTID}/start`);
             assertEq(start._status, 200, `start: ${JSON.stringify(start)}`);
-            assertEq(start.stage, "inProgress", "start did not move the task to In Progress");
+            // Start is async by design (boot check, repo check, trust
+            // pre-seed happen before the stage flips) — poll for it.
+            const started = await waitForTask(KTID, (x) => x.stage === "inProgress", 20, 1500);
+            assert(started && started.stage === "inProgress",
+                   `start never moved the task to In Progress: ${JSON.stringify(started)}`);
 
             const wt = await waitFor(id, `git -C ${REPO} worktree list --porcelain 2>/dev/null`,
                                      (s) => s.includes("wt/"));
@@ -2930,6 +2934,86 @@ async function main() {
             const l = await api("GET", "/automations");
             const acked = (l.runs || []).find((r) => r.id === failedRec.id);
             assert(acked && acked.acknowledgedAt, "acknowledge did not stamp acknowledgedAt");
+          });
+
+          await test("26.7 board MCP: subtasks land in Plan with deps; queue auto-starts on Done", async () => {
+            const PTID = "26262626-0000-4000-8000-000000000007";
+            const up = await api("POST", "/tasks",
+                                 taskDoc({ id: PTID, title: "ACE2E epic",
+                                           profileID: id, repoPath: REPO }));
+            assert(up.ok === true, `task upsert failed: ${JSON.stringify(up)}`);
+            const phaseIDs = [];
+            try {
+              // A running session binds the MCP channel to the parent task.
+              await api("POST", `/tasks/${PTID}/start`);
+              // Start is optimistic (stage flips immediately) — wait for the
+              // slug, then for THIS task's worktree (26.1's may still exist).
+              const started = await waitForTask(
+                PTID, (x) => x.stage === "inProgress" && !!x.branchSlug, 20, 1500);
+              assert(started && started.stage === "inProgress" && started.branchSlug,
+                     `parent never started: ${JSON.stringify(started)}`);
+              const wt = await waitFor(id, `git -C ${REPO} worktree list --porcelain 2>/dev/null | ` +
+                                       `grep 'refs/heads/wt/${started.branchSlug}' | head -1`,
+                                       (s) => s.includes(started.branchSlug), 30);
+              const branch = wt.trim().replace("branch refs/heads/", "");
+              assert(branch.startsWith("wt/"), `no branch for parent: ${wt.slice(0, 120)}`);
+
+              // Agent files two phases, the second depending on the first —
+              // driven over the real vsock MCP channel like the shim does.
+              const probe = [
+                "import socket, json",
+                "s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)",
+                "s.connect((2, 5831))",
+                "def send(o): s.sendall((json.dumps(o) + chr(10)).encode())",
+                "def recv():",
+                "    buf = b''",
+                "    while not buf.endswith(b'\\n'):",
+                "        c = s.recv(65536)",
+                "        if not c: break",
+                "        buf += c",
+                "    return json.loads(buf) if buf.strip() else {}",
+                `s.sendall(('bromure-hello ${branch}' + chr(10)).encode())`,
+                "send({'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'board_create_subtasks','arguments':{'subtasks':[{'title':'ACE2E phase one'},{'title':'ACE2E phase two','dependsOn':[1]}]}}})",
+                "print(recv().get('result',{}).get('content',[{}])[0].get('text',''))",
+              ].join("\n");
+              const b64 = Buffer.from(probe).toString("base64");
+              const out = await sh(id, `echo ${b64} | base64 -d | python3 -`, { timeout: 30 });
+              assertIncludes(out, "Plan column", "board_create_subtasks did not ack");
+
+              // Both phases sit in the Plan column, dependency wired.
+              let phases = [];
+              for (let i = 0; i < 10; i++) {
+                const list = await api("GET", "/tasks");
+                phases = (list.tasks || [])
+                  .filter((t) => t.parentTaskID && t.parentTaskID.toUpperCase() === PTID.toUpperCase())
+                  .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+                if (phases.length === 2) break;
+                await sleep(500);
+              }
+              assertEq(phases.length, 2, "phases never appeared");
+              phaseIDs.push(...phases.map((p) => p.id));
+              assert(phases.every((p) => p.stage === "planning"), "phases must land in Plan");
+              assertEq((phases[1].dependsOn || [])[0], phases[0].id, "dependency not wired");
+
+              // Starting the dependent phase QUEUES it (dep not Done).
+              await api("POST", `/tasks/${phases[1].id}/start`);
+              const queued = await waitForTask(phases[1].id,
+                (x) => x.stage === "planning" && !!x.queuedAt, 10);
+              assert(queued && queued.queuedAt, "dependent phase did not queue");
+
+              // Starting the free phase launches it; closing it Done pumps
+              // the queue and auto-starts the dependent one.
+              await api("POST", `/tasks/${phases[0].id}/start`);
+              const p1 = await waitForTask(phases[0].id, (x) => x.stage === "inProgress", 20, 1500);
+              assert(p1, "free phase never started");
+              await api("POST", `/tasks/${phases[0].id}/close-no-merge`);
+              const p2 = await waitForTask(phases[1].id, (x) => x.stage === "inProgress", 20, 1500);
+              assert(p2 && p2.stage === "inProgress",
+                     "queued phase did not auto-start when its dependency reached Done");
+            } finally {
+              for (const pid2 of phaseIDs) await api("DELETE", `/tasks/${pid2}`);
+              await api("DELETE", `/tasks/${PTID}`);
+            }
           });
         });
       }

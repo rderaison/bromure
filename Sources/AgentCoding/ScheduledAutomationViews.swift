@@ -6,6 +6,7 @@ import SwiftUI
 /// Renders nothing at zero.
 struct SidebarAttentionBadge: View {
     let count: Int
+    var tint: Color = .red
 
     var body: some View {
         if count > 0 {
@@ -14,7 +15,7 @@ struct SidebarAttentionBadge: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1.5)
-                .background(Capsule().fill(.red))
+                .background(Capsule().fill(tint))
         }
     }
 }

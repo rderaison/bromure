@@ -17,6 +17,33 @@ struct CodingTasksTests {
         // The explicit hand-to-review signal — same script the Stop hook
         // runs, so the transition doesn't depend on hook inference alone.
         #expect(p.contains("agent-status.sh done"))
+        // Board MCP tools are announced.
+        #expect(p.contains("board_ready_for_review"))
+    }
+
+    @Test("Planner prompt: visible, plans-only, files phases via the MCP")
+    func plannerPrompt() {
+        let task = CodingTask(title: "Create an EDR", details: "eBPF based",
+                              profileID: UUID())
+        let p = CodingTaskEngine.plannerPrompt(for: task)
+        #expect(p.contains("PLANNING this task, not implementing"))
+        #expect(p.contains("board_create_subtasks"))
+        #expect(p.contains("dependsOn"))
+        #expect(p.contains("board_set_plan"))
+        #expect(p.contains("Do NOT write any code"))
+        #expect(p.contains("agent-status.sh done"))
+        #expect(p.contains("Create an EDR"))
+    }
+
+    @Test("Unmet dependencies: only non-Done deps block; deleted deps don't")
+    func dependencies() {
+        let pid = UUID()
+        var dep = CodingTask(title: "one", profileID: pid)
+        var mid = CodingTask(title: "two", profileID: pid)
+        mid.dependsOn = [dep.id, UUID()]   // second id doesn't exist anywhere
+        #expect(mid.unmetDependencies(in: [dep, mid]) == [dep.id])
+        dep.stage = .done
+        #expect(mid.unmetDependencies(in: [dep, mid]).isEmpty)
     }
 
     @Test("Feedback prompt lists unsent comments with file scopes")
@@ -53,9 +80,74 @@ struct CodingTasksTests {
         #expect(task.validationInFlight)
         task.validatedAt = Date()
         #expect(!task.validationInFlight)
-        task.validationRequestedAt = Date(timeIntervalSinceNow: -600)  // stale
+        // A planning interview can legitimately run for a while — the bound
+        // is an hour (the watchdog aborts dead sessions much sooner).
+        task.validationRequestedAt = Date(timeIntervalSinceNow: -600)
         task.validatedAt = nil
+        #expect(task.validationInFlight)
+        task.validationRequestedAt = Date(timeIntervalSinceNow: -3700)  // stale
         #expect(!task.validationInFlight)
+    }
+
+    @Test("planTranscriptCommand: Claude project-dir encoding, since-gate, rejection")
+    func transcriptCommand() {
+        let cmd = CodingTaskEngine.planTranscriptCommand(
+            guestCwd: "/home/ubuntu/edr/", since: 1_752_800_000)
+        #expect(cmd?.contains("projects/-home-ubuntu-edr\"") == true)  // no trailing slash
+        #expect(cmd?.contains("-newermt @1752800000") == true)
+        // A dotted path is searched under BOTH encodings Claude has used.
+        let dotted = CodingTaskEngine.planTranscriptCommand(
+            guestCwd: "/home/u/my.app", since: 5)
+        #expect(dotted?.contains("-home-u-my.app") == true)
+        #expect(dotted?.contains("-home-u-my-app") == true)
+        // Quotes and other unquotable characters refuse rather than escape.
+        #expect(CodingTaskEngine.planTranscriptCommand(guestCwd: "/e'vil", since: 0) == nil)
+        #expect(CodingTaskEngine.planTranscriptCommand(guestCwd: "", since: 0) == nil)
+    }
+
+    @Test("initRepoCommand: idempotent init with a root commit")
+    func initRepoCmd() {
+        let cmd = CodingTaskEngine.initRepoCommand(quotedPath: "'/home/ubuntu/new'")
+        #expect(cmd.contains("mkdir -p '/home/ubuntu/new'"))
+        #expect(cmd.contains("git init -q"))
+        #expect(cmd.contains("--allow-empty"))   // worktrees need a HEAD
+        #expect(cmd.contains("--show-toplevel")) // no nested repo when already a root
+    }
+
+    @Test("AskUserQuestion parses into question items with options")
+    func questionParsing() {
+        let line = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"AskUserQuestion","input":{"questions":[{"question":"Which runtime?","header":"Runtime","multiSelect":false,"options":[{"label":"Python stdlib","description":"zero deps"},{"label":"Docker","description":""}]},{"question":"Which checks?","header":"Checks","multiSelect":true,"options":[{"label":"CVE match","description":"feed"}]}]}}]}}
+        """
+        let items = ClaudeTranscriptParser.parse(Data(line.utf8))
+        #expect(items.count == 2)
+        guard case .question(let q1) = items[0].kind,
+              case .question(let q2) = items[1].kind else {
+            Issue.record("expected question items"); return
+        }
+        #expect(q1.question == "Which runtime?")
+        #expect(q1.header == "Runtime")
+        #expect(!q1.multiSelect)
+        #expect(q1.options.map(\.label) == ["Python stdlib", "Docker"])
+        #expect(q2.multiSelect)
+        // Malformed input degrades to a generic tool row, not a crash.
+        let bad = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"AskUserQuestion","input":{"nope":1}}]}}
+        """
+        let fallback = ClaudeTranscriptParser.parse(Data(bad.utf8))
+        #expect(fallback.count == 1)
+        if case .question = fallback[0].kind { Issue.record("should be generic tool row") }
+    }
+
+    @Test("answerKeysCommand: literal digits, named keys, beats between")
+    func answerKeys() {
+        let cmd = CodingTaskEngine.answerKeysCommand(
+            tabIndex: 3, keys: ["1", "Right", "Enter"])
+        #expect(cmd == "tmux send-keys -t bromure:3 -l 1 && sleep 1 && "
+            + "tmux send-keys -t bromure:3 Right && sleep 1 && "
+            + "tmux send-keys -t bromure:3 Enter")
+        // Anything not a digit or known key name is dropped, not injected.
+        #expect(CodingTaskEngine.answerKeysCommand(tabIndex: 0, keys: ["; rm -rf /"]).isEmpty)
     }
 
     @Test("Tasks decode without optional fields (forward compat)")

@@ -342,6 +342,19 @@ private struct TaskReviewView: View {
     private func diffScroll(_ data: TaskReviewData) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
+                if let plan = task?.plan, !plan.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(NSLocalizedString("Plan", comment: "review"),
+                              systemImage: "list.bullet.clipboard")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.purple)
+                        MarkdownBlocks(text: plan, compact: true)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.purple.opacity(0.06)))
+                    }
+                }
                 if !data.logLines.isEmpty {
                     VStack(alignment: .leading, spacing: 3) {
                         Label(String(format: NSLocalizedString("%d commit(s)", comment: ""),

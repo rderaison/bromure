@@ -1463,6 +1463,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 profilesProvider: { [weak self] in self?.acDelegate?.profiles ?? [] },
                 actions: CodingKanbanView.Actions(
                     start: { [weak self] id in self?.acDelegate?.codingTaskEngine.start(id) },
+                    plan: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.plan(id)
+                        // The interview happens HERE, in the native window —
+                        // the worktree tab is just the machinery underneath.
+                        self?.acDelegate?.planSessionWindows.open(taskID: id)
+                    },
                     openReview: { [weak self] id in
                         self?.acDelegate?.taskReviewWindows.open(taskID: id)
                     },
@@ -1484,6 +1490,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     delete: { [weak self] id in
                         self?.acDelegate?.codingTaskStore.remove(id)
+                        self?.acDelegate?.codingTaskEngine.pumpQueue()
                     },
                     save: { [weak self] task in
                         self?.acDelegate?.codingTaskStore.upsert(task)
@@ -1492,6 +1499,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         // Persist the draft first so the result has a home.
                         self?.acDelegate?.codingTaskStore.upsert(task)
                         self?.acDelegate?.codingTaskEngine.validate(task.id)
+                    },
+                    openPlanSession: { [weak self] id in
+                        self?.acDelegate?.planSessionWindows.open(taskID: id)
                     }))
             let host = NSHostingView(rootView: view)
             host.sizingOptions = []

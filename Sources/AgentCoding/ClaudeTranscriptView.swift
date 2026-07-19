@@ -13,10 +13,43 @@ struct TranscriptItem: Identifiable {
         case toolUse(name: String, summary: String, detail: String)
         /// Tool result: the tool it answers, trimmed content, error flag.
         case toolResult(tool: String, content: String, isError: Bool)
+        /// The agent asking the user (AskUserQuestion) — rendered as the
+        /// question with its options, and answerable in a live session.
+        case question(TranscriptQuestion)
     }
     let id: Int
     var kind: Kind
     var timestamp: Date?
+}
+
+/// A parsed AskUserQuestion call: what the agent wants to know.
+struct TranscriptQuestion: Equatable {
+    struct Option: Equatable {
+        var label: String
+        var description: String
+    }
+    var question: String
+    var header: String
+    var multiSelect: Bool
+    var options: [Option]
+
+    /// All questions in the tool call, in order (the tool allows several;
+    /// each carries its own options).
+    static func parse(_ input: [String: Any]) -> [TranscriptQuestion] {
+        guard let questions = input["questions"] as? [[String: Any]] else { return [] }
+        return questions.compactMap { q in
+            guard let text = q["question"] as? String, !text.isEmpty else { return nil }
+            let opts = (q["options"] as? [[String: Any]] ?? []).compactMap { o -> Option? in
+                guard let label = o["label"] as? String, !label.isEmpty else { return nil }
+                return Option(label: label,
+                              description: o["description"] as? String ?? "")
+            }
+            return TranscriptQuestion(question: text,
+                                      header: q["header"] as? String ?? "",
+                                      multiSelect: q["multiSelect"] as? Bool ?? false,
+                                      options: opts)
+        }
+    }
 }
 
 /// Tolerant reader for Claude Code's JSONL transcripts (the format the guest
@@ -72,9 +105,15 @@ enum ClaudeTranscriptParser {
                     let name = block["name"] as? String ?? "tool"
                     if let id = block["id"] as? String { toolNames[id] = name }
                     let input = block["input"] as? [String: Any] ?? [:]
-                    add(.toolUse(name: name,
-                                 summary: toolSummary(name: name, input: input),
-                                 detail: prettyJSON(input)))
+                    let questions = name == "AskUserQuestion"
+                        ? TranscriptQuestion.parse(input) : []
+                    if !questions.isEmpty {
+                        questions.forEach { add(.question($0)) }
+                    } else {
+                        add(.toolUse(name: name,
+                                     summary: toolSummary(name: name, input: input),
+                                     detail: prettyJSON(input)))
+                    }
                 case "tool_result":
                     let tool = (block["tool_use_id"] as? String)
                         .flatMap { toolNames[$0] } ?? "tool"
@@ -177,7 +216,122 @@ struct ClaudeTranscriptPane: View {
 /// One transcript element. Prompts get a tinted bubble, assistant prose is
 /// plain text, thinking and tool traffic collapse behind disclosures so the
 /// narrative reads top-to-bottom without the plumbing in the way.
-private struct TranscriptItemView: View {
+/// An AskUserQuestion rendered as content: the question, its options, and
+/// (when `sendKeys` is set — the live planning session's ACTIVE question)
+/// tappable answers. The key sequences mirror the picker's real behavior:
+/// a single-select answers with digit+Enter (the picker then advances on
+/// its own); a multi-select toggles with digits and moves on with Right —
+/// Enter there toggles the highlighted row, it does NOT submit — plus a
+/// final Enter on the last question, where Right lands on Submit.
+struct TranscriptQuestionCard: View {
+    let question: TranscriptQuestion
+    var isLast: Bool = true
+    let sendKeys: (([String]) -> Void)?
+
+    @State private var picked = Set<Int>()
+    @State private var sent = false
+
+    private func answer(_ index: Int) {
+        guard let sendKeys, !sent else { return }
+        if question.multiSelect {
+            if picked.contains(index) { picked.remove(index) }
+            else { picked.insert(index) }
+        } else {
+            sent = true
+            sendKeys(["\(index + 1)", "Enter"])
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "questionmark.bubble.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.purple)
+                if !question.header.isEmpty {
+                    Text(question.header)
+                        .font(.system(size: 10, weight: .bold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.purple.opacity(0.15)))
+                        .foregroundStyle(.purple)
+                }
+                Text(NSLocalizedString("The agent is asking", comment: "transcript question"))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            Text(question.question)
+                .font(.system(size: 12.5, weight: .semibold))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(Array(question.options.enumerated()), id: \.offset) { i, opt in
+                Button {
+                    answer(i)
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: question.multiSelect
+                              ? (picked.contains(i) ? "checkmark.square.fill" : "square")
+                              : "\(i + 1).circle")
+                            .font(.system(size: 12))
+                            .foregroundStyle(sendKeys != nil ? Color.purple : .secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(opt.label)
+                                .font(.system(size: 12, weight: .medium))
+                            if !opt.description.isEmpty {
+                                Text(opt.description)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 5)
+                    .padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.primary.opacity(0.04)))
+                    .overlay(RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(picked.contains(i)
+                                      ? Color.purple.opacity(0.6)
+                                      : Color.primary.opacity(0.1)))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(sendKeys == nil || sent)
+            }
+            if question.multiSelect && sendKeys != nil {
+                Button {
+                    guard !sent, !picked.isEmpty else { return }
+                    sent = true
+                    var keys = picked.sorted().map { "\($0 + 1)" } + ["Right"]
+                    if isLast { keys.append("Enter") }   // Right → Submit
+                    sendKeys!(keys)
+                } label: {
+                    Label(NSLocalizedString("Send answer", comment: "transcript question"),
+                          systemImage: "arrow.up.circle.fill")
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+                .tint(.purple)
+                .disabled(sent || picked.isEmpty)
+            }
+            if sent {
+                Text(NSLocalizedString("Answer sent to the agent.", comment: "transcript question"))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8)
+            .fill(Color.purple.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 8)
+            .strokeBorder(Color.purple.opacity(0.3)))
+    }
+}
+
+struct TranscriptItemView: View {
     let item: TranscriptItem
 
     var body: some View {
@@ -201,6 +355,8 @@ private struct TranscriptItemView: View {
                 .strokeBorder(Color.accentColor.opacity(0.25)))
         case .assistantText(let text):
             assistantText(text)
+        case .question(let q):
+            TranscriptQuestionCard(question: q, sendKeys: nil)
         case .thinking(let text):
             CollapsibleRow(icon: "brain",
                            title: NSLocalizedString("Thinking", comment: "transcript"),

@@ -10,7 +10,7 @@ import Observation
 /// the branch into its parent.
 struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     enum Stage: String, Codable, CaseIterable, Sendable {
-        case backlog, inProgress, testing, done
+        case backlog, planning, inProgress, testing, done
     }
 
     var id: UUID
@@ -63,6 +63,22 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var validationRequestedAt: Date?
     /// Why the last start attempt failed, shown on the backlog card.
     var lastError: String?
+    /// The implementation plan the agent recorded via board_set_plan —
+    /// shown in the review window above the diff.
+    var plan: String?
+    /// Set when this card was filed by an agent as a subtask of another
+    /// task (board_create_subtasks / the Plan decomposition).
+    var parentTaskID: UUID?
+    /// Phases that must reach Done before this one may start. A start
+    /// attempt with unmet dependencies queues instead (see `queuedAt`).
+    var dependsOn: [UUID]?
+    /// Set when the user started this phase while its dependencies were
+    /// unmet — it auto-starts the moment they all reach Done.
+    var queuedAt: Date?
+    /// Create `repoPath` (mkdir -p + git init + empty root commit) before
+    /// launching, when it isn't already its own repository. Off by default:
+    /// a monorepo subdirectory must NOT get a nested repo by surprise.
+    var initRepo: Bool?
 
     init(id: UUID = UUID(), title: String = "", details: String = "",
          profileID: UUID, repoPath: String = "~", tool: Profile.Tool = .claude,
@@ -74,7 +90,9 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
          completedAt: Date? = nil, merged: Bool = false,
          prOpened: Bool? = nil, validation: String? = nil,
          validatedAt: Date? = nil, validationRequestedAt: Date? = nil,
-         lastError: String? = nil) {
+         lastError: String? = nil, plan: String? = nil,
+         parentTaskID: UUID? = nil, dependsOn: [UUID]? = nil,
+         queuedAt: Date? = nil, initRepo: Bool? = nil) {
         self.id = id
         self.title = title
         self.details = details
@@ -98,6 +116,20 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         self.validatedAt = validatedAt
         self.validationRequestedAt = validationRequestedAt
         self.lastError = lastError
+        self.plan = plan
+        self.parentTaskID = parentTaskID
+        self.dependsOn = dependsOn
+        self.queuedAt = queuedAt
+        self.initRepo = initRepo
+    }
+
+    /// Dependencies not yet Done, looked up in `all`. Deleted dependencies
+    /// count as satisfied — a removed phase must never wedge the queue.
+    func unmetDependencies(in all: [CodingTask]) -> [UUID] {
+        (dependsOn ?? []).filter { depID in
+            guard let dep = all.first(where: { $0.id == depID }) else { return false }
+            return dep.stage != .done
+        }
     }
 
     /// A validation round is running: requested, with no result since.
@@ -105,7 +137,7 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var validationInFlight: Bool {
         guard let requested = validationRequestedAt else { return false }
         if let done = validatedAt, done >= requested { return false }
-        return Date().timeIntervalSince(requested) < 300
+        return Date().timeIntervalSince(requested) < 3600
     }
 }
 
@@ -261,11 +293,50 @@ final class CodingTaskEngine {
     again, and finish with that same command.
     """
 
+    /// The Plan session prompt: a VISIBLE session (the user can watch and
+    /// answer) whose only job is planning — it files the phases itself via
+    /// the board MCP, so they appear on the board as it works.
+    nonisolated static func plannerPrompt(for task: CodingTask) -> String {
+        var brief = task.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let details = task.details.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !details.isEmpty { brief += "\n\n" + details }
+        return """
+        You are PLANNING this task, not implementing it. The user can see \
+        this session — narrate what you're doing, and ask them questions \
+        if the brief leaves real choices open (they may answer here). \
+        Explore the repository read-only, then:
+        1. File the implementation phases with the board_create_subtasks \
+        tool: ordered, each roughly one reviewable pull request of work, \
+        with dependsOn set (1-based indices) for phases that need earlier \
+        ones DONE first. The phases appear on the user's board as cards.
+        2. Record a short overview of the plan with board_set_plan.
+        Do NOT write any code, do NOT modify or commit anything. When the \
+        phases are filed, summarize them here and run this command to end \
+        the planning session: `sh ~/.bromure/agent-status.sh done`
+
+        The task brief:
+
+        ---
+        \(brief)
+        """
+    }
+
+    /// Appended to every task prompt: the board tools task sessions carry
+    /// (wired via --mcp-config by the guest agent).
+    nonisolated static let mcpDirectives = """
+    This session has the bromure-board MCP tools: board_get_task (your \
+    card: brief, plan, review comments), board_set_plan (record the plan \
+    on the card), board_create_subtasks (file out-of-scope follow-up work \
+    as ordered cards in the Plan column, with dependencies), and \
+    board_ready_for_review (hand this task to review — prefer it over the \
+    shell command when available).
+    """
+
     nonisolated static func prompt(for task: CodingTask) -> String {
         var out = task.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let details = task.details.trimmingCharacters(in: .whitespacesAndNewlines)
         if !details.isEmpty { out += "\n\n" + details }
-        return out + "\n\n" + taskDirectives
+        return out + "\n\n" + taskDirectives + "\n" + mcpDirectives
     }
 
     /// The follow-up prompt for a review round: the unsent comments,
@@ -414,21 +485,54 @@ final class CodingTaskEngine {
     /// pre-seed first — a belt to the guest agentd's `_pretrust` suspenders,
     /// because a workspace resumed from suspend still runs the agentd it
     /// booted with and may predate that fix.
+    /// Launch a task or plan phase: agent in a fresh worktree, fully
+    /// autonomous. Dependencies gate the launch — starting a phase whose
+    /// dependencies aren't Done QUEUES it instead (it auto-starts when
+    /// they land). The card moves to In Progress immediately ("One shot"
+    /// must feel instant); a failed launch moves it back with the reason.
     func start(_ taskID: UUID) {
-        guard let task = store.task(taskID), task.stage == .backlog,
+        guard let task = store.task(taskID),
+              task.stage == .backlog || task.stage == .planning,
               let delegate else { return }
         guard delegate.profile(for: task.profileID) != nil else {
             store.mutate(taskID) { $0.lastError = NSLocalizedString(
                 "The workspace no longer exists", comment: "task start") }
             return
         }
+        // Unmet dependencies: queue, don't launch. pumpQueue() fires the
+        // start again when the last dependency reaches Done.
+        let unmet = task.unmetDependencies(in: store.tasks)
+        guard unmet.isEmpty else {
+            BACDebug.log("tasks", "“\(task.title)”: queued behind \(unmet.count) dependenc\(unmet.count == 1 ? "y" : "ies")")
+            store.mutate(taskID) { $0.queuedAt = Date(); $0.lastError = nil }
+            return
+        }
+        let priorStage = task.stage
         let slug = ScheduledAutomationEngine.branchSlug(for: task.title, at: Date())
         let guestPath = ScheduledAutomationEngine.guestPath(task.repoPath)
         let args = [guestPath, slug, task.title, task.tool.rawValue,
-                    Self.prompt(for: task)]
+                    Self.prompt(for: task), "task"]
         let profileID = task.profileID
         let title = task.title
         let isClaude = task.tool == .claude
+
+        // Optimistic: the card is In Progress from the click; the async
+        // half reverts it with a reason if the launch can't happen.
+        store.mutate(taskID) {
+            $0.stage = .inProgress
+            $0.branchSlug = slug
+            $0.startedAt = Date()
+            $0.queuedAt = nil
+            $0.lastError = nil
+        }
+        func revert(_ reason: String) {
+            store.mutate(taskID) {
+                $0.stage = priorStage
+                $0.branchSlug = nil
+                $0.startedAt = nil
+                $0.lastError = reason
+            }
+        }
 
         Task { [weak self] in
             guard let self, let delegate = self.delegate else { return }
@@ -452,8 +556,8 @@ final class CodingTaskEngine {
                 self.pendingBoots.remove(profileID)
             }
             guard up else {
-                self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
-                    "The workspace did not boot in time", comment: "task start") }
+                revert(NSLocalizedString("The workspace did not boot in time",
+                                         comment: "task start"))
                 return
             }
             // The board's whole lifecycle — done-signal matching, diff
@@ -462,16 +566,15 @@ final class CodingTaskEngine {
             // branch, and the card can never leave In Progress. Refuse it
             // with the reason instead.
             let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
-            let isRepo = (try? await delegate.guestExec(
-                profileID: profileID,
-                command: "git -C \(q) rev-parse --is-inside-work-tree >/dev/null 2>&1",
-                timeout: 10)) != nil
-            guard isRepo else {
-                self.store.mutate(taskID) { $0.lastError = String(
-                    format: NSLocalizedString(
-                        "“%@” isn't a git repository — tasks run on their own branch, so pick a repo folder (or `git init` it first).",
-                        comment: "task start"),
-                    task.repoPath) }
+            if task.initRepo == true {
+                _ = try? await delegate.guestExec(
+                    profileID: profileID,
+                    command: Self.initRepoCommand(quotedPath: q), timeout: 15)
+            }
+            guard await self.usableRepo(profileID: profileID, quotedPath: q) else {
+                revert(String(format: NSLocalizedString(
+                    "“%@” isn't a git repository of its own — tasks run on their own branch. Pick a repo folder, or edit the task and enable “Create folder & git repo”.",
+                    comment: "task start"), task.repoPath))
                 return
             }
             if isClaude {
@@ -479,17 +582,116 @@ final class CodingTaskEngine {
             }
             guard delegate.automationWorktreeCommand(
                 profileNameOrID: profileID.uuidString, action: "run", args: args) else {
-                self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
-                    "Couldn't reach the workspace — is it running?", comment: "task start") }
+                revert(NSLocalizedString("Couldn't reach the workspace — is it running?",
+                                         comment: "task start"))
                 return
             }
             BACDebug.log("tasks", "started “\(title)” → \(slug)")
-            self.store.mutate(taskID) {
-                $0.stage = .inProgress
-                $0.branchSlug = slug
-                $0.startedAt = Date()
-                $0.lastError = nil
+        }
+    }
+
+    // MARK: Plan (Backlog → phases in the Plan column)
+
+    /// Launch the PLANNING SESSION for a backlog brief: a visible agent
+    /// tab (worktree) whose only job is to file the phases via the board
+    /// MCP. The parent stays in Backlog with the in-flight spinner; its
+    /// branchSlug binds the MCP connection and lets the card jump to the
+    /// live session. The spinner clears when the phases land (the MCP
+    /// stamps validatedAt) or after the bounded window.
+    func plan(_ taskID: UUID) {
+        guard let task = store.task(taskID), task.stage == .backlog,
+              !task.validationInFlight, let delegate else { return }
+        guard delegate.profile(for: task.profileID) != nil else {
+            store.mutate(taskID) { $0.lastError = NSLocalizedString(
+                "The workspace no longer exists", comment: "task plan") }
+            return
+        }
+        let slug = ScheduledAutomationEngine.branchSlug(
+            for: "plan " + task.title, at: Date())
+        let guestPath = ScheduledAutomationEngine.guestPath(task.repoPath)
+        let args = [guestPath, slug,
+                    String(format: NSLocalizedString("Plan: %@", comment: "plan tab"),
+                           task.title),
+                    task.tool.rawValue, Self.plannerPrompt(for: task), "plan"]
+        let profileID = task.profileID
+        let isClaude = task.tool == .claude
+        store.mutate(taskID) {
+            $0.branchSlug = slug
+            $0.validationRequestedAt = Date()
+            $0.lastError = nil
+        }
+        func revert(_ reason: String) {
+            store.mutate(taskID) {
+                $0.branchSlug = nil
+                $0.validationRequestedAt = nil
+                $0.lastError = reason
             }
+        }
+        Task { [weak self] in
+            guard let self, let delegate = self.delegate else { return }
+            var up = (try? await delegate.guestExec(profileID: profileID,
+                                                    command: "true", timeout: 5)) != nil
+            if !up {
+                if !self.pendingBoots.contains(profileID) {
+                    self.pendingBoots.insert(profileID)
+                    // Headless: the plan window is the surface for this
+                    // session — raising the terminal would bury it.
+                    delegate.startProfileForAutomation(profileID, detached: true)
+                }
+                let deadline = Date().addingTimeInterval(Self.bootTimeout)
+                while Date() < deadline {
+                    try? await Task.sleep(nanoseconds: Self.bootPollInterval)
+                    if (try? await delegate.guestExec(profileID: profileID,
+                                                      command: "true", timeout: 5)) != nil {
+                        up = true; break
+                    }
+                }
+                self.pendingBoots.remove(profileID)
+            }
+            guard up else {
+                revert(NSLocalizedString("The workspace did not boot in time",
+                                         comment: "task plan"))
+                return
+            }
+            // Planning happens IN the configured directory (no worktree —
+            // the interview writes no code and must see the tree exactly
+            // as the user left it). The directory just has to exist.
+            let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            if task.initRepo == true {
+                _ = try? await delegate.guestExec(
+                    profileID: profileID,
+                    command: Self.initRepoCommand(quotedPath: q), timeout: 15)
+            }
+            let dirExists = (try? await delegate.guestExec(
+                profileID: profileID, command: "test -d \(q)", timeout: 10)) != nil
+            guard dirExists else {
+                revert(String(format: NSLocalizedString(
+                    "“%@” doesn't exist in the workspace — pick an existing folder, or edit the task and enable “Create folder & git repo”.",
+                    comment: "task plan"), task.repoPath))
+                return
+            }
+            if isClaude {
+                await delegate.pretrustGuestPath(profileID: profileID, dir: guestPath)
+            }
+            guard delegate.automationWorktreeCommand(
+                profileNameOrID: profileID.uuidString, action: "run", args: args) else {
+                revert(NSLocalizedString("Couldn't reach the workspace — is it running?",
+                                         comment: "task plan"))
+                return
+            }
+            BACDebug.log("tasks", "planning session for “\(task.title)” → \(slug)")
+            self.watchPlanning(taskID, slug: slug, profileID: profileID)
+        }
+    }
+
+    /// Auto-start queued phases whose dependencies just reached Done.
+    /// Called from every Done transition (merge, close, PR) and deletes.
+    func pumpQueue() {
+        for t in store.tasks
+        where t.stage == .planning && t.queuedAt != nil
+            && t.unmetDependencies(in: store.tasks).isEmpty {
+            BACDebug.log("tasks", "“\(t.title)”: dependencies met — auto-starting")
+            start(t.id)
         }
     }
 
@@ -504,7 +706,8 @@ final class CodingTaskEngine {
         guard let branch = worktreeBranch, branch.hasPrefix("wt/") else { return }
         let slugPart = String(branch.dropFirst(3))
         guard let task = store.tasks.first(where: { t in
-            guard t.stage == .inProgress, t.profileID == profileID,
+            guard t.stage == .inProgress || t.stage == .planning,
+                  t.profileID == profileID,
                   let slug = t.branchSlug else { return false }
             return slugPart == slug || (slugPart.hasPrefix(slug + "-")
                 && Int(slugPart.dropFirst(slug.count + 1)) != nil)
@@ -537,19 +740,8 @@ final class CodingTaskEngine {
         guard !unsent.isEmpty else { return }
         let feedback = Self.feedbackPrompt(comments: unsent)
 
-        let liveTab = delegate.pane(for: task.profileID)?.model.tabs
-            .first { $0.worktreeBranch == branch }
-        var delivered = false
-        if let tab = liveTab {
-            // Type into the live session: base64 through the guest shell so
-            // arbitrary feedback text survives quoting, then Enter.
-            let b64 = Data(feedback.utf8).base64EncodedString()
-            let cmd = "echo \(b64) | base64 -d | xargs -0 tmux send-keys "
-                + "-t bromure:\(tab.index) -l && sleep 1 && "
-                + "tmux send-keys -t bromure:\(tab.index) Enter"
-            delivered = (try? await delegate.guestExec(
-                profileID: task.profileID, command: cmd, timeout: 20)) != nil
-        }
+        var delivered = await typeIntoSession(
+            profileID: task.profileID, branch: branch, text: feedback)
         if !delivered {
             delivered = delegate.automationWorktreeCommand(
                 profileNameOrID: task.profileID.uuidString, action: "task-resume",
@@ -570,6 +762,204 @@ final class CodingTaskEngine {
             }
         }
         BACDebug.log("tasks", "“\(task.title)”: \(unsent.count) comment(s) sent back")
+    }
+
+    /// The guest command that types text into a session's agent (base64
+    /// through the guest shell so arbitrary text survives quoting, then
+    /// Enter). Shared with the fat client, which runs it over the tunnel.
+    nonisolated static func typeCommand(tabIndex: Int, text: String) -> String {
+        let b64 = Data(text.utf8).base64EncodedString()
+        return "echo \(b64) | base64 -d | xargs -0 tmux send-keys "
+            + "-t bromure:\(tabIndex) -l && sleep 1 && "
+            + "tmux send-keys -t bromure:\(tabIndex) Enter"
+    }
+
+    /// The guest command that tails a plan session's live Claude transcript.
+    /// The planner runs IN the task's configured directory, so the project
+    /// dir is derived from that path the way Claude encodes it ("/" and "."
+    /// become "-"); `since` (epoch seconds) skips transcripts of earlier
+    /// sessions in the same directory. Output is capped so a long session
+    /// stays cheap to poll. Nil when the path has characters we won't quote.
+    nonisolated static func planTranscriptCommand(guestCwd: String, since: Int) -> String? {
+        var path = guestCwd
+        while path.count > 1 && path.hasSuffix("/") { path = String(path.dropLast()) }
+        let allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            + "0123456789-_./+ "
+        guard !path.isEmpty, path.allSatisfy({ allowed.contains($0) }) else { return nil }
+        let enc1 = path.replacingOccurrences(of: "/", with: "-")
+        let enc2 = path.replacingOccurrences(of: ".", with: "-")
+            .replacingOccurrences(of: "/", with: "-")
+        let dirs = (enc1 == enc2 ? [enc1] : [enc1, enc2])
+            .map { "\"$HOME/.claude/projects/\($0)\"" }.joined(separator: " ")
+        return "f=$(find \(dirs) -maxdepth 1 -name '*.jsonl' -newermt @\(since) "
+            + "2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); "
+            + "if [ -n \"$f\" ]; then tail -c 300000 \"$f\"; fi"
+    }
+
+    /// The guest command that makes a task's directory usable: mkdir -p,
+    /// git init when the directory isn't already its own repo root, and an
+    /// empty root commit when the repo has no HEAD (worktrees need one).
+    nonisolated static func initRepoCommand(quotedPath: String) -> String {
+        "mkdir -p \(quotedPath) && cd \(quotedPath) && "
+            + "{ [ \"$(git rev-parse --show-toplevel 2>/dev/null)\" = \"$(pwd -P)\" ] "
+            + "|| git init -q; } && "
+            + "{ git rev-parse -q --verify HEAD >/dev/null 2>&1 || "
+            + "git -c user.name=Bromure -c user.email=tasks@bromure.io "
+            + "commit -q --allow-empty -m 'task root'; }"
+    }
+
+    /// True when `guestPath` belongs to a repo the board can work with —
+    /// inside a work tree whose root is NOT the home directory. The guest
+    /// home may itself be a git repo (dotfiles, user experiments); cutting
+    /// worktrees off it silently scoops the whole home, so it doesn't count.
+    private func usableRepo(profileID: UUID, quotedPath: String) async -> Bool {
+        guard let delegate else { return false }
+        let cmd = "t=$(git -C \(quotedPath) rev-parse --show-toplevel) && "
+            + "[ \"$t\" != \"$HOME\" ]"
+        return (try? await delegate.guestExec(
+            profileID: profileID, command: cmd, timeout: 10)) != nil
+    }
+
+    /// The guest command for a sequence of TUI keystrokes into a session's
+    /// tab (answering an AskUserQuestion picker). Digits are sent literally,
+    /// named keys (Enter, Right) as tmux key names, with a beat between
+    /// keystrokes — the picker debounces and swallows bursts.
+    nonisolated static func answerKeysCommand(tabIndex: Int, keys: [String]) -> String {
+        keys.compactMap { k -> String? in
+            let named = ["Enter", "Right", "Left", "Down", "Up", "Tab", "Space"]
+            let isDigit = k.count == 1 && k.first!.isNumber
+            guard isDigit || named.contains(k) else { return nil }
+            return "tmux send-keys -t bromure:\(tabIndex) \(isDigit ? "-l " : "")\(k)"
+        }.joined(separator: " && sleep 1 && ")
+    }
+
+    /// Send picker keystrokes into a live session (see answerKeysCommand).
+    func answerInSession(profileID: UUID, branch: String, keys: [String]) async -> Bool {
+        guard let delegate, !keys.isEmpty,
+              let tab = delegate.pane(for: profileID)?.model.tabs
+                  .first(where: { $0.worktreeBranch == branch })
+        else { return false }
+        return (try? await delegate.guestExec(
+            profileID: profileID,
+            command: Self.answerKeysCommand(tabIndex: tab.index, keys: keys),
+            timeout: 30)) != nil
+    }
+
+    /// Type text into a live session's agent. Used by review send-back and
+    /// the plan window's input box.
+    func typeIntoSession(profileID: UUID, branch: String, text: String) async -> Bool {
+        guard let delegate,
+              let tab = delegate.pane(for: profileID)?.model.tabs
+                  .first(where: { $0.worktreeBranch == branch })
+        else { return false }
+        return (try? await delegate.guestExec(
+            profileID: profileID,
+            command: Self.typeCommand(tabIndex: tab.index, text: text),
+            timeout: 20)) != nil
+    }
+
+    // MARK: Planning watchdog
+
+    private var planWatchdogs: [UUID: Task<Void, Never>] = [:]
+
+    /// End a planning session's in-flight state with a reason — the card
+    /// stops spinning and says what to do, instead of waiting forever.
+    private func abortPlanning(_ taskID: UUID, reason: String) {
+        planWatchdogs[taskID]?.cancel()
+        planWatchdogs[taskID] = nil
+        guard let t = store.task(taskID), t.stage == .backlog,
+              t.validationRequestedAt != nil else { return }
+        // Phases already landed? Then the session ending is just... done.
+        if let done = t.validatedAt, let req = t.validationRequestedAt,
+           done >= req { return }
+        BACDebug.log("tasks", "“\(t.title)”: planning aborted — \(reason)")
+        store.mutate(taskID) {
+            $0.validationRequestedAt = nil
+            $0.branchSlug = nil
+            $0.lastError = reason
+        }
+    }
+
+    /// Watch a launched planning session and abort the card's in-flight
+    /// state when the session dies: tab never appears, tab disappears (VM
+    /// reboot, user closed it), the agent process exits back to a bare
+    /// shell (user quit claude), or the 1-hour window lapses. Ends itself
+    /// quietly once phases land.
+    func watchPlanning(_ taskID: UUID, slug: String, profileID: UUID) {
+        planWatchdogs[taskID]?.cancel()
+        planWatchdogs[taskID] = Task { [weak self] in
+            let started = Date()
+            var seenTab = false
+            var sawAgent = false
+            var bareShellPolls = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self, let delegate = self.delegate else { return }
+                guard let t = self.store.task(taskID),
+                      t.stage == .backlog,
+                      let req = t.validationRequestedAt else { return }
+                if let done = t.validatedAt, done >= req { return }   // phases landed
+                if Date().timeIntervalSince(started) > 3600 {
+                    self.abortPlanning(taskID, reason: NSLocalizedString(
+                        "The planning session timed out without filing phases — click Plan to retry.",
+                        comment: "plan watchdog"))
+                    return
+                }
+                let tab = delegate.pane(for: profileID)?.model.tabs.first {
+                    AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
+                }
+                guard let tab else {
+                    if seenTab || Date().timeIntervalSince(started) > 240 {
+                        self.abortPlanning(taskID, reason: seenTab
+                            ? NSLocalizedString(
+                                "The planning session ended before filing phases — click Plan to retry.",
+                                comment: "plan watchdog")
+                            : NSLocalizedString(
+                                "The planning session never started — is the workspace running? Click Plan to retry.",
+                                comment: "plan watchdog"))
+                        return
+                    }
+                    continue
+                }
+                seenTab = true
+                // Did the agent exit back to a bare shell (user quit claude)?
+                let cmd = "tmux list-panes -t bromure:\(tab.index) "
+                    + "-F '#{pane_current_command}' 2>/dev/null | head -1"
+                guard let out = try? await delegate.guestExec(
+                    profileID: profileID, command: cmd, timeout: 5) else { continue }
+                let proc = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                if ["bash", "zsh", "sh", "dash"].contains(proc) {
+                    if sawAgent {
+                        bareShellPolls += 1
+                        if bareShellPolls >= 2 {
+                            self.abortPlanning(taskID, reason: NSLocalizedString(
+                                "Claude exited before filing phases — click Plan to retry.",
+                                comment: "plan watchdog"))
+                            return
+                        }
+                    }
+                } else if !proc.isEmpty {
+                    sawAgent = true
+                    bareShellPolls = 0
+                }
+            }
+        }
+    }
+
+    /// App-launch sweep: re-arm watchdogs for planning sessions that were
+    /// in flight when the app quit, so a stale spinner can't survive a
+    /// restart unnoticed.
+    func resumePlanningWatchdogs() {
+        for t in store.tasks
+        where t.stage == .backlog && t.validationInFlight {
+            if let slug = t.branchSlug {
+                watchPlanning(t.id, slug: slug, profileID: t.profileID)
+            } else {
+                abortPlanning(t.id, reason: NSLocalizedString(
+                    "The planning session was interrupted — click Plan to retry.",
+                    comment: "plan watchdog"))
+            }
+        }
     }
 
     // MARK: Merge (Testing → Done)
@@ -603,6 +993,7 @@ final class CodingTaskEngine {
             $0.merged = true
             $0.lastError = nil
         }
+        pumpQueue()
     }
 
     /// "Create Pull Request": the existing worktree-pr flow — an agent tab
@@ -631,6 +1022,7 @@ final class CodingTaskEngine {
             $0.prOpened = true
             $0.lastError = nil
         }
+        pumpQueue()
     }
 
     /// Close a task without merging (abandoned, or merged by hand).
@@ -640,13 +1032,16 @@ final class CodingTaskEngine {
             $0.completedAt = Date()
             $0.merged = false
         }
+        pumpQueue()
     }
 
     /// Manual Testing → In Progress with no feedback (the user just wants
     /// the agent tab back in play), and manual In Progress → Testing for
     /// non-Claude agents that never signal done.
     func moveToInProgress(_ taskID: UUID) {
-        store.mutate(taskID) { if $0.stage == .testing { $0.stage = .inProgress } }
+        store.mutate(taskID) {
+            if $0.stage == .testing || $0.stage == .planning { $0.stage = .inProgress }
+        }
     }
 
     func moveToTesting(_ taskID: UUID) {

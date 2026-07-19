@@ -1984,6 +1984,57 @@ final class RemoteHostWindow: NSWindow {
                 self?.controller.taskCommand(id, "comment", body: body)
             }))
 
+    /// Native planning-conversation windows for the mirrored board — the
+    /// transcript is tailed from the remote guest over the tunnel and the
+    /// input box types into the remote session, so the fat client gets the
+    /// same "whole UI" plan experience as the host.
+    private lazy var planSessionWindows = PlanSessionWindowManager(
+        context: PlanSessionWindowManager.Context(
+            store: { [weak self] in self?.controller.taskStore },
+            fetchTranscript: { [weak self] task in
+                guard let self, let since = task.validationRequestedAt,
+                      let cmd = CodingTaskEngine.planTranscriptCommand(
+                          guestCwd: ScheduledAutomationEngine.guestPath(task.repoPath),
+                          since: Int(since.timeIntervalSince1970))
+                else { return nil }
+                return try? await self.controller.guestExec(
+                    task.profileID, command: cmd, timeout: 15)
+            },
+            send: { [weak self] profileID, branch, text in
+                guard let self,
+                      let tab = self.controller.tabsModel(for: profileID)?.tabs
+                          .first(where: { $0.worktreeBranch == branch })
+                else { return false }
+                return (try? await self.controller.guestExec(
+                    profileID,
+                    command: CodingTaskEngine.typeCommand(tabIndex: tab.index, text: text),
+                    timeout: 20)) != nil
+            },
+            sendKeys: { [weak self] profileID, branch, keys in
+                guard let self, !keys.isEmpty,
+                      let tab = self.controller.tabsModel(for: profileID)?.tabs
+                          .first(where: { $0.worktreeBranch == branch })
+                else { return false }
+                return (try? await self.controller.guestExec(
+                    profileID,
+                    command: CodingTaskEngine.answerKeysCommand(
+                        tabIndex: tab.index, keys: keys),
+                    timeout: 30)) != nil
+            },
+            openTerminal: { [weak self] task in self?.jumpToTask(task) },
+            accentHex: { [weak self] id in
+                self?.controller.profile(for: id)?.color.hexInUI ?? "#888888"
+            },
+            workspaceName: { [weak self] id in
+                self?.controller.profile(for: id)?.name ?? ""
+            },
+            liveBranch: { [weak self] task in
+                guard let self, let slug = task.branchSlug else { return nil }
+                return self.controller.tabsModel(for: task.profileID)?.tabs.first {
+                    AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
+                }?.worktreeBranch
+            }))
+
     private func jumpToTask(_ task: CodingTask) {
         guard let slug = task.branchSlug,
               let tab = controller.tabsModel(for: task.profileID)?.tabs.first(where: {
@@ -2011,6 +2062,12 @@ final class RemoteHostWindow: NSWindow {
                 profilesProvider: { c.profiles },
                 actions: CodingKanbanView.Actions(
                     start: { c.taskCommand($0, "start") },
+                    plan: { [weak self] id in
+                        c.taskCommand(id, "plan")
+                        // The interview runs in the native plan window,
+                        // mirrored over the tunnel.
+                        self?.planSessionWindows.open(taskID: id)
+                    },
                     openReview: { [weak self] id in self?.taskReviewWindows.open(taskID: id) },
                     jumpToRun: { [weak self] task in self?.jumpToTask(task) },
                     moveToTesting: { c.taskCommand($0, "to-testing") },
@@ -2022,6 +2079,9 @@ final class RemoteHostWindow: NSWindow {
                     validate: { task in
                         c.upsertTask(task)
                         c.taskCommand(task.id, "validate")
+                    },
+                    openPlanSession: { [weak self] id in
+                        self?.planSessionWindows.open(taskID: id)
                     }))
             let host = NSHostingView(rootView: view)
             host.sizingOptions = []
@@ -2092,6 +2152,7 @@ final class RemoteHostWindow: NSWindow {
             return ["ok": true,
                     "boardShown": controller.listModel.taskBoardSelected,
                     "backlog": tasks.filter { $0.stage == .backlog }.count,
+                    "planning": tasks.filter { $0.stage == .planning }.count,
                     "inProgress": tasks.filter { $0.stage == .inProgress }.count,
                     "testing": tasks.filter { $0.stage == .testing }.count,
                     "done": tasks.filter { $0.stage == .done }.count]

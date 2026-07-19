@@ -135,10 +135,14 @@ struct CodingTasksSection: View {
     let onShowBoard: () -> Void
 
     private var statusLine: String {
+        let planning = store.tasks(in: .planning).count
         let running = store.tasks(in: .inProgress).count
         let review = store.tasks(in: .testing).count
         let backlog = store.tasks(in: .backlog).count
         var parts: [String] = []
+        if planning > 0 {
+            parts.append(String(format: NSLocalizedString("%d planned", comment: ""), planning))
+        }
         if running > 0 {
             parts.append(String(format: NSLocalizedString("%d in progress", comment: ""), running))
         }
@@ -152,6 +156,9 @@ struct CodingTasksSection: View {
         }
         return parts.joined(separator: " · ")
     }
+
+    /// Finished agent runs waiting on a human review — the orange badge.
+    private var reviewCount: Int { store.tasks(in: .testing).count }
 
     /// What the badge counts: running tasks whose agent is waiting on the
     /// user right now.
@@ -197,6 +204,7 @@ struct CodingTasksSection: View {
                         .foregroundStyle(model.taskBoardSelected ? .primary : .secondary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
+                    SidebarAttentionBadge(count: reviewCount, tint: .orange)
                     SidebarAttentionBadge(count: attentionCount)
                 }
                 .padding(.vertical, 4)
@@ -219,6 +227,9 @@ struct CodingTasksSection: View {
 struct CodingKanbanView: View {
     struct Actions {
         var start: (UUID) -> Void = { _ in }
+        /// Decompose the brief into ordered phase cards in the Plan column
+        /// (headless planner agent; dependencies included).
+        var plan: (UUID) -> Void = { _ in }
         var openReview: (UUID) -> Void = { _ in }
         var jumpToRun: (CodingTask) -> Void = { _ in }
         var moveToTesting: (UUID) -> Void = { _ in }
@@ -230,6 +241,9 @@ struct CodingKanbanView: View {
         /// Persist the draft, then run the plan-validation agent; the
         /// result lands on the stored task (editor watches the store).
         var validate: (CodingTask) -> Void = { _ in }
+        /// Open the native planning-conversation window for a card whose
+        /// planning session is live.
+        var openPlanSession: (UUID) -> Void = { _ in }
     }
 
     var store: CodingTaskStore
@@ -240,6 +254,8 @@ struct CodingKanbanView: View {
 
     /// The editor sheet's subject: an existing task or a fresh draft.
     @State private var editing: CodingTask?
+    /// Plan-column multi-selection (batch start).
+    @State private var selectedPhases: Set<UUID> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -247,6 +263,7 @@ struct CodingKanbanView: View {
             Divider()
             HStack(alignment: .top, spacing: 14) {
                 backlogColumn
+                planColumn
                 inProgressColumn
                 testingColumn
                 doneColumn
@@ -256,12 +273,19 @@ struct CodingKanbanView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $editing) { task in
             TaskEditorSheet(
-                store: store,
                 task: task,
                 profiles: profilesProvider(),
+                siblings: task.parentTaskID.map { parent in
+                    store.tasks.filter { $0.parentTaskID == parent && $0.id != task.id }
+                        .sorted { $0.createdAt < $1.createdAt }
+                } ?? [],
                 isNew: store.task(task.id) == nil,
                 onSave: { saved in actions.save(saved); editing = nil },
-                onValidate: { draft in actions.validate(draft) },
+                onPlan: { draft in
+                    actions.save(draft)
+                    actions.plan(draft.id)
+                    editing = nil
+                },
                 onDelete: { id in actions.delete(id); editing = nil },
                 onCancel: { editing = nil })
         }
@@ -320,9 +344,79 @@ struct CodingKanbanView: View {
                     task: task,
                     accentHex: accentHex(for: task.profileID),
                     workspaceName: workspaceName(for: task.profileID),
+                    parentTitle: task.parentTaskID.flatMap { store.task($0)?.title },
                     onEdit: { editing = task },
+                    onOpenSession: { actions.openPlanSession(task.id) },
                     onStart: { actions.start(task.id) },
+                    onPlan: { actions.plan(task.id) },
                     onDelete: { actions.delete(task.id) })
+            }
+        }
+    }
+
+    private var planColumn: some View {
+        // Phase cards in plan order (creation order = the planner's order).
+        let tasks = store.tasks(in: .planning)
+            .sorted { $0.createdAt < $1.createdAt }
+        let selected = selectedPhases.intersection(tasks.map(\.id))
+        return KanbanColumn(title: NSLocalizedString("Plan", comment: "kanban column"),
+                            systemImage: "list.number",
+                            count: tasks.count,
+                            tint: .blue,
+                            emptyText: NSLocalizedString(
+                                "No phases yet — click Plan on a backlog card.",
+                                comment: "kanban")) {
+            if !selected.isEmpty {
+                HStack(spacing: 8) {
+                    Button {
+                        for id in tasks.map(\.id) where selected.contains(id) {
+                            actions.start(id)
+                        }
+                        selectedPhases.removeAll()
+                    } label: {
+                        Label(String(format: NSLocalizedString(
+                            "Start %d selected", comment: "plan column"), selected.count),
+                              systemImage: "play.fill")
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+                    .help(NSLocalizedString(
+                        "One-shots every selected phase. Phases whose dependencies aren't Done queue and auto-start when they are.",
+                        comment: "plan column"))
+                    Button(NSLocalizedString("Clear", comment: "plan column")) {
+                        selectedPhases.removeAll()
+                    }
+                    .controlSize(.small)
+                    Spacer(minLength: 0)
+                }
+                .padding(.bottom, 2)
+            }
+            ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
+                PlanPhaseCard(
+                    task: task,
+                    number: index + 1,
+                    accentHex: accentHex(for: task.profileID),
+                    parentTitle: task.parentTaskID.flatMap { store.task($0)?.title },
+                    dependsOnNumbers: (task.dependsOn ?? []).compactMap { depID in
+                        tasks.firstIndex { $0.id == depID }.map { $0 + 1 }
+                    },
+                    depsMet: task.unmetDependencies(in: store.tasks).isEmpty,
+                    isSelected: selectedPhases.contains(task.id),
+                    onToggleSelect: {
+                        if selectedPhases.contains(task.id) { selectedPhases.remove(task.id) }
+                        else { selectedPhases.insert(task.id) }
+                    },
+                    onEdit: { editing = task })
+                    .contextMenu {
+                        Button(NSLocalizedString("Start", comment: "")) {
+                            actions.start(task.id)
+                        }
+                        Button(NSLocalizedString("Edit…", comment: "")) { editing = task }
+                        Divider()
+                        Button(NSLocalizedString("Delete", comment: ""), role: .destructive) {
+                            actions.delete(task.id)
+                        }
+                    }
             }
         }
     }
@@ -400,16 +494,112 @@ struct CodingKanbanView: View {
 
 // MARK: - Cards
 
+/// One decomposed phase in the Plan column: numbered, selectable for batch
+/// start, with dependency and queue state. Clicking the body edits; the
+/// checkbox selects; starting happens from the selection bar or the
+/// context menu — phases run fully autonomously.
+private struct PlanPhaseCard: View {
+    let task: CodingTask
+    let number: Int
+    let accentHex: String
+    let parentTitle: String?
+    let dependsOnNumbers: [Int]
+    let depsMet: Bool
+    let isSelected: Bool
+    let onToggleSelect: () -> Void
+    let onEdit: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Button(action: onToggleSelect) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor)
+                                                : AnyShapeStyle(.tertiary))
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 1)
+            Button(action: onEdit) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text("\(number)")
+                            .font(.system(size: 10, weight: .bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .frame(width: 16, height: 16)
+                            .background(Circle().fill(Color(hex: accentHex)))
+                        Text(task.title)
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .lineLimit(2)
+                        Spacer(minLength: 4)
+                    }
+                    if !task.details.isEmpty {
+                        MarkdownBlocks(text: task.details, compact: true)
+                            .frame(maxHeight: 54, alignment: .top)
+                            .clipped()
+                            .allowsHitTesting(false)
+                    }
+                    HStack(spacing: 6) {
+                        if let parentTitle {
+                            Label(parentTitle, systemImage: "arrow.turn.down.right")
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        if task.queuedAt != nil {
+                            Text(NSLocalizedString("queued", comment: "plan card"))
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(.orange)
+                                .help(NSLocalizedString(
+                                    "Starts automatically when its dependencies are Done.",
+                                    comment: "plan card"))
+                        }
+                        if !dependsOnNumbers.isEmpty {
+                            Label(dependsOnNumbers.map(String.init).joined(separator: ","),
+                                  systemImage: depsMet ? "lock.open" : "lock")
+                                .font(.system(size: 9.5).monospacedDigit())
+                                .foregroundStyle(depsMet ? AnyShapeStyle(.secondary)
+                                                         : AnyShapeStyle(Color.orange))
+                                .help(NSLocalizedString(
+                                    "Phases that must be Done before this one starts.",
+                                    comment: "plan card"))
+                        }
+                    }
+                    if let err = task.lastError {
+                        Label(err, systemImage: "exclamationmark.triangle")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                            .lineLimit(2)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .modifier(CardChrome(borderTint: isSelected ? .accentColor : .clear))
+    }
+}
+
 private struct BacklogTaskCard: View {
     let task: CodingTask
     let accentHex: String
     let workspaceName: String
+    /// Set when this card is an agent-filed subtask of another task.
+    let parentTitle: String?
     let onEdit: () -> Void
+    /// Jump to the live planning session (while one is running).
+    let onOpenSession: () -> Void
     let onStart: () -> Void
+    let onPlan: () -> Void
     let onDelete: () -> Void
 
+    /// While the planning session runs, the card IS the door to it.
+    private var planningLive: Bool {
+        task.validationInFlight && task.branchSlug != nil
+    }
+
     var body: some View {
-        Button(action: onEdit) {
+        Button(action: { planningLive ? onOpenSession() : onEdit() }) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
                     Circle().fill(Color(hex: accentHex)).frame(width: 8, height: 8)
@@ -418,9 +608,16 @@ private struct BacklogTaskCard: View {
                         .font(.system(size: 12.5, weight: .semibold))
                         .lineLimit(2)
                     Spacer(minLength: 4)
-                    if task.validationInFlight {
-                        ProgressView().controlSize(.mini)
-                            .help(NSLocalizedString("Agent reviewing the plan…", comment: ""))
+                    if planningLive {
+                        HStack(spacing: 4) {
+                            ProgressView().controlSize(.mini)
+                            Text(NSLocalizedString("planning — click to watch", comment: "task card"))
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(.blue)
+                        }
+                        .help(NSLocalizedString(
+                            "A visible planning session is running — click the card to open it; phases appear in the Plan column as it files them.",
+                            comment: ""))
                     } else if task.validation != nil {
                         Image(systemName: "person.fill.checkmark")
                             .font(.system(size: 9))
@@ -433,6 +630,14 @@ private struct BacklogTaskCard: View {
                         .frame(maxHeight: 76, alignment: .top)
                         .clipped()
                         .allowsHitTesting(false)   // the card is the click target
+                }
+                if let parentTitle {
+                    Label(String(format: NSLocalizedString("part of “%@”", comment: ""),
+                                 parentTitle),
+                          systemImage: "arrow.turn.down.right")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
                 if let err = task.lastError {
                     Label(err, systemImage: "exclamationmark.triangle")
@@ -447,10 +652,20 @@ private struct BacklogTaskCard: View {
                             .foregroundStyle(.tertiary)
                     }
                     Spacer(minLength: 0)
-                    Button(NSLocalizedString("Start", comment: "task card")) { onStart() }
+                    Button(NSLocalizedString("Plan", comment: "task card")) { onPlan() }
+                        .controlSize(.small)
+                        .disabled(task.title.trimmingCharacters(in: .whitespaces).isEmpty
+                                  || task.validationInFlight)
+                        .help(NSLocalizedString(
+                            "A planner agent reads the brief and the repository, then files ordered phase cards (with dependencies) in the Plan column.",
+                            comment: "task card"))
+                    Button(NSLocalizedString("One shot", comment: "task card")) { onStart() }
                         .controlSize(.small)
                         .buttonStyle(.borderedProminent)
                         .disabled(task.title.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .help(NSLocalizedString(
+                            "Straight to In Progress: the agent does the whole task autonomously and hands you the diff in Testing/Review.",
+                            comment: "task card"))
                 }
             }
             .contentShape(Rectangle())
@@ -623,17 +838,20 @@ private struct DoneTaskCard: View {
 /// toggle — backlog items are supposed to be written with care, they become
 /// the agent's prompt verbatim.
 private struct TaskEditorSheet: View {
-    var store: CodingTaskStore
     @State var task: CodingTask
     let profiles: [Profile]
+    /// Fellow phases of the same plan (any stage), in plan order — the
+    /// pool a phase's dependencies are picked from. Empty for plain tasks.
+    let siblings: [CodingTask]
     let isNew: Bool
     let onSave: (CodingTask) -> Void
-    let onValidate: (CodingTask) -> Void
+    /// Save the draft and run the planner: ordered phase cards (with
+    /// dependencies) land in the Plan column.
+    let onPlan: (CodingTask) -> Void
     let onDelete: (UUID) -> Void
     let onCancel: () -> Void
 
     @State private var preview = false
-    @State private var validationExpanded = true
 
     /// A persistent caption above a control — TextFields only show their
     /// title as disappearing placeholder text, which leaves a prefilled
@@ -663,12 +881,6 @@ private struct TaskEditorSheet: View {
             && selectedProfile != nil
     }
 
-    /// The stored task, for validation state — the validate flow persists
-    /// the draft first, so results land in the store (and mirror to fat
-    /// clients) while this sheet stays open.
-    private var stored: CodingTask? { store.task(task.id) }
-    private var validationInFlight: Bool { stored?.validationInFlight ?? false }
-
     /// The Write/Preview description editor block. Frames come from the
     /// caller: alone it fills the sheet's middle; with a plan review it
     /// shares a VSplitView with the review pane.
@@ -693,6 +905,59 @@ private struct TaskEditorSheet: View {
         }
         .overlay(RoundedRectangle(cornerRadius: 6)
             .strokeBorder(Color.primary.opacity(0.12)))
+    }
+
+    private func dependencyBinding(_ sibling: CodingTask) -> Binding<Bool> {
+        Binding(
+            get: { task.dependsOn?.contains(sibling.id) ?? false },
+            set: { on in
+                var deps = task.dependsOn ?? []
+                deps.removeAll { $0 == sibling.id }
+                if on { deps.append(sibling.id) }
+                // Keep plan order so the card badges read naturally.
+                let order = Dictionary(uniqueKeysWithValues:
+                    siblings.enumerated().map { ($1.id, $0) })
+                deps.sort { (order[$0] ?? .max) < (order[$1] ?? .max) }
+                task.dependsOn = deps.isEmpty ? nil : deps
+            })
+    }
+
+    /// Which phases must reach Done before this one may start. Checked
+    /// rows are this phase's dependencies; already-Done ones show as met.
+    private var dependenciesSection: some View {
+        captioned(NSLocalizedString("Depends on — phases that must finish first",
+                                    comment: "task editor")) {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(siblings) { sib in
+                    HStack(spacing: 6) {
+                        Toggle(isOn: dependencyBinding(sib)) {
+                            Text(sib.title)
+                                .font(.system(size: 12))
+                                .lineLimit(1)
+                        }
+                        .toggleStyle(.checkbox)
+                        Spacer(minLength: 4)
+                        if sib.stage == .done {
+                            Label(NSLocalizedString("done", comment: "task editor dep"),
+                                  systemImage: "checkmark.circle.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.green)
+                                .labelStyle(.titleAndIcon)
+                        } else if dependencyBinding(sib).wrappedValue {
+                            Text(NSLocalizedString("waiting", comment: "task editor dep"))
+                                .font(.system(size: 10))
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 6)
+                .fill(Color.primary.opacity(0.03)))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color.primary.opacity(0.12)))
+        }
     }
 
     var body: some View {
@@ -737,6 +1002,16 @@ private struct TaskEditorSheet: View {
                         .help(NSLocalizedString(
                             "A path inside the workspace VM. \"~\" is the home folder (/home/ubuntu). When it's a git repository, the task runs in its own worktree and branch there.",
                             comment: "task editor"))
+                    Toggle(NSLocalizedString("Create folder & git repo if needed",
+                                             comment: "task editor"),
+                           isOn: Binding(
+                               get: { task.initRepo ?? false },
+                               set: { task.initRepo = $0 ? true : nil }))
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 11))
+                        .help(NSLocalizedString(
+                            "Starting or planning first runs mkdir + git init (with an empty root commit) when the folder isn't already a git repository of its own. Leave off for a folder inside an existing repo.",
+                            comment: "task editor"))
                 }
             }
 
@@ -754,26 +1029,12 @@ private struct TaskEditorSheet: View {
                 .labelsHidden()
             }
 
-            // Editor + plan review share the sheet's flexible middle. With a
-            // review present they live in a VSplitView — drag the divider to
-            // give the verbose reviewer as much room as it needs — and the
-            // sheet itself never grows past the window (macOS clips sheets;
-            // the Save row must never fall off).
-            if let result = stored?.validation, !validationInFlight {
-                VSplitView {
-                    editorArea
-                        .frame(minHeight: 110)
-                        .padding(.bottom, 6)
-                    validationSection(result)
-                        .frame(minHeight: 96)
-                        .padding(.top, 6)
-                }
-                .frame(maxHeight: .infinity)
+            editorArea
+                .frame(minHeight: 140, maxHeight: .infinity)
                 .layoutPriority(1)
-            } else {
-                editorArea
-                    .frame(minHeight: 140, maxHeight: .infinity)
-                    .layoutPriority(1)
+
+            if !siblings.isEmpty {
+                dependenciesSection
             }
 
             Text(NSLocalizedString(
@@ -789,24 +1050,18 @@ private struct TaskEditorSheet: View {
                         onDelete(task.id)
                     }
                 }
-                Button {
-                    onValidate(task)
-                } label: {
-                    if validationInFlight {
-                        HStack(spacing: 5) {
-                            ProgressView().controlSize(.small)
-                            Text(NSLocalizedString("Reviewing…", comment: "task editor"))
-                        }
-                    } else {
-                        Label(NSLocalizedString("Validate Plan with Agent",
-                                                comment: "task editor"),
-                              systemImage: "person.fill.questionmark")
+                if task.stage == .backlog {
+                    Button {
+                        onPlan(task)
+                    } label: {
+                        Label(NSLocalizedString("Plan", comment: "task editor"),
+                              systemImage: "list.number")
                     }
+                    .disabled(!canSave)
+                    .help(NSLocalizedString(
+                        "Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phase cards with dependencies into the Plan column.",
+                        comment: "task editor"))
                 }
-                .disabled(!canSave || validationInFlight)
-                .help(NSLocalizedString(
-                    "Saves the draft, then a read-only agent reviews the brief against the repository and asks its questions here — before anything runs. Boots the workspace if needed.",
-                    comment: "task editor"))
                 Spacer()
                 Button(NSLocalizedString("Cancel", comment: ""), action: onCancel)
                     .keyboardShortcut(.cancelAction)
@@ -822,48 +1077,4 @@ private struct TaskEditorSheet: View {
         .frame(minWidth: 680, minHeight: 500, idealHeight: 620, maxHeight: 660)
     }
 
-    /// The reviewer's questions/assumptions/risks, rendered under the
-    /// editor. Answer by refining the brief above and re-validating.
-    private func validationSection(_ result: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.12)) { validationExpanded.toggle() }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: validationExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.tertiary)
-                    Label(NSLocalizedString("Agent plan review", comment: "task editor"),
-                          systemImage: "person.fill.questionmark")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.purple)
-                    if let at = stored?.validatedAt {
-                        Text(at.formatted(date: .omitted, time: .shortened))
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if validationExpanded {
-                ScrollView {
-                    MarkdownBlocks(text: result)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                }
-                .frame(minHeight: 60, maxHeight: .infinity)
-                .background(RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.purple.opacity(0.06)))
-                .overlay(RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(Color.purple.opacity(0.25)))
-                Text(NSLocalizedString(
-                    "Answer by refining the description above, then validate again.",
-                    comment: "task editor"))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-            }
-        }
-    }
 }

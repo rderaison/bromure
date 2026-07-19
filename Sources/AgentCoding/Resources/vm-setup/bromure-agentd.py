@@ -1902,7 +1902,35 @@ def _pretrust(tool, *dirs):
         log("worktree", "pretrust failed:", e)
 
 
-def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
+_TASK_MCP_SHIM = "/mnt/bromure-meta/bromure-task-mcp.py"
+
+
+def _task_mcp_flags(branch, tool):
+    """For a coding-board task run: write a per-branch MCP config wiring the
+    board tools (a stdio shim that pipes to the host over vsock, announcing
+    the branch so the host binds the connection to the right card), and
+    return the claude flags that load it. Empty for non-claude tools or when
+    the shim isn't staged (old meta share)."""
+    if tool != "claude" or not os.path.exists(_TASK_MCP_SHIM):
+        return ""
+    cfg_dir = os.path.join(HOME, ".bromure")
+    cfg = os.path.join(cfg_dir, "task-mcp-%s.json" % branch.replace("/", "-"))
+    try:
+        os.makedirs(cfg_dir, exist_ok=True)
+        with open(cfg, "w") as f:
+            json.dump({"mcpServers": {"bromure-board": {
+                "command": "python3",
+                "args": [_TASK_MCP_SHIM, branch]}}}, f, indent=2)
+    except OSError as e:
+        log("worktree", "task-mcp config write failed:", e)
+        return ""
+    # Equals form on purpose: BROMURE_AC_WT_FLAGS word-splits in the tab
+    # launcher, and the contract there is one token per flag.
+    return " --mcp-config=" + cfg
+
+
+def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
+                     task=False):
     _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""   # "-" sentinel = no prompt
@@ -1949,6 +1977,8 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
     _env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
     if yolo and _YOLO_FLAGS.get(tool):
         _env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
+        if task:
+            _env["BROMURE_AC_WT_FLAGS"] += _task_mcp_flags(branch, tool)
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
     win = _new_window(command="bash -l", cwd=wt_dir, env=_env)
@@ -1986,7 +2016,7 @@ def _task_resume(main_root, branch, parent, display, tool, prompt_b64):
         return
     env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
     if _YOLO_FLAGS.get(tool):
-        env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
+        env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool] + _task_mcp_flags(branch, tool)
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
     win = _new_window(command="bash -l", cwd=wt_dir, env=env)
@@ -2022,13 +2052,60 @@ def _automation_tab(cwd, display, tool, prompt_b64):
     _set_window_option(win, "@display", display)
 
 
-def _automation_run(cwd, slug, display, tool, prompt_b64):
+def _plan_tab(cwd, slug, display, tool, prompt_b64):
+    """Planning interview for a coding-board task: runs IN the task's
+    configured directory — no worktree. Planning writes no code, and the
+    agent must see the tree exactly as the user left it (uncommitted work
+    included). The synthetic wt/ marker on @worktree lets the host find
+    the session (watchdog, typed answers, card jump); the board MCP tools
+    are wired in so phases land on the board."""
+    _ensure_seed_current()
+    if prompt_b64 == "-":
+        prompt_b64 = ""
+    if not os.path.isdir(cwd):
+        worktree_err("plan: no such directory: " + cwd)
+        return
+    branch = "wt/" + slug
+    env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    if _YOLO_FLAGS.get(tool):
+        env["BROMURE_AC_WT_FLAGS"] = (_YOLO_FLAGS[tool]
+                                      + _task_mcp_flags(branch, tool))
+        _preaccept_yolo(tool)
+        _pretrust(tool, cwd)
+    win = _new_window(command="bash -l", cwd=cwd, env=env)
+    if not win:
+        worktree_err("plan: could not open a tab at %s" % cwd)
+        return
+    _set_window_option(win, "@label", tool)
+    _set_window_option(win, "@display", display)
+    _set_window_option(win, "@worktree", branch)
+
+
+def _automation_run(cwd, slug, display, tool, prompt_b64, mode=""):
     """Automation fire: a worktree when cwd is inside a git repo, a plain
     agent tab otherwise (the host can't tell — the guest decides here).
     Unattended, so the agent launches in yolo mode (no trust/permission
-    prompt to hang on)."""
-    if os.path.isdir(cwd) and _worktree_main_root(cwd):
-        _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=True)
+    prompt to hang on). mode "task" = coding-board task: the run gets the
+    board MCP tools wired in. mode "plan" = planning interview, run in cwd
+    itself (no worktree)."""
+    if mode == "plan":
+        _plan_tab(cwd, slug, display, tool, prompt_b64)
+        return
+    root = _worktree_main_root(cwd) if os.path.isdir(cwd) else None
+    if mode == "task" and root == os.path.expanduser("~"):
+        # The guest home may itself be a git repo (dotfiles, experiments);
+        # cutting a worktree off it scoops the entire home. A board task
+        # must run on its own repo — fail loudly, never fall back.
+        worktree_err("task: %s resolves to the home repo — make it its own "
+                     "git repository first" % cwd)
+        return
+    if root:
+        _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=True,
+                         task=(mode == "task"))
+    elif mode == "task":
+        # A plain tab has no branch, so the card could never leave In
+        # Progress — refuse instead of degrading silently.
+        worktree_err("task: %s is not a git repo" % cwd)
     else:
         _automation_tab(cwd, display, tool, prompt_b64)
 
@@ -2835,10 +2912,11 @@ def _dispatch_command(action, arg):
             _b64d(f[3]), f[4])
     elif action == "automation-run":
         # Same field layout as worktree-create; falls back to a plain agent
-        # tab when the path isn't a git repo.
-        f = _fields(arg, 5)
+        # tab when the path isn't a git repo. Optional 6th field: run mode
+        # ("task" = coding-board task -> the run gets the board MCP tools).
+        f = _fields(arg, 6)
         _bg(_automation_run, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            _b64d(f[3]), f[4])
+            _b64d(f[3]), f[4], _b64d(f[5]) if f[5] else "")
     elif action == "automation-finish":
         f = _fields(arg, 1)
         _bg(_automation_finish, _b64d(f[0]))

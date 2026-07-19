@@ -970,9 +970,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// start is aborted and the automation records a failure instead of the
     /// interactive path's fresh-boot fallback, which would silently destroy
     /// the suspended session's terminals and running work.
-    func startProfileForAutomation(_ id: Profile.ID) {
+    /// `detached: true` boots the VM headless — used by flows that have
+    /// their own surface (the plan window) and must not raise the session
+    /// window over it. The terminal can be attached later on demand.
+    func startProfileForAutomation(_ id: Profile.ID, detached: Bool = false) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
-        launch(profile, freshBootFallback: false)
+        launch(profile, detached: detached, freshBootFallback: false)
     }
 
     /// Duplicate a workspace for a clone-first automation run: settings,
@@ -1619,6 +1622,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Per-workspace browser MCP listeners (vsock 5830) — the in-VM agents'
     /// stdio shim connects here to drive the embedded browser.
     var browserMCPBridges: [Profile.ID: BrowserMCPVsockBridge] = [:]
+    /// Coding-board MCP listeners (vsock 5831), one per running workspace.
+    var taskMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
 
     /// Errors from `guestExec`.
     enum GuestExecError: LocalizedError {
@@ -1795,6 +1800,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // routes fires missed while the app was quit through each
         // automation's missed-run policy.
         scheduledAutomationEngine.start()
+        // Planning sessions that were in flight when the app last quit must
+        // not spin forever — re-arm their watchdogs (which abort with a
+        // clear reason if the session is gone).
+        codingTaskEngine.resumePlanningWatchdogs()
 
         // Default SSH key: every new profile inherits this keypair via
         // the user's preferences template. Generate it on first launch
@@ -2297,6 +2306,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // Coding-task board as the stage surface.
                     self.unifiedWindow?.showTaskBoard()
                     window = self.unifiedWindow
+                case let w where w.hasPrefix("plan:"):
+                    // A task's plan-session window ("plan:<task-uuid>").
+                    guard let taskID = UUID(uuidString: String(w.dropFirst(5))),
+                          self.codingTaskStore.task(taskID) != nil
+                    else { return ["error": "unknown task"] }
+                    self.planSessionWindows.open(taskID: taskID)
+                    window = self.planSessionWindows.window(for: taskID)
                 case let w where w.hasPrefix("review:"):
                     // A task's review window ("review:<task-uuid>").
                     guard let taskID = UUID(uuidString: String(w.dropFirst(7))),
@@ -2573,6 +2589,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 switch action {
                 case "start":
                     self.codingTaskEngine.start(id)
+                case "plan", "plan-start":   // plan-start: legacy alias
+                    self.codingTaskEngine.plan(id)
                 case "send-back":
                     Task { @MainActor in await self.codingTaskEngine.sendBack(id) }
                 case "merge":
@@ -2599,6 +2617,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     }
                 case "delete":
                     self.codingTaskStore.remove(id)
+                    self.codingTaskEngine.pumpQueue()
                 default:
                     return ["error": "unknown action", "action": action]
                 }
@@ -6497,6 +6516,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
                 self.browserMCPBridges[pid] =
                     BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
+                // Coding-board MCP listener (vsock 5831): typed task tools
+                // for board runs (plan, subtasks, hand-to-review).
+                self.taskMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: TaskBoardMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.codingTaskStore },
+                        engine: { [weak self] in self?.codingTaskEngine }))
             }
             if sessionDisk.didCloneOnLastEnsure, let current = currentBaseVersion {
                 var p = profile
@@ -6659,7 +6686,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.addButton(withTitle: NSLocalizedString("Continue Anyway", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
 
-        let response = alert.runModal()
+        // A sheet on the session's window, NOT runModal: an app-modal alert
+        // parks the main thread, which freezes the control socket, the
+        // automation API, and every fat client until someone clicks — the
+        // whole app held hostage by one wedged boot.
+        guard let win = pane.host?.paneHostWindow else { return }
+        let response = await withCheckedContinuation { cont in
+            alert.beginSheetModal(for: win) { cont.resume(returning: $0) }
+        }
         switch response {
         case .alertFirstButtonReturn:
             // Tear down the wedged session before kickstarting — the
@@ -6791,11 +6825,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
         case "run":
             // Automation fire: same layout as "create", but the guest falls
-            // back to a plain agent tab when cwd isn't a git repo.
-            guard args.count >= 4 else { return false }   // cwd, slug, display, tool[, prompt]
+            // back to a plain agent tab when cwd isn't a git repo. Optional
+            // 6th arg: run mode ("task" wires the board MCP tools in).
+            guard args.count >= 4 else { return false }   // cwd, slug, display, tool[, prompt[, mode]]
             name = "automation-run"
             let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
             encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
+                + (args.count >= 6 && !args[5].isEmpty ? [b64(args[5])] : [])
         case "finish":
             guard args.count >= 1 else { return false }   // worktree branch
             name = "automation-finish"; encoded = [b64(args[0])]
@@ -7113,6 +7149,51 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func openAutomationRun(_ run: AutomationRunRecord) {
         automationRunWindows.open(run: run)
+    }
+
+    /// Native planning-conversation windows (the Plan card's click target).
+    private(set) lazy var planSessionWindows = PlanSessionWindowManager(
+        context: PlanSessionWindowManager.Context(
+            store: { [weak self] in self?.codingTaskStore },
+            fetchTranscript: { [weak self] task in
+                await self?.fetchLivePlanTranscript(task)
+            },
+            send: { [weak self] profileID, branch, text in
+                await self?.codingTaskEngine.typeIntoSession(
+                    profileID: profileID, branch: branch, text: text) ?? false
+            },
+            sendKeys: { [weak self] profileID, branch, keys in
+                await self?.codingTaskEngine.answerInSession(
+                    profileID: profileID, branch: branch, keys: keys) ?? false
+            },
+            openTerminal: { [weak self] task in
+                guard let self, let slug = task.branchSlug else { return }
+                // Planning boots the VM detached, so the session may have no
+                // window yet — attach one first, then land on the tab.
+                if let profile = self.profile(for: task.profileID) {
+                    self.launch(profile)
+                }
+                self.unifiedWindow?.focusWorktreeTab(
+                    profileID: task.profileID, slug: slug)
+            },
+            accentHex: { [weak self] id in
+                self?.profile(for: id)?.color.hexInUI ?? "#888888"
+            },
+            workspaceName: { [weak self] id in
+                self?.profile(for: id)?.name ?? ""
+            },
+            liveBranch: { [weak self] task in
+                self?.codingTaskEngine.liveBranch(of: task)
+            }))
+
+    /// Tail of the live Claude transcript for a task's planning session.
+    func fetchLivePlanTranscript(_ task: CodingTask) async -> String? {
+        guard let since = task.validationRequestedAt,
+              let cmd = CodingTaskEngine.planTranscriptCommand(
+                  guestCwd: ScheduledAutomationEngine.guestPath(task.repoPath),
+                  since: Int(since.timeIntervalSince1970))
+        else { return nil }
+        return try? await guestExec(profileID: task.profileID, command: cmd, timeout: 15)
     }
 
     /// Review windows for the coding board's Testing cards.
@@ -8297,6 +8378,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         shellBridges.removeValue(forKey: profile.id)
         browserMCPBridges[profile.id]?.stop()
         browserMCPBridges.removeValue(forKey: profile.id)
+        taskMCPBridges[profile.id]?.stop()
+        taskMCPBridges.removeValue(forKey: profile.id)
         unifiedWindow?.teardownBrowser(for: profile.id)
         // Drop this workspace's local models from the engine's union, unloading
         // any no longer wanted by an open workspace (stops the engine if none
@@ -8780,6 +8863,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
                 self.browserMCPBridges[pid] =
                     BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
+                // Coding-board MCP listener (vsock 5831): typed task tools
+                // for board runs (plan, subtasks, hand-to-review).
+                self.taskMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: TaskBoardMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.codingTaskStore },
+                        engine: { [weak self] in self?.codingTaskEngine }))
             }
             self.wireSandboxCallbacks(sandbox)
             self.registerSession(sandbox, profile: profile)
