@@ -497,6 +497,12 @@ final class ScheduledAutomationStore {
         }
     }
 
+    /// Remove matching run records (demo/screenshot cleanup).
+    func removeRuns(where predicate: (AutomationRunRecord) -> Bool) {
+        runs.removeAll(where: predicate)
+        save()
+    }
+
     func record(_ run: AutomationRunRecord) {
         runs.insert(run, at: 0)
         if runs.count > Self.maxRuns {

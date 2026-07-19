@@ -2287,8 +2287,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "sheet":  window = self.editorWindow?.attachedSheet
                 case "board":
                     // Kanban board as the stage surface, then the unified
-                    // window — E2E/doc-screenshot hook for the board.
-                    self.unifiedWindow?.showAutomationBoard()
+                    // window — E2E/doc-screenshot hook for the board. The
+                    // window is created on demand so a fresh headless launch
+                    // (the screenshot pipeline) can capture it.
+                    self.ensureUnifiedWindow().showAutomationBoard()
                     window = self.unifiedWindow
                 case let w where w.hasPrefix("run:"):
                     // A run-detail window ("run:<run-uuid>"): open (or find)
@@ -2304,7 +2306,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     window = self.automationRunWindows.window(for: runID)
                 case "tasks":
                     // Coding-task board as the stage surface.
-                    self.unifiedWindow?.showTaskBoard()
+                    self.ensureUnifiedWindow().showTaskBoard()
                     window = self.unifiedWindow
                 case let w where w.hasPrefix("plan:"):
                     // A task's plan-session window ("plan:<task-uuid>").
@@ -2334,6 +2336,120 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return ["error": "no app"] }
                 let action = params["action"] as? String ?? ""
                 switch action {
+                case "seed-board-demo":
+                    // Screenshot/demo fixture: populate BOTH kanban boards
+                    // with representative cards. Everything is tagged with a
+                    // fixed marker so "clear-board-demo" removes it exactly.
+                    guard let profileName = params["profile"] as? String,
+                          let profile = self.profiles.first(where: {
+                              $0.name.lowercased() == profileName.lowercased()
+                          }) else { return ["error": "unknown profile"] }
+                    let pid = profile.id
+                    let marker = "bromure-demo"
+                    let now = Date()
+                    // Automations: one per trigger flavor in Scheduled.
+                    let autoReview = ScheduledAutomation(
+                        name: "Review incoming PRs", profileID: pid,
+                        trigger: .githubPullRequest, githubRepo: "acme/webapp",
+                        prompt: "Review this pull request.", repoPath: "~/webapp")
+                    let autoDeps = ScheduledAutomation(
+                        name: "Nightly dependency bump", profileID: pid,
+                        frequency: .daily, hour: 2, minute: 30,
+                        prompt: "Bump outdated dependencies and run the tests.",
+                        repoPath: "~/webapp")
+                    let autoTriage = ScheduledAutomation(
+                        name: "Triage new issues", profileID: pid,
+                        trigger: .githubIssue, githubRepo: "acme/webapp",
+                        prompt: "Label and triage this issue.", repoPath: "~/webapp")
+                    for a in [autoReview, autoDeps, autoTriage] {
+                        self.scheduledAutomationStore.upsert(a)
+                    }
+                    // Runs: Done (completed + skipped) and Needs Attention.
+                    self.scheduledAutomationStore.record(AutomationRunRecord(
+                        automationID: autoReview.id,
+                        firedAt: now.addingTimeInterval(-7000),
+                        outcome: .launched, detail: "PR #128: fix the login redirect",
+                        branchSlug: marker,
+                        completedAt: now.addingTimeInterval(-5400)))
+                    self.scheduledAutomationStore.record(AutomationRunRecord(
+                        automationID: autoDeps.id,
+                        firedAt: now.addingTimeInterval(-30_600),
+                        outcome: .launched, detail: "Nightly dependency bump",
+                        branchSlug: marker,
+                        completedAt: now.addingTimeInterval(-29_000)))
+                    self.scheduledAutomationStore.record(AutomationRunRecord(
+                        automationID: autoTriage.id,
+                        firedAt: now.addingTimeInterval(-3200),
+                        outcome: .failed,
+                        detail: "The workspace did not boot in time",
+                        branchSlug: marker))
+                    // Coding board: one card per column.
+                    let brief = CodingTask(
+                        title: "Add rate limiting to the API",
+                        details: "Protect the public endpoints with a token bucket.",
+                        profileID: pid, repoPath: "~/webapp")
+                    var phase1 = CodingTask(
+                        title: "Phase 1 — Token bucket core",
+                        details: "Bucket + refill logic, unit tests.",
+                        profileID: pid, repoPath: "~/webapp")
+                    phase1.stage = .planning
+                    phase1.parentTaskID = brief.id
+                    phase1.createdAt = now.addingTimeInterval(-500)
+                    var phase2 = CodingTask(
+                        title: "Phase 2 — Middleware + headers",
+                        details: "Wire the limiter into the request path.",
+                        profileID: pid, repoPath: "~/webapp")
+                    phase2.stage = .planning
+                    phase2.parentTaskID = brief.id
+                    phase2.dependsOn = [phase1.id]
+                    phase2.createdAt = now.addingTimeInterval(-499)
+                    var running = CodingTask(
+                        title: "Fix the flaky websocket test",
+                        profileID: pid, repoPath: "~/webapp")
+                    running.stage = .inProgress
+                    running.branchSlug = "fix-flaky-websocket-0719"
+                    running.startedAt = now.addingTimeInterval(-120)
+                    var review = CodingTask(
+                        title: "Migrate settings to SQLite",
+                        profileID: pid, repoPath: "~/webapp")
+                    review.stage = .testing
+                    review.branch = "wt/settings-sqlite-0719"
+                    review.testingAt = now.addingTimeInterval(-700)
+                    review.comments = [ReviewComment(text: "Use a prepared statement here",
+                                                     file: "store/db.py", line: 42)]
+                    var shipped = CodingTask(
+                        title: "Dark-mode palette cleanup",
+                        profileID: pid, repoPath: "~/webapp")
+                    shipped.stage = .done
+                    shipped.merged = true
+                    shipped.parentBranch = "main"
+                    shipped.completedAt = now.addingTimeInterval(-90_000)
+                    for t in [brief, phase1, phase2, running, review, shipped] {
+                        self.codingTaskStore.upsert(t)
+                    }
+                    return ["ok": true]
+
+                case "clear-board-demo":
+                    let marker = "bromure-demo"
+                    let demoNames = ["Review incoming PRs", "Nightly dependency bump",
+                                     "Triage new issues"]
+                    let demoTasks = ["Add rate limiting to the API",
+                                     "Phase 1 — Token bucket core",
+                                     "Phase 2 — Middleware + headers",
+                                     "Fix the flaky websocket test",
+                                     "Migrate settings to SQLite",
+                                     "Dark-mode palette cleanup"]
+                    for a in self.scheduledAutomationStore.automations
+                    where demoNames.contains(a.name) {
+                        self.scheduledAutomationStore.remove(a.id)
+                    }
+                    self.scheduledAutomationStore.removeRuns(where: { $0.branchSlug == marker })
+                    for t in self.codingTaskStore.tasks
+                    where demoTasks.contains(t.title) {
+                        self.codingTaskStore.remove(t.id)
+                    }
+                    return ["ok": true]
+
                 case "ensure-profile":
                     let name = (params["name"] as? String) ?? "Screenshot"
                     if let existing = self.profiles.first(where: { $0.name.lowercased() == name.lowercased() }) {

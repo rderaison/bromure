@@ -12,21 +12,24 @@ Automations are what turn the app from an interactive tool into an unattended on
 
 > **Note:** When the repository path you give an automation is a git repository, each run gets its own worktree. When it is not, the run opens a plain agent tab at that path instead — the automation still works, it just has no branch to merge.
 
-## The AUTOMATIONS sidebar section
+## The automation board
 
-Automations live in their own group in the main window's sidebar, below **WORKSPACES** and the pinned **Grid** node. The **AUTOMATIONS** header carries a **+** button (tooltip *New automation*); each automation is one row, tinted with its owning workspace's accent color.
+Automations live on a kanban board. The sidebar keeps a slim **AUTOMATIONS** section at the very top — a **+** button on the header creates an automation, and a single pulse row summarizes the fleet (*3 automations · 1 running*) with a red count badge when runs need your attention. Clicking the section title or the pulse row opens the board; so does **⇧⌘A** from anywhere.
 
 <p align="center">
-  <img src="images/automations.en.jpg" width="700" alt="The main window: a WORKSPACES sidebar section with the Grid node and workspaces, and below it an AUTOMATIONS section listing a “Review incoming PRs” automation summarized as “PR · acme/webapp”." />
+  <img src="images/automation-board.en.jpg" width="820" alt="The automation board: Scheduled with three automation cards (Review incoming PRs, Nightly dependency bump, Triage new issues), an empty In Progress column, a Needs Attention column with one failed run offering Dismiss, and a Done column listing completed runs with a Load older runs… link." />
 </p>
 
-Each row shows:
+The board's model is deliberately asymmetric: an **automation card never leaves Scheduled** — each fire *spawns a run card* that flows across the board on its own.
 
-- The automation's **name** (or *Untitled automation*).
-- A one-line **summary** of its trigger and next fire — for example *Weekdays 9:00 · next Fri 09:00*, *PR · owner/repo*, or *Chained*. A paused automation reads *Paused* instead.
-- The **last run's outcome** as a small glyph on the trailing edge (see [Run history](#run-history-and-next-fire-times)).
+| Column | What sits there |
+| --- | --- |
+| **Scheduled** | One card per automation: name, trigger summary, next fire, paused state. Click to open its editor; right-click for **Run Now**, **Pause** / **Resume**, and **Delete…**. |
+| **In Progress** | Launched runs whose agent is still working — each card shows the run's detail line, when it fired, and the live agent-status dot. Click to open the run's window. |
+| **Needs Attention** | Failed and blocked runs, parked until you **Dismiss** them (or **Run Again**). The column only exists while it has cards, so a healthy board never shows it. |
+| **Done** | Everything over: completed runs, skipped fires, ended sessions, and acknowledged failures. **Load older runs…** pages in the archive — nothing is ever deleted. |
 
-Clicking a row opens its editor as a full-stage overlay, the same surface pattern as the [VM dashboard](06-sessions.mdx#the-vm-dashboard). Right-click a row for its context menu: **Run Now**, **Pause** / **Resume**, and **Delete…**.
+Clicking a run card opens its **run window**: while the agent is still working you get a live, read-only view of its session (a second attach to the same terminal); once it finishes, the same window shows the run's saved transcript rendered natively — prompt, the agent's narration, every tool call and result — long after the worktree and tab are gone. Failed runs state their reason in place.
 
 ## Creating an automation
 
@@ -131,14 +134,14 @@ A chained automation fires on the upstream run's finish regardless of whether th
 
 ## Run history and next-fire times
 
-Every fire is recorded, and the sidebar row shows the last outcome as a glyph:
+Every fire is recorded and lands on the [board](#the-automation-board) as a run card:
 
-| Outcome | Meaning | Glyph |
+| Outcome | Meaning | Board column |
 | --- | --- | --- |
-| **launched** | The agent started in a fresh worktree. | check-circle |
-| **skipped** | The fire was suppressed — the Mac was asleep, or the workspace was off with **Start the workspace if needed** disabled. | forward-end |
-| **failed** | The run could not be launched (the workspace is gone, or it did not boot in time). | x-circle |
-| **blocked** | An event item was stopped by the injection screen. | shield-slash |
+| **launched** | The agent started in a fresh worktree. | In Progress, then Done |
+| **skipped** | The fire was suppressed — the Mac was asleep, or the workspace was off with **Start the workspace if needed** disabled. | Done |
+| **failed** | The run could not be launched (the workspace is gone, or it did not boot in time). | Needs Attention until dismissed |
+| **blocked** | An event item was stopped by the injection screen. | Needs Attention until dismissed |
 
 The editor's **Recent runs** section lists the last several fires with their times and details. Next-fire times and event-poll high-water marks are tracked per automation so a relaunch can tell "missed while the app was quit" from "not due yet" — editing an automation re-baselines both.
 
