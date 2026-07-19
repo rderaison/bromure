@@ -110,11 +110,19 @@ struct FileExplorerPane: View {
     }
 
     /// The diff pane's commenting UI targets the coding agent in the
-    /// ACTIVE tab; a shell (or no tab) turns it off.
+    /// ACTIVE tab; a shell (or no tab) turns it off. The roster's label is
+    /// "claude" for a bare agent but "Refactor website (claude)" once the
+    /// agent sets a session title — match both, for every agent the guest
+    /// roster recognizes. Worktree tabs are agent-launched by construction.
+    private static let agentNames = ["claude", "codex", "grok", "aider",
+                                     "goose", "amp", "opencode", "gemini",
+                                     "cursor"]
     private func updateAgentTab() {
-        let tools = Set(Profile.Tool.allCases.map(\.rawValue))
         model.agentTabIndex = activeTab.flatMap { tab in
-            tools.contains(tab.label.lowercased()) ? tab.index : nil
+            let l = tab.label.lowercased()
+            let isAgent = Self.agentNames.contains(l)
+                || Self.agentNames.contains { l.hasSuffix("(\($0))") }
+            return (isAgent || tab.isWorktree) ? tab.index : nil
         }
     }
 

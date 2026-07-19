@@ -2016,11 +2016,26 @@ final class RemoteHostWindow: NSWindow {
                       let index = await self.remoteTabIndex(profileID: profileID,
                                                             branch: branch)
                 else { return false }
+                // Same guard as the host engine: keys sent before the
+                // picker is ON SCREEN land in the chat input and interrupt
+                // the tool call ("user declined"). Wait for it.
+                let probe = "tmux capture-pane -p -t bromure:\(index) 2>/dev/null "
+                    + "| grep -q 'Enter to select'"
+                var visible = false
+                for _ in 0..<15 {
+                    if (try? await self.controller.guestExec(
+                        profileID, command: probe, timeout: 8)) != nil {
+                        visible = true
+                        break
+                    }
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+                guard visible else { return false }
                 return (try? await self.controller.guestExec(
                     profileID,
                     command: CodingTaskEngine.answerKeysCommand(
                         tabIndex: index, keys: keys),
-                    timeout: 30)) != nil
+                    timeout: 60)) != nil
             },
             openTerminal: { [weak self] task in self?.jumpToTask(task) },
             accentHex: { [weak self] id in
