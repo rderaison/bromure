@@ -46,16 +46,42 @@ struct CodingTasksTests {
         #expect(mid.unmetDependencies(in: [dep, mid]).isEmpty)
     }
 
-    @Test("Feedback prompt lists unsent comments with file scopes")
+    @Test("Feedback prompt lists unsent comments with file and line scopes")
     func feedback() {
         let comments = [
             ReviewComment(text: "Rename this", file: "src/pool.c"),
+            ReviewComment(text: "Use a different method", file: "foo.js", line: 196),
             ReviewComment(text: "Add a test"),
         ]
         let p = CodingTaskEngine.feedbackPrompt(comments: comments)
-        #expect(p.contains("- [src/pool.c] Rename this"))
+        #expect(p.contains("- In src/pool.c: Rename this"))
+        #expect(p.contains("- In foo.js, line 196: Use a different method"))
         #expect(p.contains("- Add a test"))
         #expect(p.contains("commit"))
+    }
+
+    @Test("Diff parser numbers new-file lines from hunk headers")
+    func diffLineNumbers() {
+        let raw = """
+        diff --git a/foo.js b/foo.js
+        index 111..222 100644
+        --- a/foo.js
+        +++ b/foo.js
+        @@ -194,4 +194,5 @@ function f() {
+         context194
+        -removed
+        +added195
+        +added196
+         context197
+        """
+        let files = TaskDiffParser.parse(raw)
+        #expect(files.count == 1)
+        let byText = { (t: String) in files[0].lines.first { $0.text.hasSuffix(t) } }
+        #expect(byText("context194")?.newLine == 194)
+        #expect(byText("removed")?.newLine == nil)
+        #expect(byText("added195")?.newLine == 195)
+        #expect(byText("added196")?.newLine == 196)
+        #expect(byText("context197")?.newLine == 197)
     }
 
     @Test("Validation prompt is read-only, structured, and carries the brief")
@@ -166,6 +192,28 @@ struct CodingTasksTests {
             + "tmux send-keys -t bromure:3 Enter")
         // Anything not a digit or known key name is dropped, not injected.
         #expect(CodingTaskEngine.answerKeysCommand(tabIndex: 0, keys: ["; rm -rf /"]).isEmpty)
+    }
+
+    @Test("A brief whose planning filed phases leaves the Backlog column")
+    @MainActor
+    func backlogHidesPlannedBriefs() {
+        let store = CodingTaskStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("kb-\(UUID().uuidString).json"))
+        var brief = CodingTask(title: "Build an EDR", profileID: UUID())
+        store.upsert(brief)
+        #expect(store.backlogTasks().count == 1)
+        // Planning filed phases: validated + children present → hidden.
+        brief.validationRequestedAt = Date(timeIntervalSinceNow: -60)
+        brief.validatedAt = Date()
+        store.upsert(brief)
+        var phase = CodingTask(title: "Phase 1", profileID: brief.profileID)
+        phase.stage = .planning
+        phase.parentTaskID = brief.id
+        store.upsert(phase)
+        #expect(store.backlogTasks().isEmpty)
+        // All phases deleted → the brief resurfaces.
+        store.remove(phase.id)
+        #expect(store.backlogTasks().count == 1)
     }
 
     @Test("Tasks decode without optional fields (forward compat)")

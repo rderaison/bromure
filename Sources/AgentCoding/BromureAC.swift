@@ -2613,11 +2613,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     }
                     self.codingTaskStore.mutate(id) {
                         $0.comments.append(ReviewComment(
-                            text: text, file: body["file"] as? String))
+                            text: text, file: body["file"] as? String,
+                            line: body["line"] as? Int))
                     }
                 case "delete":
                     self.codingTaskStore.remove(id)
                     self.codingTaskEngine.pumpQueue()
+                case "destroy":
+                    self.codingTaskEngine.destroy(id)
                 default:
                     return ["error": "unknown action", "action": action]
                 }
@@ -7183,7 +7186,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.profile(for: id)?.name ?? ""
             },
             liveBranch: { [weak self] task in
-                self?.codingTaskEngine.liveBranch(of: task)
+                await self?.codingTaskEngine.liveBranchResolved(of: task)
             }))
 
     /// Tail of the live Claude transcript for a task's planning session.
@@ -7227,9 +7230,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             fetchBranches: { [weak self] task in
                 await self?.fetchTaskBranches(task) ?? []
             },
-            addComment: { [weak self] taskID, text, file in
+            addComment: { [weak self] taskID, text, file, line in
                 self?.codingTaskStore.mutate(taskID) {
-                    $0.comments.append(ReviewComment(text: text, file: file))
+                    $0.comments.append(ReviewComment(text: text, file: file, line: line))
                 }
             }))
 

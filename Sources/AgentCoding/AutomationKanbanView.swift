@@ -449,8 +449,9 @@ private struct InProgressRunCard: View {
                         .lineLimit(2)
                 }
                 HStack(spacing: 4) {
-                    Text(String(format: NSLocalizedString("started %@", comment: "kanban card"),
-                                run.firedAt.formatted(.relative(presentation: .named))))
+                    RelativeTimeText(
+                        format: NSLocalizedString("started %@", comment: "kanban card"),
+                        date: run.firedAt)
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                     Spacer(minLength: 0)
@@ -494,7 +495,7 @@ private struct AttentionRunCard: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
                 HStack {
-                    Text(run.firedAt.formatted(.relative(presentation: .named)))
+                    RelativeTimeText(format: nil, date: run.firedAt)
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                     Spacer(minLength: 0)

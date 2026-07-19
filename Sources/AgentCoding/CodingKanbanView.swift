@@ -138,7 +138,7 @@ struct CodingTasksSection: View {
         let planning = store.tasks(in: .planning).count
         let running = store.tasks(in: .inProgress).count
         let review = store.tasks(in: .testing).count
-        let backlog = store.tasks(in: .backlog).count
+        let backlog = store.backlogTasks().count
         var parts: [String] = []
         if planning > 0 {
             parts.append(String(format: NSLocalizedString("%d planned", comment: ""), planning))
@@ -244,6 +244,8 @@ struct CodingKanbanView: View {
         /// Open the native planning-conversation window for a card whose
         /// planning session is live.
         var openPlanSession: (UUID) -> Void = { _ in }
+        /// Remove the card AND kill its agent + delete its worktree/branch.
+        var destroy: (UUID) -> Void = { _ in }
     }
 
     var store: CodingTaskStore
@@ -333,7 +335,7 @@ struct CodingKanbanView: View {
     // MARK: Columns
 
     private var backlogColumn: some View {
-        let tasks = store.tasks(in: .backlog)
+        let tasks = store.backlogTasks()
         return KanbanColumn(title: NSLocalizedString("Backlog", comment: "kanban column"),
                             systemImage: "tray",
                             count: tasks.count,
@@ -350,6 +352,9 @@ struct CodingKanbanView: View {
                     onStart: { actions.start(task.id) },
                     onPlan: { actions.plan(task.id) },
                     onDelete: { actions.delete(task.id) })
+                    .modifier(RemovableCard(title: task.title, stage: task.stage) {
+                        actions.delete(task.id)
+                    })
             }
         }
     }
@@ -407,6 +412,9 @@ struct CodingKanbanView: View {
                         else { selectedPhases.insert(task.id) }
                     },
                     onEdit: { editing = task })
+                    .modifier(RemovableCard(title: task.title, stage: task.stage) {
+                        actions.delete(task.id)
+                    })
                     .contextMenu {
                         Button(NSLocalizedString("Start", comment: "")) {
                             actions.start(task.id)
@@ -433,12 +441,25 @@ struct CodingKanbanView: View {
                     accentHex: accentHex(for: task.profileID),
                     status: liveStatus(of: task),
                     onOpen: { actions.jumpToRun(task) })
+                    .modifier(RemovableCard(title: task.title, stage: task.stage,
+                                            onRemove: { actions.delete(task.id) },
+                                            onDestroy: { actions.destroy(task.id) }))
                     .contextMenu {
                         Button(NSLocalizedString("Move to Testing", comment: "")) {
                             actions.moveToTesting(task.id)
                         }
                         Button(NSLocalizedString("Close Without Merging", comment: "")) {
                             actions.closeNoMerge(task.id)
+                        }
+                        Divider()
+                        Button(NSLocalizedString("Stop Agent & Delete Worktree",
+                                                 comment: ""),
+                               role: .destructive) {
+                            actions.destroy(task.id)
+                        }
+                        Button(NSLocalizedString("Remove Card Only", comment: ""),
+                               role: .destructive) {
+                            actions.delete(task.id)
                         }
                     }
             }
@@ -457,6 +478,9 @@ struct CodingKanbanView: View {
                     task: task,
                     accentHex: accentHex(for: task.profileID),
                     onOpen: { actions.openReview(task.id) })
+                    .modifier(RemovableCard(title: task.title, stage: task.stage,
+                                            onRemove: { actions.delete(task.id) },
+                                            onDestroy: { actions.destroy(task.id) }))
                     .contextMenu {
                         Button(NSLocalizedString("Merge into \(task.parentBranch ?? "parent")…",
                                                  comment: "")) {
@@ -467,6 +491,16 @@ struct CodingKanbanView: View {
                         }
                         Button(NSLocalizedString("Close Without Merging", comment: "")) {
                             actions.closeNoMerge(task.id)
+                        }
+                        Divider()
+                        Button(NSLocalizedString("Delete Worktree & Branch",
+                                                 comment: ""),
+                               role: .destructive) {
+                            actions.destroy(task.id)
+                        }
+                        Button(NSLocalizedString("Remove Card Only", comment: ""),
+                               role: .destructive) {
+                            actions.delete(task.id)
                         }
                     }
             }
@@ -482,6 +516,9 @@ struct CodingKanbanView: View {
             ForEach(tasks) { task in
                 DoneTaskCard(task: task,
                              accentHex: accentHex(for: task.profileID))
+                    .modifier(RemovableCard(title: task.title, stage: task.stage) {
+                        actions.delete(task.id)
+                    })
                     .contextMenu {
                         Button(NSLocalizedString("Delete", comment: ""), role: .destructive) {
                             actions.delete(task.id)
@@ -493,6 +530,76 @@ struct CodingKanbanView: View {
 }
 
 // MARK: - Cards
+
+/// Hover-revealed ✕ on a kanban card, behind a confirmation so a stray
+/// click can't nuke a task. Removal deletes the card only — a running
+/// agent session, its branch, and its worktree are untouched.
+private struct RemovableCard: ViewModifier {
+    let title: String
+    let stage: CodingTask.Stage
+    let onRemove: () -> Void
+    /// Kill the agent + delete the worktree/branch too. Offered for cards
+    /// that have (or may have) a session or checkout behind them.
+    var onDestroy: (() -> Void)?
+
+    @State private var hovering = false
+    @State private var confirming = false
+
+    private var hasBackingWork: Bool {
+        onDestroy != nil && (stage == .inProgress || stage == .testing)
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .topTrailing) {
+                if hovering {
+                    Button {
+                        confirming = true
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 14))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(Color.white, Color.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(3)
+                    .help(NSLocalizedString("Remove from board", comment: ""))
+                }
+            }
+            .onHover { hovering = $0 }
+            .confirmationDialog(
+                String(format: NSLocalizedString("Remove “%@”?",
+                                                 comment: "remove card"), title),
+                isPresented: $confirming, titleVisibility: .visible
+            ) {
+                if hasBackingWork {
+                    Button(stage == .inProgress
+                           ? NSLocalizedString("Stop Agent & Delete Worktree",
+                                               comment: "remove card")
+                           : NSLocalizedString("Delete Worktree & Branch",
+                                               comment: "remove card"),
+                           role: .destructive) {
+                        onDestroy?()
+                    }
+                    Button(NSLocalizedString("Remove Card Only", comment: "remove card")) {
+                        onRemove()
+                    }
+                } else {
+                    Button(NSLocalizedString("Remove", comment: ""), role: .destructive) {
+                        onRemove()
+                    }
+                }
+                Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) {}
+            } message: {
+                Text(hasBackingWork
+                     ? NSLocalizedString(
+                        "Stopping deletes the agent session and its uncommitted/unmerged work in the worktree. “Remove Card Only” leaves them in the workspace.",
+                        comment: "remove card")
+                     : NSLocalizedString("This can't be undone.", comment: "remove card"))
+            }
+    }
+}
+
 
 /// One decomposed phase in the Plan column: numbered, selectable for batch
 /// start, with dependency and queue state. Clicking the body edits; the
@@ -697,30 +804,36 @@ private struct InProgressTaskCard: View {
                     Spacer(minLength: 4)
                     Circle().fill(Color(hex: accentHex)).frame(width: 7, height: 7)
                 }
-                HStack(spacing: 4) {
-                    if let started = task.startedAt {
-                        Text(String(format: NSLocalizedString("started %@", comment: ""),
-                                    started.formatted(.relative(presentation: .named))))
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer(minLength: 0)
-                    if status == .needsInput {
-                        Text(NSLocalizedString("Needs your input", comment: ""))
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.red)
-                    } else if status == nil {
-                        // No tab yet: within the boot/attach window that's
-                        // normal startup, not a lost session.
-                        if let started = task.startedAt,
-                           Date().timeIntervalSince(started) < 300 {
-                            Text(NSLocalizedString("starting…", comment: "task card"))
+                // TimelineView so the whole row re-evaluates on a timer:
+                // the relative time ticks, and "starting…" ages into
+                // "session gone" even when nothing else redraws the board.
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    HStack(spacing: 4) {
+                        if let started = task.startedAt {
+                            RelativeTimeText(
+                                format: NSLocalizedString("started %@", comment: ""),
+                                date: started)
                                 .font(.system(size: 10))
                                 .foregroundStyle(.tertiary)
-                        } else {
-                            Text(NSLocalizedString("session gone", comment: "task card"))
-                                .font(.system(size: 10))
-                                .foregroundStyle(.orange)
+                        }
+                        Spacer(minLength: 0)
+                        if status == .needsInput {
+                            Text(NSLocalizedString("Needs your input", comment: ""))
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.red)
+                        } else if status == nil {
+                            // No tab yet: within the boot/attach window that's
+                            // normal startup, not a lost session.
+                            if let started = task.startedAt,
+                               context.date.timeIntervalSince(started) < 300 {
+                                Text(NSLocalizedString("starting…", comment: "task card"))
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.tertiary)
+                            } else {
+                                Text(NSLocalizedString("session gone", comment: "task card"))
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.orange)
+                            }
                         }
                     }
                 }
@@ -927,6 +1040,10 @@ private struct TaskEditorSheet: View {
     private var dependenciesSection: some View {
         captioned(NSLocalizedString("Depends on — phases that must finish first",
                                     comment: "task editor")) {
+            // A big plan has a dozen-plus phases — the list scrolls inside
+            // a fixed height so it can't push the editor's footer out of
+            // the sheet.
+            ScrollView {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(siblings) { sib in
                     HStack(spacing: 6) {
@@ -953,6 +1070,8 @@ private struct TaskEditorSheet: View {
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 150)
             .background(RoundedRectangle(cornerRadius: 6)
                 .fill(Color.primary.opacity(0.03)))
             .overlay(RoundedRectangle(cornerRadius: 6)

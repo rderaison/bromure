@@ -1978,9 +1978,10 @@ final class RemoteHostWindow: NSWindow {
                 return out.split(whereSeparator: \.isNewline).map(String.init)
                     .filter { !$0.isEmpty && !$0.hasPrefix("wt/") }
             },
-            addComment: { [weak self] id, text, file in
+            addComment: { [weak self] id, text, file, line in
                 var body: [String: Any] = ["text": text]
                 if let file { body["file"] = file }
+                if let line { body["line"] = line }
                 self?.controller.taskCommand(id, "comment", body: body)
             }))
 
@@ -2002,23 +2003,23 @@ final class RemoteHostWindow: NSWindow {
             },
             send: { [weak self] profileID, branch, text in
                 guard let self,
-                      let tab = self.controller.tabsModel(for: profileID)?.tabs
-                          .first(where: { $0.worktreeBranch == branch })
+                      let index = await self.remoteTabIndex(profileID: profileID,
+                                                            branch: branch)
                 else { return false }
                 return (try? await self.controller.guestExec(
                     profileID,
-                    command: CodingTaskEngine.typeCommand(tabIndex: tab.index, text: text),
+                    command: CodingTaskEngine.typeCommand(tabIndex: index, text: text),
                     timeout: 20)) != nil
             },
             sendKeys: { [weak self] profileID, branch, keys in
                 guard let self, !keys.isEmpty,
-                      let tab = self.controller.tabsModel(for: profileID)?.tabs
-                          .first(where: { $0.worktreeBranch == branch })
+                      let index = await self.remoteTabIndex(profileID: profileID,
+                                                            branch: branch)
                 else { return false }
                 return (try? await self.controller.guestExec(
                     profileID,
                     command: CodingTaskEngine.answerKeysCommand(
-                        tabIndex: tab.index, keys: keys),
+                        tabIndex: index, keys: keys),
                     timeout: 30)) != nil
             },
             openTerminal: { [weak self] task in self?.jumpToTask(task) },
@@ -2030,10 +2031,34 @@ final class RemoteHostWindow: NSWindow {
             },
             liveBranch: { [weak self] task in
                 guard let self, let slug = task.branchSlug else { return nil }
-                return self.controller.tabsModel(for: task.profileID)?.tabs.first {
+                if let b = self.controller.tabsModel(for: task.profileID)?.tabs.first(where: {
                     AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
-                }?.worktreeBranch
+                })?.worktreeBranch { return b }
+                // Detached on the server: the mirror may not carry a tab
+                // roster — ask the remote guest's tmux directly.
+                guard slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" })
+                else { return nil }
+                let cmd = "tmux list-windows -t bromure -F '#{@worktree}' 2>/dev/null"
+                guard let out = try? await self.controller.guestExec(
+                    task.profileID, command: cmd, timeout: 8) else { return nil }
+                return out.split(whereSeparator: \.isNewline).map(String.init)
+                    .first { AutomationBoard.branchMatches($0, slug: slug) }
             }))
+
+    /// tmux window index for a branch: mirrored roster first, remote
+    /// guest tmux when the session runs detached on the server.
+    private func remoteTabIndex(profileID: Profile.ID, branch: String) async -> Int? {
+        if let i = controller.tabsModel(for: profileID)?.tabs
+            .first(where: { $0.worktreeBranch == branch })?.index {
+            return i
+        }
+        guard CodingTaskEngine.isSafeBranch(branch) else { return nil }
+        let cmd = "tmux list-windows -t bromure -F '#{window_index} #{@worktree}' "
+            + "2>/dev/null | awk -v b='\(branch)' '$2==b {print $1; exit}'"
+        guard let out = try? await controller.guestExec(
+            profileID, command: cmd, timeout: 8) else { return nil }
+        return Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
 
     private func jumpToTask(_ task: CodingTask) {
         guard let slug = task.branchSlug,
@@ -2082,7 +2107,8 @@ final class RemoteHostWindow: NSWindow {
                     },
                     openPlanSession: { [weak self] id in
                         self?.planSessionWindows.open(taskID: id)
-                    }))
+                    },
+                    destroy: { c.taskCommand($0, "destroy") }))
             let host = NSHostingView(rootView: view)
             host.sizingOptions = []
             host.translatesAutoresizingMaskIntoConstraints = false

@@ -147,16 +147,19 @@ struct ReviewComment: Codable, Identifiable, Equatable, Sendable {
     var id: UUID
     var text: String
     var file: String?
+    /// New-file line number the comment anchors to (margin annotations).
+    var line: Int?
     var createdAt: Date
     /// Set when a "send back to In Progress" round delivered this comment
     /// to the agent.
     var sentAt: Date?
 
     init(id: UUID = UUID(), text: String, file: String? = nil,
-         createdAt: Date = Date(), sentAt: Date? = nil) {
+         line: Int? = nil, createdAt: Date = Date(), sentAt: Date? = nil) {
         self.id = id
         self.text = text
         self.file = file
+        self.line = line
         self.createdAt = createdAt
         self.sentAt = sentAt
     }
@@ -199,6 +202,19 @@ final class CodingTaskStore {
             tasks.insert(task, at: 0)
         }
         save()
+    }
+
+    /// Backlog items that still belong on the board: a brief whose
+    /// planning has filed phases is superseded by its cards in the Plan
+    /// column and disappears from Backlog (it stays in the store as the
+    /// phases' parent — title chip, plan overview). If every phase is
+    /// later deleted, the brief resurfaces.
+    func backlogTasks() -> [CodingTask] {
+        tasks.filter { t in
+            t.stage == .backlog
+                && !(t.validatedAt != nil
+                     && tasks.contains { $0.parentTaskID == t.id })
+        }
     }
 
     func remove(_ id: UUID) {
@@ -346,7 +362,8 @@ final class CodingTaskEngine {
         out += "each point, then commit the updates:\n"
         for c in comments {
             if let file = c.file, !file.isEmpty {
-                out += "\n- [\(file)] \(c.text)"
+                let at = c.line.map { "\(file), line \($0)" } ?? file
+                out += "\n- In \(at): \(c.text)"
             } else {
                 out += "\n- \(c.text)"
             }
@@ -684,6 +701,34 @@ final class CodingTaskEngine {
         }
     }
 
+    /// Tear a task down completely: kill its agent tab, delete its
+    /// worktree and branch in the guest, and remove the card. The
+    /// destructive sibling of a plain card removal — offered when the
+    /// user removes a card that still has a session or checkout behind it.
+    func destroy(_ taskID: UUID) {
+        guard let task = store.task(taskID) else { return }
+        let profileID = task.profileID
+        let branch = task.branch ?? liveBranch(of: task)
+        if let branch {
+            let root = task.rootRepo
+                ?? delegate?.pane(for: profileID)?.model.tabs
+                    .first { $0.worktreeBranch == branch }?.rootRepo
+            closeSessionTab(profileID: profileID, branch: branch, afterSeconds: 0)
+            if let root, !root.isEmpty {
+                // Give the tab kill a beat, then drop the checkout.
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    _ = self?.delegate?.automationWorktreeCommand(
+                        profileNameOrID: profileID.uuidString,
+                        action: "remove", args: [root, branch])
+                }
+            }
+            BACDebug.log("tasks", "“\(task.title)” destroyed (\(branch))")
+        }
+        store.remove(taskID)
+        pumpQueue()
+    }
+
     /// Auto-start queued phases whose dependencies just reached Done.
     /// Called from every Done transition (merge, close, PR) and deletes.
     func pumpQueue() {
@@ -705,24 +750,48 @@ final class CodingTaskEngine {
     func agentFinished(profileID: UUID, worktreeBranch: String?) {
         guard let branch = worktreeBranch, branch.hasPrefix("wt/") else { return }
         let slugPart = String(branch.dropFirst(3))
-        guard let task = store.tasks.first(where: { t in
-            guard t.stage == .inProgress || t.stage == .planning,
-                  t.profileID == profileID,
-                  let slug = t.branchSlug else { return false }
+        func matches(_ t: CodingTask) -> Bool {
+            guard t.profileID == profileID, let slug = t.branchSlug else { return false }
             return slugPart == slug || (slugPart.hasPrefix(slug + "-")
                 && Int(slugPart.dropFirst(slug.count + 1)) != nil)
-        }) else { return }
-        let tab = delegate?.pane(for: profileID)?.model.tabs
-            .first { $0.worktreeBranch == branch }
-        BACDebug.log("tasks", "“\(task.title)” agent done → testing (\(branch))")
-        store.mutate(task.id) {
-            $0.stage = .testing
-            $0.testingAt = Date()
-            $0.branch = branch
-            if let tab {
-                $0.worktreeDir = tab.repoRoot?.isEmpty == false ? tab.repoRoot : tab.cwd
-                $0.parentBranch = tab.parentBranch
-                $0.rootRepo = tab.rootRepo
+        }
+        if let task = store.tasks.first(where: {
+            ($0.stage == .inProgress || $0.stage == .planning) && matches($0)
+        }) {
+            let tab = delegate?.pane(for: profileID)?.model.tabs
+                .first { $0.worktreeBranch == branch }
+            BACDebug.log("tasks", "“\(task.title)” agent done → testing (\(branch))")
+            store.mutate(task.id) {
+                $0.stage = .testing
+                $0.testingAt = Date()
+                $0.branch = branch
+                if let tab {
+                    $0.worktreeDir = tab.repoRoot?.isEmpty == false ? tab.repoRoot : tab.cwd
+                    $0.parentBranch = tab.parentBranch
+                    $0.rootRepo = tab.rootRepo
+                }
+            }
+            // The agent is done; a finished session left open is just an
+            // idle claude eating a tab. Review send-back reopens the
+            // worktree via task-resume when needed.
+            closeSessionTab(profileID: profileID, branch: branch)
+            return
+        }
+        // A planning session signaling done: the parent card sits in
+        // Backlog. Close the interview tab; if the agent quit WITHOUT
+        // filing phases, say so on the card.
+        if let parent = store.tasks.first(where: {
+            $0.stage == .backlog && $0.validationRequestedAt != nil && matches($0)
+        }) {
+            BACDebug.log("tasks", "planning session done for “\(parent.title)”")
+            closeSessionTab(profileID: profileID, branch: branch, afterSeconds: 10)
+            if parent.validationInFlight {
+                abortPlanning(parent.id, reason: NSLocalizedString(
+                    "The planning session ended before filing phases — click Plan to retry.",
+                    comment: "plan watchdog"))
+            } else {
+                planWatchdogs[parent.id]?.cancel()
+                planWatchdogs[parent.id] = nil
             }
         }
     }
@@ -844,27 +913,80 @@ final class CodingTaskEngine {
     }
 
     /// Send picker keystrokes into a live session (see answerKeysCommand).
+    /// Refuses until the picker is actually ON SCREEN: keystrokes that
+    /// arrive while the agent is still streaming (or after the picker
+    /// closed) land in the chat input, which INTERRUPTS the pending tool
+    /// call — Claude records "user declined to answer". Waits up to ~30s
+    /// for the picker footer, then answers.
     func answerInSession(profileID: UUID, branch: String, keys: [String]) async -> Bool {
         guard let delegate, !keys.isEmpty,
-              let tab = delegate.pane(for: profileID)?.model.tabs
-                  .first(where: { $0.worktreeBranch == branch })
+              let index = await tabIndex(profileID: profileID, branch: branch)
         else { return false }
+        let probe = "tmux capture-pane -p -t bromure:\(index) 2>/dev/null "
+            + "| grep -q 'Enter to select'"
+        var visible = false
+        for _ in 0..<15 {
+            if (try? await delegate.guestExec(
+                profileID: profileID, command: probe, timeout: 8)) != nil {
+                visible = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+        guard visible else {
+            BACDebug.log("tasks", "picker not on screen for \(branch) — not sending")
+            return false
+        }
         return (try? await delegate.guestExec(
             profileID: profileID,
-            command: Self.answerKeysCommand(tabIndex: tab.index, keys: keys),
-            timeout: 30)) != nil
+            command: Self.answerKeysCommand(tabIndex: index, keys: keys),
+            timeout: 60)) != nil
+    }
+
+    nonisolated static func isSafeBranch(_ branch: String) -> Bool {
+        !branch.isEmpty && branch.allSatisfy {
+            $0.isLowercase || $0.isNumber || $0 == "-" || $0 == "/"
+        }
+    }
+
+    /// The guest tmux window index backing a session branch. The attached
+    /// pane's roster when there is one; a DETACHED session (planning boots
+    /// the VM headless) has no pane, so ask the guest's tmux directly.
+    func tabIndex(profileID: UUID, branch: String) async -> Int? {
+        if let i = delegate?.pane(for: profileID)?.model.tabs
+            .first(where: { $0.worktreeBranch == branch })?.index {
+            return i
+        }
+        guard let delegate, Self.isSafeBranch(branch) else { return nil }
+        let cmd = "tmux list-windows -t bromure -F '#{window_index} #{@worktree}' "
+            + "2>/dev/null | awk -v b='\(branch)' '$2==b {print $1; exit}'"
+        guard let out = try? await delegate.guestExec(
+            profileID: profileID, command: cmd, timeout: 8) else { return nil }
+        return Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// The actual wt/ branch of the task's live session — pane roster
+    /// first, guest tmux when the session runs detached.
+    func liveBranchResolved(of task: CodingTask) async -> String? {
+        if let b = liveBranch(of: task) { return b }
+        guard let slug = task.branchSlug, let delegate,
+              Self.isSafeBranch(slug) else { return nil }
+        let cmd = "tmux list-windows -t bromure -F '#{@worktree}' 2>/dev/null"
+        guard let out = try? await delegate.guestExec(
+            profileID: task.profileID, command: cmd, timeout: 8) else { return nil }
+        return out.split(whereSeparator: \.isNewline).map(String.init)
+            .first { AutomationBoard.branchMatches($0, slug: slug) }
     }
 
     /// Type text into a live session's agent. Used by review send-back and
     /// the plan window's input box.
     func typeIntoSession(profileID: UUID, branch: String, text: String) async -> Bool {
         guard let delegate,
-              let tab = delegate.pane(for: profileID)?.model.tabs
-                  .first(where: { $0.worktreeBranch == branch })
+              let index = await tabIndex(profileID: profileID, branch: branch)
         else { return false }
         return (try? await delegate.guestExec(
             profileID: profileID,
-            command: Self.typeCommand(tabIndex: tab.index, text: text),
+            command: Self.typeCommand(tabIndex: index, text: text),
             timeout: 20)) != nil
     }
 
@@ -874,6 +996,29 @@ final class CodingTaskEngine {
 
     /// End a planning session's in-flight state with a reason — the card
     /// stops spinning and says what to do, instead of waiting forever.
+    /// Kill the guest tmux window backing a session branch. Called when
+    /// the agent has finished (task → Testing, or planning wrapped up):
+    /// the tab would otherwise sit there as an idle claude / dead shell.
+    /// Review send-back reopens the worktree via task-resume, so nothing
+    /// needs the old tab. A short grace lets final writes flush.
+    func closeSessionTab(profileID: UUID, branch: String,
+                         afterSeconds: UInt64 = 3) {
+        guard branch.allSatisfy({
+            $0.isLowercase || $0.isNumber || $0 == "-" || $0 == "/"
+        }), !branch.isEmpty else { return }
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: afterSeconds * 1_000_000_000)
+            guard let delegate = self?.delegate else { return }
+            let cmd = "for i in $(tmux list-windows -t bromure "
+                + "-F '#{window_index} #{@worktree}' "
+                + "| awk -v b='\(branch)' '$2==b {print $1}'); "
+                + "do tmux kill-window -t bromure:$i; done"
+            _ = try? await delegate.guestExec(profileID: profileID,
+                                              command: cmd, timeout: 15)
+            BACDebug.log("tasks", "closed session tab for \(branch)")
+        }
+    }
+
     private func abortPlanning(_ taskID: UUID, reason: String) {
         planWatchdogs[taskID]?.cancel()
         planWatchdogs[taskID] = nil
@@ -908,17 +1053,26 @@ final class CodingTaskEngine {
                 guard let t = self.store.task(taskID),
                       t.stage == .backlog,
                       let req = t.validationRequestedAt else { return }
-                if let done = t.validatedAt, done >= req { return }   // phases landed
+                if let done = t.validatedAt, done >= req {
+                    // Phases landed — the interview is over. Give the agent
+                    // a beat to print its summary, then close its tab.
+                    if let branch = self.liveBranch(of: t) {
+                        self.closeSessionTab(profileID: profileID,
+                                             branch: branch, afterSeconds: 20)
+                    }
+                    return
+                }
                 if Date().timeIntervalSince(started) > 3600 {
                     self.abortPlanning(taskID, reason: NSLocalizedString(
                         "The planning session timed out without filing phases — click Plan to retry.",
                         comment: "plan watchdog"))
                     return
                 }
-                let tab = delegate.pane(for: profileID)?.model.tabs.first {
-                    AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
-                }
-                guard let tab else {
+                // Pane roster when attached; guest tmux when the session
+                // runs detached (planning boots the VM headless).
+                let index = await self.tabIndex(profileID: profileID,
+                                                branch: "wt/" + slug)
+                guard let index else {
                     if seenTab || Date().timeIntervalSince(started) > 240 {
                         self.abortPlanning(taskID, reason: seenTab
                             ? NSLocalizedString(
@@ -933,7 +1087,7 @@ final class CodingTaskEngine {
                 }
                 seenTab = true
                 // Did the agent exit back to a bare shell (user quit claude)?
-                let cmd = "tmux list-panes -t bromure:\(tab.index) "
+                let cmd = "tmux list-panes -t bromure:\(index) "
                     + "-F '#{pane_current_command}' 2>/dev/null | head -1"
                 guard let out = try? await delegate.guestExec(
                     profileID: profileID, command: cmd, timeout: 5) else { continue }
@@ -1083,6 +1237,9 @@ struct TaskDiffFile: Identifiable, Equatable, Sendable {
         let id: Int
         var kind: LineKind
         var text: String
+        /// Line number in the NEW file (nil for removed/hunk lines) — what
+        /// a margin annotation anchors to.
+        var newLine: Int?
     }
     var id: String { path }
     var path: String
@@ -1097,6 +1254,7 @@ enum TaskDiffParser {
         var files: [TaskDiffFile] = []
         var current: TaskDiffFile?
         var lineID = 0
+        var newCounter = 0
         for line in raw.split(separator: "\n", omittingEmptySubsequences: false) {
             if line.hasPrefix("diff --git ") {
                 if let f = current { files.append(f) }
@@ -1124,7 +1282,22 @@ enum TaskDiffParser {
             else if line.hasPrefix("+") { kind = .added }
             else if line.hasPrefix("-") { kind = .removed }
             else { kind = .context }
-            current?.lines.append(.init(id: lineID, kind: kind, text: String(line)))
+            var newLine: Int?
+            switch kind {
+            case .hunk:
+                // "@@ -a,b +c,d @@" — c is where the new side resumes.
+                if let plus = line.split(separator: " ").first(where: { $0.hasPrefix("+") }),
+                   let start = Int(plus.dropFirst().split(separator: ",")[0]) {
+                    newCounter = start
+                }
+            case .added, .context:
+                newLine = newCounter
+                newCounter += 1
+            case .removed:
+                break
+            }
+            current?.lines.append(.init(id: lineID, kind: kind,
+                                        text: String(line), newLine: newLine))
         }
         if let f = current { files.append(f) }
         return files

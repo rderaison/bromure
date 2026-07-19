@@ -82,7 +82,8 @@ final class TaskReviewWindowManager {
         var fetchBranches: (CodingTask) async -> [String]
         /// Append a review comment. Host: store.mutate; fat client: POST
         /// (the mirror confirms on the next poll).
-        var addComment: (_ taskID: UUID, _ text: String, _ file: String?) -> Void
+        var addComment: (_ taskID: UUID, _ text: String, _ file: String?,
+                         _ line: Int?) -> Void
     }
 
     private let context: Context
@@ -120,8 +121,8 @@ final class TaskReviewWindowManager {
                 guard let t = self?.context.store()?.task(taskID) else { return }
                 self?.context.openTerminal(t)
             },
-            onAddComment: { [weak self] text, file in
-                self?.context.addComment(taskID, text, file)
+            onAddComment: { [weak self] text, file, line in
+                self?.context.addComment(taskID, text, file, line)
             },
             onSendBack: { [weak self] in
                 self?.context.sendBack(taskID)
@@ -163,7 +164,7 @@ private struct TaskReviewView: View {
     let workspaceName: String
     let fetchReview: (CodingTask) async -> TaskReviewData?
     let onOpenTerminal: () -> Void
-    let onAddComment: (_ text: String, _ file: String?) -> Void
+    let onAddComment: (_ text: String, _ file: String?, _ line: Int?) -> Void
     let onSendBack: () -> Void
     let fetchBranches: (CodingTask) async -> [String]
     let onMerge: (_ target: String?, _ squash: Bool) -> Void
@@ -381,9 +382,15 @@ private struct TaskReviewView: View {
                         .foregroundStyle(.orange)
                 }
                 ForEach(data.files) { file in
-                    DiffFileView(file: file) {
-                        draftFile = file.path
-                    }
+                    DiffFileView(
+                        file: file,
+                        lineComments: (task?.comments ?? []).filter {
+                            $0.file == file.path && $0.line != nil
+                        },
+                        onComment: { draftFile = file.path },
+                        onLineComment: { line, text in
+                            onAddComment(text, file.path, line)
+                        })
                 }
             }
             .padding(14)
@@ -406,7 +413,7 @@ private struct TaskReviewView: View {
                                     .padding(.top, 2)
                                 VStack(alignment: .leading, spacing: 1) {
                                     if let file = c.file {
-                                        Text(file)
+                                        Text(c.line.map { "\(file):\($0)" } ?? file)
                                             .font(.system(size: 10, design: .monospaced))
                                             .foregroundStyle(.secondary)
                                     }
@@ -427,7 +434,7 @@ private struct TaskReviewView: View {
                 }
                 .frame(maxHeight: 110)
             }
-            HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
                 if let draftFile {
                     HStack(spacing: 3) {
                         Text(draftFile)
@@ -445,15 +452,13 @@ private struct TaskReviewView: View {
                     .padding(.vertical, 3)
                     .background(Capsule().fill(Color.purple.opacity(0.15)))
                 }
-                TextField(NSLocalizedString(
-                    "Add a review comment — sent to the agent with “Send Back”",
-                    comment: ""), text: $draftComment, axis: .vertical)
-                    .lineLimit(1...4)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(addComment)
-                Button(NSLocalizedString("Add", comment: "review comment"),
-                       action: addComment)
-                    .disabled(draftComment.trimmingCharacters(in: .whitespaces).isEmpty)
+                ChatComposer(
+                    placeholder: NSLocalizedString(
+                        "Add a review comment — sent to the agent with “Send Back”",
+                        comment: ""),
+                    text: $draftComment,
+                    accent: .purple,
+                    onSend: addComment)
             }
         }
         .padding(12)
@@ -462,7 +467,7 @@ private struct TaskReviewView: View {
     private func addComment() {
         let text = draftComment.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, task != nil else { return }
-        onAddComment(text, draftFile)
+        onAddComment(text, draftFile, nil)
         draftComment = ""
         draftFile = nil
     }
@@ -472,9 +477,16 @@ private struct TaskReviewView: View {
 
 private struct DiffFileView: View {
     let file: TaskDiffFile
+    /// Pending comments anchored to lines of THIS file (drafts + sent).
+    var lineComments: [ReviewComment] = []
     let onComment: () -> Void
+    /// Margin annotation: (new-file line, text).
+    var onLineComment: (Int, String) -> Void = { _, _ in }
 
     @State private var expanded = true
+    /// The line id whose inline comment editor is open.
+    @State private var composing: Int?
+    @State private var draft = ""
     private static let maxLines = 800
 
     var body: some View {
@@ -515,13 +527,50 @@ private struct DiffFileView: View {
             if expanded {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(file.lines.prefix(Self.maxLines)) { line in
-                        Text(line.text.isEmpty ? " " : line.text)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(color(for: line.kind))
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        DiffLineRow(
+                            line: line,
+                            color: color(for: line.kind),
+                            background: background(for: line.kind),
+                            annotatable: line.newLine != nil && line.kind != .hunk,
+                            onAnnotate: {
+                                draft = ""
+                                composing = composing == line.id ? nil : line.id
+                            })
+                        // Anchored comments live under their line.
+                        ForEach(lineComments.filter { $0.line == line.newLine
+                                                      && line.newLine != nil
+                                                      && line.kind != .hunk }) { c in
+                            AnchoredCommentRow(comment: c)
+                        }
+                        if composing == line.id, let n = line.newLine {
+                            HStack(spacing: 6) {
+                                Image(systemName: "text.bubble")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.purple)
+                                TextField(String(format: NSLocalizedString(
+                                    "Comment on line %d — sent with “Send Back”",
+                                    comment: "review"), n), text: $draft)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11))
+                                    .onSubmit { submitLineComment(n) }
+                                Button(NSLocalizedString("Add", comment: "review")) {
+                                    submitLineComment(n)
+                                }
+                                .controlSize(.small)
+                                .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                                Button {
+                                    composing = nil
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
                             .padding(.horizontal, 8)
-                            .padding(.vertical, 0.5)
-                            .background(background(for: line.kind))
+                            .padding(.vertical, 4)
+                            .background(Color.purple.opacity(0.06))
+                        }
                     }
                     if file.lines.count > Self.maxLines {
                         Text(String(format: NSLocalizedString(
@@ -540,6 +589,14 @@ private struct DiffFileView: View {
             .strokeBorder(Color.primary.opacity(0.10)))
     }
 
+    private func submitLineComment(_ line: Int) {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        onLineComment(line, text)
+        draft = ""
+        composing = nil
+    }
+
     private func color(for kind: TaskDiffFile.LineKind) -> Color {
         switch kind {
         case .hunk:    return .secondary
@@ -556,5 +613,63 @@ private struct DiffFileView: View {
         case .hunk:    return .blue.opacity(0.07)
         case .context: return .clear
         }
+    }
+}
+
+/// One diff line with a hover-revealed 💬 in the margin — the entry point
+/// for a line-anchored review comment.
+private struct DiffLineRow: View {
+    let line: TaskDiffFile.Line
+    let color: Color
+    let background: Color
+    let annotatable: Bool
+    let onAnnotate: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: onAnnotate) {
+                Image(systemName: "plus.bubble")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.purple)
+                    .opacity(hovering && annotatable ? 1 : 0)
+                    .frame(width: 16)
+            }
+            .buttonStyle(.plain)
+            .disabled(!annotatable)
+            .help(NSLocalizedString("Comment on this line", comment: "review"))
+            Text(line.text.isEmpty ? " " : line.text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(color)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 0.5)
+        }
+        .padding(.horizontal, 4)
+        .background(background)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// A pending/sent comment pinned under the diff line it annotates.
+private struct AnchoredCommentRow: View {
+    let comment: ReviewComment
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: comment.sentAt == nil
+                  ? "bubble.left.fill" : "checkmark.bubble")
+                .font(.system(size: 9))
+                .foregroundStyle(comment.sentAt == nil ? .purple : .secondary)
+                .padding(.top, 2)
+            Text(comment.text)
+                .font(.system(size: 11))
+                .foregroundStyle(comment.sentAt == nil ? .primary : .secondary)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 3)
+        .background(Color.purple.opacity(0.05))
     }
 }

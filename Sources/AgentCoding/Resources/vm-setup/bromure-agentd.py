@@ -2074,6 +2074,10 @@ def _seed_question_hooks():
              "command": "mkdir -p ~/.bromure && cat > " + pq}]},
         "PostToolUse": {"matcher": "AskUserQuestion", "hooks": [
             {"type": "command", "command": "rm -f " + pq}]},
+        # A declined picker doesn't reliably fire PostToolUse — sweep the
+        # dump whenever a turn ends so a dead question can't stay clickable.
+        "Stop": {"hooks": [
+            {"type": "command", "command": "rm -f " + pq}]},
     }
     changed = False
     for key, entry in entries.items():

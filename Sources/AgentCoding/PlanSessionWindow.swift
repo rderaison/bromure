@@ -25,7 +25,8 @@ final class PlanSessionWindowManager {
         var accentHex: (Profile.ID) -> String
         var workspaceName: (Profile.ID) -> String
         /// The live wt/ branch for a task's slug (nil = session gone).
-        var liveBranch: (CodingTask) -> String?
+        /// Async: a detached session is resolved by asking the guest.
+        var liveBranch: (CodingTask) async -> String?
     }
 
     private let context: Context
@@ -56,17 +57,20 @@ final class PlanSessionWindowManager {
             store: store,
             onSend: { [weak self] text in
                 guard let self, let t = self.context.store()?.task(taskID),
-                      let branch = self.context.liveBranch(t) else { return false }
+                      let branch = await self.context.liveBranch(t) else { return false }
                 return await self.context.send(t.profileID, branch, text)
             },
             onSendKeys: { [weak self] keys in
                 guard let self, let t = self.context.store()?.task(taskID),
-                      let branch = self.context.liveBranch(t) else { return false }
+                      let branch = await self.context.liveBranch(t) else { return false }
                 return await self.context.sendKeys(t.profileID, branch, keys)
             },
             onOpenTerminal: { [weak self] in
                 guard let t = self?.context.store()?.task(taskID) else { return }
                 self?.context.openTerminal(t)
+            },
+            onClose: { [weak self] in
+                self?.windows[taskID]?.close()
             })
 
         let win = NSWindow(
@@ -119,7 +123,7 @@ final class PlanSessionWindowManager {
         } else if !task.validationInFlight {
             model.phase = .ended(task.lastError)
         } else {
-            model.phase = context.liveBranch(task) != nil ? .live : .starting
+            model.phase = await context.liveBranch(task) != nil ? .live : .starting
         }
         if previous == .starting, model.phase == .live,
            let win = windows[taskID], win.isVisible, !win.isKeyWindow {
@@ -127,6 +131,7 @@ final class PlanSessionWindowManager {
             // get buried — put it back on top, once.
             win.makeKeyAndOrderFront(nil)
         }
+        model.phaseCount = store.tasks.filter { $0.parentTaskID == taskID }.count
         guard task.validationRequestedAt != nil else { return }
         if let raw = await context.fetchTranscript(task) {
             let parsed = await Task.detached(priority: .userInitiated) {
@@ -134,6 +139,54 @@ final class PlanSessionWindowManager {
             }.value
             if parsed.count != model.items.count { model.items = parsed }
         }
+    }
+}
+
+/// One answered question round, folded: "N questions answered · headers",
+/// expandable to the full static cards.
+private struct AnsweredQuestionsRow: View {
+    let questions: [TranscriptQuestion]
+    @State private var expanded = false
+
+    private var summary: String {
+        let headers = questions.map { $0.header.isEmpty
+            ? String($0.question.prefix(24)) : $0.header }
+        return headers.joined(separator: " · ")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.12)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.tertiary)
+                    Image(systemName: "checkmark.bubble")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.purple)
+                    Text(questions.count == 1
+                         ? String(format: NSLocalizedString(
+                            "1 question answered — %@", comment: "plan window"), summary)
+                         : String(format: NSLocalizedString(
+                            "%d questions answered — %@", comment: "plan window"),
+                            questions.count, summary))
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if expanded {
+                ForEach(questions.indices, id: \.self) { i in
+                    TranscriptQuestionCard(question: questions[i])
+                }
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -154,6 +207,8 @@ final class PlanSessionModel {
     let accentHex: String
     var items: [TranscriptItem] = []
     var phase: Phase = .starting
+    /// Phases filed under this task — the completion bar's count.
+    var phaseCount = 0
 
     init(taskID: UUID, title: String, workspaceName: String, accentHex: String) {
         self.taskID = taskID
@@ -169,6 +224,7 @@ private struct PlanSessionView: View {
     let onSend: (String) async -> Bool
     let onSendKeys: ([String]) async -> Bool
     let onOpenTerminal: () -> Void
+    let onClose: () -> Void
 
     /// The trailing run of question items — the picker currently on screen
     /// in the session. Empty once a tool_result (the answers) lands.
@@ -178,6 +234,40 @@ private struct PlanSessionView: View {
             if case .question = item.kind { batch.append(item) } else { break }
         }
         return batch.reversed()
+    }
+
+    /// What the transcript area renders: plain items, with ANSWERED
+    /// question rounds folded into one collapsed row each — a full stack
+    /// of dead question cards buries the conversation.
+    private enum Block: Identifiable {
+        case item(TranscriptItem)
+        case answeredRound([TranscriptQuestion], firstID: Int)
+        var id: Int {
+            switch self {
+            case .item(let i): return i.id
+            case .answeredRound(_, let f): return 1_000_000 + f
+            }
+        }
+    }
+
+    private var blocks: [Block] {
+        let liveCount = model.phase == .live ? openBatch.count : 0
+        var out: [Block] = []
+        var round: [TranscriptItem] = []
+        func flush() {
+            guard let first = round.first else { return }
+            let qs = round.compactMap { item -> TranscriptQuestion? in
+                if case .question(let q) = item.kind { return q } else { return nil }
+            }
+            out.append(.answeredRound(qs, firstID: first.id))
+            round = []
+        }
+        for item in model.items.dropLast(liveCount) {
+            if case .question = item.kind { round.append(item) }
+            else { flush(); out.append(.item(item)) }
+        }
+        flush()
+        return out
     }
 
     @State private var draft = ""
@@ -257,8 +347,13 @@ private struct PlanSessionView: View {
                             .padding(.top, 60)
                         }
                         let batch = model.phase == .live ? openBatch : []
-                        ForEach(model.items.dropLast(batch.count)) {
-                            TranscriptItemView(item: $0)
+                        ForEach(blocks) { block in
+                            switch block {
+                            case .item(let item):
+                                TranscriptItemView(item: item)
+                            case .answeredRound(let qs, _):
+                                AnsweredQuestionsRow(questions: qs)
+                            }
                         }
                         if !batch.isEmpty {
                             TranscriptQuestionBatchCard(
@@ -285,35 +380,59 @@ private struct PlanSessionView: View {
             .background(Color(nsColor: .windowBackgroundColor))
             Divider()
 
-            // The conversation input.
-            HStack(spacing: 8) {
-                TextField(model.phase == .live
-                          ? NSLocalizedString("Answer the agent…", comment: "plan window")
-                          : NSLocalizedString("Session not accepting input", comment: "plan window"),
-                          text: $draft, axis: .vertical)
-                    .lineLimit(1...4)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(model.phase != .live || sending)
-                    .onSubmit { send() }
-                Button {
-                    send()
-                } label: {
-                    if sending { ProgressView().controlSize(.small) }
-                    else { Image(systemName: "arrow.up.circle.fill").font(.system(size: 18)) }
+            // The conversation composer — or, once the plan landed, the
+            // completion bar.
+            if model.phase == .phasesFiled {
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 26))
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(NSLocalizedString("Plan is ready", comment: "plan window"))
+                            .font(.system(size: 15, weight: .bold))
+                        Text(model.phaseCount > 0
+                             ? String(format: NSLocalizedString(
+                                "%d phases are on the board — start them from the Plan column.",
+                                comment: "plan window"), model.phaseCount)
+                             : NSLocalizedString(
+                                "The plan is recorded on the board.",
+                                comment: "plan window"))
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Button(NSLocalizedString("Close", comment: "plan window"),
+                           action: onClose)
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
                 }
-                .buttonStyle(.plain)
-                .disabled(model.phase != .live || sending
-                          || draft.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            .padding(12)
-            .overlay(alignment: .topLeading) {
+                .padding(14)
+                .background(RoundedRectangle(cornerRadius: 14)
+                    .fill(Color.green.opacity(0.08)))
+                .overlay(RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(Color.green.opacity(0.25)))
+                .padding(12)
+            } else {
+            VStack(alignment: .leading, spacing: 4) {
                 if sendFailed {
                     Text(NSLocalizedString("Couldn't reach the session — try again.",
                                            comment: "plan window"))
-                        .font(.system(size: 10))
+                        .font(.system(size: 10.5))
                         .foregroundStyle(.red)
-                        .padding(.leading, 14)
+                        .padding(.leading, 4)
                 }
+                ChatComposer(
+                    placeholder: model.phase == .live
+                        ? NSLocalizedString("Answer the agent…", comment: "plan window")
+                        : NSLocalizedString("Session not accepting input",
+                                            comment: "plan window"),
+                    text: $draft,
+                    disabled: model.phase != .live,
+                    busy: sending,
+                    accent: Color(hex: model.accentHex),
+                    onSend: send)
+            }
+            .padding(12)
             }
         }
     }

@@ -61,6 +61,12 @@ enum ClaudeTranscriptParser {
         var items: [TranscriptItem] = []
         /// tool_use id → tool name, so results can name their tool.
         var toolNames: [String: String] = [:]
+        /// Question texts of the last AskUserQuestion seen in the
+        /// transcript proper, and whether its result already landed —
+        /// a pq hook dump matching a RESOLVED call is stale, not pending.
+        var lastAskedQuestions: [String] = []
+        var lastAskResolved = false
+        var pendingDumps: [[TranscriptQuestion]] = []
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let isoPlain = ISO8601DateFormatter()
@@ -74,10 +80,10 @@ enum ClaudeTranscriptParser {
             // screen in the session but not yet in the transcript proper.
             if type.isEmpty, obj["tool_name"] as? String == "AskUserQuestion",
                let input = obj["tool_input"] as? [String: Any] {
-                for q in TranscriptQuestion.parse(input) {
-                    items.append(TranscriptItem(id: items.count,
-                                                kind: .question(q), timestamp: nil))
-                }
+                // Defer: whether this is genuinely pending depends on the
+                // rest of the transcript (see the flush below).
+                let qs = TranscriptQuestion.parse(input)
+                if !qs.isEmpty { pendingDumps.append(qs) }
                 continue
             }
             guard type == "user" || type == "assistant",
@@ -119,6 +125,8 @@ enum ClaudeTranscriptParser {
                     let questions = name == "AskUserQuestion"
                         ? TranscriptQuestion.parse(input) : []
                     if !questions.isEmpty {
+                        lastAskedQuestions = questions.map(\.question)
+                        lastAskResolved = false
                         questions.forEach { add(.question($0)) }
                     } else {
                         add(.toolUse(name: name,
@@ -128,12 +136,26 @@ enum ClaudeTranscriptParser {
                 case "tool_result":
                     let tool = (block["tool_use_id"] as? String)
                         .flatMap { toolNames[$0] } ?? "tool"
+                    if tool == "AskUserQuestion" { lastAskResolved = true }
                     add(.toolResult(tool: tool,
                                     content: resultText(block["content"]),
                                     isError: block["is_error"] as? Bool ?? false))
                 default:
                     continue
                 }
+            }
+        }
+        // Flush pending-question dumps: only a dump whose questions are
+        // NOT the transcript's last (already answered or declined)
+        // AskUserQuestion round is genuinely pending.
+        for qs in pendingDumps {
+            // A dump matching the transcript's last AskUserQuestion round is
+            // never pending: resolved → stale file; unresolved-but-present →
+            // the transcript items already carry it.
+            if qs.map(\.question) == lastAskedQuestions { continue }
+            qs.forEach {
+                items.append(TranscriptItem(id: items.count,
+                                            kind: .question($0), timestamp: nil))
             }
         }
         return items
@@ -227,6 +249,75 @@ struct ClaudeTranscriptPane: View {
 /// One transcript element. Prompts get a tinted bubble, assistant prose is
 /// plain text, thinking and tool traffic collapse behind disclosures so the
 /// narrative reads top-to-bottom without the plumbing in the way.
+/// A modern chat composer, Codex-Desktop style: the text area rides on
+/// top, a slim utility bar with the key hint and the send control sits
+/// beneath it, all in one elevated rounded container that glows with the
+/// accent while focused. Return sends, Option-Return inserts a newline.
+struct ChatComposer: View {
+    let placeholder: String
+    @Binding var text: String
+    var disabled = false
+    var busy = false
+    var accent: Color = .accentColor
+    let onSend: () -> Void
+
+    @FocusState private var focused: Bool
+
+    private var sendable: Bool {
+        !disabled && !busy
+            && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField(placeholder, text: $text, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13.5))
+                .lineSpacing(3)
+                .lineLimit(1...12)
+                .focused($focused)
+                .onSubmit { if sendable { onSend() } }
+                .disabled(disabled)
+                .frame(minHeight: 22)
+            HStack(spacing: 8) {
+                Text(NSLocalizedString("⏎ send   ⌥⏎ newline", comment: "composer hint"))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.quaternary)
+                Spacer(minLength: 0)
+                Button(action: { if sendable { onSend() } }) {
+                    Group {
+                        if busy {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                    .frame(width: 27, height: 27)
+                    .background(RoundedRectangle(cornerRadius: 8)
+                        .fill(sendable ? accent : Color.secondary.opacity(0.28)))
+                }
+                .buttonStyle(.plain)
+                .disabled(!sendable)
+                .keyboardShortcut(.return, modifiers: .command)
+                .help(NSLocalizedString("Send (⏎)", comment: "composer"))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
+        .background(RoundedRectangle(cornerRadius: 14)
+            .fill(Color(nsColor: .textBackgroundColor))
+            .shadow(color: .black.opacity(0.10), radius: 6, y: 2))
+        .overlay(RoundedRectangle(cornerRadius: 14)
+            .strokeBorder(focused ? accent.opacity(0.55)
+                                  : Color.primary.opacity(0.12),
+                          lineWidth: focused ? 1.5 : 1))
+        .animation(.easeOut(duration: 0.12), value: focused)
+    }
+}
+
 /// An AskUserQuestion rendered statically (archived transcripts, or a
 /// question that is no longer answerable): the question with its options.
 struct TranscriptQuestionCard: View {

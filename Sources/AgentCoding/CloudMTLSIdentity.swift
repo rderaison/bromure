@@ -94,7 +94,15 @@ public enum BACMTLSIdentity {
             certDER: certDer, privateKeyDER: pkcs8, password: password,
         )
 
-        let options: [String: Any] = [kSecImportExportPassphrase as String: password]
+        // Memory-only import: without this, macOS writes the private key
+        // into the login keychain on EVERY import, and each ad-hoc rebuild
+        // (new code signature) invalidates the previous item's ACL — the
+        // user gets endless "bromure-ac wants to sign using an imported
+        // private key" prompts on cloud TLS handshakes.
+        var options: [String: Any] = [kSecImportExportPassphrase as String: password]
+        if #available(macOS 15.0, *) {
+            options[kSecImportToMemoryOnly as String] = true
+        }
         var items: CFArray?
         let status = SecPKCS12Import(pfx as CFData, options as CFDictionary, &items)
         guard status == errSecSuccess, let arr = items as? [[String: Any]] else {

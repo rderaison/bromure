@@ -1502,6 +1502,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     openPlanSession: { [weak self] id in
                         self?.acDelegate?.planSessionWindows.open(taskID: id)
+                    },
+                    destroy: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.destroy(id)
                     }))
             let host = NSHostingView(rootView: view)
             host.sizingOptions = []
@@ -1575,6 +1578,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func selectTab(profileID id: Profile.ID, index: Int) {
         guard clearAutomationEditor() else { return }   // dirty draft kept
         hideGrid()
+        // The boards overlay the stage: without this, clicking a sidebar
+        // tab while a kanban is up switches the (hidden) terminal and
+        // looks like a dead click.
+        clearTaskBoard()
+        clearAutomationBoard()
         clearDockerDashboard()
         clearVMDashboard()
         if selectedID != id { select(profileID: id) }
@@ -1583,6 +1591,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func newTab(profileID id: Profile.ID) {
         guard clearAutomationEditor() else { return }   // dirty draft kept
         hideGrid()
+        clearTaskBoard()
+        clearAutomationBoard()
         clearDockerDashboard()
         clearVMDashboard()
         if selectedID != id { select(profileID: id) }

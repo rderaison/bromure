@@ -4,6 +4,23 @@ import SwiftUI
 
 /// Red numeric badge for the sidebar sections — "N items need you".
 /// Renders nothing at zero.
+/// A relative timestamp that stays current. A plain formatted string only
+/// re-renders when something else invalidates the view tree, so a quiet
+/// board shows "started 1 sec ago" forever — this recomputes on a timer.
+struct RelativeTimeText: View {
+    /// Format with one %@ placeholder for the relative time ("started %@"),
+    /// or nil for the bare relative time.
+    var format: String?
+    let date: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { _ in
+            let rel = date.formatted(.relative(presentation: .named))
+            Text(format.map { String(format: $0, rel) } ?? rel)
+        }
+    }
+}
+
 struct SidebarAttentionBadge: View {
     let count: Int
     var tint: Color = .red
