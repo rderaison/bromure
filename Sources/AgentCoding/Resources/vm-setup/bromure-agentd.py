@@ -2233,14 +2233,15 @@ _MERGE_PROMPT = ("A git merge in this directory hit conflicts. Run 'git status'"
 # unless one is already in progress, then either hand the checkout to the coding
 # agent (conflicts → exec bash -l → .bashrc worktree-launch branch) or report a
 # clean merge and wait. Branch names arrive via -e (env VALUES, never re-parsed).
+# A clean merge closes its own tab after a beat (the tmux window dies with
+# the command); only a conflict keeps it open, handing off to the resolver.
 _MERGE_WINDOW_CMD = (
     'if ! git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then '
     'git merge --no-edit "$WT_SRC"; fi; echo; '
     'if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then '
     'echo "bromure: merge conflicts — starting $BROMURE_AC_WT_TOOL to resolve…";'
     ' echo; exec bash -l; else '
-    'echo "bromure: merged $WT_SRC into $WT_DST."; '
-    'echo; echo Press Enter to close; read _; fi')
+    'echo "bromure: merged $WT_SRC into $WT_DST."; sleep 2; fi')
 
 # Squash flavor: one commit on the target from the branch's whole diff.
 # `merge --squash` sets no MERGE_HEAD — conflicts show as unmerged index
@@ -2251,8 +2252,7 @@ _SQUASH_WINDOW_CMD = (
     'echo "bromure: squash-merge conflicts — starting $BROMURE_AC_WT_TOOL to resolve…";'
     ' echo; exec bash -l; else '
     'git commit -m "$WT_MSG" >/dev/null 2>&1; '
-    'echo "bromure: squash-merged $WT_SRC into $WT_DST."; '
-    'echo; echo Press Enter to close; read _; fi')
+    'echo "bromure: squash-merged $WT_SRC into $WT_DST."; sleep 2; fi')
 
 
 def _worktree_merge(branch, target, root, display, tool, mode="merge"):

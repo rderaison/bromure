@@ -216,6 +216,18 @@ struct CodingTasksTests {
         #expect(store.backlogTasks().count == 1)
     }
 
+    @Test("planBrief extracts the user's brief from the planner meta-prompt")
+    func planBriefExtraction() {
+        let task = CodingTask(title: "VM scanner",
+                              details: "Write a **Nessus-like** vuln scanner.",
+                              profileID: UUID())
+        let prompt = CodingTaskEngine.plannerPrompt(for: task)
+        let brief = CodingTaskEngine.planBrief(fromPrompt: prompt)
+        #expect(brief == "VM scanner\n\nWrite a **Nessus-like** vuln scanner.")
+        // Ordinary user messages pass through untouched.
+        #expect(CodingTaskEngine.planBrief(fromPrompt: "use Go please") == nil)
+    }
+
     @Test("Tasks decode without optional fields (forward compat)")
     func decodeCompat() throws {
         let json = """

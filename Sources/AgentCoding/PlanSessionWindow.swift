@@ -142,6 +142,38 @@ final class PlanSessionWindowManager {
     }
 }
 
+/// The opening card of a planning session: the user's OWN brief, rendered
+/// as markdown — not the meta-prompt that carried it. A one-line caption
+/// says what happens instead of showing the plumbing.
+private struct PlanBriefCard: View {
+    let brief: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.accentColor)
+                Text(NSLocalizedString("Your brief", comment: "plan window"))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            MarkdownBlocks(text: brief)
+            Text(NSLocalizedString(
+                "The agent explores the repository and may ask you questions here, then files the plan's phases onto the board.",
+                comment: "plan window"))
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10)
+            .fill(Color.accentColor.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .strokeBorder(Color.accentColor.opacity(0.22)))
+    }
+}
+
 /// One answered question round, folded: "N questions answered · headers",
 /// expandable to the full static cards.
 private struct AnsweredQuestionsRow: View {
@@ -350,7 +382,12 @@ private struct PlanSessionView: View {
                         ForEach(blocks) { block in
                             switch block {
                             case .item(let item):
-                                TranscriptItemView(item: item)
+                                if case .userText(let text) = item.kind,
+                                   let brief = CodingTaskEngine.planBrief(fromPrompt: text) {
+                                    PlanBriefCard(brief: brief)
+                                } else {
+                                    TranscriptItemView(item: item)
+                                }
                             case .answeredRound(let qs, _):
                                 AnsweredQuestionsRow(questions: qs)
                             }

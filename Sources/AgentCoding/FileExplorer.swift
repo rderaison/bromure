@@ -234,6 +234,47 @@ final class FileExplorerModel {
     private static let maxPreviewBytes = 512 * 1024
     private static let maxDiffBytes = 1024 * 1024
 
+    // MARK: Review comments (diff pane → the live agent)
+
+    /// A margin annotation drafted on the diff pane, to be batched to the
+    /// coding agent running in the active tab.
+    struct ReviewDraft: Identifiable, Equatable {
+        let id = UUID()
+        var file: String
+        var line: Int
+        var text: String
+    }
+
+    var reviewDrafts: [ReviewDraft] = []
+    /// tmux window index of the active tab WHEN its front process is a
+    /// coding agent — nil hides the commenting UI. Kept fresh by the pane.
+    var agentTabIndex: Int?
+    var sendingReview = false
+
+    func addReviewDraft(file: String, line: Int, text: String) {
+        reviewDrafts.append(ReviewDraft(file: file, line: line, text: text))
+    }
+
+    func removeReviewDraft(_ id: UUID) {
+        reviewDrafts.removeAll { $0.id == id }
+    }
+
+    /// Batch every draft into one feedback message and type it into the
+    /// active tab's agent session. Clears the drafts on success.
+    func submitReviewDrafts() async -> Bool {
+        guard let index = agentTabIndex, !reviewDrafts.isEmpty else { return false }
+        var msg = "Review feedback on your current changes — address each point:"
+        for d in reviewDrafts {
+            msg += "\n- In \(d.file), line \(d.line): \(d.text)"
+        }
+        sendingReview = true
+        defer { sendingReview = false }
+        let cmd = CodingTaskEngine.typeCommand(tabIndex: index, text: msg)
+        guard (try? await exec(cmd, timeout: 25)) != nil else { return false }
+        reviewDrafts.removeAll()
+        return true
+    }
+
     private func exec(_ command: String, timeout: Int = 30) async throws -> String {
         guard let profileID, let execProvider else {
             throw ACAppDelegate.GuestExecError.vmNotRunning
@@ -246,6 +287,7 @@ final class FileExplorerModel {
     /// (also used to park the model while the pane is closed).
     func setRepo(profileID: Profile.ID?, root: String?) {
         guard profileID != self.profileID || root != repoRoot else { return }
+        reviewDrafts.removeAll()
         self.profileID = profileID
         self.repoRoot = root
         refreshGeneration += 1   // orphan any in-flight refresh

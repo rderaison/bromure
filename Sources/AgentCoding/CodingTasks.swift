@@ -312,6 +312,17 @@ final class CodingTaskEngine {
     /// The Plan session prompt: a VISIBLE session (the user can watch and
     /// answer) whose only job is planning — it files the phases itself via
     /// the board MCP, so they appear on the board as it works.
+    /// Recognize the planner meta-prompt in a session transcript and
+    /// return just the user's brief. The window renders the brief — the
+    /// tool directives are plumbing, not conversation, and showing them
+    /// first makes the session open on a wall of internal instructions.
+    nonisolated static func planBrief(fromPrompt text: String) -> String? {
+        guard text.hasPrefix("You are PLANNING this task") else { return nil }
+        guard let r = text.range(of: "The task brief:\n\n---\n") else { return nil }
+        return String(text[r.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     nonisolated static func plannerPrompt(for task: CodingTask) -> String {
         var brief = task.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let details = task.details.trimmingCharacters(in: .whitespacesAndNewlines)

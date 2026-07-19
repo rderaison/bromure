@@ -94,6 +94,7 @@ struct FileExplorerPane: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
                 if Task.isCancelled { return }
+                updateAgentTab()
                 await model.refresh()
             }
         }
@@ -105,6 +106,16 @@ struct FileExplorerPane: View {
             return
         }
         model.setRepo(profileID: listModel.selectedID, root: currentRepoRoot)
+        updateAgentTab()
+    }
+
+    /// The diff pane's commenting UI targets the coding agent in the
+    /// ACTIVE tab; a shell (or no tab) turns it off.
+    private func updateAgentTab() {
+        let tools = Set(Profile.Tool.allCases.map(\.rawValue))
+        model.agentTabIndex = activeTab.flatMap { tab in
+            tools.contains(tab.label.lowercased()) ? tab.index : nil
+        }
     }
 
     /// IDE-style auto-show/auto-hide, both edge-triggered so the 0.7s roster
@@ -482,7 +493,8 @@ private struct FileDetailSection: View {
             if doc.lines.isEmpty {
                 centered("No changes against HEAD")
             } else {
-                DiffView(document: doc)
+                DiffView(document: doc, model: model,
+                         filePath: model.selectedPath ?? "")
             }
         case .markdown(let text):
             ScrollView {
@@ -588,25 +600,164 @@ private struct FileViewerWindowContent: View {
 
 private struct DiffView: View {
     let document: DiffDocument
+    var model: FileExplorerModel
+    let filePath: String
+
+    /// The line id whose inline comment editor is open.
+    @State private var composing: Int?
+    @State private var draft = ""
+
+    private var canComment: Bool { model.agentTabIndex != nil }
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(document.lines) { line in
-                    DiffLineRow(line: line)
+                    DiffLineRow(
+                        line: line,
+                        annotatable: canComment && line.newLine != nil
+                            && (line.kind == .addition || line.kind == .context),
+                        onAnnotate: {
+                            draft = ""
+                            composing = composing == line.id ? nil : line.id
+                        })
+                    ForEach(model.reviewDrafts.filter {
+                        $0.file == filePath && $0.line == line.newLine
+                            && line.newLine != nil && line.kind != .hunk
+                    }) { d in
+                        DiffDraftRow(draft: d) { model.removeReviewDraft(d.id) }
+                    }
+                    if composing == line.id, let n = line.newLine {
+                        HStack(spacing: 6) {
+                            Image(systemName: "text.bubble")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.purple)
+                            TextField(String(format: NSLocalizedString(
+                                "Comment on line %d", comment: "diff pane"), n),
+                                text: $draft)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 11))
+                                .onSubmit { addDraft(n) }
+                            Button(NSLocalizedString("Add", comment: "diff pane")) {
+                                addDraft(n)
+                            }
+                            .controlSize(.small)
+                            .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                            Button {
+                                composing = nil
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.purple.opacity(0.06))
+                    }
                 }
             }
             .padding(.vertical, 4)
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if canComment && !model.reviewDrafts.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "text.bubble.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.purple)
+                    Text(String(format: NSLocalizedString(
+                        "%d comment(s) drafted", comment: "diff pane"),
+                        model.reviewDrafts.count))
+                        .font(.system(size: 11))
+                    Spacer(minLength: 8)
+                    Button(NSLocalizedString("Discard", comment: "diff pane")) {
+                        model.reviewDrafts.removeAll()
+                    }
+                    .controlSize(.small)
+                    Button {
+                        Task { _ = await model.submitReviewDrafts() }
+                    } label: {
+                        if model.sendingReview {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Label(NSLocalizedString("Send to agent", comment: "diff pane"),
+                                  systemImage: "arrow.up.circle.fill")
+                        }
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.purple)
+                    .disabled(model.sendingReview)
+                    .help(NSLocalizedString(
+                        "Types every drafted comment into the coding agent running in the active tab.",
+                        comment: "diff pane"))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(.bar)
+            }
+        }
+    }
+
+    private func addDraft(_ line: Int) {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        model.addReviewDraft(file: filePath, line: line, text: text)
+        draft = ""
+        composing = nil
+    }
+}
+
+/// A drafted comment pinned under the diff line it annotates.
+private struct DiffDraftRow: View {
+    let draft: FileExplorerModel.ReviewDraft
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "bubble.left.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(.purple)
+                .padding(.top, 2)
+            Text(draft.text)
+                .font(.system(size: 11))
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+            Button(action: onDelete) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.leading, 78)
+        .padding(.trailing, 8)
+        .padding(.vertical, 3)
+        .background(Color.purple.opacity(0.05))
     }
 }
 
 private struct DiffLineRow: View {
     let line: DiffDocument.Line
+    var annotatable = false
+    var onAnnotate: () -> Void = {}
+
+    @State private var hovering = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
+            Button(action: onAnnotate) {
+                Image(systemName: "plus.bubble")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.purple)
+                    .opacity(hovering && annotatable ? 1 : 0)
+                    .frame(width: 14)
+            }
+            .buttonStyle(.plain)
+            .disabled(!annotatable)
+            .help(NSLocalizedString("Comment on this line", comment: "diff pane"))
             gutter(line.oldLine)
             gutter(line.newLine)
             Text(line.text.isEmpty ? " " : line.text)
@@ -618,6 +769,7 @@ private struct DiffLineRow: View {
                 .padding(.vertical, 0.5)
         }
         .background(backgroundColor)
+        .onHover { hovering = $0 }
     }
 
     private func gutter(_ number: Int?) -> some View {

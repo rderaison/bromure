@@ -482,8 +482,10 @@ struct CodingKanbanView: View {
                                             onRemove: { actions.delete(task.id) },
                                             onDestroy: { actions.destroy(task.id) }))
                     .contextMenu {
-                        Button(NSLocalizedString("Merge into \(task.parentBranch ?? "parent")…",
-                                                 comment: "")) {
+                        Button(String(format: NSLocalizedString("Merge into %@…",
+                                                                comment: "kanban menu"),
+                                      task.parentBranch ?? NSLocalizedString(
+                                        "parent", comment: "kanban menu"))) {
                             actions.merge(task.id)
                         }
                         Button(NSLocalizedString("Back to In Progress", comment: "")) {
@@ -1071,7 +1073,12 @@ private struct TaskEditorSheet: View {
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxHeight: 150)
+            // A FIRM height, not a cap: the description editor above has
+            // layoutPriority(1) + maxHeight .infinity and would squeeze a
+            // merely-capped ScrollView to zero. Sized to the rows, capped
+            // so a dozen-phase plan scrolls instead of pushing the footer
+            // out of the sheet.
+            .frame(height: min(150, CGFloat(siblings.count) * 30 + 16))
             .background(RoundedRectangle(cornerRadius: 6)
                 .fill(Color.primary.opacity(0.03)))
             .overlay(RoundedRectangle(cornerRadius: 6)
