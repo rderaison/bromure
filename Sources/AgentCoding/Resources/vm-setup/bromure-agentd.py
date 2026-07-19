@@ -1905,28 +1905,70 @@ def _pretrust(tool, *dirs):
 _TASK_MCP_SHIM = "/mnt/bromure-meta/bromure-task-mcp.py"
 
 
-def _task_mcp_flags(branch, tool):
-    """For a coding-board task run: write a per-branch MCP config wiring the
-    board tools (a stdio shim that pipes to the host over vsock, announcing
-    the branch so the host binds the connection to the right card), and
-    return the claude flags that load it. Empty for non-claude tools or when
-    the shim isn't staged (old meta share)."""
-    if tool != "claude" or not os.path.exists(_TASK_MCP_SHIM):
+def _task_mcp_setup(branch, tool, workdir):
+    """For a coding-board session: wire the board MCP tools (a stdio shim
+    that pipes to the host over vsock, announcing the branch so the host
+    binds the connection to the right card). Per tool:
+
+      - claude: a per-branch JSON config + ` --mcp-config=<cfg>` flag.
+      - codex:  per-invocation `-c mcp_servers.…` TOML overrides — nothing
+                is written to ~/.codex, so concurrent tasks can't fight
+                over one config file.
+      - grok:   a project-scoped .grok/settings.json in the session's
+                directory (grok-cli reads mcpServers from there); the
+                .grok/ dir is added to the checkout's local git exclude so
+                it can never dirty the task's diff or get committed.
+
+    Returns the extra CLI flags for BROMURE_AC_WT_FLAGS (may be "" — grok
+    is wired purely through the settings file). Flag strings word-split in
+    the tab launcher, so every token must be space-free."""
+    if not os.path.exists(_TASK_MCP_SHIM):
         return ""
-    cfg_dir = os.path.join(HOME, ".bromure")
-    cfg = os.path.join(cfg_dir, "task-mcp-%s.json" % branch.replace("/", "-"))
-    try:
-        os.makedirs(cfg_dir, exist_ok=True)
-        with open(cfg, "w") as f:
-            json.dump({"mcpServers": {"bromure-board": {
-                "command": "python3",
-                "args": [_TASK_MCP_SHIM, branch]}}}, f, indent=2)
-    except OSError as e:
-        log("worktree", "task-mcp config write failed:", e)
+    if tool == "claude":
+        cfg_dir = os.path.join(HOME, ".bromure")
+        cfg = os.path.join(cfg_dir, "task-mcp-%s.json" % branch.replace("/", "-"))
+        try:
+            os.makedirs(cfg_dir, exist_ok=True)
+            with open(cfg, "w") as f:
+                json.dump({"mcpServers": {"bromure-board": {
+                    "command": "python3",
+                    "args": [_TASK_MCP_SHIM, branch]}}}, f, indent=2)
+        except OSError as e:
+            log("worktree", "task-mcp config write failed:", e)
+            return ""
+        # Equals form on purpose: one token per flag.
+        return " --mcp-config=" + cfg
+    if tool == "codex":
+        # json.dumps with no-space separators emits a valid, token-safe
+        # TOML array; the quoted values survive word splitting because the
+        # launcher never re-parses quotes.
+        args = json.dumps([_TASK_MCP_SHIM, branch], separators=(",", ":"))
+        return (' -c mcp_servers.bromure_board.command="python3"'
+                ' -c mcp_servers.bromure_board.args=' + args)
+    if tool == "grok":
+        try:
+            d = os.path.join(workdir, ".grok")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "settings.json"), "w") as f:
+                json.dump({"mcpServers": {"bromure-board": {
+                    "command": "python3",
+                    "args": [_TASK_MCP_SHIM, branch]}}}, f, indent=2)
+            ex = _capture(["git", "-C", workdir, "rev-parse",
+                           "--git-path", "info/exclude"]).strip()
+            if ex:
+                path = ex if os.path.isabs(ex) else os.path.join(workdir, ex)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                current = ""
+                if os.path.exists(path):
+                    with open(path) as f:
+                        current = f.read()
+                if ".grok/" not in current:
+                    with open(path, "a") as f:
+                        f.write("\n.grok/\n")
+        except OSError as e:
+            log("worktree", "grok task-mcp setup failed:", e)
         return ""
-    # Equals form on purpose: BROMURE_AC_WT_FLAGS word-splits in the tab
-    # launcher, and the contract there is one token per flag.
-    return " --mcp-config=" + cfg
+    return ""
 
 
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
@@ -1975,10 +2017,12 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
     _worktree_include(main_root, wt_dir)
 
     _env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    flags = _YOLO_FLAGS.get(tool, "") if yolo else ""
+    if task:
+        flags += _task_mcp_setup(branch, tool, wt_dir)
+    if flags:
+        _env["BROMURE_AC_WT_FLAGS"] = flags
     if yolo and _YOLO_FLAGS.get(tool):
-        _env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
-        if task:
-            _env["BROMURE_AC_WT_FLAGS"] += _task_mcp_flags(branch, tool)
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
     win = _new_window(command="bash -l", cwd=wt_dir, env=_env)
@@ -2015,8 +2059,10 @@ def _task_resume(main_root, branch, parent, display, tool, prompt_b64):
         worktree_err("task-resume: no worktree checkout for %s" % branch)
         return
     env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    flags = _YOLO_FLAGS.get(tool, "") + _task_mcp_setup(branch, tool, wt_dir)
+    if flags:
+        env["BROMURE_AC_WT_FLAGS"] = flags
     if _YOLO_FLAGS.get(tool):
-        env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool] + _task_mcp_flags(branch, tool)
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
     win = _new_window(command="bash -l", cwd=wt_dir, env=env)
@@ -2123,9 +2169,10 @@ def _plan_tab(cwd, slug, display, tool, prompt_b64):
     except OSError:
         pass
     env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    flags = _YOLO_FLAGS.get(tool, "") + _task_mcp_setup(branch, tool, cwd)
+    if flags:
+        env["BROMURE_AC_WT_FLAGS"] = flags
     if _YOLO_FLAGS.get(tool):
-        env["BROMURE_AC_WT_FLAGS"] = (_YOLO_FLAGS[tool]
-                                      + _task_mcp_flags(branch, tool))
         _preaccept_yolo(tool)
         _pretrust(tool, cwd)
     win = _new_window(command="bash -l", cwd=cwd, env=env)

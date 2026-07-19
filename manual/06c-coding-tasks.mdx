@@ -107,4 +107,4 @@ The whole board is mirrored on the app's control socket for [rich clients](14-re
 | `POST /tasks/<id>/destroy` | Stop the agent, delete the worktree and branch, remove the card. |
 | `DELETE /tasks/<id>` | Remove the card only. |
 
-Under the hood, the planning and task agents talk back to the board through a per-session **board MCP server** (vsock, host-side): `board_get_task`, `board_set_plan`, `board_create_subtasks`, and `board_ready_for_review` are how phases get filed and how a finished task announces itself — no polling, no scraping.
+Under the hood, the planning and task agents talk back to the board through a per-session **board MCP server** (vsock, host-side): `board_get_task`, `board_set_plan`, `board_create_subtasks`, and `board_ready_for_review` are how phases get filed and how a finished task announces itself — no polling, no scraping. The tools are wired automatically for every supported agent: Claude Code loads a per-branch MCP config, Codex gets per-invocation `mcp_servers` overrides, and Grok reads a project-scoped `.grok/settings.json` written into the session's checkout (and excluded from its diff).
