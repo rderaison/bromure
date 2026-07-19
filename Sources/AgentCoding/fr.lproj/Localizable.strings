@@ -1384,3 +1384,7 @@
 "%d comment(s) drafted" = "%d commentaire(s) en brouillon";
 "Send to agent" = "Envoyer à l’agent";
 "Types every drafted comment into the coding agent running in the active tab." = "Saisit chaque commentaire en brouillon dans l’agent de code de l’onglet actif.";
+
+/* Plan column — batch selection bar */
+"Delete %d selected phase(s)?" = "Supprimer %d phase(s) sélectionnée(s) ?";
+"Remove every selected phase from the board" = "Retirer du tableau toutes les phases sélectionnées";

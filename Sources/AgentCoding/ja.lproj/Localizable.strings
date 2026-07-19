@@ -1384,3 +1384,7 @@
 "%d comment(s) drafted" = "%d件のコメント下書き";
 "Send to agent" = "エージェントに送信";
 "Types every drafted comment into the coding agent running in the active tab." = "下書きしたコメントをすべて、アクティブなタブで実行中のコーディングエージェントに入力します。";
+
+/* Plan column — batch selection bar */
+"Delete %d selected phase(s)?" = "選択した%d件のフェーズを削除しますか？";
+"Remove every selected phase from the board" = "選択したすべてのフェーズをボードから削除";

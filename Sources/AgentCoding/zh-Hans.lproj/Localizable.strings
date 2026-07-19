@@ -1384,3 +1384,7 @@
 "%d comment(s) drafted" = "已起草%d条评论";
 "Send to agent" = "发送给智能体";
 "Types every drafted comment into the coding agent running in the active tab." = "把每条草稿评论输入到活动标签页中运行的编码智能体。";
+
+/* Plan column — batch selection bar */
+"Delete %d selected phase(s)?" = "删除所选的%d个阶段？";
+"Remove every selected phase from the board" = "从看板移除所有所选阶段";

@@ -1386,3 +1386,7 @@
 "%d comment(s) drafted" = "%d comentario(s) en borrador";
 "Send to agent" = "Enviar al agente";
 "Types every drafted comment into the coding agent running in the active tab." = "Escribe cada comentario en borrador en el agente de código de la pestaña activa.";
+
+/* Plan column — batch selection bar */
+"Delete %d selected phase(s)?" = "¿Eliminar %d fase(s) seleccionada(s)?";
+"Remove every selected phase from the board" = "Quitar del tablero todas las fases seleccionadas";

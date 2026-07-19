@@ -1387,3 +1387,7 @@
 "%d comment(s) drafted" = "已起草%d則評論";
 "Send to agent" = "傳送給代理程式";
 "Types every drafted comment into the coding agent running in the active tab." = "把每則草稿評論輸入到作用中標籤頁執行的編碼代理程式。";
+
+/* Plan column — batch selection bar */
+"Delete %d selected phase(s)?" = "刪除所選的%d個階段？";
+"Remove every selected phase from the board" = "從看板移除所有所選階段";

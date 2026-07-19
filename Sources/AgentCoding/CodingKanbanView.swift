@@ -258,6 +258,7 @@ struct CodingKanbanView: View {
     @State private var editing: CodingTask?
     /// Plan-column multi-selection (batch start).
     @State private var selectedPhases: Set<UUID> = []
+    @State private var confirmingBatchDelete = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -393,6 +394,32 @@ struct CodingKanbanView: View {
                     }
                     .controlSize(.small)
                     Spacer(minLength: 0)
+                    Button(role: .destructive) {
+                        confirmingBatchDelete = true
+                    } label: {
+                        Label(NSLocalizedString("Delete", comment: "plan column"),
+                              systemImage: "trash")
+                    }
+                    .controlSize(.small)
+                    .help(NSLocalizedString("Remove every selected phase from the board",
+                                            comment: "plan column"))
+                    .confirmationDialog(
+                        String(format: NSLocalizedString(
+                            "Delete %d selected phase(s)?", comment: "plan column"),
+                            selected.count),
+                        isPresented: $confirmingBatchDelete, titleVisibility: .visible
+                    ) {
+                        Button(NSLocalizedString("Delete", comment: "plan column"),
+                               role: .destructive) {
+                            for id in tasks.map(\.id) where selected.contains(id) {
+                                actions.delete(id)
+                            }
+                            selectedPhases.removeAll()
+                        }
+                        Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) {}
+                    } message: {
+                        Text(NSLocalizedString("This can't be undone.", comment: "remove card"))
+                    }
                 }
                 .padding(.bottom, 2)
             }
