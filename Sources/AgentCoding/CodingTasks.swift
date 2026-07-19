@@ -791,9 +791,19 @@ final class CodingTaskEngine {
             .replacingOccurrences(of: "/", with: "-")
         let dirs = (enc1 == enc2 ? [enc1] : [enc1, enc2])
             .map { "\"$HOME/.claude/projects/\($0)\"" }.joined(separator: " ")
+        // The pq file is a PreToolUse hook's dump of a PENDING
+        // AskUserQuestion (see the guest agent's _seed_question_hooks):
+        // Claude Code doesn't write the assistant turn to the transcript
+        // until the question is answered, so this is the only way the
+        // window can show the question while it's actually being asked.
+        // tr strips newlines so a pretty-printed dump still parses as one
+        // transcript line.
+        let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
         return "f=$(find \(dirs) -maxdepth 1 -name '*.jsonl' -newermt @\(since) "
             + "2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); "
-            + "if [ -n \"$f\" ]; then tail -c 300000 \"$f\"; fi"
+            + "if [ -n \"$f\" ]; then tail -c 300000 \"$f\"; fi; "
+            + "if [ -n \"$(find \(pq) -newermt @\(since) 2>/dev/null)\" ]; "
+            + "then echo; tr -d '\\n' < \(pq); echo; fi"
     }
 
     /// The guest command that makes a task's directory usable: mkdir -p,

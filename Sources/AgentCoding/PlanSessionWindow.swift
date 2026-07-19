@@ -132,18 +132,7 @@ final class PlanSessionWindowManager {
             let parsed = await Task.detached(priority: .userInitiated) {
                 ClaudeTranscriptParser.parse(Data(raw.utf8))
             }.value
-            if parsed.count != model.items.count {
-                model.items = parsed
-                var firstQuestion: Int?
-                for item in parsed.reversed() {
-                    if case .question = item.kind { firstQuestion = item.id }
-                    else { break }
-                }
-                if firstQuestion != model.answeredBatchFirstID {
-                    model.answeredBatchFirstID = firstQuestion
-                    model.answeredCount = 0
-                }
-            }
+            if parsed.count != model.items.count { model.items = parsed }
         }
     }
 }
@@ -165,12 +154,6 @@ final class PlanSessionModel {
     let accentHex: String
     var items: [TranscriptItem] = []
     var phase: Phase = .starting
-    /// The open question batch (trailing question items): id of its first
-    /// item + how many of its questions have been answered from this
-    /// window. Gates the cards so answers land on the picker tab that is
-    /// actually showing.
-    var answeredBatchFirstID: Int?
-    var answeredCount = 0
 
     init(taskID: UUID, title: String, workspaceName: String, accentHex: String) {
         self.taskID = taskID
@@ -274,24 +257,18 @@ private struct PlanSessionView: View {
                             .padding(.top, 60)
                         }
                         let batch = model.phase == .live ? openBatch : []
-                        let batchFirst = batch.first?.id
-                        ForEach(model.items) { item in
-                            if case .question(let q) = item.kind,
-                               let first = batchFirst, item.id >= first {
-                                let index = item.id - first
-                                // Answers must land on the picker tab that's
-                                // showing — cards activate strictly in order.
-                                let active = index == model.answeredCount
-                                TranscriptQuestionCard(
-                                    question: q,
-                                    isLast: index == batch.count - 1,
-                                    sendKeys: active ? { keys in
-                                        model.answeredCount += 1
-                                        Task { _ = await onSendKeys(keys) }
-                                    } : nil)
-                            } else {
-                                TranscriptItemView(item: item)
-                            }
+                        ForEach(model.items.dropLast(batch.count)) {
+                            TranscriptItemView(item: $0)
+                        }
+                        if !batch.isEmpty {
+                            TranscriptQuestionBatchCard(
+                                questions: batch.compactMap {
+                                    if case .question(let q) = $0.kind { q }
+                                    else { nil }
+                                },
+                                onSubmit: onSendKeys)
+                                // A new batch = fresh local answers.
+                                .id(batch.first?.id ?? -1)
                         }
                         Color.clear.frame(height: 1).id("tail")
                     }

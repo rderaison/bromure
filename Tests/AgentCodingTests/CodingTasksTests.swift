@@ -103,6 +103,24 @@ struct CodingTasksTests {
         // Quotes and other unquotable characters refuse rather than escape.
         #expect(CodingTaskEngine.planTranscriptCommand(guestCwd: "/e'vil", since: 0) == nil)
         #expect(CodingTaskEngine.planTranscriptCommand(guestCwd: "", since: 0) == nil)
+        // The pending-question dump rides along, gated by the same since.
+        #expect(cmd?.contains("pq--home-ubuntu-edr.json") == true)
+        #expect(cmd?.contains("tr -d '\\n'") == true)
+    }
+
+    @Test("Pending-question hook dump parses into live question items")
+    func pendingQuestionParsing() {
+        let transcript = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me check the repo."}]}}
+        {"session_id":"s1","cwd":"/home/ubuntu/vm","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which scan model?","header":"Scan model","multiSelect":false,"options":[{"label":"Remote network scan","description":"no creds"},{"label":"Authenticated local","description":"deeper"}]}]}}
+        """
+        let items = ClaudeTranscriptParser.parse(Data(transcript.utf8))
+        #expect(items.count == 2)
+        guard case .question(let q) = items[1].kind else {
+            Issue.record("expected a pending question item"); return
+        }
+        #expect(q.question == "Which scan model?")
+        #expect(q.options.count == 2)
     }
 
     @Test("initRepoCommand: idempotent init with a root commit")

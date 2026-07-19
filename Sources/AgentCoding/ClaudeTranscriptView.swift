@@ -69,6 +69,17 @@ enum ClaudeTranscriptParser {
             guard let obj = try? JSONSerialization.jsonObject(
                 with: Data(line.utf8)) as? [String: Any] else { continue }
             let type = obj["type"] as? String ?? ""
+            // A PreToolUse hook dump of a PENDING AskUserQuestion (appended
+            // to the tail by the plan-transcript fetch): the question is on
+            // screen in the session but not yet in the transcript proper.
+            if type.isEmpty, obj["tool_name"] as? String == "AskUserQuestion",
+               let input = obj["tool_input"] as? [String: Any] {
+                for q in TranscriptQuestion.parse(input) {
+                    items.append(TranscriptItem(id: items.count,
+                                                kind: .question(q), timestamp: nil))
+                }
+                continue
+            }
             guard type == "user" || type == "assistant",
                   let message = obj["message"] as? [String: Any] else { continue }
             // Meta lines (command echoes, hook chatter) aren't conversation.
@@ -216,31 +227,10 @@ struct ClaudeTranscriptPane: View {
 /// One transcript element. Prompts get a tinted bubble, assistant prose is
 /// plain text, thinking and tool traffic collapse behind disclosures so the
 /// narrative reads top-to-bottom without the plumbing in the way.
-/// An AskUserQuestion rendered as content: the question, its options, and
-/// (when `sendKeys` is set — the live planning session's ACTIVE question)
-/// tappable answers. The key sequences mirror the picker's real behavior:
-/// a single-select answers with digit+Enter (the picker then advances on
-/// its own); a multi-select toggles with digits and moves on with Right —
-/// Enter there toggles the highlighted row, it does NOT submit — plus a
-/// final Enter on the last question, where Right lands on Submit.
+/// An AskUserQuestion rendered statically (archived transcripts, or a
+/// question that is no longer answerable): the question with its options.
 struct TranscriptQuestionCard: View {
     let question: TranscriptQuestion
-    var isLast: Bool = true
-    let sendKeys: (([String]) -> Void)?
-
-    @State private var picked = Set<Int>()
-    @State private var sent = false
-
-    private func answer(_ index: Int) {
-        guard let sendKeys, !sent else { return }
-        if question.multiSelect {
-            if picked.contains(index) { picked.remove(index) }
-            else { picked.insert(index) }
-        } else {
-            sent = true
-            sendKeys(["\(index + 1)", "Enter"])
-        }
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -256,7 +246,7 @@ struct TranscriptQuestionCard: View {
                         .background(Capsule().fill(Color.purple.opacity(0.15)))
                         .foregroundStyle(.purple)
                 }
-                Text(NSLocalizedString("The agent is asking", comment: "transcript question"))
+                Text(NSLocalizedString("The agent asked", comment: "transcript question"))
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
@@ -265,61 +255,234 @@ struct TranscriptQuestionCard: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(Array(question.options.enumerated()), id: \.offset) { i, opt in
-                Button {
-                    answer(i)
-                } label: {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Image(systemName: question.multiSelect
-                              ? (picked.contains(i) ? "checkmark.square.fill" : "square")
-                              : "\(i + 1).circle")
-                            .font(.system(size: 12))
-                            .foregroundStyle(sendKeys != nil ? Color.purple : .secondary)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(opt.label)
-                                .font(.system(size: 12, weight: .medium))
-                            if !opt.description.isEmpty {
-                                Text(opt.description)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
+                QuestionOptionRow(index: i, option: opt,
+                                  multiSelect: question.multiSelect,
+                                  picked: false, interactive: false)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8)
+            .fill(Color.purple.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 8)
+            .strokeBorder(Color.purple.opacity(0.3)))
+    }
+}
+
+private struct QuestionOptionRow: View {
+    let index: Int
+    let option: TranscriptQuestion.Option
+    let multiSelect: Bool
+    let picked: Bool
+    let interactive: Bool
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: multiSelect
+                  ? (picked ? "checkmark.square.fill" : "square")
+                  : (picked ? "\(index + 1).circle.fill" : "\(index + 1).circle"))
+                .font(.system(size: 12))
+                .foregroundStyle(interactive ? Color.purple : .secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(option.label)
+                    .font(.system(size: 12, weight: .medium))
+                if !option.description.isEmpty {
+                    Text(option.description)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6)
+            .fill(picked ? Color.purple.opacity(0.10) : Color.primary.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .strokeBorder(picked ? Color.purple.opacity(0.6)
+                                 : Color.primary.opacity(0.1)))
+        .contentShape(Rectangle())
+    }
+}
+
+/// The LIVE question batch as one tabbed card — one tab per question (the
+/// session's picker shows the same tabs), answers collected locally and
+/// editable until a single Submit sends the whole set as the picker's key
+/// sequence. Nothing reaches the agent before Submit, so a mis-click is
+/// just a click away from being fixed.
+struct TranscriptQuestionBatchCard: View {
+    let questions: [TranscriptQuestion]
+    /// Sends the picker keystrokes; awaited so the card can show progress.
+    let onSubmit: ([String]) async -> Bool
+
+    @State private var tab = 0
+    @State private var picks: [Int: Set<Int>] = [:]
+    @State private var sending = false
+    @State private var sent = false
+    @State private var failed = false
+
+    private func answered(_ i: Int) -> Bool {
+        guard let q = questions.indices.contains(i) ? questions[i] : nil
+        else { return false }
+        // A multi-select may legitimately be submitted with nothing picked;
+        // it counts as answered once visited or picked.
+        return q.multiSelect ? (picks[i] != nil) : !(picks[i] ?? []).isEmpty
+    }
+
+    private var allAnswered: Bool {
+        questions.indices.allSatisfy { answered($0) }
+    }
+
+    /// The picker's real key semantics, front to back: a single-select
+    /// answers with digit+Enter (the picker advances itself); a
+    /// multi-select toggles digits then moves on with Right — plus a final
+    /// Enter when it's the last question, where Right lands on Submit.
+    private func submitKeys() -> [String] {
+        var keys: [String] = []
+        for (i, q) in questions.enumerated() {
+            let sel = (picks[i] ?? []).sorted()
+            if q.multiSelect {
+                keys += sel.map { "\($0 + 1)" }
+                keys.append("Right")
+                if i == questions.count - 1 { keys.append("Enter") }
+            } else if let s = sel.first {
+                keys += ["\(s + 1)", "Enter"]
+            }
+        }
+        return keys
+    }
+
+    private func toggle(_ option: Int) {
+        guard !sending, !sent else { return }
+        var sel = picks[tab] ?? []
+        if questions[tab].multiSelect {
+            if sel.contains(option) { sel.remove(option) } else { sel.insert(option) }
+        } else {
+            sel = [option]
+        }
+        picks[tab] = sel
+        // Single-select: picking advances to the next unanswered tab, the
+        // same flow the terminal picker has — minus the instant commit.
+        if !questions[tab].multiSelect,
+           let next = questions.indices.first(where: { !answered($0) }) {
+            tab = next
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "questionmark.bubble.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.purple)
+                Text(questions.count > 1
+                     ? String(format: NSLocalizedString(
+                        "The agent is asking %d questions — answer them all, then Submit",
+                        comment: "question batch"), questions.count)
+                     : NSLocalizedString("The agent is asking", comment: "question batch"))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            if questions.count > 1 {
+                HStack(spacing: 4) {
+                    ForEach(questions.indices, id: \.self) { i in
+                        Button {
+                            if !sending && !sent { tab = i }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: answered(i)
+                                      ? "checkmark.circle.fill" : "circle")
+                                    .font(.system(size: 9))
+                                Text(questions[i].header.isEmpty
+                                     ? String(format: NSLocalizedString(
+                                        "Q%d", comment: "question tab"), i + 1)
+                                     : questions[i].header)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .lineLimit(1)
                             }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(
+                                tab == i ? Color.purple.opacity(0.2)
+                                         : Color.primary.opacity(0.05)))
+                            .foregroundStyle(tab == i ? Color.purple :
+                                             answered(i) ? Color.green : .secondary)
+                            .contentShape(Capsule())
                         }
-                        Spacer(minLength: 0)
+                        .buttonStyle(.plain)
                     }
-                    .padding(.vertical, 5)
-                    .padding(.horizontal, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.primary.opacity(0.04)))
-                    .overlay(RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(picked.contains(i)
-                                      ? Color.purple.opacity(0.6)
-                                      : Color.primary.opacity(0.1)))
-                    .contentShape(Rectangle())
+                    Spacer(minLength: 0)
+                }
+            }
+
+            let q = questions[min(tab, questions.count - 1)]
+            Text(q.question)
+                .font(.system(size: 12.5, weight: .semibold))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(Array(q.options.enumerated()), id: \.offset) { i, opt in
+                Button {
+                    toggle(i)
+                } label: {
+                    QuestionOptionRow(index: i, option: opt,
+                                      multiSelect: q.multiSelect,
+                                      picked: (picks[tab] ?? []).contains(i),
+                                      interactive: true)
                 }
                 .buttonStyle(.plain)
-                .disabled(sendKeys == nil || sent)
+                .disabled(sending || sent)
             }
-            if question.multiSelect && sendKeys != nil {
+            if q.multiSelect && picks[tab] == nil {
+                Button(NSLocalizedString("None of these", comment: "question batch")) {
+                    picks[tab] = []
+                }
+                .controlSize(.small)
+                .disabled(sending || sent)
+            }
+
+            HStack(spacing: 8) {
                 Button {
-                    guard !sent, !picked.isEmpty else { return }
-                    sent = true
-                    var keys = picked.sorted().map { "\($0 + 1)" } + ["Right"]
-                    if isLast { keys.append("Enter") }   // Right → Submit
-                    sendKeys!(keys)
+                    guard allAnswered, !sending, !sent else { return }
+                    sending = true
+                    failed = false
+                    let keys = submitKeys()
+                    Task {
+                        let ok = await onSubmit(keys)
+                        sending = false
+                        if ok { sent = true } else { failed = true }
+                    }
                 } label: {
-                    Label(NSLocalizedString("Send answer", comment: "transcript question"),
-                          systemImage: "arrow.up.circle.fill")
+                    if sending {
+                        Label(NSLocalizedString("Sending answers…", comment: "question batch"),
+                              systemImage: "ellipsis.circle")
+                    } else {
+                        Label(NSLocalizedString("Submit", comment: "question batch"),
+                              systemImage: "arrow.up.circle.fill")
+                    }
                 }
                 .controlSize(.small)
                 .buttonStyle(.borderedProminent)
                 .tint(.purple)
-                .disabled(sent || picked.isEmpty)
-            }
-            if sent {
-                Text(NSLocalizedString("Answer sent to the agent.", comment: "transcript question"))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
+                .disabled(!allAnswered || sending || sent)
+                if sent {
+                    Text(NSLocalizedString("Answers sent to the agent.",
+                                           comment: "question batch"))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                } else if failed {
+                    Text(NSLocalizedString("Couldn't reach the session — try again.",
+                                           comment: "question batch"))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.red)
+                } else if !allAnswered && questions.count > 1 {
+                    Text(NSLocalizedString("Submit enables once every tab is answered.",
+                                           comment: "question batch"))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(10)
@@ -356,7 +519,7 @@ struct TranscriptItemView: View {
         case .assistantText(let text):
             assistantText(text)
         case .question(let q):
-            TranscriptQuestionCard(question: q, sendKeys: nil)
+            TranscriptQuestionCard(question: q)
         case .thinking(let text):
             CollapsibleRow(icon: "brain",
                            title: NSLocalizedString("Thinking", comment: "transcript"),

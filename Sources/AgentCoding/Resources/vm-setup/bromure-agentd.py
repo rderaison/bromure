@@ -2052,6 +2052,48 @@ def _automation_tab(cwd, display, tool, prompt_b64):
     _set_window_option(win, "@display", display)
 
 
+def _seed_question_hooks():
+    """Make a pending AskUserQuestion visible to the host. Claude Code only
+    writes an assistant turn to the session transcript when the turn
+    completes — while the question picker is up, the question exists
+    nowhere on disk, and the host's plan window would sit stale and look
+    stalled. A PreToolUse hook dumps the tool input to
+    ~/.bromure/pq-<cwd-enc>.json; PostToolUse (answered) removes it. The
+    host's transcript tail appends that file while it's fresh."""
+    path = os.path.join(HOME, ".claude", "settings.json")
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        cfg = {}
+    hooks = cfg.setdefault("hooks", {})
+    pq = "\"$HOME/.bromure/pq-$(pwd | tr './' '--').json\""
+    entries = {
+        "PreToolUse": {"matcher": "AskUserQuestion", "hooks": [
+            {"type": "command",
+             "command": "mkdir -p ~/.bromure && cat > " + pq}]},
+        "PostToolUse": {"matcher": "AskUserQuestion", "hooks": [
+            {"type": "command", "command": "rm -f " + pq}]},
+    }
+    changed = False
+    for key, entry in entries.items():
+        arr = hooks.setdefault(key, [])
+        if not any("/.bromure/pq-" in json.dumps(e) for e in arr):
+            arr.append(entry)
+            changed = True
+    if not changed:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, path)
+        log("plan", "question hooks seeded into ~/.claude/settings.json")
+    except OSError as e:
+        log("plan", "question hook seeding failed: %s" % e)
+
+
 def _plan_tab(cwd, slug, display, tool, prompt_b64):
     """Planning interview for a coding-board task: runs IN the task's
     configured directory — no worktree. Planning writes no code, and the
@@ -2066,6 +2108,16 @@ def _plan_tab(cwd, slug, display, tool, prompt_b64):
         worktree_err("plan: no such directory: " + cwd)
         return
     branch = "wt/" + slug
+    if tool == "claude":
+        _seed_question_hooks()
+    # A pq file left by an earlier session in this directory would show a
+    # phantom question — start clean.
+    stale = os.path.join(HOME, ".bromure",
+                         "pq-" + cwd.replace(".", "-").replace("/", "-") + ".json")
+    try:
+        os.remove(stale)
+    except OSError:
+        pass
     env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
     if _YOLO_FLAGS.get(tool):
         env["BROMURE_AC_WT_FLAGS"] = (_YOLO_FLAGS[tool]
