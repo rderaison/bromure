@@ -163,6 +163,17 @@ struct CodingTasksTests {
         #expect(CodingTaskEngine.transcriptAgeCommand(slug: "") == nil)
     }
 
+    @Test("ensureHeadCommand: root commit only, never git init")
+    func ensureHeadCmd() {
+        let cmd = CodingTaskEngine.ensureHeadCommand(quotedPath: "'/home/ubuntu/x'")
+        #expect(cmd.contains("--allow-empty"))
+        #expect(cmd.contains("rev-parse -q --verify HEAD"))
+        // Must not create repos — a monorepo subdir task would grow a
+        // nested repo. Only initRepoCommand may init.
+        #expect(!cmd.contains("git init"))
+        #expect(!cmd.contains("mkdir"))
+    }
+
     @Test("initRepoCommand: idempotent init with a root commit")
     func initRepoCmd() {
         let cmd = CodingTaskEngine.initRepoCommand(quotedPath: "'/home/ubuntu/new'")

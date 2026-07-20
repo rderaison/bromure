@@ -137,7 +137,11 @@ final class PlanSessionWindowManager {
             let parsed = await Task.detached(priority: .userInitiated) {
                 ClaudeTranscriptParser.parse(Data(raw.utf8))
             }.value
-            if parsed.count != model.items.count { model.items = parsed }
+            // Compare CONTENT, not count: mid-turn, an answered question
+            // round and the next round both exist only as the pq hook dump,
+            // so consecutive rounds of the same size parse to the same item
+            // count — a count gate froze the window on round 1 forever.
+            if parsed != model.items { model.items = parsed }
         }
     }
 }
@@ -393,14 +397,18 @@ private struct PlanSessionView: View {
                             }
                         }
                         if !batch.isEmpty {
+                            let questions = batch.compactMap {
+                                if case .question(let q) = $0.kind { q } else { nil }
+                            }
                             TranscriptQuestionBatchCard(
-                                questions: batch.compactMap {
-                                    if case .question(let q) = $0.kind { q }
-                                    else { nil }
-                                },
+                                questions: questions,
                                 onSubmit: onSendKeys)
-                                // A new batch = fresh local answers.
-                                .id(batch.first?.id ?? -1)
+                                // A new batch = fresh local answers. Keyed by
+                                // the question TEXTS: consecutive rounds can
+                                // land at the same item indices (both live
+                                // only in the pq dump mid-turn), so an
+                                // index-based id kept round 1's selections.
+                                .id(questions.map(\.question).joined(separator: "\u{1f}"))
                         }
                         Color.clear.frame(height: 1).id("tail")
                     }

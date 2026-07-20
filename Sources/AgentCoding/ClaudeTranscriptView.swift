@@ -3,8 +3,8 @@ import SwiftUI
 // MARK: - Transcript model + parser
 
 /// One rendered element of a Claude Code session transcript.
-struct TranscriptItem: Identifiable {
-    enum Kind {
+struct TranscriptItem: Identifiable, Equatable {
+    enum Kind: Equatable {
         case userText(String)
         case assistantText(String)
         case thinking(String)

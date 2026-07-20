@@ -211,7 +211,13 @@ final class TaskBoardMCPServer {
             guard let raw = args["subtasks"] as? [[String: Any]], !raw.isEmpty else {
                 return errorResult("subtasks (non-empty array) is required")
             }
-            guard raw.count <= 20 else { return errorResult("at most 20 subtasks per call") }
+            // Runaway-agent guard, not a plan-size limit — bigger plans just
+            // file in batches (dependsOn numbers span calls).
+            guard raw.count <= 40 else {
+                return errorResult("at most 40 subtasks per call — file the plan in "
+                    + "several calls (dependsOn phase numbers count ALL phases filed "
+                    + "for this task so far, so cross-call dependencies work)")
+            }
             // Phases already filed for this parent by EARLIER calls, in plan
             // order. dependsOn indices number the parent's whole phase list —
             // a planner that files its phases across several calls used to get

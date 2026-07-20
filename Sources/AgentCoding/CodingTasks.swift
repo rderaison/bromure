@@ -623,6 +623,12 @@ final class CodingTaskEngine {
                     comment: "task start"), task.repoPath))
                 return
             }
+            // A user-inited repo with no commits yet would fail the worktree
+            // cut (git needs a HEAD) — give it the same empty root commit
+            // the initRepo path makes. No-ops whenever HEAD exists.
+            _ = try? await delegate.guestExec(
+                profileID: profileID,
+                command: Self.ensureHeadCommand(quotedPath: q), timeout: 15)
             if isClaude {
                 await delegate.pretrustGuestPath(profileID: profileID, dir: guestPath)
             }
@@ -1168,16 +1174,30 @@ final class CodingTaskEngine {
             + "if [ -n \"$newest\" ]; then echo $(( $(date +%s) - newest )); fi"
     }
 
+    /// "The repo has a HEAD" — an empty root commit when it doesn't.
+    /// Worktrees can't be cut from a commit-less repo, and that's git's
+    /// actual requirement (a commit, not files — no README needed).
+    private nonisolated static let ensureHeadFragment =
+        "{ git rev-parse -q --verify HEAD >/dev/null 2>&1 || "
+        + "git -c user.name=Bromure -c user.email=tasks@bromure.io "
+        + "commit -q --allow-empty -m 'task root'; }"
+
     /// The guest command that makes a task's directory usable: mkdir -p,
     /// git init when the directory isn't already its own repo root, and an
     /// empty root commit when the repo has no HEAD (worktrees need one).
     nonisolated static func initRepoCommand(quotedPath: String) -> String {
         "mkdir -p \(quotedPath) && cd \(quotedPath) && "
             + "{ [ \"$(git rev-parse --show-toplevel 2>/dev/null)\" = \"$(pwd -P)\" ] "
-            + "|| git init -q; } && "
-            + "{ git rev-parse -q --verify HEAD >/dev/null 2>&1 || "
-            + "git -c user.name=Bromure -c user.email=tasks@bromure.io "
-            + "commit -q --allow-empty -m 'task root'; }"
+            + "|| git init -q; } && " + ensureHeadFragment
+    }
+
+    /// HEAD-ensure alone, for repos the USER initialized: a brand-new
+    /// `git init` with no commits can't host worktrees, so every phase
+    /// start would fail. Unlike `initRepoCommand` this never runs
+    /// `git init` — a task pointing into a monorepo subdirectory must not
+    /// grow a nested repo.
+    nonisolated static func ensureHeadCommand(quotedPath: String) -> String {
+        "cd \(quotedPath) && " + ensureHeadFragment
     }
 
     /// True when `guestPath` belongs to a repo the board can work with —
